@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+
+  # Win7-SP1 → Win11 build check (CIRISVerify#67 pattern, mirrored by every
+  # upstream substrate crate). Rust 1.78 raised the windows-msvc std floor to
+  # Win10 1809; a default-target build hard-imports Win8/Win10 APIs. We build
+  # the Tier-3 target `x86_64-win7-windows-msvc` (std keeps the Win7 fallbacks)
+  # on nightly + `-Zbuild-std` so the fabric node still LoadLibrary's on Win7.
+  # build-std crate list is `std,panic_abort`; panic_abort is required by std's
+  # own build (omit → E0463) and does NOT set the panic strategy, which stays
+  # "unwind" via the Cargo.toml profile pin (so any catch_unwind sites work).
+  win7-build-std:
+    name: Win7 build-std check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          key: ci-win7-build-std
+      - name: Build (x86_64-win7-windows-msvc, build-std)
+        shell: bash
+        run: |
+          cargo +nightly build --release \
+            --target x86_64-win7-windows-msvc \
+            -Z build-std=std,panic_abort \
+            -p ciris-server

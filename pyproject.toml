@@ -1,0 +1,33 @@
+# CIRISServer is shipped as a PyO3 abi3 wheel that CIRISAgent (pure Python)
+# pip-installs and links instead of composing the cores itself — the single
+# `ciris-cohabitation` composition (MISSION.md §1.2/§6). The same crate also
+# builds as the `ciris-server` binary (Cargo [[bin]]); see Cargo.toml.
+#
+# STATUS: Spec. The wheel does not build until the substrate floor resolves
+# (CIRISEdge v3.0.0 tag + registry/lens co-bump). See MISSION.md §4.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ciris-server"
+# Mirrors Cargo.toml; bump in lockstep.
+version = "0.5.0-spec.0"
+description = "The fabric node — the federation's headless cohabitation runtime (registry + lens [+ node] over one shared substrate), as the abi3 wheel CIRISAgent consumes. agent = fabric node + brain."
+authors = [{ name = "Eric Moore", email = "eric@ciris.ai" }]
+license = { text = "AGPL-3.0-or-later" }
+readme = "README.md"
+# abi3-py310 → one wheel covers CPython 3.10+ (matches the substrate crates,
+# which ship cp310-abi3). The Win7-SP1-loadable floor rides the Tier-3
+# build-std lane (release.yml; CIRISVerify#67 pattern).
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/CIRISAI/CIRISServer"
+
+[tool.maturin]
+# Build the abi3 wheel with the extension-module feature (the binary builds
+# WITHOUT it, so a plain `cargo build` never links libpython — Cargo.toml).
+features = ["extension-module"]
+module-name = "ciris_server"
+# Pure-Rust extension (no Python wrapper source); abi3 forward-compat wheel.

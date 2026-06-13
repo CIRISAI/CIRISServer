@@ -1,0 +1,207 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  id-token: write  # Sigstore keyless signing
+
+# ============================================================================
+# CIRISServer ships the `ciris-server` BINARY (the fabric node) across the full
+# server/embedded matrix — the same platform set the upstream substrate crates
+# (Edge / Persist / Verify / LensCore) build, restricted to targets a headless
+# server actually runs on, plus the two the maintainer requires explicitly:
+# **Windows 7** (the Tier-3 build-std lane) and **ARM32** (armv7 linux — Pi /
+# embedded Reticulum-mesh nodes; de-singletonization includes hardware
+# diversity, M-1).
+#
+# The mobile FFI lanes (Android .aar / iOS .xcframework) are NOT here: a headless
+# server binary does not ship as a mobile library. Those belong to the core
+# LIBRARY crates this binary composes (they build them in their own repos so the
+# AGENT — fabric node + brain — can embed them on mobile).
+#
+# TODO(post-#210): when the binary actually builds (CIRISPersist#210 +
+# CIRISEdge v2.3.0 land the shared-edge-singleton API), port the deeper
+# conformance pipeline from CIRISVerify/.github/workflows/release.yml —
+# function-manifest generation + signed BuildManifest self-attestation +
+# upload to the registry's /v1/verify/build-manifest. The fabric node is part
+# of the conformance fabric; it must attest its own builds.
+# ============================================================================
+
+jobs:
+  build-native:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross: true
+          # ARM32 — Raspberry Pi / embedded mesh nodes.
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Windows 7 → Win11 lane (CIRISVerify#67). `target` stays
+          # x86_64-pc-windows-msvc so the artifact name is stable; `build_target`
+          # is the Tier-3 win7 triple cargo actually compiles (nightly +
+          # build-std keeps std's Win7 syscall fallbacks). panic_abort is in the
+          # build-std crate list because std's build references it (else E0463);
+          # the active panic strategy stays "unwind" via the Cargo.toml profile.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            build_target: x86_64-win7-windows-msvc
+            toolchain: nightly
+            build_std: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ matrix.toolchain != 'nightly' }}
+        with:
+          targets: ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@nightly
+        if: ${{ matrix.toolchain == 'nightly' }}
+        with:
+          components: rust-src
+
+      - name: Install build deps (Linux native)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libsqlite3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          key: release-${{ matrix.build_target || matrix.target }}-${{ github.ref_name }}
+
+      - name: Install cross (retry on timeout)
+        if: matrix.cross
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on: timeout
+          command: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p ciris-server
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: |
+          TARGET="${{ matrix.build_target || matrix.target }}"
+          if [ "${{ matrix.build_std }}" = "true" ]; then
+            cargo +nightly build --release --target "$TARGET" -Z build-std=std,panic_abort -p ciris-server
+          else
+            cargo build --release --target "$TARGET" -p ciris-server
+          fi
+
+      - name: Stage + strip binary
+        shell: bash
+        run: |
+          TARGET="${{ matrix.build_target || matrix.target }}"
+          EXT=""; [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
+          BIN="target/$TARGET/release/ciris-server$EXT"
+          mkdir -p stage
+          if [ "${{ runner.os }}" != "Windows" ]; then strip "$BIN" || true; fi
+          cp "$BIN" stage/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-${{ matrix.target }}
+          path: stage/
+          if-no-files-found: error
+
+  # Linux ARM64 musl (Alpine / Home Assistant) — static, via zigbuild.
+  build-musl:
+    name: Build (aarch64 musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          key: release-musl-aarch64-${{ github.ref_name }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild (retry on timeout)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on: timeout
+          command: cargo install cargo-zigbuild
+      - run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ciris-server
+      - name: Stage + strip
+        run: |
+          BIN=target/aarch64-unknown-linux-musl/release/ciris-server
+          zig objcopy --strip-all "$BIN" "$BIN.stripped" && mv "$BIN.stripped" "$BIN" || true
+          mkdir -p stage && cp "$BIN" stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-aarch64-unknown-linux-musl
+          path: stage/
+          if-no-files-found: error
+
+  create-release:
+    name: Create Release
+    needs: [build-native, build-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package + checksum
+        run: |
+          mkdir -p release
+          for dir in artifacts/ciris-server-*; do
+            [ -d "$dir" ] || continue
+            target=$(basename "$dir" | sed 's/ciris-server-//')
+            tar -czvf "release/ciris-server-${{ github.ref_name }}-${target}.tar.gz" -C "$dir" .
+          done
+          cd release && sha256sum *.tar.gz > SHA256SUMS
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign artifacts (Sigstore keyless)
+        run: |
+          cd release
+          for f in *.tar.gz SHA256SUMS; do
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+          done
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release/*.tar.gz
+            release/*.tar.gz.sig
+            release/*.tar.gz.pem
+            release/SHA256SUMS
+            release/SHA256SUMS.sig
+            release/SHA256SUMS.pem
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-spec') || contains(github.ref_name, '-beta') }}

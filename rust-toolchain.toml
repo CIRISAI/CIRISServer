@@ -1,0 +1,5 @@
+# Stable for all targets except the Win7 Tier-3 build-std lane, which the
+# release workflow pins to nightly + rust-src per-job (CIRISVerify#67 pattern).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
