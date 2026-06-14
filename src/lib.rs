@@ -26,6 +26,9 @@
 
 mod compose;
 mod config;
+/// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
+/// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
+pub mod quorum;
 
 pub use config::{Mode, ServerConfig, Slices};
 

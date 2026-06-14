@@ -985,14 +985,18 @@ name = "ciris-server"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "chrono",
  "ciris-edge",
  "ciris-keyring",
  "ciris-lens-core",
  "ciris-persist",
  "ciris-verify-core",
+ "ed25519-dalek",
  "fs2",
  "pyo3",
  "pyo3-async-runtimes",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -104,6 +104,16 @@ fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Test-only — the two-node replication integration test (tests/replication.rs)
+# builds + signs CEG batches with the same primitives persist verifies against.
+# ed25519-dalek MUST match persist's locked 2.x (the SigningKey type crosses the
+# Engine::with_signer / put_public_key API boundary).
+[dev-dependencies]
+ed25519-dalek = "2"
+base64        = "0.22"
+chrono        = { version = "0.4", features = ["serde"] }
+serde_json    = "1"
+
 [profile.release]
 # panic strategy stays "unwind" (the Win7 build-std lane relies on this being
 # pinned here, not on the build-std crate list — see release.yml win7 lane).
