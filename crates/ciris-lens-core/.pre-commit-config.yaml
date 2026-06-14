@@ -1,0 +1,91 @@
+# Pre-commit hook config — catches the cheap CI gates locally before
+# push. The fast tier (this file) is everything that runs in seconds;
+# the slow tier (cargo clippy + cargo test) stays in CI where the
+# cache amortizes the cost.
+#
+# Install:  pip install pre-commit && pre-commit install
+# Run on whole tree:  pre-commit run --all-files
+#
+# CI parity (these hooks gate the same things ci.yml's lint job does):
+# - cargo fmt --check                  → fmt diff catches; broke 5c33a72
+# - cargo bench --no-run                → bench compile/fixture catches;
+#                                          broke 5c33a72 via BatchEnvelope
+#                                          schema shift
+# - cargo check --features python       → catches feature-graph drift
+#
+# What's deliberately NOT here:
+# - cargo clippy: ~30s cold; CI's caching makes it cheap there
+# - cargo test:    same — CI catches; pre-push if you want it local
+# - cargo deny:    network-dependent (advisory db fetch); CI runs it
+#
+# When ci.yml grows a new fast gate (cargo nextest --no-run etc.),
+# add it here. Pre-commit's value is fast-fail at commit time; if a
+# gate is slow enough to skip, leave it for CI.
+
+repos:
+  # ─── Whitespace / file-shape sanity (the pre-commit-hooks defaults) ─
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown's `  \n` (two-space-newline → break) is intentional.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # CI yaml uses GH Actions-specific extensions criterion sees as
+        # unsafe (e.g. !!python-style nested) — skip unsafe-yaml check.
+        args: [--unsafe]
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # bench artifact tarballs land in target/, never in git, so a
+        # large file landing in a commit is almost certainly a mistake.
+        args: [--maxkb=512]
+
+  # ─── Rust fast gates (local hooks — `language: system` runs the
+  # ─── system's cargo, no plugin install needed) ──────────────────────
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        description: >
+          Catches rustfmt drift before push. Cost: ~1s. Broke
+          CIRISLensCore 5c33a72; pre-commit would have caught it.
+
+      - id: cargo-check-no-default
+        name: cargo check --no-default-features (rlib path)
+        entry: cargo check --lib --no-default-features
+        language: system
+        types: [rust]
+        pass_filenames: false
+        description: >
+          Catches the rlib-path build under the post-PoB §3.1 fold
+          configuration (no PyO3). Cost: ~3s warm, ~15s cold.
+
+      - id: cargo-check-python
+        name: cargo check --features python
+        entry: cargo check --lib --features python
+        language: system
+        types: [rust]
+        pass_filenames: false
+        description: >
+          Catches the cohabitation-feature-graph build. The python
+          feature propagates pyo3 + ciris-edge/pyo3 + ciris-persist
+          /pyo3; missing this gate let through the bench-fixture
+          regression in 5c33a72.
+
+      - id: cargo-bench-no-run
+        name: cargo bench --no-run (bench compile-only gate)
+        entry: cargo bench --no-default-features --no-run
+        language: system
+        types: [rust]
+        pass_filenames: false
+        description: >
+          Catches bench-fixture API drift before push. The
+          BatchEnvelope-schema shift that broke 5c33a72's bench
+          would have been caught here at commit time. Cost: ~5s
+          warm.

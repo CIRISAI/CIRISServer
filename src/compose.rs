@@ -18,9 +18,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ciris_edge::transport::reticulum::{ReticulumAuth, ReticulumTransport, ReticulumTransportConfig};
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
-use ciris_keyring::{BlobTransportKeystore, TransportIdentityKeystore};
+use ciris_keyring::{
+    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, TransportIdentityKeystore,
+};
 use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
-use ciris_persist::prelude::{Engine, LocalSigner, LocalSignerConfig};
+use ciris_persist::prelude::Engine;
 use tokio::sync::watch;
 
 use crate::config::{Capabilities, ServerConfig};
@@ -32,7 +34,6 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 /// slices the host can support, serve until shutdown.
 pub async fn serve(cfg: ServerConfig) -> Result<()> {
     cfg.ensure_dirs()?;
-    mint_seed_if_absent(&cfg)?;
 
     let caps = Capabilities::detect(&cfg);
     tracing::info!(
@@ -41,12 +42,25 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
         "host capabilities"
     );
 
+    // ── ONE federation signing identity — a TPM / Secure-Enclave / StrongBox
+    //    SEALED Ed25519 seed (verify v5.4.0 get_platform_ed25519_signer;
+    //    CIRISVerify#70). The seed is hardware-custodied at rest, yet the pubkey
+    //    stays 32-byte Ed25519 — so key_id + the Reticulum announce (AV-42) are
+    //    preserved, and an existing `ed25519.seed` is adopted byte-identically
+    //    (no re-key on takeover). Shared by the persist Engine AND the edge
+    //    transport signer => ONE federation identity, hardware-custodied
+    //    (MISSION §1.5). Software-encrypted fallback when no hardware. ──────────
+    let signer: Arc<dyn HardwareSigner> = Arc::from(
+        get_platform_ed25519_signer(&cfg.key_id, cfg.identity_dir.clone())
+            .map_err(|e| anyhow::anyhow!("load sealed-Ed25519 federation signer: {e}"))?,
+    );
+
     // ── ONE shared persist Engine ────────────────────────────────────────────
-    let engine = build_engine(&cfg).await?;
+    let engine = build_engine(&cfg, Arc::clone(&signer)).await?;
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
-    let edge = build_edge(&engine, &cfg).await?;
+    let edge = build_edge(&engine, &cfg, Arc::clone(&signer)).await?;
 
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
@@ -105,18 +119,10 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// The one shared persist `Engine` (SQLite-backed; builds + migrates).
-async fn build_engine(cfg: &ServerConfig) -> Result<Arc<Engine>> {
-    let signer = Arc::new(
-        LocalSigner::from_config(&LocalSignerConfig {
-            key_id: cfg.key_id.clone(),
-            key_path: cfg.seed_path(),
-            pqc_key_id: None,
-            pqc_key_path: None,
-        })
-        .context("load persist LocalSigner")?,
-    );
-    let engine = Engine::with_signer(signer, &cfg.dsn())
+/// The one shared persist `Engine` (SQLite-backed; builds + migrates), keyed by
+/// the node's sealed-Ed25519 hardware federation signer.
+async fn build_engine(cfg: &ServerConfig, signer: Arc<dyn HardwareSigner>) -> Result<Arc<Engine>> {
+    let engine = Engine::with_hardware_signer(signer, &cfg.dsn())
         .await
         .context("build shared persist Engine")?;
     Ok(Arc::new(engine))
@@ -126,16 +132,19 @@ async fn build_engine(cfg: &ServerConfig) -> Result<Arc<Engine>> {
 /// (directory + queue) and the node's transport-signing identity. The federation
 /// signer is wired into the authenticated-announce path (AV-42); the transport-
 /// tier RET dual-key identity load-or-generates at `ret_identity_path`.
-async fn build_edge(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<Edge> {
+async fn build_edge(
+    engine: &Arc<Engine>,
+    cfg: &ServerConfig,
+    signer: Arc<dyn HardwareSigner>,
+) -> Result<Edge> {
     let backend = engine
         .sqlite_backend()
         .context("Engine must be SQLite-backed for the relay")?
         .clone();
-    let signer = Arc::new(
-        EdgeSigner::from_keyring_seed_dir(&cfg.key_id, cfg.identity_dir.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("load edge transport signer: {e}"))?,
-    );
+    // The edge transport signer wraps the SAME sealed-Ed25519 federation key as
+    // the Engine — one federation identity per node (distinct from the RNS
+    // transport-tier identity held in the keystore below).
+    let signer = Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, None));
 
     // Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99):
     // TPM-sealed when available (the `tpm` feature + hardware), encrypted software
@@ -199,27 +208,4 @@ async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConf
 /// on the shared Edge + the WBD `route_deferral` / Wise-Authority surface. SCAFFOLD.
 async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
     todo!("node slice (Server 1.0) — pin ciris-node-core (CIRISNodeCore#38) + install(&edge)")
-}
-
-/// Zero-setup identity: mint a 32-byte ed25519 seed on first boot if absent
-/// (chmod 600 on unix). Both the persist Engine signer and the edge transport
-/// signer load this same seed — one federation identity per node. (The RET
-/// transport-tier dual-key identity is separate, minted by the transport at
-/// `ret_identity_path`.)
-fn mint_seed_if_absent(cfg: &ServerConfig) -> Result<()> {
-    let seed = cfg.seed_path();
-    if seed.exists() {
-        return Ok(());
-    }
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).context("CSPRNG for identity seed")?;
-    std::fs::write(&seed, bytes).with_context(|| format!("write {}", seed.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 600 {}", seed.display()))?;
-    }
-    tracing::info!(path = %seed.display(), "minted node identity seed (first boot)");
-    Ok(())
 }

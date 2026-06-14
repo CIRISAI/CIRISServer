@@ -1,0 +1,385 @@
+[
+  {
+    "name": "float_and_empty_fields",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "THOUGHT_START",
+          "component_type": "observation",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "k_eff": 0.9,
+            "phase": "healthy",
+            "empty_field": null,
+            "empty_list": []
+          }
+        },
+        {
+          "event_type": "ACTION_RESULT",
+          "component_type": "action",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 3,
+          "data": {
+            "action": "speak",
+            "rationale": "test"
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"observation\",\"data\":{\"attempt_index\":0,\"k_eff\":0.9,\"phase\":\"healthy\"},\"event_type\":\"THOUGHT_START\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"action\",\"data\":{\"action\":\"speak\",\"attempt_index\":3,\"rationale\":\"test\"},\"event_type\":\"ACTION_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "zero_false_kept_empties_dropped",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "DMA_RESULTS",
+          "component_type": "rationale",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "count": 0,
+            "passed": false,
+            "blank": "",
+            "obj": {},
+            "keep": "x"
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"rationale\",\"data\":{\"attempt_index\":0,\"count\":0,\"keep\":\"x\",\"passed\":false},\"event_type\":\"DMA_RESULTS\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "with_deployment_profile",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": {
+        "agent_role": "ally",
+        "agent_template": "ally-default",
+        "deployment_domain": "general",
+        "deployment_type": "production",
+        "deployment_region": null,
+        "deployment_trust_mode": "sovereign"
+      },
+      "components": [
+        {
+          "event_type": "THOUGHT_START",
+          "component_type": "observation",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "x": 1
+          }
+        },
+        {
+          "event_type": "ACTION_RESULT",
+          "component_type": "action",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "a": "y"
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"observation\",\"data\":{\"attempt_index\":0,\"x\":1},\"event_type\":\"THOUGHT_START\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"action\",\"data\":{\"a\":\"y\",\"attempt_index\":0},\"event_type\":\"ACTION_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"deployment_profile\":{\"agent_role\":\"ally\",\"agent_template\":\"ally-default\",\"deployment_domain\":\"general\",\"deployment_region\":null,\"deployment_trust_mode\":\"sovereign\",\"deployment_type\":\"production\"},\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "null_task_and_completed",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": null,
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": null,
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "ACTION_RESULT",
+          "component_type": "action",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "a": "z"
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":null,\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"action\",\"data\":{\"a\":\"z\",\"attempt_index\":0},\"event_type\":\"ACTION_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":null,\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "unicode_nested_numeric",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "CONSCIENCE_RESULT",
+          "component_type": "conscience",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 2,
+          "data": {
+            "note": "café ☕ — überwacht",
+            "nested": {
+              "b": [
+                1,
+                2,
+                3
+              ],
+              "f": -15000000000.0
+            },
+            "big": 9007199254740993
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"conscience\",\"data\":{\"attempt_index\":2,\"big\":9007199254740993,\"nested\":{\"b\":[1,2,3],\"f\":-15000000000.0},\"note\":\"caf\\u00e9 \\u2615 \\u2014 \\u00fcberwacht\"},\"event_type\":\"CONSCIENCE_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "full_event_taxonomy",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "deadbeef",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "THOUGHT_START",
+          "component_type": "observation",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 0
+          }
+        },
+        {
+          "event_type": "SNAPSHOT_AND_CONTEXT",
+          "component_type": "context",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 1
+          }
+        },
+        {
+          "event_type": "DMA_RESULTS",
+          "component_type": "rationale",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 2
+          }
+        },
+        {
+          "event_type": "IDMA_RESULT",
+          "component_type": "rationale",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 3
+          }
+        },
+        {
+          "event_type": "ASPDMA_RESULT",
+          "component_type": "rationale",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 4
+          }
+        },
+        {
+          "event_type": "TSASPDMA_RESULT",
+          "component_type": "rationale",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 5
+          }
+        },
+        {
+          "event_type": "VERB_SECOND_PASS_RESULT",
+          "component_type": "verb_second_pass",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 6
+          }
+        },
+        {
+          "event_type": "CONSCIENCE_RESULT",
+          "component_type": "conscience",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 7
+          }
+        },
+        {
+          "event_type": "LLM_CALL",
+          "component_type": "llm_call",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 8
+          }
+        },
+        {
+          "event_type": "DEFERRAL_ROUTED",
+          "component_type": "deferral_routed",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 9
+          }
+        },
+        {
+          "event_type": "DEFERRAL_RECEIVED",
+          "component_type": "deferral_received",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 10
+          }
+        },
+        {
+          "event_type": "DEFERRAL_RESOLVED",
+          "component_type": "deferral_resolved",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 11
+          }
+        },
+        {
+          "event_type": "GRATITUDE_SIGNALED",
+          "component_type": "gratitude_signaled",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 12
+          }
+        },
+        {
+          "event_type": "CREDIT_GENERATED",
+          "component_type": "credit_generated",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 13
+          }
+        },
+        {
+          "event_type": "ACTION_RESULT",
+          "component_type": "action",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "deadbeef",
+          "attempt_index": 0,
+          "data": {
+            "i": 14
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"deadbeef\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"observation\",\"data\":{\"attempt_index\":0,\"i\":0},\"event_type\":\"THOUGHT_START\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"context\",\"data\":{\"attempt_index\":0,\"i\":1},\"event_type\":\"SNAPSHOT_AND_CONTEXT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"rationale\",\"data\":{\"attempt_index\":0,\"i\":2},\"event_type\":\"DMA_RESULTS\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"rationale\",\"data\":{\"attempt_index\":0,\"i\":3},\"event_type\":\"IDMA_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"rationale\",\"data\":{\"attempt_index\":0,\"i\":4},\"event_type\":\"ASPDMA_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"rationale\",\"data\":{\"attempt_index\":0,\"i\":5},\"event_type\":\"TSASPDMA_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"verb_second_pass\",\"data\":{\"attempt_index\":0,\"i\":6},\"event_type\":\"VERB_SECOND_PASS_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"conscience\",\"data\":{\"attempt_index\":0,\"i\":7},\"event_type\":\"CONSCIENCE_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"llm_call\",\"data\":{\"attempt_index\":0,\"i\":8},\"event_type\":\"LLM_CALL\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"deferral_routed\",\"data\":{\"attempt_index\":0,\"i\":9},\"event_type\":\"DEFERRAL_ROUTED\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"deferral_received\",\"data\":{\"attempt_index\":0,\"i\":10},\"event_type\":\"DEFERRAL_RECEIVED\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"deferral_resolved\",\"data\":{\"attempt_index\":0,\"i\":11},\"event_type\":\"DEFERRAL_RESOLVED\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"gratitude_signaled\",\"data\":{\"attempt_index\":0,\"i\":12},\"event_type\":\"GRATITUDE_SIGNALED\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"credit_generated\",\"data\":{\"attempt_index\":0,\"i\":13},\"event_type\":\"CREDIT_GENERATED\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"deadbeef\",\"component_type\":\"action\",\"data\":{\"attempt_index\":0,\"i\":14},\"event_type\":\"ACTION_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  },
+  {
+    "name": "component_hash_denormalize",
+    "trace": {
+      "trace_id": "tr",
+      "thought_id": "th",
+      "task_id": "task-1",
+      "agent_id_hash": "ENVELOPE_HASH",
+      "started_at": "2026-04-23T12:00:00+00:00",
+      "completed_at": "2026-04-23T12:00:00+00:00",
+      "trace_level": "generic",
+      "trace_schema_version": "2.7.9",
+      "deployment_profile": null,
+      "components": [
+        {
+          "event_type": "THOUGHT_START",
+          "component_type": "observation",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "",
+          "attempt_index": 0,
+          "data": {
+            "x": 1
+          }
+        },
+        {
+          "event_type": "ACTION_RESULT",
+          "component_type": "action",
+          "timestamp": "2026-04-23T12:00:00+00:00",
+          "agent_id_hash": "",
+          "attempt_index": 0,
+          "data": {
+            "a": "y"
+          }
+        }
+      ]
+    },
+    "expected_canonical": "{\"agent_id_hash\":\"ENVELOPE_HASH\",\"completed_at\":\"2026-04-23T12:00:00+00:00\",\"components\":[{\"agent_id_hash\":\"ENVELOPE_HASH\",\"component_type\":\"observation\",\"data\":{\"attempt_index\":0,\"x\":1},\"event_type\":\"THOUGHT_START\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"},{\"agent_id_hash\":\"ENVELOPE_HASH\",\"component_type\":\"action\",\"data\":{\"a\":\"y\",\"attempt_index\":0},\"event_type\":\"ACTION_RESULT\",\"timestamp\":\"2026-04-23T12:00:00+00:00\"}],\"started_at\":\"2026-04-23T12:00:00+00:00\",\"task_id\":\"task-1\",\"thought_id\":\"th\",\"trace_id\":\"tr\",\"trace_level\":\"generic\",\"trace_schema_version\":\"2.7.9\"}"
+  }
+]

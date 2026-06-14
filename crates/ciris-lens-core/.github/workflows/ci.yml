@@ -1,0 +1,1089 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Fire on v-prefixed release tags so the publish-pypi job
+    # (gated on `refs/tags/v*`) actually runs. Mirrors persist + edge.
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ─── linux-x86_64 — pyo3 path (covers PyO3 cdylib build) ────────────
+  linux-x86_64-test:
+    name: linux-x86_64 (python feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ciris-keyring's `tpm` feature is auto-enabled for Linux
+      # targets by ciris-persist v1.10.0+ (CIRISPersist#87); cargo
+      # unions the feature across the graph so lens-core inherits it
+      # even though it never asks for `tpm`. Building tss-esapi links
+      # system libtss2. Mirrors edge's CIRISEdge#12 CI fix.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (python feature)
+        run: cargo test --features "python" --all-targets
+
+  # ─── darwin-aarch64 — Phase 1 macOS dev path ────────────────────────
+  # No python feature here per persist/edge precedent — the abi3 wheel
+  # build for darwin runs via the pyo3-wheel matrix entry below.
+  darwin-aarch64-test:
+    name: darwin-aarch64 (rlib only)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # `cache-bin: false` per persist v0.7.3 closure: the macos-14
+      # runner image ships a rustup stub at
+      # `/Users/runner/.cargo/bin/cargo` that falls through to
+      # `rustup-init` when the toolchain isn't installed locally.
+      # dtolnay's action installs the real cargo into the same
+      # directory; without `cache-bin: false`, rust-cache restores
+      # the rustup-stub from a prior run's cache, masking the real
+      # cargo and breaking subsequent `cargo` calls with
+      # "unexpected argument 'test'". Linux runners unaffected.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: cargo test (no python)
+        run: cargo test --no-default-features
+
+  # ─── lint: clippy + fmt (mission rejection gate) ────────────────────
+  lint:
+    name: clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # libtss2 for the tpm keyring feature — clippy compiles the
+      # full dependency graph. See linux-x86_64-test; CIRISEdge#12.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --features "python" -- -D warnings
+
+  # ─── license-audit: cargo deny (license + advisories) ───────────────
+  license-audit:
+    name: cargo deny (license + advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ─── benches: per-PR compile-only gate ──────────────────────────────
+  #
+  # `cargo bench --no-run` compiles every bench target without running
+  # them — fast (a few seconds beyond the regular check), pass/fail
+  # gates per-PR, catches API drift between lens-core and the bench
+  # fixture builders before it lands in main. The slow actually-run
+  # pass is `bench.yml` (daily cron + manual dispatch + tag triggers,
+  # criterion HTML + bencher text artifact). Same split persist + edge
+  # use.
+  benches:
+    name: bench compile-only gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo bench --no-run
+        run: cargo bench --no-default-features --no-run
+
+  # ─── pyo3-wheel: maturin abi3-py310 wheels ──────────────────────────
+  #
+  # Three wheels per release. Matrix mirrors persist + edge exactly
+  # (linux x86_64 + aarch64, darwin arm64). darwin-x86_64 omitted —
+  # GitHub Actions Intel macOS runners queue indefinitely due to
+  # capacity issues; persist + edge matrices dropped it for the same
+  # reason. Add back via manual upload if a real consumer materializes.
+  #
+  # Each matrix entry runs on a NATIVE runner for that target so we
+  # avoid cross-compile drama (sysroot, linkers, vendored crypto
+  # quirks).
+  pyo3-wheel:
+    name: maturin abi3-py310 wheel (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    label: linux-x86_64,   tag: manylinux_2_34_x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64,  tag: manylinux_2_34_aarch64 }
+          - { os: macos-14,         label: darwin-aarch64, tag: macosx_11_0_arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # libtss2 for the tpm keyring feature on the Linux wheel
+      # builds; the macos-14 matrix entry skips it (no apt, and the
+      # tpm feature is Linux-target-only). See CIRISEdge#12.
+      - name: install libtss2-dev (TPM build dep)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      # `cache-bin: false` on macos-14 only (linux runners unaffected
+      # by the rustup-stub issue). Cheaper to enable on all matrix
+      # entries than to conditionalize — the cache hit ratio drops
+      # slightly but builds are correct.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: install maturin
+        run: pip install maturin
+      - name: maturin build
+        run: maturin build --release --strip
+      - name: confirm wheel shape
+        # Reject anything that isn't cp310-abi3 — mixed-mode maturin
+        # can silently emit cp31N-cp31N wheels which break consumer
+        # install on other minors. Catching at build time, before
+        # PyPI. Same v0.1.10-regression closure persist + edge use.
+        run: |
+          ls -la target/wheels/
+          if ! ls target/wheels/*-cp310-abi3-*.whl >/dev/null 2>&1; then
+            echo "::error::Expected cp310-abi3 wheel for ${{ matrix.label }}; got:"
+            ls target/wheels/*.whl 2>/dev/null || echo "  (no wheels)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris_lens_core-wheel-${{ matrix.label }}
+          path: target/wheels/*.whl
+
+  # ─── pyo3-wheel-windows: Win7-capable abi3-py310 wheel (#43.3 / #48) ─
+  #
+  # CIRISAgent 2.9.6+ bootstrap-loads lens-core on Windows desktop as
+  # well as Linux/macOS. The TPM feature is Linux-only (ciris-keyring's
+  # `tpm` flag is `cfg(target_os = "linux")`); no libtss2 step on Windows.
+  #
+  # GATING to publish-pypi: `pyo3-wheel-windows` IS in publish-pypi's
+  # `needs:` (the v1.1.0 fix — without it the artifact download raced
+  # this slow build and the Windows wheel never reached PyPI). A Windows
+  # build failure now blocks the release rather than silently shipping a
+  # Windows-less set the agent cannot boot against. The wheel also goes
+  # to the GitHub Release via `mobile-release`.
+  #
+  # WIN7 (#48 — mirror CIRISEdge v2.2.1 / CIRISPersist v5.5.5 /
+  # CIRISVerify v5.1.3): built with the Tier-3 `x86_64-win7-windows-msvc`
+  # target via nightly + `-Zbuild-std`, so std keeps the Win7 fallback
+  # paths (keyed events, GetSystemTimeAsFileTime, RtlGenRandom) instead
+  # of stable ≥1.78's hard-imported Win8/Win10 APIs (WaitOnAddress,
+  # GetSystemTimePreciseAsFileTime, ProcessPrng) that fail to load on
+  # Win7. lens-core statically bundles persist/edge/verify, so build-std
+  # recompiles that embedded substrate code for Win7 too — the single
+  # `win_amd64.whl` runs unchanged on Win7 SP1 + Server 2008 R2 →
+  # Win10/11. OpenSSL switches from the v1.1.0 vendored/Strawberry-Perl
+  # path to vcpkg static (the openssl-src perl/Configure target table
+  # does not map the Tier-3 triple).
+  pyo3-wheel-windows:
+    name: maturin abi3-py310 wheel (windows-x86_64, Win7-capable)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # OpenSSL via vcpkg static x64-windows-static (mirror CIRISEdge
+      # v2.2.1). openssl-sys arrives transitively (edge's transport-http
+      # TLS). vcpkg ships prebuilt static libs — no per-target perl/
+      # Configure, which is what breaks the vendored path under the
+      # Tier-3 triple. OPENSSL_NO_VENDOR=1 stops the vendored fallback;
+      # OPENSSL_STATIC=1 links statically (wheel needs no runtime OpenSSL).
+      # The `[target.'cfg(windows)'] openssl/vendored` Cargo dep is
+      # removed in lockstep — left in, it would force the vendored feature.
+      - name: install OpenSSL via vcpkg (static, x64-windows-static)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install openssl:x64-windows-static --x-install-root="$VCPKG_INSTALLATION_ROOT/installed"
+          ROOT="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static"
+          win_root=$(cygpath -w "$ROOT")
+          {
+            echo "OPENSSL_DIR=${win_root}"
+            echo "OPENSSL_LIB_DIR=${win_root}\\lib"
+            echo "OPENSSL_INCLUDE_DIR=${win_root}\\include"
+            echo "OPENSSL_STATIC=1"
+            echo "OPENSSL_NO_VENDOR=1"
+          } >> "$GITHUB_ENV"
+          echo "::notice::OpenSSL_DIR=${win_root} (vcpkg static x64-windows-static)"
+          ls -la "${ROOT}/lib/libssl.lib" "${ROOT}/lib/libcrypto.lib"
+      # nightly + rust-src for the Tier-3 build-std (Tier-3 ships no
+      # precompiled std; without build-std the link fails).
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: install maturin
+        run: pip install maturin
+      - name: maturin build (Win7 Tier-3 build-std)
+        shell: bash
+        # CARGO_BUILD_TARGET drives the Tier-3 triple; build-std compiles
+        # std + deps from source for it. The LNK1181 workaround augments
+        # LIB with the per-version `windows_x86_64_msvc-*/lib` dirs the
+        # `windows-targets` crate ships its `windows.<N>.<M>.<P>.lib`
+        # import libs in — under `-Zbuild-std` link.exe doesn't auto-
+        # discover them. Verbatim from CIRISEdge's pyo3-wheel windows arm.
+        # lens-core's pyproject `[tool.maturin] features = ["python"]`
+        # already pulls pyo3 + edge/persist pyo3 + both transports, so no
+        # explicit --features here (matches the linux/darwin matrix arms).
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=nightly
+          export CARGO_BUILD_TARGET=x86_64-win7-windows-msvc
+          export CARGO_UNSTABLE_BUILD_STD=std,panic_abort
+          if ! rustc --print target-list | grep -qx 'x86_64-win7-windows-msvc'; then
+            echo "::error::x86_64-win7-windows-msvc not in nightly target-list — target may have been renamed; check rustc release notes"
+            exit 1
+          fi
+          cargo fetch
+          extra=""
+          while IFS= read -r d; do
+            extra="${extra};$(cygpath -w "$d")"
+          done < <(find "$HOME/.cargo/registry/src" -type d -path '*windows_x86_64_msvc-*/lib' 2>/dev/null | sort -u)
+          if [ -n "$extra" ]; then
+            export LIB="${LIB:-}${extra}"
+            echo "::notice::LIB augmented with windows_x86_64_msvc import-lib dirs:${extra}"
+          else
+            echo "::warning::no windows_x86_64_msvc import-lib dirs found under cargo registry"
+          fi
+          maturin build --release --strip
+      - name: confirm wheel shape
+        # Reject anything that isn't cp310-abi3 — same gate the linux/
+        # darwin entries run. Catches mixed-mode maturin emissions
+        # before the release upload.
+        shell: bash
+        run: |
+          ls -la target/wheels/
+          if ! ls target/wheels/*-cp310-abi3-*.whl >/dev/null 2>&1; then
+            echo "::error::Expected cp310-abi3 wheel for windows-x86_64; got:"
+            ls target/wheels/*.whl 2>/dev/null || echo "  (no wheels)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris_lens_core-wheel-windows-x86_64
+          path: target/wheels/*.whl
+
+  # ─── ios-pyo3: PyO3 abi3 cross-compile for iOS (device + sim) ───────
+  #
+  # Mirrors edge's `ios-pyo3` lane. Two matrix entries — device
+  # (`aarch64-apple-ios`) and simulator (`aarch64-apple-ios-sim`) —
+  # each cross-compile a `ciris_lens_core.abi3.so` against the
+  # Python-Apple-support libpython for iOS. NOT a Python wheel:
+  # BeeWare Briefcase consumes the `.abi3.so` files via its own
+  # `iOS.pth` mechanism, not via pip install (same shape persist +
+  # edge ship).
+  #
+  # PYTHON_IOS_VER / PYTHON_IOS_BUILD pins match persist's exactly
+  # (CIRISPersist ci.yml's ios-build job docblock has the upstream
+  # rationale for the specific 3.10.b13 pin). Cohabitation requires
+  # all three (persist + edge + lens-core) to ship the same iOS
+  # libpython binding, otherwise the agent's iOS app loads three
+  # different `_sysconfigdata__ios_arm64-iphoneos.py` files and at
+  # most one wins.
+  ios-pyo3:
+    name: ios PyO3 abi3 (${{ matrix.target }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-ios,     dir: ios-device,    sysconfig: _sysconfigdata__ios_arm64-iphoneos.py,       xcfw_dir: ios-arm64 }
+          - { target: aarch64-apple-ios-sim, dir: ios-simulator, sysconfig: _sysconfigdata__ios_arm64-iphonesimulator.py, xcfw_dir: ios-arm64_x86_64-simulator }
+    env:
+      PYTHON_IOS_VER: "3.10"
+      PYTHON_IOS_BUILD: "b13"
+      # `python` feature propagates pyo3 + ciris-edge/pyo3 +
+      # ciris-persist/pyo3 to the iOS build — same surface the
+      # linux/darwin wheel matrix exercises.
+      IOS_PYO3_FEATURES: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: ios-pyo3-${{ matrix.target }}
+        continue-on-error: true
+      - name: Repair toolchain if rustup-init shadow (cache-poison heal)
+        # macos-14 runners exhibit rustup-init shim poison-restore
+        # under Swatinem/rust-cache; CIRISVerify v2.1.4+ pattern,
+        # mirrored in persist + edge.
+        shell: bash
+        run: |
+          if cargo build --help 2>&1 | grep -q "rustup-init"; then
+            echo "::warning::Detected rustup-init shadow in ~/.cargo/bin; reinstalling toolchain"
+            rm -rf "$HOME/.cargo/bin"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup default stable
+          cargo --version
+      - uses: actions/setup-python@v5
+        with:
+          # Host runner Python (3.13). The target Python comes from
+          # Python-Apple-support; persist + edge both pin 3.13 here.
+          python-version: "3.13"
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: download Python-Apple-support (iOS)
+        id: python-ios
+        # Stage libpython + matching _sysconfigdata into one dir for
+        # PYO3_CROSS_LIB_DIR. Persist's recipe verbatim — keep the
+        # cohabitation libpython binding aligned across all three
+        # repos.
+        run: |
+          SUPPORT_URL="https://github.com/beeware/Python-Apple-support/releases/download/${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD}/Python-${PYTHON_IOS_VER}-iOS-support.${PYTHON_IOS_BUILD}.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/python-ios"
+          curl -sL "${SUPPORT_URL}" -o "${RUNNER_TEMP}/python-ios-support.tar.gz"
+          tar xzf "${RUNNER_TEMP}/python-ios-support.tar.gz" -C "${RUNNER_TEMP}/python-ios"
+
+          XCFW="${RUNNER_TEMP}/python-ios/Python.xcframework"
+
+          STAGE_DIR="${RUNNER_TEMP}/pyo3-ios-stage"
+          mkdir -p "$STAGE_DIR"
+          cp "$XCFW/${{ matrix.xcfw_dir }}/Python.framework/Python" \
+             "$STAGE_DIR/libpython${PYTHON_IOS_VER}.dylib"
+          cp "$XCFW/${{ matrix.xcfw_dir }}/lib-arm64/python${PYTHON_IOS_VER}/${{ matrix.sysconfig }}" \
+             "$STAGE_DIR/"
+          echo "lib_dir=${STAGE_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "✓ Python-Apple-support ${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD} staged for ${{ matrix.target }}"
+          ls -la "$STAGE_DIR/"
+      - name: cargo build (ios PyO3 — ${{ matrix.target }})
+        env:
+          PYO3_CROSS: "1"
+          PYO3_CROSS_PYTHON_VERSION: "3.10"
+          PYO3_CROSS_LIB_DIR: ${{ steps.python-ios.outputs.lib_dir }}
+        # Direct `cargo build` — not `maturin build`. Maturin 1.13's
+        # platform check rejects darwin→iOS cross-compile; persist
+        # documented this in v2.0.4 and the constraint persists.
+        run: >-
+          cargo build --release
+          --target ${{ matrix.target }}
+          --lib
+          --features "$IOS_PYO3_FEATURES"
+      - name: strip + rename + install_name fix
+        # Mach-O rename: libciris_lens_core.dylib →
+        # ciris_lens_core.abi3.so (Python extension naming
+        # convention). install_name_tool rewrites the embedded path
+        # from /Users/runner/work/... to @rpath-relative for
+        # Briefcase consumption. The hash-integrity hit is intentional
+        # and accepted (same posture persist + edge take).
+        run: |
+          mkdir -p "dist/${{ matrix.dir }}"
+          SRC="target/${{ matrix.target }}/release/libciris_lens_core.dylib"
+          DST="dist/${{ matrix.dir }}/ciris_lens_core.abi3.so"
+          if [ ! -f "$SRC" ]; then
+            echo "::error::$SRC not found"
+            ls -la "target/${{ matrix.target }}/release/" | grep ciris
+            exit 1
+          fi
+          strip -x "$SRC"
+          install_name_tool -id \
+            "@rpath/ciris_lens_core.ciris_lens_core.framework/ciris_lens_core.ciris_lens_core" \
+            "$SRC"
+          cp "$SRC" "$DST"
+          echo "✓ ${{ matrix.dir }}: $(stat -f%z "$DST" 2>/dev/null || stat -c%s "$DST") bytes"
+          otool -D "$DST"
+          file "$DST"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-ios-pyo3-${{ matrix.dir }}
+          path: dist/${{ matrix.dir }}/ciris_lens_core.abi3.so
+          if-no-files-found: error
+
+  # ─── ios-pyo3-package: collect device + simulator into one tarball ──
+  #
+  # Output shape matches persist + edge exactly:
+  #
+  #     ciris-lens-core-v{VERSION}-ios.tar.gz
+  #       ├── ios-device/ciris_lens_core.abi3.so
+  #       └── ios-simulator/ciris_lens_core.abi3.so
+  #
+  # Briefcase consumes via its `iOS.pth` mechanism; this is NOT a
+  # pip-installable wheel.
+  ios-pyo3-package:
+    name: ios PyO3 package (device + simulator tarball)
+    needs: ios-pyo3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-lens-core-ios-pyo3-*
+          path: dist
+      - name: assemble tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUTDIR="ciris-lens-core-v${VERSION}-ios"
+          mkdir -p "$OUTDIR/ios-device" "$OUTDIR/ios-simulator"
+          cp dist/ciris-lens-core-ios-pyo3-ios-device/ciris_lens_core.abi3.so "$OUTDIR/ios-device/"
+          cp dist/ciris-lens-core-ios-pyo3-ios-simulator/ciris_lens_core.abi3.so "$OUTDIR/ios-simulator/"
+          tar czf "${OUTDIR}.tar.gz" "$OUTDIR"
+          ls -la "${OUTDIR}.tar.gz"
+          tar tzf "${OUTDIR}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-ios
+          path: ciris-lens-core-v${{ steps.version.outputs.version }}-ios.tar.gz
+
+  # ─── android-ndk: NDK cross-compile (3-ABI matrix) ──────────────────
+  #
+  # Mirrors edge's android-ndk lane (which itself mirrors persist's).
+  # Three matrix entries — arm64-v8a (the primary; ~99% of Android
+  # devices in 2026), x86_64 (Chaquopy CI emulators + Intel-host
+  # dev), armeabi-v7a (legacy 32-bit Pi-class). Each builds twice:
+  #
+  #   1. Plain `.so` (no PyO3) — for the post-PoB §3.1 fold path
+  #      where the agent links lens-core as rlib + ships a single
+  #      app binary
+  #   2. PyO3 Chaquopy abi3 `.so` — for the cohabitation Python
+  #      agent on Chaquopy; needs the DT_NEEDED libpython3.10 stub
+  #      dance (CIRISPersist#98 finding)
+  #
+  # x86_64 requires the OpenSSL 3.4.1 SM4-NI workaround (assembler
+  # bug in newer OpenSSL on Android x86_64 NDK; persist + edge
+  # documented the pin + workaround. Lens-core transitively pulls
+  # OpenSSL via edge's transport-http rustls stack → same workaround
+  # applies).
+  #
+  # Cohabitation invariant: persist + edge + lens-core all ship the
+  # same libpython3.10 ABI on Android. Pin mismatches → Chaquopy
+  # loads three different libpython binding mismatches and at most
+  # one wins.
+  android-ndk:
+    name: android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a,    target: aarch64-linux-android,   clang_prefix: aarch64-linux-android24,     pointer_width: 64 }
+          - { abi: x86_64,       target: x86_64-linux-android,    clang_prefix: x86_64-linux-android24,      pointer_width: 64, needs_openssl: true }
+          - { abi: armeabi-v7a,  target: armv7-linux-androideabi, clang_prefix: armv7a-linux-androideabi24,  pointer_width: 32 }
+    env:
+      # Plain build: --no-default-features for the rlib post-fold
+      # path. The host agent's Cargo.toml selects what features it
+      # actually needs on Android.
+      # PyO3 build: --features python propagates pyo3 +
+      # ciris-edge/pyo3 + ciris-persist/pyo3 — the Chaquopy
+      # cohabitation surface.
+      MOBILE_PYO3_FEATURES: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-${{ matrix.abi }}
+        continue-on-error: true
+      - name: setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # x86_64 only: OpenSSL 3.4.1 SM4-NI workaround. The newer
+      # OpenSSL the rustls/reqwest stack pulls would hit an
+      # assembler bug on Android x86_64 NDK; pin to 3.4.1 + no-sm4.
+      # Persist + edge both run this; lens-core inherits the same
+      # OpenSSL dependency via edge's transport-http stack.
+      - name: pre-build OpenSSL for x86_64-android (SM4-NI workaround)
+        if: matrix.needs_openssl
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          OPENSSL_VERSION="3.4.1"
+          curl -sL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+            -o openssl-src.tar.gz
+          tar xzf openssl-src.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:${PATH}"
+          export CC="x86_64-linux-android24-clang"
+          export AR="llvm-ar"
+          export RANLIB="llvm-ranlib"
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+          INSTALL_DIR="${RUNNER_TEMP}/openssl-x86_64-android"
+          ./Configure android-x86_64 \
+            no-sm4 no-shared no-stdio no-tests \
+            -D__ANDROID_API__=24 \
+            --prefix="${INSTALL_DIR}" \
+            --openssldir="${INSTALL_DIR}/ssl"
+          make -j"$(nproc)" build_libs
+          make install_dev
+          echo "✓ OpenSSL ${OPENSSL_VERSION} built for x86_64-android (no-sm4)"
+      - name: export pre-built OpenSSL env vars
+        if: matrix.needs_openssl
+        run: |
+          echo "OPENSSL_NO_VENDOR=1" >> "$GITHUB_ENV"
+          echo "X86_64_LINUX_ANDROID_OPENSSL_DIR=${{ runner.temp }}/openssl-x86_64-android" >> "$GITHUB_ENV"
+          echo "X86_64_LINUX_ANDROID_OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+
+      # Plain .so (no PyO3) — first; save before the PyO3 build
+      # overwrites target/. Native Android consumers (Rust-only,
+      # UniFFI/JNI) take this artifact.
+      - name: cargo ndk build (${{ matrix.abi }} — plain, no PyO3)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: >-
+          cargo ndk -t ${{ matrix.abi }} build --release
+          --no-default-features
+      - name: save plain .so
+        run: |
+          mkdir -p dist/${{ matrix.abi }}
+          cp "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+             "dist/${{ matrix.abi }}/libciris_lens_core.so"
+
+      # PyO3 Chaquopy abi3 .so — with explicit libpython3.10 DT_NEEDED.
+      # Chaquopy loads libpython with RTLD_LOCAL so extensions must
+      # DT_NEED it explicitly. Build a stub libpython3.10.so for the
+      # linker to resolve against and add `-lpython3.10` via
+      # RUSTFLAGS. Chaquopy's real libpython provides the symbols at
+      # runtime.
+      - name: create PyO3 config + libpython stub
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          CFG="${RUNNER_TEMP}/pyo3-android.config"
+          cat > "${CFG}" <<CFGEOF
+          implementation=CPython
+          version=3.10
+          shared=false
+          abi3=true
+          lib_name=python3.10
+          lib_dir=
+          executable=
+          pointer_width=${{ matrix.pointer_width }}
+          build_flags=
+          suppress_build_script_link_lines=true
+          CFGEOF
+          sed -i 's/^[[:space:]]*//' "${CFG}"
+          echo "PYO3_CONFIG_FILE=${CFG}" >> "$GITHUB_ENV"
+
+          STUB_DIR="${RUNNER_TEMP}/python-stub"
+          mkdir -p "${STUB_DIR}"
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo 'void __pystub(void){}' | \
+            "${TOOLCHAIN}/bin/${{ matrix.clang_prefix }}-clang" \
+              -shared -nostdlib -Wl,-soname,libpython3.10.so \
+              -o "${STUB_DIR}/libpython3.10.so" -x c -
+          echo "✓ PyO3 config (pointer_width=${{ matrix.pointer_width }}):"
+          cat "${CFG}"
+          echo "✓ stub libpython3.10.so:"
+          file "${STUB_DIR}/libpython3.10.so"
+      - name: cargo ndk build (${{ matrix.abi }} — PyO3 Chaquopy abi3)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          RUSTFLAGS: "-L ${{ runner.temp }}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
+        run: >-
+          cargo ndk -t ${{ matrix.abi }} build --release --lib
+          --features "$MOBILE_PYO3_FEATURES"
+      - name: verify DT_NEEDED includes libpython3.10.so
+        # The whole point of the stub-link dance is the DT_NEEDED
+        # entry. If this assertion fails the wheel will silently
+        # dlopen on Chaquopy and crash on first import — catch at
+        # build time.
+        run: |
+          readelf -d "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+            | grep -q 'libpython3.10.so' \
+            && echo "✓ DT_NEEDED: libpython3.10.so present" \
+            || { echo "::error::libpython3.10.so missing from DT_NEEDED"; exit 1; }
+      - name: strip + collect artifacts
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          # PyO3 .so (for Chaquopy wheels)
+          cp "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+             "dist/${{ matrix.abi }}/libciris_lens_core_pyo3.so"
+          if [ -x "$STRIP" ]; then
+            "$STRIP" "dist/${{ matrix.abi }}/libciris_lens_core.so"
+            "$STRIP" "dist/${{ matrix.abi }}/libciris_lens_core_pyo3.so"
+          fi
+          echo "=== ${{ matrix.abi }} ==="
+          ls -la dist/${{ matrix.abi }}/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android-${{ matrix.abi }}
+          path: dist/${{ matrix.abi }}/
+
+  # ─── android-package: collate per-ABI artifacts into tarball ────────
+  #
+  # Two output tarballs (matches persist + edge shape exactly):
+  #
+  #   1. ciris-lens-core-v{VERSION}-android.tar.gz — raw .so per ABI
+  #      for native Android consumers (Rust-only / UniFFI / JNI)
+  #   2. ciris-lens-core-v{VERSION}-android-wheels.tar.gz — three
+  #      Chaquopy abi3 wheels, tagged cp310-abi3-android_24_{abi}
+  #
+  # Pattern lifted verbatim from CIRISEdge v0.7.0+ `android-package`
+  # (CIRISEdge .github/workflows/ci.yml `android-package`). Wheel
+  # assembly uses the `build_wheel` bash function from that job —
+  # includes METADATA, WHEEL, top_level.txt, and a sha256-RECORD per
+  # the wheel spec (PEP 427 / PEP 491).
+  android-package:
+    name: package android artifacts
+    needs: android-ndk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-lens-core-android-*
+          path: dist
+      - name: assemble native-.so tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUTDIR="ciris-lens-core-v${VERSION}-android"
+          mkdir -p "$OUTDIR"
+          for abi in arm64-v8a x86_64 armeabi-v7a; do
+            mkdir -p "$OUTDIR/$abi"
+            cp "dist/ciris-lens-core-android-$abi/libciris_lens_core.so" \
+               "$OUTDIR/$abi/libciris_lens_core.so"
+          done
+          tar czf "${OUTDIR}.tar.gz" "$OUTDIR"
+          ls -la "${OUTDIR}.tar.gz"
+          tar tzf "${OUTDIR}.tar.gz"
+      - name: assemble Chaquopy abi3 wheels tarball
+        # Pattern lifted verbatim from CIRISEdge v0.7.0+ android-package
+        # `build_wheel` function. Produces cp310-abi3-android_24_{abi}
+        # wheels with METADATA, WHEEL, top_level.txt, and a sha256-RECORD.
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          build_wheel() {
+            local ABI="$1"         # e.g. arm64_v8a (underscore for wheel tag)
+            local ABI_DIR="$2"     # e.g. arm64-v8a (hyphen for artifact dir)
+
+            local WHEEL_TAG="cp310-abi3-android_24_${ABI}"
+            local WHEEL_NAME="ciris_lens_core-${VERSION}-${WHEEL_TAG}.whl"
+            local WORK="dist/wheel-work/${ABI}"
+
+            mkdir -p "${WORK}/ciris_lens_core" "${WORK}/ciris_lens_core-${VERSION}.dist-info"
+
+            cp "dist/ciris-lens-core-android-${ABI_DIR}/libciris_lens_core_pyo3.so" \
+               "${WORK}/ciris_lens_core/ciris_lens_core.so"
+            cp python/ciris_lens_core/__init__.py "${WORK}/ciris_lens_core/"
+            # .pyi stubs — copy only if present (optional; resistant to
+            # future addition without a workflow tweak). Mirrors edge's
+            # android-package pattern.
+            if [ -f python/ciris_lens_core/ciris_lens_core.pyi ]; then
+              cp python/ciris_lens_core/ciris_lens_core.pyi "${WORK}/ciris_lens_core/"
+            fi
+
+            cat > "${WORK}/ciris_lens_core-${VERSION}.dist-info/METADATA" <<METAEOF
+          Metadata-Version: 2.1
+          Name: ciris-lens-core
+          Version: ${VERSION}
+          Summary: Science-layer runtime for the CIRIS federation (lens-core)
+          License: AGPL-3.0-or-later
+          Requires-Python: >=3.10
+          METAEOF
+
+            cat > "${WORK}/ciris_lens_core-${VERSION}.dist-info/WHEEL" <<WHEELEOF
+          Wheel-Version: 1.0
+          Generator: ciris-lens-core-ci
+          Root-Is-Purelib: false
+          Tag: ${WHEEL_TAG}
+          WHEELEOF
+
+            echo "ciris_lens_core" > "${WORK}/ciris_lens_core-${VERSION}.dist-info/top_level.txt"
+
+            cd "${WORK}"
+            local RECORD="ciris_lens_core-${VERSION}.dist-info/RECORD"
+            : > "${RECORD}"
+            find ciris_lens_core "ciris_lens_core-${VERSION}.dist-info" \
+              -type f ! -name RECORD | sort | while read -r f; do
+              local HASH
+              HASH=$(python3 -c "
+          import hashlib, base64
+          with open('${f}', 'rb') as fh:
+              d = hashlib.sha256(fh.read()).digest()
+          print('sha256=' + base64.urlsafe_b64encode(d).rstrip(b'=').decode())
+          ")
+              local SIZE
+              SIZE=$(stat -c%s "${f}")
+              echo "${f},${HASH},${SIZE}" >> "${RECORD}"
+            done
+            echo "${RECORD},," >> "${RECORD}"
+            cd - > /dev/null
+
+            (cd "${WORK}" && zip -r "../../${WHEEL_NAME}" ciris_lens_core "ciris_lens_core-${VERSION}.dist-info")
+            echo "✓ ${WHEEL_NAME} ($(stat -c%s "dist/${WHEEL_NAME}") bytes)"
+          }
+
+          build_wheel arm64_v8a    arm64-v8a
+          build_wheel x86_64      x86_64
+          build_wheel armeabi_v7a armeabi-v7a
+
+          VERSION="${{ steps.version.outputs.version }}"
+          tar -czf "dist/ciris-lens-core-v${VERSION}-android-wheels.tar.gz" \
+            -C dist \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_arm64_v8a.whl" \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_x86_64.whl" \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_armeabi_v7a.whl"
+
+          echo "✓ ciris-lens-core-v${VERSION}-android-wheels.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android
+          path: ciris-lens-core-v${{ steps.version.outputs.version }}-android.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android-wheels
+          path: dist/ciris-lens-core-v${{ steps.version.outputs.version }}-android-wheels.tar.gz
+
+  # ─── publish-pypi: tag-gated wheel upload via OIDC ──────────────────
+  #
+  # Trust posture for v0.1.0: PEP 740 sigstore attestation via OIDC
+  # is the day-1 provenance trail. Build-manifest hybrid-signing +
+  # CIRISRegistry round-trip (the second layer persist + edge run)
+  # is deferred until Bridge provisions a lens-core trusted-primitive
+  # entry; lands in a v0.1.x follow-up. PyPI publish itself works
+  # without it.
+  #
+  # Auth: OIDC trusted publishing. NO API token in CI secrets — PyPI
+  # validates the workflow's GitHub identity directly. One-time setup
+  # on PyPI side: project owner reserves `ciris-lens-core` + configures
+  # the trusted publisher pointing at
+  # `CIRISAI/CIRISLensCore` → `.github/workflows/ci.yml` →
+  # environment `pypi`.
+  publish-pypi:
+    name: Publish wheels to PyPI (tag-gated)
+    runs-on: ubuntu-latest
+    # Gate publish on every quality job — presence-of-wheel alone is
+    # not a quality gate. Same closure persist + edge apply.
+    #
+    # `pyo3-wheel-windows` IS in this list (was not, through v1.0.1).
+    # That omission was the bug: without the dependency edge, this job's
+    # `download-artifact` step raced the Windows build (vendored OpenSSL
+    # compiles from source — minutes slower than the linux/darwin wheels)
+    # and ran BEFORE the `ciris_lens_core-wheel-windows-x86_64` artifact
+    # existed, so PyPI got only the 3 fast wheels every release while the
+    # Windows wheel went solely to the GitHub Release. The v1.0.1 tag run
+    # shows both jobs green yet PyPI carries 3 wheels — that race, not a
+    # build failure. CIRISAgent 2.9.6+ bootstrap-REQUIRES lens-core on
+    # Windows desktop, so the Windows wheel is now a first-class gate: a
+    # Windows build failure SHOULD block the release rather than silently
+    # ship a Windows-less wheel set the agent cannot boot against.
+    needs:
+      - pyo3-wheel
+      - pyo3-wheel-windows
+      - lint
+      - license-audit
+      - linux-x86_64-test
+      - darwin-aarch64-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ciris-lens-core/
+    permissions:
+      # OIDC token-issuance permission. Required for PyPI's trusted
+      # publishing. Scope is the workflow's GitHub-issued JWT only;
+      # no long-lived secret.
+      id-token: write
+    steps:
+      - name: download all multi-arch wheels
+        # `merge-multiple: true` flattens the per-artifact subdirs;
+        # the .whl filenames already encode the target tag (e.g.
+        # `-manylinux_2_34_aarch64`) so there's no collision.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ciris_lens_core-wheel-*
+          merge-multiple: true
+          path: dist
+      - name: sanity-check wheel shapes before publish
+        # Expect 4 wheels: linux x86_64 + aarch64, darwin arm64, AND
+        # windows x86_64. The Windows wheel is now gating (in `needs:`
+        # above), so its artifact is guaranteed present — the `lt 4`
+        # floor enforces that the Windows wheel actually reaches PyPI
+        # rather than silently dropping back to the pre-v1.0.2 3-wheel
+        # set on a Windows ListArtifacts hiccup.
+        run: |
+          ls -la dist/
+          COUNT=$(ls dist/*.whl 2>/dev/null | wc -l)
+          if [ "${COUNT}" -lt 4 ]; then
+            echo "::error::Expected 4 wheels (linux x86_64 + aarch64, darwin arm64, windows x86_64); got ${COUNT}"
+            ls dist/*.whl 2>/dev/null || echo "  (no .whl files at all)"
+            exit 1
+          fi
+          for wheel in dist/*.whl; do
+            if ! [[ "${wheel}" =~ -cp310-abi3- ]]; then
+              echo "::error::Non-abi3 wheel detected: ${wheel}"
+              exit 1
+            fi
+            echo "✓ ${wheel}"
+          done
+          echo "✓ All ${COUNT} wheels conform to cp310-abi3."
+      - name: publish to PyPI via OIDC trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No `password:` — OIDC trusted publishing handles auth.
+          packages-dir: dist
+          # skip-existing makes tag re-runs idempotent. PyPI rejects
+          # same-version re-uploads anyway; failing softly here keeps
+          # re-runs from blowing up.
+          skip-existing: true
+          # PEP 740 — sigstore-attested upload. Consumers verifying
+          # the wheel can verify the PyPI artifact ties to this exact
+          # GH workflow identity.
+          attestations: true
+
+  # ─── mobile-release: GitHub Release artifact publish (#43.3) ────────
+  #
+  # CIRISAgent 2.9.6+ bootstrap-loads lens-core as an adapter and
+  # gates mobile/desktop releases on lens-core shipping the standard
+  # sibling artifact set — the persist + edge pattern (#43.3).
+  #
+  # Pattern lifted verbatim from CIRISEdge v0.7.0+ `mobile-release`
+  # (CIRISEdge .github/workflows/ci.yml job `mobile-release`), which
+  # itself mirrors CIRISPersist v2.0.7+ `mobile-release`. Upload shape:
+  #
+  #   ciris-lens-core-v{VERSION}-android-wheels.tar.gz
+  #     └── three Chaquopy abi3 wheels (arm64-v8a, armeabi-v7a, x86_64)
+  #   ciris-lens-core-v{VERSION}-android.tar.gz
+  #     └── jniLibs layout (.so per ABI, plain — no PyO3)
+  #   ciris-lens-core-v{VERSION}-ios.tar.gz
+  #     └── ios-device/ciris_lens_core.abi3.so
+  #     └── ios-simulator/ciris_lens_core.abi3.so
+  #   ciris_lens_core-{VERSION}-cp310-abi3-win_amd64.whl  (Windows)
+  #     └── uploaded as a release asset AND (v1.0.2+) published to PyPI
+  #         via the `pyo3-wheel-windows` → `publish-pypi` needs edge.
+  #   SHA256SUMS
+  #
+  # ADDITIVE + NON-GATING: this job does NOT appear in publish-pypi's
+  # `needs:` list. A failure here does not block the PyPI publish.
+  # The job is TAG-GATED (`if: startsWith(github.ref, 'refs/tags/v')`),
+  # same discipline as publish-pypi.
+  #
+  # Artifact download uses `gh run download` (not actions/download-
+  # artifact@v4) + 5-attempt retry — absorbs ListArtifacts transient
+  # 403s persist observed on v1.5.24 tag run (same pattern edge uses).
+  #
+  # The `gh release create --verify-tag` guard prevents accidental
+  # release creation on a workflow_dispatch against main (no tag →
+  # --verify-tag exits non-zero). `--clobber` on upload makes tag
+  # re-runs idempotent.
+  mobile-release:
+    name: Upload mobile + Windows artifacts to GitHub Release (tag-gated, #43.3)
+    runs-on: ubuntu-latest
+    needs:
+      - ios-pyo3-package
+      - android-package
+      - pyo3-wheel-windows
+      - lint
+      - license-audit
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: download iOS PyO3 artifact (with retry)
+        # `gh run download` — absorbs ListArtifacts transient 403s that
+        # actions/download-artifact@v4 surfaces directly. 5-attempt retry
+        # verbatim from edge + persist pattern.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-ios \
+                --dir dist; then
+              echo "✓ iOS artifact download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::iOS artifact download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::iOS download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Android raw .so artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-android \
+                --dir dist; then
+              echo "✓ Android raw .so artifact download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Android artifact download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Android download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Android Chaquopy wheels artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-android-wheels \
+                --dir dist; then
+              echo "✓ Android wheels download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Android wheels download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Android wheels download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Windows wheel artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris_lens_core-wheel-windows-x86_64 \
+                --dir dist; then
+              echo "✓ Windows wheel download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Windows wheel download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Windows wheel download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: verify artifacts present
+        run: |
+          echo "=== dist/ ==="
+          ls -la dist/
+          VERSION="${{ steps.version.outputs.version }}"
+          for ASSET in "ciris-lens-core-v${VERSION}-ios.tar.gz" \
+                       "ciris-lens-core-v${VERSION}-android.tar.gz" \
+                       "ciris-lens-core-v${VERSION}-android-wheels.tar.gz"; do
+            if [ ! -f "dist/${ASSET}" ]; then
+              echo "::error::Missing expected asset: ${ASSET}"
+              exit 1
+            fi
+            echo "✓ ${ASSET} ($(stat -c%s "dist/${ASSET}") bytes)"
+          done
+          # Windows wheel — filename encodes the version + platform tag.
+          WIN_WHL=$(ls dist/ciris_lens_core-${VERSION}-cp310-abi3-win*.whl 2>/dev/null | head -1)
+          if [ -z "$WIN_WHL" ]; then
+            echo "::error::No Windows cp310-abi3 wheel found in dist/"
+            ls dist/*.whl 2>/dev/null || echo "  (no .whl files)"
+            exit 1
+          fi
+          echo "✓ $(basename $WIN_WHL) ($(stat -c%s "$WIN_WHL") bytes)"
+      - name: generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum ciris-lens-core-v*.tar.gz ciris_lens_core-*.whl > SHA256SUMS
+          cat SHA256SUMS
+      - name: create GitHub Release + upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create the release if publish-pypi hasn't created it yet;
+          # otherwise just upload assets. --verify-tag guards against
+          # accidental release creation on workflow_dispatch (no tag).
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ciris-lens-core ${TAG}" \
+              --generate-notes \
+              --verify-tag
+            echo "✓ created release ${TAG}"
+          else
+            echo "✓ release ${TAG} already exists — uploading assets"
+          fi
+
+          WIN_WHL=$(ls dist/ciris_lens_core-${VERSION}-cp310-abi3-win*.whl | head -1)
+
+          # --clobber makes tag re-runs idempotent (same discipline
+          # edge + persist use).
+          gh release upload "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "dist/ciris-lens-core-v${VERSION}-ios.tar.gz" \
+            "dist/ciris-lens-core-v${VERSION}-android.tar.gz" \
+            "dist/ciris-lens-core-v${VERSION}-android-wheels.tar.gz" \
+            "${WIN_WHL}" \
+            "dist/SHA256SUMS"
+
+          # Promote draft → published (idempotent on already-published
+          # releases). Closes the edge v1.2.0 regression where a prior
+          # failed tag run left the release in draft state so consumers
+          # couldn't see assets even though PyPI was green.
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+          echo "✓ ensured ${TAG} is published (draft → false)"
+
+          echo "✓ uploaded mobile + Windows assets to ${TAG}"
+          {
+            echo "## Mobile + Windows release assets (#43.3)"
+            echo ""
+            echo "- \`ciris-lens-core-v${VERSION}-ios.tar.gz\` (iOS PyO3: device + simulator .abi3.so)"
+            echo "- \`ciris-lens-core-v${VERSION}-android.tar.gz\` (jniLibs layout: raw per-ABI .so)"
+            echo "- \`ciris-lens-core-v${VERSION}-android-wheels.tar.gz\` (Chaquopy abi3 wheels: arm64_v8a, x86_64, armeabi_v7a)"
+            echo "- \`$(basename ${WIN_WHL})\` (Windows cp310-abi3 wheel; GitHub Release only — PyPI in v1.0.2)"
+            echo "- \`SHA256SUMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"

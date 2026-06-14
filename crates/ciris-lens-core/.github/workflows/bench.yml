@@ -1,0 +1,88 @@
+name: Bench
+
+# Runs the criterion benchmark suite (docs/BENCHMARKS.md) on a daily
+# cron + manual dispatch + tag pushes, and publishes the criterion
+# HTML report + text summary as artifacts. NOT a pass/fail gate —
+# GitHub's shared runners are too noisy for pass/fail regression
+# detection. This job answers "what are our numbers" and surfaces
+# unexplained curve shapes (a step-function on `project`'s blob-count
+# sweep would be the indexing-broke-into-iteration regression the
+# doc calls out).
+#
+# The ci.yml `benches` job stays as the fast per-PR compile gate
+# (`cargo bench --no-run`). This workflow is the slow, actually-run
+# pass — same cadence persist + edge use for their bench.yml.
+
+on:
+  # Daily regression cadence — catches drift within 24h without
+  # burning CI minutes on every main-push.
+  schedule:
+    - cron: "37 5 * * *"
+  # On-demand: run the suite against an arbitrary commit.
+  workflow_dispatch:
+  # Tag pushes always record numbers so each release's curves are
+  # captured in the GH Actions artifact set alongside the manifest.
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Criterion Benchmark Suite
+    runs-on: ubuntu-latest
+    # 3 benches × 6 sizes each × ~5s measurement budget ≈ ~5 min
+    # realistic; 30 min hard cap leaves slack for cold-start +
+    # criterion's HTML-report generation.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # libtss2 — ciris-keyring's `tpm` feature is auto-enabled by
+      # ciris-persist v1.10.0+ for Linux targets; cargo unions the
+      # feature across the graph so lens-core inherits it. Building
+      # tss-esapi links system libtss2. Same dep ci.yml installs.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        # CI hardening: cache restore is a speedup, not a correctness
+        # gate. A flaky runner / Actions infra hiccup should downgrade
+        # to "build from scratch this run", not abort.
+        continue-on-error: true
+        with:
+          # `cache-bin: false` per persist v0.7.3 closure — the
+          # rust-cache restore can shadow dtolnay's cargo install
+          # otherwise. Linux runners are usually unaffected; safe
+          # to keep on for sister-parity.
+          cache-bin: false
+
+      - name: cargo bench (no-default-features — rlib path)
+        # No-default-features hits the same surface ci.yml's
+        # darwin-aarch64-test job runs against — keeps the bench
+        # numbers reproducible against the no-PyO3 configuration
+        # the agent post-PoB §3.1 fold consumes.
+        run: cargo bench --no-default-features -- --output-format bencher | tee bench-output.txt
+
+      - name: upload criterion HTML report
+        # Criterion auto-generates target/criterion/ with a top-level
+        # report.html. Surface it as an artifact so reviewers can
+        # eyeball the curves visually rather than parsing bencher
+        # text output.
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report-${{ github.sha }}
+          path: target/criterion/
+          retention-days: 30
+
+      - name: upload bencher text summary
+        # The bencher format is greppable + diffable across runs —
+        # useful for the "is this branch faster than main" comparison
+        # without HTML rendering.
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output-${{ github.sha }}
+          path: bench-output.txt
+          retention-days: 90

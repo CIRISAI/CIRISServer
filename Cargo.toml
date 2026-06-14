@@ -18,6 +18,12 @@ publish = false
 #   - [lib] rlib    → so the ciris-server binary links the same composition.
 #   - [[bin]]       → the headless fabric node deployment.
 # The composition lives in src/lib.rs; src/main.rs is a thin entry point.
+[workspace]
+# lens-core is absorbed in-tree (CIRISLensCore repo retired); the root package
+# composes it as a path dep. node-core folds in here the same way at Server 1.0.
+members = ["crates/ciris-lens-core"]
+resolver = "2"
+
 [lib]
 name = "ciris_server"
 crate-type = ["cdylib", "rlib"]
@@ -71,21 +77,21 @@ tpm = ["ciris-keyring/tpm"]
 # OLD floor (persist 5.5.5 / edge 2.2.2 / verify 5.1.3) and would drag a second
 # persist+edge rev into the build. The compose_registry() scaffold stays in
 # src/compose.rs; this dep returns once registry co-bumps.
-ciris-lens-core     = { git = "https://github.com/CIRISAI/CIRISLensCore",  branch = "cobump-persist-6.5-edge-3.2" } # TEMP: the green co-bump branch (PR #55); repin to tag v1.5.0 once merged
+ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (workspace member); CIRISLensCore repo retired
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 
 # The substrate trio (also pulled transitively by the cores; pinned here so the
 # composition root owns the singleton construction).
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.6.0", features = ["postgres", "sqlite"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", branch = "persist-6.6", features = ["transport-reticulum", "transport-http"] } # TEMP: co-bump branch (persist v6.6.0); repin to the edge tag when cut
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.8.1", features = ["postgres", "sqlite"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.5.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.4.0" }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
 # `tpm` feature; runtime auto-detects hardware and falls back to software.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0", version = "5", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.4.0", version = "5", features = ["software", "pqc-ml-dsa"] }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
@@ -94,7 +100,6 @@ pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional
 
 tokio   = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 anyhow  = "1"
-getrandom = "0.2"   # mint the node identity seed on first boot (zero setup)
 fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

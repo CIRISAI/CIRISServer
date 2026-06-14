@@ -1,0 +1,93 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ciris-lens-core"
+description = "Science-layer runtime for the CIRIS federation: cohort routing, manifold-conformity scoring, signed detection events"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "CIRIS AI", email = "hello@ciris.ai" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+# v0.1.0 — pip-install-time subsumption mirroring edge's pattern.
+# `pip install ciris-lens-core` pulls `ciris-persist` (which
+# transitively pulls `ciris-verify` and the build-sign / build-verify
+# console scripts). Deployed lens + agent get one install command for
+# the whole lens+persist+verify stack.
+#
+# EXACT pin to v4.1.0 — the CIRIS 3.0 in-process cohabitation
+# convergence pin (CIRISLensCore#22). For agent + NodeCore + LensCore
+# co-resident in one process, every consumer must link ONE identical
+# ciris-persist: a single tokio runtime, a single process-singleton
+# Engine. A version RANGE would let pip resolve LensCore to a
+# different patch than NodeCore/agent and break the singleton.
+# Exact `==` is the contract.
+#
+# v4.1.0 is the live CIRIS 3.0 cohabitation convergence point — the
+# streaming-substrate cut (CEG 0.10 §10.5: chunked blobs, per-stream
+# transparency log, STREAM-nonce AES-256-GCM sealing, key_grant
+# stream/epoch addressing) on top of the v4.0 Data Access Surface cut.
+# CIRISEdge v1.2.1 already moved here (consuming persist v4.1.0 +
+# CIRISVerify v4.8.1); CIRISNodeCore + CIRISAgent re-target the
+# identical v4.1.0. v4.0 reorganized the read surface under
+# topic-named `ceg::*` namespaces + added the CallerScope admission
+# substrate (AV-44 read-side + AV-45 write-side cohort_scope gating,
+# both closed by construction); v4.1 adds the streaming primitives.
+# Lens-core's own surface is unaffected by either cut — it consumes
+# `derived::*` (calibration bundles + detection-event reads) + the
+# `Engine` facade methods, NONE of which moved or changed signature
+# across v4.0 → v4.1; every bump was a pure pin bump (zero source
+# changes), validated by the full test suite green on both rlib +
+# python paths. verify v4.8.1 is transitive via persist + edge —
+# single version across the federation tree.
+#
+# DEPLOYMENT NOTE — libtss2: persist v1.10.0 (CIRISPersist#87)
+# auto-enables ciris-keyring's `tpm` feature for Linux targets;
+# cargo's additive feature unification forces it onto every
+# downstream Linux build. Building tss-esapi links system libtss2.
+# Any Linux host running the 3.0 shared-engine process needs
+# `libtss2` installed — a real deployment dependency, not just CI.
+# Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
+# CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
+# Relaxed from exact `==5.2.0` to a v5-major range (CIRISLensCore#43 /
+# the agent 2.9.6 fold): cohabitation no longer requires lens-core to
+# dictate the persist version — cross-wheel engine reach is name-based
+# Python dispatch (LensClient(engine=...), edge v2.1.0 PyEdge::engine()),
+# version-tolerant across the v5 line. The HOST pins the exact persist;
+# lens-core just needs compatibility. The exact pin was blocking persist
+# v5.3.0 currency. Floor raised to `>=5.5.5,<6` (v1.2.0 / #48) so pip
+# installs a Win7-capable + RUSTSEC-2026-0178/0179/0180-fixed persist host
+# alongside lens-core's own Win7 wheel; the `<6` ceiling holds the family
+# on the persist 5.x / pyo3 0.28 line (persist 6.0.0 is the separate pyo3
+# 0.29 lockstep). Mirrors edge v2.2.1's `>=5.5.5,<6` exactly.
+dependencies = [
+    "ciris-persist>=6.5.0,<7",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://ciris.ai"
+Repository = "https://github.com/CIRISAI/CIRISLensCore"
+Issues = "https://github.com/CIRISAI/CIRISLensCore/issues"
+
+[tool.maturin]
+features = ["python"]
+module-name = "ciris_lens_core"
+# abi3-py311 — one wheel covers Python 3.11+ per the same matrix
+# precedent persist + edge + verify use. CIRISLensCore ships three
+# platform wheels: linux-x86_64, linux-aarch64, darwin-aarch64
+# (darwin-x86_64 omitted per GitHub Actions Intel macOS runner
+# capacity issues — matches persist/edge exactly).
+python-source = "python"
+strip = true
