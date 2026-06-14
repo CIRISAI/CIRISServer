@@ -1012,6 +1012,8 @@ dependencies = [
  "hyper",
  "jsonwebtoken",
  "parking_lot",
+ "pyo3",
+ "pyo3-async-runtimes",
  "qrcodegen",
  "rcgen",
  "reqwest",
@@ -1109,7 +1111,7 @@ dependencies = [
 [[package]]
 name = "ciris-lens-core"
 version = "1.4.2"
-source = "git+https://github.com/CIRISAI/CIRISLensCore?branch=cobump-persist-6.5-edge-3.2#f87a30c85432e2c5206d7e93dae3c5784aa5591e"
+source = "git+https://github.com/CIRISAI/CIRISLensCore?branch=cobump-persist-6.5-edge-3.2#bda65b079a259751e32101ba3927ab74bebfd116"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -1121,6 +1123,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "opentelemetry",
+ "pyo3",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1194,6 +1197,7 @@ dependencies = [
  "openssl",
  "parking_lot",
  "postgres-types",
+ "pyo3",
  "redb",
  "refinery",
  "regex",
@@ -1271,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.1.0-spec.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "ciris-edge 3.2.0",
@@ -2942,7 +2946,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-layer",
@@ -4734,7 +4738,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4771,7 +4775,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -7075,7 +7079,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc5f2297ee5b893405bed1a6929faec4713a061df158ecf5198089f23910d470"
 dependencies = [
  "anyhow",
+ "camino",
  "cargo_metadata",
+ "clap",
  "uniffi_bindgen",
  "uniffi_build",
  "uniffi_core",

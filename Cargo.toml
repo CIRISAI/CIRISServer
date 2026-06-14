@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.1.0-spec.0"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10)
+version = "0.1.0-alpha.1"   # maturin maps -> PEP 440 0.1.0a1. 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -31,7 +31,7 @@ path = "src/main.rs"
 default = []
 # `python` pulls the PyO3 bindings (for the wheel). The binary builds WITHOUT it,
 # so a plain `cargo build` never links libpython.
-python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
+python = ["dep:pyo3", "dep:pyo3-async-runtimes", "ciris-lens-core/python"]
 # `extension-module` is what maturin builds the wheel with (tells PyO3 not to
 # link libpython). The bin must NOT enable it. See pyproject.toml [tool.maturin].
 extension-module = ["python", "pyo3/extension-module"]

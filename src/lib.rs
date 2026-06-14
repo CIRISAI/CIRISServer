@@ -77,6 +77,11 @@ mod python {
     #[pymodule]
     fn ciris_server(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
+        // Re-export lens-core's Python surface so CIRISAgent can swap
+        // `from ciris_lens_core import LensClient` → `from ciris_server import
+        // LensClient` (drop-in). One wheel bundles the lens slice; registry +
+        // node join the same `register` call as they fold in.
+        ciris_lens_core::ffi::pyo3::register(m)?;
         // TODO: expose the fabric UX handles (trust/consent toggles, NodeCode,
         // membership) as the wheel API the KMP client consumes (MISSION §3.4).
         Ok(())
