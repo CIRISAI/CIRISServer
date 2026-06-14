@@ -49,7 +49,7 @@ tpm = ["ciris-keyring/tpm"]
 # corpus in-process; per-slice views via Engine::from_shared).
 #
 # Substrate floor (the 6.5 / edge-3.2 family; SHIPPED — scouted 2026-06-14):
-#   ciris-persist v6.5.0   (pyo3 0.29; cumulative 6.x read/observability surface)
+#   ciris-persist v6.6.0   (pyo3 0.29; + Engine::with_hardware_signer — TPM federation key, #220)
 #   ciris-edge    v3.2.0   (family floor edge>=3.2.0,<4 — the old "tag v3.0.0"
 #                             gate is CLOSED; edge shipped to PyPI + git tag)
 #   ciris-verify  v5.2.0   (threshold::verify_quorum_policy / verify_founder_quorum)
@@ -66,14 +66,18 @@ tpm = ["ciris-keyring/tpm"]
 # ----------------------------------------------------------------------------
 [dependencies]
 # The composed cores (authority + observation; node folds in at Server 1.0).
-ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", branch = "main" } # TODO: pin the co-bumped tag once CIRISRegistry#76 ships (6.5/edge-3.2) — for 0.5
+# ciris-registry-core — re-added at Server 0.5, co-bumped to the 6.6/edge-3.2 floor
+# (CIRISRegistry#76). Held OUT of the 0.1 graph: registry-core@main still pins the
+# OLD floor (persist 5.5.5 / edge 2.2.2 / verify 5.1.3) and would drag a second
+# persist+edge rev into the build. The compose_registry() scaffold stays in
+# src/compose.rs; this dep returns once registry co-bumps.
 ciris-lens-core     = { git = "https://github.com/CIRISAI/CIRISLensCore",  branch = "cobump-persist-6.5-edge-3.2" } # TEMP: the green co-bump branch (PR #55); repin to tag v1.5.0 once merged
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 
 # The substrate trio (also pulled transitively by the cores; pinned here so the
 # composition root owns the singleton construction).
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.5.0", features = ["postgres", "sqlite"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.2.0", features = ["transport-reticulum", "transport-http"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.6.0", features = ["postgres", "sqlite"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", branch = "persist-6.6", features = ["transport-reticulum", "transport-http"] } # TEMP: co-bump branch (persist v6.6.0); repin to the edge tag when cut
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0" }
