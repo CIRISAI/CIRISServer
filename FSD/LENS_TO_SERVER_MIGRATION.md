@@ -64,9 +64,9 @@ cp /var/lib/cirislens/keyring/ed25519.seed "$CIRIS_HOME/identity/ed25519.seed"
 export CIRIS_SERVER_RET_IDENTITY_PATH=/var/lib/cirislens/keyring/lens-edge.identity
 ```
 On first boot the node:
-- **adopts** `ed25519.seed` via `get_platform_ed25519_signer` → the **same** 32-byte
-  Ed25519 pubkey ⇒ the **same `key_id`**, now custodied in the TPM (the original
-  seed file remains the adoption source);
+- **adopts** `ed25519.seed` (`SealedEd25519Signer::adopt`) → the **same** 32-byte
+  Ed25519 pubkey ⇒ the **same `key_id`**, now TPM-sealed; the plaintext is archived
+  to `ed25519.seed.migrated` (the sealed copy is load-bearing);
 - **adopts** the `.rid` into `BlobTransportKeystore` → the **same Reticulum
   destination hash**, now TPM-sealed; the original is archived to
   `*.migrated-<ts>`.

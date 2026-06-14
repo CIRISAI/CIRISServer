@@ -19,7 +19,8 @@ use anyhow::{Context, Result};
 use ciris_edge::transport::reticulum::{ReticulumAuth, ReticulumTransport, ReticulumTransportConfig};
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
 use ciris_keyring::{
-    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, TransportIdentityKeystore,
+    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, SealedEd25519Signer,
+    TransportIdentityKeystore,
 };
 use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
 use ciris_persist::prelude::Engine;
@@ -50,10 +51,7 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     //    (no re-key on takeover). Shared by the persist Engine AND the edge
     //    transport signer => ONE federation identity, hardware-custodied
     //    (MISSION §1.5). Software-encrypted fallback when no hardware. ──────────
-    let signer: Arc<dyn HardwareSigner> = Arc::from(
-        get_platform_ed25519_signer(&cfg.key_id, cfg.identity_dir.clone())
-            .map_err(|e| anyhow::anyhow!("load sealed-Ed25519 federation signer: {e}"))?,
-    );
+    let signer: Arc<dyn HardwareSigner> = Arc::from(federation_signer(&cfg)?);
 
     // ── ONE shared persist Engine ────────────────────────────────────────────
     let engine = build_engine(&cfg, Arc::clone(&signer)).await?;
@@ -117,6 +115,45 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     let _ = edge_shutdown_tx.send(true);
     let _ = edge_join.await;
     Ok(())
+}
+
+/// The node's federation signing identity, hardware-custodied.
+///
+/// **Migrates an existing key.** If a plaintext `ed25519.seed` is present at
+/// `identity_dir` (an agent/lens/registry takeover — see
+/// FSD/LENS_TO_SERVER_MIGRATION.md), it is **adopted byte-identically** into the
+/// sealed keystore (`SealedEd25519Signer::adopt`) — the `key_id` is preserved (no
+/// re-key) and the plaintext is archived off the live path. Otherwise the
+/// already-sealed seed is loaded, or a fresh one is generated + sealed
+/// (`get_platform_ed25519_signer`). Either way the seed is TPM/SE/StrongBox-sealed
+/// at rest with software-encrypted fallback; the pubkey stays 32-byte Ed25519.
+fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSigner>> {
+    let seed_path = cfg.seed_path(); // identity_dir/ed25519.seed — the takeover source
+    if seed_path.exists() {
+        let bytes = std::fs::read(&seed_path)
+            .with_context(|| format!("read {}", seed_path.display()))?;
+        let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "{} must be a 32-byte ed25519 seed (got {} bytes)",
+                seed_path.display(),
+                bytes.len()
+            )
+        })?;
+        let signer = SealedEd25519Signer::adopt(cfg.key_id.clone(), cfg.identity_dir.clone(), &seed)
+            .map_err(|e| anyhow::anyhow!("adopt existing federation seed into the keystore: {e}"))?;
+        // The sealed copy is now load-bearing; move the plaintext off the live path.
+        let archived = seed_path.with_file_name("ed25519.seed.migrated");
+        std::fs::rename(&seed_path, &archived)
+            .with_context(|| format!("archive {} -> {}", seed_path.display(), archived.display()))?;
+        tracing::info!(
+            archived = %archived.display(),
+            "adopted existing federation seed into the sealed keystore (key_id preserved)"
+        );
+        Ok(Box::new(signer))
+    } else {
+        get_platform_ed25519_signer(&cfg.key_id, cfg.identity_dir.clone())
+            .map_err(|e| anyhow::anyhow!("open sealed-Ed25519 federation signer: {e}"))
+    }
 }
 
 /// The one shared persist `Engine` (SQLite-backed; builds + migrates), keyed by
