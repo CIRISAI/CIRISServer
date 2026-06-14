@@ -12,7 +12,7 @@ build-backend = "maturin"
 [project]
 name = "ciris-server"
 # Mirrors Cargo.toml; bump in lockstep.
-version = "0.5.0-spec.0"
+version = "0.1.0-spec.0"   # 0.1 = lens-only
 description = "The fabric node — the federation's headless cohabitation runtime (registry + lens [+ node] over one shared substrate), as the abi3 wheel CIRISAgent consumes. agent = fabric node + brain."
 authors = [{ name = "Eric Moore", email = "eric@ciris.ai" }]
 license = { text = "AGPL-3.0-or-later" }
@@ -24,6 +24,12 @@ requires-python = ">=3.10"
 
 [project.urls]
 Repository = "https://github.com/CIRISAI/CIRISServer"
+
+[project.scripts]
+# `pip install ciris-server` → the `ciris-server` command. Boots a node with
+# zero-setup defaults (mode = server, trusting ciris-canonical) — no wizard.
+# Resolves to the PyO3 `main` exported from src/lib.rs (block_on(run())).
+ciris-server = "ciris_server:main"
 
 [tool.maturin]
 # Build the abi3 wheel with the extension-module feature (the binary builds

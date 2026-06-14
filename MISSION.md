@@ -10,14 +10,14 @@
 *same* composition of cores that folds into an agent, packaged **without a
 reasoning brain**. The defining identity: **`agent = fabric node + brain`.**
 
-**Status**: Spec (skeleton only; gated — see §4). The blockers this charter first
-named (CIRISPersist#210 / CIRISEdge v2.3.0) have **shipped**; the substrate floor
-is now the **6.x / edge-3.0 family** (persist v6.0.1, verify v5.2.0). The current
-gate is the **[CIRISEdge v3.0.0 tag](https://github.com/CIRISAI/CIRISEdge/issues/89)**
-+ a registry/lens co-bump + two adapter PRs ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76),
-[CIRISEdge#106](https://github.com/CIRISAI/CIRISEdge/issues/106),
-[CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)) — the full
-task graph, dependencies, and GANTT are in [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
+**Status**: Spec (skeleton only). The substrate floor **shipped** — persist v6.5.0,
+edge v3.2.0, verify v5.2.0 are tagged + on PyPI; CIRISServer is re-pinned to them and
+there is **no edge-tag gate left**. The only remaining cross-repo work is the **family
+co-bump** of the cores: **[CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)**
+is the LIVE blocker (it alone unblocks the lens-only 0.1 node), then
+[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (0.5) and
+[CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) (1.0). Full task
+graph, dependencies, and GANTT in [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
 **Crate identifier (target)**: `ciris-server` (a thin composition *binary* — it
 authors no primitives; it composes `ciris-registry-core` + `ciris-lens-core`
 [+ `ciris-node-core`]).
@@ -25,9 +25,11 @@ authors no primitives; it composes `ciris-registry-core` + `ciris-lens-core`
 (`lens` + `registry-us` + `registry-eu`), each a fabric node, replicating via
 CEG/RET. Any operator MAY run one (the stewardship covenant: the work belongs to
 whoever keeps it running, not to a name).
-**Last updated**: 2026-06-13 (substrate scouted to the 6.x/edge-3.0 family; gate moved
-to the CIRISEdge v3.0.0 tag + registry/lens co-bump + two adapter PRs; bin+abi3-wheel
-shape and composition mechanism resolved; see [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md)).
+**Last updated**: 2026-06-14 (substrate floor SHIPPED — persist 6.5.0 / edge 3.2.0 /
+verify 5.2.0, re-pinned, no gate left; roadmap is three increments 0.1 lens-only → 0.5
++registry → 1.0 +node on the agent train; 0.1 retires the standalone lens server;
+pip-installable node, modes client/proxy/server default server; see
+[`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md)).
 Preceded by the 2026-06-12 initial charter and the design discussion
 in CIRISRegistry, the [#62](https://github.com/CIRISAI/CIRISRegistry/issues/62)
 sibling epic, and the `ciris-canonical` decision at
@@ -375,6 +377,13 @@ level*:
   shorthand encoding** so every impl renders the same code for the same key — tracked
   as a follow-up.*
 
+**Transport posture (modes) + zero setup.** Orthogonal to the §3.3 self/family/server/agent
+axis, a node runs in one of three transport postures — `client` / `proxy` / `server` (the
+`AgentMode` enum) — and CIRISServer **defaults to `server`** (a public, always-on node),
+trusting `ciris-canonical` by default (a replaceable pin, §3.2). `pip install ciris-server`
+yields a working node started with the `ciris-server` command — **no setup wizard** — on the
+agent's zero-config defaults (SQLite corpus, mint-on-first-boot identity, `0.0.0.0:4242`).
+
 This is also where the Accord's **transparency requirement** lands operationally:
 the fabric nodes are the surface that serves redacted PDMA logs / WBD tickets /
 attestation reads for deployments above the public-accountability threshold. The
@@ -388,43 +397,32 @@ it.
 > **The full task graph, dependency lanes, and GANTT live in
 > [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).** This section is the summary.
 
-**What shipped (the old blockers are closed).** CIRISPersist#210 landed as
-`SharedInstanceLease` (cross-process leader election) in persist v5.6.0; CIRISEdge's
-shared-singleton acquisition shipped in v2.3.0. **persist v6.0.1** (pyo3-0.29 reland;
-MSRV 1.83) and **verify v5.2.0** (MSRV 1.86) are tagged.
+**The floor SHIPPED — there is no gate left.** persist **v6.5.0**, edge **v3.2.0**,
+verify **v5.2.0** are all tagged + on PyPI (CIRISServer is re-pinned to them; the old
+edge-tag keystone is closed). The only cross-repo work is the **family co-bump** of the
+cores, which still sit on the persist-5.5.5/edge-2.2.2 floor (a binary can't link two
+persist majors):
 
-**Substrate floor (target):** the **6.x / edge-3.0 family** — `ciris-persist v6.0.1`,
-`ciris-verify v5.2.0`, and `ciris-edge v3.0.0`. The cores (`ciris-registry-core`
-v2.3.0, `ciris-lens-core` v1.4.2) are still on the **persist-5.5.5 / edge-2.2.2 /
-verify-5.1.3** floor and must co-bump; a binary cannot link two persist majors.
+- **LIVE blocker (0.1)** — co-bump `ciris-lens-core` ([CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)):
+  version-only; `attach_handler` unchanged. This alone unblocks the lens-only node.
+- **0.5** — co-bump `ciris-registry-core` ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76); narrowed to co-bump, no API change — we adapt).
+- **1.0** — co-bump + de-stub `ciris-node-core` ([CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38)).
 
-**The current gate (four items; see the plan's §2 table):**
-- **G0 — tag CIRISEdge v3.0.0** ([#89](https://github.com/CIRISAI/CIRISEdge/issues/89)):
-  the family-lockstep WIP (persist 6.0.1 + pyo3 0.29) is uncommitted. **Keystone** —
-  until edge v3.0.0 is a pinnable artifact, persist 6.x and edge cannot co-resolve.
-- **G1 — co-bump `ciris-lens-core`** ([CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)):
-  version-only; `attach_handler` is already the proven cohabitation entry.
-- **G2 — `ciris-registry-core` co-bump + `compose()` + injectable edge identity**
-  ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76)): today the
-  registry boot is hand-rolled in its bin's `main.rs` (no library `compose()`), and
-  its edge identity mints from a filesystem path rather than accepting the shared one.
-- **G3 — Rust-native edge-runtime acquisition** ([CIRISEdge#106](https://github.com/CIRISAI/CIRISEdge/issues/106)):
-  `init_edge_runtime` is a PyO3 `#[pyfunction]`; a pure-Rust fabric node needs a Rust
-  path. G2(b/c) and G3 can be *drafted* now; they only need G0 to *test*.
+**No core API change is needed (adapt, don't fix):** `attach_handler` is unchanged;
+registry wires via `build_client(Some(engine))` + `http::serve(..., transport_pubkeys)`;
+edge is built in-Rust via lens-core's `ret_relay` pattern (single-process ⇒ no leader
+election; CIRISEdge#106 closed). MSRV floor **1.86** (verify); pyo3 0.29 transitively.
 
-**Sequencing:** Path A — wait for G0, ship clean. **Server 0.5 = lens + registry**
-(adopted by the agent ~2.9.8 train); **Server 1.0 = + node**, the complete fabric node
-(agent ~2.9.10) — node-core is built last (a full substrate generation behind: persist
-4.10; its WBD `route_deferral` surface already exists). Then: stand up `ciris-server`
-→ cut the three canonical nodes (`lens` + `registry-us` + `registry-eu`) over to it →
-all three become `ciris-canonical` fabric nodes. Landing window tracks the agent
-~2.9.8 / 2.9.9 train (§5).
+**Sequencing:** three increments on the agent train (§5) — **0.1 lens-only** (~2.9.7,
+which also retires the standalone CIRISLens server), **0.5 + registry** (~2.9.8), **1.0
++ node** (~2.9.10). Then cut the three canonical nodes (`lens` + `registry-us` +
+`registry-eu`) over to `ciris-server`.
 
 ---
 
 ## 5. Lifecycle — the release plan
 
-The **agent release train is the coordination clock**; the two Server releases hang
+The **agent release train is the coordination clock**; the Server releases hang
 off it. The load-bearing move: registry-core stops folding into the *agent* and
 instead lands in the *Server composition* the agent then adopts — one cohabitation
 built once, not a per-shape fold built twice.
@@ -432,14 +430,16 @@ built once, not a per-shape fold built twice.
 | Agent release | Server | Composition | What happens |
 |---|---|---|---|
 | **2.9.6** ✅ | — | + `ciris-lens-core` | LensCore cohabits the agent — proves the pattern. [Deployed] |
+| **~2.9.7** | **Server 0.1** | lens-only | The agent's direct lens-core cohabitation is **replaced by CIRISServer (lens-only)** — the agent depends on the `ciris-server` wheel — and the **standalone CIRISLens server retires** in the same move (Grafana/TimescaleDB/Python ingest gone). Smallest fabric node; proves the wheel/compose/pip path. Blocker: CIRISLensCore#53 only. [Spec] |
 | **~2.9.8** | **Server 0.5** | lens + **registry** | Registry-core was slated to fold into the *agent* at 2.9.8 — **superseded**: the agent adopts **CIRISServer 0.5** (the lens+registry fabric node) as its composition instead of a bespoke agent fold. [Spec — gated §4] |
 | **2.9.9** | — | (same) | **Cleanup**: retire the half-built agent-2.9.8 registry-fold scaffolding; align the agent onto the shared composition. [Spec] |
 | **2.9.10** | **Server 1.0** | registry + lens + **node** | The **node fold completes the fabric node** — **CIRISServer 1.0** is the full three-core node; the agent adopts the complete composition instead of folding node itself. Gated additionally on node-core readiness. [Spec] |
 
-**Why lens+registry first, node later.** Server 0.5 ships the two *ready* cores —
-lens proven in 2.9.6, registry green on the substrate-trio branch. `ciris-node-core`
-(the least-mature sibling) is deliberately held to Server 1.0 / 2.9.10: a third rlib
-over the same singletons, no structural change.
+**Why lens-only first, then +registry, then +node.** Server 0.1 ships the single
+*ready* core (lens, proven in 2.9.6) — the smallest possible fabric node, which also
+lets the standalone lens server retire in the same move. Server 0.5 adds registry.
+`ciris-node-core` (the least-mature sibling) is held to Server 1.0 / 2.9.10: a third
+rlib over the same singletons, no structural change.
 
 **Why the supersession.** Registry-core was always going to cohabit; the fabric-node
 realization only changed its *home*. Folding it into the agent specifically would
@@ -506,4 +506,4 @@ This document is updated:
 - On every lifecycle-stage transition (Spec → Impl → Deployed (canonical)).
 - On every CIRISAccord revision affecting the fabric node's mission.
 
-Last updated: 2026-06-13 (substrate scouted; gate moved to the CIRISEdge v3.0.0 tag + registry/lens co-bump + two adapter PRs [CIRISRegistry#76, CIRISEdge#106, CIRISLensCore#53]; bin+abi3-wheel shape fixed; see FSD/SERVER_1.0_PLAN.md). Preceded by the 2026-06-12 initial charter.
+Last updated: 2026-06-14 (substrate floor shipped — persist 6.5.0 / edge 3.2.0 / verify 5.2.0, re-pinned, no gate left; roadmap = three increments 0.1 lens-only → 0.5 +registry → 1.0 +node on the agent train; 0.1 retires the standalone lens server; pip-installable node, modes client/proxy/server default server. See FSD/SERVER_1.0_PLAN.md). Preceded by the 2026-06-12 initial charter.

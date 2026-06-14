@@ -1,135 +1,170 @@
-# CIRISServer — Plan to 1.0 (via 0.5), Dependencies & GANTT
+# CIRISServer — Roadmap to 1.0, Dependencies & GANTT
 
-> **Two milestones, driven by the CIRISAgent train (not a 1.0/2.0 split):**
-> - **Server 0.5** = lens + registry. The agent adopts it at **~2.9.8** *instead
->   of* folding registry into itself.
-> - **Server 1.0** = + node — the **complete** fabric node. The agent adopts it at
->   **~2.9.10** *instead of* folding node into itself.
+> **Three increments, driven by the CIRISAgent train (the clock):**
+> - **0.1 — lens-only** @ agent **~2.9.7**: CIRISServer composes *only* lens-core.
+>   The agent stops importing `ciris_lens_core` directly and depends on the
+>   `ciris-server` wheel; the **standalone CIRISLens server is retired** at the
+>   same time (Grafana/TimescaleDB/Python ingest gone).
+> - **0.5 — + registry** @ agent **~2.9.8**: add the authority slice; the three
+>   canonical nodes become fabric nodes.
+> - **1.0 — + node** @ agent **~2.9.10**: add consensus; the *complete* fabric node.
 >
-> Written against [`MISSION.md`](../MISSION.md). Scouted federation state of
-> **2026-06-13**. **No time estimates** — lanes are ordered by dependency.
+> Written against [`MISSION.md`](../MISSION.md). Scouted **2026-06-14**.
+> **No time estimates** — lanes are ordered by dependency.
 
 ## 0. Operating principle — adapt, don't fix
 
 > *We can't fix what isn't broken, and we can't break what isn't shipped.*
 
-The cores and the agent are **shipped and working**. CIRISServer is the **unshipped**
-thing, so the burden of adaptation is entirely ours. We wire the cores **as they
-exist**; we do **not** ask a shipped, working core to grow new API for our
-convenience. Concretely, the wiring needs **no core changes**:
+The cores and the agent are shipped and working; CIRISServer is the unshipped
+thing, so **all** adaptation is ours. The wiring needs **no core API change**:
+`LensCore::attach_handler(&edge, engine)` is unchanged; registry adapts via
+`federation::build_client(Some(engine))` + `api::http::serve(..., transport_pubkeys)`;
+edge is built in-Rust via lens-core's `ret_relay` pattern (single-process ⇒ no
+leader election). The only cross-repo needs are the **family co-bump** of the
+cores — no edge-tag gate (edge shipped).
 
-- **registry** — replicate the bin's boot against the lib's public modules
-  (`federation::build_client(Some(engine))`, `api::http::serve(..., persist_engine:
-  Some(engine), transport_pubkeys: Some(...))`, the tonic services); pass the
-  **shared** edge's transport pubkeys into `/v1/identity`.
-- **lens** — `LensCore::attach_handler(&edge, engine)` (already the proven entry).
-- **edge** — build one Rust `Edge` over the shared `Engine` following lens-core's
-  `ret_relay` pattern. A single-process node needs **no** multi-worker leader
-  election (`SharedInstanceLease` is for multi-worker one-host).
+## 1. Ground truth (2026-06-14) — the gate is gone
 
-So the **only** cross-repo needs are the **family co-bump** and the **edge v3.0.0
-tag** — both family-driven, not CIRISServer-imposed. (This is why the earlier
-`compose()` / injectable-edge / Rust-acquisition asks were dropped:
-CIRISRegistry#76 narrowed to co-bump-only; CIRISEdge#106 closed.)
+The substrate floor **shipped** and is pinnable now:
 
-## 1. The dependency gate
+| Crate | Tag | State |
+|---|---|---|
+| ciris-persist | **v6.5.0** | tagged + PyPI (pyo3 0.29; cumulative 6.x read surface) |
+| ciris-edge | **v3.2.0** | tagged + PyPI (4 wheels); the old "tag v3.0.0" gate is **closed** |
+| ciris-verify | **v5.2.0** | tagged |
 
-| # | Gate | Owner | Tracking | State |
-|---|---|---|---|---|
-| **G0** | **Tag CIRISEdge v3.0.0** (family lockstep: persist 6.0.1 + pyo3 0.29). Keystone — until tagged, persist 6.x + edge can't co-resolve (edge v2.4.0 pins persist `<6`). Family-driven (RUSTSEC), not ours. | CIRISEdge | **[#89](https://github.com/CIRISAI/CIRISEdge/issues/89)** | WIP, uncommitted |
-| **G1** | **Co-bump `ciris-lens-core`** to 6.0.1/edge-3.0/verify-5.2.0. `attach_handler` already ready — version only. | CIRISLensCore | **[#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)** | filed |
-| **G2** | **Co-bump `ciris-registry-core`** to 6.0.1/edge-3.0/verify-5.2.0. No new API (we adapt). | CIRISRegistry | **[#76](https://github.com/CIRISAI/CIRISRegistry/issues/76)** | filed (narrowed) |
-| **G3** | **Co-bump `ciris-node-core`** to 6.0.1/edge-3.0/verify-5.2.0 + de-stub its MockEngine surfaces. **1.0 phase only.** *File on CIRISNodeCore when the 1.0/2.9.10 phase begins* — not now (node-core is v0.1.0 pilot; we don't pile requirements on a barely-shipped core early). | CIRISNodeCore | *(deferred)* | — |
+CIRISServer is **re-pinned** to these (Cargo.toml). The cores are **not yet
+co-bumped** — both still on persist-5.5.5/edge-2.2.2:
 
-G0 is the keystone for both milestones. G1/G2 are the **0.5** floor; G3 is the
-**1.0** floor.
+| Core | Now | Co-bump issue | Blocks |
+|---|---|---|---|
+| ciris-lens-core | v1.4.2 | **[CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)** (+#54 read accessors) | **0.1 (LIVE critical path)** |
+| ciris-registry-core | v2.3.0 | **[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76)** (co-bump only) | 0.5 |
+| ciris-node-core | v0.1.0 (persist 4.10) | [#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) + de-stub | 1.0 |
 
-## 2. GANTT (dependency lanes — no time)
+**Single live blocker for 0.1: CIRISLensCore#53.** It is a *version-only* bump
+(`attach_handler` unchanged) and no longer waits on anything — edge shipped. Once
+#53 cuts a co-bumped tag, CIRISServer pins it and the lens-only node builds.
+
+## 2. The product spec — `pip install ciris-server` just works
+
+Cuts across all three increments (defaults mirrored from CIRISAgent):
+
+- **One command, no wizard.** `pip install ciris-server` → the `ciris-server`
+  console script (pyproject `[project.scripts]` → PyO3 `main` → `block_on(run())`).
+  Starts a working node on first run.
+- **Modes = transport posture** (`AgentMode`: `client` / `proxy` / `server`).
+  CIRISServer **defaults to `server`** (the agent defaults `proxy`). NOTE: SERVER
+  is disk-gated in the agent (`SERVER_MINIMUM_DISK_BYTES = 256 GiB`) — **open
+  decision §7** whether CIRISServer keeps/relaxes that gate. This axis is
+  orthogonal to CEG §3.3's self/family/server/agent (agency + cohort).
+- **Trust the canonical trio by default** (a *default pin*, replaceable —
+  MISSION §3.2). Mechanism exists in the agent (`CIRIS_CANONICAL_BOOTSTRAP_PEERS`,
+  reseeded each boot with `trust=TRUSTED`) but the list is **empty today** — the
+  trio addresses aren't published yet (**open decision §7**: chicken-and-egg —
+  CIRISServer *becomes* those nodes at 0.5).
+
+**Zero-setup defaults to adopt** (from `essential.py` / `path_resolution.py` /
+`edge_runtime.py`):
+
+| Concern | Default |
+|---|---|
+| Data dir | `~/ciris/data/` (installed) |
+| Persist DSN | SQLite file `<data>/ciris_engine.db` (honor `CIRIS_DB_URL` for postgres) |
+| Identity key | mint-on-first-boot, load thereafter (`edge_identity.rid`; one keyring identity per host) |
+| Listen | `0.0.0.0:4242` (lens read-API binds `listen_addr`, relay `+1`) |
+| occurrence_id | `"default"` |
+| agent_mode | **`server`** |
+| Logs | `~/ciris/logs/`, level INFO |
+
+## 3. 0.1 — what the lens-only node must serve (retiring the lens server)
+
+The standalone CIRISLens deployment is **retired**; its *function* moves into the
+fabric node.
+
+**Retired:** Grafana, TimescaleDB, the Python FastAPI ingest service, the prod
+telemetry sidecars (Prometheus/Loki/Tempo/Mimir/MinIO), and the OAuth admin UI
+(**no equivalent** in the fabric node's read-only surface — flag to operators).
+
+**Survives, inside the node:**
+- **Trace ingest** — CEG `AccordEventsBatch` over RET/HTTP → `engine.receive_and_persist`
+  (scrub/classify/extract live in persist v6) → `LensCoreHandler`.
+- **Detection events** — persist-owned storage; lens-core signs via `engine.local_sign`.
+- **The 7 frozen read endpoints** (replace Grafana; GET-only, federation-signed):
+  `GET /lens/api/v1/{scores, scores/{trace_id}, detection_events,
+  detection_events/{detection_id}, manifold_conformity_aggregate,
+  calibration_bundles, calibration_bundles/{version}}`.
+- **Per-node identity** — `/v1/identity` six-key `LocalIdentityAggregate`.
+
+**How CIRISServer composes lens-only:** `LensCore::node(engine, listen_addr,
+key_id, seed_dir, peer_acl, upstream, retention, scoring, ux)` (relay + the 7-endpoint
+read API) over the one shared persist Engine + one Rust Edge (`ret_relay` pattern).
+
+**Migration concerns:**
+- **Corpus starts FRESH at cutover**; old TimescaleDB kept read-only (dedup keys
+  differ; legacy history is not re-imported).
+- **Grafana consumers break** → move to the 7 JSON endpoints (programmatic, not
+  interactive dashboards).
+- **Carry the lens's existing Reticulum identity** into the node so `/v1/identity`
+  + federation enrollment stay stable.
+
+## 4. The agent-side swap (0.1)
+
+Today the agent embeds lens-core **directly**: `ciris_adapters/ciris_accord_metrics/
+services.py::_build_lens_client()` does `from ciris_lens_core import LensClient`,
+and `logic/runtime/edge_runtime.py` calls `init_edge_runtime(...)`. At 0.1 these
+collapse into **one dependency**: the agent pip-installs `ciris-server`, which does
+the `init_edge_runtime` + `LensCore::node` composition internally; the accord-metrics
+adapter consumes CIRISServer's surface instead of importing `ciris_lens_core`. The
+shared-substrate contract (`current_rust_engine()`, one Edge) is unchanged — this is
+*moving the composition call from the agent into the wheel*. (Tracked: Agent#885 is
+the floor co-bump; an agent-side "swap lens-core → ciris-server" task is **to file
+when 0.1 is buildable** — not before, per §0.)
+
+## 5. GANTT (dependency lanes — no time)
 
 ```
 EXTERNAL (owners; family-driven)            CIRISSERVER (ours; adapt-don't-fix)
 ──────────────────────────────────         ──────────────────────────────────────────
-
- G0 ─ Edge#89 ─ tag edge v3.0.0             S0 spec refresh ............ [DONE]
-     (persist 6.0.1 + pyo3 0.29)            S1 lib.rs composition ...... [DONE]
-        │  (pinnable artifact)              S2 hybrid CI matrix ........ [authorable now]
-        │                                       (merge gate + abi3 wheel lane)
-   ─── SERVER 0.5 (lens + registry · agent ~2.9.8) ───────────────────────────────
-        ├──► G1 lens co-bump (#53) ───┐
-        └──► G2 registry co-bump (#76)┤
-                                      ▼
-                               S3 first build  (deps: G0 + G1 + G2)
-                                      │
-                            ┌─────────┴──────────┬──────────────┐
-                            ▼                    ▼              ▼
-                    S4 wire authority      S5 wire lens    S6 build+share
-                    (adapt registry        (attach_handler) one Rust Edge
-                     wiring; /v1/identity   over shared      over shared Engine
-                     via shared pubkeys)    Engine)          (no leader-elect)
-                            └─────────┬──────────┴──────────────┘
-                                      ▼
-                            S7 abi3 wheel + agent adoption (agent ~2.9.8
-                               drops registry-fold scaffolding) + S8 conformance
-                               self-attest  ──►  S9 cut 3 canonical nodes over
-                                                 = SERVER 0.5 Deployed (canonical)
-   ─── SERVER 1.0 (+ node · agent ~2.9.10) ──────────────────────────────────────
-        └──► G3 node co-bump + de-stub ──► S10 wire consensus slice
-             (file when this phase begins)     (node-core install(&edge);
-                                                WBD route_deferral surface)
-                                                  ──► S11 agent ~2.9.10 adopts
-                                                      the complete composition
-                                                      = SERVER 1.0 Deployed (canonical)
+ SHIPPED: persist v6.5.0 · edge v3.2.0 ·    S0 spec refresh ............ [DONE]
+          verify v5.2.0   (no gate left)    S1 lib.rs composition ...... [DONE]
+                                            S2 hybrid CI matrix + abi3 wheel lane [now]
+                                            S-repin to 6.5/3.2 ......... [DONE]
+  ─── 0.1  LENS-ONLY · agent ~2.9.7 ───────────────────────────────────────────────
+   G-L ─ LensCore#53 co-bump (LIVE) ──► S3 pin lens tag → first build (lens-only)
+        (version-only; no edge gate)        └─► S4 compose LensCore::node (7 endpoints
+                                                + /v1/identity) · S5 build Rust Edge
+                                                  └─► S6 abi3 wheel + console script
+                                                      + zero-setup defaults (mode=server)
+                                                        └─► S7 agent ~2.9.7 swaps
+                                                            lens-core → ciris-server
+                                                            + RETIRE standalone lens server
+                                                            = 0.1 Deployed
+  ─── 0.5  + REGISTRY · agent ~2.9.8 ──────────────────────────────────────────────
+   G-R ─ Registry#76 co-bump ──► S8 add authority (adapt wiring; unified /v1/identity)
+                                   └─► S9 cut 3 canonical nodes → fabric nodes
+                                       (founder-quorum) = 0.5 Deployed (canonical)
+  ─── 1.0  + NODE · agent ~2.9.10 ─────────────────────────────────────────────────
+   G-N ─ NodeCore#38 co-bump + de-stub ──► S10 add consensus (install(&edge);
+        (file at this phase)                WBD route_deferral surface)
+                                             └─► S11 agent ~2.9.10 = 1.0 Deployed
 ```
 
-## 3. Tasks (by lane, with explicit dependencies)
+## 6. Open decisions (need a call)
 
-### External (tracked on owners; family-driven)
-- **G0** edge v3.0.0 tag · #89 · *deps:* persist v6.0.1 (✅). **Keystone.**
-- **G1** lens co-bump · #53 · *deps:* G0.
-- **G2** registry co-bump · #76 · *deps:* G0.
-- **G3** node co-bump + de-stub · *(file at 1.0 phase)* · *deps:* G0.
+1. **0.1 version label** — proposed `0.1.0` for lens-only (crate re-pinned to it).
+   Confirm, or pick another scheme.
+2. **SERVER disk gate** — the agent gates `server` mode on ≥256 GiB free. Keep it
+   for CIRISServer, relax it, or make it warn-only? A lens-only node is light.
+3. **Canonical trio pins** — `CIRIS_CANONICAL_BOOTSTRAP_PEERS` is empty today.
+   "Default-trust the trio" needs published addresses/keys; those come into being
+   *as 0.5 stands the trio up*. For 0.1, ship empty (or a seed)?
+4. **Admin-UI gap** — the retired lens OAuth admin UI has no fabric-node
+   equivalent. Accept the drop, or is a minimal operator surface needed?
 
-### CIRISServer — Server 0.5 (lens + registry)
-- **S0** Spec refresh · *deps:* none · **DONE.**
-- **S1** Composition library skeleton (`src/lib.rs`) · *deps:* none · **DONE.**
-- **S2** Hybrid CI matrix · *deps:* authorable now (green needs S3). Merge gate
-  (fmt · clippy/test ubuntu+macos+windows · cargo-deny · Win7 build-std smoke,
-  nightly pinned `nightly-2026-06-12`, `CARGO_NET_RETRY:"10"`) + release sweep
-  (linux x86_64/aarch64/armv7 · macos x86_64/arm64 · Win7 Tier-3 build-std ·
-  aarch64-musl · **abi3 wheel lane** · Sigstore · build-manifest TODO).
-- **S3** First real build · *deps:* G0 + G1 + G2. Pin co-bumped core tags + edge v3.0.0.
-- **S4** Wire authority (adapt registry wiring; unified `/v1/identity` via the
-  shared transport pubkeys) · *deps:* S3.
-- **S5** Wire observation (`attach_handler`; the 7 frozen `GET /lens/api/v1/*`) · *deps:* S3 + G1.
-- **S6** Build + share one Rust `Edge` over the shared Engine (lens-core `ret_relay`
-  pattern; no leader election) · *deps:* S3.
-- **S7** abi3 wheel + agent adoption (agent ~2.9.8 drops its registry-fold
-  scaffolding, depends on the ciris-server wheel) · *deps:* S4+S5+S6 + S2 wheel lane.
-- **S8** Conformance self-attestation (signed BuildManifest → registry) · *deps:* S4 + S2.
-- **S9** Cut `lens` + `registry-us` + `registry-eu` over to `ciris-server` → three
-  `ciris-canonical` fabric nodes · *deps:* S4+S5+S6+S7. **= Server 0.5 Deployed (canonical).**
+## 7. Cross-references
 
-### CIRISServer — Server 1.0 (+ node)
-- **S10** Wire consensus slice (`ciris-node-core` `install(service, &edge)` over the
-  shared Engine/Edge; expose the WBD `route_deferral` / Wise-Authority surface) ·
-  *deps:* S9 + G3.
-- **S11** agent ~2.9.10 adopts the complete three-core composition · *deps:* S10.
-  **= Server 1.0 Deployed (canonical).**
-
-## 4. Definition of done
-
-**Server 0.5:** one `ciris-server` process composes registry + lens over one persist
-Engine + one edge transport identity; `/v1/identity` emits the six-key aggregate; CEG
-§7.0.1 holds by construction (a co-located node votes, never verdicts; `detection:*`
-is never sole authority evidence); the abi3 wheel builds Win7-loadable; the agent
-~2.9.8 consumes the wheel; the three `ciris-canonical` nodes run as fabric nodes with
-2-of-3 founder-quorum over per-node keys (shared vaulted steward key retired).
-
-**Server 1.0:** + node-core composed in-process; the WBD routing / Wise-Authority
-surface served; the agent ~2.9.10 consumes the complete composition.
-
-## 5. Cross-references
-
-- [`MISSION.md`](../MISSION.md) §1.5 (CEG §7.0.1), §2 (boot), §4 (gate), §5 (agent train).
-- Issues: [CIRISEdge#89](https://github.com/CIRISAI/CIRISEdge/issues/89) · [CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53) · [CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76). (Closed/narrowed per §0: CIRISEdge#106 closed; #76 narrowed to co-bump.)
-- CEG spec: `CIRISRegistry/FSD/CEG` (§7.0.1 fabric-node discipline; §5.6.8.8.2 identity aggregate; §8.1.13.1.1 founder-quorum).
+- [`MISSION.md`](../MISSION.md) §3.3/§3.4 (modes + UX handles), §4 (floor/gate), §5 (agent train).
+- Issues: [CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53) (0.1 blocker) · [CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (0.5) · [CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) (1.0) · [CIRISAgent#885](https://github.com/CIRISAI/CIRISAgent/issues/885) (floor co-bump).
+- CEG spec: `CIRISRegistry/FSD/CEG` (§7.0.1 fabric-node discipline; §5.6.8.8.2 identity aggregate).

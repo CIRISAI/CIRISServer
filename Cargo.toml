@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.0-spec.0"   # 0.5 = lens+registry (agent ~2.9.8); 1.0 = +node (agent ~2.9.10)
+version = "0.1.0-spec.0"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -41,40 +41,32 @@ extension-module = ["python", "pyo3/extension-module"]
 # libraries over ONE shared persist Engine (registry + lens read/write the same
 # corpus in-process; per-slice views via Engine::from_shared).
 #
-# Substrate floor (the 6.x / edge-3.0 family; scouted 2026-06-13):
-#   ciris-persist v6.0.1   (pyo3-0.29 reland; MSRV 1.83)
-#   ciris-edge    v3.0.0   ── NOT YET TAGGED. The "family lockstep" work
-#                             (persist 6.0.1 + pyo3 0.29) is uncommitted WIP on
-#                             branch edge-v3-0-0-family-lockstep. This is the
-#                             CURRENT gate: edge v2.4.0 pins persist <6, so
-#                             persist 6.x and edge cannot co-resolve until v3.0.0
-#                             tags. Pin the branch until then.  TODO(edge#v3): tag.
-#   ciris-verify  v5.2.0   (verify_founder_quorum shipped v5.0.0/#31;
-#                             threshold::verify_quorum_policy added #69)
+# Substrate floor (the 6.5 / edge-3.2 family; SHIPPED — scouted 2026-06-14):
+#   ciris-persist v6.5.0   (pyo3 0.29; cumulative 6.x read/observability surface)
+#   ciris-edge    v3.2.0   (family floor edge>=3.2.0,<4 — the old "tag v3.0.0"
+#                             gate is CLOSED; edge shipped to PyPI + git tag)
+#   ciris-verify  v5.2.0   (threshold::verify_quorum_policy / verify_founder_quorum)
+# pyo3 0.29 transitively; workspace MSRV 1.86 (verify's floor).
 #
-# The cores must CO-BUMP to this floor before the binary builds — registry-core
-# v2.3.0 and lens-core v1.4.2 are still on the persist-5.5.5/edge-2.2.2 floor.
-# Lockstep happens via the CIRISConformance matrix. Until co-bumped tags exist,
-# the core pins below track `main` and the binary does not build (Spec stage).
-#
-# Two adapter gaps remain before the composition compiles (MISSION.md §4):
-#   1. registry-core has NO compose() entrypoint (boot is hand-rolled in its
-#      bin's main.rs) and its edge identity is not injectable.
-#   2. edge's shared-singleton acquisition (init_edge_runtime, leader election)
-#      is a PyO3 #[pyfunction], not a Rust constructor — a pure-Rust fabric node
-#      needs a Rust-native path (lens-core's ret_relay shows Rust Edge
-#      construction; pair with persist's SharedInstanceLease for election).
+# The cores still CO-BUMP to this floor before the binary builds: lens-core
+# v1.4.2 and registry-core v2.3.0 are on the persist-5.5.5/edge-2.2.2 floor.
+# This is now the ONLY cross-repo blocker — there is NO edge-tag gate anymore.
+# The lens-core co-bump (CIRISLensCore#53) is the LIVE critical path (it unblocks
+# the lens-only 0.1 milestone); registry-core (CIRISRegistry#76) follows for 0.5.
+# No core API change is needed — CIRISServer adapts to existing wiring
+# (LensCore::attach_handler unchanged; registry build_client/http::serve; edge
+# via lens-core's ret_relay pattern, single-process = no leader election).
 # ----------------------------------------------------------------------------
 [dependencies]
 # The composed cores (authority + observation; node folds in at Server 1.0).
-ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", branch = "main" } # TODO: pin the 6.x/edge-3.0 co-bumped tag + compose() adapter
-ciris-lens-core     = { git = "https://github.com/CIRISAI/CIRISLensCore",  branch = "main" } # TODO: pin the 6.x/edge-3.0 co-bumped tag
+ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", branch = "main" } # TODO: pin the co-bumped tag once CIRISRegistry#76 ships (6.5/edge-3.2) — for 0.5
+ciris-lens-core     = { git = "https://github.com/CIRISAI/CIRISLensCore",  branch = "cobump-persist-6.5-edge-3.2" } # TEMP: the green co-bump branch (PR #55); repin to tag v1.5.0 once merged
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 
 # The substrate trio (also pulled transitively by the cores; pinned here so the
 # composition root owns the singleton construction).
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.0.1", features = ["postgres", "sqlite"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", branch = "edge-v3-0-0-family-lockstep", features = ["transport-reticulum-tcp-server", "transport-reticulum-tcp-client", "transport-reticulum-local"] } # TODO(edge#v3): pin tag = "v3.0.0" when cut
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.5.0", features = ["postgres", "sqlite"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.2.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0" }
@@ -84,8 +76,9 @@ ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.
 pyo3                = { version = "0.29", features = ["abi3-py310"], optional = true }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
-tokio   = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio   = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 anyhow  = "1"
+getrandom = "0.2"   # mint the node identity seed on first boot (zero setup)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

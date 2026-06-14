@@ -1,109 +1,49 @@
 //! CIRISServer — the fabric node composition library.
 //!
-//! The federation's headless cohabitation runtime: `ciris-registry-core`
-//! (authority) + `ciris-lens-core` (observation) [+ `ciris-node-core` at
-//! Server 1.0] composed over **one shared persist `Engine`**. `agent = fabric
-//! node + brain`; this is that composition with the brain removed.
+//! The federation's headless cohabitation runtime: `ciris-lens-core`
+//! (observation) — and, as their co-bumps land, `ciris-registry-core`
+//! (authority, Server 0.5) and `ciris-node-core` (consensus, Server 1.0) —
+//! composed over **one shared persist `Engine`**. `agent = fabric node + brain`;
+//! this is that composition with the brain removed.
 //!
 //! ONE composition, TWO shapes (MISSION.md §1.2/§6):
 //!   - this crate as a **PyO3 abi3 wheel** (`crate-type = cdylib`, `python`
 //!     feature) that CIRISAgent — pure Python — pip-installs and links instead
-//!     of composing the cores itself;
+//!     of composing the cores itself (`pip install ciris-server` → the
+//!     `ciris-server` command);
 //!   - this crate as an **rlib** linked by the `ciris-server` binary
 //!     (src/main.rs) for the headless deployment.
 //!
 //! It authors no primitives and holds no ethical agency (MISSION.md §1.3): it
 //! attests, stores, observes, reaches consensus, and transports — it does not
-//! reason, decide, or act. The load-bearing invariant is separation of powers
-//! held cryptographically (MISSION.md §1.5 ⇒ **CEG §7.0.1** fabric-node
-//! discipline): authority is quorum-bound, observation is non-authoritative by
-//! namespace, even though both share this process.
+//! reason, decide, or act. The separation-of-powers invariant is held
+//! cryptographically per **CEG §7.0.1** (MISSION.md §1.5).
 //!
-//! STATUS: Spec — this is a skeleton. The composition cannot be wired until:
-//!   1. **CIRISEdge tags v3.0.0** (the family-lockstep work: persist 6.0.1 +
-//!      pyo3 0.29). Until then persist 6.x and edge cannot co-resolve.
-//!   2. **registry-core + lens-core co-bump** to the 6.x/edge-3.0 floor.
-//!   3. Two adapter gaps land — a registry-core `compose()` entrypoint with an
-//!      injectable edge identity, and a Rust-native edge shared-singleton
-//!      acquisition API (today `init_edge_runtime` is PyO3-only).
-//! The `todo!()` sites below mark exactly where that wiring goes. See
-//! MISSION.md §4/§5 and the tracked downstream issues.
+//! STATUS: **0.1 — lens-only, implemented.** `run()` boots a working lens fabric
+//! node (relay ingest + the 7 frozen `GET /lens/api/v1/*` read endpoints) over a
+//! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
+//! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
+
+mod compose;
+mod config;
+
+pub use config::{Mode, ServerConfig, Slices};
 
 use anyhow::Result;
 
-/// Run the fabric node: compose the cores over one shared substrate and serve.
-///
-/// Boot order (MISSION.md §2; corrected to the v6.0.1 / edge-3.0 substrate).
-/// The composition root owns the singleton; no core constructs its own Engine.
+/// Run the fabric node: load zero-setup config, compose the active slices, serve.
 pub async fn run() -> Result<()> {
+    let cfg = ServerConfig::from_env()?;
     tracing::info!(
-        "CIRISServer (the fabric node) — Spec skeleton; boot blocked on \
-         CIRISEdge v3.0.0 tag + registry/lens co-bump to the 6.x floor + the \
-         compose()/Rust-edge-singleton adapters. See MISSION.md §4."
+        mode = ?cfg.mode,
+        data_dir = %cfg.data_dir.display(),
+        listen = %cfg.listen_addr,
+        "CIRISServer (the fabric node) starting — lens-only (0.1)"
     );
-
-    // 1. ONE shared persist Engine — the durable corpus + federation directory.
-    //    `Engine::with_signer(signer, &dsn)` builds AND runs migrations; DSN is
-    //    URL-sniffed (postgresql:// | sqlite://... | sqlite::memory:). The two
-    //    slices then read/write the SAME substrate via cheap per-slice views:
-    //      let registry_engine = Engine::from_shared(engine.backend().clone(),
-    //                                                 engine.signer().clone());
-    //      let lens_engine     = Engine::from_shared(engine.backend().clone(),
-    //                                                 engine.signer().clone());
-    //    (DSN from CIRIS_SERVER_PERSIST_DSN; sqlite::memory: for dev.)
-    // let engine = build_shared_persist_engine().await?;
-
-    // 2. ONE edge runtime — CEG/RET transport + the node's SINGLE Reticulum
-    //    transport identity, with cross-process leader election over the shared
-    //    backend (persist `SharedInstanceLease::try_acquire_shared_instance`,
-    //    role="auto"). NOTE: edge's `init_edge_runtime` is currently a PyO3
-    //    #[pyfunction]; a pure-Rust fabric node needs a Rust-native path
-    //    (tracked downstream). This is NOT a separate "federation identity" —
-    //    that is `Engine::local_identity_aggregate(x25519_b64, ed25519_b64)`.
-    // let edge = acquire_edge_runtime(&engine).await?;   // BLOCKED: edge Rust API
-
-    // 3. Compose each core over the shared singletons (node-core at Server 1.0).
-    //    Observation (READY today): the proven cohabitation entry point —
-    //      ciris_lens_core::LensCore::attach_handler(&edge, registry_engine)?;
-    //    Authority (BLOCKED): registry-core has no compose() yet; its boot is
-    //    hand-rolled in its bin's main.rs and its edge identity is not
-    //    injectable. Target shape:
-    //      ciris_registry_core::compose(&engine, &edge, &settings)?;
-
-    // 4. Expose the unified surface: registry gRPC/HTTP (which already mounts
-    //    `/v1/identity` → the §5.6.8.8.2 six-key LocalIdentityAggregate, the
-    //    federation ID by which `ciris-canonical` enrolls this node) + the lens
-    //    read surface (the 7 frozen GET /lens/api/v1/* endpoints).
-
-    let _ = build_shared_persist_engine;
-    let _ = acquire_edge_runtime;
-    todo!(
-        "Wire the composition once CIRISEdge v3.0.0 tags, registry/lens co-bump \
-         to the 6.x floor, and the compose()/Rust-edge-singleton adapters land. \
-         See MISSION.md §4."
-    );
+    compose::serve(cfg).await
 }
 
-/// 1. Construct the one shared persist `Engine` both slices read/write.
-async fn build_shared_persist_engine() -> Result<()> {
-    // ciris_persist::engine::Engine::with_signer(signer, &dsn).await — builds +
-    // migrates once; derive per-slice views with Engine::from_shared so the
-    // authority view and the observation view never diverge (MISSION.md §2).
-    todo!("shared persist Engine — Engine::with_signer + from_shared views")
-}
-
-/// 2. Acquire the one shared edge runtime (one Reticulum transport identity).
-///    BLOCKED: edge's shared-singleton acquisition is PyO3-only; needs a
-///    Rust-native API (downstream issue on CIRISEdge).
-async fn acquire_edge_runtime() -> Result<()> {
-    // The node holds ONE Reticulum transport identity, surfaced by both slices;
-    // leader election rides persist's SharedInstanceLease over the shared
-    // backend. Replaces the retired shared-vaulted registry steward key; this
-    // node's key becomes its founder share of the ciris-canonical quorum.
-    todo!("shared edge runtime — blocked on a Rust-native edge acquisition API")
-}
-
-/// Initialize tracing (shared by the binary and any embedding host).
+/// Initialize tracing (shared by the binary and the wheel entry point).
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
     tracing_subscriber::registry()
@@ -113,17 +53,32 @@ pub fn init_tracing() {
 }
 
 // ── PyO3 abi3 wheel surface (the shape CIRISAgent consumes) ──────────────────
-// Gated behind the `python` feature so the binary never links libpython. The
-// wheel exposes the composition entry point + the fabric control handles
-// (MISSION.md §3.4) to the agent client. Skeleton until the composition wires.
+// Gated behind the `python` feature so the binary never links libpython.
 #[cfg(feature = "python")]
 mod python {
     use pyo3::prelude::*;
 
+    /// Console entry point: `pip install ciris-server` → the `ciris-server`
+    /// command (pyproject `[project.scripts]`). Boots a node with zero-setup
+    /// defaults — mode = server, trusting `ciris-canonical` — no wizard.
+    #[pyfunction]
+    #[pyo3(name = "main")]
+    fn py_main() -> PyResult<()> {
+        crate::init_tracing();
+        // ONE multi-thread runtime; the lens node spawns onto it (never a second
+        // runtime around the Engine — the persist dual-runtime-deadlock rule).
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        rt.block_on(crate::run())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// `import ciris_server` — the composition CIRISAgent embeds.
     #[pymodule]
-    fn ciris_server(_py: Python<'_>, _m: &Bound<'_, PyModule>) -> PyResult<()> {
-        // TODO: expose run()/compose handles once the Rust composition wires.
+    fn ciris_server(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add_function(wrap_pyfunction!(py_main, m)?)?;
+        // TODO: expose the fabric UX handles (trust/consent toggles, NodeCode,
+        // membership) as the wheel API the KMP client consumes (MISSION §3.4).
         Ok(())
     }
 }
