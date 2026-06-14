@@ -153,10 +153,13 @@ EXTERNAL (owners; family-driven)            CIRISSERVER (ours; adapt-don't-fix)
 
 ## 6. Open decisions (need a call)
 
-1. **0.1 version label** — proposed `0.1.0` for lens-only (crate re-pinned to it).
-   Confirm, or pick another scheme.
-2. **SERVER disk gate** — the agent gates `server` mode on ≥256 GiB free. Keep it
-   for CIRISServer, relax it, or make it warn-only? A lens-only node is light.
+1. ✅ **0.1 version label** — RESOLVED: `0.1.0` (crate at `0.1.0-spec.0`).
+2. ✅ **Resource gating** — RESOLVED: **no refusal gate.** Installing the server
+   means a server; the node always runs as a **Reticulum node**, and heavier
+   features gate on realistic minimums (`Capabilities`): the lens corpus + read
+   API need ≥ `CIRIS_SERVER_LENS_STORE_MIN_GIB` (default 5 GiB) free, else the
+   node degrades to a Reticulum relay node. Implemented + verified (both paths) in
+   `src/config.rs` / `src/compose.rs`.
 3. **Canonical trio pins** — `CIRIS_CANONICAL_BOOTSTRAP_PEERS` is empty today.
    "Default-trust the trio" needs published addresses/keys; those come into being
    *as 0.5 stands the trio up*. For 0.1, ship empty (or a seed)?

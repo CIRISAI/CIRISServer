@@ -3,17 +3,27 @@
 //! `ciris-server` boots with **no wizard**: every field has a sensible default
 //! (mirrored from CIRISAgent — MISSION §3.4) and an env override. Defaults:
 //! data `~/ciris/data`, a SQLite corpus, mint-on-first-boot identity, listen
-//! `0.0.0.0:4242`, mode = `server` (the public, always-on posture).
+//! `0.0.0.0:4242` (the Reticulum node port), mode = `server`.
+//!
+//! Installing the server means a server. There is **no refusal gate** — instead
+//! heavier features gate behind realistic resource minimums ([`Capabilities`]):
+//! the node always runs as a Reticulum node; the lens corpus + read API light up
+//! when the host has the disk for them.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+/// Default minimum free disk (GiB) to run the local lens corpus + read API.
+/// Below this the node still runs as a Reticulum relay node. Tunable via
+/// `CIRIS_SERVER_LENS_STORE_MIN_GIB`.
+const DEFAULT_LENS_STORE_MIN_GIB: u64 = 5;
+
 /// Transport posture (the agent's `AgentMode`). **Orthogonal** to the §3.3
 /// self/family/server/agent axis (agency + cohort). CIRISServer defaults to
-/// `Server`. The agent's 256 GiB disk gate on `Server` is an open decision —
-/// not enforced here yet (MISSION §3.4 / SERVER_1.0_PLAN §6).
+/// `Server` — installing the server means a server. What the node can *do*
+/// scales with [`Capabilities`], never a hard refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// Egress-only, no listener.
@@ -37,9 +47,8 @@ impl Mode {
     }
 }
 
-/// Which composed slices are active. **0.1 ships lens-only**; registry (0.5)
-/// and node (1.0) fold in as their co-bumps land (CIRISRegistry#76 /
-/// CIRISNodeCore#38) — see `compose.rs`.
+/// Which composed slices are active. **0.1 ships lens-only**; registry (0.5) and
+/// node (1.0) fold in as their co-bumps land (CIRISRegistry#76 / CIRISNodeCore#38).
 #[derive(Debug, Clone, Copy)]
 pub struct Slices {
     pub lens: bool,
@@ -53,16 +62,40 @@ impl Default for Slices {
     }
 }
 
+/// Realistic-minimum feature gating. The node always runs as a Reticulum node;
+/// resource-hungry features light up only when the host meets their minimums.
+#[derive(Debug, Clone, Copy)]
+pub struct Capabilities {
+    pub disk_free_bytes: u64,
+    /// Local lens corpus + read API — needs realistic disk for the growing corpus.
+    pub lens_store: bool,
+}
+
+impl Capabilities {
+    pub fn detect(cfg: &ServerConfig) -> Self {
+        let disk_free_bytes = fs2::available_space(&cfg.data_dir).unwrap_or(0);
+        let min = cfg.lens_store_min_gib.saturating_mul(1024 * 1024 * 1024);
+        Capabilities { disk_free_bytes, lens_store: disk_free_bytes >= min }
+    }
+
+    pub fn disk_free_gib(&self) -> u64 {
+        self.disk_free_bytes / (1024 * 1024 * 1024)
+    }
+}
+
 /// The fully-resolved node configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub identity_dir: PathBuf,
+    /// The node's primary (Reticulum TCP) listen address.
     pub listen_addr: SocketAddr,
+    pub bootstrap_peers: Vec<SocketAddr>,
     pub key_id: String,
     pub occurrence_id: String,
     pub mode: Mode,
     pub slices: Slices,
+    pub lens_store_min_gib: u64,
 }
 
 impl ServerConfig {
@@ -82,6 +115,17 @@ impl ServerConfig {
             .parse()
             .context("CIRIS_SERVER_LISTEN_ADDR must be host:port")?;
 
+        let bootstrap_peers = std::env::var("CIRIS_SERVER_BOOTSTRAP_PEERS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .filter_map(|p| p.parse::<SocketAddr>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let key_id = std::env::var("CIRIS_SERVER_KEY_ID").unwrap_or_else(|_| "ciris-server".to_string());
 
         let occurrence_id = std::env::var("CIRIS_OCCURRENCE_ID")
@@ -93,14 +137,21 @@ impl ServerConfig {
             .map(|s| Mode::parse(&s))
             .unwrap_or_default();
 
+        let lens_store_min_gib = std::env::var("CIRIS_SERVER_LENS_STORE_MIN_GIB")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(DEFAULT_LENS_STORE_MIN_GIB);
+
         Ok(Self {
             data_dir,
             identity_dir,
             listen_addr,
+            bootstrap_peers,
             key_id,
             occurrence_id,
             mode,
             slices: Slices::default(),
+            lens_store_min_gib,
         })
     }
 
@@ -113,10 +164,21 @@ impl ServerConfig {
         format!("sqlite:///{}", self.db_path().display())
     }
 
-    /// The ed25519 seed that BOTH the persist Engine signer and lens-core's
-    /// transport signer load — one identity per node.
+    /// The ed25519 seed both the persist Engine signer and the edge transport
+    /// signer load — one federation identity per node.
     pub fn seed_path(&self) -> PathBuf {
         self.identity_dir.join("ed25519.seed")
+    }
+
+    /// The Reticulum transport-tier dual-key identity (distinct from the
+    /// federation key; minted by the transport on first run, chmod 600).
+    pub fn ret_identity_path(&self) -> PathBuf {
+        self.identity_dir.join("reticulum.identity")
+    }
+
+    /// The lens read-API HTTP address — the primary (RET) port + 1.
+    pub fn read_api_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.listen_addr.ip(), self.listen_addr.port().saturating_add(1))
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {

@@ -381,8 +381,11 @@ level*:
 axis, a node runs in one of three transport postures — `client` / `proxy` / `server` (the
 `AgentMode` enum) — and CIRISServer **defaults to `server`** (a public, always-on node),
 trusting `ciris-canonical` by default (a replaceable pin, §3.2). `pip install ciris-server`
-yields a working node started with the `ciris-server` command — **no setup wizard** — on the
-agent's zero-config defaults (SQLite corpus, mint-on-first-boot identity, `0.0.0.0:4242`).
+yields a working node started with the `ciris-server` command — **no setup wizard** — on
+zero-config defaults (SQLite corpus, mint-on-first-boot identity, Reticulum transport on
+`0.0.0.0:4242`, lens read API on `:4243`). Installing the server means a server: there is
+**no refusal gate** — the node always runs as a **Reticulum node**, and heavier features
+(the lens corpus + read API) light up only when the host meets realistic resource minimums.
 
 This is also where the Accord's **transparency requirement** lands operationally:
 the fabric nodes are the surface that serves redacted PDMA logs / WBD tickets /

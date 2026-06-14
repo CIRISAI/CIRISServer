@@ -79,6 +79,7 @@ pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional
 tokio   = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 anyhow  = "1"
 getrandom = "0.2"   # mint the node identity seed on first boot (zero setup)
+fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
