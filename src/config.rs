@@ -170,10 +170,22 @@ impl ServerConfig {
         self.identity_dir.join("ed25519.seed")
     }
 
-    /// The Reticulum transport-tier dual-key identity (distinct from the
-    /// federation key; minted by the transport on first run, chmod 600).
+    /// The Reticulum transport-tier dual-key identity (64-byte X25519‖Ed25519;
+    /// distinct from the federation key). On first run the transport mints it
+    /// here; when migrating from an existing deployment (agent/lens/registry),
+    /// point `CIRIS_SERVER_RET_IDENTITY_PATH` at its `*.rid` and the keystore
+    /// adopts it byte-identically (preserving the destination hash), archiving
+    /// the original to `*.migrated-<ts>`.
     pub fn ret_identity_path(&self) -> PathBuf {
-        self.identity_dir.join("reticulum.identity")
+        std::env::var("CIRIS_SERVER_RET_IDENTITY_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.identity_dir.join("reticulum.identity"))
+    }
+
+    /// Storage dir for the hardware-backed transport-identity keystore
+    /// (TPM-sealed blob when available; encrypted software blob otherwise).
+    pub fn keyring_dir(&self) -> PathBuf {
+        self.identity_dir.join("keyring")
     }
 
     /// The lens read-API HTTP address — the primary (RET) port + 1.

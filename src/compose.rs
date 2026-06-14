@@ -18,6 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ciris_edge::transport::reticulum::{ReticulumAuth, ReticulumTransport, ReticulumTransportConfig};
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
+use ciris_keyring::{BlobTransportKeystore, TransportIdentityKeystore};
 use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
 use ciris_persist::prelude::{Engine, LocalSigner, LocalSignerConfig};
 use tokio::sync::watch;
@@ -135,6 +136,26 @@ async fn build_edge(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<Edge> {
             .await
             .map_err(|e| anyhow::anyhow!("load edge transport signer: {e}"))?,
     );
+
+    // Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99):
+    // TPM-sealed when available (the `tpm` feature + hardware), encrypted software
+    // otherwise — auto-detects, never errors on absent hardware. Setting it on
+    // ReticulumAuth makes ReticulumTransport::new adopt an existing
+    // `ret_identity_path` *.rid byte-identically (archiving it to *.migrated-<ts>),
+    // or generate-and-store the transport identity in the keystore.
+    let keyring_dir = cfg.keyring_dir();
+    std::fs::create_dir_all(&keyring_dir)
+        .with_context(|| format!("create {}", keyring_dir.display()))?;
+    let transport_keystore: Arc<dyn TransportIdentityKeystore> = Arc::new(
+        BlobTransportKeystore::platform(cfg.key_id.clone(), keyring_dir.clone())
+            .map_err(|e| anyhow::anyhow!("open transport-identity keystore: {e}"))?,
+    );
+    tracing::info!(
+        hardware_backed = transport_keystore.is_hardware_backed(),
+        dir = %keyring_dir.display(),
+        "transport-identity keystore opened"
+    );
+
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
@@ -148,6 +169,7 @@ async fn build_edge(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<Edge> {
         signer: Some(Arc::clone(&signer)),
         rooting: None,
         resolver: None,
+        transport_identity_keystore: Some(transport_keystore),
         ..ReticulumAuth::default()
     };
     let transport = Arc::new(

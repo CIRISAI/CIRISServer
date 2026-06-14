@@ -35,6 +35,13 @@ python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
 # `extension-module` is what maturin builds the wheel with (tells PyO3 not to
 # link libpython). The bin must NOT enable it. See pyproject.toml [tool.maturin].
 extension-module = ["python", "pyo3/extension-module"]
+# Real TPM-2.0 / Secure-Enclave / StrongBox hardware backing for the node's RNS
+# transport identity. The CIRIS family already pulls `ciris-keyring/tpm`
+# transitively on Linux (so libtss2-dev is a Linux build dep regardless — CI must
+# install it); this is the explicit handle for CIRISServer's own intent and for
+# non-Linux targets. Runtime auto-detects hardware and degrades to encrypted
+# software when absent (`is_hardware_backed()` reports the posture).
+tpm = ["ciris-keyring/tpm"]
 
 # ----------------------------------------------------------------------------
 # Dependencies — CIRISServer AUTHORS NO PRIMITIVES. It composes the core
@@ -70,6 +77,11 @@ ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.2.
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0" }
+# Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
+# Base = software keystore + byte-identical migration of an existing .rid (works
+# everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
+# `tpm` feature; runtime auto-detects hardware and falls back to software.
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0", version = "5", features = ["software", "pqc-ml-dsa"] }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
