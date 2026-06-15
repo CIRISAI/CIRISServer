@@ -130,7 +130,7 @@ ed25519-dalek = "2"
 base64        = "0.22"
 chrono        = { version = "0.4", features = ["serde"] }
 serde_json    = "1"
-criterion     = "0.5"
+criterion     = { version = "0.5", features = ["async_tokio"] }
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
@@ -139,6 +139,11 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0"
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
 name = "pqc_av_streaming"
+harness = false
+
+# Replication / corpus-ingest throughput (the CEG-RC5 receive spine).
+[[bench]]
+name = "replication_ingest"
 harness = false
 
 [profile.release]

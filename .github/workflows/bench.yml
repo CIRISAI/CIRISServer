@@ -1,0 +1,67 @@
+name: bench
+
+# Run the criterion benches, turn them into an INTERPRETED page (video
+# throughput / replication speed / post-quantum overhead — what the numbers
+# mean, not just ns), and publish to GitHub Pages. Mirrors the substrate
+# sisters' publish-only bench discipline (not a pass/fail gate — shared runners
+# are too noisy), but with an interpretation layer on top (scripts/bench_report.py).
+#
+# Published at: https://cirisai.github.io/CIRISServer/
+# One-time: Settings → Pages → Source = "GitHub Actions" (the configure-pages
+# step below sets enablement: true to do this automatically on first run).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "benches/**"
+      - "scripts/bench_report.py"
+      - ".github/workflows/bench.yml"
+      - "Cargo.toml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-flight Pages deploy; let bench runs serialize.
+concurrency:
+  group: bench-pages
+  cancel-in-progress: false
+
+jobs:
+  bench-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          key: bench
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run benches (criterion)
+        run: cargo bench --bench pqc_av_streaming --bench replication_ingest
+      - name: Generate interpreted page
+        run: |
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+            python3 scripts/bench_report.py --out bench-site --commit "$GITHUB_SHA"
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: bench-site
+      - id: deploy
+        uses: actions/deploy-pages@v4
