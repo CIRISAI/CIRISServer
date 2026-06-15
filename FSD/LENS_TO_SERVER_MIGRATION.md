@@ -18,6 +18,13 @@
 4. Verify (`/v1/identity` shows the same `key_id`; read endpoints 200; ingest lands).
 5. Tear down Grafana / TimescaleDB / the Python ingest API / the OAuth admin.
 
+> **Procedure validated** (2026-06-15, on 0.1.x / persist-7 floor): two fresh
+> homes given the *same* planted `ed25519.seed` + `.rid` both booted to the
+> **identical** RNS destination hash — the federation seed is adopted + sealed
+> (`ed25519.seed.migrated` archived), the `.rid` adopted into the keystore
+> (`hardware_backed=true`), no re-key. Adoption is deterministic: the carried
+> identity reproduces byte-for-byte.
+
 ## 1. What changes
 
 | CIRISLens (retired) | CIRISServer (the fabric node) |
@@ -35,10 +42,16 @@ the shared substrate, queryable from any node.
 
 ## 2. Prerequisites
 
-- A host with the substrate build deps (Linux: `libsqlite3-dev`, `libtss2-dev` —
-  the family links the TPM backend on Linux). A TPM/SE is **optional**: with one,
-  keys are hardware-sealed; without, they fall back to encrypted-software (the node
-  still runs — `is_hardware_backed=false`).
+- **`ciris-server` is published on PyPI** (0.1.x, abi3 / CPython 3.10+: manylinux
+  x86_64 + aarch64, macOS, Windows). Substrate floor baked into the wheel:
+  **persist v7.0.0 / edge v3.6.0 / verify-family v5.6.0** (CEG 1.0-RC6).
+  - **`pip install ciris-server` needs NO build deps** — the manylinux wheel
+    bundles libtss2 + libcrypto (auditwheel). This is the recommended path.
+  - **Building from source** (the `ciris-server` binary, or an unsupported
+    platform) needs the substrate build deps — Linux: `libsqlite3-dev`,
+    `libtss2-dev` (the family links the TPM backend on Linux).
+- A TPM/SE is **optional**: with one, keys are hardware-sealed; without, they fall
+  back to encrypted-software (the node still runs — `is_hardware_backed=false`).
 - The lens host's existing identity files (from the CIRISLens deployment):
   - the Reticulum transport identity, e.g. `CIRISLENS_EDGE_IDENTITY_PATH`
     (`…/lens-edge.identity`, 64 raw bytes), and
@@ -51,7 +64,8 @@ the shared substrate, queryable from any node.
 
 ### 3.1 Install
 ```
-pip install ciris-server        # the abi3 wheel, or use the ciris-server binary
+pip install ciris-server        # the abi3 wheel (live on PyPI; self-contained, no build deps)
+                                # — or build/deploy the `ciris-server` binary from source
 ```
 
 ### 3.2 Place the identities (continuity — do this BEFORE first boot)
