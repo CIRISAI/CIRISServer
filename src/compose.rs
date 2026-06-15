@@ -21,8 +21,8 @@ use ciris_edge::transport::reticulum::{
 };
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
 use ciris_keyring::{
-    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, SealedEd25519Signer,
-    TransportIdentityKeystore,
+    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, MlDsa65SoftwareSigner,
+    PqcSigner, SealedEd25519Signer, TransportIdentityKeystore,
 };
 use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
 use ciris_persist::prelude::Engine;
@@ -55,12 +55,17 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     //    (MISSION §1.5). Software-encrypted fallback when no hardware. ──────────
     let signer: Arc<dyn HardwareSigner> = Arc::from(federation_signer(&cfg)?);
 
+    // ── The post-quantum half (ML-DSA-65) → the federation signature is a FULL
+    //    HYBRID (Ed25519 + ML-DSA-65). Classical is hardware-sealed; PQC is a
+    //    software seed (no sealed-ML-DSA backend exists). ───────────────────────
+    let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(&cfg)?;
+
     // ── ONE shared persist Engine ────────────────────────────────────────────
     let engine = build_engine(&cfg, Arc::clone(&signer)).await?;
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
-    let edge = build_edge(&engine, &cfg, Arc::clone(&signer)).await?;
+    let edge = build_edge(&engine, &cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
 
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
@@ -85,9 +90,14 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // The node's identity aggregate (CEG §5.6.8.8.2) for GET /v1/identity —
     // assembled ONCE at boot from the federation signing key + the RNS transport
     // identity (both stable). Captured before edge.run() consumes the Edge.
-    let identity_json = local_identity_json(&cfg, signer.as_ref(), edge.local_transport_pubkey())
-        .await
-        .context("assemble /v1/identity aggregate")?;
+    let identity_json = local_identity_json(
+        &cfg,
+        signer.as_ref(),
+        pqc.as_ref(),
+        edge.local_transport_pubkey(),
+    )
+    .await
+    .context("assemble /v1/identity aggregate")?;
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
@@ -130,17 +140,18 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 /// Assemble the node's `LocalIdentityAggregate` (CEG §5.6.8.8.2) as JSON for
 /// `GET /v1/identity` — the migration's identity-continuity check (same `key_id`).
 ///
-/// 0.1 sources the **signing** role from the sealed-Ed25519 federation signer and
-/// the **RET-transport** role from the Reticulum transport identity (x25519 ‖
-/// ed25519, RNS `get_public_key` order). The **content-KEM** pair is `null` for
-/// now: persist's `Engine::local_identity_aggregate` requires a software
-/// `LocalSigner`, but CIRISServer runs a hardware signer (`with_hardware_signer`
-/// → `local_signer: None`), so the persist-minted content-KEM halves aren't yet
-/// reachable here — tracked upstream; they fill in on that co-bump. `key_id` +
-/// Ed25519 (+ transport) are the continuity-critical fields.
+/// Sources the **signing** role as a FULL HYBRID — Ed25519 (hardware-sealed) +
+/// ML-DSA-65 (the PQC half) — and the **RET-transport** role from the Reticulum
+/// transport identity (x25519 ‖ ed25519, RNS `get_public_key` order). The
+/// **content-KEM** pair is `null` for now: persist's `local_identity_aggregate`
+/// requires a software `LocalSigner`, but CIRISServer runs a hardware signer
+/// (`with_hardware_signer` → `local_signer: None`), so the persist-minted
+/// content-KEM halves aren't yet reachable here (CIRISPersist#223). `key_id` +
+/// the hybrid signing keys (+ transport) are the continuity-critical fields.
 async fn local_identity_json(
     cfg: &ServerConfig,
     signer: &dyn HardwareSigner,
+    pqc: &dyn PqcSigner,
     transport_pubkey: Option<[u8; 64]>,
 ) -> Result<String> {
     use base64::Engine as _;
@@ -149,6 +160,11 @@ async fn local_identity_json(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("federation signer public_key: {e}"))?;
+    // The PQC half — ML-DSA-65 — so the aggregate is a full hybrid identity.
+    let ml_dsa_65 = pqc
+        .public_key()
+        .await
+        .map_err(|e| anyhow::anyhow!("ML-DSA-65 signer public_key: {e}"))?;
     let (ret_x25519_b64, ret_ed25519_b64) = match transport_pubkey {
         Some(tp) => (Some(b64.encode(&tp[..32])), Some(b64.encode(&tp[32..]))),
         None => (None, None),
@@ -159,9 +175,9 @@ async fn local_identity_json(
         .unwrap_or(0);
     let aggregate = ciris_persist::federation::LocalIdentityAggregate::assemble(
         cfg.key_id.clone(),
-        None, // pqc_key_id
+        Some(format!("{}-pqc", cfg.key_id)), // pqc_key_id
         b64.encode(ed25519),
-        None, // ml_dsa_65 — the sealed-Ed25519 federation signer is Ed25519-only
+        Some(b64.encode(ml_dsa_65)), // ml_dsa_65 — the PQC half (full hybrid)
         ret_x25519_b64,
         ret_ed25519_b64,
         None, // content_x25519        — persist hw-signer aggregate gap (above)
@@ -187,6 +203,41 @@ fn identity_router(identity_json: String) -> axum::Router {
             }
         }),
     )
+}
+
+/// The node's **post-quantum** federation signing half — ML-DSA-65 — so the
+/// federation signature is a FULL HYBRID (Ed25519 + ML-DSA-65), per CEG.
+///
+/// Custody caveat: the keyring has no sealed/TPM ML-DSA backend (a TPM can't do
+/// ML-DSA), so this is a **software** signer over a seed at `ml_dsa_65.seed`
+/// (minted on first boot, `0600`; **adopted** byte-identically on takeover — the
+/// PQC half of a migrating steward/lens/registry identity). The classical half
+/// stays hardware-sealed ([`federation_signer`]); together they hybrid-sign.
+fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSigner>> {
+    let path = cfg.identity_dir.join("ml_dsa_65.seed");
+    let alias = format!("{}-pqc", cfg.key_id);
+    let signer = if path.exists() {
+        // Adopt an existing ML-DSA-65 seed (migration: the steward/lens PQC half).
+        let s = MlDsa65SoftwareSigner::from_seed_file(&path, alias)
+            .map_err(|e| anyhow::anyhow!("adopt ML-DSA-65 seed {}: {e}", path.display()))?;
+        tracing::info!(seed = %path.display(), "adopted existing ML-DSA-65 federation seed (hybrid PQC)");
+        s
+    } else {
+        // Mint a fresh 32-byte ML-DSA-65 seed on first boot.
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).map_err(|e| anyhow::anyhow!("mint ML-DSA-65 seed: {e}"))?;
+        std::fs::write(&path, seed).with_context(|| format!("write {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        let s = MlDsa65SoftwareSigner::from_seed_bytes(&seed, alias)
+            .map_err(|e| anyhow::anyhow!("load minted ML-DSA-65 seed: {e}"))?;
+        tracing::info!(seed = %path.display(), "minted ML-DSA-65 federation seed (hybrid PQC; software-at-rest)");
+        s
+    };
+    Ok(Arc::new(signer))
 }
 
 /// The node's federation signing identity, hardware-custodied.
@@ -249,15 +300,18 @@ async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
     signer: Arc<dyn HardwareSigner>,
+    pqc: Arc<dyn PqcSigner>,
 ) -> Result<Edge> {
     let backend = engine
         .sqlite_backend()
         .context("Engine must be SQLite-backed for the relay")?
         .clone();
     // The edge transport signer wraps the SAME sealed-Ed25519 federation key as
-    // the Engine — one federation identity per node (distinct from the RNS
-    // transport-tier identity held in the keystore below).
-    let signer = Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, None));
+    // the Engine PLUS the ML-DSA-65 PQC half — so every federation envelope the
+    // node emits carries a FULL HYBRID signature (Ed25519 + ML-DSA-65). One
+    // federation identity per node (distinct from the RNS transport-tier identity
+    // held in the keystore below).
+    let signer = Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, Some(pqc)));
 
     // Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99):
     // TPM-sealed when available (the `tpm` feature + hardware), encrypted software

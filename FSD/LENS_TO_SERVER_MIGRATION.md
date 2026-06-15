@@ -72,8 +72,13 @@ pip install ciris-server        # the abi3 wheel (live on PyPI; self-contained, 
 ```
 export CIRIS_HOME=/var/lib/ciris-server          # data + identity root
 mkdir -p "$CIRIS_HOME/identity"
-# Federation signing seed → adopted + TPM-sealed on first boot, byte-identical
+# Federation signing seed (Ed25519) → adopted + TPM-sealed on first boot, byte-identical
 cp /var/lib/cirislens/keyring/ed25519.seed "$CIRIS_HOME/identity/ed25519.seed"
+# PQC signing seed (ML-DSA-65) → adopted as the hybrid half, IF the deployment had one.
+# The federation signature is a FULL HYBRID (Ed25519 + ML-DSA-65); if no ml_dsa_65.seed
+# is carried over, the node MINTS a fresh PQC half on first boot — a NEW PQC pubkey, so
+# coordinate enrollment (the Ed25519 key_id is still continuous).
+cp /var/lib/cirislens/keyring/ml_dsa_65.seed "$CIRIS_HOME/identity/ml_dsa_65.seed"  # if present
 # RNS transport identity → adopted into the keystore byte-identically (dest hash preserved)
 export CIRIS_SERVER_RET_IDENTITY_PATH=/var/lib/cirislens/keyring/lens-edge.identity
 ```
@@ -81,6 +86,8 @@ On first boot the node:
 - **adopts** `ed25519.seed` (`SealedEd25519Signer::adopt`) → the **same** 32-byte
   Ed25519 pubkey ⇒ the **same `key_id`**, now TPM-sealed; the plaintext is archived
   to `ed25519.seed.migrated` (the sealed copy is load-bearing);
+- **adopts** `ml_dsa_65.seed` (if present) → the **same** ML-DSA-65 pubkey (the PQC
+  half of the hybrid signature); software-at-rest (no sealed-ML-DSA backend);
 - **adopts** the `.rid` into `BlobTransportKeystore` → the **same Reticulum
   destination hash**, now TPM-sealed; the original is archived to
   `*.migrated-<ts>`.

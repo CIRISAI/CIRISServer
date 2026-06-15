@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.1.2"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
+version = "0.2.0"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -109,6 +109,7 @@ fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 axum       = "0.8"
 base64     = "0.22"
 serde_json = "1"
+getrandom  = "0.3"   # mint the ML-DSA-65 federation seed on first boot (hybrid PQC)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
@@ -120,6 +121,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v7.0.0", features = ["postgres"] }
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0", version = "5", features = ["tpm"] }
+
+# Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
+# Keystore/StrongBox); sqlite bundles, no postgres/tpm. Mirrors persist/edge.
+[target.'cfg(target_os = "android")'.dependencies]
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0", version = "5", features = ["android"] }
 
 # Test-only — the two-node replication integration test (tests/replication.rs)
 # builds + signs CEG batches with the same primitives persist verifies against.

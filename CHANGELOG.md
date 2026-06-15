@@ -4,6 +4,37 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.0] — 2026-06-15
+
+All-platforms-green CI, **full hybrid post-quantum federation signatures**, and a
+published interpreted benchmark page.
+
+### Added
+- **Full hybrid PQC federation signature (Ed25519 + ML-DSA-65).** The node mints
+  (or **adopts**, on takeover) an `ml_dsa_65.seed` and signs every federation
+  envelope with both halves (edge `LocalSigner` classical + pqc). `/v1/identity`
+  now carries `ml_dsa_65_pubkey_b64` + `pqc_key_id`. Classical stays
+  hardware-sealed; the ML-DSA half is a software seed (no sealed-ML-DSA backend
+  exists — a TPM can't do ML-DSA).
+  - **One remaining classical path**, filed upstream: persist's storage-tier
+    scrub signature is Ed25519-only — `with_hardware_signer` is classical-only and
+    `with_signer_arcs` (hybrid) needs a plaintext key. **CIRISPersist#224** adds a
+    hybrid-hardware ctor to close it without un-sealing.
+- **Interpreted benchmark page** → `https://cirisai.github.io/CIRISServer/`
+  (`.github/workflows/bench.yml` + `scripts/bench_report.py`): video throughput
+  (fps ceiling, sustainable mesh participants @30 fps), post-quantum handshake
+  overhead, mesh fan-out, and **replication speed** (new `replication_ingest`
+  bench, ~13K traces/s/core).
+- Android arm32 (armeabi-v7a) + arm64 wheel lane (NDK cross-compile;
+  `continue-on-error` while it iterates to green).
+
+### Changed / Fixed
+- **All CI platforms green** (was red on macOS/Windows/Win7). Root cause was our
+  own feature wiring: a top-level `tpm` feature + unconditional `postgres`
+  dragged `tss-esapi`/`openssl` onto platforms that can't build them. Fixed with
+  per-target deps (`postgres` + `tpm` Linux-only; `android` keyring backend) and
+  dropping `--all-features`.
+
 ## [0.1.2] — 2026-06-15
 
 Substrate floor bump + the `/v1/identity` endpoint the migration runbook requires.
