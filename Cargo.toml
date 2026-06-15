@@ -82,16 +82,16 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 
 # The substrate trio (also pulled transitively by the cores; pinned here so the
 # composition root owns the singleton construction).
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.8.1", features = ["postgres", "sqlite"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.5.0", features = ["transport-reticulum", "transport-http"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v7.0.0", features = ["postgres", "sqlite"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.6.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.4.0" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0" }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
 # `tpm` feature; runtime auto-detects hardware and falls back to software.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.4.0", version = "5", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0", version = "5", features = ["software", "pqc-ml-dsa"] }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
@@ -117,7 +117,7 @@ criterion     = "0.5"
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
-ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.4.0", version = "5", features = ["hybrid-kex", "aes-gcm"] }
+ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0", version = "5", features = ["hybrid-kex", "aes-gcm"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]

@@ -1,0 +1,167 @@
+name: publish-pypi
+
+# Build the ciris-server abi3 wheels for every platform, gate them through the
+# CIRISConformance cohabitation suite, then publish to PyPI via **Trusted
+# Publishing** (OIDC — no stored API token). Fires on a v* tag.
+#
+# Trusted-publisher registration (one-time, done on PyPI by a maintainer):
+#   PyPI project:      ciris-server
+#   Owner:             CIRISAI
+#   Repository:        CIRISServer
+#   Workflow filename: publish-pypi.yml
+#   Environment:       pypi
+# Until that's registered, the `publish` job's OIDC mint will fail — the build
+# + conformance jobs still run, so the gate is exercised on every tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI (true) or build+conformance only (false)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Build abi3 wheels per platform (maturin + manylinux repair) ────────────
+  linux:
+    name: wheel linux-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel (maturin, manylinux_2_28)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          args: --release --out dist
+          # The family links the TPM keyring backend + sqlite/openssl on Linux;
+          # install the -devel headers in the manylinux container so the build
+          # links and auditwheel bundles libtss2/libcrypto into the wheel.
+          before-script-linux: |
+            if command -v dnf >/dev/null; then
+              dnf install -y tpm2-tss-devel sqlite-devel openssl-devel
+            else
+              yum install -y tpm2-tss-devel sqlite-devel openssl-devel
+            fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: wheel macos-${{ matrix.target }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: wheel windows-x64
+    runs-on: windows-latest
+    # The family's Windows wheel has historically failed on persist's Unix-only
+    # paths (CIRISPersist#200 / CIRISEdge#90). Don't block the release on it;
+    # publish whatever platforms succeed. Remove continue-on-error once green.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist/*.whl
+          if-no-files-found: warn
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ── Gate: the linux wheel must pass cohabitation conformance ───────────────
+  # A failure here BLOCKS publish (the substrate-sister discipline). Runs the
+  # CIRISConformance suite with the just-built wheel + the pinned triple.
+  conformance-gate:
+    name: cohabitation gate (linux-x86_64 × ${{ matrix.backend }})
+    needs: linux
+    strategy:
+      fail-fast: true
+      matrix:
+        backend: [sqlite, postgres]
+    uses: CIRISAI/CIRISConformance/.github/workflows/run-against-wheels.yml@main
+    with:
+      runs-on: ubuntu-latest
+      backend: ${{ matrix.backend }}
+      under-test-wheel-artifact: wheels-linux-x86_64
+      under-test-package: ciris-server
+      # TODO(CIRISConformance#14): drop matrix-ref after the persist-7 triple
+      # matrix merges to main.
+      matrix-ref: ceg-rc6-and-realtime-av-benches
+
+  # ── Publish to PyPI via Trusted Publishing (OIDC) ──────────────────────────
+  publish:
+    name: publish to PyPI
+    needs: [linux, macos, windows, sdist, conformance-gate]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing — no stored secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # Trusted Publishing: no `password:` — the OIDC identity is verified
+          # against the publisher registered on PyPI.
