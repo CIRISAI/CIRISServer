@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.2.0"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
+version = "0.2.1"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.

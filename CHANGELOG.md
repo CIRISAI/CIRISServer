@@ -4,6 +4,24 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.1] — 2026-06-15
+
+Android wheels (incl. arm32) now publish; legacy-trace importer.
+
+### Added
+- **`ciris-server import-traces <dump-dir>`** — imports the legacy CIRISLens
+  TimescaleDB dump into the persist corpus as CEG objects. Reconstructs flat
+  1.9.x lens rows → `CompleteTrace`/`BatchEnvelope` (reasoning columns →
+  components; original schema + signature in a provenance component); stamped
+  `2.7.legacy`; imported pre-verified; idempotent. A salvage pass repairs the
+  dump's systematic `\\"`→`\"` export mis-escaping and flags those rows
+  `_salvaged: true`. Validated on the prod dump: **all 12,165 traces →
+  20,959 trace-events, errored=0** (3,635 salvaged).
+- **Android wheels** (armeabi-v7a + arm64-v8a) now build & publish (NDK r26b
+  cross-compile: explicit `CC`/`AR`/linker for the toolchain, legacy-NDK
+  tool-name shims for openssl-src, `ANDROID_API_LEVEL`). Promoted from
+  continue-on-error to a required publish lane.
+
 ## [0.2.0] — 2026-06-15
 
 All-platforms-green CI, **full hybrid post-quantum federation signatures**, and a
