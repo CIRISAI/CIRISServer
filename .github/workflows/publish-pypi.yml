@@ -155,6 +155,7 @@ jobs:
       - name: Build wheel (maturin, Android NDK)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_API_LEVEL: "24" # maturin can't infer the API level for armv7 (it can for arm64)
         run: |
           # cc-rs guesses the wrong NDK clang name (arm-linux-androideabi-clang);
           # point CC/CXX/AR + the cargo linker at the real r26b tools (what
