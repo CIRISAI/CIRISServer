@@ -58,7 +58,11 @@ pub struct Slices {
 
 impl Default for Slices {
     fn default() -> Self {
-        Slices { lens: true, registry: false, node: false }
+        Slices {
+            lens: true,
+            registry: false,
+            node: false,
+        }
     }
 }
 
@@ -75,7 +79,10 @@ impl Capabilities {
     pub fn detect(cfg: &ServerConfig) -> Self {
         let disk_free_bytes = fs2::available_space(&cfg.data_dir).unwrap_or(0);
         let min = cfg.lens_store_min_gib.saturating_mul(1024 * 1024 * 1024);
-        Capabilities { disk_free_bytes, lens_store: disk_free_bytes >= min }
+        Capabilities {
+            disk_free_bytes,
+            lens_store: disk_free_bytes >= min,
+        }
     }
 
     pub fn disk_free_gib(&self) -> u64 {
@@ -126,7 +133,8 @@ impl ServerConfig {
             })
             .unwrap_or_default();
 
-        let key_id = std::env::var("CIRIS_SERVER_KEY_ID").unwrap_or_else(|_| "ciris-server".to_string());
+        let key_id =
+            std::env::var("CIRIS_SERVER_KEY_ID").unwrap_or_else(|_| "ciris-server".to_string());
 
         let occurrence_id = std::env::var("CIRIS_OCCURRENCE_ID")
             .or_else(|_| std::env::var("AGENT_OCCURRENCE_ID"))
@@ -190,7 +198,10 @@ impl ServerConfig {
 
     /// The lens read-API HTTP address — the primary (RET) port + 1.
     pub fn read_api_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.listen_addr.ip(), self.listen_addr.port().saturating_add(1))
+        SocketAddr::new(
+            self.listen_addr.ip(),
+            self.listen_addr.port().saturating_add(1),
+        )
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {

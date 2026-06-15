@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ciris_edge::transport::reticulum::{ReticulumAuth, ReticulumTransport, ReticulumTransportConfig};
+use ciris_edge::transport::reticulum::{
+    ReticulumAuth, ReticulumTransport, ReticulumTransportConfig,
+};
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
 use ciris_keyring::{
     get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, SealedEd25519Signer,
@@ -130,8 +132,8 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSigner>> {
     let seed_path = cfg.seed_path(); // identity_dir/ed25519.seed — the takeover source
     if seed_path.exists() {
-        let bytes = std::fs::read(&seed_path)
-            .with_context(|| format!("read {}", seed_path.display()))?;
+        let bytes =
+            std::fs::read(&seed_path).with_context(|| format!("read {}", seed_path.display()))?;
         let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
                 "{} must be a 32-byte ed25519 seed (got {} bytes)",
@@ -139,12 +141,16 @@ fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSigner>> {
                 bytes.len()
             )
         })?;
-        let signer = SealedEd25519Signer::adopt(cfg.key_id.clone(), cfg.identity_dir.clone(), &seed)
-            .map_err(|e| anyhow::anyhow!("adopt existing federation seed into the keystore: {e}"))?;
+        let signer =
+            SealedEd25519Signer::adopt(cfg.key_id.clone(), cfg.identity_dir.clone(), &seed)
+                .map_err(|e| {
+                    anyhow::anyhow!("adopt existing federation seed into the keystore: {e}")
+                })?;
         // The sealed copy is now load-bearing; move the plaintext off the live path.
         let archived = seed_path.with_file_name("ed25519.seed.migrated");
-        std::fs::rename(&seed_path, &archived)
-            .with_context(|| format!("archive {} -> {}", seed_path.display(), archived.display()))?;
+        std::fs::rename(&seed_path, &archived).with_context(|| {
+            format!("archive {} -> {}", seed_path.display(), archived.display())
+        })?;
         tracing::info!(
             archived = %archived.display(),
             "adopted existing federation seed into the sealed keystore (key_id preserved)"

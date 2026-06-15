@@ -725,7 +725,11 @@ impl LensCore {
                 .ok();
             tracing::info!(%listen_addr, "lens read API stopped");
         });
-        Ok(ReadApiHandle { http_shutdown_tx, http_join, listen_addr })
+        Ok(ReadApiHandle {
+            http_shutdown_tx,
+            http_join,
+            listen_addr,
+        })
     }
 
     /// Start lens-core in **node mode** — relay + UX read API.

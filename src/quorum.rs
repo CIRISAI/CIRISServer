@@ -56,7 +56,10 @@ pub fn verify_canonical_quorum(
     signatures: &[ThresholdSignature],
 ) -> Result<usize> {
     let policy = QuorumPolicy::parse(&community.consensus_protocol).with_context(|| {
-        format!("invalid consensus_protocol {:?}", community.consensus_protocol)
+        format!(
+            "invalid consensus_protocol {:?}",
+            community.consensus_protocol
+        )
     })?;
     verify_quorum_policy(bytes, &community.members, signatures, policy)
         .map_err(|e| anyhow::anyhow!("founder-quorum verify failed: {e}"))
@@ -98,10 +101,16 @@ mod tests {
     #[test]
     fn canonical_community_is_a_conformant_entrenched_2of3_trust_root() {
         let c = canonical_community(founders());
-        assert!(c.is_trust_root_conformant(), "must be a conformant trust root");
+        assert!(
+            c.is_trust_root_conformant(),
+            "must be a conformant trust root"
+        );
         assert_eq!(c.community_key_id, CANONICAL_COMMUNITY_KEY_ID);
         assert!(c.consensus_protocol_entrenched);
-        assert_eq!(c.infrastructure_constraint.admission_quorum_basis, "founders");
+        assert_eq!(
+            c.infrastructure_constraint.admission_quorum_basis,
+            "founders"
+        );
 
         let p = QuorumPolicy::parse(&c.consensus_protocol).expect("parse consensus_protocol");
         assert_eq!((p.m, p.n), (2, 3), "2-of-3");

@@ -4,6 +4,21 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.1.1] — 2026-06-15
+
+Release-CI fixes only — **no change to the node**. 0.1.0 was tagged but did not
+publish: `publish-pypi.yml`'s linux wheel built in a manylinux_2_28 (AlmaLinux 8)
+container whose tpm2-tss is 2.3.2, too old for the keyring's `tss-esapi-sys`
+(`tss2-sys not found`), and two lint gates failed.
+
+### Fixed
+- **Linux wheels** now build on the native runners (ubuntu-latest + ubuntu-24.04-arm)
+  with apt `libtss2-dev` + `patchelf` — the same recipe the green conformance
+  wheel job and the sister wheels (persist `manylinux_2_38`, edge `_2_39`) use —
+  instead of the el8 container with its stale tss2.
+- `rustfmt` (bench formatting) and `clippy` doc-list lints in
+  `benches/pqc_av_streaming.rs` (allow the two stylized-doc lints).
+
 ## [0.1.0] — 2026-06-15
 
 First release. **Lens-only fabric node** — the federation's headless cohabitation

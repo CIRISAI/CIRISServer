@@ -32,6 +32,7 @@
 //!
 //! Derived metrics (fps ceiling, max mesh size at 30 fps) are computed from these
 //! in the run report, not here.
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
@@ -41,8 +42,8 @@ use ciris_edge::transport::federation_session::{
     FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys,
 };
 use ciris_edge::transport::realtime_av::{
-    derive_inner_nonce, derive_outer_nonce, open_av_chunk, seal_av_chunk, ChunkSeq, Epoch, EpochDek,
-    MeshParticipant, RealtimeFanout, StreamId, REALTIME_MIN_RATIO,
+    derive_inner_nonce, derive_outer_nonce, open_av_chunk, seal_av_chunk, ChunkSeq, Epoch,
+    EpochDek, MeshParticipant, RealtimeFanout, StreamId, REALTIME_MIN_RATIO,
 };
 use ciris_edge::transport::TransportId;
 
@@ -89,9 +90,8 @@ fn bench_frame_e2e(c: &mut Criterion) {
                 .expect("seal");
                 let wire = sealed.to_bytes();
                 // Receiver: parse wire → two-layer open → plaintext.
-                let parsed =
-                    ciris_edge::transport::realtime_av::SealedAvChunk::from_bytes(&wire)
-                        .expect("parse");
+                let parsed = ciris_edge::transport::realtime_av::SealedAvChunk::from_bytes(&wire)
+                    .expect("parse");
                 let opened =
                     open_av_chunk(&parsed, &TRANSIT_KEY, LINK_ID, seq, &dek).expect("open");
                 black_box(opened)
@@ -131,8 +131,17 @@ fn bench_frame_halves(c: &mut Criterion) {
     });
 
     // Pre-seal a chunk so open() is measured in isolation.
-    let pre = seal_av_chunk(&frame, &TRANSIT_KEY, LINK_ID, 7, &dek, stream(), Epoch(1), ChunkSeq(7))
-        .expect("pre-seal");
+    let pre = seal_av_chunk(
+        &frame,
+        &TRANSIT_KEY,
+        LINK_ID,
+        7,
+        &dek,
+        stream(),
+        Epoch(1),
+        ChunkSeq(7),
+    )
+    .expect("pre-seal");
     g.bench_function("open_64KiB", |b| {
         b.iter(|| {
             black_box(open_av_chunk(black_box(&pre), &TRANSIT_KEY, LINK_ID, 7, &dek).expect("open"))
@@ -227,7 +236,9 @@ fn bench_mesh_fanout(c: &mut Criterion) {
     let mut g = c.benchmark_group("av_mesh_fanout");
     for &n in &mesh_sizes {
         // Distinct per-Link ids (outer nonce binds to link_id).
-        let links: Vec<Vec<u8>> = (0..n).map(|i| format!("link-{i:04}").into_bytes()).collect();
+        let links: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("link-{i:04}").into_bytes())
+            .collect();
         g.throughput(Throughput::Bytes(SIZE as u64)); // one logical frame, regardless of N
 
         // Current API: full two-layer seal per participant.
@@ -287,11 +298,16 @@ fn bench_fanout_plan(c: &mut Criterion) {
                 let outcome = if k < 8 {
                     AttemptOutcome::SendSuccess
                 } else {
-                    AttemptOutcome::SendFailure { error_class: "timeout".into() }
+                    AttemptOutcome::SendFailure {
+                        error_class: "timeout".into(),
+                    }
                 };
                 tracker.record_attempt(&id, transport_id, outcome);
             }
-            MeshParticipant { peer_key_id: id, link_id: format!("link-{i:04}").into_bytes() }
+            MeshParticipant {
+                peer_key_id: id,
+                link_id: format!("link-{i:04}").into_bytes(),
+            }
         })
         .collect();
 
