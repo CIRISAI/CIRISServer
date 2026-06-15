@@ -155,8 +155,19 @@ jobs:
       - name: Build wheel (maturin, Android NDK)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          RUSTFLAGS: "-L ${{ runner.temp }}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
         run: |
+          # cc-rs guesses the wrong NDK clang name (arm-linux-androideabi-clang);
+          # point CC/CXX/AR + the cargo linker at the real r26b tools (what
+          # cargo-ndk would set). Var names use the underscore/SCREAMING target.
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG="${TC}/${{ matrix.clang }}-clang"
+          TUS="$(echo '${{ matrix.target }}' | tr - _)"
+          TSC="$(echo "$TUS" | tr a-z A-Z)"
+          export "CC_${TUS}=${CLANG}"
+          export "CXX_${TUS}=${CLANG}++"
+          export "AR_${TUS}=${TC}/llvm-ar"
+          export "CARGO_TARGET_${TSC}_LINKER=${CLANG}"
+          export RUSTFLAGS="-L ${RUNNER_TEMP}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
           maturin build --release --out dist --target ${{ matrix.target }}
