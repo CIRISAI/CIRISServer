@@ -120,8 +120,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { abi: armeabi-v7a, target: armv7-linux-androideabi, clang: armv7a-linux-androideabi24, pw: 32 }
-          - { abi: arm64-v8a,   target: aarch64-linux-android,   clang: aarch64-linux-android24,    pw: 64 }
+          - { abi: armeabi-v7a, target: armv7-linux-androideabi, clang: armv7a-linux-androideabi24, legacy: arm-linux-androideabi,  pw: 32 }
+          - { abi: arm64-v8a,   target: aarch64-linux-android,   clang: aarch64-linux-android24,    legacy: aarch64-linux-android, pw: 64 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -166,7 +166,16 @@ jobs:
           export "CC_${TUS}=${CLANG}"
           export "CXX_${TUS}=${CLANG}++"
           export "AR_${TUS}=${TC}/llvm-ar"
+          export "RANLIB_${TUS}=${TC}/llvm-ranlib"
           export "CARGO_TARGET_${TSC}_LINKER=${CLANG}"
+          # openssl-src (pulled by persist on android) hardcodes the LEGACY NDK
+          # tool names that r26b dropped; shim them → the r26b llvm tools.
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+          ln -sf "${TC}/llvm-ar"     "${TC}/${{ matrix.legacy }}-ar"
+          ln -sf "${TC}/llvm-ranlib" "${TC}/${{ matrix.legacy }}-ranlib"
+          ln -sf "${CLANG}"          "${TC}/${{ matrix.legacy }}-clang"
+          ln -sf "${CLANG}++"        "${TC}/${{ matrix.legacy }}-clang++"
+          export PATH="${TC}:${PATH}"
           export RUSTFLAGS="-L ${RUNNER_TEMP}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
