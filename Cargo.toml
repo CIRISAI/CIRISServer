@@ -41,13 +41,13 @@ python = ["dep:pyo3", "dep:pyo3-async-runtimes", "ciris-lens-core/python"]
 # `extension-module` is what maturin builds the wheel with (tells PyO3 not to
 # link libpython). The bin must NOT enable it. See pyproject.toml [tool.maturin].
 extension-module = ["python", "pyo3/extension-module"]
-# Real TPM-2.0 / Secure-Enclave / StrongBox hardware backing for the node's RNS
-# transport identity. The CIRIS family already pulls `ciris-keyring/tpm`
-# transitively on Linux (so libtss2-dev is a Linux build dep regardless — CI must
-# install it); this is the explicit handle for CIRISServer's own intent and for
-# non-Linux targets. Runtime auto-detects hardware and degrades to encrypted
-# software when absent (`is_hardware_backed()` reports the posture).
-tpm = ["ciris-keyring/tpm"]
+# NOTE: hardware key custody (TPM/SE/StrongBox) is wired per-TARGET below, not as
+# a cargo feature — TPM (tss-esapi) is Linux-only, so a top-level `tpm` feature
+# made `--all-features` drag tss-esapi onto Windows/macOS (where it can't build).
+# The `[target.'cfg(target_os = "linux")']` table enables keyring/tpm + persist
+# postgres on Linux only; runtime auto-detects hardware and degrades to encrypted
+# software when absent (`is_hardware_backed()` reports the posture). This mirrors
+# the substrate crates' per-target keyring/postgres gating.
 
 # ----------------------------------------------------------------------------
 # Dependencies — CIRISServer AUTHORS NO PRIMITIVES. It composes the core
@@ -82,7 +82,10 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 
 # The substrate trio (also pulled transitively by the cores; pinned here so the
 # composition root owns the singleton construction).
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v7.0.0", features = ["postgres", "sqlite"] }
+# sqlite on all platforms; postgres is Linux-only (libpq/openssl don't link
+# cleanly on the macOS/Windows runners — same posture as persist's own CI). The
+# `[target.linux]` table below adds postgres.
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v7.0.0", features = ["sqlite"] }
 ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v3.6.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
@@ -108,6 +111,15 @@ base64     = "0.22"
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Linux-only hardware + Postgres: cargo UNIONS these onto the base deps above.
+# - persist `postgres` (libpq/openssl) — Linux deployment + the postgres
+#   conformance lane; macOS/Windows stay sqlite-only.
+# - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
+#   libtss2 (Linux build dep). Other targets keep the software keystore.
+[target.'cfg(target_os = "linux")'.dependencies]
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v7.0.0", features = ["postgres"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.6.0", version = "5", features = ["tpm"] }
 
 # Test-only — the two-node replication integration test (tests/replication.rs)
 # builds + signs CEG batches with the same primitives persist verifies against.
