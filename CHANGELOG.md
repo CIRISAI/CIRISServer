@@ -4,6 +4,31 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.1.2] — 2026-06-15
+
+Substrate floor bump + the `/v1/identity` endpoint the migration runbook requires.
+
+### Added
+- **`GET /v1/identity`** — the node's `LocalIdentityAggregate` (CEG §5.6.8.8.2),
+  merged onto the read-API listener (same port as `GET /lens/api/v1/*`). Serves
+  `key_id`, the Ed25519 federation pubkey, the Reticulum transport pubkeys
+  (x25519 ‖ ed25519), and `identity_hash` — the identity-continuity surface the
+  CIRISLens→CIRISServer cutover verifies (runbook §4 step 1). Closes the gap that
+  blocked the first cutover attempt (#5).
+  - `content_x25519` / `content_ml_kem_768` are `null` for now: persist's
+    `local_identity_aggregate` requires a software `LocalSigner`, and CIRISServer
+    runs a hardware signer (`with_hardware_signer` → `local_signer: None`). The
+    content-KEM halves fill in once persist exposes the aggregate for a
+    hardware-signed Engine (tracked upstream).
+
+### Changed
+- Substrate floor → **persist v7.0.0 / edge v3.6.0 / verify-family v5.6.0**
+  (the edge v3.6.0 "CEWP-ready" co-bump; CEG 1.0-RC6). Major persist 6→7, built
+  clean with zero code changes.
+- `build_edge` wires the Reticulum transport via the typed `.reticulum_transport()`
+  builder so `Edge::local_transport_pubkey()` resolves (populates the
+  RET-transport role of `/v1/identity`).
+
 ## [0.1.1] — 2026-06-15
 
 Release-CI fixes only — **no change to the node**. 0.1.0 was tagged but did not

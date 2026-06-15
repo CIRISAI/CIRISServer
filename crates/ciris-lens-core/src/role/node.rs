@@ -700,13 +700,29 @@ impl LensCore {
         scoring: ScoringConfig,
         ux: UxConfig,
     ) -> Result<ReadApiHandle, NodeError> {
+        Self::read_api_with_extra(engine, listen_addr, peer_acl, scoring, ux, Router::new()).await
+    }
+
+    /// Like [`Self::read_api`], but merges `extra` routes onto the same HTTP
+    /// listener — so the composing host (CIRISServer) can serve its own
+    /// fabric-node surface (e.g. `GET /v1/identity`) on the same port as the
+    /// frozen `GET /lens/api/v1/*` read API. The lens routes win on conflict
+    /// (merge order); `extra` should use non-`/lens/api/v1` paths.
+    pub async fn read_api_with_extra(
+        engine: Arc<Engine>,
+        listen_addr: SocketAddr,
+        peer_acl: PeerAcl,
+        scoring: ScoringConfig,
+        ux: UxConfig,
+        extra: Router,
+    ) -> Result<ReadApiHandle, NodeError> {
         let state = NodeState {
             engine: Some(engine),
             peer_acl: Arc::new(peer_acl),
             ratchet_version: scoring.ratchet_calibration_version,
             api_root: ux.api_root.clone(),
         };
-        let router = build_read_router(state);
+        let router = extra.merge(build_read_router(state));
         let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
         let http_join = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(listen_addr).await {

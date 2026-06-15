@@ -124,8 +124,14 @@ is the legacy pipeline's). Keep the old TimescaleDB **read-only** for archival a
 long as you need it, then decommission.
 
 ## 4. Verify (before tearing anything down)
-- `GET /v1/identity` returns the six-key `LocalIdentityAggregate` with the **same
-  `key_id`** the CIRISLens node published (identity continuity confirmed).
+- `GET /v1/identity` (on the read-API port, `listen+1`) returns the
+  `LocalIdentityAggregate` with the **same `key_id`** the CIRISLens node published
+  (identity continuity confirmed), plus the Ed25519 federation pubkey and the
+  Reticulum transport pubkeys. **0.1.x note:** `content_x25519` /
+  `content_ml_kem_768` are `null` — the content-KEM halves fill in once persist
+  exposes the aggregate for a hardware-signed Engine
+  ([CIRISPersist#223](https://github.com/CIRISAI/CIRISPersist/issues/223)); the
+  continuity-critical fields (`key_id`, `ed25519_pubkey_b64`, transport) are present.
 - Boot log shows `transport-identity keystore opened hardware_backed=true` (TPM
   host) and, for the federation key, the keyring reports a sealed-Ed25519 / hardware
   posture (not `NO HARDWARE BINDING`) — or encrypted-software fallback on a

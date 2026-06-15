@@ -982,9 +982,10 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "ciris-crypto",

@@ -82,6 +82,13 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
         compose_node(&edge, &engine, &cfg).await?;
     }
 
+    // The node's identity aggregate (CEG §5.6.8.8.2) for GET /v1/identity —
+    // assembled ONCE at boot from the federation signing key + the RNS transport
+    // identity (both stable). Captured before edge.run() consumes the Edge.
+    let identity_json = local_identity_json(&cfg, signer.as_ref(), edge.local_transport_pubkey())
+        .await
+        .context("assemble /v1/identity aggregate")?;
+
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
     let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
@@ -89,16 +96,17 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
     //    when the host meets the lens-store minimum. ───────────────────────────
     let read = if caps.lens_store {
-        let read = LensCore::read_api(
+        let read = LensCore::read_api_with_extra(
             Arc::clone(&engine),
             cfg.read_api_addr(),
             PeerAcl::AllowAll,
             ScoringConfig::default(),
             UxConfig::api_only("/lens/api/v1"),
+            identity_router(identity_json),
         )
         .await
-        .context("start lens read API")?;
-        tracing::info!(read_api = %read.listen_addr(), "lens slice up — GET /lens/api/v1/*");
+        .context("start read API")?;
+        tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
         Some(read)
     } else {
         None
@@ -117,6 +125,68 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     let _ = edge_shutdown_tx.send(true);
     let _ = edge_join.await;
     Ok(())
+}
+
+/// Assemble the node's `LocalIdentityAggregate` (CEG §5.6.8.8.2) as JSON for
+/// `GET /v1/identity` — the migration's identity-continuity check (same `key_id`).
+///
+/// 0.1 sources the **signing** role from the sealed-Ed25519 federation signer and
+/// the **RET-transport** role from the Reticulum transport identity (x25519 ‖
+/// ed25519, RNS `get_public_key` order). The **content-KEM** pair is `null` for
+/// now: persist's `Engine::local_identity_aggregate` requires a software
+/// `LocalSigner`, but CIRISServer runs a hardware signer (`with_hardware_signer`
+/// → `local_signer: None`), so the persist-minted content-KEM halves aren't yet
+/// reachable here — tracked upstream; they fill in on that co-bump. `key_id` +
+/// Ed25519 (+ transport) are the continuity-critical fields.
+async fn local_identity_json(
+    cfg: &ServerConfig,
+    signer: &dyn HardwareSigner,
+    transport_pubkey: Option<[u8; 64]>,
+) -> Result<String> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let ed25519 = signer
+        .public_key()
+        .await
+        .map_err(|e| anyhow::anyhow!("federation signer public_key: {e}"))?;
+    let (ret_x25519_b64, ret_ed25519_b64) = match transport_pubkey {
+        Some(tp) => (Some(b64.encode(&tp[..32])), Some(b64.encode(&tp[32..]))),
+        None => (None, None),
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let aggregate = ciris_persist::federation::LocalIdentityAggregate::assemble(
+        cfg.key_id.clone(),
+        None, // pqc_key_id
+        b64.encode(ed25519),
+        None, // ml_dsa_65 — the sealed-Ed25519 federation signer is Ed25519-only
+        ret_x25519_b64,
+        ret_ed25519_b64,
+        None, // content_x25519        — persist hw-signer aggregate gap (above)
+        None, // content_ml_kem_768
+        now_ms,
+    );
+    serde_json::to_string(&aggregate).context("serialize LocalIdentityAggregate")
+}
+
+/// `GET /v1/identity` → the cached identity-aggregate JSON (stable for the
+/// node's lifetime), merged onto the read-API listener.
+fn identity_router(identity_json: String) -> axum::Router {
+    let body = std::sync::Arc::new(identity_json);
+    axum::Router::new().route(
+        "/v1/identity",
+        axum::routing::get(move || {
+            let body = std::sync::Arc::clone(&body);
+            async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    (*body).clone(),
+                )
+            }
+        }),
+    )
 }
 
 /// The node's federation signing identity, hardware-custodied.
@@ -233,7 +303,11 @@ async fn build_edge(
         .directory(backend.clone())
         .queue(backend)
         .signer(signer)
-        .transport(transport)
+        // The TYPED reticulum path (not the generic `.transport(Arc<dyn Transport>)`):
+        // it both wires the transport for run/dispatch AND records it so
+        // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
+        // populate the RET-transport role of GET /v1/identity.
+        .reticulum_transport(transport)
         .build()
         .map_err(|e| anyhow::anyhow!("build shared Edge: {e}"))?;
     tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
