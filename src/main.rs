@@ -10,5 +10,17 @@ use anyhow::Result;
 #[tokio::main]
 async fn main() -> Result<()> {
     ciris_server::init_tracing();
-    ciris_server::run().await
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        // `ciris-server import-traces <dump-dir>` — one-shot legacy-trace import
+        // (CIRISLens TimescaleDB dump → persist corpus as CEG objects).
+        Some("import-traces") => {
+            let dump_dir = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("usage: ciris-server import-traces <dump-dir>"))?;
+            ciris_server::import_traces(&dump_dir).await
+        }
+        // Default: boot the fabric node.
+        _ => ciris_server::run().await,
+    }
 }

@@ -250,7 +250,7 @@ fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSigner>> {
 /// already-sealed seed is loaded, or a fresh one is generated + sealed
 /// (`get_platform_ed25519_signer`). Either way the seed is TPM/SE/StrongBox-sealed
 /// at rest with software-encrypted fallback; the pubkey stays 32-byte Ed25519.
-fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSigner>> {
+pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSigner>> {
     let seed_path = cfg.seed_path(); // identity_dir/ed25519.seed — the takeover source
     if seed_path.exists() {
         let bytes =

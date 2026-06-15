@@ -110,6 +110,7 @@ axum       = "0.8"
 base64     = "0.22"
 serde_json = "1"
 getrandom  = "0.3"   # mint the ML-DSA-65 federation seed on first boot (hybrid PQC)
+flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

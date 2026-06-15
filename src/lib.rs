@@ -26,6 +26,7 @@
 
 mod compose;
 mod config;
+mod import;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
@@ -44,6 +45,12 @@ pub async fn run() -> Result<()> {
         "CIRISServer (the fabric node) starting — lens-only (0.1)"
     );
     compose::serve(cfg).await
+}
+
+/// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
+/// CEG objects (the `import-traces <dump-dir>` subcommand). See `src/import.rs`.
+pub async fn import_traces(dump_dir: &str) -> Result<()> {
+    import::run(dump_dir).await
 }
 
 /// Initialize tracing (shared by the binary and the wheel entry point).
