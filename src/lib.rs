@@ -68,25 +68,52 @@ pub fn init_tracing() {
 mod python {
     use pyo3::prelude::*;
 
+    fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
+        // ONE multi-thread runtime; the node spawns onto it (never a second
+        // runtime around the Engine — the persist dual-runtime-deadlock rule).
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        rt.block_on(fut)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Console entry point: `pip install ciris-server` → the `ciris-server`
-    /// command (pyproject `[project.scripts]`). Boots a node with zero-setup
-    /// defaults — mode = server, trusting `ciris-canonical` — no wizard.
+    /// command (pyproject `[project.scripts]`). Mirrors the binary's CLI:
+    /// `ciris-server import-traces <dump-dir>` runs the legacy-trace import;
+    /// otherwise boots a zero-setup node (mode = server, trusts `ciris-canonical`).
     #[pyfunction]
     #[pyo3(name = "main")]
     fn py_main() -> PyResult<()> {
         crate::init_tracing();
-        // ONE multi-thread runtime; the lens node spawns onto it (never a second
-        // runtime around the Engine — the persist dual-runtime-deadlock rule).
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        rt.block_on(crate::run())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        let mut args = std::env::args().skip(1);
+        match args.next().as_deref() {
+            Some("import-traces") => {
+                let dir = args.next().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "usage: ciris-server import-traces <dump-dir>",
+                    )
+                })?;
+                rt_block_on(crate::import_traces(&dir))
+            }
+            _ => rt_block_on(crate::run()),
+        }
+    }
+
+    /// `ciris_server.import_traces(dump_dir)` — programmatic legacy-trace import
+    /// for a pip-only bridge (the CIRISLens TimescaleDB dump → persist corpus as
+    /// CEG objects). Reads `CIRIS_HOME`/DSN from the environment, same as the node.
+    #[pyfunction]
+    #[pyo3(name = "import_traces")]
+    fn py_import_traces(dump_dir: String) -> PyResult<()> {
+        crate::init_tracing();
+        rt_block_on(crate::import_traces(&dump_dir))
     }
 
     /// `import ciris_server` — the composition CIRISAgent embeds.
     #[pymodule]
     fn ciris_server(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
+        m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +

@@ -4,6 +4,16 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.2] — 2026-06-15
+
+### Added
+- **`import-traces` on the wheel** (pip-only bridge): the abi3 wheel now exposes
+  `ciris_server.import_traces(dump_dir)`, and the `ciris-server` console script
+  accepts `ciris-server import-traces <dump-dir>` (same CLI as the binary). The
+  legacy CIRISLens dump → persist-corpus-as-CEG import no longer needs the
+  source-built binary. Verified from the installed wheel against the prod dump:
+  all 12,165 traces, errored=0.
+
 ## [0.2.1] — 2026-06-15
 
 Android wheels (incl. arm32) now publish; legacy-trace importer.
