@@ -1,0 +1,66 @@
+name: conformance
+
+# Cohabitation conformance: build the ciris-server abi3 wheel, then drive it
+# through CIRISConformance's reusable suite alongside the pinned substrate
+# triple (persist / edge / verify) — the production cohabitation shape (the
+# wheels run together in one Python process). CIRISServer carries the absorbed
+# lens surface, so the suite's `requires_lens` tests run against THIS wheel.
+#
+# A failure here is the cohabitation contract failing — the same gate that
+# blocks publish-pypi in the substrate sisters' release flows. Wired on PR +
+# push now; promote to a publish gate when the PyPI release job lands.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-wheel:
+    name: build ciris-server wheel (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        # libtss2-dev: the family links the TPM keyring backend on Linux.
+        # libsqlite3-dev: persist's sqlite backend.
+        # patchelf: maturin's manylinux repair (the wheel dynamically links
+        # libtss2/libcrypto) — without it `maturin build` fails.
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libsqlite3-dev patchelf
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build abi3 wheel (maturin)
+        # [tool.maturin] in pyproject.toml supplies features = ["extension-module"]
+        # + module-name = ciris_server; pyo3 abi3-py310 → one wheel for 3.10+.
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.7,<2"
+          maturin build --release --out dist
+          ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris_server-wheel-linux-x86_64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  cohabitation-conformance:
+    name: cohabitation (linux-x86_64 × ${{ matrix.backend }})
+    needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
+    uses: CIRISAI/CIRISConformance/.github/workflows/run-against-wheels.yml@main
+    with:
+      runs-on: ubuntu-latest
+      backend: ${{ matrix.backend }}
+      under-test-wheel-artifact: ciris_server-wheel-linux-x86_64
+      under-test-package: ciris-server
+      # The matrix pins the persist-6 substrate triple + maps requires_lens →
+      # ciris_server (lens absorbed). That landed in CIRISConformance#14 — pin
+      # to its branch until merged, then drop this line (defaults to main).
+      # TODO(CIRISConformance#14): remove `matrix-ref` after merge.
+      matrix-ref: ceg-rc6-and-realtime-av-benches
