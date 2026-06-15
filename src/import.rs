@@ -91,8 +91,8 @@ pub async fn run(dump_dir: &str) -> Result<()> {
     let lines = std::io::BufReader::new(reader).lines();
     let mut buf = String::new();
 
-    let (mut seen, mut inserted, mut conflicted, mut errored, mut unparsed) =
-        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut seen, mut inserted, mut conflicted, mut errored, mut unparsed, mut salvaged) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     for line in lines {
         let line = line.context("read dump line")?;
         if buf.is_empty() {
@@ -101,24 +101,51 @@ pub async fn run(dump_dir: &str) -> Result<()> {
             buf.push('\n');
             buf.push_str(&line);
         }
+        let mut was_salvaged = false;
         let row: Value = match serde_json::from_str(&buf) {
             Ok(v) => {
                 buf.clear();
                 v
             }
             Err(e) if e.is_eof() => continue, // incomplete multi-line record — keep accumulating
-            Err(e) => {
-                // Malformed at this boundary — skip + resync at the next line.
-                unparsed += 1;
-                if unparsed <= 5 {
-                    tracing::warn!(error = %e, "skipping unparseable dump record");
-                }
+            Err(_) => {
+                // Complete but malformed: the dump's systematic export bug —
+                // stringified-JSON fields escape inner quotes as `\\"` (escaped
+                // backslash + bare quote, which closes the string early) instead
+                // of `\"`. Salvage by un-doubling `\\"` → `\"` and retrying
+                // (a few passes for multi-level nesting).
+                let mut repaired = buf.clone();
                 buf.clear();
-                continue;
+                let mut got: Option<Value> = None;
+                for _ in 0..4 {
+                    let next = repaired.replace("\\\\\"", "\\\"");
+                    if next == repaired {
+                        break;
+                    }
+                    repaired = next;
+                    if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                        got = Some(v);
+                        break;
+                    }
+                }
+                match got {
+                    Some(v) => {
+                        salvaged += 1;
+                        was_salvaged = true;
+                        v
+                    }
+                    None => {
+                        unparsed += 1;
+                        if unparsed <= 5 {
+                            tracing::warn!("skipping unparseable dump record (unrepairable)");
+                        }
+                        continue;
+                    }
+                }
             }
         };
         seen += 1;
-        let bytes = match reconstruct_batch(&row) {
+        let bytes = match reconstruct_batch(&row, was_salvaged) {
             Some(b) => b,
             None => {
                 errored += 1;
@@ -151,6 +178,7 @@ pub async fn run(dump_dir: &str) -> Result<()> {
         conflicted,
         errored,
         unparsed,
+        salvaged,
         "legacy trace import complete"
     );
     Ok(())
@@ -158,7 +186,7 @@ pub async fn run(dump_dir: &str) -> Result<()> {
 
 /// Reconstruct one flat 1.9.x lens row into a CEG `BatchEnvelope` JSON (bytes).
 /// Returns `None` if the row lacks the minimum identity fields.
-fn reconstruct_batch(row: &Value) -> Option<Vec<u8>> {
+fn reconstruct_batch(row: &Value, salvaged: bool) -> Option<Vec<u8>> {
     let s = |k: &str| row.get(k).and_then(Value::as_str);
     let trace_id = s("trace_id")?;
     let thought_id = s("thought_id")?;
@@ -196,6 +224,9 @@ fn reconstruct_batch(row: &Value) -> Option<Vec<u8>> {
             "legacy_schema_version": orig_schema,
             "legacy_signature": s("signature").unwrap_or(""),
             "legacy_signature_key_id": s("signature_key_id").unwrap_or(""),
+            // The raggedest edge: this record's JSON was repaired (the export's
+            // `\\"`→`\"` mis-escaping in stringified-JSON fields) before import.
+            "_salvaged": salvaged,
         },
     }));
 
