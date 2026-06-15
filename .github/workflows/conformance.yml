@@ -59,8 +59,5 @@ jobs:
       backend: ${{ matrix.backend }}
       under-test-wheel-artifact: ciris_server-wheel-linux-x86_64
       under-test-package: ciris-server
-      # The matrix pins the persist-6 substrate triple + maps requires_lens →
-      # ciris_server (lens absorbed). That landed in CIRISConformance#14 — pin
-      # to its branch until merged, then drop this line (defaults to main).
-      # TODO(CIRISConformance#14): remove `matrix-ref` after merge.
-      matrix-ref: ceg-rc6-and-realtime-av-benches
+      # matrix-ref defaults to main, which pins the persist-7 substrate triple
+      # + maps requires_lens → ciris_server (CIRISConformance#14, merged).

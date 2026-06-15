@@ -77,20 +77,46 @@ The *repos* (`ciris-registry-core`, `ciris-lens-core`, `ciris-node-core`) stay �
 they are the libraries this binary composes, the same cores that fold into
 CIRISAgent.
 
+## Install
+
+```sh
+pip install ciris-server      # the PyO3 abi3 wheel (or build the binary: cargo build --release)
+ciris-server                  # boots a zero-setup node — mode=server, trusts ciris-canonical, no wizard
+```
+
+Defaults need no setup: data under `$CIRIS_HOME`, SQLite corpus (Postgres via
+`CIRIS_DB_URL`), identity minted-or-migrated on first boot, Reticulum transport
+up, the lens read API on `listen+1`. Migrating a deployed CIRISLens host? See
+[`FSD/LENS_TO_SERVER_MIGRATION.md`](FSD/LENS_TO_SERVER_MIGRATION.md) — the
+federation key and RNS address carry over byte-identically (no re-key).
+
+The same wheel gives CIRISAgent the lens drop-in: `from ciris_server import
+LensClient`.
+
 ## Status
 
-**Spec — skeleton only; gated.** Driven by the CIRISAgent train:
+**0.1.0 — lens-only, shipped.** `ciris-server` boots a working lens fabric node:
+relay ingest (CEG `AccordEventsBatch` over Reticulum/HTTP) + the seven frozen
+`GET /lens/api/v1/*` read endpoints, over one shared persist Engine. Both key
+classes (RNS transport identity + Ed25519 federation seed) are TPM/SE/StrongBox
+sealed with a software-encrypted fallback. Below the lens-store disk minimum the
+node degrades to a Reticulum relay node.
 
-- **Server 0.5** (lens + registry) — the agent adopts it at **~2.9.8**.
-- **Server 1.0** (+ node, the complete fabric node) — at **~2.9.10**.
+Substrate floor: **persist v7.0.0 / edge v3.6.0 / verify-family v5.6.0**
+(CEG 1.0-RC6). `ciris-lens-core` is **absorbed in-tree** — the standalone
+CIRISLensCore library and the CIRISLens deployment (Grafana/TimescaleDB/Python
+ingest) retire. Cohabitation + CEG-profile conformance is gated by
+[CIRISConformance](https://github.com/CIRISAI/CIRISConformance) against the
+published wheels.
 
-The substrate floor is the **6.x / edge-3.0 family** (persist v6.0.1, verify
-v5.2.0). The current gate is the **CIRISEdge v3.0.0 tag**
-([#89](https://github.com/CIRISAI/CIRISEdge/issues/89)) + a registry/lens
-co-bump ([CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53),
-[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76)). The
-wiring needs **no core changes** — CIRISServer adapts to what's shipped. See
-[`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
+Roadmap (driven by the CIRISAgent train):
+
+- **0.5** (+ registry authority) — agent **~2.9.8**. Prep:
+  [`FSD/REGISTRY_FOLD_DERISK.md`](FSD/REGISTRY_FOLD_DERISK.md), [#2](https://github.com/CIRISAI/CIRISServer/issues/2).
+- **1.0** (+ node consensus — the complete fabric node) — agent **~2.9.10**.
+
+The wiring needs **no core changes** — CIRISServer adapts to what's shipped.
+See [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
 
 ## License
 

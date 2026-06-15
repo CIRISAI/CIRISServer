@@ -139,9 +139,7 @@ jobs:
       backend: ${{ matrix.backend }}
       under-test-wheel-artifact: wheels-linux-x86_64
       under-test-package: ciris-server
-      # TODO(CIRISConformance#14): drop matrix-ref after the persist-7 triple
-      # matrix merges to main.
-      matrix-ref: ceg-rc6-and-realtime-av-benches
+      # matrix-ref defaults to main = the persist-7 triple (CIRISConformance#14, merged).
 
   # ── Publish to PyPI via Trusted Publishing (OIDC) ──────────────────────────
   publish:
