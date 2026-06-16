@@ -60,8 +60,8 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     //    software seed (no sealed-ML-DSA backend exists). ───────────────────────
     let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(&cfg)?;
 
-    // ── ONE shared persist Engine ────────────────────────────────────────────
-    let engine = build_engine(&cfg, Arc::clone(&signer)).await?;
+    // ── ONE shared persist Engine (hybrid hardware signer — hard cut) ─────────
+    let engine = build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
@@ -90,14 +90,9 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // The node's identity aggregate (CEG §5.6.8.8.2) for GET /v1/identity —
     // assembled ONCE at boot from the federation signing key + the RNS transport
     // identity (both stable). Captured before edge.run() consumes the Edge.
-    let identity_json = local_identity_json(
-        &cfg,
-        signer.as_ref(),
-        pqc.as_ref(),
-        edge.local_transport_pubkey(),
-    )
-    .await
-    .context("assemble /v1/identity aggregate")?;
+    let identity_json = local_identity_json(&engine, edge.local_transport_pubkey())
+        .await
+        .context("assemble /v1/identity aggregate")?;
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
@@ -140,50 +135,29 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 /// Assemble the node's `LocalIdentityAggregate` (CEG §5.6.8.8.2) as JSON for
 /// `GET /v1/identity` — the migration's identity-continuity check (same `key_id`).
 ///
-/// Sources the **signing** role as a FULL HYBRID — Ed25519 (hardware-sealed) +
-/// ML-DSA-65 (the PQC half) — and the **RET-transport** role from the Reticulum
-/// transport identity (x25519 ‖ ed25519, RNS `get_public_key` order). The
-/// **content-KEM** pair is `null` for now: persist's `local_identity_aggregate`
-/// requires a software `LocalSigner`, but CIRISServer runs a hardware signer
-/// (`with_hardware_signer` → `local_signer: None`), so the persist-minted
-/// content-KEM halves aren't yet reachable here (CIRISPersist#223). `key_id` +
-/// the hybrid signing keys (+ transport) are the continuity-critical fields.
+/// Sourced directly from persist's `Engine::local_identity_aggregate`
+/// (CIRISPersist#223 + #224), so all SIX keys are populated:
+///   - **signing** role — a FULL HYBRID, Ed25519 (hardware-sealed) + ML-DSA-65,
+///     because the Engine is built with `with_hardware_signer_hybrid` and its
+///     `local_signer` carries both halves;
+///   - **content-KEM** pair (x25519 + ML-KEM-768) — persist-minted/sealed and now
+///     reachable for a hardware-signed Engine (#223 closed the `null` gap);
+///   - **RET-transport** role (x25519 ‖ ed25519, RNS `get_public_key` order),
+///     supplied here from the Reticulum transport identity.
 async fn local_identity_json(
-    cfg: &ServerConfig,
-    signer: &dyn HardwareSigner,
-    pqc: &dyn PqcSigner,
+    engine: &Engine,
     transport_pubkey: Option<[u8; 64]>,
 ) -> Result<String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let ed25519 = signer
-        .public_key()
-        .await
-        .map_err(|e| anyhow::anyhow!("federation signer public_key: {e}"))?;
-    // The PQC half — ML-DSA-65 — so the aggregate is a full hybrid identity.
-    let ml_dsa_65 = pqc
-        .public_key()
-        .await
-        .map_err(|e| anyhow::anyhow!("ML-DSA-65 signer public_key: {e}"))?;
     let (ret_x25519_b64, ret_ed25519_b64) = match transport_pubkey {
         Some(tp) => (Some(b64.encode(&tp[..32])), Some(b64.encode(&tp[32..]))),
         None => (None, None),
     };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let aggregate = ciris_persist::federation::LocalIdentityAggregate::assemble(
-        cfg.key_id.clone(),
-        Some(format!("{}-pqc", cfg.key_id)), // pqc_key_id
-        b64.encode(ed25519),
-        Some(b64.encode(ml_dsa_65)), // ml_dsa_65 — the PQC half (full hybrid)
-        ret_x25519_b64,
-        ret_ed25519_b64,
-        None, // content_x25519        — persist hw-signer aggregate gap (above)
-        None, // content_ml_kem_768
-        now_ms,
-    );
+    let aggregate = engine
+        .local_identity_aggregate(ret_x25519_b64, ret_ed25519_b64)
+        .await
+        .map_err(|e| anyhow::anyhow!("persist local_identity_aggregate: {e}"))?;
     serde_json::to_string(&aggregate).context("serialize LocalIdentityAggregate")
 }
 
@@ -213,7 +187,7 @@ fn identity_router(identity_json: String) -> axum::Router {
 /// (minted on first boot, `0600`; **adopted** byte-identically on takeover — the
 /// PQC half of a migrating steward/lens/registry identity). The classical half
 /// stays hardware-sealed ([`federation_signer`]); together they hybrid-sign.
-fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSigner>> {
+pub(crate) fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSigner>> {
     let path = cfg.identity_dir.join("ml_dsa_65.seed");
     let alias = format!("{}-pqc", cfg.key_id);
     let signer = if path.exists() {
@@ -284,11 +258,24 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
 }
 
 /// The one shared persist `Engine` (SQLite-backed; builds + migrates), keyed by
-/// the node's sealed-Ed25519 hardware federation signer.
-async fn build_engine(cfg: &ServerConfig, signer: Arc<dyn HardwareSigner>) -> Result<Arc<Engine>> {
-    let engine = Engine::with_hardware_signer(signer, &cfg.dsn())
-        .await
-        .context("build shared persist Engine")?;
+/// the node's **hybrid hardware** federation signer.
+///
+/// Hard cut to hybrid (CIRISVerify#75 — no classical-only anywhere): the
+/// storage-tier scrub signature is a FULL HYBRID (sealed Ed25519 + ML-DSA-65) via
+/// `Engine::with_hardware_signer_hybrid` (CIRISPersist#224). The Ed25519 half
+/// stays hardware-sealed (never unsealed); the ML-DSA-65 half is the software PQC
+/// signer. This also lets `local_identity_aggregate` surface the ML-DSA + the
+/// persist-minted content-KEM halves for `/v1/identity` (#223).
+async fn build_engine(
+    cfg: &ServerConfig,
+    signer: Arc<dyn HardwareSigner>,
+    pqc: Arc<dyn PqcSigner>,
+) -> Result<Arc<Engine>> {
+    let pqc_key_id = format!("{}-pqc", cfg.key_id);
+    let engine =
+        Engine::with_hardware_signer_hybrid(signer, Some(pqc), Some(pqc_key_id), &cfg.dsn())
+            .await
+            .context("build shared persist Engine (hybrid hardware signer)")?;
     Ok(Arc::new(engine))
 }
 

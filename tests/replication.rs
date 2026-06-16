@@ -132,14 +132,29 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
         cohort_target_id: None,
         signature: String::new(),
         signature_key_id: key_id.into(),
+        // Hybrid half (persist v7.2.0 #225) — filled below.
+        signature_ml_dsa_65: None,
+        pubkey_ml_dsa_65: None,
+        pqc_key_id: None,
     };
 
-    // Sign the canonicalized payload — the same canonicalization verify re-runs.
+    // Hard cut (persist v7.2.0 #225): VerifyMode::Full rejects classical-only.
+    // Sign FULL HYBRID — Ed25519 over canon, ML-DSA-65 over (canon ‖ ed25519_sig).
+    // The ML-DSA pubkey rides the trace envelope (the verifier reads it there).
     let payload = canonical_payload_value(&trace);
     let canon = PythonJsonDumpsCanonicalizer
         .canonicalize_value(&payload)
         .expect("canonicalize trace payload");
-    trace.signature = BASE64.encode(agent_sk.sign(&canon).to_bytes());
+    let ed_sig = agent_sk.sign(&canon).to_bytes();
+    let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
+    bound.extend_from_slice(&canon);
+    bound.extend_from_slice(&ed_sig);
+    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    use ciris_crypto::PqcSigner as _;
+    trace.signature = BASE64.encode(ed_sig);
+    trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
+    trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
+    trace.pqc_key_id = Some("test-mldsa".into());
 
     let envelope = serde_json::json!({
         "events": [{

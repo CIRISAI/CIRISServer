@@ -1,15 +1,25 @@
 //! Replication / corpus-ingest throughput — the receive side of CEG-RC5
 //! replication (the spine `tests/replication.rs` proves correct). Measures
-//! `Engine::receive_and_persist`: verify (Ed25519) + persist + content-addressed
-//! dedup — the cost a node pays per replicated trace. Run:
-//! `cargo bench --bench replication_ingest`.
+//! `Engine::receive_and_persist`: signature verify (Ed25519) → decompose →
+//! persist with a **5-tuple `ON CONFLICT DO NOTHING`** dedup (NOT a content-hash
+//! lookup — the dedup key is `(agent_id_hash, trace_id, thought_id, event_type,
+//! attempt_index[, ts])`). Run: `cargo bench --bench replication_ingest`.
 //!
-//! Two numbers:
-//! - `ingest_new` — a fresh signed trace each iteration (insert path = a new
-//!   envelope arriving from a peer). This is "replication speed" — traces/sec a
-//!   node absorbs.
-//! - `ingest_dedup` — re-delivering an already-seen trace (the anti gossip-loop
-//!   path: verify + dedup-reject, no insert). The steady-state of anti-entropy.
+//! Both run against ONE shared in-memory Engine (not a fresh backend per
+//! iteration), so the dedup path is exercised for real:
+//! - `ingest_new`   — a fresh signed trace each iteration (a new envelope from a
+//!   peer). "Replication speed" — traces/sec a node absorbs.
+//! - `ingest_dedup` — re-delivering an already-seen trace (anti gossip-loop:
+//!   verify → decompose → insert rejected at the unique index).
+//!
+//! THE FINDING: `ingest_dedup` is only marginally cheaper than `ingest_new` —
+//! because **verify runs BEFORE the dedup insert**, a re-delivery still pays full
+//! Ed25519 verification. So a replay / gossip flood is bounded by **verify
+//! throughput**, not a cheap hash reject. This is deliberate (verify-before-
+//! mutation, MISSION §3 — reordering dedup ahead of verify is an AV-9 suppression
+//! oracle: the dedup tuple is attacker-controllable). The scale levers are the
+//! pre-verified relay path (`VerifyMode::TrustPreVerified` gated on an Edge
+//! `verify_outcome`) and batch verification (CIRISPersist#225) — NOT dedup-first.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -106,11 +116,29 @@ fn batch_bytes(agent_sk: &SigningKey, trace_id: &str) -> Vec<u8> {
         cohort_target_id: None,
         signature: String::new(),
         signature_key_id: KEY_ID.into(),
+        // Hybrid half (persist v7.2.0 #225) — filled below.
+        signature_ml_dsa_65: None,
+        pubkey_ml_dsa_65: None,
+        pqc_key_id: None,
     };
     let canon = PythonJsonDumpsCanonicalizer
         .canonicalize_value(&canonical_payload_value(&trace))
         .unwrap();
-    trace.signature = BASE64.encode(agent_sk.sign(&canon).to_bytes());
+    // Hard cut (CIRISPersist v7.2.0 #225): VerifyMode::Full rejects classical-only
+    // per-trace sigs. Sign FULL HYBRID — Ed25519 over `canon`, ML-DSA-65 over
+    // `canon ‖ ed25519_sig` (the bound input; ciris-crypto HybridSigner contract).
+    // The ML-DSA pubkey rides the trace envelope (the verifier reads it there, not
+    // from the KeyRecord). Sync ciris_crypto signer → no async in the setup closure.
+    use ciris_crypto::{MlDsa65Signer, PqcSigner as _};
+    let ed_sig = agent_sk.sign(&canon).to_bytes();
+    let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
+    bound.extend_from_slice(&canon);
+    bound.extend_from_slice(&ed_sig);
+    let mldsa = MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    trace.signature = BASE64.encode(ed_sig);
+    trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
+    trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
+    trace.pqc_key_id = Some("bench-mldsa".into());
     serde_json::json!({
         "events": [{ "event_type": "complete_trace", "trace_level": "generic",
                      "trace": serde_json::to_value(&trace).unwrap() }],

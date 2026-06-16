@@ -102,8 +102,8 @@ classes (RNS transport identity + Ed25519 federation seed) are TPM/SE/StrongBox
 sealed with a software-encrypted fallback. Below the lens-store disk minimum the
 node degrades to a Reticulum relay node.
 
-Substrate floor: **persist v7.0.0 / edge v3.6.0 / verify-family v5.6.0**
-(CEG 1.0-RC6). `ciris-lens-core` is **absorbed in-tree** — the standalone
+Substrate floor: **persist v7.2.0 / edge v3.7.1 / verify-family v5.7.0**
+(CEG 1.0-RC7). `ciris-lens-core` is **absorbed in-tree** — the standalone
 CIRISLensCore library and the CIRISLens deployment (Grafana/TimescaleDB/Python
 ingest) retire. Cohabitation + CEG-profile conformance is gated by
 [CIRISConformance](https://github.com/CIRISAI/CIRISConformance) against the

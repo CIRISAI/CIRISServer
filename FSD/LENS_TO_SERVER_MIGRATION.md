@@ -44,7 +44,7 @@ the shared substrate, queryable from any node.
 
 - **`ciris-server` is published on PyPI** (0.1.x, abi3 / CPython 3.10+: manylinux
   x86_64 + aarch64, macOS, Windows). Substrate floor baked into the wheel:
-  **persist v7.0.0 / edge v3.6.0 / verify-family v5.6.0** (CEG 1.0-RC6).
+  **persist v7.2.0 / edge v3.7.1 / verify-family v5.7.0** (CEG 1.0-RC7).
   - **`pip install ciris-server` needs NO build deps** — the manylinux wheel
     bundles libtss2 + libcrypto (auditwheel). This is the recommended path.
   - **Building from source** (the `ciris-server` binary, or an unsupported

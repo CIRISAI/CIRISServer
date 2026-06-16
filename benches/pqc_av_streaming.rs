@@ -22,13 +22,18 @@
 //!
 //! 1. `av_frame_e2e`     — full per-frame round-trip (seal → wire codec → open)
 //!                          across realistic A/V frame sizes. The hot loop.
-//! 2. `av_frame_halves`  — seal-only vs open-only at one size (sender/receiver split).
+//! 2. `av_frame_halves`  — seal-only (sender) vs open-only (receiver) PER size, so
+//!                          mesh cost is charged honestly (receivers pay open only).
 //! 3. `pqc_kex`          — hybrid vs classical KEX initiate+respond (per-link, amortized).
 //! 4. `av_mesh_fanout`   — per-frame SENDER cost for a room of N, two ways:
-//!                          `naive` (current API: N× full seal) vs `shared_inner`
-//!                          (1× inner-seal reused across the mesh + N× outer-seal).
-//!                          Quantifies the optimization headroom for large rooms.
-//! 5. `av_fanout_plan`   — the entitled∧reachable fan-out planner over N peers.
+//!                          `naive` (N× full `seal_av_chunk`) vs `shared_inner`
+//!                          (v3.7.0's `seal_av_inner` once + `seal_av_outer` per
+//!                          Link). Quantifies the realized fan-out win for big rooms.
+//! 5. `av_rekey`         — membership-change rekey cost (CIRISEdge#129): the hybrid
+//!                          -KEM DEK rewrap per join/leave, `flat_rewrap` O(N)
+//!                          (unicast baseline) vs `tree_rewrap` O(log N) (the #66
+//!                          TreeKEM optimization). Projected — not yet implemented.
+//! 6. `av_fanout_plan`   — the entitled∧reachable fan-out planner over N peers.
 //!
 //! Derived metrics (fps ceiling, max mesh size at 30 fps) are computed from these
 //! in the run report, not here.
@@ -36,14 +41,14 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use ciris_crypto::{aes_gcm, ml_kem, x25519};
+use ciris_crypto::{ml_kem, x25519};
 use ciris_edge::reachability::{AttemptOutcome, ReachabilityTracker};
 use ciris_edge::transport::federation_session::{
     FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys,
 };
 use ciris_edge::transport::realtime_av::{
-    derive_inner_nonce, derive_outer_nonce, open_av_chunk, seal_av_chunk, ChunkSeq, Epoch,
-    EpochDek, MeshParticipant, RealtimeFanout, StreamId, REALTIME_MIN_RATIO,
+    open_av_chunk, seal_av_chunk, seal_av_inner, seal_av_outer, ChunkSeq, Epoch, EpochDek,
+    MeshParticipant, RealtimeFanout, StreamId, REALTIME_MIN_RATIO,
 };
 use ciris_edge::transport::TransportId;
 
@@ -101,53 +106,59 @@ fn bench_frame_e2e(c: &mut Criterion) {
     g.finish();
 }
 
-// ── 2. Sender vs receiver split at a representative size ──────────────────────
+// ── 2. Sender vs receiver split, PER frame size ───────────────────────────────
+// The sender pays `seal`; the receiver pays only `open` (it does NOT re-seal what
+// it receives). Per-size halves let the report do HONEST mesh accounting — a
+// 50-room receiver opens 49 inbound streams (open-only), it never charges them the
+// seal half. Both halves across the full size sweep so the report can weight by a
+// stated GOP instead of cherry-picking one frame.
 fn bench_frame_halves(c: &mut Criterion) {
-    const SIZE: usize = 64 * 1024;
-    let frame = vec![0xABu8; SIZE];
-    let dek = dek();
-
     let mut g = c.benchmark_group("av_frame_halves");
-    g.throughput(Throughput::Bytes(SIZE as u64));
+    for &size in FRAME_SIZES {
+        let frame = vec![0xABu8; size];
+        let dek = dek();
+        g.throughput(Throughput::Bytes(size as u64));
 
-    g.bench_function("seal_64KiB", |b| {
-        let mut seq = 0u64;
-        b.iter(|| {
-            seq += 1;
-            black_box(
-                seal_av_chunk(
-                    black_box(&frame),
-                    &TRANSIT_KEY,
-                    LINK_ID,
-                    seq,
-                    &dek,
-                    stream(),
-                    Epoch(1),
-                    ChunkSeq(seq),
+        g.bench_with_input(BenchmarkId::new("seal", size), &frame, |b, frame| {
+            let mut seq = 0u64;
+            b.iter(|| {
+                seq += 1;
+                black_box(
+                    seal_av_chunk(
+                        black_box(frame),
+                        &TRANSIT_KEY,
+                        LINK_ID,
+                        seq,
+                        &dek,
+                        stream(),
+                        Epoch(1),
+                        ChunkSeq(seq),
+                    )
+                    .expect("seal"),
                 )
-                .expect("seal"),
-            )
+            });
         });
-    });
 
-    // Pre-seal a chunk so open() is measured in isolation.
-    let pre = seal_av_chunk(
-        &frame,
-        &TRANSIT_KEY,
-        LINK_ID,
-        7,
-        &dek,
-        stream(),
-        Epoch(1),
-        ChunkSeq(7),
-    )
-    .expect("pre-seal");
-    g.bench_function("open_64KiB", |b| {
-        b.iter(|| {
-            black_box(open_av_chunk(black_box(&pre), &TRANSIT_KEY, LINK_ID, 7, &dek).expect("open"))
+        // Pre-seal so open() is measured in isolation (the receiver's true cost).
+        let pre = seal_av_chunk(
+            &frame,
+            &TRANSIT_KEY,
+            LINK_ID,
+            7,
+            &dek,
+            stream(),
+            Epoch(1),
+            ChunkSeq(7),
+        )
+        .expect("pre-seal");
+        g.bench_with_input(BenchmarkId::new("open", size), &pre, |b, pre| {
+            b.iter(|| {
+                black_box(
+                    open_av_chunk(black_box(pre), &TRANSIT_KEY, LINK_ID, 7, &dek).expect("open"),
+                )
+            });
         });
-    });
-
+    }
     g.finish();
 }
 
@@ -265,18 +276,80 @@ fn bench_mesh_fanout(c: &mut Criterion) {
         });
 
         // Optimization: inner-seal once (shared E2E ciphertext), outer-seal per Link.
-        // Mirrors seal_av_chunk's internals (same nonces, same AEAD).
+        // v3.7.0 shipped this exact split as public API (CIRISEdge#122):
+        // `seal_av_inner` once + `seal_av_outer` per Link — wire bytes byte-identical
+        // to N×`seal_av_chunk`. (Was hand-rolled against v3.5.0 before the split existed.)
         g.bench_with_input(BenchmarkId::new("shared_inner", n), &n, |b, _| {
             let mut seq = 0u64;
             b.iter(|| {
                 seq += 1;
-                let inner_nonce = derive_inner_nonce(stream(), Epoch(1), ChunkSeq(seq));
-                let inner = aes_gcm::encrypt(dek.as_bytes(), &inner_nonce, black_box(&frame))
-                    .expect("inner seal");
+                let inner =
+                    seal_av_inner(black_box(&frame), &dek, stream(), Epoch(1), ChunkSeq(seq))
+                        .expect("inner seal");
                 for link in &links {
-                    let outer_nonce = derive_outer_nonce(link, seq);
+                    black_box(seal_av_outer(&inner, &TRANSIT_KEY, link, seq).expect("outer seal"));
+                }
+            });
+        });
+    }
+    g.finish();
+}
+
+// ── 6. Membership-change rekey cost (CIRISEdge#129) ───────────────────────────
+//
+// On a join/leave the stream owner advances the epoch and rewraps the fresh inner
+// DEK to the member-set via a hybrid-KEM `key_grant` wrap (X25519 + ML-KEM-768) —
+// the SAME encapsulation `pqc_kex/hybrid_initiate` measures. v3.7.0 does NOT
+// implement this yet (`EpochDek` has no ratchet primitive; epoch rotation + DEK
+// distribution are owned out-of-module), so this PROJECTS the intended cost from
+// the real primitive — "unmeasured because unimplemented", now bounded:
+//   - `flat_rewrap` (the #129 unicast-mesh baseline): O(N) wraps per delta — the
+//      owner pays one hybrid-KEM encapsulation per remaining member.
+//   - `tree_rewrap` (the #66 TreeKEM optimization, needs multicast): O(log N)
+//      wraps — only the rekeyed tree path is touched.
+// This is what turns "effectively free" from a STEADY-STATE claim into a CHURN
+// claim: a churny 50-room re-pays flat O(N) on every join/leave until #66 lands.
+// (The outer per-Link transit key is NOT re-KEX'd on churn — KEX is one-shot per
+// session — so churn cost is the inner-DEK rewrap only, which is what this models.)
+fn bench_av_rekey(c: &mut Criterion) {
+    // A member's content-KEM hybrid pubkey (the rewrap target).
+    let (_x_priv, x_pub) = x25519::generate_ephemeral_keypair().expect("x25519");
+    let (_mlkem_priv, mlkem_pub) = ml_kem::generate_keypair().expect("ml-kem");
+    let peer = PeerKexPubkeys {
+        x25519_pub: x_pub,
+        mlkem768_pub: Some(mlkem_pub),
+    };
+
+    // ceil(log2(n)) = bit_length(n-1) for n >= 1 — the rekeyed tree-path length.
+    let tree_path = |n: usize| -> usize {
+        if n <= 1 {
+            0
+        } else {
+            (usize::BITS - (n - 1).leading_zeros()) as usize
+        }
+    };
+
+    let mut g = c.benchmark_group("av_rekey");
+    for &n in &[2usize, 8, 50] {
+        // Flat O(N): one hybrid-KEM wrap per member — the unicast-mesh #129 cost.
+        g.bench_with_input(BenchmarkId::new("flat_rewrap", n), &n, |b, &n| {
+            b.iter(|| {
+                for _ in 0..n {
                     black_box(
-                        aes_gcm::encrypt(&TRANSIT_KEY, &outer_nonce, &inner).expect("outer seal"),
+                        FederationSession::initiate(black_box(&peer), KexAlgorithm::Hybrid)
+                            .expect("rewrap"),
+                    );
+                }
+            });
+        });
+        // Tree O(log N): only the rekeyed path is rewrapped — the #66 optimization.
+        let path = tree_path(n);
+        g.bench_with_input(BenchmarkId::new("tree_rewrap", n), &path, |b, &path| {
+            b.iter(|| {
+                for _ in 0..path {
+                    black_box(
+                        FederationSession::initiate(black_box(&peer), KexAlgorithm::Hybrid)
+                            .expect("rewrap"),
                     );
                 }
             });
@@ -329,6 +402,7 @@ criterion_group!(
     bench_frame_halves,
     bench_pqc_kex,
     bench_mesh_fanout,
+    bench_av_rekey,
     bench_fanout_plan
 );
 criterion_main!(benches);

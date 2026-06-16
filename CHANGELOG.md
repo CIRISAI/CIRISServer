@@ -4,6 +4,61 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.3] — 2026-06-16
+
+Hybrid **hard cut, complete end-to-end** (no classical-only path at any tier),
+substrate floor → the v3.7.1 / v7.2.0 / v5.7.0 family, CEG **1.0-RC7**, and a
+CEWP-honest benchmark page.
+
+### Changed
+- **Hard cut to hybrid signing — now end-to-end (CIRISVerify#75 — "no classical-
+  only, HNDL demands it").** Three tiers, all hybrid (sealed Ed25519 + ML-DSA-65):
+  1. **Federation wire** sigs — edge `LocalSigner` (already hybrid).
+  2. **Storage-tier scrub** sig — the Engine is built with
+     `Engine::with_hardware_signer_hybrid` (CIRISPersist#224); the Ed25519 half
+     stays hardware-sealed (never unsealed), the ML-DSA-65 half is the software PQC
+     signer. Applies to the node Engine **and** the legacy-import Engine.
+  3. **Per-trace envelope** sig — closed by **persist v7.2.0** (CIRISPersist#225,
+     migration `V083`): `trace_events` carries the ML-DSA-65 half and
+     `VerifyMode::Full` **rejects classical-only per-trace sigs**. CIRISServer's
+     replication path inherits the rejection; the legacy-import path stays exempt
+     (`TrustPreVerified`, provenance-only Ed25519).
+  Rationale is forge-later, not decrypt-later: the trace corpus is durable,
+  content-addressed, kept-for-posterity evidence, so its signatures must outlive
+  the classical primitive.
+- **`GET /v1/identity` now serves all six keys.** With the hybrid hardware Engine,
+  the aggregate is sourced directly from persist's `local_identity_aggregate`
+  (CIRISPersist#223) — the ML-DSA-65 signing half **and** the persist-minted
+  content-KEM pair (`content_x25519` / `content_ml_kem_768`) are populated; they
+  are no longer `null`. Removes the hand-assembled aggregate.
+- **Substrate floor → persist v7.2.0 / edge v3.7.1 / verify-family v5.7.0**
+  (edge v3.7.1's hard-cut co-bump: verify v5.7.0 = hybrid-required at federation
+  tier, closes CIRISVerify#75/#76/#77; persist v7.2.0 = trace-tier hybrid, #225);
+  **CEG 1.0-RC7**. lens-core co-bumped in lockstep.
+
+### Added
+- **Benchmark upgrade — the CEWP crux ("stream and store at massive scale").**
+  - `av_mesh_fanout/shared_inner` now drives v3.7.0's real `seal_av_inner` /
+    `seal_av_outer` (CIRISEdge#122), not a hand-rolled mirror — measured fan-out
+    win 1.36×/1.85×/**2.07×** at N=2/8/50.
+  - **`av_rekey`** (new): the membership-change rekey cost, **projected** from the
+    real hybrid-KEM wrap — `flat_rewrap` O(N) vs `tree_rewrap` O(log N). A 50-room
+    delta is ~3.4 ms flat → ~0.41 ms with the tree (8.3×). Labelled projected: the
+    substrate doesn't rekey on join/leave yet (**CIRISEdge#129**), so "effectively
+    free" holds at steady state, not yet under churn.
+  - **Honest accounting:** `av_frame_halves` now measures seal (send) vs open
+    (recv) **per size**; the report charges receivers open-only and states its GOP
+    model inline instead of cherry-picking a frame. A 50-person 30 fps room is
+    ~0.5% of a core to receive (stated 720p/GOP-30 model), range ~0.17–0.45%.
+  - **Replication is now hybrid (the hard cut at the store path).** The bench
+    signs full-hybrid traces (the only kind v7.2.0 accepts); measured ingest is
+    **~230 µs/trace (~4,300 traces/s/core)** — the ML-DSA-65 verify adds ~150 µs
+    over the old Ed25519-only ~76 µs. That is the **measured HNDL price** at the
+    store path. Re-delivery still pays full verify (replay is verify-bound by
+    design — verify-before-mutation; dedup-first would be an AV-9 oracle), so the
+    levers are the pre-verified relay path + **batch verification** (now materially
+    more valuable; tracked in CIRISPersist#225's scale note), not reordering.
+
 ## [0.2.2] — 2026-06-15
 
 ### Added

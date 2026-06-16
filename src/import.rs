@@ -26,7 +26,7 @@ use ciris_persist::scrub::NullScrubber;
 use flate2::read::GzDecoder;
 use serde_json::{json, Map, Value};
 
-use crate::compose::federation_signer;
+use crate::compose::{federation_pqc_signer, federation_signer};
 use crate::config::ServerConfig;
 
 /// (flat column, component_type, event_type, timestamp column) — the mapping.
@@ -65,9 +65,17 @@ pub async fn run(dump_dir: &str) -> Result<()> {
     let cfg = ServerConfig::from_env()?;
     cfg.ensure_dirs()?;
     let signer: Arc<dyn ciris_keyring::HardwareSigner> = Arc::from(federation_signer(&cfg)?);
-    let engine = Engine::with_hardware_signer(signer, &cfg.dsn())
-        .await
-        .context("open persist Engine for import")?;
+    // Hard cut to hybrid (CIRISVerify#75): even the legacy-import Engine signs its
+    // storage-tier scrub envelopes as a FULL HYBRID (sealed Ed25519 + ML-DSA-65).
+    // The imported traces' OWN 1.9.x Ed25519 signatures ride along as provenance
+    // only — pre-verified, exempt from the hybrid-required ingest gate
+    // (CIRISPersist#225 legacy carve-out).
+    let pqc = federation_pqc_signer(&cfg)?;
+    let pqc_key_id = format!("{}-pqc", cfg.key_id);
+    let engine =
+        Engine::with_hardware_signer_hybrid(signer, Some(pqc), Some(pqc_key_id), &cfg.dsn())
+            .await
+            .context("open persist Engine for import (hybrid hardware signer)")?;
 
     let path = Path::new(dump_dir).join("accord_traces.jsonl.gz");
     let path = if path.exists() {
