@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.2.5"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
+version = "0.2.6"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -54,12 +54,12 @@ extension-module = ["python", "pyo3/extension-module"]
 # libraries over ONE shared persist Engine (registry + lens read/write the same
 # corpus in-process; per-slice views via Engine::from_shared).
 #
-# Substrate floor (SHIPPED): persist v8.1.0 / edge v4.1.0 / verify-family v5.8.0
-# (ciris-keyring + ciris-crypto + ciris-verify-core), CEG 1.0-RC11. The composition
+# Substrate floor (SHIPPED): persist v8.2.0 / edge v4.2.0 / verify-family v5.9.0
+# (ciris-keyring + ciris-crypto + ciris-verify-core), CEG 1.0-RC12. The composition
 # root pins the singleton construction; the in-tree ciris-lens-core co-bumps in
-# lockstep (MAJOR caret pins persist "8" / edge "4"). persist v8 adds the fountain
-# content primitive; edge v4 adds the holonomic substrate (CEG §19) + realtime-A/V
-# scale — both additive, no composition-root API change. pyo3 0.29; MSRV 1.86.
+# lockstep (MAJOR caret pins persist "8" / edge "4"). edge v4.2.0 ships the relay
+# outer-open primitive (`open_av_outer`, CIRISEdge#149) → multi-tier ALM chains
+# (benches/alm_chain.rs). All additive; no composition-root API change. pyo3 0.29.
 # ----------------------------------------------------------------------------
 [dependencies]
 # The composed cores (authority + observation; node folds in at Server 1.0).
@@ -76,16 +76,16 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # sqlite on all platforms; postgres is Linux-only (libpq/openssl don't link
 # cleanly on the macOS/Windows runners — same posture as persist's own CI). The
 # `[target.linux]` table below adds postgres.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.1.0", features = ["sqlite"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.1.0", features = ["transport-reticulum", "transport-http"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.2.0", features = ["sqlite"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.2.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.8.0" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0" }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
 # `tpm` feature; runtime auto-detects hardware and falls back to software.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.8.0", version = "5", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["software", "pqc-ml-dsa"] }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
@@ -112,13 +112,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.1.0", features = ["postgres"] }
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.8.0", version = "5", features = ["tpm"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.2.0", features = ["postgres"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["tpm"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
 # Keystore/StrongBox); sqlite bundles, no postgres/tpm. Mirrors persist/edge.
 [target.'cfg(target_os = "android")'.dependencies]
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.8.0", version = "5", features = ["android"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["android"] }
 
 # Test-only — the two-node replication integration test (tests/replication.rs)
 # builds + signs CEG batches with the same primitives persist verifies against.
@@ -133,7 +133,7 @@ criterion     = { version = "0.5", features = ["async_tokio"] }
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
-ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.8.0", version = "5", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa"] }
+ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
@@ -143,6 +143,12 @@ harness = false
 # Replication / corpus-ingest throughput (the CEG-RC5 receive spine).
 [[bench]]
 name = "replication_ingest"
+harness = false
+
+# Multi-tier ALM relay chain (CIRISEdge#149 open_av_outer) — per-hop + per-depth
+# cost; the E2E byte-survival invariant is gated in tests/alm_chain.rs.
+[[bench]]
+name = "alm_chain"
 harness = false
 
 [profile.release]

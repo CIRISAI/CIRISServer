@@ -4,6 +4,28 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.6] — 2026-06-16
+
+Substrate floor → **v4.2.0 family** + the **multi-tier ALM relay chain** test
+(CIRISEdge#149 shipped).
+
+### Changed
+- **Floor → persist v8.2.0 / edge v4.2.0 / verify-family v5.9.0** (CEG 1.0-RC12),
+  root + in-tree lens-core. Additive minor bumps; no composition-root change.
+
+### Added
+- **`benches/alm_chain.rs` + `tests/alm_chain.rs`** — the multi-tier ALM relay
+  chain, now buildable because edge v4.2.0 ships the relay outer-open primitive
+  `open_av_outer` (CIRISEdge#149). Each interior hop opens the inbound per-link
+  outer AEAD and re-seals downstream **without touching the epoch DEK**, so the
+  inner E2E ciphertext survives arbitrary relay→relay hops.
+  - **Correctness (gated)**: `inner_e2e_survives_relay_chain` — viewer recovers the
+    publisher's plaintext byte-identical after 1–5 relay hops; `wrong_outer_key_at_a_hop_fails_closed`.
+  - **Cost (measured)**: ~**437 ns per relay hop** (blob) / 3.18 µs (full 720p);
+    end-to-end through 4 tiers ~2.7 µs (≈0.44 µs/added tier). So 2,000 blob streams
+    × 4 tiers @30 fps ≈ ~10% of one core of relay forwarding — confirming the limit
+    is donated bandwidth, not CPU (FSD §3–§4).
+
 ## [0.2.5] — 2026-06-16
 
 First cut of the **holonomic federation scoreboard** (CIRISServer#12/#13) — the
