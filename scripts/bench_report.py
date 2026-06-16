@@ -185,11 +185,92 @@ def H(s) -> str:
     return html.escape(str(s))
 
 
-def render(model: dict, est: dict, commit: str, date: str) -> str:
+def render_references(model: dict) -> str:
+    """Per-layer comparison to the recognized reference for each subsystem — the
+    honest replacement for cross-tier 'SOTA' toy numbers. No single PQC-streaming
+    suite exists; each layer is held next to its field reference."""
+    kex = model.get("kex", {})
+    rep = model.get("replication", {})
+    v = model.get("video_frames", [])
+    rekey = {r["n"]: r for r in model.get("rekey", [])}
+    peak = max((f["gib_s"] for f in v), default=None)
+    open16 = next((f.get("open_us") for f in v if f["bytes"] == 16384), None)
+    r50 = rekey.get(50, {})
+    rows = [
+        ("PQ KEM primitive (X25519+ML-KEM-768)",
+         f"hybrid KEX {kex.get('hybrid_full_us', '—')} µs (init {kex.get('hybrid_initiate_us', '—')} µs)",
+         "liboqs ML-KEM-768: encap ~95 µs / decap ~118 µs",
+         "https://openquantumsafe.org/benchmarking/"),
+        ("PQ handshake tax (vs classical)",
+         f"+{kex.get('mlkem_tax_us', '—')} µs once per peer-link",
+         "PQ-TLS (Cloudflare/AWS): ~80–150 µs ML-KEM compute overhead",
+         "https://aws.amazon.com/blogs/security/ml-kem-post-quantum-tls-now-supported-in-aws-kms-acm-and-secrets-manager/"),
+        ("E2E media AEAD",
+         (f"two-layer AES-256-GCM, up to {peak} GiB/s (open {open16} µs/16 KiB)" if peak else "—"),
+         "SFrame (RFC 9605): AES-GCM E2E media, SFU-forwardable",
+         "https://www.rfc-editor.org/rfc/rfc9605"),
+        ("Group rekey on membership change",
+         f"flat O(N) {r50.get('flat_ms', '—')} ms vs tree O(log N) {r50.get('tree_ms', '—')} ms @ N=50",
+         "OpenMLS / PQ-MLS combiner: update sub-linear O(log n)",
+         "https://eprint.iacr.org/2026/034.pdf"),
+        ("Store-path signature verify",
+         f"hybrid trace ingest {rep.get('ingest_new_us', '—')} µs (~{format(rep.get('traces_per_sec', 0), ',')}/s/core)",
+         "liboqs ML-DSA-65 verify ~0.40 ms",
+         "https://openquantumsafe.org/benchmarking/"),
+    ]
+    body = "\n".join(
+        f"<tr><td>{H(layer)}</td><td>{H(ours)}</td><td>{H(ref)}</td><td><a href='{H(url)}'>src</a></td></tr>"
+        for layer, ours, ref, url in rows)
+    return f"""<h2>Benchmarked against the field — per layer</h2>
+<p>There is no single "PQC streaming platform" suite to compare against, so each layer is held
+next to its recognized reference. Absolute µs are host-relative; the ratios and the parity claim travel.</p>
+<table><tr><th>layer</th><th>CIRISServer (this run)</th><th>reference</th><th></th></tr>
+{body}</table>"""
+
+
+def render_scoreboard(sb: dict | None) -> str:
+    """Render the holonomic federation scoreboard (from `ciris-server scoreboard`)."""
+    if not sb:
+        return ""
+    st = sb.get("storage", {})
+    pol = sb.get("policy", {})
+    ro = st.get("replication_overhead", {})
+    curve = "\n".join(
+        f"<tr><td>{p['q']}</td><td>{H(p['label'])}</td><td>{p['p_reconstruct'] * 100:.3f}%</td></tr>"
+        for p in st.get("survival_curve", []))
+    tiers = "\n".join(
+        f"<tr><td>{H(t['tier'])}</td><td>{t['holders']}</td><td>{t['overhead_multiplier']}×</td></tr>"
+        for t in st.get("degradation_tiers", []))
+
+    def gated(name: str, g: dict) -> str:
+        return (f"<li><b>{H(name)}</b> — <code>gated</code> on {H(g.get('gated_on', ''))}: "
+                f"{H(', '.join(g.get('metrics', [])))}</li>")
+
+    return f"""<h2>Holonomic federation scoreboard <span class="note">(CIRISServer#12/#13)</span></h2>
+<p>Measured-vs-modeled capacity &amp; survival for the fountain-replicated corpus. Policy
+<code>N={pol.get('n')} K={pol.get('k')} H={pol.get('h')}</code>. The survival curve is
+<b>computed</b> (<code>P(Binomial(H,q) ≥ N)</code>) — it reproduces the scale_model v0.7 targets,
+which is what makes "measured vs modeled" trustworthy.</p>
+<table><tr><th>metric</th><th>modeled</th><th>alarm</th></tr>
+<tr><td>replication overhead (H/N)</td><td>{ro.get('modeled', '—')}×</td><td>&gt;{ro.get('alarm_high', '—')}× / &lt;{ro.get('alarm_low', '—')}×</td></tr>
+<tr><td>per-peer load (1/N)</td><td>{st.get('per_peer_load_frac', '—')}</td><td>&gt;0.10</td></tr>
+<tr><td>active-eject threshold</td><td>{st.get('eject_threshold_holders', '—')} holders</td><td>H×1.15</td></tr>
+<tr><td>survival floor / target @ q={st.get('design_q', '—')}</td><td>{st.get('survival_floor', '—')} / {st.get('survival_target', '—')}</td><td>&lt; floor</td></tr></table>
+<p class="note"><b>Survival curve</b> — P(reconstruct) by per-peer availability q:</p>
+<table><tr><th>q</th><th>regime</th><th>P(reconstruct)</th></tr>{curve}</table>
+<p class="note"><b>Holographic degradation tiers</b> — capacity grows under pressure (sheds toward min_viable=5):</p>
+<table><tr><th>tier</th><th>holders</th><th>overhead</th></tr>{tiers}</table>
+<p class="note">Tiers not yet grounded — emitted as explicit stubs (the deliberate anti-toy-numbers posture), not fabricated:</p>
+<ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
+
+
+def render(model: dict, est: dict, commit: str, date: str, scoreboard: dict | None = None) -> str:
     v = model["video_frames"]
     kex = model["kex"]
     rep = model["replication"]
     mesh = model["mesh"]
+    refs_html = render_references(model)
+    scoreboard_html = render_scoreboard(scoreboard)
 
     def rows(cells_list):
         return "\n".join("<tr>" + "".join(f"<td>{H(c)}</td>" for c in r) + "</tr>" for r in cells_list)
@@ -297,6 +378,10 @@ is attacker-controllable). The scale levers are the pre-verified relay path
 (<code>VerifyMode::TrustPreVerified</code> gated on an Edge <code>verify_outcome</code>) and batch
 verification (CIRISPersist#225) — not dedup-first.</p>
 
+{refs_html}
+
+{scoreboard_html}
+
 <h2>Assumptions</h2>
 <ul>{''.join(f'<li>{H(x)}</li>' for x in model['assumptions'].values())}</ul>
 
@@ -315,21 +400,34 @@ def main() -> int:
     ap.add_argument("--out", default="bench-site")
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "local"))
     ap.add_argument("--date", default=os.environ.get("BENCH_DATE", ""))
+    ap.add_argument("--scoreboard", default=None,
+                    help="path to `ciris-server scoreboard` JSON (holonomic federation scoreboard)")
     args = ap.parse_args()
 
     est = load_estimates(args.criterion_dir)
     if not est:
         print(f"no estimates under {args.criterion_dir} — run the benches first", file=sys.stderr)
         return 1
+    scoreboard = None
+    if args.scoreboard and os.path.exists(args.scoreboard):
+        try:
+            with open(args.scoreboard) as fh:
+                scoreboard = json.load(fh)
+        except Exception as e:
+            print(f"warning: could not read scoreboard {args.scoreboard}: {e}", file=sys.stderr)
     model = build_model(est)
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "data.json"), "w") as fh:
         json.dump({"schema": "ciris-server/bench/2", "commit": args.commit,
-                   "date": args.date, "model": model,
+                   "date": args.date, "model": model, "scoreboard": scoreboard,
                    "raw_means_us": {k: round(v / 1000, 4) for k, v in est.items()}}, fh, indent=2)
+    if scoreboard is not None:
+        with open(os.path.join(args.out, "scoreboard.json"), "w") as fh:
+            json.dump(scoreboard, fh, indent=2)
     with open(os.path.join(args.out, "index.html"), "w") as fh:
-        fh.write(render(model, est, args.commit, args.date))
-    print(f"wrote {args.out}/index.html ({len(est)} benches) + data.json")
+        fh.write(render(model, est, args.commit, args.date, scoreboard))
+    print(f"wrote {args.out}/index.html ({len(est)} benches"
+          f"{', + scoreboard' if scoreboard else ''}) + data.json")
     return 0
 
 

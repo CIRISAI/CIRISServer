@@ -53,10 +53,13 @@ jobs:
           python-version: "3.12"
       - name: Run benches (criterion)
         run: cargo bench --bench pqc_av_streaming --bench replication_ingest
+      - name: Generate holonomic scoreboard (CIRISServer#12/#13)
+        run: cargo run --release --quiet -- scoreboard > scoreboard.json
       - name: Generate interpreted page
         run: |
           BENCH_DATE="$(date -u +%Y-%m-%d)" \
-            python3 scripts/bench_report.py --out bench-site --commit "$GITHUB_SHA"
+            python3 scripts/bench_report.py --out bench-site --commit "$GITHUB_SHA" \
+              --scoreboard scoreboard.json
       - uses: actions/configure-pages@v5
         with:
           enablement: true
