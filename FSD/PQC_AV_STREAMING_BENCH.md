@@ -1,133 +1,120 @@
-# PQC realtime A/V streaming — E2E benchmark results
+# Realtime A/V + holonomic federation — methodology & capacity model
 
-> The cost a CIRIS fabric node pays to carry **group video/voice** over the edge
-> realtime-A/V mesh profile (CIRISEdge#62, CEG §10.5.8) under its **two-layer
-> hybrid-PQC crypto** — the "stream" axis of the CEWP crux use case (*stream and
-> store at massive scale*). Bench: [`benches/pqc_av_streaming.rs`](../benches/pqc_av_streaming.rs)
-> (`cargo bench --bench pqc_av_streaming`); the live, auto-generated page is at
-> <https://cirisai.github.io/CIRISServer/>. Numbers below: release build, single
-> host, criterion 0.5, on the shipped triple (**persist v8.1.0 / edge v4.1.0 /
-> verify v5.8.0**, CEG 1.0-RC11). **Absolute µs are host-relative; the ratios and
-> the conclusion are not.**
+> Methodology behind the capability page (<https://cirisai.github.io/CIRISServer/>).
+> Three provenance classes, badged on the page and here:
+> **MEASURED** (criterion microbench, this repo) · **MODEL** (bandwidth arithmetic
+> over the scaling toys) · **FRONTIER** (wire/substrate ships; production piece does not yet).
+> Substrate floor: persist v8.1.0 / edge v4.1.x / verify v5.8.0, CEG 1.0-RC12.
+> Scaling sources: CIRISEdge `FEDERATION_SCALING_MODEL.md` + CIRISNodeCore
+> `examples/scale_model.rs` (scale_model v0.7 fountain).
 
-## The path under test
+## 1. MEASURED — the crypto path (`benches/pqc_av_streaming.rs`, `replication_ingest.rs`)
 
-```text
-wire = OuterAEAD( transit_key, OuterNonce,
-          InnerAEAD( epoch_dek, InnerNonce, frame_plaintext ) )
-```
+Two-layer seal: inner AES-256-GCM under a per-`(stream,epoch)` DEK (end-to-end —
+relays never hold it) ‖ outer AES-256-GCM under a per-Link transit key from a
+hybrid X25519+ML-KEM-768 KEX. Single-core, in-memory, host-relative.
 
-- **Inner** — AES-256-GCM under the per-`(stream,epoch)` DEK. End-to-end: relays /
-  SFUs never see plaintext. The inner nonce is deterministic in
-  `(stream_id, epoch, chunk_seq)`, so the inner ciphertext is **identical across
-  the whole mesh** for a given frame (the basis of the fan-out win, §3).
-- **Outer** — AES-256-GCM under the per-Link transit key. Hop authenticity +
-  replay binding (nonce from `link_id || link_seq`). The transit key is the output
-  of the **hybrid X25519 + ML-KEM-768 KEX** (`federation_session`, CIRISEdge#54),
-  run **one-shot per session** — the post-quantum half.
+- **Per-frame PQC cost is structurally zero** — bulk is AES-256-GCM; the only PQ
+  cost is the KEM, paid **once per peer-link** (~80–90 µs ML-KEM tax, matching
+  PQ-TLS deployments). Frame e2e ≈ 2.2 GiB/s asymptote.
+- **Fan-out** (`seal_av_inner` once + `seal_av_outer` per Link, CIRISEdge#122):
+  ~2× sender-CPU win at N=50.
+- **Membership rekey** PROJECTED from the real hybrid-KEM (CIRISEdge#129 not yet
+  implemented): flat O(N) vs tree O(log N) per join/leave.
+- **Store spine**: hybrid trace ingest (`VerifyMode::Full` verifies both halves,
+  rejects classical-only — CIRISPersist#225); replay is verify-bound by design.
 
-The load-bearing insight: **bulk frames are AES-256-GCM, which is already
-quantum-fine** (Grover only halves a 256-bit key — still 128-bit). So the
-post-quantum cost *can only* live in the KEM, and the design pushes it to setup.
-**Per-frame PQC cost is structurally zero, not just small.**
+**Honesty:** these are AEAD-bound in-memory microbenches. Over the wire,
+deployment is NIC/kernel/Reticulum-bound — crypto is *not* the bottleneck anywhere.
 
-## 1. Per-frame end-to-end (seal → wire codec → open, one link)
+## 2. MODEL — bitrate anchors & room scale
 
-| Frame | size | e2e | seal (send) | open (recv) | throughput |
-|---|---|---|---|---|---|
-| Opus voice (~20 ms @128 kbps) | 320 B | 0.95 µs | 0.52 µs | 0.45 µs | ~330 MiB/s |
-| 720p inter-frame (low motion) | 4 KiB | 2.37 µs | 1.21 µs | 1.12 µs | 1.6 GiB/s |
-| 720p inter-frame (typical) | 16 KiB | 7.05 µs | 3.25 µs | 3.08 µs | 2.1 GiB/s |
-| 1080p inter / 720p keyframe | 64 KiB | 27.3 µs | 12.8 µs | 12.8 µs | 2.2 GiB/s |
-| 1080p keyframe | 256 KiB | 112 µs | 56.7 µs | 49.0 µs | 2.2 GiB/s |
+Anchors (edge `FEDERATION_SCALING_MODEL.md`; NodeCore `scale_model.rs`):
 
-Seal (sender) and open (receiver) are measured **per size** — because honest mesh
-accounting charges a **receiver open-only** (it never re-seals what it receives).
+| stream | bitrate | per-30fps-frame |
+|---|---|---|
+| blinking-dot blob (`{0,0,0}` base layer) | ~50 kbps | ~208 B |
+| 720p30 AV1-SVC (full) | 2.5 Mbps | ~10 KiB |
+| 1080p30 | 4–5 Mbps | |
+| 8K30 (publisher top layer) | ~80 Mbps | |
 
-## 2. The post-quantum half — hybrid vs classical KEX (per-link, one-time)
+Per relay core: **~150 Mbps egress** (kernel-TX-bound) → **~3,000 blob** or **~60
+full-720p** forwards/core. Home uplink ~30 Mbps → flat-mesh cap ≈ **13** at 720p30.
 
-| | initiate | respond | full handshake |
+**Room scale — downlink to render *everyone* as a blob (`N × 50 kbps`):**
+
+| room N | see-all-as-blobs (your downlink) | flat-mesh full-720p uplink/publisher | topology |
 |---|---|---|---|
-| **Hybrid (X25519 + ML-KEM-768)** | 68.1 µs | 93.7 µs | **~162 µs** |
-| Classical (X25519 only) | 39.6 µs | 39.2 µs | ~79 µs |
+| 49 | 2.4 Mbps ✓ | 120 Mbps ✕ | ALM tree |
+| 200 | 10 Mbps ✓ | 498 Mbps ✕ | ALM tree |
+| 500 | 25 Mbps ✓ | 1.25 Gbps ✕ | ALM tree |
+| 1000 | 50 Mbps ✓ | 2.5 Gbps ✕ | ALM tree |
+| **2000** | **100 Mbps ✓** | 5 Gbps ✕ | ALM tree |
 
-ML-KEM-768 adds **~83 µs once per peer-link** at session setup — the *entire*
-post-quantum tax for the stream path. Never paid per frame. (The responder eats
-most of it — decapsulation-side.)
+**"2,000 four-pixel blobs from 2,000 8K streams?"** Yes: subscribe to each
+publisher's base SVC layer (~50 kbps) → 2,000 × 50 kbps ≈ 100 Mbps down (home
+gigabit). The 8K is each publisher's *top* layer, uploaded once and forwarded only
+to whoever zooms in. RaptorQ-per-layer makes each blob reconstruct from any
+sufficient fragment subset (lossy mesh, no jitter-buffer stalls). **The bitrate win
+is SVC/MDC layering; RaptorQ buys loss-resilience + the holographic property.**
 
-## 3. Mesh fan-out per frame (16 KiB, sender CPU for a room of N)
+## 3. MODEL — the ALM relay tree (why large rooms work)
 
-| room N | naive (`seal_av_chunk` ×N) | shared-inner (`seal_av_inner` ×1 + `seal_av_outer` ×N) | speedup |
-|---|---|---|---|
-| 2 | 6.51 µs | 4.79 µs | 1.36× |
-| 8 | 26.0 µs | 14.0 µs | 1.85× |
-| 50 | 163 µs | 78.6 µs | **2.07×** |
+No node fans out to N. Each publisher emits **one** sealed copy into a tree of
+peer-relays, per-node fan-out `f` bounded by measured uplink. Depth =
+`ceil(log_f N)`:
 
-Fan-out planner (`RealtimeFanout::plan`, entitled∧reachable, 50 peers): ~15 µs.
+| fan-out f | tiers for N=2000 | tier sizes (2000 → root) |
+|---|---|---|
+| 12 | **4** | 2000 → 167 → 14 → 2 → root |
+| 13 | **3** | 2000 → 154 → 12 → root |
+| 45 | 2 | 2000 → 45 → root |
 
-The inner (E2E) ciphertext is identical across the mesh, so sealing it **once** and
-applying only the per-Link outer seal per recipient roughly **halves sender CPU at
-room scale**. As of **edge v3.7.0 this is the real shipped API** (`seal_av_inner` /
-`seal_av_outer`, CIRISEdge#122) — wire bytes byte-identical to N×`seal_av_chunk`;
-the bench drives the real functions (it previously hand-rolled the equivalent
-against v3.5.0).
+At blob bitrate even a 30 Mbps home uplink could fan out to ~600; `f` is capped
+(~12–15) for latency/balance, giving the **3–4 tiers** a 2,000-room needs. Capacity
+ads are hybrid-PQC-signed + capped; topology is a deterministic pure function of
+witnessed state (no leader, no node lies its way to the center). CEG RC12 §19.
 
-## 4. Membership-change rekey — the churn path (⚠ projected, not implemented)
+## 4. Scale / chaos CI test — design & math (gated on CIRISEdge#149)
 
-On a join/leave the stream owner advances the epoch and rewraps the fresh inner DEK
-to the member-set via a hybrid-KEM `key_grant` wrap (the same encapsulation §2
-measures). **edge v3.7.1 does not implement this yet** — `EpochDek` has no ratchet
-primitive and epoch rotation / DEK distribution are owned out-of-module
-(**CIRISEdge#129** files the unicast-mesh baseline). These numbers **project** the
-intended cost from the real primitive:
+Goal (CIRISConformance#16): a synthetic in-process federation — **2,000 streams →
+3–4 ALM relay tiers → 5 viewers each viewing all 2,000** — asserting correctness at
+depth and fitting GH CI (4 vCPU, <3 min).
 
-| room N | flat O(N) / delta | tree O(log N) / delta | tree win |
-|---|---|---|---|
-| 2 | 0.135 ms | 0.068 ms | 2.0× |
-| 8 | 0.543 ms | 0.203 ms | 2.7× |
-| 50 | **3.41 ms** | **0.41 ms** | 8.3× |
+**How many streams can one core create (GH CI, in-memory)?** Seal is
+nonce-derivation-dominated:
 
-`flat` = O(N) wraps (the unicast-mesh baseline, #129); `tree` = O(log N) (the
-TreeKEM optimization, needs multicast, CIRISEdge#66). The outer per-Link key is
-**not** re-KEX'd on churn (KEX is one-shot per session) — churn cost is the inner
-DEK rewrap only. A 50-room paying the flat baseline spends ~3.4 ms per membership
-delta — ~10 % of a single 33 ms frame, or ~0.34 % of a core at one join/leave per
-second. Affordable even unoptimized; the tree removes it as a concern.
+| op | per-frame | streams/core @30fps (theory · CI-throttled) |
+|---|---|---|
+| `seal_av_inner` blob (~208 B) | ~1 µs | ~33,000 · ~20,000 |
+| `seal_av_inner` full 720p (~10 KiB) | ~3 µs | ~11,000 · ~7,000 |
+| `open_av_chunk` blob (viewer) | ~1 µs | ~33,000 · ~20,000 |
 
-## 5. What it means
+So **2,000 blob streams is ~6–10% of one core** — the "50 streams/core × 40
+workers" instinct is ~400× conservative. Realistic CI layout: all 2,000 publishers
+on **1–2 cores** (or 500/core × 4); the tree + viewers on the rest.
 
-**Crypto is nowhere near the bottleneck for interactive group video.**
+**CPU budget for the full 2,000 × 4-tier × 5-viewer blob sim @30fps:**
+- publishers: 2000 × 30 × 1 µs ≈ **6% of a core**
+- viewer-facing fan (5 viewers × 2000 streams): 10,000 outer-seals × 30 × ~0.7 µs ≈ **~21% of a core**; interior tiers similar order
+- viewers: 5 × 2000 × 30 × 1 µs ≈ **~30% of a core** (6% each)
+- **Total ≈ 1–2 cores** → fits GH CI's 4 vCPU with headroom, well under 3 min.
 
-- A 50-person mesh at 30 fps costs, on one core, **~0.5 % to receive** (open-only,
-  under a stated 720p / GOP-30 model: 1×64 KiB keyframe + 29×16 KiB inter per
-  second × 49 inbound streams), range ~0.17 % (low-motion 4 KiB) to ~0.45 %
-  (typical 16 KiB). Publishing one stream to the room is ~0.24 %. Headroom is
-  ~10,000+ inbound 30 fps streams/core before the AES path saturates. Bandwidth and
-  the network give out long before the crypto.
-- The PQ-safe handshake is a **sub-200 µs one-time** cost per link.
-- Steady-state, the frame path **is** AES-256-GCM at ~2.2 GiB/s; post-quantum
-  confidentiality is paid entirely at session setup.
+**The point of the test is correctness, not a CPU limit** (in-memory has no
+egress): inner ciphertext **byte-identical** publisher→tier1→…→viewer (E2E
+preserved across N outer hops), tree assembly, and all 2,000 streams decode at all
+5 viewers.
 
-**Net: PQC group video is effectively free — at steady state.** The one cost that
-is *not* yet zero is the **membership-change rekey** (§4): real, affordable, but
-**unimplemented** (CIRISEdge#129). Until it lands, "effectively free" is a
-steady-state claim, not a churn claim — stated plainly so it doesn't over-travel.
+**Blocked on CIRISEdge#149:** a true wire chain needs the relay **outer-open**
+(`SealedAvChunk → InnerSealed`, never touching the `EpochDek`) so a relay can
+forward an *upstream relay's* chunk. Shipped APIs wire only a depth-1 tree
+(`RelayNode::forward` takes an `InnerSealed`). When #149 lands, the chain test is a
+`benches/alm_chain.rs` over the real primitives.
 
-## 6. Methodology notes / honesty
-
-- Benches the **crypto + wire-codec spine** (`seal_av_chunk`/`seal_av_inner`/
-  `seal_av_outer`/`open_av_chunk` / `SealedAvChunk` codec / `FederationSession` KEX
-  / `RealtimeFanout::plan`) — the CPU cost CIRISServer owns. Excludes the RNS Link
-  send/recv network path (bandwidth/RTT-bound; edge's transport benches) and codec
-  encode/decode (the app's job).
-- **Receivers are charged open-only.** A node never re-seals frames it receives, so
-  mesh receive cost uses the per-size `open` half, not the e2e round-trip. (An
-  earlier page charged receivers the full e2e — that inflated the per-room figure;
-  fixed here.)
-- **Blended figures state their model inline.** The GOP/fps assumption is named
-  wherever a single "% of a core" number appears; per-size rows are shown so the
-  range is visible, not one cherry-picked frame.
-- **Rekey is projected, not measured-as-shipped** (§4) — flagged everywhere.
-- Single-threaded, single-host, warm cache. Real deployments fan out across cores;
-  these are per-operation lower bounds, not a system throughput model.
-- Frame sizes are representative codec outputs, not captured from a live encoder.
+## 5. Provenance & honesty
+- **MEASURED**: §1 — in-memory criterion, AEAD-bound; wire is NIC/kernel-bound.
+- **MODEL**: §2–§4 — bandwidth arithmetic over the scaling toys, not a live N-node test.
+- **FRONTIER**: the blob path ships via AV1 SVC base layers; symmetric M>2 MDC video
+  is the design ceiling (NeuralMDC-class codec does not exist yet; M=2 is the
+  production default). Membership rekey is projected (CIRISEdge#129). The multi-tier
+  chain test is gated (CIRISEdge#149).
