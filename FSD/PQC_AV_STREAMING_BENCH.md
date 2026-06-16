@@ -6,8 +6,8 @@
 > store at massive scale*). Bench: [`benches/pqc_av_streaming.rs`](../benches/pqc_av_streaming.rs)
 > (`cargo bench --bench pqc_av_streaming`); the live, auto-generated page is at
 > <https://cirisai.github.io/CIRISServer/>. Numbers below: release build, single
-> host, criterion 0.5, on the shipped triple (**persist v7.2.0 / edge v3.7.1 /
-> verify v5.7.0**, CEG 1.0-RC7). **Absolute µs are host-relative; the ratios and
+> host, criterion 0.5, on the shipped triple (**persist v8.1.0 / edge v4.1.0 /
+> verify v5.8.0**, CEG 1.0-RC11). **Absolute µs are host-relative; the ratios and
 > the conclusion are not.**
 
 ## The path under test

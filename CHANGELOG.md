@@ -4,6 +4,43 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.4] — 2026-06-16
+
+Catch-up to the **v8 / v4 / v5.8 substrate family** and **CEG 1.0-RC11**. Two
+substrate MAJOR bumps (persist 7→8, edge 3→4) adopted with **zero composition-root
+changes** — the breakage surface was a single benchmark.
+
+### Changed
+- **Substrate floor → persist v8.1.0 / edge v4.1.0 / verify-family v5.8.0**
+  (root + in-tree `ciris-lens-core`, MAJOR caret pins co-bumped). The major bumps
+  are additive: persist v8 = the `fountain` content primitive (new module);
+  edge v4 = the `holonomic` substrate (CEG §19) + realtime-A/V scale work — none of
+  it touches the symbols the composition root calls. `compose.rs`, `import.rs`,
+  `lib.rs`, and the replication bench/test needed no edits; `CompleteTrace` and the
+  hybrid ingest gate are unchanged (replication test still green under v8.1.0).
+- **CEG → 1.0-RC11** (doc/vendor-only for the node, as RC6/RC7 were). The frozen
+  §4 "1+4" attestation envelope, signature format, dest-hash, trace schema, and
+  identity aggregate are untouched across RC7→RC11. The one envelope-touching
+  behavior change — RC8's store-path PQC clarification (the durable corpus MUST
+  carry+verify the ML-DSA-65 half) — is already satisfied by 0.2.3's hybrid hard
+  cut. RC9/RC10/RC11 wire additions (`codec_id`/`ChunkLayer`, the full
+  `SealedAvChunk` layout + double-seal nonces, the §19 holonomic shapes) are
+  **edge-owned transport/substrate framing**, additive, reached only through the
+  edge dependency.
+
+### Fixed
+- **`pqc_av_streaming` bench** updated to edge v3.8.0's seal API (CIRISEdge#128):
+  `seal_av_chunk`/`seal_av_inner` take `codec_id` + `ChunkLayer` (pass
+  `CODEC_OPAQUE` + `ChunkLayer::BASE` to keep byte-identical v3.7.0 wire output),
+  and `MeshParticipant::new` defaults the new `layer_policy`. CI now checks
+  `--all-targets` so the (harness=false) bench can't silently break on a co-bump.
+
+### Adoption
+- Closes the persist 7.0/7.1/7.2 adoption issues (#3/#8/#10) — all satisfied by the
+  0.2.3 hybrid hard cut + this floor. persist v8.0's fountain store API (#11) is now
+  available at the floor; wiring the fountain/swarm storage role is tracked as
+  follow-on feature work, not required for the floor.
+
 ## [0.2.3] — 2026-06-16
 
 Hybrid **hard cut, complete end-to-end** (no classical-only path at any tier),

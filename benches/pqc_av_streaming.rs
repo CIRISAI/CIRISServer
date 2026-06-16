@@ -47,8 +47,8 @@ use ciris_edge::transport::federation_session::{
     FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys,
 };
 use ciris_edge::transport::realtime_av::{
-    open_av_chunk, seal_av_chunk, seal_av_inner, seal_av_outer, ChunkSeq, Epoch, EpochDek,
-    MeshParticipant, RealtimeFanout, StreamId, REALTIME_MIN_RATIO,
+    open_av_chunk, seal_av_chunk, seal_av_inner, seal_av_outer, ChunkLayer, ChunkSeq, Epoch,
+    EpochDek, MeshParticipant, RealtimeFanout, StreamId, CODEC_OPAQUE, REALTIME_MIN_RATIO,
 };
 use ciris_edge::transport::TransportId;
 
@@ -91,6 +91,8 @@ fn bench_frame_e2e(c: &mut Criterion) {
                     stream(),
                     Epoch(1),
                     ChunkSeq(seq),
+                    CODEC_OPAQUE,
+                    ChunkLayer::BASE,
                 )
                 .expect("seal");
                 let wire = sealed.to_bytes();
@@ -133,6 +135,8 @@ fn bench_frame_halves(c: &mut Criterion) {
                         stream(),
                         Epoch(1),
                         ChunkSeq(seq),
+                        CODEC_OPAQUE,
+                        ChunkLayer::BASE,
                     )
                     .expect("seal"),
                 )
@@ -149,6 +153,8 @@ fn bench_frame_halves(c: &mut Criterion) {
             stream(),
             Epoch(1),
             ChunkSeq(7),
+            CODEC_OPAQUE,
+            ChunkLayer::BASE,
         )
         .expect("pre-seal");
         g.bench_with_input(BenchmarkId::new("open", size), &pre, |b, pre| {
@@ -268,6 +274,8 @@ fn bench_mesh_fanout(c: &mut Criterion) {
                             stream(),
                             Epoch(1),
                             ChunkSeq(seq),
+                            CODEC_OPAQUE,
+                            ChunkLayer::BASE,
                         )
                         .expect("seal"),
                     );
@@ -283,9 +291,16 @@ fn bench_mesh_fanout(c: &mut Criterion) {
             let mut seq = 0u64;
             b.iter(|| {
                 seq += 1;
-                let inner =
-                    seal_av_inner(black_box(&frame), &dek, stream(), Epoch(1), ChunkSeq(seq))
-                        .expect("inner seal");
+                let inner = seal_av_inner(
+                    black_box(&frame),
+                    &dek,
+                    stream(),
+                    Epoch(1),
+                    ChunkSeq(seq),
+                    CODEC_OPAQUE,
+                    ChunkLayer::BASE,
+                )
+                .expect("inner seal");
                 for link in &links {
                     black_box(seal_av_outer(&inner, &TRANSIT_KEY, link, seq).expect("outer seal"));
                 }
@@ -377,10 +392,9 @@ fn bench_fanout_plan(c: &mut Criterion) {
                 };
                 tracker.record_attempt(&id, transport_id, outcome);
             }
-            MeshParticipant {
-                peer_key_id: id,
-                link_id: format!("link-{i:04}").into_bytes(),
-            }
+            // v3.8.0 (CIRISEdge#128) added `layer_policy`; `::new` defaults it to
+            // UNCAPPED, preserving the pre-#128 fan-out semantics this bench measures.
+            MeshParticipant::new(id, format!("link-{i:04}").into_bytes())
         })
         .collect();
 
