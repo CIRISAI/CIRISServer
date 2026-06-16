@@ -240,18 +240,21 @@ def fmt(n) -> str:
 
 def render_hero(model: dict) -> str:
     cap = model["capacity"]
-    r2000 = next((r for r in cap["rooms"] if r["n"] == 2000), {})
+    dot = next((s for s in cap["blob_sensitivity"] if s["kbps"] == 5), {})
+    dot_down = dot.get("per_viewer_down_mbps", 10.0)
+    dot_agg = dot.get("aggregate_gbps", 20.0)
     peak = max((f["gib_s"] for f in model["video_frames"]), default=None)
     tax = model["kex"].get("mlkem_tax_us", "—")
     return f"""<header class="hero">
   <h1>Encrypted, datacenter-free <b>presence at scale</b>.</h1>
-  <p class="tag">Thousands of people sharing one space — each <i>present</i> as a live blob, with full
+  <p class="tag">Thousands of people sharing one space — each <i>present</i> as a live presence dot, with full
   quality focus-pulled on demand. End-to-end post-quantum. Forwarded by the participants' own uplinks,
   <b>no datacenter</b>. This is a category the centralized incumbents can't enter — not a bigger grid of tiles.</p>
   <div class="cards">
     <div class="card"><div class="big">presence<br>at scale</div>
-      <div class="cl">the blob is a deliberate <b>presence primitive</b>, not degraded video — a 2,000-person
-      space is ~{int(r2000.get('down_all_blobs_mbps',0))} Mbps to <i>your</i> device</div></div>
+      <div class="cl">the dot is a deliberate <b>presence primitive</b>, not degraded video — at a true
+      ~5 kbps presence dot a 2,000-person space is ~{dot_down:g} Mbps to <i>your</i> device, and the room's
+      whole forwarding load (~{dot_agg:g} Gbps) sums from <b>ordinary home uplinks</b> — no datacenter</div></div>
     <div class="card"><div class="big">0</div>
       <div class="cl">datacenters — peers relay for each other; scale by adding people, not servers</div></div>
     <div class="card"><div class="big">100%</div>
@@ -309,10 +312,11 @@ sufficient fragment subset reconstructs — lossy mesh, no jitter-buffer stalls)
 
 def render_sota() -> str:
     rows = [
-        ("Visible video tiles", "capped at 49 (gallery view)",
-         "bounded only by your downlink (≈2,000 on home gigabit)"),
-        ("1,000+ interactive", "falls back to webinar / HLS-DASH (one-way, seconds of latency)",
-         "stays interactive — blobs for all + focus-pull full quality"),
+        ("Ambient presence of a large room", "no such mode — gallery caps at 49 tiles; beyond that you "
+         "see a speaker + a participant count, not the room",
+         "every person present at once as a live ~5 kbps dot — a category SFUs don't have"),
+        ("1,000+ in one space", "falls back to webinar / HLS-DASH (one-way, seconds of latency)",
+         "presence for all + focus-pull full quality on demand (interactivity bounded by donated uplink, MODEL)"),
         ("Topology", "centralized SFU, cascaded in a datacenter",
          "peer ALM relay tree — no datacenter, every peer relays"),
         ("Per-core fan-out", "~500 consumers / worker-core (mediasoup), ~115 Mbps/core",
@@ -335,8 +339,10 @@ def render_sota() -> str:
 <a href="https://mediasoup.discourse.group/t/maximum-number-of-consumers-per-worker-is-500-w-r-t-cpu/4058">mediasoup ~500 consumers/core</a>,
 <a href="https://getstream.io/glossary/sfu-cascading/">SFU cascading</a>,
 <a href="https://www.rfc-editor.org/rfc/rfc9605">SFrame (E2E media)</a>.
-The honest headline: <i>Zoom shows you 49 faces from a datacenter; the fabric shows you 2,000 from your
-neighbors' uplinks, end-to-end encrypted, scaling by peers instead of servers.</i></p>"""
+The honest framing: <i>this isn't a bigger gallery — it's a different mode. An SFU can't show you the
+ambient presence of a 2,000-person room at all; the fabric makes that the primitive, end-to-end encrypted,
+scaling by peers instead of servers. Whether a given room sustains it is the donated-uplink question
+(MODEL) above, not a crypto one.</i></p>"""
 
 
 def render_how(model: dict) -> str:
@@ -433,8 +439,8 @@ extractive middle</b>. Streaming, video calls, gaming, files, messages, and sign
 <b>directly between the devices people already own</b>, over a post-quantum-encrypted mesh: no giant data
 centers in the middle, no handful of companies owning the pipes or deciding what you see. The network
 <b>governs itself</b> through signed, weighted votes (no platform owner), never advertises your local
-content to the rest of the network, and runs on hardware you already have. Today's centralized middle
-costs ~175 Mt CO₂/yr; CEWP removes it.</p>
+content to the rest of the network, and runs on hardware you already have — it <b>removes the centralized
+control plane</b> rather than renting it back to you.</p>
 <p>This page measures <b>one capability</b> of that substrate — <b>presence at scale</b>: encrypted
 realtime A/V for thousands, forwarded by participants' own uplinks. The fabric node (CIRISServer) is the
 transport + storage tier — the same primitives that carry a live blob also store the durable corpus.
@@ -451,7 +457,7 @@ def render_landscape() -> str:
         ("Post-quantum by default", ["✗", "✗", "partial (exploratory)", "✗",
                                      "✓ Ed25519+ML-DSA · X25519+ML-KEM"]),
         ("Realtime group video at scale", ["✗", "✗", "✗ (small WebRTC bridge)", "building block",
-                                           "✓ ALM tree, ~2,000 presence"]),
+                                           "◐ ALM tree, ~2,000 presence (MODEL, uplink-gated)"]),
         ("Durable storage (survives node loss)", ["partial (manual pinning)", "✗ relays drop", "server DB",
                                                   "✗", "✓ fountain, any-N-of-H"]),
         ("Self-governance (no owner)", ["✗", "✗ relay operators", "✗ server admins", "✗",

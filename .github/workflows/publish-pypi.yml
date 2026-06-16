@@ -243,3 +243,7 @@ jobs:
           packages-dir: dist/
           # Trusted Publishing: no `password:` — the OIDC identity is verified
           # against the publisher registered on PyPI.
+          # Idempotent re-cuts: if a tag is re-cut onto a new commit, the wheels
+          # for any platform already on PyPI are skipped instead of 400-ing the
+          # whole upload — a clean re-cut publishes only the newly-built files.
+          skip-existing: true
