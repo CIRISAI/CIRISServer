@@ -4,7 +4,7 @@
 > Three provenance classes, badged on the page and here:
 > **MEASURED** (criterion microbench, this repo) · **MODEL** (bandwidth arithmetic
 > over the scaling toys) · **FRONTIER** (wire/substrate ships; production piece does not yet).
-> Substrate floor: persist v8.1.0 / edge v4.1.x / verify v5.8.0, CEG 1.0-RC12.
+> Substrate floor: persist v8.2.0 / edge v4.2.0 / verify v5.9.0, CEG 1.0-RC12.
 > Scaling sources: CIRISEdge `FEDERATION_SCALING_MODEL.md` + CIRISNodeCore
 > `examples/scale_model.rs` (scale_model v0.7 fountain).
 
@@ -75,11 +75,27 @@ At blob bitrate even a 30 Mbps home uplink could fan out to ~600; `f` is capped
 ads are hybrid-PQC-signed + capped; topology is a deterministic pure function of
 witnessed state (no leader, no node lies its way to the center). CEG RC12 §19.
 
-## 4. Scale / chaos CI test — design & math (gated on CIRISEdge#149)
+## 4. Scale / chaos — multi-tier chain (SHIPPED) + 2,000-stream harness (design)
 
-Goal (CIRISConformance#16): a synthetic in-process federation — **2,000 streams →
-3–4 ALM relay tiers → 5 viewers each viewing all 2,000** — asserting correctness at
-depth and fitting GH CI (4 vCPU, <3 min).
+**The multi-tier relay chain is built.** edge v4.2.0 shipped the relay outer-open
+primitive `open_av_outer` (CIRISEdge#149): a relay opens an upstream hop's per-link
+outer AEAD and re-seals downstream **without touching the epoch DEK**, so the inner
+E2E ciphertext survives arbitrary relay→relay hops. Now proven + measured:
+
+- **`tests/alm_chain.rs`** (CI-gated): inner E2E plaintext recovered **byte-identical**
+  at the viewer after **1–5 relay→relay hops**; a wrong inbound key fails closed.
+- **`tests/chaos_mesh.rs`** (CI-gated): **stream path-redundancy** — a chunk delivered
+  over disjoint relay paths (ALM primary + 2 backups) decodes identically from any
+  *surviving* path (kill all but one → the stream continues); and the **survival
+  floor** — any 20 of 30 fountain holders reconstruct (33% loss tolerance).
+- **`benches/alm_chain.rs`**: **~437 ns / relay hop** (blob) · 3.18 µs (full 720p);
+  end-to-end through 4 tiers ~2.7 µs (~0.44 µs/added tier). So a 2,000-room (3–4-tier
+  tree) is ~10% of one core of relay forwarding — bandwidth, not CPU, is the limit.
+
+**The 2,000-stream / 5-viewer chaos harness (CIRISConformance#16) is the remaining
+design** — the in-process federation that fans 2,000 streams through 3–4 tiers to 5
+viewers each viewing all 2,000, asserting correctness at depth in GH CI (4 vCPU,
+<3 min). The streams-per-core math (still valid) shows it's CPU-trivial:
 
 **How many streams can one core create (GH CI, in-memory)?** Seal is
 nonce-derivation-dominated:
@@ -100,16 +116,10 @@ on **1–2 cores** (or 500/core × 4); the tree + viewers on the rest.
 - viewers: 5 × 2000 × 30 × 1 µs ≈ **~30% of a core** (6% each)
 - **Total ≈ 1–2 cores** → fits GH CI's 4 vCPU with headroom, well under 3 min.
 
-**The point of the test is correctness, not a CPU limit** (in-memory has no
-egress): inner ciphertext **byte-identical** publisher→tier1→…→viewer (E2E
-preserved across N outer hops), tree assembly, and all 2,000 streams decode at all
-5 viewers.
-
-**Blocked on CIRISEdge#149:** a true wire chain needs the relay **outer-open**
-(`SealedAvChunk → InnerSealed`, never touching the `EpochDek`) so a relay can
-forward an *upstream relay's* chunk. Shipped APIs wire only a depth-1 tree
-(`RelayNode::forward` takes an `InnerSealed`). When #149 lands, the chain test is a
-`benches/alm_chain.rs` over the real primitives.
+**The harness's value is correctness-at-depth, not a CPU limit** (in-memory has no
+egress — the real-world limit is donated bandwidth, §2–§3). The chain primitive that
+backbone rests on is already *proven* above; the harness extends it to the full
+2,000-stream / 5-viewer fan-out.
 
 ## 5. Provenance & honesty
 - **MEASURED**: §1 — in-memory criterion, AEAD-bound; wire is NIC/kernel-bound.
@@ -117,4 +127,5 @@ forward an *upstream relay's* chunk. Shipped APIs wire only a depth-1 tree
 - **FRONTIER**: the blob path ships via AV1 SVC base layers; symmetric M>2 MDC video
   is the design ceiling (NeuralMDC-class codec does not exist yet; M=2 is the
   production default). Membership rekey is projected (CIRISEdge#129). The multi-tier
-  chain test is gated (CIRISEdge#149).
+  relay chain is **shipped + proven** (CIRISEdge#149, edge v4.2.0; §4); the
+  2,000-stream chaos harness (CIRISConformance#16) is the remaining design.
