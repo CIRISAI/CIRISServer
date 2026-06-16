@@ -426,6 +426,66 @@ under the 99% floor. Substrate/holonomic tiers are explicit <code>gated</code> s
 <ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
 
 
+def render_what() -> str:
+    return """<h2>What this is</h2>
+<p><b>CIRIS is the CIRIS Epistemic Web Platform (CEWP)</b> — a <b>complete replacement for the internet's
+extractive middle</b>. Streaming, video calls, gaming, files, messages, and signed claims route
+<b>directly between the devices people already own</b>, over a post-quantum-encrypted mesh: no giant data
+centers in the middle, no handful of companies owning the pipes or deciding what you see. The network
+<b>governs itself</b> through signed, weighted votes (no platform owner), never advertises your local
+content to the rest of the network, and runs on hardware you already have. Today's centralized middle
+costs ~175 Mt CO₂/yr; CEWP removes it.</p>
+<p>This page measures <b>one capability</b> of that substrate — <b>presence at scale</b>: encrypted
+realtime A/V for thousands, forwarded by participants' own uplinks. The fabric node (CIRISServer) is the
+transport + storage tier — the same primitives that carry a live blob also store the durable corpus.
+Full framing: <a href="https://ciris.ai/cewp">ciris.ai/cewp</a>.</p>"""
+
+
+def render_landscape() -> str:
+    cols = ["IPFS", "Nostr", "Matrix", "Reticulum", "CIRIS / CEWP"]
+    rows = [
+        ("What it is", ["content-addressed storage", "relayed social notes", "federated chat",
+                        "real-time mesh transport", "full stack: stream + store + govern"]),
+        ("End-to-end encryption", ["✗ content public", "✗ signed, not encrypted", "✓ Olm/MLS",
+                                   "✓ transport", "✓ two-layer hybrid"]),
+        ("Post-quantum by default", ["✗", "✗", "partial (exploratory)", "✗",
+                                     "✓ Ed25519+ML-DSA · X25519+ML-KEM"]),
+        ("Realtime group video at scale", ["✗", "✗", "✗ (small WebRTC bridge)", "building block",
+                                           "✓ ALM tree, ~2,000 presence"]),
+        ("Durable storage (survives node loss)", ["partial (manual pinning)", "✗ relays drop", "server DB",
+                                                  "✗", "✓ fountain, any-N-of-H"]),
+        ("Self-governance (no owner)", ["✗", "✗ relay operators", "✗ server admins", "✗",
+                                        "✓ signed weighted votes"]),
+        ("No datacenter / runs on owned HW", ["partial (mostly DC-pinned)", "relays (often hosted)",
+                                              "homeservers (often hosted)", "✓", "✓ every peer relays"]),
+        ("Maturity", ["production (~230k nodes)", "production", "production", "stable",
+                      "RC-grade, pre-1.0"]),
+    ]
+    head = "<tr><th>dimension</th>" + "".join(f"<th>{H(c)}</th>" for c in cols) + "</tr>"
+    body = "\n".join(
+        "<tr><td>" + H(dim) + "</td>"
+        + "".join(
+            (f"<td class='ciris'><b>{H(c)}</b></td>" if i == len(cells) - 1 else f"<td>{H(c)}</td>")
+            for i, c in enumerate(cells))
+        + "</tr>"
+        for dim, cells in rows)
+    return f"""<h2>Where this sits among decentralized projects</h2>
+<p>Against the centralized incumbents the contrast is the 49-tile cap (above). Against the
+<i>decentralized</i> field, the distinction is <b>scope</b>: the others are mature, excellent,
+<i>single-purpose</i> layers; CEWP is the (pre-1.0) attempt at the <b>whole stack</b> — transport +
+durable storage + realtime-at-scale + self-governance — and 100% post-quantum.</p>
+<table class="matrix">{head}
+{body}</table>
+<p class="note"><b>Composes, not only competes.</b> CEWP runs <i>on</i> Reticulum transport today, and can
+piggyback IPFS / Veilid / Iroh as blob-bootstrap &amp; cache substrates (CIRISPersist#147). The
+distinctive claim isn't beating any one layer — it's the whole stack in one post-quantum substrate, with
+realtime presence-at-scale and self-governance that none of the others attempt together. (Honest caveat:
+those projects are production-deployed at scale; CEWP is RC-grade.) Sources:
+<a href="https://news.ycombinator.com/item?id=41259030">Reticulum vs IPFS/Nostr/SSB (HN)</a>,
+<a href="https://www.iroh.computer/blog/comparing-iroh-and-libp2p">Iroh vs libp2p</a>,
+<a href="https://github.com/2gatherproject/decentralized-social-apps-guide">decentralized-apps guide</a>.</p>"""
+
+
 def badge_cls(prov: str) -> str:
     if prov.startswith("MEASURED"):
         return "measured"
@@ -524,6 +584,7 @@ def render(model, est, commit, date, scoreboard=None) -> str:
  th,td{{text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}}
  th{{background:#f7f8fa;font-size:.85rem;text-transform:uppercase;letter-spacing:.02em;color:var(--mut)}}
  td:first-child{{font-weight:600}} table.vs td:nth-child(2){{color:var(--red)}} table.vs td:nth-child(3){{color:var(--green)}}
+ table.matrix td.ciris{{background:#eaf7ee}} table.matrix th:last-child{{background:#dcefe2;color:var(--green)}}
  .ok{{color:var(--green)}} .bad{{color:var(--red)}}
  .note{{color:var(--mut);font-size:.9rem}}
  .hl{{background:#eaf3ff;border-left:4px solid var(--blue);padding:.9rem 1.1rem;border-radius:8px;margin:1rem 0}}
@@ -538,8 +599,10 @@ def render(model, est, commit, date, scoreboard=None) -> str:
  a{{color:var(--blue)}}
 </style></head><body>
 {render_hero(model)}
+{render_what()}
 {render_roomscale(model)}
 {render_sota()}
+{render_landscape()}
 {render_how(model)}
 {render_characteristics(model, scoreboard)}
 {render_crypto_proof(model, est)}
