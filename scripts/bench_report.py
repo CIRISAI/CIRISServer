@@ -426,10 +426,11 @@ def render_scoreboard(sb: dict | None) -> str:
 sufficient subset reconstructs. Policy <code>N={pol.get('n')} K={pol.get('k')} H={pol.get('h')}</code>;
 overhead {ro.get('modeled','—')}× (vs ~5× whole-copy). Survival
 <code>P(Binomial(H,q) ≥ N)</code> — computed, reproducing scale_model v0.7. The <i>reconstruction itself</i>
-is no longer assumed: <code>tests/chaos_mesh.rs</code> really RaptorQ-codes content into H=30 holders, kills
-a third, and rebuilds it byte-identical — <b>MEASURED</b> at <b>99.6%</b> from any 20/30 (33% loss) and
-<b>100%</b> from 21/30 (the reference codec's small reception overhead; the <i>substrate</i> codec is
-FRONTIER). The q-curve below stays MODEL — it's the swarm-availability assumption, not the codec:</p>
+is no longer assumed: <code>tests/chaos_mesh.rs</code> drives <b>edge v4.2.0's own fountain codec</b>
+(<code>codec-fountain</code>) — really encoding content into H=30 holders, killing a third, and rebuilding
+it byte-identical — <b>MEASURED</b> at <b>99.6%</b> from any 20/30 (33% loss) and <b>100%</b> from 21/30
+(RaptorQ's small reception overhead at the exact floor). The q-curve below stays MODEL — it's the
+swarm-availability assumption, not the codec:</p>
 <table><tr><th>per-peer availability q</th><th>regime</th><th>P(reconstruct)</th></tr>{curve}</table>
 <p class="note">A live node recomputes survival from <i>measured</i> q + observed holders and alarms
 under the 99% floor. Substrate/holonomic tiers are explicit <code>gated</code> stubs (not fabricated):</p>
@@ -531,7 +532,7 @@ def render_characteristics(model: dict, scoreboard: dict | None) -> str:
         ("Stream path-redundancy", "survives loss of all-but-one of 3 paths", "MEASURED",
          "presence holds through relay churn — no reconnect flicker"),
         ("Content survival", survival, "MEASURED",
-         "recordings & corpus persist through node churn (RaptorQ ref codec; substrate codec FRONTIER)"),
+         "recordings & corpus persist through node churn (edge v4.2.0 codec-fountain, real encode→drop→decode)"),
         ("Encryption", "E2E hybrid-PQC, ~0 per-frame", "MEASURED",
          "no quality/feature tradeoff for E2E; relays forward ciphertext they can't read"),
     ]

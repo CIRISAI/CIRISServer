@@ -19,8 +19,11 @@ hybrid X25519+ML-KEM-768 KEX. Single-core, in-memory, host-relative.
   PQ-TLS deployments). Frame e2e ≈ 2.2 GiB/s asymptote.
 - **Fan-out** (`seal_av_inner` once + `seal_av_outer` per Link, CIRISEdge#122):
   ~2× sender-CPU win at N=50.
-- **Membership rekey** PROJECTED from the real hybrid-KEM (CIRISEdge#129 not yet
-  implemented): flat O(N) vs tree O(log N) per join/leave.
+- **Membership rekey** SHIPPED in edge v4.2.0 (`realtime_av_session.rs`,
+  `AvSession::advance_epoch`, MLS/openmls X-Wing) — join/leave epoch-DEK rotation
+  with forward secrecy + batch cold-join. *Caveat:* the joiner-side bootstrap
+  `AvSession::process_welcome` is still a documented stub (`JoinerSurfaceUnwired`)
+  pending the L3 federation-directory KeyPackage publish/fetch — see §6.
 - **Store spine**: hybrid trace ingest (`VerifyMode::Full` verifies both halves,
   rejects classical-only — CIRISPersist#225); replay is verify-bound by design.
 
@@ -87,14 +90,15 @@ E2E ciphertext survives arbitrary relay→relay hops. Now proven + measured:
 - **`tests/chaos_mesh.rs`** (CI-gated): **stream path-redundancy** — a chunk delivered
   over disjoint relay paths (ALM primary + 2 backups) decodes identically from any
   *surviving* path (kill all but one → the stream continues); and the **survival
-  floor**, now a **real RaptorQ encode→drop→decode** (reference codec; the substrate
-  ships no fountain codec yet, so the substrate codec stays FRONTIER): content is
-  coded into H=30 holders (N=20 source-equiv), a third are killed, and the survivors
-  reconstruct it **byte-identical**. Measured reception overhead
-  (`report_fountain_overhead`, RaptorQ 2.0.1): **20/30 (33% loss) → 99.6%**,
-  **21/30 (30%) → 100% (2000/2000)**, 19/30 below the floor → never. This replaces
-  the old `(H−k) ≥ N` tautology; the q-availability survival *curve* in §scoreboard
-  stays MODEL (it's the swarm-availability assumption, not the codec).
+  floor**, now a **real encode→drop→decode against edge v4.2.0's own fountain codec**
+  (`fountain_encode`/`fountain_decode`, `codec-fountain` L1-A): content is coded into
+  H=30 holders (N=20 source), a third are killed, and the survivors reconstruct it
+  **byte-identical**. Measured reception overhead (`report_fountain_overhead`):
+  **20/30 (33% loss) → 99.6%**, **21/30 (30%) → 100% (2000/2000)**, 19/30 below the
+  floor → never. This replaces the old `(H−k) ≥ N` tautology; the q-availability
+  survival *curve* in §scoreboard stays MODEL (the swarm-availability assumption, not
+  the codec). The codec is dev-enabled for the test; the fabric node relays symbols
+  opaquely, so the shipped wheel stays codec-free.
 - **`benches/alm_chain.rs`**: **~437 ns / relay hop** (blob) · 3.18 µs (full 720p);
   end-to-end through 4 tiers ~2.7 µs (~0.44 µs/added tier). So a 2,000-room (3–4-tier
   tree) is ~10% of one core of relay forwarding — bandwidth, not CPU, is the limit.
@@ -133,16 +137,23 @@ backbone rests on is already *proven* above; the harness extends it to the full
 ## 5. Provenance & honesty
 - **MEASURED**: §1 (crypto path, AEAD-bound; wire is NIC/kernel-bound); the multi-tier
   relay chain (`benches/alm_chain.rs`, `tests/alm_chain.rs`); **stream path-redundancy
-  + the fountain survival floor** via real RaptorQ encode→drop→decode
-  (`tests/chaos_mesh.rs` — 99.6% @ 20/30, 100% @ 21/30); and **sustained multi-stream
-  seal throughput** (`benches/stream_fanout.rs` — 2,000 streams ≈ 1.6% of a core).
-  *Caveat:* the fountain proof uses the **RaptorQ reference codec** (dev-dep); the
-  substrate ships no fountain codec yet, so the **substrate** codec stays FRONTIER.
+  + the fountain survival floor** via real encode→drop→decode against **edge's own
+  `codec-fountain`** (`tests/chaos_mesh.rs` — 99.6% @ 20/30, 100% @ 21/30); and
+  **sustained multi-stream seal throughput** (`benches/stream_fanout.rs` — 2,000
+  streams ≈ 1.6% of a core).
 - **MODEL**: §2–§3 bandwidth/probability arithmetic (room scale, supply ledger, tier
   depth, the q-availability survival curve) — not a live N-node test.
-- **FRONTIER**: the blob path ships via AV1 SVC base layers; symmetric M>2 MDC video
-  is the design ceiling (NeuralMDC-class codec does not exist yet; M=2 is the
-  production default). The **substrate fountain codec** (we prove the property with
-  the RaptorQ reference) and **membership rekey** (CIRISEdge#129) are projected. The
-  multi-tier relay chain is **shipped + proven** (CIRISEdge#149, edge v4.2.0; §4); the
-  full 2,000-stream chaos harness (CIRISConformance#16) is the remaining design.
+- **SHIPPED in edge v4.2.0** (substrate provides it; integration is the remaining work):
+  the fountain codec (`codec-fountain`), AV1 + Opus codecs, the ALM tree primitives
+  (`realtime_av_alm` — `SignedRelayCapacity`, `AlmJoinPlanner` primary+backup parent
+  selection, `heal`), the per-subscriber relay fan-out with layer-drop
+  (`realtime_av_relay`), and MLS membership rekey (`realtime_av_session`).
+- **FRONTIER / integration gaps** (what's NOT yet end-to-end): the **Layer-2 wire
+  dispatcher** (`RelayNode::forward` returns sealed chunks; enqueuing them onto each
+  subscriber's RNS Link is deferred to "Layer 2 / T8"), the **joiner bootstrap**
+  (`AvSession::process_welcome` stub → `JoinerSurfaceUnwired`, pending L3 directory
+  KeyPackage publish/fetch), and **multi-tier tree orchestration** (ALM-B selects
+  parents; assembling N participants into the full O(log_f N) tree is application/
+  directory scope). Symmetric M>2 MDC video stays FRONTIER (NeuralMDC-class codec
+  doesn't exist; M=2 default). The full 2,000-stream chaos harness
+  (CIRISConformance#16) is the remaining design.

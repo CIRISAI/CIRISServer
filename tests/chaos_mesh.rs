@@ -8,27 +8,25 @@
 //!     plaintext — kill all but one and the stream continues. Shown at the
 //!     crypto/transport layer with `open_av_outer` (CIRISEdge#149): the inner
 //!     ciphertext is path-independent, only the outer per-link layer differs.
-//!  2. **Survival floor (MEASURED — RaptorQ reference codec).** Content is really
-//!     RaptorQ-coded into H=30 holders (one symbol each), a third are killed, and
-//!     the survivors RaptorQ-reconstruct it BYTE-IDENTICAL — not the old
-//!     `(H-k) >= N` tautology. Measured reception overhead (`report_fountain_
-//!     overhead`): keep 20/30 (33% loss) → 99.6% reconstruct; keep 21/30 (30%) →
-//!     100% (2000/2000); 19/30 is below the floor and never reconstructs. The
-//!     substrate ships no fountain codec yet, so this proves the property with the
-//!     reference codec (scale_model v0.7 N=20/H=30): substrate codec is FRONTIER.
+//!  2. **Survival floor (MEASURED — substrate codec).** Content is really
+//!     fountain-coded by edge v4.2.0's OWN `fountain_encode` (codec-fountain, L1-A)
+//!     into H=30 holders (one symbol each), a third are killed, and the survivors
+//!     `fountain_decode` it BYTE-IDENTICAL — not the old `(H-k) >= N` tautology.
+//!     Measured reception overhead (`report_fountain_overhead`): keep 20/30
+//!     (33% loss) → 99.6% reconstruct; keep 21/30 (30%) → 100% (2000/2000); 19/30
+//!     is below the floor and never reconstructs the content (scale_model v0.7
+//!     N=20/H=30). The codec is dev-enabled here; a relay forwards symbols opaquely.
 
 use ciris_edge::transport::realtime_av::{
     open_av_chunk, open_av_outer, seal_av_inner, seal_av_outer, ChunkLayer, ChunkSeq, Epoch,
     EpochDek, InnerSealed, SealedAvChunk, StreamId, CODEC_OPAQUE,
 };
-// RaptorQ (RFC 6330) REFERENCE codec — dev/test only. The substrate ships no
-// fountain codec yet (edge/persist expose only seal/open + reachability; the
-// v0.7 toy's `fountain_defaults` are policy constants). We use the reference
-// codec to PROVE the survival floor empirically — encode → drop a third →
-// reconstruct byte-identical — instead of asserting the `(H-killed) >= N`
-// tautology. Badge: MEASURED (RaptorQ reference) · substrate codec FRONTIER.
-use raptorq::{
-    EncodingPacket, ObjectTransmissionInformation, SourceBlockDecoder, SourceBlockEncoder,
+// The SUBSTRATE's own fountain codec (edge v4.2.0 `codec-fountain`, L1-A — RaptorQ
+// RFC 6330). We prove the survival floor against the shipped codec directly:
+// encode → drop a third of the holders → reconstruct byte-identical, instead of
+// the old `(H-killed) >= N` tautology. Badge: MEASURED (substrate codec).
+use ciris_edge::transport::realtime_av_codec::fountain::{
+    fountain_decode, fountain_encode, FountainConfig, FountainSymbol,
 };
 
 fn stream() -> StreamId {
@@ -102,51 +100,44 @@ fn stream_survives_loss_of_all_but_one_path() {
     );
 }
 
-// ─── Fountain survival floor — REAL RaptorQ encode/drop/decode ──────────────
+// ─── Fountain survival floor — REAL substrate codec encode/drop/decode ──────
 //
 // Fountain policy (scale_model v0.7): content is RaptorQ-coded into N_SOURCE
 // source symbols; the swarm converges to H=TARGET_HOLDERS holders, each storing
 // ONE symbol (source or repair). The resilience claim is that losing a third of
-// the holders still leaves enough symbols to reconstruct.
+// the holders still leaves enough symbols to reconstruct. Exercised against
+// edge v4.2.0's OWN `fountain_encode`/`fountain_decode` (codec-fountain).
 
-const N_SOURCE: usize = 20; // scale_model::N_SOURCE — source-symbol count = reconstruction floor
-const TARGET_HOLDERS: usize = 30; // scale_model::TARGET_HOLDERS (H) — one symbol per holder
-const SYMBOL: u16 = 64; // bytes/symbol → content is exactly N_SOURCE symbols
+const N_SOURCE: u32 = 20; // scale_model::N_SOURCE — source-symbol count = reconstruction floor
+const K_REPAIR: u32 = 10; // repair symbols → N_SOURCE+K_REPAIR = TARGET_HOLDERS symbols (one/holder)
+const TARGET_HOLDERS: usize = (N_SOURCE + K_REPAIR) as usize; // H = 30
+const SYMBOL: u32 = 64; // bytes/symbol → content fills exactly N_SOURCE symbols
+const MIN_VIABLE: u32 = 5; // scale_model::MIN_VIABLE_SYMBOLS (BLINKING_DOT floor)
 
-fn fountain_oti() -> ObjectTransmissionInformation {
-    // One source block, no sub-blocking, byte alignment — so the block splits
-    // into exactly N_SOURCE source symbols of SYMBOL bytes.
-    ObjectTransmissionInformation::new(N_SOURCE as u64 * SYMBOL as u64, SYMBOL, 1, 1, 1)
+fn fountain_config() -> FountainConfig {
+    FountainConfig {
+        n_source: N_SOURCE,
+        k_repair: K_REPAIR,
+        symbol_size: SYMBOL,
+        min_viable_symbols: MIN_VIABLE,
+    }
 }
 
 fn fountain_content() -> Vec<u8> {
-    (0..N_SOURCE * SYMBOL as usize)
+    (0..(N_SOURCE * SYMBOL) as usize)
         .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
         .collect()
 }
 
-/// The H encoded symbols, one per holder: N_SOURCE source + (H−N_SOURCE) repair.
-fn fountain_holders(content: &[u8]) -> Vec<EncodingPacket> {
-    let cfg = fountain_oti();
-    let enc = SourceBlockEncoder::new(0, &cfg, content);
-    let mut pkts = enc.source_packets(); // N_SOURCE source symbols
-    pkts.extend(enc.repair_packets(0, (TARGET_HOLDERS - N_SOURCE) as u32)); // repair
-    pkts
-}
-
-fn fountain_decode(subset: &[EncodingPacket]) -> Option<Vec<u8>> {
-    let cfg = fountain_oti();
-    let mut dec = SourceBlockDecoder::new(0, &cfg, N_SOURCE as u64 * SYMBOL as u64);
-    dec.decode(subset.iter().cloned())
-}
-
 /// Deterministic shuffle (LCG) so "which holders die" is reproducible without an
 /// rng dependency — same `seed` ⇒ same surviving subset every CI run.
-fn surviving_subset(holders: &[EncodingPacket], keep: usize, seed: u64) -> Vec<EncodingPacket> {
+fn surviving_subset(holders: &[FountainSymbol], keep: usize, seed: u64) -> Vec<FountainSymbol> {
     let mut idx: Vec<usize> = (0..holders.len()).collect();
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     for i in (1..idx.len()).rev() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (state >> 33) as usize % (i + 1);
         idx.swap(i, j);
     }
@@ -155,58 +146,64 @@ fn surviving_subset(holders: &[EncodingPacket], keep: usize, seed: u64) -> Vec<E
 
 #[test]
 fn content_survives_one_third_holder_loss() {
+    let cfg = fountain_config();
     let content = fountain_content();
-    let holders = fountain_holders(&content);
-    assert_eq!(holders.len(), TARGET_HOLDERS, "H holders, one symbol each");
+    let enc = fountain_encode(&content, &cfg).expect("substrate fountain_encode");
+    assert_eq!(enc.symbols.len(), TARGET_HOLDERS, "H holders, one symbol each");
 
-    // Kill a third of the holders (H−N_SOURCE = 10, 33%); the surviving 20 must
-    // RaptorQ-reconstruct the content BYTE-IDENTICAL. Repeated over many
-    // deterministic kill patterns — this is a real decode, not `(H-k) >= N`.
-    // (RaptorQ has a small reception overhead — see `report_fountain_overhead`
-    // for the measured success rate exactly at the floor; we keep N_SOURCE+1
-    // here so the floor test is deterministic and non-flaky.)
-    let keep = N_SOURCE + 1; // 21 of 30 — within the 33%-loss budget, above RaptorQ overhead
+    // Kill a third of the holders (H−N_SOURCE = 10, 33%); the survivors must
+    // reconstruct the content BYTE-IDENTICAL through the SUBSTRATE codec — a real
+    // decode, not `(H-k) >= N`. (RaptorQ has a small reception overhead at the
+    // exact floor — see `report_fountain_overhead`; we keep N_SOURCE+1 here so
+    // the floor test is deterministic and non-flaky.)
+    let keep = N_SOURCE as usize + 1; // 21 of 30 — inside the 33%-loss budget, above overhead
     for seed in 0..32u64 {
-        let kept = surviving_subset(&holders, keep, seed);
-        let decoded = fountain_decode(&kept)
-            .unwrap_or_else(|| panic!("seed {seed}: {keep} of {TARGET_HOLDERS} must reconstruct"));
+        let kept = surviving_subset(&enc.symbols, keep, seed);
+        let decoded = fountain_decode(&kept, &enc.symbol_hashes, enc.original_content_length, &cfg)
+            .unwrap_or_else(|e| panic!("seed {seed}: {keep}/{TARGET_HOLDERS} must reconstruct: {e:?}"));
         assert_eq!(decoded, content, "seed {seed}: reconstruction must be byte-identical");
     }
 }
 
 #[test]
 fn below_floor_cannot_reconstruct() {
-    // Fewer than N_SOURCE encoded symbols is below the information-theoretic
-    // floor — RaptorQ cannot (and must not) reconstruct.
+    // Fewer than N_SOURCE encoded symbols is below the information floor — the
+    // substrate codec cannot (and must not) reconstruct the full content.
+    let cfg = fountain_config();
     let content = fountain_content();
-    let holders = fountain_holders(&content);
+    let enc = fountain_encode(&content, &cfg).expect("encode");
     for seed in 0..16u64 {
-        let kept = surviving_subset(&holders, N_SOURCE - 1, seed); // 19 of 30
+        let kept = surviving_subset(&enc.symbols, N_SOURCE as usize - 1, seed); // 19 of 30
+        let r = fountain_decode(&kept, &enc.symbol_hashes, enc.original_content_length, &cfg);
         assert!(
-            fountain_decode(&kept).is_none(),
-            "seed {seed}: {} symbols is below the floor — must not reconstruct",
+            r.map(|d| d != content).unwrap_or(true),
+            "seed {seed}: {} symbols is below the floor — must not reconstruct the content",
             N_SOURCE - 1
         );
     }
 }
 
-/// Characterization probe (not an assertion): prints the measured RaptorQ
-/// reception overhead — the fraction of random `s`-of-H subsets that
+/// Characterization probe (not an assertion): prints the measured reception
+/// overhead of the SUBSTRATE codec — the fraction of random `s`-of-H subsets that
 /// reconstruct, for s around the N_SOURCE floor. Run with:
 ///   `cargo test --test chaos_mesh report_fountain_overhead -- --nocapture --ignored`
-/// Use the output to keep the page's survival wording honest (the v0.7 toy
-/// idealizes exactly-N_SOURCE reconstruction; RaptorQ needs a small overhead).
+/// Keeps the page's survival wording honest (the v0.7 toy idealizes exactly-N
+/// reconstruction; RaptorQ needs a small overhead at the exact floor).
 #[test]
 #[ignore]
 fn report_fountain_overhead() {
+    let cfg = fountain_config();
     let content = fountain_content();
-    let holders = fountain_holders(&content);
+    let enc = fountain_encode(&content, &cfg).expect("encode");
     const TRIALS: u64 = 2000;
-    for keep in [N_SOURCE, N_SOURCE + 1, N_SOURCE + 2] {
+    for keep in [N_SOURCE as usize, N_SOURCE as usize + 1, N_SOURCE as usize + 2] {
         let mut ok = 0u64;
         for seed in 0..TRIALS {
-            let kept = surviving_subset(&holders, keep, seed + keep as u64 * 1_000_003);
-            if fountain_decode(&kept).map(|d| d == content).unwrap_or(false) {
+            let kept = surviving_subset(&enc.symbols, keep, seed + keep as u64 * 1_000_003);
+            if fountain_decode(&kept, &enc.symbol_hashes, enc.original_content_length, &cfg)
+                .map(|d| d == content)
+                .unwrap_or(false)
+            {
                 ok += 1;
             }
         }

@@ -134,14 +134,13 @@ criterion     = { version = "0.5", features = ["async_tokio"] }
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
 ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa"] }
-# RaptorQ (RFC 6330) reference codec — dev/test ONLY. The substrate ships no
-# fountain codec yet (edge v4.2.0 / persist v8.2.0 expose only the AV seal/open
-# + reachability primitives; the toy's `fountain_defaults` are policy constants).
-# We use the reference codec to PROVE the survival-floor property empirically
-# (encode → drop a third → reconstruct byte-identical) instead of asserting the
-# `(H-killed) >= N` tautology. Badged "MEASURED (RaptorQ reference) · substrate
-# codec FRONTIER" — NOT a shipped primitive of this crate.
-raptorq       = "2"
+# Enable edge's OWN fountain codec (`codec-fountain`, L1-A) for the survival-floor
+# proof — dev/test ONLY (feature unification applies to test/bench builds; the
+# shipped wheel stays codec-free, since a relay forwards sealed symbols opaquely
+# and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
+# codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
+# not a reference stand-in.
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.2.0", features = ["codec-fountain"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
