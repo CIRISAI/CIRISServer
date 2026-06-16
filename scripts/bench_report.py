@@ -86,9 +86,22 @@ def capacity_model() -> dict:
     for n in ROOMS:
         rooms.append({
             "n": n,
-            "down_all_blobs_mbps": round(n * blob, 2),         # see everyone as a blob
+            "down_all_blobs_mbps": round(n * blob, 2),          # DEMAND: your downlink to see all blobs
+            "aggregate_uplink_gbps": round(n * n * blob / 1000.0, 1),  # SUPPLY: N²·b donated uplink (= agg. downlink)
             "mesh_full_uplink_mbps": round((n - 1) * full, 1),  # flat-mesh full-720p uplink/publisher
             "feasible_blobs": (n * blob) <= GIGABIT_MBPS,
+        })
+    # What a "blob" costs is the dominant lever on the supply side. 50 kbps is edge's
+    # BLINKING_DOT (a low-res *video thumbnail*); a literal presence dot is far cheaper.
+    sensitivity = []
+    for kbps, label in [(5, "presence dot (~4 px, 1–2 fps)"),
+                        (15, "low thumbnail"),
+                        (50, "video thumbnail (edge BLINKING_DOT)")]:
+        b = kbps / 1000.0
+        sensitivity.append({
+            "kbps": kbps, "label": label,
+            "per_viewer_down_mbps": round(2000 * b, 1),
+            "aggregate_gbps": round(2000 * 2000 * b / 1000.0, 1),
         })
     return {
         "rooms": rooms,
@@ -100,6 +113,7 @@ def capacity_model() -> dict:
         "home_uplink_mbps": HOME_UPLINK_MBPS,
         "sota_tile_cap": SOTA_TILE_CAP,
         "bitrates_mbps": BITRATE_MBPS,
+        "blob_sensitivity": sensitivity,
     }
 
 
@@ -211,22 +225,24 @@ def render_hero(model: dict) -> str:
     cap = model["capacity"]
     r2000 = next((r for r in cap["rooms"] if r["n"] == 2000), {})
     peak = max((f["gib_s"] for f in model["video_frames"]), default=None)
+    tax = model["kex"].get("mlkem_tax_us", "—")
     return f"""<header class="hero">
-  <h1>The federation can put <b>2,000 people</b> on one screen.</h1>
-  <p class="tag">End-to-end post-quantum encrypted. Forwarded by your neighbors' uplinks.
-  <b>No datacenter.</b> Zoom, Meet and Teams cap you at {cap['sota_tile_cap']} tiles — this doesn't.</p>
+  <h1>Encrypted, datacenter-free <b>presence at scale</b>.</h1>
+  <p class="tag">Thousands of people sharing one space — each <i>present</i> as a live blob, with full
+  quality focus-pulled on demand. End-to-end post-quantum. Forwarded by the participants' own uplinks,
+  <b>no datacenter</b>. This is a category the centralized incumbents can't enter — not a bigger grid of tiles.</p>
   <div class="cards">
-    <div class="card"><div class="big">{int(r2000.get('down_all_blobs_mbps',0))} Mbps</div>
-      <div class="cl">to render <b>2,000 video tiles</b> at once (one home gigabit line)</div></div>
+    <div class="card"><div class="big">presence<br>at scale</div>
+      <div class="cl">the blob is a deliberate <b>presence primitive</b>, not degraded video — a 2,000-person
+      space is ~{int(r2000.get('down_all_blobs_mbps',0))} Mbps to <i>your</i> device</div></div>
     <div class="card"><div class="big">0</div>
-      <div class="cl">datacenters — every peer is a relay; scale by adding people, not servers</div></div>
+      <div class="cl">datacenters — peers relay for each other; scale by adding people, not servers</div></div>
     <div class="card"><div class="big">100%</div>
-      <div class="cl">post-quantum, <b>end-to-end</b> — the relay forwards ciphertext it can never read</div></div>
+      <div class="cl">post-quantum, <b>end-to-end</b> — relays forward ciphertext they can never read</div></div>
   </div>
-  <p class="note">Crypto isn't the constraint and we measured it: the AEAD frame path runs at
-  up to {peak} GiB/s and the post-quantum cost is a one-time ~{model['kex'].get('mlkem_tax_us','—')} µs
-  per peer-link, <b>never per frame</b>. The constraint is bandwidth — which is exactly what the
-  holographic / ALM design attacks.</p>
+  <p class="note">Crypto isn't the constraint (measured: AEAD up to {peak} GiB/s, post-quantum cost
+  ~{tax} µs <b>once per peer-link</b>, never per frame). The real constraint is <b>donated uplink</b> —
+  how much the room's own peers can forward — shown below on <i>both</i> sides of the ledger.</p>
 </header>"""
 
 
@@ -234,28 +250,44 @@ def render_roomscale(model: dict) -> str:
     cap = model["capacity"]
     rows = "\n".join(
         f"<tr><td><b>{fmt(r['n'])}</b></td>"
-        f"<td class='ok'>{r['down_all_blobs_mbps']} Mbps ✓</td>"
-        f"<td class='bad'>{fmt(round(r['mesh_full_uplink_mbps']))} Mbps ✕</td>"
-        f"<td>ALM relay tree + receiver layer-cap</td>"
-        f"<td>your downlink</td></tr>"
+        f"<td class='ok'>{r['down_all_blobs_mbps']} Mbps</td>"
+        f"<td>{r['aggregate_uplink_gbps']} Gbps</td>"
+        f"<td class='bad'>{fmt(round(r['mesh_full_uplink_mbps']))} Mbps ✕</td></tr>"
         for r in cap["rooms"])
+    sens = "\n".join(
+        f"<tr><td>{s['kbps']} kbps — {H(s['label'])}</td>"
+        f"<td>{s['per_viewer_down_mbps']} Mbps</td><td>{s['aggregate_gbps']} Gbps</td></tr>"
+        for s in cap["blob_sensitivity"])
     return f"""<h2>Can a room of N do video? <span class="badge model">MODEL</span></h2>
-<p>The trick is <b>layered encoding</b>: you don't pull everyone at full quality — you pull each
-person's lowest layer (a ~{cap['blob_kbps']} kbps "blinking-dot" blob) and pull full 720p only for
-whoever you focus on. So "can N people do video?" becomes "what's your downlink to render N blobs?":</p>
-<table><tr><th>room</th><th>see everyone as blobs (your downlink)</th>
-<th>flat-mesh at full 720p (uplink/publisher)</th><th>topology</th><th>bottleneck</th></tr>
+<p>Layered encoding makes it a bandwidth question, not a tile cap: you pull each person's lowest layer
+(a ~{cap['blob_kbps']} kbps presence blob) and focus-pull full quality only for whoever you're looking at.
+Two sides of the ledger — what <i>you</i> receive (demand), and what the room's peers must <i>donate</i>
+to forward it (supply, = N²·b by conservation):</p>
+<table><tr><th>room</th><th>your downlink (demand)</th>
+<th>room's total donated uplink (supply, N²·b)</th><th>flat-mesh full-720p (why mesh dies)</th></tr>
 {rows}</table>
-<p class="note">Flat mesh dies at ~{cap['mesh_full_cap']} people on a {int(cap['home_uplink_mbps'])} Mbps
-home upload (you'd have to send {fmt(round(cap['rooms'][-1]['mesh_full_uplink_mbps']))} Mbps to 1,999 peers).
-The <b>ALM relay tree</b> turns that into <b>one copy per publisher</b> into an O(log N)-deep tree of peer
-relays; one relay core forwards ~{fmt(cap['blob_per_core'])} blob-streams or ~{cap['full720_per_core']}
-full-720p streams of egress. <b>The limit is always bandwidth — never crypto.</b></p>
-<div class="hl"><b>"2,000 four-pixel blobs from 2,000 8K streams?"</b> Yes. You subscribe to the base
-SVC layer of each (≈{cap['blob_kbps']} kbps) → 2,000 × {cap['blob_kbps']} kbps ≈
-{int(cap['rooms'][-1]['down_all_blobs_mbps'])} Mbps down. The 8K is each publisher's <i>top</i> layer,
-uploaded once to its relay parent and forwarded only to whoever zooms in. RaptorQ-per-layer makes each
-blob reconstruct from any sufficient fragment subset — lossy mesh, no jitter-buffer stalls.</div>"""
+<p class="note"><b>Demand is the easy half</b> — even 2,000 blobs is ~100 Mbps to your device.
+<b>Supply is the real question.</b> Everyone-sees-everyone is N×N delivery, so the room must source
+~{cap['rooms'][-1]['aggregate_uplink_gbps']} Gbps of forwarding at N=2,000 — and <b>leaves forward nothing</b>
+(a constrained mobile peer just publishes its own blob), so that load lands on the <b>fat interior</b>:
+peers with real donated uplink, in an O(log N)-deep ALM tree (per-node fan-out bounded by <i>measured</i>
+uplink). Feasibility is <code>Σ(donated interior uplink) ≥ N²·b</code> — <b>not</b> crypto. It's the one
+open empirical variable, gated honestly in the edge capacity benches (<code>alm_tree_depth_vs_n</code>,
+<code>cold_join_burst_latency</code>, CIRISEdge PR#147).</p>
+<p>And what a "blob" costs dominates the supply side. {cap['blob_kbps']} kbps is edge's
+<code>BLINKING_DOT</code> — a low-res <i>video thumbnail</i>; a literal presence dot is far cheaper, which
+decides whether the room needs prosumer fat interior or rides ordinary asymmetric home uplinks:</p>
+<table><tr><th>blob @ N=2,000</th><th>your downlink</th><th>room's donated uplink (N²·b)</th></tr>
+{sens}</table>
+<p class="note">At a true <b>presence dot (~5 kbps)</b> the room needs ~20 Gbps total — ordinary
+asymmetric homes (~10 Mbps up each) sum to it with no datacenter. At a <b>50 kbps video thumbnail</b>
+it needs ~200 Gbps — real prosumer/home-server fat interior, or it collapses back toward centralization.
+<b>The "presence at scale" claim is strongest precisely because presence is cheap.</b></p>
+<div class="hl"><b>"2,000 four-pixel blobs from 2,000 8K streams?"</b> Yes — you subscribe to each
+publisher's base SVC layer; the 8K is their <i>top</i> layer, uploaded once and forwarded only to whoever
+zooms in. The bitrate win is <b>SVC/MDC layering</b>; <b>RaptorQ</b> buys the loss-resilience (any
+sufficient fragment subset reconstructs — lossy mesh, no jitter-buffer stalls). Whether the room holds
+2,000 is the donated-uplink question above, not a crypto or codec one.</div>"""
 
 
 def render_sota() -> str:
