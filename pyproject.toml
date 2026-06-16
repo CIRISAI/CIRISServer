@@ -11,8 +11,11 @@ build-backend = "maturin"
 
 [project]
 name = "ciris-server"
-# Mirrors Cargo.toml; bump in lockstep.
-version = "0.2.2"   # matches the Cargo crate. 0.1 = lens-only; patch forward (0.1.1) on breakage
+# Version is DYNAMIC — maturin reads it from Cargo.toml's [package] version, so the
+# wheel can never desync from the crate. (It was a static "0.2.2" here through
+# 0.2.6, which silently built 0.2.2 wheels on every tag → PyPI "File already
+# exists". Never hard-code it again.)
+dynamic = ["version"]
 description = "The fabric node — the federation's headless cohabitation runtime (registry + lens [+ node] over one shared substrate), as the abi3 wheel CIRISAgent consumes. agent = fabric node + brain."
 authors = [{ name = "Eric Moore", email = "eric@ciris.ai" }]
 license = { text = "AGPL-3.0-or-later" }
