@@ -24,6 +24,13 @@
 > (`ed25519.seed.migrated` archived), the `.rid` adopted into the keystore
 > (`hardware_backed=true`), no re-key. Adoption is deterministic: the carried
 > identity reproduces byte-for-byte.
+>
+> **Trace import re-validated** (2026-06-16, on the v8.2.0 / edge-v4.2.0 / CEG-RC12
+> floor): `import-traces` on the prod dump → 12,165 traces → 20,959 events,
+> errored=0 (3,635 salvaged). **All cutover gates are met — this migration is
+> READY:** identity continuity (byte-identical `key_id` + RNS dest), 100% hybrid PQC
+> signing, six-key `/v1/identity`, the frozen read endpoints, and legacy-history
+> pre-seed all proven on the shipped floor.
 
 ## 1. What changes
 
@@ -42,8 +49,9 @@ the shared substrate, queryable from any node.
 
 ## 2. Prerequisites
 
-- **`ciris-server` is published on PyPI** (0.1.x, abi3 / CPython 3.10+: manylinux
-  x86_64 + aarch64, macOS, Windows). Substrate floor baked into the wheel:
+- **`ciris-server` is published on PyPI** (0.2.x, abi3 / CPython 3.10+: manylinux
+  x86_64 + aarch64, macOS, Windows, **Android arm64 + armeabi-v7a**). Substrate
+  floor baked into the wheel:
   **persist v8.2.0 / edge v4.2.0 / verify-family v5.9.0** (CEG 1.0-RC12).
   - **`pip install ciris-server` needs NO build deps** — the manylinux wheel
     bundles libtss2 + libcrypto (auditwheel). This is the recommended path.
@@ -125,20 +133,28 @@ replaceable default pin).
   the agent's KMP client.
 
 ### 3.5 Corpus
-The corpus **starts fresh** on the persist substrate. The legacy TimescaleDB
-history is **not migrated** (the post-cutover dedup keys differ; pre-cutover quality
-is the legacy pipeline's). Keep the old TimescaleDB **read-only** for archival as
-long as you need it, then decommission.
+The live corpus **starts fresh** on the persist substrate. **Legacy history can be
+pre-seeded** for posterity / to show the ragged edge:
+```
+ciris-server import-traces <dump-dir>     # the CIRISLens TimescaleDB dump dir
+```
+It reconstructs the flat 1.9.x `accord_traces` rows into CEG `CompleteTrace`s under
+the closed-set `2.7.legacy` schema bucket — the original 1.9.x Ed25519 signature
+preserved as **provenance**, imported **pre-verified** (`VerifyMode::TrustPreVerified`
+carve-out; the legacy sig signed the 1.9.x bytes, not the reconstruction, so it is
+not re-verifiable), content-addressed + idempotent. A salvage pass repairs the dump's
+systematic `\\"`→`\"` export mis-escaping. **Validated on the prod dump (v8.2.0
+floor): 12,165 traces → 20,959 trace-events, errored=0 (3,635 salvaged).** Keep the
+old TimescaleDB read-only until you've imported + verified, then decommission.
 
 ## 4. Verify (before tearing anything down)
-- `GET /v1/identity` (on the read-API port, `listen+1`) returns the
+- `GET /v1/identity` (on the read-API port, `listen+1`) returns the **six-key**
   `LocalIdentityAggregate` with the **same `key_id`** the CIRISLens node published
-  (identity continuity confirmed), plus the Ed25519 federation pubkey and the
-  Reticulum transport pubkeys. **0.1.x note:** `content_x25519` /
-  `content_ml_kem_768` are `null` — the content-KEM halves fill in once persist
-  exposes the aggregate for a hardware-signed Engine
-  ([CIRISPersist#223](https://github.com/CIRISAI/CIRISPersist/issues/223)); the
-  continuity-critical fields (`key_id`, `ed25519_pubkey_b64`, transport) are present.
+  (identity continuity confirmed): the **hybrid** federation signing keys (Ed25519 +
+  ML-DSA-65), the persist-minted content-KEM pair (`content_x25519` /
+  `content_ml_kem_768`), and the Reticulum transport pubkeys — **all populated** as
+  of 0.2.x (CIRISPersist#223/#224; the `with_hardware_signer_hybrid` Engine). A
+  carried-over `ed25519.seed` yields a byte-identical `key_id`.
 - Boot log shows `transport-identity keystore opened hardware_backed=true` (TPM
   host) and, for the federation key, the keyring reports a sealed-Ed25519 / hardware
   posture (not `NO HARDWARE BINDING`) — or encrypted-software fallback on a

@@ -38,19 +38,26 @@ jobs:
   build-native:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # Allowed-to-fail lanes (the TPM backend can't cross-compile) never block the
+    # release; see the armv7 entry + the build-musl job.
+    continue-on-error: ${{ matrix.allow_fail || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          # ARM64 builds NATIVELY on an ARM runner (apt libtss2-dev applies) —
+          # cross-compiling tss-esapi from x86 has no target libtss2.
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            cross: true
-          # ARM32 — Raspberry Pi / embedded mesh nodes.
+          # ARM32 — Raspberry Pi / embedded mesh nodes. Cross-builds the TPM
+          # backend with no target libtss2 → allowed-to-fail (CIRISServer#7);
+          # never blocks the release.
           - os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
             cross: true
+            allow_fail: true
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
@@ -134,6 +141,9 @@ jobs:
   build-musl:
     name: Build (aarch64 musl)
     runs-on: ubuntu-latest
+    # zigbuild cross can't satisfy the TPM backend's target libtss2 — allowed to
+    # fail so it never blocks the release (aarch64-gnu native covers ARM64 Linux).
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -170,6 +180,10 @@ jobs:
   create-release:
     name: Create Release
     needs: [build-native, build-musl]
+    # Run as long as the build stage finished (not cancelled) — the allowed-to-fail
+    # ARM lanes (armv7 cross, aarch64 musl) must not skip the release; it ships
+    # whatever built (x86_64 linux/mac/win + aarch64-linux-gnu native).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
