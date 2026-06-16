@@ -20,6 +20,12 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("usage: ciris-server import-traces <dump-dir>"))?;
             ciris_server::import_traces(&dump_dir).await
         }
+        // `ciris-server scoreboard` — print the holonomic federation scoreboard
+        // (modeled capacity/survival; CIRISServer#12/#13) as JSON and exit.
+        Some("scoreboard") => {
+            println!("{}", ciris_server::scoreboard_json());
+            Ok(())
+        }
         // Default: boot the fabric node.
         _ => ciris_server::run().await,
     }

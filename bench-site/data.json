@@ -1,0 +1,167 @@
+{
+  "schema": "ciris-server/bench/2",
+  "commit": "localtest",
+  "date": "2026-06-16",
+  "model": {
+    "video_frames": [
+      {
+        "bytes": 320,
+        "label": "Opus voice frame (~20 ms @128 kbps)",
+        "e2e_us": 0.95,
+        "seal_us": 0.51,
+        "open_us": 0.45,
+        "gib_s": 0.31,
+        "fps_ceiling": 1051216
+      },
+      {
+        "bytes": 4096,
+        "label": "720p inter-frame (low motion)",
+        "e2e_us": 2.37,
+        "seal_us": 1.21,
+        "open_us": 1.12,
+        "gib_s": 1.61,
+        "fps_ceiling": 421581
+      },
+      {
+        "bytes": 16384,
+        "label": "720p inter-frame (typical)",
+        "e2e_us": 7.07,
+        "seal_us": 3.26,
+        "open_us": 3.08,
+        "gib_s": 2.16,
+        "fps_ceiling": 141534
+      },
+      {
+        "bytes": 65536,
+        "label": "1080p inter / 720p keyframe",
+        "e2e_us": 27.24,
+        "seal_us": 12.78,
+        "open_us": 12.79,
+        "gib_s": 2.24,
+        "fps_ceiling": 36710
+      },
+      {
+        "bytes": 262144,
+        "label": "1080p keyframe",
+        "e2e_us": 112.27,
+        "seal_us": 56.78,
+        "open_us": 48.99,
+        "gib_s": 2.17,
+        "fps_ceiling": 8907
+      }
+    ],
+    "kex": {
+      "hybrid_full_us": 161.9,
+      "hybrid_initiate_us": 68.2,
+      "classical_full_us": 78.7,
+      "mlkem_tax_us": 83.2
+    },
+    "fanout": [
+      {
+        "n": 2,
+        "naive_us": 6.51,
+        "shared_inner_us": 4.79,
+        "speedup": 1.36
+      },
+      {
+        "n": 8,
+        "naive_us": 25.98,
+        "shared_inner_us": 14.02,
+        "speedup": 1.85
+      },
+      {
+        "n": 50,
+        "naive_us": 162.93,
+        "shared_inner_us": 78.57,
+        "speedup": 2.07
+      }
+    ],
+    "rekey": [
+      {
+        "n": 2,
+        "flat_ms": 0.135,
+        "tree_ms": 0.068,
+        "tree_speedup": 2.0
+      },
+      {
+        "n": 8,
+        "flat_ms": 0.543,
+        "tree_ms": 0.203,
+        "tree_speedup": 2.7
+      },
+      {
+        "n": 50,
+        "flat_ms": 3.405,
+        "tree_ms": 0.412,
+        "tree_speedup": 8.3
+      }
+    ],
+    "mesh": {
+      "send_pct_core": 0.24,
+      "recv_typical_pct_core": 0.45,
+      "max_recv_streams_30fps_core": 10823,
+      "recv_lowmotion_pct_core": 0.17,
+      "recv_gop_blend_pct_core": 0.5,
+      "gop_model": "720p, 30 fps, GOP=30 (1\u00d764 KiB keyframe + 29\u00d716 KiB inter per second), receiver opens 49 streams"
+    },
+    "replication": {
+      "ingest_new_us": 230.61,
+      "traces_per_sec": 4336,
+      "dedup_us": 205.79,
+      "dedup_per_sec": 4859,
+      "dedup_savings_pct": 10.8
+    },
+    "assumptions": {
+      "cores": "single thread, one core; real deployments fan out across cores",
+      "frames": "frame sizes are representative codec outputs, not a live encoder; the GOP blend states its model inline",
+      "receiver": "receivers are charged OPEN-ONLY \u2014 a node never re-seals frames it receives",
+      "fps": "30 fps reference for all per-second / % -of-core figures",
+      "rekey": "membership-change rekey is PROJECTED from the real hybrid-KEM primitive \u2014 the substrate does not implement it yet (CIRISEdge#129); steady-state cost is unaffected",
+      "scope": "crypto + wire-codec + persist spine (CIRISServer-owned); excludes the RNS network hop (bandwidth/RTT-bound) and codec encode/decode",
+      "pqc": "100% hybrid PQC, hard cut \u2014 Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path"
+    },
+    "rekey_note": {
+      "flat50_ms": 3.41,
+      "pct_core_per_delta_per_sec": 0.34,
+      "frame_budget_pct": 10.2
+    }
+  },
+  "raw_means_us": {
+    "av_fanout_plan_50": 15.4052,
+    "av_mesh_fanout/shared_inner/50": 78.5737,
+    "av_mesh_fanout/shared_inner/2": 4.7866,
+    "av_mesh_fanout/shared_inner/8": 14.0196,
+    "av_mesh_fanout/naive/50": 162.9274,
+    "av_mesh_fanout/naive/2": 6.5074,
+    "av_mesh_fanout/naive/8": 25.9783,
+    "pqc_kex/classical_respond": 39.1042,
+    "pqc_kex/classical_initiate": 39.5884,
+    "pqc_kex/hybrid_respond": 93.6552,
+    "pqc_kex/hybrid_initiate": 68.2097,
+    "av_frame_e2e/16384": 7.0655,
+    "av_frame_e2e/65536": 27.2406,
+    "av_frame_e2e/262144": 112.2717,
+    "av_frame_e2e/320": 0.9513,
+    "av_frame_e2e/4096": 2.372,
+    "replication_ingest/ingest_dedup": 205.7878,
+    "replication_ingest/ingest_new": 230.6103,
+    "av_rekey/flat_rewrap/50": 3405.3139,
+    "av_rekey/flat_rewrap/2": 134.5673,
+    "av_rekey/flat_rewrap/8": 543.1598,
+    "av_rekey/tree_rewrap/50": 411.945,
+    "av_rekey/tree_rewrap/2": 67.523,
+    "av_rekey/tree_rewrap/8": 203.0953,
+    "av_frame_halves/seal_64KiB": 12.8019,
+    "av_frame_halves/seal/16384": 3.2576,
+    "av_frame_halves/seal/65536": 12.7764,
+    "av_frame_halves/seal/262144": 56.7753,
+    "av_frame_halves/seal/320": 0.5144,
+    "av_frame_halves/seal/4096": 1.2138,
+    "av_frame_halves/open_64KiB": 12.361,
+    "av_frame_halves/open/16384": 3.08,
+    "av_frame_halves/open/65536": 12.7923,
+    "av_frame_halves/open/262144": 48.9851,
+    "av_frame_halves/open/320": 0.4518,
+    "av_frame_halves/open/4096": 1.1246
+  }
+}

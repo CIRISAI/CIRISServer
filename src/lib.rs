@@ -24,6 +24,8 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
+/// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
+pub mod benchmarks;
 mod compose;
 mod config;
 mod import;
@@ -51,6 +53,14 @@ pub async fn run() -> Result<()> {
 /// CEG objects (the `import-traces <dump-dir>` subcommand). See `src/import.rs`.
 pub async fn import_traces(dump_dir: &str) -> Result<()> {
     import::run(dump_dir).await
+}
+
+/// Emit the **modeled** holonomic federation scoreboard (CIRISServer#12/#13) as
+/// JSON — the operator surface for measured-vs-modeled capacity/survival. The
+/// storage tier is fully grounded (binomial survival reproduces scale_model v0.7);
+/// substrate/holonomic tiers are honest "gated" stubs until their data lands.
+pub fn scoreboard_json() -> String {
+    benchmarks::Scoreboard::modeled(benchmarks::FountainPolicy::REFERENCE).to_json()
 }
 
 /// Initialize tracing (shared by the binary and the wheel entry point).

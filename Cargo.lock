@@ -1012,6 +1012,7 @@ dependencies = [
  "getrandom 0.3.4",
  "pyo3",
  "pyo3-async-runtimes",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

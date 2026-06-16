@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.2.4"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
+version = "0.2.5"   # 0.1 = lens-only (agent ~2.9.7); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward (0.1.1) on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -99,6 +99,7 @@ fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 # read-API listener. axum pinned to lens-core's 0.8 so the merged Router unifies.
 axum       = "0.8"
 base64     = "0.22"
+serde      = { version = "1", features = ["derive"] } # holonomic scoreboard model (benchmarks::)
 serde_json = "1"
 getrandom  = "0.3"   # mint the ML-DSA-65 federation seed on first boot (hybrid PQC)
 flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)

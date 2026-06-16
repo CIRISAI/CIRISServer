@@ -4,6 +4,31 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.2.5] — 2026-06-16
+
+First cut of the **holonomic federation scoreboard** (CIRISServer#12/#13) — the
+operator-facing measured-vs-modeled surface, replacing per-cut SOTA-comparison toy
+numbers with grounded metrics.
+
+### Added
+- **`server::benchmarks` module + `ciris-server scoreboard`** — emits a JSON
+  scoreboard of the federation's capacity/survival posture.
+  - **Storage tier — fully grounded** from a `FountainPolicy` (N=20, K=6, H=30
+    reference). Replication overhead (1.5×), per-peer load (5%), active-eject
+    threshold (H×1.15=34.5), holographic degradation tiers, and the **survival
+    floor** `P(Binomial(H, q) ≥ N)` computed in log-space. The calculator
+    **reproduces the scale_model v0.7 survival curve from first principles**
+    (99.99999 / 99.991 / 99.706 / 97.438 / 73.04 % at q = 0.95/0.90/0.85/0.80/0.70)
+    — asserted in tests — which is what makes "measured vs modeled" trustworthy.
+  - **Live overlay** (`with_measurement`): recomputes overhead + survival from
+    observed holders + real per-peer `q`, and **alarms** when live survival dips
+    under the 99% floor (the early-warning signal before content becomes
+    unreconstructable), or on >2.0× over-replication.
+  - **Substrate + holonomic tiers are honest `gated` stubs** (not fabricated):
+    substrate gated on edge v4.1.1's `NETWORK_CAPACITY_MODEL.md` + benches
+    (CIRISEdge PR#147); holonomic gated on fountain/holonomic wiring (#11) +
+    CIRISRegistry#88's composite model that grounds the targets.
+
 ## [0.2.4] — 2026-06-16
 
 Catch-up to the **v8 / v4 / v5.8 substrate family** and **CEG 1.0-RC11**. Two

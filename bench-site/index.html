@@ -1,0 +1,125 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CIRISServer — benchmarks, interpreted</title>
+<style>
+ body{font:16px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:880px;margin:2.2rem auto;padding:0 1.1rem;color:#1a1a1a}
+ h1{font-size:1.7rem;margin:.2rem 0} h2{margin-top:2.2rem;border-bottom:2px solid #eee;padding-bottom:.3rem}
+ .lead{font-size:1.15rem;background:#f0f7ff;border-left:4px solid #2b7cff;padding:.8rem 1rem;border-radius:6px}
+ table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.95rem}
+ th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #eee} th{background:#fafafa}
+ td:nth-child(n+2){font-variant-numeric:tabular-nums}
+ .note{color:#555;font-size:.9rem} .big{font-size:1.35rem;font-weight:600;color:#0a7d2c}
+ .warn{background:#fff7e6;border-left:4px solid #e69500;padding:.6rem .9rem;border-radius:6px;font-size:.95rem}
+ code{background:#f4f4f4;padding:.05rem .3rem;border-radius:3px}
+ details{margin-top:1rem} footer{margin-top:2.5rem;color:#888;font-size:.85rem;border-top:1px solid #eee;padding-top:.8rem}
+</style></head><body>
+<h1>CIRISServer — benchmarks, interpreted</h1>
+<p class="note">The CEWP crux use case — <b>stream and store at massive scale</b> — measured and
+interpreted. Receivers are charged open-only; every blended figure names its model. Raw criterion
+numbers at the bottom. Absolute µs are host-relative (this run's runner); the ratios and ceilings travel.</p>
+<p class="lead"><b>PQC group video is effectively free at steady state.</b> the steady-state frame path runs at up to 2.2 GiB/s (AES-256-GCM — quantum-irrelevant at 256-bit); the post-quantum tax is ~83 µs <b>once per peer-link</b>, never per frame.</p>
+
+<h2>Video throughput — realtime A/V mesh (two-layer hybrid-PQC)</h2>
+<p>Per frame: inner AES-256-GCM (E2E epoch DEK) → wire codec → outer AES-256-GCM (per-Link transit
+key). <code>seal</code> is the sender's cost; <code>open</code> is the receiver's (it never re-seals).</p>
+<table><tr><th>Frame</th><th>size</th><th>seal→wire→open</th><th>seal (send)</th><th>open (recv)</th><th>throughput</th></tr>
+<tr><td>Opus voice frame (~20 ms @128 kbps)</td><td>320 B</td><td>0.95 µs</td><td>0.51 µs</td><td>0.45 µs</td><td>0.31 GiB/s</td></tr>
+<tr><td>720p inter-frame (low motion)</td><td>4 KiB</td><td>2.37 µs</td><td>1.21 µs</td><td>1.12 µs</td><td>1.61 GiB/s</td></tr>
+<tr><td>720p inter-frame (typical)</td><td>16 KiB</td><td>7.07 µs</td><td>3.26 µs</td><td>3.08 µs</td><td>2.16 GiB/s</td></tr>
+<tr><td>1080p inter / 720p keyframe</td><td>64 KiB</td><td>27.24 µs</td><td>12.78 µs</td><td>12.79 µs</td><td>2.24 GiB/s</td></tr>
+<tr><td>1080p keyframe</td><td>256 KiB</td><td>112.27 µs</td><td>56.78 µs</td><td>48.99 µs</td><td>2.17 GiB/s</td></tr></table>
+<p class='big'>A 50-person room costs ~0.5% of one core to receive</p><p class='note'>…under a <b>stated</b> model: 720p, 30 fps, GOP=30 (1×64 KiB keyframe + 29×16 KiB inter per second), receiver opens 49 streams. Range across motion: ~0.17% (low-motion 4 KiB) to ~0.45% (typical 16 KiB), receive-only. Publishing one stream to the room is ~0.24% of a core. Crypto is nowhere near the bottleneck — bandwidth and the network are.</p>
+
+<h2>Post-quantum overhead — the hybrid handshake (per peer-link, one-time)</h2>
+<p>The only place the post-quantum cost can live: bulk frames are AES-256-GCM (already quantum-fine),
+so the PQ cost is structurally confined to the KEM at session setup. Per-frame PQC cost is zero.</p>
+<table><tr><th>handshake</th><th>full (initiate+respond)</th></tr>
+<tr><td>Hybrid X25519 + ML-KEM-768 (PQ-safe)</td><td>161.9 µs</td></tr>
+<tr><td>Classical X25519 only</td><td>78.7 µs</td></tr>
+<tr><td><b>ML-KEM-768 tax</b></td><td><b>+83.2 µs, once per peer-link</b></td></tr></table>
+
+<h2>Mesh fan-out — sender cost per frame (16 KiB)</h2>
+<p><code>naive</code> = N× full <code>seal_av_chunk</code>. <code>shared_inner</code> = v3.7.0's
+<code>seal_av_inner</code> once + <code>seal_av_outer</code> per Link (CIRISEdge#122) — wire-identical,
+inner AEAD done once.</p>
+<table><tr><th>room (N)</th><th>naive</th><th>shared-inner</th><th>speedup</th></tr>
+<tr><td>2</td><td>6.51 µs</td><td>4.79 µs</td><td>1.36×</td></tr>
+<tr><td>8</td><td>25.98 µs</td><td>14.02 µs</td><td>1.85×</td></tr>
+<tr><td>50</td><td>162.93 µs</td><td>78.57 µs</td><td>2.07×</td></tr></table>
+
+<h2>Membership-change rekey — the churn path <span class="note">(projected)</span></h2>
+<div class="warn">⚠ <b>Projected, not implemented.</b> The substrate does not yet rekey on join/leave
+(CIRISEdge#129 — <code>EpochDek</code> has no ratchet; epoch rotation is owned out-of-module). These
+numbers project the <i>intended</i> cost from the real hybrid-KEM <code>key_grant</code> wrap. They
+are the answer to "is rekey-on-membership-change affordable?" — not a measurement of shipped code.</div>
+<p>Each join/leave rewraps the fresh epoch DEK to the member-set. <code>flat</code> = O(N) (the
+unicast-mesh baseline, #129). <code>tree</code> = O(log N) (the TreeKEM optimization, needs multicast,
+#66). The outer per-Link key is <b>not</b> re-KEX'd on churn (KEX is one-shot per session).</p>
+<table><tr><th>room (N)</th><th>flat O(N) / delta</th><th>tree O(log N) / delta</th><th>tree win</th></tr>
+<tr><td>2</td><td>0.135 ms</td><td>0.068 ms</td><td>2.0×</td></tr>
+<tr><td>8</td><td>0.543 ms</td><td>0.203 ms</td><td>2.7×</td></tr>
+<tr><td>50</td><td>3.405 ms</td><td>0.412 ms</td><td>8.3×</td></tr></table>
+<p class="note">A 50-room paying the flat baseline spends ~3.41 ms per membership
+delta — ~10.2% of a single 33 ms frame, or ~0.34%
+of a core at one join/leave per second. Affordable even unoptimized; the tree (#66) removes it as a concern.
+Steady-state video is untouched by churn.</p>
+
+<h2>Replication speed — CEG-RC5 corpus ingest (the "store" spine)</h2>
+<p>What a node pays per replicated trace: Ed25519 verify → decompose → persist (5-tuple
+<code>ON CONFLICT DO NOTHING</code> dedup — not a content-hash lookup).</p>
+<table><tr><th>path</th><th>per trace</th><th>throughput</th></tr>
+<tr><td>new trace (insert — replication intake)</td><td>230.61 µs</td><td>4,336 traces/s/core</td></tr>
+<tr><td>re-delivery (dedup — anti gossip-loop)</td><td>205.79 µs</td><td>4,859 /s/core</td></tr></table>
+<p class="note"><b>The finding:</b> re-delivery saves only ~10.8% over a fresh
+insert — because <b>verify runs before dedup</b>, a duplicate still pays full Ed25519 verification. So a
+replay / gossip flood is bounded by verify throughput, not a cheap reject. This is <b>deliberate</b>
+(verify-before-mutation; reordering dedup ahead of verify is an AV-9 suppression oracle — the dedup key
+is attacker-controllable). The scale levers are the pre-verified relay path
+(<code>VerifyMode::TrustPreVerified</code> gated on an Edge <code>verify_outcome</code>) and batch
+verification (CIRISPersist#225) — not dedup-first.</p>
+
+<h2>Assumptions</h2>
+<ul><li>single thread, one core; real deployments fan out across cores</li><li>frame sizes are representative codec outputs, not a live encoder; the GOP blend states its model inline</li><li>receivers are charged OPEN-ONLY — a node never re-seals frames it receives</li><li>30 fps reference for all per-second / % -of-core figures</li><li>membership-change rekey is PROJECTED from the real hybrid-KEM primitive — the substrate does not implement it yet (CIRISEdge#129); steady-state cost is unaffected</li><li>crypto + wire-codec + persist spine (CIRISServer-owned); excludes the RNS network hop (bandwidth/RTT-bound) and codec encode/decode</li><li>100% hybrid PQC, hard cut — Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path</li></ul>
+
+<details><summary>Raw criterion means (36)</summary>
+<table><tr><th>bench</th><th>mean</th></tr><tr><td>av_fanout_plan_50</td><td>15.405 µs</td></tr>
+<tr><td>av_frame_e2e/16384</td><td>7.065 µs</td></tr>
+<tr><td>av_frame_e2e/262144</td><td>112.272 µs</td></tr>
+<tr><td>av_frame_e2e/320</td><td>0.951 µs</td></tr>
+<tr><td>av_frame_e2e/4096</td><td>2.372 µs</td></tr>
+<tr><td>av_frame_e2e/65536</td><td>27.241 µs</td></tr>
+<tr><td>av_frame_halves/open/16384</td><td>3.080 µs</td></tr>
+<tr><td>av_frame_halves/open/262144</td><td>48.985 µs</td></tr>
+<tr><td>av_frame_halves/open/320</td><td>0.452 µs</td></tr>
+<tr><td>av_frame_halves/open/4096</td><td>1.125 µs</td></tr>
+<tr><td>av_frame_halves/open/65536</td><td>12.792 µs</td></tr>
+<tr><td>av_frame_halves/open_64KiB</td><td>12.361 µs</td></tr>
+<tr><td>av_frame_halves/seal/16384</td><td>3.258 µs</td></tr>
+<tr><td>av_frame_halves/seal/262144</td><td>56.775 µs</td></tr>
+<tr><td>av_frame_halves/seal/320</td><td>0.514 µs</td></tr>
+<tr><td>av_frame_halves/seal/4096</td><td>1.214 µs</td></tr>
+<tr><td>av_frame_halves/seal/65536</td><td>12.776 µs</td></tr>
+<tr><td>av_frame_halves/seal_64KiB</td><td>12.802 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/2</td><td>6.507 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/50</td><td>162.927 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/8</td><td>25.978 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/2</td><td>4.787 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/50</td><td>78.574 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/8</td><td>14.020 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/2</td><td>134.567 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/50</td><td>3405.314 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/8</td><td>543.160 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/2</td><td>67.523 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/50</td><td>411.945 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/8</td><td>203.095 µs</td></tr>
+<tr><td>pqc_kex/classical_initiate</td><td>39.588 µs</td></tr>
+<tr><td>pqc_kex/classical_respond</td><td>39.104 µs</td></tr>
+<tr><td>pqc_kex/hybrid_initiate</td><td>68.210 µs</td></tr>
+<tr><td>pqc_kex/hybrid_respond</td><td>93.655 µs</td></tr>
+<tr><td>replication_ingest/ingest_dedup</td><td>205.788 µs</td></tr>
+<tr><td>replication_ingest/ingest_new</td><td>230.610 µs</td></tr></table></details>
+
+<footer>CIRISServer · benches/pqc_av_streaming.rs + replication_ingest.rs ·
+commit localtest · 2026-06-16 ·
+<a href="https://github.com/CIRISAI/CIRISServer/blob/main/FSD/PQC_AV_STREAMING_BENCH.md">methodology</a></footer>
+</body></html>
