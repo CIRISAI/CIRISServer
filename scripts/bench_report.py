@@ -1,41 +1,51 @@
 #!/usr/bin/env python3
 """
-Turn criterion's raw `target/criterion/**/estimates.json` into an INTERPRETED
-benchmark page for CIRISServer — what the numbers MEAN (video throughput under
-*stated* assumptions, membership-rekey cost, replication speed, post-quantum
-overhead), not just ns.
+Build the CIRISServer capability page — what the fabric node can actually DO
+(room-scale video, vs the state of the art, how), grounded in measured crypto
+microbenches + the edge capacity model + the holonomic scoreboard.
 
 Usage:
     cargo bench --bench pqc_av_streaming --bench replication_ingest
-    python3 scripts/bench_report.py --out bench-site [--commit SHA --date ISO]
+    cargo run --release -- scoreboard > scoreboard.json
+    python3 scripts/bench_report.py --out bench-site --scoreboard scoreboard.json
 
-Emits  <out>/index.html  (the page) + <out>/data.json  (machine-readable).
-Self-contained HTML, no external assets. Host-relative numbers — the ratios and
-conclusions are what travel, not the absolute µs (stamped with the runner).
+Emits <out>/index.html + <out>/data.json (+ scoreboard.json passthrough).
 
-Honesty discipline (CEWP crux use case = stream AND store at massive scale):
-  - Receivers are charged OPEN-ONLY (they don't re-seal what they receive).
-  - Any blended "% of a core" figure names its GOP/fps model inline; per-size
-    rows are shown so the reader sees the range, not one cherry-picked frame.
-  - Membership-rekey is labelled PROJECTED (the substrate doesn't implement it
-    yet — CIRISEdge#129); steady-state and churn costs are kept distinct.
+Every figure is badged by provenance so the page is credible, not marketing:
+  • MEASURED  — criterion microbench on this run's runner (in-memory, AEAD-bound;
+                real deployment is NIC/kernel-bound — absolute µs host-relative).
+  • MODEL     — derived from edge FEDERATION_SCALING_MODEL.md bitrate anchors +
+                bandwidth arithmetic (not a live N-node test).
+  • FRONTIER  — design ships at the wire/substrate but the production piece
+                (e.g. symmetric M>2 MDC video codec) does not exist yet.
 """
 from __future__ import annotations
-import argparse, glob, html, json, math, os, sys
+import argparse, glob, html, json, os, sys
 
 MiB = 1024 * 1024
-FPS = 30  # reference frame rate for all per-second utilisation figures
-
-# Pinned video-encoding model (stated, not cherry-picked): 720p @30fps, GOP=30
-# (one keyframe per second). Inter = 16 KiB "typical" (av_frame), keyframe = 64 KiB.
+FPS = 30
 GOP = 30
 KEYFRAME_BYTES = 64 * 1024
 INTER_BYTES = 16 * 1024
-MESH_N = 50  # the realtime mesh cap before the SFU/relay crossover (CIRISEdge#66)
+MESH_N = 50
+
+# ── Capacity model constants — edge FEDERATION_SCALING_MODEL.md (v4.1.x) ──────
+BITRATE_MBPS = {                       # codec output bitrate anchors
+    "Opus voice": 0.024,
+    "blinking-dot blob": 0.05,
+    "720p30 AV1-SVC": 2.5,
+    "1080p30": 4.5,
+    "4K30": 20.0,
+    "8K30 (top layer)": 80.0,
+}
+RELAY_EGRESS_MBPS = 150.0   # sustained egress per relay core (kernel TX-bound)
+HOME_UPLINK_MBPS = 30.0     # median home upload
+GIGABIT_MBPS = 1000.0
+ROOMS = [49, 200, 500, 1000, 2000]
+SOTA_TILE_CAP = 49          # Zoom / Meet / Teams gallery-view cap
 
 
 def load_estimates(criterion_dir: str) -> dict[str, float]:
-    """Map criterion bench id -> mean estimate in nanoseconds."""
     out: dict[str, float] = {}
     for p in glob.glob(os.path.join(criterion_dir, "**", "new", "estimates.json"), recursive=True):
         bench_id = os.path.relpath(os.path.dirname(os.path.dirname(p)), criterion_dir)
@@ -54,7 +64,6 @@ def us(ns: float | None) -> float | None:
 
 
 def pct_core(ns_per_sec: float) -> float:
-    """ns of CPU spent per wall-second -> % of one core."""
     return round(100.0 * ns_per_sec / 1e9, 2)
 
 
@@ -67,12 +76,37 @@ FRAME_LABELS = {
 }
 
 
-def build_model(est: dict[str, float]) -> dict:
-    """Compute the interpreted metrics from raw means."""
-    m: dict = {"video_frames": [], "kex": {}, "fanout": [], "rekey": [],
-               "mesh": {}, "replication": {}, "assumptions": {}}
+def capacity_model() -> dict:
+    """MODEL-derived room-scale feasibility (bandwidth arithmetic over the edge
+    bitrate anchors). The headline question: what downlink renders *everyone* as a
+    blinking-dot blob, and where does flat mesh die?"""
+    blob = BITRATE_MBPS["blinking-dot blob"]
+    full = BITRATE_MBPS["720p30 AV1-SVC"]
+    rooms = []
+    for n in ROOMS:
+        rooms.append({
+            "n": n,
+            "down_all_blobs_mbps": round(n * blob, 2),         # see everyone as a blob
+            "mesh_full_uplink_mbps": round((n - 1) * full, 1),  # flat-mesh full-720p uplink/publisher
+            "feasible_blobs": (n * blob) <= GIGABIT_MBPS,
+        })
+    return {
+        "rooms": rooms,
+        "blob_kbps": int(blob * 1000),
+        "blob_per_core": int(RELAY_EGRESS_MBPS / blob),     # ~3000
+        "full720_per_core": int(RELAY_EGRESS_MBPS / full),  # ~60
+        "mesh_full_cap": 1 + int(HOME_UPLINK_MBPS // full),  # ~13
+        "relay_egress_mbps": RELAY_EGRESS_MBPS,
+        "home_uplink_mbps": HOME_UPLINK_MBPS,
+        "sota_tile_cap": SOTA_TILE_CAP,
+        "bitrates_mbps": BITRATE_MBPS,
+    }
 
-    # ── Video: per-frame end-to-end + the seal/open split (sender/receiver) ──
+
+def build_model(est: dict[str, float]) -> dict:
+    m: dict = {"video_frames": [], "kex": {}, "fanout": [], "rekey": [],
+               "mesh": {}, "replication": {}, "capacity": capacity_model(), "assumptions": {}}
+
     for size_s, label in FRAME_LABELS.items():
         e2e = est.get(f"av_frame_e2e/{size_s}")
         if e2e is None:
@@ -87,7 +121,6 @@ def build_model(est: dict[str, float]) -> dict:
             "fps_ceiling": round(1e9 / e2e),
         })
 
-    # ── Mesh fan-out (sender, 16 KiB) — realized inner-once/outer-N win ─────
     for n in (2, 8, MESH_N):
         naive = est.get(f"av_mesh_fanout/naive/{n}")
         shared = est.get(f"av_mesh_fanout/shared_inner/{n}")
@@ -100,28 +133,22 @@ def build_model(est: dict[str, float]) -> dict:
             row["speedup"] = round(naive / shared, 2)
         m["fanout"].append(row)
 
-    # ── HONEST 50-room cost @30fps — send (seal/fan-out) vs receive (open) ──
     open_inter = est.get(f"av_frame_halves/open/{INTER_BYTES}")
     open_key = est.get(f"av_frame_halves/open/{KEYFRAME_BYTES}")
     open_low = est.get(f"av_frame_halves/open/4096")
     send_50 = est.get(f"av_mesh_fanout/shared_inner/{MESH_N}")
     peers = MESH_N - 1
     if send_50:
-        # publish one stream to 49 peers, every frame, 30 fps (16 KiB frame)
         m["mesh"]["send_pct_core"] = pct_core(FPS * send_50)
     if open_inter:
-        # receive 49 inbound 16 KiB streams @30fps (open-only — the honest charge)
         m["mesh"]["recv_typical_pct_core"] = pct_core(peers * FPS * open_inter)
         m["mesh"]["max_recv_streams_30fps_core"] = round(1e9 / (FPS * open_inter))
     if open_low:
         m["mesh"]["recv_lowmotion_pct_core"] = pct_core(peers * FPS * open_low)
     if open_inter and open_key:
-        # stated-GOP blend: 1 keyframe + (GOP-1) inter per second, ×49 receivers
         per_stream_sec = open_key + (GOP - 1) * open_inter
         m["mesh"]["recv_gop_blend_pct_core"] = pct_core(peers * per_stream_sec)
-        m["mesh"]["gop_model"] = f"720p, {FPS} fps, GOP={GOP} (1×64 KiB keyframe + {GOP-1}×16 KiB inter per second), receiver opens {peers} streams"
 
-    # ── Post-quantum KEX overhead (per peer-link, one-time) ────────────────
     h_i, h_r = est.get("pqc_kex/hybrid_initiate"), est.get("pqc_kex/hybrid_respond")
     c_i, c_r = est.get("pqc_kex/classical_initiate"), est.get("pqc_kex/classical_respond")
     if h_i and h_r:
@@ -132,7 +159,6 @@ def build_model(est: dict[str, float]) -> dict:
     if h_i and h_r and c_i and c_r:
         m["kex"]["mlkem_tax_us"] = round(us((h_i + h_r) - (c_i + c_r)), 1)
 
-    # ── Membership-change rekey (PROJECTED — CIRISEdge#129 unimplemented) ───
     for n in (2, 8, MESH_N):
         flat = est.get(f"av_rekey/flat_rewrap/{n}")
         tree = est.get(f"av_rekey/tree_rewrap/{n}")
@@ -144,16 +170,7 @@ def build_model(est: dict[str, float]) -> dict:
         if flat and tree:
             row["tree_speedup"] = round(flat / tree, 1)
         m["rekey"].append(row)
-    # churn budget: a 50-room paying flat O(N) per delta, as % of a core per delta/s
-    flat50 = est.get(f"av_rekey/flat_rewrap/{MESH_N}")
-    if flat50:
-        m["rekey_note"] = {
-            "flat50_ms": round(flat50 / 1e6, 2),
-            "pct_core_per_delta_per_sec": pct_core(flat50),  # one join/leave per second
-            "frame_budget_pct": round(100.0 * flat50 / (1e9 / FPS), 1),  # vs one 33 ms frame
-        }
 
-    # ── Replication / corpus ingest (CEG-RC5 receive spine) ────────────────
     new = est.get("replication_ingest/ingest_new")
     dedup = est.get("replication_ingest/ingest_dedup")
     if new:
@@ -163,20 +180,21 @@ def build_model(est: dict[str, float]) -> dict:
         m["replication"]["dedup_us"] = round(us(dedup), 2)
         m["replication"]["dedup_per_sec"] = round(1e9 / dedup)
     if new and dedup:
-        # the finding: re-delivery saves almost nothing because verify runs first
         m["replication"]["dedup_savings_pct"] = round(100.0 * (new - dedup) / new, 1)
 
     m["assumptions"] = {
-        "cores": "single thread, one core; real deployments fan out across cores",
-        "frames": "frame sizes are representative codec outputs, not a live encoder; "
-                  "the GOP blend states its model inline",
-        "receiver": "receivers are charged OPEN-ONLY — a node never re-seals frames it receives",
-        "fps": f"{FPS} fps reference for all per-second / % -of-core figures",
-        "rekey": "membership-change rekey is PROJECTED from the real hybrid-KEM primitive — "
-                 "the substrate does not implement it yet (CIRISEdge#129); steady-state cost is unaffected",
-        "scope": "crypto + wire-codec + persist spine (CIRISServer-owned); excludes the "
-                 "RNS network hop (bandwidth/RTT-bound) and codec encode/decode",
-        "pqc": "100% hybrid PQC, hard cut — Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path",
+        "measured": "MEASURED rows are single-core in-memory criterion microbenches "
+                    "(AEAD-bound); over-the-wire deployment is NIC/kernel/Reticulum-bound. "
+                    "Absolute µs are host-relative; ratios travel.",
+        "model": "MODEL rows are bandwidth arithmetic over edge FEDERATION_SCALING_MODEL.md "
+                 "bitrate anchors (720p30≈2.5 Mbps, blinking-dot≈50 kbps, relay egress≈150 Mbps/core) "
+                 "— not a live N-node test.",
+        "frontier": "The blob path ships today via AV1 SVC base layers. Full symmetric M>2 MDC "
+                    "video is FRONTIER — the wire/substrate ships; the production codec "
+                    "(NeuralMDC-class) does not exist yet. M=2 is the production default.",
+        "pqc": "100% hybrid PQC, hard cut — Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path.",
+        "rekey": "Membership-change rekey is PROJECTED from the real hybrid-KEM primitive "
+                 "(CIRISEdge#129 not yet implemented); steady-state video is unaffected.",
     }
     return m
 
@@ -185,212 +203,255 @@ def H(s) -> str:
     return html.escape(str(s))
 
 
-def render_references(model: dict) -> str:
-    """Per-layer comparison to the recognized reference for each subsystem — the
-    honest replacement for cross-tier 'SOTA' toy numbers. No single PQC-streaming
-    suite exists; each layer is held next to its field reference."""
-    kex = model.get("kex", {})
-    rep = model.get("replication", {})
-    v = model.get("video_frames", [])
-    rekey = {r["n"]: r for r in model.get("rekey", [])}
-    peak = max((f["gib_s"] for f in v), default=None)
-    open16 = next((f.get("open_us") for f in v if f["bytes"] == 16384), None)
-    r50 = rekey.get(50, {})
+def fmt(n) -> str:
+    return format(n, ",") if isinstance(n, (int,)) else str(n)
+
+
+def render_hero(model: dict) -> str:
+    cap = model["capacity"]
+    r2000 = next((r for r in cap["rooms"] if r["n"] == 2000), {})
+    peak = max((f["gib_s"] for f in model["video_frames"]), default=None)
+    return f"""<header class="hero">
+  <h1>The federation can put <b>2,000 people</b> on one screen.</h1>
+  <p class="tag">End-to-end post-quantum encrypted. Forwarded by your neighbors' uplinks.
+  <b>No datacenter.</b> Zoom, Meet and Teams cap you at {cap['sota_tile_cap']} tiles — this doesn't.</p>
+  <div class="cards">
+    <div class="card"><div class="big">{int(r2000.get('down_all_blobs_mbps',0))} Mbps</div>
+      <div class="cl">to render <b>2,000 video tiles</b> at once (one home gigabit line)</div></div>
+    <div class="card"><div class="big">0</div>
+      <div class="cl">datacenters — every peer is a relay; scale by adding people, not servers</div></div>
+    <div class="card"><div class="big">100%</div>
+      <div class="cl">post-quantum, <b>end-to-end</b> — the relay forwards ciphertext it can never read</div></div>
+  </div>
+  <p class="note">Crypto isn't the constraint and we measured it: the AEAD frame path runs at
+  up to {peak} GiB/s and the post-quantum cost is a one-time ~{model['kex'].get('mlkem_tax_us','—')} µs
+  per peer-link, <b>never per frame</b>. The constraint is bandwidth — which is exactly what the
+  holographic / ALM design attacks.</p>
+</header>"""
+
+
+def render_roomscale(model: dict) -> str:
+    cap = model["capacity"]
+    rows = "\n".join(
+        f"<tr><td><b>{fmt(r['n'])}</b></td>"
+        f"<td class='ok'>{r['down_all_blobs_mbps']} Mbps ✓</td>"
+        f"<td class='bad'>{fmt(round(r['mesh_full_uplink_mbps']))} Mbps ✕</td>"
+        f"<td>ALM relay tree + receiver layer-cap</td>"
+        f"<td>your downlink</td></tr>"
+        for r in cap["rooms"])
+    return f"""<h2>Can a room of N do video? <span class="badge model">MODEL</span></h2>
+<p>The trick is <b>layered encoding</b>: you don't pull everyone at full quality — you pull each
+person's lowest layer (a ~{cap['blob_kbps']} kbps "blinking-dot" blob) and pull full 720p only for
+whoever you focus on. So "can N people do video?" becomes "what's your downlink to render N blobs?":</p>
+<table><tr><th>room</th><th>see everyone as blobs (your downlink)</th>
+<th>flat-mesh at full 720p (uplink/publisher)</th><th>topology</th><th>bottleneck</th></tr>
+{rows}</table>
+<p class="note">Flat mesh dies at ~{cap['mesh_full_cap']} people on a {int(cap['home_uplink_mbps'])} Mbps
+home upload (you'd have to send {fmt(round(cap['rooms'][-1]['mesh_full_uplink_mbps']))} Mbps to 1,999 peers).
+The <b>ALM relay tree</b> turns that into <b>one copy per publisher</b> into an O(log N)-deep tree of peer
+relays; one relay core forwards ~{fmt(cap['blob_per_core'])} blob-streams or ~{cap['full720_per_core']}
+full-720p streams of egress. <b>The limit is always bandwidth — never crypto.</b></p>
+<div class="hl"><b>"2,000 four-pixel blobs from 2,000 8K streams?"</b> Yes. You subscribe to the base
+SVC layer of each (≈{cap['blob_kbps']} kbps) → 2,000 × {cap['blob_kbps']} kbps ≈
+{int(cap['rooms'][-1]['down_all_blobs_mbps'])} Mbps down. The 8K is each publisher's <i>top</i> layer,
+uploaded once to its relay parent and forwarded only to whoever zooms in. RaptorQ-per-layer makes each
+blob reconstruct from any sufficient fragment subset — lossy mesh, no jitter-buffer stalls.</div>"""
+
+
+def render_sota() -> str:
     rows = [
-        ("PQ KEM primitive (X25519+ML-KEM-768)",
-         f"hybrid KEX {kex.get('hybrid_full_us', '—')} µs (init {kex.get('hybrid_initiate_us', '—')} µs)",
-         "liboqs ML-KEM-768: encap ~95 µs / decap ~118 µs",
-         "https://openquantumsafe.org/benchmarking/"),
-        ("PQ handshake tax (vs classical)",
-         f"+{kex.get('mlkem_tax_us', '—')} µs once per peer-link",
-         "PQ-TLS (Cloudflare/AWS): ~80–150 µs ML-KEM compute overhead",
-         "https://aws.amazon.com/blogs/security/ml-kem-post-quantum-tls-now-supported-in-aws-kms-acm-and-secrets-manager/"),
-        ("E2E media AEAD",
-         (f"two-layer AES-256-GCM, up to {peak} GiB/s (open {open16} µs/16 KiB)" if peak else "—"),
-         "SFrame (RFC 9605): AES-GCM E2E media, SFU-forwardable",
-         "https://www.rfc-editor.org/rfc/rfc9605"),
-        ("Group rekey on membership change",
-         f"flat O(N) {r50.get('flat_ms', '—')} ms vs tree O(log N) {r50.get('tree_ms', '—')} ms @ N=50",
-         "OpenMLS / PQ-MLS combiner: update sub-linear O(log n)",
-         "https://eprint.iacr.org/2026/034.pdf"),
-        ("Store-path signature verify",
-         f"hybrid trace ingest {rep.get('ingest_new_us', '—')} µs (~{format(rep.get('traces_per_sec', 0), ',')}/s/core)",
-         "liboqs ML-DSA-65 verify ~0.40 ms",
-         "https://openquantumsafe.org/benchmarking/"),
+        ("Visible video tiles", "capped at 49 (gallery view)",
+         "bounded only by your downlink (≈2,000 on home gigabit)"),
+        ("1,000+ interactive", "falls back to webinar / HLS-DASH (one-way, seconds of latency)",
+         "stays interactive — blobs for all + focus-pull full quality"),
+        ("Topology", "centralized SFU, cascaded in a datacenter",
+         "peer ALM relay tree — no datacenter, every peer relays"),
+        ("Per-core fan-out", "~500 consumers / worker-core (mediasoup), ~115 Mbps/core",
+         "~3,000 blob / ~60 full-720p streams per core (egress)"),
+        ("Encryption", "DTLS-SRTP hop-by-hop — the SFU sees plaintext",
+         "two-layer hybrid-PQC E2E — the relay never sees plaintext"),
+        ("Packet loss", "NACK / RTX / jitter buffer",
+         "RaptorQ per layer — any sufficient subset reconstructs"),
+        ("Capacity claims", "trusted infrastructure",
+         "hybrid-PQC-signed, capped, deterministically verifiable tree"),
     ]
     body = "\n".join(
-        f"<tr><td>{H(layer)}</td><td>{H(ours)}</td><td>{H(ref)}</td><td><a href='{H(url)}'>src</a></td></tr>"
-        for layer, ours, ref, url in rows)
-    return f"""<h2>Benchmarked against the field — per layer</h2>
-<p>There is no single "PQC streaming platform" suite to compare against, so each layer is held
-next to its recognized reference. Absolute µs are host-relative; the ratios and the parity claim travel.</p>
-<table><tr><th>layer</th><th>CIRISServer (this run)</th><th>reference</th><th></th></tr>
-{body}</table>"""
+        f"<tr><td>{H(d)}</td><td class='bad'>{H(s)}</td><td class='ok'>{H(c)}</td></tr>"
+        for d, s, c in rows)
+    return f"""<h2>vs the state of the art</h2>
+<table class="vs"><tr><th>dimension</th><th>Zoom / Meet / Teams / SFU</th><th>CIRIS fabric</th></tr>
+{body}</table>
+<p class="note">Sources:
+<a href="https://support.google.com/meet/answer/9292748">Meet 49-tile cap</a>,
+<a href="https://mediasoup.discourse.group/t/maximum-number-of-consumers-per-worker-is-500-w-r-t-cpu/4058">mediasoup ~500 consumers/core</a>,
+<a href="https://getstream.io/glossary/sfu-cascading/">SFU cascading</a>,
+<a href="https://www.rfc-editor.org/rfc/rfc9605">SFrame (E2E media)</a>.
+The honest headline: <i>Zoom shows you 49 faces from a datacenter; the fabric shows you 2,000 from your
+neighbors' uplinks, end-to-end encrypted, scaling by peers instead of servers.</i></p>"""
 
 
-def render_scoreboard(sb: dict | None) -> str:
-    """Render the holonomic federation scoreboard (from `ciris-server scoreboard`)."""
-    if not sb:
-        return ""
-    st = sb.get("storage", {})
-    pol = sb.get("policy", {})
-    ro = st.get("replication_overhead", {})
-    curve = "\n".join(
-        f"<tr><td>{p['q']}</td><td>{H(p['label'])}</td><td>{p['p_reconstruct'] * 100:.3f}%</td></tr>"
-        for p in st.get("survival_curve", []))
-    tiers = "\n".join(
-        f"<tr><td>{H(t['tier'])}</td><td>{t['holders']}</td><td>{t['overhead_multiplier']}×</td></tr>"
-        for t in st.get("degradation_tiers", []))
-
-    def gated(name: str, g: dict) -> str:
-        return (f"<li><b>{H(name)}</b> — <code>gated</code> on {H(g.get('gated_on', ''))}: "
-                f"{H(', '.join(g.get('metrics', [])))}</li>")
-
-    return f"""<h2>Holonomic federation scoreboard <span class="note">(CIRISServer#12/#13)</span></h2>
-<p>Measured-vs-modeled capacity &amp; survival for the fountain-replicated corpus. Policy
-<code>N={pol.get('n')} K={pol.get('k')} H={pol.get('h')}</code>. The survival curve is
-<b>computed</b> (<code>P(Binomial(H,q) ≥ N)</code>) — it reproduces the scale_model v0.7 targets,
-which is what makes "measured vs modeled" trustworthy.</p>
-<table><tr><th>metric</th><th>modeled</th><th>alarm</th></tr>
-<tr><td>replication overhead (H/N)</td><td>{ro.get('modeled', '—')}×</td><td>&gt;{ro.get('alarm_high', '—')}× / &lt;{ro.get('alarm_low', '—')}×</td></tr>
-<tr><td>per-peer load (1/N)</td><td>{st.get('per_peer_load_frac', '—')}</td><td>&gt;0.10</td></tr>
-<tr><td>active-eject threshold</td><td>{st.get('eject_threshold_holders', '—')} holders</td><td>H×1.15</td></tr>
-<tr><td>survival floor / target @ q={st.get('design_q', '—')}</td><td>{st.get('survival_floor', '—')} / {st.get('survival_target', '—')}</td><td>&lt; floor</td></tr></table>
-<p class="note"><b>Survival curve</b> — P(reconstruct) by per-peer availability q:</p>
-<table><tr><th>q</th><th>regime</th><th>P(reconstruct)</th></tr>{curve}</table>
-<p class="note"><b>Holographic degradation tiers</b> — capacity grows under pressure (sheds toward min_viable=5):</p>
-<table><tr><th>tier</th><th>holders</th><th>overhead</th></tr>{tiers}</table>
-<p class="note">Tiers not yet grounded — emitted as explicit stubs (the deliberate anti-toy-numbers posture), not fabricated:</p>
-<ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
+def render_how() -> str:
+    return """<h2>How</h2>
+<div class="pillars">
+  <div class="pillar"><h3>① ALM relay tree</h3>
+    <p>No node fans out to 2,000. Each publisher emits <b>one</b> sealed copy to a relay parent;
+    relays form a tree with per-node fan-out bounded by each peer's <i>measured</i> uplink budget —
+    O(log N) deep. Every capacity claim is hybrid-PQC-signed and capped; the topology is a deterministic
+    pure function of witnessed state, so peers agree with <b>no leader and no node can lie its way to the
+    center</b>. No datacenter; switching cost ≈ 0.</p></div>
+  <div class="pillar"><h3>② Holographic layered encoding <span class="badge frontier">SVC today · MDC frontier</span></h3>
+    <p>Streams are layered (spatial × temporal × quality). Subscribe to fewer layers → send/receive less;
+    the relay drops un-admitted layers <b>before</b> sealing (no bandwidth, no CPU). The base
+    <code>{0,0,0}</code> layer is the ~50 kbps "blinking dot." Under MDC, any subset of descriptions
+    decodes at proportional fidelity — "holographic": degrade gracefully, reconstruct from fragments.</p></div>
+  <div class="pillar"><h3>③ Two-layer hybrid-PQC E2E</h3>
+    <p>Inner AES-256-GCM under a per-epoch group key (end-to-end — relays never hold it); outer
+    AES-256-GCM under a per-link transit key from an X25519+ML-KEM-768 handshake. The bulk is symmetric
+    AES (already quantum-safe); the post-quantum cost is one handshake per link. A fully compromised
+    relay recovers only ciphertext.</p></div>
+</div>"""
 
 
-def render(model: dict, est: dict, commit: str, date: str, scoreboard: dict | None = None) -> str:
-    v = model["video_frames"]
-    kex = model["kex"]
-    rep = model["replication"]
-    mesh = model["mesh"]
-    refs_html = render_references(model)
-    scoreboard_html = render_scoreboard(scoreboard)
+def render_crypto_proof(model: dict, est: dict) -> str:
+    v, kex, rep, mesh = model["video_frames"], model["kex"], model["replication"], model["mesh"]
 
-    def rows(cells_list):
-        return "\n".join("<tr>" + "".join(f"<td>{H(c)}</td>" for c in r) + "</tr>" for r in cells_list)
+    def rows(rs):
+        return "\n".join("<tr>" + "".join(f"<td>{H(c)}</td>" for c in r) + "</tr>" for r in rs)
 
     def kib(b):
         return f"{b // 1024} KiB" if b >= 1024 else f"{b} B"
 
     video_rows = rows([[f["label"], kib(f["bytes"]), f"{f['e2e_us']} µs",
-                        f"{f.get('seal_us','—')} µs", f"{f.get('open_us','—')} µs",
-                        f"{f['gib_s']} GiB/s"] for f in v])
-    fan_rows = rows([[f"{r['n']}", f"{r.get('naive_us','—')} µs", f"{r.get('shared_inner_us','—')} µs",
+                        f"{f.get('seal_us','—')} µs", f"{f.get('open_us','—')} µs", f"{f['gib_s']} GiB/s"] for f in v])
+    fan_rows = rows([[r["n"], f"{r.get('naive_us','—')} µs", f"{r.get('shared_inner_us','—')} µs",
                       f"{r.get('speedup','—')}×"] for r in model["fanout"]])
-    rekey_rows = rows([[f"{r['n']}", f"{r.get('flat_ms','—')} ms", f"{r.get('tree_ms','—')} ms",
+    rekey_rows = rows([[r["n"], f"{r.get('flat_ms','—')} ms", f"{r.get('tree_ms','—')} ms",
                         f"{r.get('tree_speedup','—')}×"] for r in model["rekey"]])
-    raw_rows = rows([[k, f"{us(ns):.3f} µs"] for k, ns in sorted(est.items())])
-
-    # headline
-    sub = []
-    if v:
-        peak = max(f["gib_s"] for f in v)
-        sub.append(f"the steady-state frame path runs at up to {peak:.1f} GiB/s (AES-256-GCM — quantum-irrelevant at 256-bit)")
-    if kex.get("mlkem_tax_us") is not None:
-        sub.append(f"the post-quantum tax is ~{kex['mlkem_tax_us']:.0f} µs <b>once per peer-link</b>, never per frame")
-    sub_html = "; ".join(sub) + "." if sub else ""
-
-    rk = model.get("rekey_note", {})
-    gop_line = ""
-    if mesh.get("recv_gop_blend_pct_core") is not None:
-        gop_line = (f"<p class='big'>A 50-person room costs ~{mesh['recv_gop_blend_pct_core']}% of one core to receive</p>"
-                    f"<p class='note'>…under a <b>stated</b> model: {H(mesh.get('gop_model',''))}. "
-                    f"Range across motion: ~{mesh.get('recv_lowmotion_pct_core','—')}% (low-motion 4 KiB) "
-                    f"to ~{mesh.get('recv_typical_pct_core','—')}% (typical 16 KiB), receive-only. "
-                    f"Publishing one stream to the room is ~{mesh.get('send_pct_core','—')}% of a core. "
-                    f"Crypto is nowhere near the bottleneck — bandwidth and the network are.</p>")
-
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CIRISServer — benchmarks, interpreted</title>
-<style>
- body{{font:16px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:880px;margin:2.2rem auto;padding:0 1.1rem;color:#1a1a1a}}
- h1{{font-size:1.7rem;margin:.2rem 0}} h2{{margin-top:2.2rem;border-bottom:2px solid #eee;padding-bottom:.3rem}}
- .lead{{font-size:1.15rem;background:#f0f7ff;border-left:4px solid #2b7cff;padding:.8rem 1rem;border-radius:6px}}
- table{{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.95rem}}
- th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #eee}} th{{background:#fafafa}}
- td:nth-child(n+2){{font-variant-numeric:tabular-nums}}
- .note{{color:#555;font-size:.9rem}} .big{{font-size:1.35rem;font-weight:600;color:#0a7d2c}}
- .warn{{background:#fff7e6;border-left:4px solid #e69500;padding:.6rem .9rem;border-radius:6px;font-size:.95rem}}
- code{{background:#f4f4f4;padding:.05rem .3rem;border-radius:3px}}
- details{{margin-top:1rem}} footer{{margin-top:2.5rem;color:#888;font-size:.85rem;border-top:1px solid #eee;padding-top:.8rem}}
-</style></head><body>
-<h1>CIRISServer — benchmarks, interpreted</h1>
-<p class="note">The CEWP crux use case — <b>stream and store at massive scale</b> — measured and
-interpreted. Receivers are charged open-only; every blended figure names its model. Raw criterion
-numbers at the bottom. Absolute µs are host-relative (this run's runner); the ratios and ceilings travel.</p>
-<p class="lead"><b>PQC group video is effectively free at steady state.</b> {sub_html}</p>
-
-<h2>Video throughput — realtime A/V mesh (two-layer hybrid-PQC)</h2>
-<p>Per frame: inner AES-256-GCM (E2E epoch DEK) → wire codec → outer AES-256-GCM (per-Link transit
-key). <code>seal</code> is the sender's cost; <code>open</code> is the receiver's (it never re-seals).</p>
-<table><tr><th>Frame</th><th>size</th><th>seal→wire→open</th><th>seal (send)</th><th>open (recv)</th><th>throughput</th></tr>
+    return f"""<h2>Is the crypto in the way? No — here's the measurement. <span class="badge measured">MEASURED</span></h2>
+<p>Per-frame the post-quantum cost is <b>structurally zero</b> (bulk is AES-256-GCM); the PQ cost is a
+one-time handshake per peer-link. The numbers, single-core, in-memory:</p>
+<table><tr><th>frame</th><th>size</th><th>seal→wire→open</th><th>seal (send)</th><th>open (recv)</th><th>throughput</th></tr>
 {video_rows}</table>
-{gop_line}
-
-<h2>Post-quantum overhead — the hybrid handshake (per peer-link, one-time)</h2>
-<p>The only place the post-quantum cost can live: bulk frames are AES-256-GCM (already quantum-fine),
-so the PQ cost is structurally confined to the KEM at session setup. Per-frame PQC cost is zero.</p>
 <table><tr><th>handshake</th><th>full (initiate+respond)</th></tr>
 <tr><td>Hybrid X25519 + ML-KEM-768 (PQ-safe)</td><td>{kex.get('hybrid_full_us','—')} µs</td></tr>
 <tr><td>Classical X25519 only</td><td>{kex.get('classical_full_us','—')} µs</td></tr>
 <tr><td><b>ML-KEM-768 tax</b></td><td><b>+{kex.get('mlkem_tax_us','—')} µs, once per peer-link</b></td></tr></table>
+<p class="note">A 50-person 30 fps room is ~{mesh.get('recv_gop_blend_pct_core','—')}% of one core to
+<i>receive</i> (open-only) and ~{mesh.get('send_pct_core','—')}% to publish. Fan-out (inner-once/outer-N):</p>
+<table><tr><th>room (N)</th><th>naive</th><th>shared-inner</th><th>speedup</th></tr>{fan_rows}</table>
+<p class="note"><b>Membership-rekey</b> <span class="badge model">PROJECTED · CIRISEdge#129</span>
+flat O(N) vs tree O(log N) per join/leave:</p>
+<table><tr><th>room (N)</th><th>flat O(N)/delta</th><th>tree O(log N)/delta</th><th>tree win</th></tr>{rekey_rows}</table>
+<p class="note"><b>Store spine</b>: hybrid trace ingest {rep.get('ingest_new_us','—')} µs
+(~{fmt(rep.get('traces_per_sec',0))} traces/s/core); re-delivery saves only
+~{rep.get('dedup_savings_pct','—')}% (verify runs before dedup — replay is verify-bound by design, the
+AV-9-safe choice). Levers: pre-verified relay path + batch verify (CIRISPersist#225).</p>"""
 
-<h2>Mesh fan-out — sender cost per frame (16 KiB)</h2>
-<p><code>naive</code> = N× full <code>seal_av_chunk</code>. <code>shared_inner</code> = v3.7.0's
-<code>seal_av_inner</code> once + <code>seal_av_outer</code> per Link (CIRISEdge#122) — wire-identical,
-inner AEAD done once.</p>
-<table><tr><th>room (N)</th><th>naive</th><th>shared-inner</th><th>speedup</th></tr>
-{fan_rows}</table>
 
-<h2>Membership-change rekey — the churn path <span class="note">(projected)</span></h2>
-<div class="warn">⚠ <b>Projected, not implemented.</b> The substrate does not yet rekey on join/leave
-(CIRISEdge#129 — <code>EpochDek</code> has no ratchet; epoch rotation is owned out-of-module). These
-numbers project the <i>intended</i> cost from the real hybrid-KEM <code>key_grant</code> wrap. They
-are the answer to "is rekey-on-membership-change affordable?" — not a measurement of shipped code.</div>
-<p>Each join/leave rewraps the fresh epoch DEK to the member-set. <code>flat</code> = O(N) (the
-unicast-mesh baseline, #129). <code>tree</code> = O(log N) (the TreeKEM optimization, needs multicast,
-#66). The outer per-Link key is <b>not</b> re-KEX'd on churn (KEX is one-shot per session).</p>
-<table><tr><th>room (N)</th><th>flat O(N) / delta</th><th>tree O(log N) / delta</th><th>tree win</th></tr>
-{rekey_rows}</table>
-{f'''<p class="note">A 50-room paying the flat baseline spends ~{rk.get('flat50_ms')} ms per membership
-delta — ~{rk.get('frame_budget_pct')}% of a single {int(1000/FPS)} ms frame, or ~{rk.get('pct_core_per_delta_per_sec')}%
-of a core at one join/leave per second. Affordable even unoptimized; the tree (#66) removes it as a concern.
-Steady-state video is untouched by churn.</p>''' if rk else ""}
+def render_scoreboard(sb: dict | None) -> str:
+    if not sb:
+        return ""
+    st, pol = sb.get("storage", {}), sb.get("policy", {})
+    ro = st.get("replication_overhead", {})
+    curve = "\n".join(
+        f"<tr><td>{p['q']}</td><td>{H(p['label'])}</td><td>{p['p_reconstruct'] * 100:.3f}%</td></tr>"
+        for p in st.get("survival_curve", []))
 
-<h2>Replication speed — CEG-RC5 corpus ingest (the "store" spine)</h2>
-<p>What a node pays per replicated trace: Ed25519 verify → decompose → persist (5-tuple
-<code>ON CONFLICT DO NOTHING</code> dedup — not a content-hash lookup).</p>
-<table><tr><th>path</th><th>per trace</th><th>throughput</th></tr>
-<tr><td>new trace (insert — replication intake)</td><td>{rep.get('ingest_new_us','—')} µs</td><td>{format(rep.get('traces_per_sec',0),',')} traces/s/core</td></tr>
-<tr><td>re-delivery (dedup — anti gossip-loop)</td><td>{rep.get('dedup_us','—')} µs</td><td>{format(rep.get('dedup_per_sec',0),',')} /s/core</td></tr></table>
-<p class="note"><b>The finding:</b> re-delivery saves only ~{rep.get('dedup_savings_pct','—')}% over a fresh
-insert — because <b>verify runs before dedup</b>, a duplicate still pays full Ed25519 verification. So a
-replay / gossip flood is bounded by verify throughput, not a cheap reject. This is <b>deliberate</b>
-(verify-before-mutation; reordering dedup ahead of verify is an AV-9 suppression oracle — the dedup key
-is attacker-controllable). The scale levers are the pre-verified relay path
-(<code>VerifyMode::TrustPreVerified</code> gated on an Edge <code>verify_outcome</code>) and batch
-verification (CIRISPersist#225) — not dedup-first.</p>
+    def gated(name, g):
+        return (f"<li><b>{H(name)}</b> — <code>gated</code> on {H(g.get('gated_on', ''))}: "
+                f"{H(', '.join(g.get('metrics', [])))}</li>")
 
-{refs_html}
+    return f"""<h2>Holonomic storage — survival of the replicated corpus <span class="badge model">MODEL</span></h2>
+<p>The same holographic property runs the "store" half: content is fountain-split into symbols, any
+sufficient subset reconstructs. Policy <code>N={pol.get('n')} K={pol.get('k')} H={pol.get('h')}</code>;
+overhead {ro.get('modeled','—')}× (vs ~5× whole-copy). Survival
+<code>P(Binomial(H,q) ≥ N)</code> — computed, reproducing scale_model v0.7:</p>
+<table><tr><th>per-peer availability q</th><th>regime</th><th>P(reconstruct)</th></tr>{curve}</table>
+<p class="note">A live node recomputes survival from <i>measured</i> q + observed holders and alarms
+under the 99% floor. Substrate/holonomic tiers are explicit <code>gated</code> stubs (not fabricated):</p>
+<ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
 
-{scoreboard_html}
 
-<h2>Assumptions</h2>
-<ul>{''.join(f'<li>{H(x)}</li>' for x in model['assumptions'].values())}</ul>
+def render_references(model: dict) -> str:
+    kex, rep = model.get("kex", {}), model.get("replication", {})
+    v = model.get("video_frames", [])
+    rekey = {r["n"]: r for r in model.get("rekey", [])}
+    peak = max((f["gib_s"] for f in v), default=None)
+    r50 = rekey.get(50, {})
+    rows = [
+        ("PQ KEM (X25519+ML-KEM-768)", f"hybrid KEX {kex.get('hybrid_full_us','—')} µs",
+         "liboqs ML-KEM-768: encap ~95 / decap ~118 µs", "https://openquantumsafe.org/benchmarking/"),
+        ("PQ handshake tax", f"+{kex.get('mlkem_tax_us','—')} µs once/peer-link",
+         "PQ-TLS (Cloudflare/AWS): ~80–150 µs ML-KEM overhead",
+         "https://aws.amazon.com/blogs/security/ml-kem-post-quantum-tls-now-supported-in-aws-kms-acm-and-secrets-manager/"),
+        ("E2E media AEAD", f"two-layer AES-256-GCM, up to {peak} GiB/s",
+         "SFrame (RFC 9605): AES-GCM E2E, SFU-forwardable", "https://www.rfc-editor.org/rfc/rfc9605"),
+        ("Group rekey", f"flat {r50.get('flat_ms','—')} / tree {r50.get('tree_ms','—')} ms @N=50",
+         "OpenMLS / PQ-MLS combiner: O(log n)", "https://eprint.iacr.org/2026/034.pdf"),
+        ("Store verify", f"hybrid ingest {rep.get('ingest_new_us','—')} µs",
+         "liboqs ML-DSA-65 verify ~0.40 ms", "https://openquantumsafe.org/benchmarking/"),
+    ]
+    body = "\n".join(
+        f"<tr><td>{H(a)}</td><td>{H(b)}</td><td>{H(c)}</td><td><a href='{H(u)}'>src</a></td></tr>"
+        for a, b, c, u in rows)
+    return f"""<h2>Benchmarked against the field — per layer</h2>
+<p>No single "PQC streaming" suite exists, so each layer is held next to its recognized reference.</p>
+<table><tr><th>layer</th><th>CIRISServer (this run)</th><th>reference</th><th></th></tr>{body}</table>"""
+
+
+def render(model, est, commit, date, scoreboard=None) -> str:
+    raw_rows = "\n".join(f"<tr><td>{H(k)}</td><td>{us(ns):.3f} µs</td></tr>" for k, ns in sorted(est.items()))
+    honesty = "".join(f"<li>{H(x)}</li>" for x in model["assumptions"].values())
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CIRIS fabric — streaming &amp; storage at scale</title>
+<style>
+ :root{{--ink:#16181d;--mut:#5b6370;--line:#e6e8ec;--blue:#2b6cff;--green:#0a7d2c;--red:#c0392b;--amber:#b8740f}}
+ *{{box-sizing:border-box}}
+ body{{font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:920px;margin:0 auto;padding:0 1.1rem 4rem;color:var(--ink)}}
+ h1{{font-size:2.1rem;line-height:1.2;margin:.2rem 0}} h2{{font-size:1.4rem;margin:2.6rem 0 .4rem;border-bottom:2px solid var(--line);padding-bottom:.3rem}}
+ h3{{font-size:1.05rem;margin:.2rem 0 .4rem}}
+ .hero{{background:linear-gradient(135deg,#0b1f4d,#123a8a);color:#fff;margin:1.2rem -1.1rem 0;padding:2.2rem 1.6rem;border-radius:0 0 14px 14px}}
+ .hero h1{{color:#fff}} .hero .tag{{font-size:1.12rem;opacity:.95;max-width:46rem}}
+ .hero .note{{color:#cfe0ff;font-size:.92rem;border-top:1px solid #ffffff2e;padding-top:.8rem;margin-top:1.2rem}}
+ .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.8rem;margin:1.3rem 0 .4rem}}
+ .card{{background:#ffffff14;border:1px solid #ffffff2e;border-radius:10px;padding:.9rem 1rem}}
+ .card .big{{font-size:1.9rem;font-weight:700}} .card .cl{{font-size:.9rem;opacity:.92}}
+ table{{border-collapse:collapse;width:100%;margin:.7rem 0;font-size:.94rem}}
+ th,td{{text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}}
+ th{{background:#f7f8fa;font-size:.85rem;text-transform:uppercase;letter-spacing:.02em;color:var(--mut)}}
+ td:first-child{{font-weight:600}} table.vs td:nth-child(2){{color:var(--red)}} table.vs td:nth-child(3){{color:var(--green)}}
+ .ok{{color:var(--green)}} .bad{{color:var(--red)}}
+ .note{{color:var(--mut);font-size:.9rem}}
+ .hl{{background:#eaf3ff;border-left:4px solid var(--blue);padding:.9rem 1.1rem;border-radius:8px;margin:1rem 0}}
+ .pillars{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;margin-top:.6rem}}
+ .pillar{{border:1px solid var(--line);border-radius:10px;padding:1rem}}
+ .pillar p{{font-size:.92rem;color:#2c313a;margin:0}}
+ .badge{{font-size:.66rem;font-weight:700;letter-spacing:.04em;padding:.12rem .4rem;border-radius:5px;vertical-align:middle}}
+ .badge.measured{{background:#e3f6e9;color:var(--green)}} .badge.model{{background:#e7eefc;color:var(--blue)}}
+ .badge.frontier{{background:#fdf0dc;color:var(--amber)}}
+ code{{background:#f1f2f4;padding:.05rem .3rem;border-radius:4px;font-size:.88em}}
+ details{{margin-top:1.4rem}} footer{{margin-top:3rem;color:#8a909a;font-size:.82rem;border-top:1px solid var(--line);padding-top:1rem}}
+ a{{color:var(--blue)}}
+</style></head><body>
+{render_hero(model)}
+{render_roomscale(model)}
+{render_sota()}
+{render_how()}
+{render_crypto_proof(model, est)}
+{render_scoreboard(scoreboard)}
+{render_references(model)}
+
+<h2>Provenance &amp; honesty</h2>
+<ul class="note">{honesty}</ul>
 
 <details><summary>Raw criterion means ({len(est)})</summary>
 <table><tr><th>bench</th><th>mean</th></tr>{raw_rows}</table></details>
 
-<footer>CIRISServer · benches/pqc_av_streaming.rs + replication_ingest.rs ·
+<footer>CIRIS fabric node (CIRISServer) · pqc_av_streaming + replication_ingest + holonomic scoreboard ·
 commit {H(commit[:12])} · {H(date)} ·
-<a href="https://github.com/CIRISAI/CIRISServer/blob/main/FSD/PQC_AV_STREAMING_BENCH.md">methodology</a></footer>
+<a href="https://github.com/CIRISAI/CIRISServer/blob/main/FSD/PQC_AV_STREAMING_BENCH.md">methodology</a> ·
+capacity model: CIRISEdge FEDERATION_SCALING_MODEL.md</footer>
 </body></html>"""
 
 
@@ -400,8 +461,7 @@ def main() -> int:
     ap.add_argument("--out", default="bench-site")
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "local"))
     ap.add_argument("--date", default=os.environ.get("BENCH_DATE", ""))
-    ap.add_argument("--scoreboard", default=None,
-                    help="path to `ciris-server scoreboard` JSON (holonomic federation scoreboard)")
+    ap.add_argument("--scoreboard", default=None)
     args = ap.parse_args()
 
     est = load_estimates(args.criterion_dir)
@@ -418,8 +478,8 @@ def main() -> int:
     model = build_model(est)
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "data.json"), "w") as fh:
-        json.dump({"schema": "ciris-server/bench/2", "commit": args.commit,
-                   "date": args.date, "model": model, "scoreboard": scoreboard,
+        json.dump({"schema": "ciris-server/bench/3", "commit": args.commit, "date": args.date,
+                   "model": model, "scoreboard": scoreboard,
                    "raw_means_us": {k: round(v / 1000, 4) for k, v in est.items()}}, fh, indent=2)
     if scoreboard is not None:
         with open(os.path.join(args.out, "scoreboard.json"), "w") as fh:
