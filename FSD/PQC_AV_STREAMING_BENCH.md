@@ -87,7 +87,14 @@ E2E ciphertext survives arbitrary relay→relay hops. Now proven + measured:
 - **`tests/chaos_mesh.rs`** (CI-gated): **stream path-redundancy** — a chunk delivered
   over disjoint relay paths (ALM primary + 2 backups) decodes identically from any
   *surviving* path (kill all but one → the stream continues); and the **survival
-  floor** — any 20 of 30 fountain holders reconstruct (33% loss tolerance).
+  floor**, now a **real RaptorQ encode→drop→decode** (reference codec; the substrate
+  ships no fountain codec yet, so the substrate codec stays FRONTIER): content is
+  coded into H=30 holders (N=20 source-equiv), a third are killed, and the survivors
+  reconstruct it **byte-identical**. Measured reception overhead
+  (`report_fountain_overhead`, RaptorQ 2.0.1): **20/30 (33% loss) → 99.6%**,
+  **21/30 (30%) → 100% (2000/2000)**, 19/30 below the floor → never. This replaces
+  the old `(H−k) ≥ N` tautology; the q-availability survival *curve* in §scoreboard
+  stays MODEL (it's the swarm-availability assumption, not the codec).
 - **`benches/alm_chain.rs`**: **~437 ns / relay hop** (blob) · 3.18 µs (full 720p);
   end-to-end through 4 tiers ~2.7 µs (~0.44 µs/added tier). So a 2,000-room (3–4-tier
   tree) is ~10% of one core of relay forwarding — bandwidth, not CPU, is the limit.
@@ -95,26 +102,28 @@ E2E ciphertext survives arbitrary relay→relay hops. Now proven + measured:
 **The 2,000-stream / 5-viewer chaos harness (CIRISConformance#16) is the remaining
 design** — the in-process federation that fans 2,000 streams through 3–4 tiers to 5
 viewers each viewing all 2,000, asserting correctness at depth in GH CI (4 vCPU,
-<3 min). The streams-per-core math (still valid) shows it's CPU-trivial:
+<3 min). The publisher-seal slice is now **MEASURED** (no longer arithmetic):
 
-**How many streams can one core create (GH CI, in-memory)?** Seal is
-nonce-derivation-dominated:
+**Sustained multi-stream seal throughput (`benches/stream_fanout.rs`, MEASURED).**
+Sealing all N blob streams for one 30 fps frame-tick in a real loop (release,
+single core, host-relative):
 
-| op | per-frame | streams/core @30fps (theory · CI-throttled) |
+| N streams | seal time / 30fps tick | × 30 fps = core-fraction |
 |---|---|---|
-| `seal_av_inner` blob (~208 B) | ~1 µs | ~33,000 · ~20,000 |
-| `seal_av_inner` full 720p (~10 KiB) | ~3 µs | ~11,000 · ~7,000 |
-| `open_av_chunk` blob (viewer) | ~1 µs | ~33,000 · ~20,000 |
+| 500 | ~127 µs | ~0.4% of a core |
+| 1,000 | ~268 µs | ~0.8% of a core |
+| **2,000** | **~528 µs** | **~1.6% of a core** |
 
-So **2,000 blob streams is ~6–10% of one core** — the "50 streams/core × 40
-workers" instinct is ~400× conservative. Realistic CI layout: all 2,000 publishers
-on **1–2 cores** (or 500/core × 4); the tree + viewers on the rest.
+So **2,000 blob publishers seal in ~1.6% of one core** — measured ~0.26 µs/seal,
+*better* than the ~1 µs arithmetic estimate (the old "~6–10%" was conservative).
+The "50 streams/core × 40 workers" instinct is ~3,000× off.
 
-**CPU budget for the full 2,000 × 4-tier × 5-viewer blob sim @30fps:**
-- publishers: 2000 × 30 × 1 µs ≈ **6% of a core**
-- viewer-facing fan (5 viewers × 2000 streams): 10,000 outer-seals × 30 × ~0.7 µs ≈ **~21% of a core**; interior tiers similar order
-- viewers: 5 × 2000 × 30 × 1 µs ≈ **~30% of a core** (6% each)
-- **Total ≈ 1–2 cores** → fits GH CI's 4 vCPU with headroom, well under 3 min.
+**CPU budget for the full 2,000 × 4-tier × 5-viewer blob sim @30fps** (publisher
+seal MEASURED; the rest still MODEL-arithmetic from the per-op costs):
+- publishers: **~1.6% of a core** (MEASURED, `stream_fanout`)
+- viewer-facing fan (5 viewers × 2000 streams): 10,000 outer-seals × 30 × ~0.7 µs ≈ **~21% of a core** (MODEL); interior tiers similar order
+- viewers: 5 × 2000 × 30 × ~0.26 µs ≈ **~8% of a core** (MODEL, scaled to the measured per-seal)
+- **Total ≈ well under 1 core for seals** → fits GH CI's 4 vCPU with headroom, well under 3 min.
 
 **The harness's value is correctness-at-depth, not a CPU limit** (in-memory has no
 egress — the real-world limit is donated bandwidth, §2–§3). The chain primitive that
@@ -122,10 +131,18 @@ backbone rests on is already *proven* above; the harness extends it to the full
 2,000-stream / 5-viewer fan-out.
 
 ## 5. Provenance & honesty
-- **MEASURED**: §1 — in-memory criterion, AEAD-bound; wire is NIC/kernel-bound.
-- **MODEL**: §2–§4 — bandwidth arithmetic over the scaling toys, not a live N-node test.
+- **MEASURED**: §1 (crypto path, AEAD-bound; wire is NIC/kernel-bound); the multi-tier
+  relay chain (`benches/alm_chain.rs`, `tests/alm_chain.rs`); **stream path-redundancy
+  + the fountain survival floor** via real RaptorQ encode→drop→decode
+  (`tests/chaos_mesh.rs` — 99.6% @ 20/30, 100% @ 21/30); and **sustained multi-stream
+  seal throughput** (`benches/stream_fanout.rs` — 2,000 streams ≈ 1.6% of a core).
+  *Caveat:* the fountain proof uses the **RaptorQ reference codec** (dev-dep); the
+  substrate ships no fountain codec yet, so the **substrate** codec stays FRONTIER.
+- **MODEL**: §2–§3 bandwidth/probability arithmetic (room scale, supply ledger, tier
+  depth, the q-availability survival curve) — not a live N-node test.
 - **FRONTIER**: the blob path ships via AV1 SVC base layers; symmetric M>2 MDC video
   is the design ceiling (NeuralMDC-class codec does not exist yet; M=2 is the
-  production default). Membership rekey is projected (CIRISEdge#129). The multi-tier
-  relay chain is **shipped + proven** (CIRISEdge#149, edge v4.2.0; §4); the
-  2,000-stream chaos harness (CIRISConformance#16) is the remaining design.
+  production default). The **substrate fountain codec** (we prove the property with
+  the RaptorQ reference) and **membership rekey** (CIRISEdge#129) are projected. The
+  multi-tier relay chain is **shipped + proven** (CIRISEdge#149, edge v4.2.0; §4); the
+  full 2,000-stream chaos harness (CIRISConformance#16) is the remaining design.

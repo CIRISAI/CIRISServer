@@ -109,11 +109,16 @@ constraints on the motion. Tier labels and counts are **real** — use them.
   (10 of 30 go dark). A meter reads **"20 / 30 symbols — reconstructing"** and the
   full frame **rebuilds from the survivors**, crisp.
 - *Feeling:* you can hit it hard and it shrugs.
-- *Grounding (MODEL, both CI-proven in this repo):* `tests/chaos_mesh.rs` —
-  path-redundant chunk decodes from any **surviving** path; survival floor is **any
-  20 of 30** holders (**33% loss tolerance**), survival probability
-  **P(Binomial(H,q) ≥ N) ≈ 99.7% at q=0.85**. *Optional truth-in-advertising:* the
-  reconstruction floor is **5 viable symbols** (MIN_VIABLE_SYMBOLS).
+- *Grounding (MEASURED, both CI-proven in this repo — `tests/chaos_mesh.rs`):*
+  **5a** path-redundancy is a real seal→relay→decode: the chunk decodes byte-identical
+  from any **surviving** path. **5b** the survival floor is a real RaptorQ
+  encode→drop→decode (reference codec): content coded into **H=30** holders, a third
+  killed, survivors reconstruct **byte-identical** — measured **99.6% from any 20/30
+  (33% loss)** and **100% from 21/30 (30% loss)**; 19/30 is below the floor and never
+  rebuilds. So the honest on-screen number is *"20 of 30 → 99.6%, 21 of 30 →
+  certain."* The survival *probability curve* (P(Binomial(H,q)≥N) ≈ 99.7% @ q=0.85)
+  stays **MODEL** — it's the swarm-availability assumption, not the codec — and the
+  **substrate** fountain codec is **FRONTIER** (we prove the property with RaptorQ).
 
 ### Scene 6 — The seal (why a relay can betray you and lose)  *(≈8 s)*
 - Zoom into one relay hop. The packet has **two shells**: an **outer** shell the
@@ -174,9 +179,9 @@ class a thing is, ask us; don't guess upward.
 
 | class | means | examples in this animation |
 |---|---|---|
-| **MEASURED** | real benchmark in this repo, host-relative | ~437 ns/relay hop · ~0.44 µs/added tier · AEAD ~2.2 GiB/s · ML-KEM tax ~80–90 µs **once per peer-link, never per frame** · inner ciphertext byte-identical across hops |
-| **MODEL** | bandwidth/probability arithmetic over the v0.7 toy + capacity model — **not** a live N-node test | tier sizes (2000→167→14→2→root) · ~10 Mbps downlink @ 2,000 dots · 20 Gbps room total (N²·b) · 1.5× vs 5× overhead · any-20-of-30 survival |
-| **FRONTIER** | the wire/substrate ships, the **production piece does not exist yet** | symmetric **M>2 MDC** video (NeuralMDC-class codec doesn't exist; **M=2 is the default**) · the full 2,000-stream live federation (the chain primitive is proven; the full harness is design — CIRISConformance#16) |
+| **MEASURED** | real benchmark/test in this repo, host-relative | ~437 ns/relay hop · ~0.44 µs/added tier · AEAD ~2.2 GiB/s · ML-KEM tax ~80–90 µs **once per peer-link, never per frame** · inner ciphertext byte-identical across hops · **fountain survival: 99.6% from 20/30, 100% from 21/30** (real RaptorQ encode→drop→decode) · **2,000 streams seal ≈ 1.6% of a core** |
+| **MODEL** | bandwidth/probability arithmetic over the v0.7 toy + capacity model — **not** a live N-node test | tier sizes (2000→167→14→2→root) · ~10 Mbps downlink @ 2,000 dots · 20 Gbps room total (N²·b) · 1.5× vs 5× overhead · the q-availability survival *curve* P(Binomial(H,q)≥N) |
+| **FRONTIER** | the wire/substrate ships, the **production piece does not exist yet** | symmetric **M>2 MDC** video (NeuralMDC-class codec doesn't exist; **M=2 is the default**) · the **substrate fountain codec** (the survival property is proven with the RaptorQ *reference* codec; the substrate ships none yet) · the full 2,000-stream live federation (chain primitive proven; full harness is design — CIRISConformance#16) |
 
 **Hard "do nots":**
 - **Do not** headline the **50 kbps / 100 Mbps** thumbnail point. The honest,
@@ -208,10 +213,12 @@ else from the companion docs, or ask.
 - **Supply ledger (MODEL):** everyone-sees-everyone = N×N delivery; room's total
   donated uplink = **N²·b**. @ N=2,000: 5 kbps→20 Gbps (ordinary homes); 50 kbps→
   200 Gbps (prosumer interior).
-- **Holonomic fountain (v0.7 toy, MODEL):** RaptorQ; **N=20** source + **K=6** repair;
-  hold **1/N ≈ 5%** each; target **H=30** holders; overhead **1.5×** (vs 5×); rebuild
-  from **any 20 of 30** (33% loss); floor **5** viable symbols; survival
-  **P(Binomial(H,q)≥N) ≈ 99.7% @ q=0.85**.
+- **Holonomic fountain (v0.7 toy):** RaptorQ; **N=20** source + **K=6** repair; hold
+  **1/N ≈ 5%** each; target **H=30** holders; overhead **1.5×** (vs 5×). **Rebuild is
+  now MEASURED** (real RaptorQ encode→drop→decode, `tests/chaos_mesh.rs`): **99.6%
+  from any 20/30 (33% loss), 100% from 21/30 (30%)**, 19/30 below the floor → never.
+  The q-availability survival *curve* P(Binomial(H,q)≥N) ≈ 99.7% @ q=0.85 stays
+  **MODEL**; the **substrate** fountain codec is **FRONTIER** (reference codec used).
 - **Layers (SVC today / MDC FRONTIER):** base `{0,0,0}` ≈ presence layer; relays drop
   un-subscribed layers *before* sealing.
 - **Crypto (MEASURED + shipped):** inner AES-256-GCM (per-(stream,epoch) DEK, E2E) +

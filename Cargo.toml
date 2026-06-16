@@ -134,6 +134,14 @@ criterion     = { version = "0.5", features = ["async_tokio"] }
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
 ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.9.0", version = "5", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa"] }
+# RaptorQ (RFC 6330) reference codec — dev/test ONLY. The substrate ships no
+# fountain codec yet (edge v4.2.0 / persist v8.2.0 expose only the AV seal/open
+# + reachability primitives; the toy's `fountain_defaults` are policy constants).
+# We use the reference codec to PROVE the survival-floor property empirically
+# (encode → drop a third → reconstruct byte-identical) instead of asserting the
+# `(H-killed) >= N` tautology. Badged "MEASURED (RaptorQ reference) · substrate
+# codec FRONTIER" — NOT a shipped primitive of this crate.
+raptorq       = "2"
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
@@ -149,6 +157,13 @@ harness = false
 # cost; the E2E byte-survival invariant is gated in tests/alm_chain.rs.
 [[bench]]
 name = "alm_chain"
+harness = false
+
+# Sustained multi-stream seal throughput — measures the actual core-fraction to
+# seal N blob streams @30fps in a real loop (promotes the page's "2,000 blob
+# streams ≈ 6-10% of a core" from arithmetic to MEASURED).
+[[bench]]
+name = "stream_fanout"
 harness = false
 
 [profile.release]
