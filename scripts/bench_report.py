@@ -118,7 +118,7 @@ def capacity_model() -> dict:
 
 
 def build_model(est: dict[str, float]) -> dict:
-    m: dict = {"video_frames": [], "kex": {}, "fanout": [], "rekey": [],
+    m: dict = {"video_frames": [], "kex": {}, "fanout": [], "rekey": [], "chain": {},
                "mesh": {}, "replication": {}, "capacity": capacity_model(), "assumptions": {}}
 
     for size_s, label in FRAME_LABELS.items():
@@ -195,6 +195,23 @@ def build_model(est: dict[str, float]) -> dict:
         m["replication"]["dedup_per_sec"] = round(1e9 / dedup)
     if new and dedup:
         m["replication"]["dedup_savings_pct"] = round(100.0 * (new - dedup) / new, 1)
+
+    # ── ALM relay chain (per-hop + per-depth; CIRISEdge#149 open_av_outer) ──
+    hop_blob = est.get("alm_chain_hop/208")
+    hop_full = est.get("alm_chain_hop/16384")
+    if hop_blob:
+        m["chain"]["hop_blob_ns"] = round(hop_blob, 1)
+    if hop_full:
+        m["chain"]["hop_full_us"] = round(us(hop_full), 2)
+    e2e = {}
+    for t in (1, 2, 3, 4):
+        v = est.get(f"alm_chain_e2e_blob/tiers/{t}")
+        if v:
+            e2e[str(t)] = round(us(v), 2)
+    if e2e:
+        m["chain"]["e2e_by_tier_us"] = e2e
+        if "1" in e2e and "4" in e2e:
+            m["chain"]["per_tier_added_us"] = round((e2e["4"] - e2e["1"]) / 3, 3)
 
     m["assumptions"] = {
         "measured": "MEASURED rows are single-core in-memory criterion microbenches "
@@ -322,19 +339,24 @@ The honest headline: <i>Zoom shows you 49 faces from a datacenter; the fabric sh
 neighbors' uplinks, end-to-end encrypted, scaling by peers instead of servers.</i></p>"""
 
 
-def render_how() -> str:
-    return """<h2>How</h2>
+def render_how(model: dict) -> str:
+    ch = model.get("chain", {})
+    chain_line = (f" <b>Measured</b> (CIRISEdge#149 <code>open_av_outer</code>): ~{ch.get('hop_blob_ns', '—')} ns CPU "
+                  f"per relay hop, ~{ch.get('per_tier_added_us', '—')} µs added per tier "
+                  f"(<code>benches/alm_chain.rs</code>); the inner E2E ciphertext is byte-identical across "
+                  f"arbitrary hops (<code>tests/chaos_mesh.rs</code>).") if ch else ""
+    return f"""<h2>How</h2>
 <div class="pillars">
   <div class="pillar"><h3>① ALM relay tree</h3>
     <p>No node fans out to 2,000. Each publisher emits <b>one</b> sealed copy to a relay parent;
     relays form a tree with per-node fan-out bounded by each peer's <i>measured</i> uplink budget —
-    O(log N) deep. Every capacity claim is hybrid-PQC-signed and capped; the topology is a deterministic
-    pure function of witnessed state, so peers agree with <b>no leader and no node can lie its way to the
-    center</b>. No datacenter; switching cost ≈ 0.</p></div>
+    O(log N) deep, primary + 2 backup parents. Every capacity claim is hybrid-PQC-signed and capped; the
+    topology is a deterministic pure function of witnessed state, so peers agree with <b>no leader and no
+    node can lie its way to the center</b>. No datacenter; switching cost ≈ 0.{chain_line}</p></div>
   <div class="pillar"><h3>② Holographic layered encoding <span class="badge frontier">SVC today · MDC frontier</span></h3>
     <p>Streams are layered (spatial × temporal × quality). Subscribe to fewer layers → send/receive less;
     the relay drops un-admitted layers <b>before</b> sealing (no bandwidth, no CPU). The base
-    <code>{0,0,0}</code> layer is the ~50 kbps "blinking dot." Under MDC, any subset of descriptions
+    <code>{{0,0,0}}</code> layer is the ~50 kbps "blinking dot." Under MDC, any subset of descriptions
     decodes at proportional fidelity — "holographic": degrade gracefully, reconstruct from fragments.</p></div>
   <div class="pillar"><h3>③ Two-layer hybrid-PQC E2E</h3>
     <p>Inner AES-256-GCM under a per-epoch group key (end-to-end — relays never hold it); outer
@@ -404,6 +426,55 @@ under the 99% floor. Substrate/holonomic tiers are explicit <code>gated</code> s
 <ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
 
 
+def badge_cls(prov: str) -> str:
+    if prov.startswith("MEASURED"):
+        return "measured"
+    if prov.startswith("FRONTIER"):
+        return "frontier"
+    return "model"  # MODEL, PROJECTED
+
+
+def render_characteristics(model: dict, scoreboard: dict | None) -> str:
+    """The UX-facing spec: the envelope the substrate guarantees, with provenance."""
+    cap = model["capacity"]
+    ch = model.get("chain", {})
+    rk = {r["n"]: r for r in model.get("rekey", [])}
+    r2000 = next((r for r in cap["rooms"] if r["n"] == 2000), {})
+    sb = scoreboard or {}
+    sv = next((p["p_reconstruct"] * 100 for p in sb.get("storage", {}).get("survival_curve", [])
+               if p["q"] == 0.85), None)
+    rk50 = rk.get(50, {})
+    survival = (f"{sv:.1f}% @ q=0.85 · survives 33% holder loss" if sv
+                else "survives 33% holder loss (any 20 of 30)")
+    rows = [
+        ("Presence blob", f"~{cap['blob_kbps']} kbps / stream", "MODEL",
+         f"max tiles ≈ your downlink ÷ {cap['blob_kbps']} kbps (~{int(r2000.get('down_all_blobs_mbps', 0))} Mbps → 2,000)"),
+        ("Focus stream (full 720p)", "2.5 Mbps", "MODEL",
+         "one full view ≈ 50 blobs of bandwidth — focus-pull on tap"),
+        ("Per relay hop", f"~{ch.get('hop_blob_ns', '—')} ns CPU + 1 RTT", "MEASURED",
+         "a depth-d tree adds d network hops to glass-to-glass latency"),
+        ("Tree depth at N", "3–4 tiers @ 2,000 (ceil log_f N)", "MODEL",
+         "budget ~3–4 added RTT at the largest rooms"),
+        ("Join / membership rekey", f"flat {rk50.get('flat_ms', '—')} ms · tree {rk50.get('tree_ms', '—')} ms / delta", "PROJECTED",
+         "join-latency budget; gated CIRISEdge#129"),
+        ("Stream path-redundancy", "survives loss of all-but-one of 3 paths", "MEASURED",
+         "presence holds through relay churn — no reconnect flicker"),
+        ("Content survival", survival, "MODEL",
+         "recordings & corpus persist through node churn — a 'durable' affordance"),
+        ("Encryption", "E2E hybrid-PQC, ~0 per-frame", "MEASURED",
+         "no quality/feature tradeoff for E2E; relays forward ciphertext they can't read"),
+    ]
+    body = "\n".join(
+        f"<tr><td>{H(c)}</td><td><b>{H(g)}</b></td>"
+        f"<td><span class='badge {badge_cls(p)}'>{H(p)}</span></td><td>{H(u)}</td></tr>"
+        for c, g, p, u in rows)
+    return f"""<h2>Guaranteed mesh characteristics <span class="note">— build the UX against these</span></h2>
+<p>The envelope the substrate guarantees, with provenance. A UX can rely on these directly — what a device
+renders at a given downlink, how presence degrades, what survives node churn — without re-deriving the physics.</p>
+<table><tr><th>characteristic</th><th>guarantee</th><th>basis</th><th>UX implication</th></tr>
+{body}</table>"""
+
+
 def render_references(model: dict) -> str:
     kex, rep = model.get("kex", {}), model.get("replication", {})
     v = model.get("video_frames", [])
@@ -469,7 +540,8 @@ def render(model, est, commit, date, scoreboard=None) -> str:
 {render_hero(model)}
 {render_roomscale(model)}
 {render_sota()}
-{render_how()}
+{render_how(model)}
+{render_characteristics(model, scoreboard)}
 {render_crypto_proof(model, est)}
 {render_scoreboard(scoreboard)}
 {render_references(model)}

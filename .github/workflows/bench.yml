@@ -52,7 +52,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run benches (criterion)
-        run: cargo bench --bench pqc_av_streaming --bench replication_ingest
+        run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain
       - name: Generate holonomic scoreboard (CIRISServer#12/#13)
         run: cargo run --release --quiet -- scoreboard > scoreboard.json
       - name: Generate interpreted page

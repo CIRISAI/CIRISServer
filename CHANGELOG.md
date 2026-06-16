@@ -25,6 +25,17 @@ Substrate floor → **v4.2.0 family** + the **multi-tier ALM relay chain** test
     end-to-end through 4 tiers ~2.7 µs (≈0.44 µs/added tier). So 2,000 blob streams
     × 4 tiers @30 fps ≈ ~10% of one core of relay forwarding — confirming the limit
     is donated bandwidth, not CPU (FSD §3–§4).
+- **`tests/chaos_mesh.rs` — resilience proofs.** Stream **path-redundancy**: a
+  chunk reaches a viewer over disjoint relay paths (ALM primary + 2 backups); any
+  *surviving* path yields the identical plaintext — kill all but one and the stream
+  continues, no re-publish. And the **survival floor**: any 20 of 30 fountain
+  holders reconstruct → 33% holder-loss tolerance.
+- **Bench page → "Guaranteed mesh characteristics" (the UX spec).** Each guarantee
+  — presence-blob (50 kbps) / focus-stream (2.5 Mbps) bandwidth, per-relay-hop +
+  tree-depth latency, join/rekey cost, path-redundancy, content survival, E2E-PQC
+  (~0/frame) — with a provenance badge (MEASURED / MODEL / PROJECTED) and a UX
+  implication, so the UX is built against guaranteed envelopes. `alm_chain` wired
+  into `bench.yml`; the ALM pillar now carries the measured per-hop/per-tier cost.
 
 ## [0.2.5] — 2026-06-16
 
