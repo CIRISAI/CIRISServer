@@ -26,22 +26,40 @@
 //!
 //! # Auth model
 //!
-//! Every endpoint requires federation-signed request headers:
-//! - `X-Lens-Signing-Key-Id: <key_id>`
-//! - `X-Lens-Signature: <hex-ed25519-sig>`
-//! - `X-Lens-Signed-At: <RFC-3339>`
+//! The read API reuses the substrate's existing federation
+//! request-auth contract — the SAME hybrid Ed25519 + ML-DSA-65
+//! scheme `ciris-persist`'s secrets server uses (no new crypto
+//! primitive is invented here). Requests carry these headers:
+//! - `x-ciris-signing-key-id: <federation_keys.key_id>`
+//! - `x-ciris-signature-ed25519: <base64-ed25519-sig>`
+//! - `x-ciris-signature-ml-dsa-65: <base64-ml-dsa-65-sig>` (optional;
+//!   required under `HybridPolicy::Strict`)
 //!
-//! The axum auth middleware calls
-//! `engine.verify_hybrid_via_directory(...)` on the request canonical
-//! bytes and then checks the `key_id` against the `PeerAcl`. Requests
-//! that fail either step receive `401 LensQueryError::UnauthorizedSignature`.
+//! The **canonical bytes are the request BODY**. These are GET
+//! requests, so the body is empty and canonicalizes as `b""` — this
+//! matches persist's contract, which signs the body and explicitly
+//! handles the empty-body case. Read clients (KMP / portal) MUST
+//! therefore sign the empty-body request with these `x-ciris-*`
+//! headers for the authenticated path to succeed.
 //!
-//! For the v0.4 implementation the auth middleware is **present but
-//! advisory** — it validates headers when present and rejects with 401
-//! when signatures fail to verify. A missing `X-Lens-Signing-Key-Id`
-//! header on a non-auth-critical deployment is a configuration choice
-//! left to the operator's `PeerAcl`; `AllowAll` skips the key-ID
-//! presence check for local-dev.
+//! The [`require_federation_signature`] middleware enforces this:
+//!
+//! - `PeerAcl::AllowAll` → **open passthrough** (the documented
+//!   local-dev / open posture). No signature is required.
+//! - any other `PeerAcl` (a real ACL = production posture) →
+//!   1. missing `x-ciris-signing-key-id` / `x-ciris-signature-ed25519`
+//!      → `401 LensQueryError::UnauthorizedSignature`;
+//!   2. no `engine` to source the federation directory → `503`;
+//!   3. hybrid verify (`verify_hybrid_via_directory` over the empty
+//!      body, with the configured [`HybridPolicy`], default
+//!      [`HybridPolicy::Strict`]) fails → `401`;
+//!   4. `key_id` not permitted by the `PeerAcl` → `403`;
+//!   5. otherwise the request passes through to the handler.
+//!
+//! `HybridPolicy::Strict` is the project's hard-cut default: there is
+//! no classical-only path. Operators mid-PQC-rollout may set
+//! `HybridPolicy::Ed25519Fallback` (matching persist's own
+//! secrets-server rollout posture).
 //!
 //! # Endpoints (frozen at v0.5.0 per #18)
 //!
@@ -59,13 +77,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use ciris_persist::derived::types::{DetectionEvent, DetectionSeverity, EventFilter};
-use ciris_persist::prelude::Engine;
+use ciris_persist::prelude::{verify_hybrid_via_directory, Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -85,18 +103,37 @@ pub(crate) struct NodeState {
     /// `None` is only valid in unit tests that exercise routes which
     /// do not call into the Engine (e.g. `/calibration_bundles`).
     pub(crate) engine: Option<Arc<Engine>>,
-    /// ACL applied after signature verify. Checked by the auth
-    /// middleware (`permits`) before dispatching to route handlers.
-    /// v0.4: middleware is present but advisory (AllowAll bypasses
-    /// the key-ID check post-verify); field is retained for the v0.5
-    /// strict-auth path. Suppressing the dead-code lint here because
-    /// the field IS part of the stable API shape (#15).
-    #[allow(dead_code)]
+    /// ACL applied after signature verify. The
+    /// [`require_federation_signature`] middleware checks `permits`
+    /// (step 4) once the hybrid signature verifies. `AllowAll` is the
+    /// open / local-dev passthrough: the middleware skips verification
+    /// entirely. Any other variant is the production posture and gates
+    /// every read on a valid federation-signed request.
     pub(crate) peer_acl: Arc<PeerAcl>,
+    /// Hybrid-verify posture for the auth middleware. Defaults to
+    /// [`HybridPolicy::Strict`] — the project's hard-cut: both
+    /// Ed25519 and ML-DSA-65 are required, no classical-only path.
+    /// Operators mid-PQC-rollout may set
+    /// [`HybridPolicy::Ed25519Fallback`] (matching persist's own
+    /// secrets-server rollout posture) via
+    /// [`NodeState::with_hybrid_policy`].
+    pub(crate) hybrid_policy: HybridPolicy,
     /// RATCHET version stamped onto responses.
     pub(crate) ratchet_version: i32,
     /// Frozen API root path prefix (e.g. `/lens/api/v1`).
     pub(crate) api_root: String,
+}
+
+impl NodeState {
+    /// Override the hybrid-verify policy (default
+    /// [`HybridPolicy::Strict`]). Kept as a setter so the public
+    /// `read_api` / `read_api_with_extra` constructors stay
+    /// non-breaking for existing call sites.
+    #[allow(dead_code)]
+    pub(crate) fn with_hybrid_policy(mut self, policy: HybridPolicy) -> Self {
+        self.hybrid_policy = policy;
+        self
+    }
 }
 
 // ─── Wire response types (frozen at v0.5.0 per #18) ───────────────
@@ -237,6 +274,20 @@ fn not_found(detail: impl Into<String>) -> (StatusCode, Json<LensQueryError>) {
     (
         StatusCode::NOT_FOUND,
         Json(LensQueryError::new("not_found").with_detail(detail)),
+    )
+}
+
+fn unauthorized_signature(detail: impl Into<String>) -> (StatusCode, Json<LensQueryError>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(LensQueryError::new("unauthorized_signature").with_detail(detail)),
+    )
+}
+
+fn forbidden_key(detail: impl Into<String>) -> (StatusCode, Json<LensQueryError>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(LensQueryError::new("forbidden").with_detail(detail)),
     )
 }
 
@@ -600,13 +651,124 @@ async fn get_calibration_bundle_by_version(
     .into_response()
 }
 
+// ─── Auth middleware ───────────────────────────────────────────────
+
+/// Header carrying the caller's `federation_keys.key_id`.
+/// Mirrors `ciris_persist::server::secrets::HEADER_KEY_ID`.
+const HEADER_KEY_ID: &str = "x-ciris-signing-key-id";
+/// Header carrying the base64 Ed25519 signature over the request body.
+const HEADER_ED25519: &str = "x-ciris-signature-ed25519";
+/// Header carrying the base64 ML-DSA-65 signature over the request
+/// body. Optional under `HybridPolicy::Ed25519Fallback`; required
+/// under the default `HybridPolicy::Strict`.
+const HEADER_ML_DSA_65: &str = "x-ciris-signature-ml-dsa-65";
+
+/// Federation-signed-request auth gate for the frozen read API.
+///
+/// Reuses the substrate's hybrid request-auth contract verbatim (the
+/// `x-ciris-*` headers + `verify_hybrid_via_directory`) — no new
+/// crypto primitive. See the module-level "Auth model" section for the
+/// full behavior. Middleware order + status codes:
+///
+/// 1. `PeerAcl::AllowAll` → passthrough (open / local-dev).
+/// 2. missing `x-ciris-signing-key-id` / `x-ciris-signature-ed25519`
+///    → `401`.
+/// 3. `engine` is `None` (no federation directory source) → `503`.
+/// 4. hybrid verify over the (empty) body fails → `401`.
+/// 5. `key_id` not permitted by the ACL → `403`.
+/// 6. otherwise → pass through to the handler.
+async fn require_federation_signature(
+    State(state): State<NodeState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // 1. AllowAll → open passthrough (documented local-dev posture).
+    if matches!(state.peer_acl.as_ref(), PeerAcl::AllowAll) {
+        return next.run(request).await;
+    }
+
+    // 2. Extract the mandatory signature headers.
+    let key_id = match headers.get(HEADER_KEY_ID).and_then(|v| v.to_str().ok()) {
+        Some(k) => k.to_owned(),
+        None => {
+            return unauthorized_signature(format!("missing {HEADER_KEY_ID} header"))
+                .into_response()
+        }
+    };
+    let ed25519 = match headers.get(HEADER_ED25519).and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return unauthorized_signature(format!("missing {HEADER_ED25519} header"))
+                .into_response()
+        }
+    };
+    let ml_dsa_65 = headers
+        .get(HEADER_ML_DSA_65)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned());
+
+    // 3. Require an Engine to source the federation directory.
+    let engine = match &state.engine {
+        Some(e) => e.clone(),
+        None => return engine_unavailable().into_response(),
+    };
+
+    // 4. Hybrid-verify over the request BODY. These are GET requests,
+    //    so the canonical bytes are empty (`b""`) — matches persist's
+    //    contract, which signs the body and handles the empty case.
+    //
+    //    `verify_hybrid_via_directory` is generic over a *Sized*
+    //    `F: FederationDirectory`, so we hand it the concrete
+    //    SqliteBackend handle (`&SqliteBackend`) rather than the
+    //    `Arc<dyn FederationDirectory>` `engine.federation_directory()`
+    //    returns (a `dyn` value is unsized and won't satisfy the
+    //    implicit `Sized` bound). lens-core is `sqlite`-featured and
+    //    the relay already reads `engine.sqlite_backend()` for the
+    //    shared directory — this is the same handle.
+    let directory = match engine.sqlite_backend() {
+        Some(b) => b.clone(),
+        None => return engine_unavailable().into_response(),
+    };
+    let outcome = verify_hybrid_via_directory(
+        &*directory,
+        b"",
+        &key_id,
+        &ed25519,
+        ml_dsa_65.as_deref(),
+        state.hybrid_policy,
+        None,
+    )
+    .await;
+    if let Err(e) = outcome {
+        tracing::warn!(
+            error = %e,
+            key_id = %key_id,
+            "lens read API rejected: signature verification failed"
+        );
+        return unauthorized_signature(format!("signature verification failed: {e}"))
+            .into_response();
+    }
+
+    // 5. ACL check on the verified key_id.
+    if !state.peer_acl.permits(&key_id) {
+        tracing::warn!(key_id = %key_id, "lens read API rejected: key not permitted by ACL");
+        return forbidden_key(format!("key {key_id} not permitted")).into_response();
+    }
+
+    // 6. Pass through.
+    next.run(request).await
+}
+
 // ─── Router builder ────────────────────────────────────────────────
 
 /// Build the axum router for the frozen public read API.
 ///
 /// The `api_root` prefix (e.g. `/lens/api/v1`) is prepended to each
 /// route path — handlers are mounted under the prefix via
-/// [`Router::nest`].
+/// [`Router::nest`]. The [`require_federation_signature`] auth gate is
+/// layered onto the nested router (so every `GET /lens/api/v1/*` route
+/// is gated before dispatch).
 pub(crate) fn build_read_router(state: NodeState) -> Router {
     let api_root = state.api_root.clone();
 
@@ -627,6 +789,10 @@ pub(crate) fn build_read_router(state: NodeState) -> Router {
             "/calibration_bundles/{version}",
             get(get_calibration_bundle_by_version),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_federation_signature,
+        ))
         .with_state(state);
 
     Router::new().nest(&api_root, nested)
@@ -719,6 +885,9 @@ impl LensCore {
         let state = NodeState {
             engine: Some(engine),
             peer_acl: Arc::new(peer_acl),
+            // Hard-cut PQC default. Operators mid-rollout can swap to
+            // Ed25519Fallback via NodeState::with_hybrid_policy.
+            hybrid_policy: HybridPolicy::Strict,
             ratchet_version: scoring.ratchet_calibration_version,
             api_root: ux.api_root.clone(),
         };
@@ -999,11 +1168,27 @@ mod tests {
     // so those route paths are also reachable in tests (400/404 paths
     // for bad input are caught before the engine check).
 
-    /// Build a test NodeState with no Engine (engine: None).
+    /// Build a test NodeState with no Engine (engine: None) and the
+    /// open `AllowAll` posture (auth passthrough).
     fn test_state(ratchet_version: i32) -> NodeState {
         NodeState {
             engine: None,
             peer_acl: Arc::new(PeerAcl::AllowAll),
+            hybrid_policy: HybridPolicy::Strict,
+            ratchet_version,
+            api_root: "/lens/api/v1".to_string(),
+        }
+    }
+
+    /// Build a test NodeState with a non-empty `AllowList` ACL — the
+    /// production posture that the auth gate enforces. `engine: None`
+    /// here exercises the middleware order: missing-header rejection
+    /// (401) happens BEFORE the engine check (503).
+    fn test_state_acl(ratchet_version: i32) -> NodeState {
+        NodeState {
+            engine: None,
+            peer_acl: Arc::new(PeerAcl::AllowList(vec!["allowed-key".to_string()])),
+            hybrid_policy: HybridPolicy::Strict,
             ratchet_version,
             api_root: "/lens/api/v1".to_string(),
         }
@@ -1140,5 +1325,112 @@ mod tests {
     async fn node_error_relay_variant_formats() {
         let err = NodeError::Relay(RelayError::NotSqliteBacked);
         assert!(err.to_string().contains("relay:"));
+    }
+
+    // ── Federation-signed-request auth gate ───────────────────────
+    //
+    // Prove the door is CLOSED. Middleware order (see
+    // `require_federation_signature`):
+    //   1. AllowAll                → passthrough (no signature needed)
+    //   2. missing key-id/ed25519  → 401
+    //   3. engine: None            → 503
+    //   4. hybrid verify fails     → 401
+    //   5. key_id not in ACL       → 403
+    // The missing-header (401) check runs BEFORE the engine check, so
+    // `engine: None` + AllowList still yields 401 for a header-less
+    // request. The bad-signature (401) check runs AFTER the engine
+    // check, so that test supplies a real in-memory Engine whose
+    // directory has no matching key → `verify_unknown_key` → 401.
+
+    /// AllowAll posture: a header-less GET passes the auth gate
+    /// (returns NOT 401 — here a 503 from `engine: None`, never 401).
+    #[tokio::test]
+    async fn allow_all_passes_through_without_signature() {
+        let router = build_read_router(test_state(0));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/lens/api/v1/scores")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Passed the gate: engine: None → 503 (NOT 401). The point is
+        // the auth middleware did not reject the unsigned request.
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Configured ACL posture: a request with NO auth headers is
+    /// rejected with 401 before the engine is even consulted.
+    #[tokio::test]
+    async fn configured_acl_rejects_missing_signature() {
+        let router = build_read_router(test_state_acl(0));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/lens/api/v1/scores")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: LensQueryError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "unauthorized_signature");
+    }
+
+    /// Configured ACL posture: a request with a key-id + garbage
+    /// Ed25519 signature is rejected with 401 (the directory has no
+    /// such key → `verify_unknown_key`, so hybrid verify fails).
+    #[tokio::test]
+    async fn configured_acl_rejects_bad_signature() {
+        use ciris_persist::prelude::{Engine, LocalSigner};
+        use ed25519_dalek::SigningKey;
+
+        // In-memory Engine with an EMPTY federation directory — no key
+        // is registered, so verify_hybrid_via_directory returns
+        // `verify_unknown_key`. Deterministic; no real crypto needed.
+        let signing_key = SigningKey::from_bytes(&[0x11u8; 32]);
+        let signer = Arc::new(LocalSigner::from_parts(
+            signing_key,
+            "unused-engine-signer".to_string(),
+            None,
+            None,
+        ));
+        let engine = Engine::with_signer(signer, "sqlite::memory:")
+            .await
+            .expect("in-memory Engine");
+
+        let state = NodeState {
+            engine: Some(Arc::new(engine)),
+            peer_acl: Arc::new(PeerAcl::AllowList(vec!["allowed-key".to_string()])),
+            hybrid_policy: HybridPolicy::Strict,
+            ratchet_version: 0,
+            api_root: "/lens/api/v1".to_string(),
+        };
+        let router = build_read_router(state);
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/lens/api/v1/scores")
+                    .header(HEADER_KEY_ID, "allowed-key")
+                    .header(HEADER_ED25519, "bm90LWEtcmVhbC1zaWduYXR1cmU=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: LensQueryError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "unauthorized_signature");
     }
 }
