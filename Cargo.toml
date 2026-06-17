@@ -37,10 +37,32 @@ path = "src/main.rs"
 default = []
 # `python` pulls the PyO3 bindings (for the wheel). The binary builds WITHOUT it,
 # so a plain `cargo build` never links libpython.
-python = ["dep:pyo3", "dep:pyo3-async-runtimes", "ciris-lens-core/python"]
+# ONE-WHEEL RE-EXPORT (CIRISServer#4): `python` ALSO turns on the substrate
+# crates' OWN pyo3 surfaces (`ciris-persist/pyo3`, `ciris-edge/pyo3`) so their
+# `#[pyclass]`es compile into THIS cdylib — one `.so`, one PyO3 type registry,
+# so the persist `Engine` handed to edge is the SAME type both sides see (the
+# CIRISPersist#109 cross-wheel type-identity bug CANNOT occur). persist names its
+# feature `pyo3` (not `python`); edge likewise, and edge's `pyo3` already pulls
+# `ciris-persist/pyo3` transitively — both listed for explicitness. verify is
+# deliberately ABSENT: it is a ctypes wheel (libciris_verify_ffi.so via
+# ctypes.CDLL), not a `#[pymodule]`, so it cannot be a pyo3 submodule.
+python = [
+    "dep:pyo3",
+    "dep:pyo3-async-runtimes",
+    "ciris-lens-core/python",
+    "ciris-persist/pyo3",
+    "ciris-edge/pyo3",
+]
 # `extension-module` is what maturin builds the wheel with (tells PyO3 not to
 # link libpython). The bin must NOT enable it. See pyproject.toml [tool.maturin].
-extension-module = ["python", "pyo3/extension-module"]
+# Propagated to the substrate crates so THEIR pyo3 surfaces also skip linking
+# libpython (each crate gates `extension-module` as its own feature).
+extension-module = [
+    "python",
+    "pyo3/extension-module",
+    "ciris-persist/extension-module",
+    "ciris-edge/extension-module",
+]
 # NOTE: hardware key custody (TPM/SE/StrongBox) is wired per-TARGET below, not as
 # a cargo feature — TPM (tss-esapi) is Linux-only, so a top-level `tpm` feature
 # made `--all-features` drag tss-esapi onto Windows/macOS (where it can't build).

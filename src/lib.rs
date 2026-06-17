@@ -127,9 +127,91 @@ mod python {
         rt_block_on(crate::import_traces(&dump_dir))
     }
 
+    // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
+    // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
+    // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
+    // substrate `#[pyclass]`es into THIS module means one `.so` = one PyO3 type
+    // registry: the persist `Engine` PyObject the agent hands to edge's
+    // `init_edge_runtime` is the SAME registered type both crates see, so the
+    // CIRISPersist#109 cross-wheel type-identity bug class cannot occur.
+    //
+    // MECHANISM NOTE (load-bearing — see FSD/ONE_WHEEL_REEXPORT.md): persist and
+    // edge expose ONLY their macro-generated `#[pymodule]` init fns, which are
+    // PRIVATE (`fn ciris_persist`, `fn ciris_edge` — no `pub`). The PyO3 0.29
+    // `#[pymodule]`/`#[pyfunction]` macros emit their `_PYO3_DEF` glue with the
+    // item's own visibility, so `wrap_pymodule!`/`wrap_pyfunction!` cannot reach
+    // them from this crate. We therefore re-register the PUB-reachable surface
+    // directly: the `#[pyclass]`es (`pub struct PyEngine`/`PyEdge`/…) and
+    // persist's `pub use`d exception types. The free `#[pyfunction]`s the agent
+    // needs — persist `reset_engine`, edge `init_edge_runtime` — are PRIVATE and
+    // CANNOT be re-hosted from here; they require an upstream `pub fn register`
+    // (the lens-core pattern). Tracked as the two upstream asks in the FSD.
+
+    /// Re-host persist's pub `#[pyclass]`es + exception types onto a host module.
+    /// Covers `from ciris_server import Engine, NotFound` (the agent's persist
+    /// import sites). Does NOT cover `reset_engine` (private upstream fn — needs
+    /// `CIRISPersist: pub fn register`).
+    fn register_persist(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+        use ciris_persist::ffi::pyo3 as persist_pyo3;
+        m.add_class::<persist_pyo3::PyEngine>()?; // exposed to Python as `Engine`
+        // Typed exception hierarchy (`from ciris_persist import NotFound, …`).
+        m.add("PersistError", py.get_type::<persist_pyo3::PersistError>())?;
+        m.add("NotFound", py.get_type::<persist_pyo3::NotFound>())?;
+        m.add("Conflict", py.get_type::<persist_pyo3::Conflict>())?;
+        m.add("Transient", py.get_type::<persist_pyo3::Transient>())?;
+        m.add("Permanent", py.get_type::<persist_pyo3::Permanent>())?;
+        m.add(
+            "EngineConfigMismatch",
+            py.get_type::<persist_pyo3::EngineConfigMismatch>(),
+        )?;
+        m.add("EngineClosed", py.get_type::<persist_pyo3::EngineClosed>())?;
+        m.add(
+            "EngineUsedAcrossFork",
+            py.get_type::<persist_pyo3::EngineUsedAcrossFork>(),
+        )?;
+        m.add("LensQueryError", py.get_type::<persist_pyo3::LensQueryError>())?;
+        Ok(())
+    }
+
+    /// Re-host edge's pub `#[pyclass]`es onto a host module. Covers the `Edge`
+    /// handle + the conformance/session pyclasses. Does NOT cover the free
+    /// `init_edge_runtime` constructor (private upstream fn — needs
+    /// `CIRISEdge: pub fn register`); without it the agent cannot actually mint
+    /// an `Edge` from this wheel, so edge re-export is INCOMPLETE until upstream.
+    fn register_edge(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+        use ciris_edge::ffi::pyo3 as edge_pyo3;
+        m.add_class::<edge_pyo3::PyEdge>()?; // exposed to Python as `Edge`
+        m.add_class::<edge_pyo3::PyDurableHandle>()?;
+        m.add_class::<edge_pyo3::PySubscriptionHandle>()?;
+        m.add_class::<edge_pyo3::PyVerifiedFeedSubscription>()?;
+        m.add_class::<edge_pyo3::PyNetworkEventSubscription>()?;
+        m.add_class::<edge_pyo3::PyReplicationHandle>()?;
+        m.add_class::<edge_pyo3::PyAvSession>()?;
+        m.add_class::<edge_pyo3::PyRelayNode>()?;
+        Ok(())
+    }
+
+    /// Add a child module to `ciris_server` AND register it in `sys.modules` as
+    /// `ciris_server.<name>` so `from ciris_server.<name> import X` resolves
+    /// (PyO3 submodules aren't auto-importable without the sys.modules entry).
+    fn add_child_module(
+        py: Python<'_>,
+        parent: &Bound<'_, PyModule>,
+        name: &str,
+        build: impl FnOnce(Python<'_>, &Bound<'_, PyModule>) -> PyResult<()>,
+    ) -> PyResult<()> {
+        let child = PyModule::new(py, name)?;
+        build(py, &child)?;
+        parent.add_submodule(&child)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(format!("ciris_server.{name}"), &child)?;
+        Ok(())
+    }
+
     /// `import ciris_server` — the composition CIRISAgent embeds.
     #[pymodule]
-    fn ciris_server(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    fn ciris_server(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
@@ -137,6 +219,17 @@ mod python {
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +
         // node join the same `register` call as they fold in.
         ciris_lens_core::ffi::pyo3::register(m)?;
+
+        // Substrate submodules: `ciris_server.persist` / `ciris_server.edge`.
+        add_child_module(py, m, "persist", register_persist)?;
+        add_child_module(py, m, "edge", register_edge)?;
+        // Top-level aliases matching the agent's flat persist imports
+        // (`from ciris_persist import Engine, NotFound` → `from ciris_server
+        // import Engine, NotFound`). One registration, shared type identity.
+        register_persist(py, m)?;
+        // `Edge` at top level too (the agent reaches it as `ciris_edge.Edge`).
+        register_edge(py, m)?;
+
         // TODO: expose the fabric UX handles (trust/consent toggles, NodeCode,
         // membership) as the wheel API the KMP client consumes (MISSION §3.4).
         Ok(())
