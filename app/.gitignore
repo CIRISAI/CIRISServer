@@ -1,0 +1,7 @@
+# Gradle / KMP build outputs
+.gradle/
+build/
+*/build/
+.kotlin/
+local.properties
+kotlin-js-store/
