@@ -46,6 +46,16 @@ jobs:
       # `extension-module` (libpython-no-link) into the test binary.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
+      # individual-unrecoverability for erasure compliance, run explicitly so the
+      # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
+      # canonical record; the test also runs on every OS via `cargo test` above).
+      # The three gated cases: (a) revocation ⇒ EjectHardDelete leaves NO
+      # recoverable tier, (b) the measured noise floor below n_source symbols,
+      # (c) N→1 aggregation erases the individual below the 1/N gist bound.
+      - name: Noise floor proof (MEASURED, Linux)
+        if: runner.os == 'Linux'
+        run: cargo test --test noise_floor -- --nocapture
       # The PyO3 wheel surface (Linux only; libpython linked, no extension-module).
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
