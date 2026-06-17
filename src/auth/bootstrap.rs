@@ -17,10 +17,16 @@
 //!    founder's identity resolves to `UserRole::SystemAdmin`.
 //!
 //! 3. **First-run claim** — `POST /v1/setup/root`: the literal first-time-setup
-//!    flow for a FRESH node with NO baked seed. The first identity to present a
-//!    valid `x-ciris-*` signature claims ROOT; once a ROOT exists the route is
-//!    closed (409). This is the only path that needs no offline private key — the
-//!    founder claims the node they just stood up.
+//!    flow for a FRESH node with NO baked seed, claimed by a FRESH founder whose
+//!    key is NOT yet in this node's `federation_keys` directory. The founder
+//!    presents their OWN hybrid pubkeys in the body and proves control of them by
+//!    hybrid-signing the body (self-attested proof-of-possession, verified against
+//!    the SUPPLIED pubkeys under `Strict` — NOT the directory). The handler then
+//!    registers the founder's key (admitting it thereafter) and binds ROOT to it.
+//!    The claim is NodeCode-pinned (the founder proves they reached the intended
+//!    node) and first-run-only — once a ROOT exists the route is closed (409). This
+//!    is the only path that needs no offline private key AND no prior directory
+//!    registration — the founder claims the node they just stood up.
 //!
 //! Why this makes `POST /v1/federation/peering` reachable: that route is gated by
 //! [`federation_admin::require_owner`] on `UserRole::SystemAdmin` + `FullAccess`.
@@ -45,12 +51,15 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::prelude::{Engine, HybridPolicy};
+use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
+use ciris_persist::prelude::{verify_hybrid, Engine, HybridPolicy};
+use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::store;
-use super::verify::{self, VerifyError};
+use super::verify;
 
 /// Env: a filesystem path to a `root_pub.json`-shaped seed (the agent's shape).
 pub const ENV_SEED_PATH: &str = "CIRIS_ROOT_SEED_PATH";
@@ -444,7 +453,28 @@ struct SetupState {
     node_pubkey_ed25519_base64: String,
 }
 
-/// The first-run ROOT-claim request body — the NodeCode identity-pin (CEG §0.10).
+/// The FRESH founder's self-attested hybrid identity (the claimant's OWN keys).
+///
+/// A fresh founder's key is NOT yet in this node's `federation_keys` directory, so
+/// the claim cannot be verified directory-side. Instead the founder presents their
+/// own public keys here and proves control of them by hybrid-signing the request
+/// body (proof-of-possession). The handler verifies the `x-ciris-*` signature
+/// AGAINST THESE pubkeys (not the directory), then registers this key in
+/// `federation_keys` (self-attested admission) so the founder becomes a real
+/// federation identity, and binds ROOT to `key_id`.
+#[derive(Debug, Deserialize, Clone)]
+struct Founder {
+    /// The founder's federation `key_id` — the identity ROOT is bound to. The
+    /// `x-ciris-signing-key-id` header MUST equal this value.
+    key_id: String,
+    /// The founder's raw Ed25519 public key (base64-standard, 32 bytes).
+    ed25519_pubkey_b64: String,
+    /// The founder's raw ML-DSA-65 public key (base64-standard, 1952 bytes).
+    ml_dsa_65_pubkey_b64: String,
+}
+
+/// The first-run ROOT-claim request body — the NodeCode identity-pin (CEG §0.10)
+/// PLUS the self-attested founder identity.
 ///
 /// The founder MUST prove they reached the INTENDED node (the one whose NodeCode
 /// they hold out-of-band) by supplying that node's identity. Either form is
@@ -452,8 +482,9 @@ struct SetupState {
 /// the decoded `key_id` + `pubkey_ed25519_base64` pair directly. The handler
 /// verifies the pin matches THIS node's actual steward identity before admitting
 /// the claim — defeating a spoof where the founder is tricked into claiming a
-/// different node. The request body is ALSO the signed payload (the existing
-/// `x-ciris-*` hybrid signature covers it), so the pin is signature-bound.
+/// different node. The request body is ALSO the signed payload (the `x-ciris-*`
+/// hybrid signature covers it), so both the pin AND the founder pubkeys are
+/// signature-bound.
 #[derive(Debug, Deserialize, Default)]
 struct SetupRootRequest {
     /// The node's full `CIRIS-V1-...` NodeCode string (dashes/whitespace/case
@@ -467,6 +498,11 @@ struct SetupRootRequest {
     /// The node's raw Ed25519 pubkey (base64) — the other decoded pin half.
     #[serde(default)]
     pubkey_ed25519_base64: Option<String>,
+    /// The fresh founder's self-attested hybrid identity (the claimant's OWN keys).
+    /// REQUIRED: the claim is verified against these pubkeys (proof-of-possession),
+    /// NOT the federation directory.
+    #[serde(default)]
+    founder: Option<Founder>,
 }
 
 #[derive(Debug, Serialize)]
@@ -488,21 +524,7 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 /// decoded `key_id` + `pubkey_ed25519_base64` pair. Returns `None` on a match;
 /// `Some(response)` (a `400` to short-circuit) when the pin is absent,
 /// undecodable, or names a different node.
-fn verify_node_code_pin(st: &SetupState, body: &[u8]) -> Option<Response> {
-    let req: SetupRootRequest = if body.is_empty() {
-        SetupRootRequest::default()
-    } else {
-        match serde_json::from_slice(body) {
-            Ok(r) => r,
-            Err(e) => {
-                return Some(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("setup/root body is not valid JSON: {e}"),
-                ))
-            }
-        }
-    };
-
+fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response> {
     // Resolve the (key_id, pubkey) pin from the request: prefer the full NodeCode.
     let (claim_key_id, claim_pubkey) = if let Some(code) = req.node_code.as_deref() {
         match crate::nodecode::decode(code) {
@@ -542,22 +564,53 @@ fn verify_node_code_pin(st: &SetupState, body: &[u8]) -> Option<Response> {
 ///
 /// 1. **First-run only** — allowed ONLY when no ROOT WaCert exists; after a ROOT
 ///    exists the route returns `409 Conflict` (no silent re-claim).
-/// 2. **Signature** — the caller proves control of a federation identity via the
-///    `x-ciris-*` hybrid signature over the request body (the same verifier
-///    self-login uses, default [`HybridPolicy::Strict`]); that identity is bound
-///    as the ROOT WaCert. This is the CLAIM AUTHORITY.
-/// 3. **NodeCode identity-pin (CEG §0.10)** — the claim MUST carry THIS node's
+/// 2. **NodeCode identity-pin (CEG §0.10)** — the claim MUST carry THIS node's
 ///    own NodeCode (or its decoded `key_id` + `pubkey_ed25519_base64`), and the
 ///    handler verifies it matches the node's actual steward identity before
 ///    admitting the claim. The NodeCode is the OUT-OF-BAND bootstrap handle the
 ///    operator reads off the node and hands to the founder's app; pinning it
 ///    proves the founder reached the INTENDED node — not a spoof that intercepted
 ///    the claim. The pin rides inside the signed body, so it is signature-bound.
+/// 3. **Self-attested hybrid proof-of-possession** — a FRESH founder's key is NOT
+///    yet in this node's `federation_keys` directory, so the claim is NOT verified
+///    directory-side ([`verify::verify_request`]/`verify_hybrid_via_directory`).
+///    Instead the founder presents their OWN pubkeys in the `founder` object and
+///    proves control by hybrid-signing the request body. The handler verifies the
+///    `x-ciris-*` signature AGAINST THOSE pubkeys ([`verify_hybrid`],
+///    [`HybridPolicy::Strict`] — both Ed25519 + ML-DSA-65 REQUIRED, no
+///    classical-only path). This is the CLAIM AUTHORITY (proof-of-possession).
+/// 4. The founder's key is then REGISTERED in `federation_keys` via the canonical
+///    self-attested admission gate
+///    ([`Engine::register_federation_key`](ciris_persist::Engine::register_federation_key)
+///    → `verify_key_registration`, `scrub_key_id == key_id`), so the founder
+///    becomes a real federation identity admitted thereafter. ROOT is then bound to
+///    `founder.key_id`.
 ///
-/// First-run + signature is the claim authority; the NodeCode pin is which node
-/// is being claimed. This is the path that needs NO offline private key: the
-/// founder claims the node they just stood up (and proved they reached),
-/// becoming `SYSTEM_ADMIN`.
+/// # Wire contract (the parallel client matches this exactly)
+///
+/// `POST /v1/setup/root`, headers:
+/// - `x-ciris-signing-key-id`: MUST equal `founder.key_id`
+/// - `x-ciris-signature-ed25519`: base64 Ed25519 over the EXACT serialized body bytes
+/// - `x-ciris-signature-ml-dsa-65`: base64 ML-DSA-65 over the EXACT serialized body bytes
+///
+/// body (JSON):
+/// ```json
+/// {
+///   "node_code": "CIRIS-V1-...",
+///   "founder": {
+///     "key_id": "...",
+///     "ed25519_pubkey_b64": "...",
+///     "ml_dsa_65_pubkey_b64": "..."
+///   }
+/// }
+/// ```
+/// (`node_code` may instead be supplied as the decoded `key_id` +
+/// `pubkey_ed25519_base64` pair at the top level — the node-pin half, distinct
+/// from the `founder` object.) The signature MUST cover the body bytes verbatim.
+///
+/// This is the path that needs NO offline private key and NO prior directory
+/// registration: the founder claims the node they just stood up (and proved they
+/// reached), self-attesting their fresh identity, becoming `SYSTEM_ADMIN`.
 async fn setup_root(
     State(st): State<SetupState>,
     headers: HeaderMap,
@@ -576,34 +629,112 @@ async fn setup_root(
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
 
-    // (2) Verify the claimant controls a federation identity (hybrid signature).
-    let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
-        Ok(c) => c,
-        Err(VerifyError::MissingHeader(h)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+    // Parse the signed body once (the pin + the founder identity both ride here).
+    let req: SetupRootRequest = if body.is_empty() {
+        SetupRootRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!("setup/root body is not valid JSON: {e}"),
+                )
+            }
         }
-        Err(VerifyError::NoDirectory) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
-        }
-        Err(VerifyError::SignatureInvalid(e)) => {
+    };
+
+    // (2) NodeCode identity-pin (CEG §0.10): the claim must carry THIS node's own
+    //     identity (the out-of-band bootstrap handle), proving the founder reached
+    //     the intended node. The pin rides inside the signed body, so it is
+    //     signature-bound. A claim with no pin, an undecodable NodeCode, or a pin
+    //     that names a DIFFERENT node is rejected (400) — closing the spoof where a
+    //     founder is tricked into claiming an attacker's node.
+    if let Some(resp) = verify_node_code_pin(&st, &req) {
+        return resp;
+    }
+
+    // (3) Self-attested hybrid proof-of-possession. A FRESH founder is not in the
+    //     directory, so we verify the body signature against the founder's OWN
+    //     pubkeys (NOT the directory) under Strict policy (both sigs required).
+    let Some(founder) = req.founder.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "first-run ROOT claim must carry a `founder` object \
+             { key_id, ed25519_pubkey_b64, ml_dsa_65_pubkey_b64 }",
+        );
+    };
+
+    let signing_key_id = match header_str(&headers, verify::HEADER_KEY_ID) {
+        Some(v) => v,
+        None => {
             return err(
                 StatusCode::UNAUTHORIZED,
-                format!("signature verification failed: {e}"),
+                format!("missing {}", verify::HEADER_KEY_ID),
+            )
+        }
+    };
+    // The signing identity MUST be the founder identity (no third-party claim).
+    if signing_key_id != founder.key_id {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "{} ({signing_key_id}) does not match founder.key_id ({})",
+                verify::HEADER_KEY_ID,
+                founder.key_id
+            ),
+        );
+    }
+    let ed25519_sig = match header_str(&headers, verify::HEADER_ED25519) {
+        Some(v) => v,
+        None => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("missing {}", verify::HEADER_ED25519),
+            )
+        }
+    };
+    let ml_dsa_65_sig = match header_str(&headers, verify::HEADER_ML_DSA_65) {
+        Some(v) => v,
+        None => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("missing {} (Strict requires it)", verify::HEADER_ML_DSA_65),
             )
         }
     };
 
-    // (2b) NodeCode identity-pin (CEG §0.10): the claim must carry THIS node's own
-    //      identity (the out-of-band bootstrap handle), proving the founder reached
-    //      the intended node. The pin rides inside the signed body, so it is
-    //      signature-bound. A claim with no pin, an undecodable NodeCode, or a pin
-    //      that names a DIFFERENT node is rejected (400) — closing the spoof where
-    //      a founder is tricked into claiming an attacker's node.
-    if let Some(resp) = verify_node_code_pin(&st, &body) {
-        return resp;
+    // Verify the hybrid signature over the EXACT body bytes against the founder's
+    // PROVIDED pubkeys — proof-of-possession, not a directory lookup. Uses the
+    // node's configured policy (production default [`HybridPolicy::Strict`]: both
+    // Ed25519 + ML-DSA-65 required; no classical-only path). The ML-DSA-65 header
+    // is required above regardless, so a Strict node never downgrades.
+    if let Err(e) = verify_hybrid(
+        &body,
+        &ed25519_sig,
+        Some(&ml_dsa_65_sig),
+        &founder.ed25519_pubkey_b64,
+        Some(&founder.ml_dsa_65_pubkey_b64),
+        st.policy,
+        None,
+    ) {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            format!("self-attested signature verification failed: {e}"),
+        );
     }
 
-    // (3) Bind this identity as ROOT (race-narrowed: re-check + claim).
+    // (4) Register the founder's key in federation_keys via the canonical
+    //     self-attested admission gate (scrub_key_id == key_id). The founder
+    //     becomes a real federation identity admitted thereafter.
+    if let Err(e) = register_founder_key(&st.engine, &founder, &ed25519_sig, &ml_dsa_65_sig).await {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("register founder federation key: {e}"),
+        );
+    }
+
+    // (5) Bind this identity as ROOT (race-narrowed: re-check + claim).
     if let Ok(v) = store::list_by_role(&st.engine, WaRole::Root, 1).await {
         if !v.is_empty() {
             return err(
@@ -612,13 +743,13 @@ async fn setup_root(
             );
         }
     }
-    let wa_id = root_wa_id_for_identity(&caller.key_id);
+    let wa_id = root_wa_id_for_identity(&founder.key_id);
     let now = chrono::Utc::now();
     let cert = WaCert {
         wa_id: wa_id.clone(),
-        name: format!("root:{}", caller.key_id),
+        name: format!("root:{}", founder.key_id),
         role: WaRole::Root,
-        pubkey: caller.key_id.clone(),
+        pubkey: founder.key_id.clone(),
         jwt_kid: format!("{wa_id}-jwt"),
         password_hash: None,
         api_key_hash: None,
@@ -642,15 +773,16 @@ async fn setup_root(
     match store::upsert(&st.engine, cert).await {
         Ok(()) => {
             tracing::info!(
-                identity = %caller.key_id,
+                identity = %founder.key_id,
                 wa_id = %wa_id,
-                "first-run ROOT claim: identity bound as ROOT (founder → SYSTEM_ADMIN)"
+                "first-run ROOT claim: self-attested founder registered + bound as ROOT \
+                 (founder → SYSTEM_ADMIN)"
             );
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
                     wa_id,
-                    identity_key_id: caller.key_id,
+                    identity_key_id: founder.key_id,
                     role: super::roles::UserRole::SystemAdmin.as_str().to_string(),
                 }),
             )
@@ -658,6 +790,73 @@ async fn setup_root(
         }
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
+}
+
+/// Read a header as a `String` (UTF-8). `None` if absent or non-UTF-8.
+fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// Register the fresh founder's hybrid key in `federation_keys` so it is admitted
+/// thereafter (the founder becomes a real federation identity).
+///
+/// ## Why `put_public_key`, not `register_federation_key`
+///
+/// The canonical admission gate
+/// ([`Engine::register_federation_key`](ciris_persist::Engine::register_federation_key)
+/// → `verify_key_registration`) verifies a scrub-signature over the canonical
+/// `registration_envelope` — bytes DISTINCT from the request body. Requiring that
+/// would force the founder's client to produce a SECOND signature (over the
+/// envelope) on top of the body signature, complicating the wire contract.
+///
+/// The proof-of-possession is already established by the handler's step-3
+/// [`verify_hybrid`] (Strict, both sigs) over the request body against THESE same
+/// pubkeys — cryptographically equivalent authority to the envelope scrub-check,
+/// just over the body. So we record the proven identity directly via
+/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key),
+/// which keeps its own `algorithm == hybrid` + `accord_holder` attestation gates
+/// (a `steward` row needs no attestation). The `scrub_*` fields are populated for
+/// row-shape completeness (a self-attested envelope + the body signatures); they
+/// are NOT re-verified by `put_public_key`.
+async fn register_founder_key(
+    engine: &Engine,
+    founder: &Founder,
+    ed25519_body_sig_b64: &str,
+    ml_dsa_65_body_sig_b64: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let now = chrono::Utc::now();
+    let envelope = serde_json::json!({ "key_id": founder.key_id });
+    let canonical = ceg_produce_canonicalize(&envelope)?;
+    let record = KeyRecord {
+        key_id: founder.key_id.clone(),
+        pubkey_ed25519_base64: founder.ed25519_pubkey_b64.clone(),
+        pubkey_ml_dsa_65_base64: Some(founder.ml_dsa_65_pubkey_b64.clone()),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: identity_type::STEWARD.into(),
+        identity_ref: founder.key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        // The founder's body signatures, recorded as scrub material for row-shape
+        // completeness. PoP was already verified over the body in handler step 3.
+        scrub_signature_classical: ed25519_body_sig_b64.to_string(),
+        scrub_signature_pqc: Some(ml_dsa_65_body_sig_b64.to_string()),
+        scrub_key_id: founder.key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await?;
+    Ok(())
 }
 
 /// The first-run setup router — merge onto the read-API listener beside the other

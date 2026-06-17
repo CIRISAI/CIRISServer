@@ -108,6 +108,24 @@ fn node_pubkey_b64() -> String {
     BASE64.encode(signing_key.verifying_key().to_bytes())
 }
 
+/// A FRESH founder hybrid signer (Ed25519 + ML-DSA-65), distinct from the node's
+/// signer and NOT registered in the directory. Seeded distinctly per `key_id` so
+/// each founder identity is unique. This is the claimant the self-attested
+/// first-run flow admits: the founder presents these pubkeys + proves possession.
+fn founder_signer(key_id: &str) -> LocalSigner {
+    let signing_key = SigningKey::from_bytes(&[0xF1; 32]);
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xF2; 32], format!("{key_id}-founder-pqc"))
+            .expect("founder ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        signing_key,
+        key_id.to_string(),
+        Some(pqc),
+        Some(format!("{key_id}-founder-pqc")),
+    )
+}
+
 /// Serve the bootstrap (setup) router on an ephemeral port; return its base URL.
 /// Pins the router to the node's identity (`key_id` + its Ed25519 pubkey).
 async fn serve(engine: Arc<Engine>, node_key_id: &str) -> (String, tokio::task::JoinHandle<()>) {
@@ -230,48 +248,101 @@ fn node_code_string(key_id: &str) -> String {
     ciris_server::nodecode::encode(&nc).expect("encode node code")
 }
 
+/// Build the self-attested first-run claim body for `founder_key_id` pinning the
+/// node `node_key_id`. Returns `(body_bytes, ed25519_pubkey_b64, ml_dsa_65_pubkey_b64)`.
+fn founder_claim_body(node_key_id: &str, founder_key_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "node_code": node_code_string(node_key_id),
+        "founder": {
+            "key_id": founder_key_id,
+            // Pubkeys are filled in by the caller after signing (they come off the
+            // HybridSignature), so this placeholder is replaced below.
+        }
+    })
+}
+
 #[tokio::test]
 async fn first_run_setup_root_claims_then_rejects_second_claim() {
-    let key_id = "ciris-founder-node";
-    let engine = node(key_id).await;
-    register_self(&engine, key_id).await;
-    let (base, _h) = serve(Arc::clone(&engine), key_id).await;
+    let node_key_id = "ciris-founder-node";
+    let founder_key_id = "ciris-fresh-founder";
+    let engine = node(node_key_id).await;
+    // The NODE's own steward key is registered (so the node has an identity), but
+    // the FOUNDER's key is deliberately NOT in the directory — proving the claim is
+    // self-attested, not directory-resolved.
+    register_self(&engine, node_key_id).await;
+    assert!(
+        engine
+            .federation_directory()
+            .lookup_public_key(founder_key_id)
+            .await
+            .expect("lookup founder")
+            .is_none(),
+        "founder key must be ABSENT from the directory before the claim (self-attested)"
+    );
+
+    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
 
-    // The signed body carries the NodeCode identity-pin (CEG §0.10) — proving the
-    // founder reached THIS node. The hybrid signature covers the whole body.
-    let claim_body = serde_json::json!({ "node_code": node_code_string(key_id) });
-    let body = serde_json::to_vec(&claim_body).unwrap();
-    let sig = engine.sign_hybrid(&body).await.expect("sign setup body");
+    // The founder is a FRESH hybrid identity. The signed body carries the NodeCode
+    // pin (CEG §0.10) AND the founder's OWN pubkeys; the hybrid signature (founder's
+    // keypair) covers the whole body — self-attested proof-of-possession.
+    let fsigner = founder_signer(founder_key_id);
+    let mut claim = founder_claim_body(node_key_id, founder_key_id);
+    // We need the pubkeys, which come off a sign over the FINAL body — so sign a
+    // first time to extract pubkeys, fill them in, then re-sign the final body.
+    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
+    claim["founder"]["ed25519_pubkey_b64"] = BASE64.encode(&probe.classical.public_key).into();
+    claim["founder"]["ml_dsa_65_pubkey_b64"] = BASE64.encode(&probe.pqc.public_key).into();
+    let body = serde_json::to_vec(&claim).unwrap();
+    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
     let ed_b64 = BASE64.encode(&sig.classical.signature);
     let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
 
-    // No ROOT yet → claim succeeds (201) and binds the signer identity as ROOT.
+    // No ROOT yet → claim succeeds (201) and binds the FOUNDER identity as ROOT.
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", key_id)
+        .header("x-ciris-signing-key-id", founder_key_id)
         .header("x-ciris-signature-ed25519", &ed_b64)
         .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
         .body(body.clone())
         .send()
         .await
         .expect("POST setup/root");
-    assert_eq!(resp.status(), 201, "first-run claim must succeed");
+    assert_eq!(
+        resp.status(),
+        201,
+        "first-run self-attested claim must succeed"
+    );
     let json: serde_json::Value = resp.json().await.expect("setup response json");
-    assert_eq!(json["identity_key_id"], key_id);
+    assert_eq!(json["identity_key_id"], founder_key_id);
     assert_eq!(json["role"], "SYSTEM_ADMIN");
 
-    // A ROOT WaCert now exists, bridging to SystemAdmin.
+    // A ROOT WaCert now exists, bridging to SystemAdmin, bound to the founder.
     let roots = store::list_by_role(&engine, WaRole::Root, 10)
         .await
         .expect("list roots");
     assert_eq!(roots.len(), 1, "exactly one ROOT after first-run claim");
     assert_eq!(UserRole::from_wa_role(roots[0].role), UserRole::SystemAdmin);
+    assert_eq!(
+        roots[0].pubkey, founder_key_id,
+        "ROOT bound to founder.key_id"
+    );
+
+    // The founder's key is now REGISTERED in the directory (admitted thereafter).
+    assert!(
+        engine
+            .federation_directory()
+            .lookup_public_key(founder_key_id)
+            .await
+            .expect("lookup founder after claim")
+            .is_some(),
+        "founder key must be REGISTERED after a successful claim"
+    );
 
     // Second claim → 409 (no silent re-claim).
     let resp2 = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", key_id)
+        .header("x-ciris-signing-key-id", founder_key_id)
         .header("x-ciris-signature-ed25519", &ed_b64)
         .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
         .body(body)
@@ -285,6 +356,58 @@ async fn first_run_setup_root_claims_then_rejects_second_claim() {
     assert_eq!(roots2.len(), 1, "no second ROOT minted");
 }
 
+/// A first-run claim whose hybrid signature is TAMPERED is rejected (401) and
+/// claims NO ROOT — proof-of-possession fails.
+#[tokio::test]
+async fn first_run_setup_root_rejects_tampered_signature() {
+    let node_key_id = "ciris-tamper-node";
+    let founder_key_id = "ciris-tamper-founder";
+    let engine = node(node_key_id).await;
+    register_self(&engine, node_key_id).await;
+    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
+    let client = reqwest::Client::new();
+
+    let fsigner = founder_signer(founder_key_id);
+    let mut claim = founder_claim_body(node_key_id, founder_key_id);
+    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
+    claim["founder"]["ed25519_pubkey_b64"] = BASE64.encode(&probe.classical.public_key).into();
+    claim["founder"]["ml_dsa_65_pubkey_b64"] = BASE64.encode(&probe.pqc.public_key).into();
+    let body = serde_json::to_vec(&claim).unwrap();
+    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
+    // Tamper the Ed25519 signature: flip the last byte before base64.
+    let mut ed_sig = sig.classical.signature.clone();
+    *ed_sig.last_mut().unwrap() ^= 0x01;
+    let ed_b64 = BASE64.encode(&ed_sig);
+    let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
+
+    let resp = client
+        .post(format!("{base}/v1/setup/root"))
+        .header("x-ciris-signing-key-id", founder_key_id)
+        .header("x-ciris-signature-ed25519", &ed_b64)
+        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
+        .body(body)
+        .send()
+        .await
+        .expect("POST setup/root (tampered)");
+    assert_eq!(resp.status(), 401, "a tampered signature must be rejected");
+    assert!(
+        store::list_by_role(&engine, WaRole::Root, 10)
+            .await
+            .expect("list roots")
+            .is_empty(),
+        "a rejected (tampered) claim must mint NO ROOT"
+    );
+    assert!(
+        engine
+            .federation_directory()
+            .lookup_public_key(founder_key_id)
+            .await
+            .expect("lookup founder")
+            .is_none(),
+        "a rejected claim must NOT register the founder key"
+    );
+}
+
 /// A first-run claim whose NodeCode pins a DIFFERENT node is rejected (400) and
 /// claims NO ROOT — the spoof defense (CEG §0.10). First-run-only still holds:
 /// the route is open (no ROOT yet), but the wrong-node pin closes it for this
@@ -292,6 +415,7 @@ async fn first_run_setup_root_claims_then_rejects_second_claim() {
 #[tokio::test]
 async fn first_run_setup_root_rejects_wrong_node_pin() {
     let key_id = "ciris-target-node";
+    let founder_key_id = "ciris-wrongpin-founder";
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
@@ -305,16 +429,25 @@ async fn first_run_setup_root_rejects_wrong_node_pin() {
         alias_hint: None,
     };
     let wrong_code = ciris_server::nodecode::encode(&wrong).expect("encode wrong code");
-    let claim_body = serde_json::json!({ "node_code": wrong_code });
+    // A valid fresh founder — only the node pin is wrong.
+    let fsigner = founder_signer(founder_key_id);
+    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
+    let claim_body = serde_json::json!({
+        "node_code": wrong_code,
+        "founder": {
+            "key_id": founder_key_id,
+            "ed25519_pubkey_b64": BASE64.encode(&probe.classical.public_key),
+            "ml_dsa_65_pubkey_b64": BASE64.encode(&probe.pqc.public_key),
+        }
+    });
     let body = serde_json::to_vec(&claim_body).unwrap();
-    // Sign with the node's OWN signer (so signature passes; only the pin is wrong).
-    let sig = engine.sign_hybrid(&body).await.expect("sign setup body");
+    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
     let ed_b64 = BASE64.encode(&sig.classical.signature);
     let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
 
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", key_id)
+        .header("x-ciris-signing-key-id", founder_key_id)
         .header("x-ciris-signature-ed25519", &ed_b64)
         .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
         .body(body)
@@ -340,20 +473,22 @@ async fn first_run_setup_root_rejects_wrong_node_pin() {
 #[tokio::test]
 async fn first_run_setup_root_requires_a_pin() {
     let key_id = "ciris-pinless-node";
+    let founder_key_id = "ciris-pinless-founder";
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
     let client = reqwest::Client::new();
 
-    // Empty-object body — no pin.
+    // Empty-object body — no pin (the pin check runs first, before the founder).
     let body = serde_json::to_vec(&serde_json::json!({})).unwrap();
-    let sig = engine.sign_hybrid(&body).await.expect("sign setup body");
+    let fsigner = founder_signer(founder_key_id);
+    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
     let ed_b64 = BASE64.encode(&sig.classical.signature);
     let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
 
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", key_id)
+        .header("x-ciris-signing-key-id", founder_key_id)
         .header("x-ciris-signature-ed25519", &ed_b64)
         .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
         .body(body)
