@@ -107,7 +107,11 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
             PeerAcl::AllowAll,
             ScoringConfig::default(),
             UxConfig::api_only("/lens/api/v1"),
-            identity_router(identity_json),
+            // /v1/identity + /v1/self/login (self-at-login → user-managed consent).
+            identity_router(identity_json).merge(crate::auth::self_login::router(
+                Arc::clone(&engine),
+                ciris_persist::prelude::HybridPolicy::Strict,
+            )),
         )
         .await
         .context("start read API")?;

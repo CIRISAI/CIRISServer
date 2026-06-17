@@ -26,6 +26,11 @@
 
 /// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
 pub mod benchmarks;
+/// The fabric auth subsystem — CIRISServer as the single auth authority
+/// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
+/// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), and the
+/// owner-binding gate.
+mod auth;
 mod compose;
 mod config;
 mod import;
