@@ -27,8 +27,15 @@
 //! - Migrate the agent to consumer/delegate (drop its WA / JWT / own identity;
 //!   it acts under `delegates_to(user → agent)` — cross-repo).
 
+pub mod api_keys;
+pub mod attestation;
+pub mod consent;
+pub mod device_auth;
+pub mod erasure;
 pub mod gate;
+pub mod oauth;
 pub mod roles;
 pub mod self_login;
 pub mod session;
+pub mod store;
 pub mod verify;
