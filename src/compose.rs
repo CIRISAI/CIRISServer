@@ -107,11 +107,29 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
             PeerAcl::AllowAll,
             ScoringConfig::default(),
             UxConfig::api_only("/lens/api/v1"),
-            // /v1/identity + /v1/self/login (self-at-login → user-managed consent).
-            identity_router(identity_json).merge(crate::auth::self_login::router(
-                Arc::clone(&engine),
-                ciris_persist::prelude::HybridPolicy::Strict,
-            )),
+            // /v1/identity + the full fabric auth surface (CIRISServer#9). All
+            // auth routers merge onto the one read-API listener. Federation-
+            // signed control routes default to HybridPolicy::Strict (no
+            // classical-only path).
+            {
+                use ciris_persist::prelude::HybridPolicy;
+                let strict = HybridPolicy::Strict;
+                identity_router(identity_json)
+                    // login ceremony (self-at-login → user-managed consent)
+                    .merge(crate::auth::self_login::router(Arc::clone(&engine), strict))
+                    // sessions/tokens: login / logout / me / refresh / owner-hint
+                    .merge(crate::auth::session::router(Arc::clone(&engine)))
+                    // OAuth front-door + native google/apple
+                    .merge(crate::auth::oauth::router(Arc::clone(&engine)))
+                    // API keys + service-token revocation
+                    .merge(crate::auth::api_keys::router(Arc::clone(&engine)))
+                    // attestation / consent / erasure (CEG-native)
+                    .merge(crate::auth::attestation::router(Arc::clone(&engine), strict))
+                    .merge(crate::auth::consent::router(Arc::clone(&engine), strict))
+                    .merge(crate::auth::erasure::router(Arc::clone(&engine), strict))
+                    // device-auth setup (scaffold)
+                    .merge(crate::auth::device_auth::router(Arc::clone(&engine)))
+            },
         )
         .await
         .context("start read API")?;

@@ -76,7 +76,10 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # sqlite on all platforms; postgres is Linux-only (libpq/openssl don't link
 # cleanly on the macOS/Windows runners — same posture as persist's own CI). The
 # `[target.linux]` table below adds postgres.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.4.0", features = ["sqlite"] }
+# `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
+# substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
+# table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.4.0", features = ["sqlite", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
 ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.3.0", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
@@ -102,6 +105,12 @@ base64     = "0.22"
 serde      = { version = "1", features = ["derive"] } # holonomic scoreboard model (benchmarks::)
 serde_json = "1"
 getrandom  = "0.3"   # mint the ML-DSA-65 federation seed on first boot (hybrid PQC)
+# Auth subsystem (src/auth, CIRISServer#9): timestamps on the absorbed wa_cert
+# rows, SHA-256 for api-key / service-token hashing, hex for the digest wire form.
+# All three already in the lock as substrate-transitive deps (no new resolution).
+chrono     = { version = "0.4", features = ["serde"] }
+sha2       = "0.10"
+hex        = "0.4"
 flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -112,7 +121,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.4.0", features = ["postgres"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.4.0", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.10.0", version = "5", features = ["tpm"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
