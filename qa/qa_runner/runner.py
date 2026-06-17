@@ -1,0 +1,2717 @@
+"""
+Main QA Runner implementation.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import subprocess
+import sys
+import time
+import re
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import requests
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+
+from .config import QAConfig, QAModule, QATestCase
+from .modules.filter_test_helper import FilterTestHelper
+from .server import APIServerManager
+from .status_tracker import update_module_status
+
+logger = logging.getLogger(__name__)
+
+
+def _expand_module_aggregates(modules: List[QAModule]) -> List[QAModule]:
+    """Expand QAModule.ALL / ALL_1 / ALL_2 into their constituent modules.
+
+    A bare aggregate is not in `sdk_modules` and is not a startup-adapter
+    key, so leaving it unexpanded makes the HTTP/SDK routing split skip
+    every SDK module AND the adapter auto-config miss every adapter. All
+    per-module logic must see the expanded list. Idempotent; order- and
+    dedupe-preserving.
+    """
+    from .config import (
+        ALL_1_MODULE_SEQUENCE,
+        ALL_2_MODULE_SEQUENCE,
+        ALL_MODULE_SEQUENCE,
+    )
+
+    aggregates = {
+        QAModule.ALL: ALL_MODULE_SEQUENCE,
+        QAModule.ALL_1: ALL_1_MODULE_SEQUENCE,
+        QAModule.ALL_2: ALL_2_MODULE_SEQUENCE,
+    }
+    if not any(a in modules for a in aggregates):
+        return list(modules)
+    expanded: List[QAModule] = []
+    for m in modules:
+        for sm in aggregates.get(m, [m]):
+            if sm not in expanded:
+                expanded.append(sm)
+    return expanded
+
+
+class QARunner:
+    """Main QA test runner."""
+
+    def __init__(self, config: Optional[QAConfig] = None, modules: Optional[List[QAModule]] = None):
+        """Initialize QA runner with configuration."""
+        self.config = config or QAConfig()
+        self.console = Console()
+        self.token: Optional[str] = None
+        # Expand `all` / `all_1` / `all_2` up front so every per-module
+        # consumer (adapter auto-config below, the HTTP/SDK routing split,
+        # the requires-server check) sees real modules, not the aggregate.
+        self.modules = _expand_module_aggregates(modules or [])  # Store modules for server manager
+        # Real per-module wall time (seconds). SDK modules are timed directly
+        # around test_instance.run(); HTTP modules are summed from per-test
+        # durations in _update_status_tracker. Replaces the old fake
+        # even-split (total / module_count) that stamped every module
+        # identically — useless for balancing the CI matrix.
+        self._module_wall: Dict[str, float] = {}
+
+        # Module-metadata driven: if any selected module declares
+        # WIPE_DATA_ON_START=True (per CIRISNodeCore FSD/SAFETY_BATTERY_CI_LOOP.md
+        # §5.1), force --wipe-data regardless of CLI flags. Required for
+        # signed-artifact reproducibility — every run starts from a
+        # deterministic baseline so the bundle hash is meaningful.
+        from .modules._module_metadata import get_metadata as _get_module_md
+
+        for _mod in self.modules:
+            _md = _get_module_md(_mod)
+            if getattr(_md, "wipe_data_on_start", False) and not self.config.wipe_data:
+                self.config.wipe_data = True
+                self.console.print(
+                    f"[dim]Auto-enabled --wipe-data: {_mod.value} module "
+                    f"declares WIPE_DATA_ON_START (reproducibility requirement)[/dim]"
+                )
+
+        # If every selected module declares REQUIRES_CIRIS_SERVER=False,
+        # skip server start + auth entirely. Such modules (e.g.
+        # safety_interpret) talk to external APIs directly — booting a
+        # CIRIS agent just to throw it away is wasteful and surfaces
+        # unrelated failure modes (e.g. CIRISVerify FFI on TPM-less
+        # runners) that have nothing to do with the test in question.
+        if self.modules and all(
+            not getattr(_get_module_md(_m), "requires_ciris_server", True)
+            for _m in self.modules
+        ):
+            self._skip_ciris_server = True
+            if self.config.auto_start_server:
+                self.config.auto_start_server = False
+                self.console.print(
+                    "[dim]Auto-disabled server start: all selected modules "
+                    "declare REQUIRES_CIRIS_SERVER=False[/dim]"
+                )
+        else:
+            self._skip_ciris_server = False
+
+        # Auto-configure adapters based on the modules being tested. Built
+        # ADDITIVELY so multiple adapter-needing modules in one batch compose:
+        # the old per-branch `self.config.adapter = "api,X"` clobbered the
+        # whole string, so e.g. a reddit + sql_external_data batch silently
+        # lost the reddit adapter and every reddit test failed.
+        if self.modules:
+            # QAModule -> the adapter it needs loaded at server startup.
+            _MODULE_STARTUP_ADAPTERS = {
+                QAModule.REDDIT: "reddit",
+                QAModule.SQL_EXTERNAL_DATA: "external_data_sql",
+                QAModule.DSAR_MULTI_SOURCE: "external_data_sql",
+                QAModule.HE300_BENCHMARK: "a2a",
+                # accord_metrics validates traces shipped by the agent; the
+                # adapter must be loaded from startup so messages processed
+                # before the module's own runtime adapter-loads still emit
+                # traces (see accord_metrics_tests.py — "default adapter
+                # loaded at startup").
+                QAModule.ACCORD_METRICS: "ciris_accord_metrics",
+            }
+            adapters = [a.strip() for a in self.config.adapter.split(",") if a.strip()]
+            if "api" not in adapters:
+                adapters.insert(0, "api")
+            for _mod, _adapter_name in _MODULE_STARTUP_ADAPTERS.items():
+                if _mod in self.modules and _adapter_name not in adapters:
+                    adapters.append(_adapter_name)
+            joined = ",".join(adapters)
+            if joined != self.config.adapter:
+                self.config.adapter = joined
+                self.console.print(f"[dim]Auto-configured adapters: {joined}[/dim]")
+
+        # Determine database backends to test
+        if self.config.database_backends is None:
+            self.database_backends = ["sqlite"]  # Default to SQLite only
+        else:
+            self.database_backends = self.config.database_backends
+
+        # Create server managers for each backend
+        self.server_managers: Dict[str, APIServerManager] = {}
+        for backend in self.database_backends:
+            port = self.config.api_port if backend == "sqlite" else self.config.postgres_api_port
+            # Create a copy of config with the right port
+            backend_config = QAConfig(
+                base_url=f"http://localhost:{port}",
+                api_port=port,
+                admin_username=self.config.admin_username,
+                admin_password=self.config.admin_password,
+                oauth_test_user_id=self.config.oauth_test_user_id,
+                oauth_test_email=self.config.oauth_test_email,
+                oauth_test_provider=self.config.oauth_test_provider,
+                oauth_test_external_id=self.config.oauth_test_external_id,
+                billing_enabled=self.config.billing_enabled,
+                billing_api_key=self.config.billing_api_key,
+                billing_api_url=self.config.billing_api_url,
+                parallel_tests=self.config.parallel_tests,
+                max_workers=self.config.max_workers,
+                timeout=self.config.timeout,
+                retry_count=self.config.retry_count,
+                retry_delay=self.config.retry_delay,
+                verbose=self.config.verbose,
+                json_output=self.config.json_output,
+                html_report=self.config.html_report,
+                report_dir=self.config.report_dir,
+                auto_start_server=self.config.auto_start_server,
+                server_startup_timeout=self.config.server_startup_timeout,
+                mock_llm=self.config.mock_llm,
+                adapter=self.config.adapter,
+                database_backends=None,  # Don't pass this recursively
+                postgres_url=self.config.postgres_url,
+                postgres_api_port=self.config.postgres_api_port,
+                # Live LLM configuration
+                live_api_key=self.config.live_api_key,
+                live_model=self.config.live_model,
+                live_base_url=self.config.live_base_url,
+                live_provider=self.config.live_provider,
+                # Live Lens configuration
+                live_lens=self.config.live_lens,
+                # Data management
+                wipe_data=self.config.wipe_data,
+                # Memory benchmark configuration
+                message_count=self.config.message_count,
+                concurrent_channels=self.config.concurrent_channels,
+                # Model eval configuration — propagate so the runner's
+                # backend-specific config (which self.config gets re-bound
+                # to at line ~129) doesn't lose the CLI-passed filters.
+                # Without this, `--model-eval-languages en` and
+                # `--model-eval-questions History` silently reset to the
+                # 4-language × 6-question defaults.
+                model_eval_languages=self.config.model_eval_languages,
+                model_eval_concurrency=self.config.model_eval_concurrency,
+                model_eval_profile_memory=self.config.model_eval_profile_memory,
+                model_eval_question_categories=self.config.model_eval_question_categories,
+                model_eval_questions_file=self.config.model_eval_questions_file,
+                # Safety battery configuration — same backend-config preservation
+                # rationale as the model_eval block above.
+                safety_battery_lang=self.config.safety_battery_lang,
+                safety_battery_domain=self.config.safety_battery_domain,
+                safety_battery_template=self.config.safety_battery_template,
+                safety_interpret_capture_dir=self.config.safety_interpret_capture_dir,
+                safety_interpret_criteria_file=self.config.safety_interpret_criteria_file,
+                safety_interpret_openrouter_key_file=self.config.safety_interpret_openrouter_key_file,
+                safety_interpret_judge_model=self.config.safety_interpret_judge_model,
+                setup_template_id=self.config.setup_template_id,
+            )
+            self.server_managers[backend] = APIServerManager(
+                backend_config, database_backend=backend, modules=self.modules
+            )
+
+        # For backward compatibility, keep a reference to the first server manager
+        self.server_manager = self.server_managers[self.database_backends[0]]
+
+        # For single-backend runs, update self.config to use the backend-specific config
+        # This ensures all test execution uses the correct base_url/port
+        if len(self.database_backends) == 1:
+            self.config = self.server_manager.config
+
+        self.results: Dict[str, Dict] = {}
+        self._startup_incidents_position = 0
+        self._filter_helper: Optional[FilterTestHelper] = None
+
+    def run(self, modules: List[QAModule]) -> bool:
+        """Run QA tests for specified modules."""
+        # Expand `all` / `all_1` / `all_2` so the HTTP/SDK routing split
+        # below runs SDK modules too. Idempotent — __init__ already expanded
+        # self.modules, but run() may be called directly (and is, per-backend,
+        # by _run_parallel_backends).
+        modules = _expand_module_aggregates(modules)
+
+        # If testing multiple backends, always use parallel mode for proper state isolation
+        # (Sequential mode doesn't properly isolate database/server state between backends)
+        if len(self.database_backends) > 1:
+            return self._run_parallel_backends(modules)
+
+        # Single backend execution (original flow)
+        start_time = time.time()
+
+        self.console.print(
+            Panel.fit(
+                "[bold cyan]CIRIS QA Test Runner[/bold cyan]\n"
+                f"Database: {self.database_backends[0]}\n"
+                f"Modules: {', '.join(m.value for m in modules)}",
+                title="🧪 Starting QA Tests",
+            )
+        )
+
+        # Show initial incidents log status. The baseline position is
+        # recorded AFTER server start (below) so server-startup log content
+        # is excluded — only incidents raised during testing fail the run.
+        self._show_incidents_status("STARTUP")
+
+        # Setup OAuth test user and billing config BEFORE starting server if billing_integration is in modules
+        # This ensures the auth service loads the user with password when it initializes
+        if QAModule.BILLING_INTEGRATION in modules:
+            # Enable billing backend integration
+            import os
+
+            # Try to load billing key from ~/.ciris/qa_billing_key first, then env var
+            billing_api_key = None
+            key_file = Path.home() / ".ciris" / "qa_billing_key"
+
+            if key_file.exists():
+                try:
+                    billing_api_key = key_file.read_text().strip()
+                    self.console.print(f"[dim]Loaded billing API key from {key_file}[/dim]")
+                except Exception as e:
+                    self.console.print(f"[yellow]⚠️  Failed to read {key_file}: {e}[/yellow]")
+
+            # Fall back to environment variable
+            if not billing_api_key:
+                billing_api_key = os.getenv("CIRIS_BILLING_API_KEY")
+
+            if not billing_api_key:
+                self.console.print("[red]❌ Billing API key required for billing integration tests[/red]")
+                self.console.print("[red]   Place key in ~/.ciris/qa_billing_key or set CIRIS_BILLING_API_KEY[/red]")
+                return False
+
+            self.config.billing_enabled = True
+            self.config.billing_api_key = billing_api_key
+            self.config.billing_api_url = os.getenv("CIRIS_BILLING_API_URL", "https://billing.ciris.ai")
+
+            self.console.print(f"[cyan]💳 Billing integration enabled: {self.config.billing_api_url}[/cyan]")
+
+            if not self._setup_oauth_test_user():
+                self.console.print("[red]❌ Failed to setup OAuth test user[/red]")
+                return False
+
+        # Configure SQL external data service if needed - MUST BE BEFORE SERVER STARTS
+        if modules and QAModule.SQL_EXTERNAL_DATA in modules:
+            # Set up test database BEFORE starting server
+            import asyncio
+
+            from .modules.sql_external_data_tests import SQLExternalDataTests
+
+            temp_test = SQLExternalDataTests(None, self.console)  # type: ignore
+            self.console.print("[cyan]Setting up test database...[/cyan]")
+            setup_result = asyncio.run(temp_test._setup_test_database())
+            if setup_result.get("success"):
+                # Set SQL config path on server manager so it can pass to env var
+                self.server_manager._sql_config_path = temp_test.sql_config_path
+                self.console.print("[dim]SQL external data test database configured[/dim]")
+            else:
+                self.console.print(f"[red]❌ Failed to setup SQL test database: {setup_result.get('error')}[/red]")
+                return False
+
+        # Start API server if needed
+        if self.config.auto_start_server:
+            if not self.server_manager.start():
+                self.console.print("[red]❌ Failed to start API server[/red]")
+                return False
+
+        # Baseline the incidents log now that the server is up — only agent
+        # ERROR/CRITICAL incidents raised from here on (auth + every module)
+        # count toward failing the run.
+        self._record_startup_incidents_position()
+
+        # Get authentication token (skip for SETUP module - first-run has no users,
+        # and skip when no module needs a CIRIS server at all)
+        if getattr(self, "_skip_ciris_server", False):
+            self.console.print(
+                "[dim]Skipping authentication: no selected module requires a CIRIS server[/dim]"
+            )
+        elif QAModule.SETUP not in modules:
+            if not self._authenticate():
+                self.console.print("[red]❌ Authentication failed[/red]")
+                if self.config.auto_start_server:
+                    self.server_manager.stop()
+                return False
+        else:
+            self.console.print("[dim]Skipping authentication for SETUP module (first-run mode)[/dim]")
+
+        # Note: FILTERS and HANDLERS are now SDK-based and don't need SSE monitoring
+        # SSE monitoring only needed for any remaining HTTP-based async message tests
+        self._filter_helper = None
+
+        # Separate SDK-based modules from HTTP test modules
+        sdk_modules = [
+            QAModule.CONSENT,
+            QAModule.DSAR,
+            QAModule.DSAR_MULTI_SOURCE,
+            QAModule.DSAR_TICKET_WORKFLOW,
+            QAModule.PARTNERSHIP,
+            QAModule.BILLING,
+            QAModule.BILLING_INTEGRATION,
+            QAModule.MESSAGE_ID_DEBUG,
+            QAModule.REDDIT,
+            QAModule.SQL_EXTERNAL_DATA,
+            QAModule.STATE_TRANSITIONS,
+            QAModule.COGNITIVE_STATE_API,
+            QAModule.MCP,
+            QAModule.ADAPTER_CONFIG,
+            QAModule.ADAPTER_AUTOLOAD,
+            QAModule.ADAPTER_MANIFEST,
+            QAModule.ADAPTER_AVAILABILITY,
+            QAModule.IDENTITY_UPDATE,
+            QAModule.CONTEXT_ENRICHMENT,
+            QAModule.VISION,
+            QAModule.AIR,
+            QAModule.ACCORD_METRICS,
+            QAModule.AGENT_MODE,
+            QAModule.SYSTEM_MESSAGES,
+            QAModule.HOSTED_TOOLS,
+            QAModule.UTILITY_ADAPTERS,
+            QAModule.HOMEASSISTANT_AGENTIC,
+            QAModule.DEFERRAL_TAXONOMY,
+            QAModule.CIRISNODE,
+            QAModule.LICENSED_AGENT,
+            QAModule.SOLITUDE_LIVE,
+            QAModule.PLAY_LIVE,
+            QAModule.DREAM_LIVE,
+            QAModule.FILTERS,
+            QAModule.HANDLERS,
+            QAModule.DEFERRAL,
+            QAModule.WALLET,
+            QAModule.DEGRADED_MODE,
+            QAModule.MODEL_EVAL,
+            QAModule.PARALLEL_LOCALES,
+            QAModule.SAFETY_BATTERY,
+            QAModule.SAFETY_INTERPRET,
+            QAModule.SECRETS_ENCRYPTION,
+            QAModule.MEMORY_BENCHMARK,
+        ]
+        http_modules = [m for m in modules if m not in sdk_modules]
+        sdk_test_modules = [m for m in modules if m in sdk_modules]
+
+        # Collect HTTP test cases
+        # Get password from server manager (set during setup wizard completion)
+        dynamic_password = None
+        if hasattr(self, "server_manager") and self.server_manager:
+            dynamic_password = self.server_manager.get_admin_password()
+
+        # Keep SETUP tests separate from the rest. On a SETUP run the data
+        # dir is wiped (first-run), so authentication was skipped above —
+        # there is no admin user yet. SETUP runs the wizard which CREATES
+        # that user; only after it completes can the remaining HTTP + SDK
+        # modules authenticate. Running SETUP batched with other modules
+        # without this phasing leaves every later module tokenless (401).
+        setup_tests = []
+        all_tests = []
+        for module in http_modules:
+            tests = self.config.get_module_tests(module, admin_password=dynamic_password)
+            if module == QAModule.SETUP:
+                setup_tests.extend(tests)
+            else:
+                all_tests.extend(tests)
+
+        success = True
+
+        # Phase 1: SETUP wizard (first-run, no token) — creates the admin user.
+        if setup_tests:
+            self.console.print(f"\n📋 Running {len(setup_tests)} SETUP test cases...")
+            if self.config.parallel_tests:
+                success = self._run_parallel(setup_tests)
+            else:
+                success = self._run_sequential(setup_tests)
+            # The wizard has created the admin user — authenticate now so
+            # every subsequent HTTP + SDK module is wired with a token.
+            if not self.token and not getattr(self, "_skip_ciris_server", False):
+                self.console.print("[dim]Authenticating after SETUP wizard...[/dim]")
+                if not self._authenticate():
+                    self.console.print(
+                        "[yellow]⚠️  Post-SETUP authentication failed — "
+                        "remaining modules may report 401[/yellow]"
+                    )
+
+        # Phase 2: remaining HTTP test modules (now token-wired).
+        if all_tests:
+            self.console.print(f"\n📋 Running {len(all_tests)} HTTP test cases...")
+            if self.config.parallel_tests:
+                success = self._run_parallel(all_tests) and success
+            else:
+                success = self._run_sequential(all_tests) and success
+
+        # Run TRUE multi-occurrence integration test if requested
+        if QAModule.MULTI_OCCURRENCE in modules:
+            from .modules.multi_occurrence_tests import MultiOccurrenceTestModule
+
+            self.console.print("\n" + "=" * 80)
+            self.console.print("[bold cyan]🔄 RUNNING TRUE MULTI-OCCURRENCE INTEGRATION TEST[/bold cyan]")
+            self.console.print("=" * 80)
+
+            # This test spawns 2 separate runtimes and tests coordination
+            mo_result = MultiOccurrenceTestModule.run_true_multi_occurrence_integration_test(self)
+
+            # Store result
+            self.results["multi_occurrence::integration_test"] = {
+                "success": mo_result["success"],
+                "details": mo_result.get("details", {}),
+                "errors": mo_result.get("errors", []),
+                "duration": 0.0,
+            }
+
+            if not mo_result["success"]:
+                success = False
+                self.console.print(f"[red]❌ Multi-occurrence integration test failed: {mo_result.get('errors')}[/red]")
+            else:
+                self.console.print("[green]✅ Multi-occurrence integration test passed![/green]")
+
+        # Run ACCORD tests if requested (standalone - no server needed)
+        if QAModule.ACCORD in modules:
+            from .modules.accord_tests import AccordTestModule
+
+            self.console.print("\n" + "=" * 80)
+            self.console.print("[bold cyan]🔐 RUNNING ACCORD INVOCATION SYSTEM TESTS[/bold cyan]")
+            self.console.print("=" * 80)
+
+            accord_module = AccordTestModule()
+            accord_results = accord_module.run_all_tests()
+
+            # Store results
+            accord_passed = 0
+            accord_failed = 0
+            for result in accord_results:
+                test_key = f"accord::{result.name}"
+                self.results[test_key] = {
+                    "success": result.passed,
+                    "status": "✅ PASS" if result.passed else "❌ FAIL",
+                    "error": None if result.passed else result.message,
+                    "duration": result.duration,
+                }
+                if result.passed:
+                    accord_passed += 1
+                else:
+                    accord_failed += 1
+                    success = False
+
+            self.console.print(f"\n[cyan]Accord tests: {accord_passed} passed, {accord_failed} failed[/cyan]")
+
+        # Run SDK-based tests
+        if sdk_test_modules:
+            sdk_success = self._run_sdk_modules(sdk_test_modules)
+            success = success and sdk_success
+
+        # MANDATORY: Always show incidents log status after tests
+        self._show_incidents_status("POST-TEST")
+
+        # Check if any incidents occurred during testing
+        has_incidents = self._has_incidents_occurred()
+
+        # Generate reports
+        self._generate_reports()
+
+        # Stop filter helper if running
+        if self._filter_helper:
+            self._filter_helper.stop_monitoring()
+            self.console.print("[cyan]⏹️  SSE monitoring stopped[/cyan]")
+
+        # Stop server if we started it
+        if self.config.auto_start_server:
+            self.server_manager.stop()
+
+        # Print summary
+        elapsed = time.time() - start_time
+        self._print_summary(elapsed, has_incidents)
+
+        # Update QA status tracker
+        self._update_status_tracker(elapsed)
+
+        # Final incidents reminder - CANNOT be missed
+        if has_incidents:
+            self.console.print("\n" + "=" * 60)
+            self.console.print("[bold red]🚨 CRITICAL: INCIDENTS DETECTED DURING TESTING! 🚨[/bold red]")
+            self.console.print("[bold red]REVIEW THE INCIDENTS LOG ABOVE IMMEDIATELY![/bold red]")
+            self.console.print("=" * 60)
+            return False  # Force failure if incidents occurred
+        else:
+            self.console.print("\n[bold green]✅ No critical incidents - tests completed cleanly![/bold green]")
+
+        # ALWAYS print log location reminders - helpful for debugging
+        log_dir = f"logs/{self.server_manager.database_backend}"
+        self.console.print("\n[cyan]📋 Log Locations:[/cyan]")
+        self.console.print(f"[dim]   • Console (early startup): {log_dir}/console.log[/dim]")
+        self.console.print(f"[dim]   • Full logs: {log_dir}/latest.log[/dim]")
+        self.console.print(f"[dim]   • Incidents: {log_dir}/incidents_latest.log[/dim]")
+
+        # Billing-specific reminder for billing integration tests
+        if QAModule.BILLING_INTEGRATION in modules:
+            self.console.print("\n[yellow]💳 Billing Integration Note:[/yellow]")
+            self.console.print("[dim]   • Credit replenishment takes 5 minutes for QA user[/dim]")
+            self.console.print("[dim]   • If tests fail due to no credits, wait 5 minutes and retry[/dim]")
+
+        return success
+
+    def _check_incidents_for_test(self, test_name: str) -> List[str]:
+        """Check incidents log for errors during a specific test.
+
+        Returns list of critical incidents found.
+        """
+        incidents_log = self._incidents_log_path()
+
+        if not incidents_log.exists():
+            return []
+
+        # Patterns to ignore (non-critical).
+        # Kept in sync with the comprehensive list in `_has_incidents_occurred`
+        # below — both filter against the same incidents log and the same
+        # categories of expected / environmental / test-induced ERRORs.
+        ignore_patterns = [
+            "MOCK_MODULE_LOADED",
+            "MOCK LLM",
+            "RUNTIME SHUTDOWN",
+            "SYSTEM SHUTDOWN",
+            "GRACEFUL SHUTDOWN",
+            "Edge already exists",
+            "duplicate edge",
+            "TSDB consolidation",
+            "[SIGNAL]",
+            "[VALIDATE_LLM]",
+            "MANIFEST_CACHE MISS",
+            # QA/CI has no TPM / hardware key — CIRISVerify probes log ERROR
+            # and fall back to software; environmental, not a test failure.
+            "get_ed25519_public_key: no key loaded",
+            "Error when creating a TCTI context",
+            "TPM: failed to create context",
+            # CIRISVerify file-integrity periodically re-checks the working
+            # tree against the registry-published manifest. CI runs against
+            # an unregistered working tree so this always fails — the
+            # CI-vs-prod ground truth is set up that way deliberately. The
+            # SQLite-vs-Postgres CI flake on 2026-05-28 was caused by this
+            # periodic re-check landing inside the SQLite test window (and
+            # not the Postgres one). See run 26608575466 + CIRISAgent#836.
+            "check_full: manifest integrity verification FAILED",
+            # Same shape as the patterns in _has_incidents_occurred below —
+            # see comments there for the test-module that drives each:
+            "qa_manifest_test_",
+            "Invalid target state",
+            "Config validation failed: Configuration is empty",
+            "No channel context found for thought thought_dream_",
+            "Failed to transition from AgentState.WORK to AgentState.WORK",
+            "ciris_adapters.mcp_common' has no attribute 'Adapter'",
+            "No consent found for user user_dsar",
+            "WBD deferral rejected: Status 404",
+            "ciris_verify_run_attestation: TIMEOUT",
+            "Attestation in progress - sign_ed25519 blocked",
+            "Reddit credentials are not configured",
+        ]
+
+        critical_errors = []
+
+        try:
+            # Get file size to track new entries
+            current_size = incidents_log.stat().st_size
+
+            # Only read new entries since last check
+            if not hasattr(self, "_last_incidents_position"):
+                self._last_incidents_position = 0
+
+            if current_size > self._last_incidents_position:
+                with open(incidents_log, "r") as f:
+                    f.seek(self._last_incidents_position)
+
+                    for line in f:
+                        # Check if line contains ERROR or CRITICAL
+                        if "ERROR" in line or "CRITICAL" in line:
+                            # Skip if it matches an ignore pattern
+                            if any(pattern in line for pattern in ignore_patterns):
+                                continue
+
+                            # Extract the error message
+                            if " - ERROR - " in line:
+                                parts = line.split(" - ERROR - ")
+                                if len(parts) > 1:
+                                    error_msg = parts[-1].strip()
+                                    # Skip very long errors (likely stack traces)
+                                    if len(error_msg) < 500:
+                                        critical_errors.append(f"[{test_name}] {error_msg}")
+
+                self._last_incidents_position = current_size
+
+        except Exception as e:
+            logger.error(f"Error checking incidents log: {e}")
+
+        return critical_errors
+
+    def _check_task_appending_warnings(self, test_name: str) -> List[str]:
+        """Check main log for task appending warnings during a specific test.
+
+        Returns list of task appending warnings found.
+        """
+        # Check database backend to determine correct log path
+        backend = getattr(self.server_manager, "database_backend", "sqlite")
+        main_log = Path(f"logs/{backend}/latest.log")
+
+        if not main_log.exists():
+            return []
+
+        warnings = []
+
+        try:
+            # Get file size to track new entries
+            current_size = main_log.stat().st_size
+
+            # Only read new entries since last check
+            if not hasattr(self, "_last_main_log_position"):
+                self._last_main_log_position = 0
+
+            if current_size > self._last_main_log_position:
+                with open(main_log, "r") as f:
+                    f.seek(self._last_main_log_position)
+
+                    for line in f:
+                        # Check for UPDATED_EXISTING_TASK pattern
+                        if "UPDATED_EXISTING_TASK" in line or "TASK UPDATE: Flagged existing task" in line:
+                            # Extract relevant info - show first 300 chars of the warning
+                            warning_msg = line.strip()[:300]
+                            warnings.append(
+                                f"[{test_name}] ⚠️ Message appended to existing active task instead of creating new task: {warning_msg}"
+                            )
+
+                self._last_main_log_position = current_size
+
+        except Exception as e:
+            # Don't fail the test run if we can't check logs
+            if self.config.verbose:
+                self.console.print(f"[yellow]⚠️  Error checking main log for task appending: {e}[/yellow]")
+
+        return warnings
+
+    def _show_incidents_status(self, phase: str):
+        """ALWAYS show incidents log status - prominent and mandatory."""
+        incidents_log = self._incidents_log_path()
+
+        self.console.print(f"\n[bold cyan]📋 INCIDENTS LOG STATUS ({phase}):[/bold cyan]")
+
+        if not incidents_log.exists():
+            self.console.print("[bold red]❌ NO INCIDENTS LOG FOUND[/bold red]")
+            return
+
+        # Show log file info
+        try:
+            log_size = incidents_log.stat().st_size
+            self.console.print(f"   📁 Log: {incidents_log.resolve()}")
+            self.console.print(f"   📊 Size: {log_size:,} bytes")
+        except Exception as e:
+            self.console.print(f"[red]❌ Cannot read log file: {e}[/red]")
+            return
+
+        # Patterns to ignore (non-critical)
+        ignore_patterns = [
+            "MOCK_MODULE_LOADED",
+            "MOCK LLM",
+            "RUNTIME SHUTDOWN",
+            "SYSTEM SHUTDOWN",
+            "GRACEFUL SHUTDOWN",
+            "Edge already exists",
+            "duplicate edge",
+            "TSDB consolidation",
+            "[SIGNAL]",
+            "[VALIDATE_LLM]",
+            "MANIFEST_CACHE MISS",
+            # QA/CI has no TPM / hardware key — CIRISVerify probes log ERROR
+            # and fall back to software; environmental, not a test failure.
+            "get_ed25519_public_key: no key loaded",
+            "Error when creating a TCTI context",
+            "TPM: failed to create context",
+        ]
+
+        critical_errors = []
+        warning_count = 0
+        error_count = 0
+        critical_count = 0
+
+        try:
+            with open(incidents_log, "r") as f:
+                for line in f:
+                    if "WARNING" in line:
+                        warning_count += 1
+                    elif "ERROR" in line:
+                        error_count += 1
+                        # Check if it's a critical error we should report
+                        if not any(pattern in line for pattern in ignore_patterns):
+                            if " - ERROR - " in line:
+                                parts = line.split(" - ERROR - ")
+                                if len(parts) > 1:
+                                    error_msg = parts[-1].strip()
+                                    if len(error_msg) < 500:
+                                        critical_errors.append(error_msg)
+                    elif "CRITICAL" in line:
+                        critical_count += 1
+                        # Check if it's a critical error we should report
+                        if not any(pattern in line for pattern in ignore_patterns):
+                            if " - CRITICAL - " in line:
+                                parts = line.split(" - CRITICAL - ")
+                                if len(parts) > 1:
+                                    error_msg = parts[-1].strip()
+                                    if len(error_msg) < 500:
+                                        critical_errors.append(error_msg)
+
+        except Exception as e:
+            self.console.print(f"[red]❌ Could not read incidents log: {e}[/red]")
+            return
+
+        # ALWAYS show counts - even if zero
+        self.console.print(f"   ⚠️  Warnings: {warning_count}")
+        self.console.print(f"   🚫 Errors: {error_count}")
+        self.console.print(f"   💥 Critical: {critical_count}")
+
+        # Report critical errors prominently
+        if critical_errors:
+            unique_errors = list(dict.fromkeys(critical_errors))
+            self.console.print(f"\n[bold red]🚨 CRITICAL ISSUES FOUND ({len(unique_errors)}):[/bold red]")
+            for i, error in enumerate(unique_errors[:10], 1):  # Show more errors
+                self.console.print(f"   {i:2d}. {error[:250]}")  # Show more of each error
+
+            if len(unique_errors) > 10:
+                self.console.print(f"   ... and {len(unique_errors) - 10} more critical errors")
+
+            # Make it impossible to miss
+            self.console.print(f"\n[bold red]🚨 {len(unique_errors)} CRITICAL ISSUES REQUIRE ATTENTION! 🚨[/bold red]")
+        else:
+            self.console.print("[bold green]✅ No critical issues found[/bold green]")
+
+        self.console.print()  # Extra spacing
+
+    def _incidents_log_path(self) -> Path:
+        """Path to the incidents log the running server actually writes to.
+
+        Backend runs write to ``logs/{backend}/incidents_latest.log`` — NOT
+        the stale top-level ``logs/incidents_latest.log``. Watching the wrong
+        file is why agent ERROR/CRITICAL incidents raised during testing went
+        undetected and runs reported "no incidents" when they should have
+        failed.
+        """
+        server_manager = getattr(self, "server_manager", None)
+        backend = getattr(server_manager, "database_backend", None) if server_manager else None
+        if backend:
+            return Path(f"logs/{backend}/incidents_latest.log")
+        return Path("logs/incidents_latest.log")
+
+    def _record_startup_incidents_position(self):
+        """Record the incidents log position at startup for comparison."""
+        incidents_log = self._incidents_log_path()
+
+        if incidents_log.exists():
+            try:
+                self._startup_incidents_position = incidents_log.stat().st_size
+            except Exception:
+                self._startup_incidents_position = 0
+        else:
+            self._startup_incidents_position = 0
+
+    def _has_incidents_occurred(self) -> bool:
+        """Check if any NEW incidents occurred during testing."""
+        incidents_log = self._incidents_log_path()
+
+        if not incidents_log.exists():
+            return False
+
+        # Only check for new content added since startup
+        try:
+            current_size = incidents_log.stat().st_size
+            if current_size <= self._startup_incidents_position:
+                return False  # No new content
+
+            # Check only the new content
+            ignore_patterns = [
+                "MOCK_MODULE_LOADED",
+                "MOCK LLM",
+                "RUNTIME SHUTDOWN",
+                "SYSTEM SHUTDOWN",
+                "GRACEFUL SHUTDOWN",
+                "[SIGNAL]",  # signal-handler lines (e.g. SIGTERM to stop the QA server)
+                "Edge already exists",
+                "duplicate edge",
+                "TSDB consolidation",
+                # The setup module deliberately validates bad LLM endpoints —
+                # the agent correctly logs the validation failure.
+                "[VALIDATE_LLM]",
+                # ciris_verify logs ERROR for an offline build-registry; in QA
+                # there is no registry and L4 file integrity is legitimately
+                # skipped — an environmental degradation, not a test failure.
+                "MANIFEST_CACHE MISS",
+                # CIRISVerify's file-integrity periodic re-check fails in CI
+                # because CI runs against the working tree, not a registry-
+                # published build. The re-check fires every ~3 minutes and on
+                # 2026-05-28 (run 26608575466) the SQLite-vs-Postgres timing
+                # diff made the third re-check land inside the SQLite test
+                # window while Postgres just missed it — flaking the SQLite
+                # backend. Both backends always produce ≥2 of these per run.
+                # Environmental; tracked at CIRISAgent#836.
+                "check_full: manifest integrity verification FAILED",
+                # QA/CI hosts have no TPM and no hardware Ed25519 key, so the
+                # CIRISVerify FFI key probe + TPM TCTI context creation log
+                # ERROR and fall back to software — expected, not a failure.
+                "get_ed25519_public_key: no key loaded",
+                "Error when creating a TCTI context",
+                "TPM: failed to create context",
+                # QA modules that DELIBERATELY exercise error / edge paths —
+                # the agent correctly logs the rejection; the ERROR line is
+                # the expected test outcome, not an incident (cf. VALIDATE_LLM):
+                #  - state_transitions test submits an invalid target state
+                "Invalid target state",
+                #  - adapter_manifest test unloads its scratch adapters, some
+                #    of which were never loaded
+                "qa_manifest_test_",
+                #  - adapter_manifest probes every ciris_adapters/* dir; the
+                #    shared MCP library `mcp_common` is not a loadable adapter
+                #    (no Adapter class — by design), and the loader correctly
+                #    says so. Expected probe noise, not an incident.
+                "ciris_adapters.mcp_common' has no attribute 'Adapter'",
+                #  - dsar_multi_source exercises the DSAR path for a test user
+                #    that has no consent record; the orchestrator correctly
+                #    reports the absence (the test asserts that behaviour).
+                "No consent found for user user_dsar",
+                #  - accord_metrics ships WBD deferrals to the lens; the QA
+                #    mock lens does not implement /accord/wbd/deferrals, so the
+                #    adapter correctly logs the 404 it received. Mock gap.
+                "WBD deferral rejected: Status 404",
+                #  - CIRISVerify's attestation probe reaches for the registry
+                #    over the network; CI has no route to it, so it correctly
+                #    logs a timeout and falls back to software. Environmental.
+                "ciris_verify_run_attestation: TIMEOUT",
+                #  - accord_metrics trace-signing is briefly blocked while an
+                #    attestation is in progress; the adapter retries (~500ms).
+                #    A transient, self-recovering condition, not a fault.
+                "Attestation in progress - sign_ed25519 blocked",
+                #  - adapter_config test submits an empty config to verify
+                #    validation rejects it
+                "Config validation failed: Configuration is empty",
+                #  - cognitive-state tests force unnatural WORK/DREAM
+                #    transitions; a force-transitioned DREAM seed thought has
+                #    no originating adapter channel. (Tracked as a follow-up:
+                #    DREAM seed thoughts should carry a synthetic channel.)
+                "No channel context found for thought thought_dream_",
+                "Failed to transition from AgentState.WORK to AgentState.WORK",
+                # High-frequency BENIGN warnings — routine per-thought / per-
+                # cache-gen chatter, not systemic malfunctions. Excluded so the
+                # WARNING-flood detector below isn't tripped by normal noise:
+                #  - the mock LLM's own diagnostic (QA fixture only — never
+                #    emitted in production, there is no mock LLM there)
+                "[MOCK_LLM] No user_input found in context",
+                #  - the tool-cache generator noting CIRISVerifyService is not
+                #    a tool-enumeration provider (true by design — it is a
+                #    verification service, not a tool service)
+                "[TOOL_CACHE] CIRISVerifyService: No get_all_tool_info",
+            ]
+
+            # A single WARNING is noise; the same WARNING repeated dozens of
+            # times is a systemic malfunction (e.g. 352× "[STORE_RESPONSE] No
+            # event found" — every agent response failing to correlate). Flag
+            # a WARNING flood even though no line is ERROR-level.
+            warning_flood_threshold = 50
+            warning_counts: Dict[str, int] = {}
+
+            with open(incidents_log, "r") as f:
+                f.seek(self._startup_incidents_position)  # Start from where we left off
+
+                for line in f:
+                    if any(pattern in line for pattern in ignore_patterns):
+                        continue
+                    if "ERROR" in line or "CRITICAL" in line:
+                        return True
+                    if "WARNING" in line:
+                        # Normalize away per-event variables (uuids, hex ids,
+                        # numbers) so identical warnings collapse to one key.
+                        sig = re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{8,}", "<id>", line)
+                        sig = re.sub(r"\b[0-9a-fA-F]{12,}\b", "<hex>", sig)
+                        sig = re.sub(r"\d+", "<n>", sig)
+                        sig = sig.split(" - ", 3)[-1].strip()[:160]
+                        warning_counts[sig] = warning_counts.get(sig, 0) + 1
+
+            for sig, count in warning_counts.items():
+                if count >= warning_flood_threshold:
+                    self.console.print(
+                        f"[bold red]🚨 WARNING flood: '{sig}' repeated {count}× "
+                        f"during testing — systemic malfunction[/bold red]"
+                    )
+                    return True
+
+        except Exception:
+            return False
+
+        return False
+
+    def _assert_token_valid(self, after_label: str) -> bool:
+        """Diagnostic auth gate — confirm self.token still works after `after_label`.
+
+        A test that logs out, refreshes, revokes, or otherwise corrupts the
+        session token leaves EVERY later test 401-ing far from the real
+        culprit (the diffuse "Invalid API key" failures seen under
+        --parallel-backends). This gate runs one cheap check — GET
+        /v1/auth/me — right after each test/module: on a non-200 it fails
+        LOUDLY, naming the exact step that just ran, then re-authenticates so
+        the rest of the run still produces signal. The loud line makes the
+        culprit obvious instead of a mystery N modules downstream.
+
+        Returns True if the token was already valid, False if it had to be
+        restored (i.e. `after_label` is the suspect).
+        """
+        if not self.token:
+            return True
+        try:
+            resp = requests.get(
+                f"{self.config.base_url}/v1/auth/me",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10,
+            )
+        except Exception as e:
+            self.console.print(f"[yellow]🔑 [AUTH GATE] could not validate token after '{after_label}': {e}[/yellow]")
+            return True
+        if resp.status_code == 200:
+            return True
+        self.console.print(
+            f"[bold red]🔑 [AUTH GATE] auth token INVALID (HTTP {resp.status_code}) "
+            f"immediately after '{after_label}' — that step corrupted the session "
+            f"token. Re-authenticating so the run continues.[/bold red]"
+        )
+        self._authenticate()
+        return False
+
+    def _authenticate(self) -> bool:
+        """Get authentication token."""
+        try:
+            # Use server manager's extracted password if available (dynamic password)
+            # Otherwise fall back to config password
+            admin_password = self.config.admin_password
+            if hasattr(self, "server_manager") and self.server_manager:
+                admin_password = self.server_manager.get_admin_password()
+
+            response = requests.post(
+                f"{self.config.base_url}/v1/auth/login",
+                json={"username": self.config.admin_username, "password": admin_password},
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                self.token = response.json()["access_token"]
+                self.console.print("[green]✅ Authentication successful[/green]")
+                # Diagnostic: which URL this _authenticate() hit and the
+                # token suffix it yielded — to catch a base_url cross under
+                # --parallel-backends (a child authenticating against the
+                # other backend's server).
+                print(
+                    f"QA_AUTH_TRACE backend={self.database_backends} "
+                    f"login_url={self.config.base_url}/v1/auth/login "
+                    f"token_suffix=...{(self.token or '')[-12:]}",
+                    flush=True,
+                )
+                return True
+            else:
+                self.console.print(f"[red]Authentication failed: {response.status_code}[/red]")
+                return False
+
+        except Exception as e:
+            self.console.print(f"[red]Authentication error: {e}[/red]")
+            return False
+
+    def _setup_oauth_test_user(self) -> bool:
+        """Create/verify OAuth test user in database for billing integration tests."""
+        try:
+            import base64
+            import hashlib
+            import json
+            import secrets
+            import sqlite3
+            from datetime import datetime, timezone
+
+            # Find database - MUST use auth database where authentication service stores users
+            db_path = Path("data/ciris_engine_auth.db")
+            if not db_path.exists():
+                self.console.print(f"[red]❌ Auth database not found: {db_path}[/red]")
+                return False
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Generate proper wa_id format (wa-YYYY-MM-DD-XXXXXX)
+            timestamp = datetime.now(timezone.utc)
+            proper_wa_id = f"wa-{timestamp.strftime('%Y-%m-%d')}-{secrets.token_hex(3).upper()}"
+
+            # Check if user exists (by OAuth provider:external_id)
+            cursor.execute(
+                "SELECT wa_id, name FROM wa_cert WHERE oauth_provider = ? AND oauth_external_id = ?",
+                (self.config.oauth_test_provider, self.config.oauth_test_external_id),
+            )
+            exists = cursor.fetchone()
+
+            if not exists:
+                # Generate dummy pubkey and jwt_kid for OAuth user
+                # OAuth users don't use real Ed25519 keys - these are just placeholders
+                dummy_pubkey = base64.b64encode(
+                    hashlib.sha256(self.config.oauth_test_user_id.encode()).digest()
+                ).decode()
+                jwt_kid = f"oauth_{self.config.oauth_test_provider}_{hashlib.sha256(self.config.oauth_test_external_id.encode()).hexdigest()[:16]}"
+
+                # Observer scopes
+                scopes = json.dumps(
+                    {
+                        "scopes": [
+                            "read:agent_status",
+                            "read:messages",
+                            "write:messages",
+                            "read:memory",
+                            "read:telemetry",
+                        ]
+                    }
+                )
+
+                # Generate password hash for test user (allows login via /v1/auth/login)
+                # This enables us to authenticate as the OAuth user and create API keys
+                test_password = "qa_test_oauth_password_temp"
+                # Use PBKDF2 (matches infrastructure AuthenticationService)
+                import base64
+                import secrets
+
+                from cryptography.hazmat.primitives import hashes
+                from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+                salt = secrets.token_bytes(32)
+                kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+                key = kdf.derive(test_password.encode())
+                password_hash = base64.b64encode(salt + key).decode()
+
+                # Store OAuth profile with email in oauth_links_json
+                # This makes the email available for billing purchase requests
+                oauth_profile = json.dumps(
+                    [
+                        {
+                            "provider": self.config.oauth_test_provider,
+                            "external_id": self.config.oauth_test_external_id,
+                            "account_name": "QA Test User",
+                            "is_primary": True,
+                            "metadata": {
+                                "email": "qa_test_oauth@ciris.ai",  # Email for purchase tests
+                                "name": "QA Test User",
+                            },
+                        }
+                    ]
+                )
+
+                # Create user - using proper wa_id format
+                cursor.execute(
+                    """
+                    INSERT INTO wa_cert (
+                        wa_id, name, oauth_provider, oauth_external_id, password_hash,
+                        role, pubkey, jwt_kid, scopes_json, oauth_links_json, created, active, auto_minted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
+                """,
+                    (
+                        proper_wa_id,  # Use proper wa_id format
+                        "qa_oauth_user",  # Username for login
+                        self.config.oauth_test_provider,
+                        self.config.oauth_test_external_id,
+                        password_hash,  # Add password for login
+                        "observer",
+                        dummy_pubkey,
+                        jwt_kid,
+                        scopes,
+                        oauth_profile,  # OAuth profile with email
+                        1,  # active
+                        1,  # auto_minted
+                    ),
+                )
+                conn.commit()
+                self.console.print(f"[green]✅ Created OAuth test user: {proper_wa_id}[/green]")
+                self.console.print(f"[dim]   Username: qa_oauth_user[/dim]")
+                self.console.print(f"[dim]   Provider: {self.config.oauth_test_provider}[/dim]")
+                self.console.print(f"[dim]   External ID: {self.config.oauth_test_external_id}[/dim]")
+            else:
+                existing_wa_id = exists[0]
+                self.console.print(f"[cyan]ℹ️  OAuth test user exists: {existing_wa_id}[/cyan]")
+
+                # Update the name and password if needed to ensure login works
+                user_name = exists[1]
+
+                # Generate password hash for login capability
+                test_password = "qa_test_oauth_password_temp"
+                # Use PBKDF2 (matches infrastructure AuthenticationService)
+                import base64
+                import secrets
+
+                from cryptography.hazmat.primitives import hashes
+                from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+                salt = secrets.token_bytes(32)
+                kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+                key = kdf.derive(test_password.encode())
+                password_hash = base64.b64encode(salt + key).decode()
+
+                # Store OAuth profile with email in oauth_links_json
+                oauth_profile = json.dumps(
+                    [
+                        {
+                            "provider": self.config.oauth_test_provider,
+                            "external_id": self.config.oauth_test_external_id,
+                            "account_name": "QA Test User",
+                            "is_primary": True,
+                            "metadata": {
+                                "email": "qa_test_oauth@ciris.ai",  # Email for purchase tests
+                                "name": "QA Test User",
+                            },
+                        }
+                    ]
+                )
+
+                # Update name, password, and OAuth profile
+                cursor.execute(
+                    """
+                    UPDATE wa_cert SET name = ?, password_hash = ?, oauth_links_json = ? WHERE wa_id = ?
+                """,
+                    ("qa_oauth_user", password_hash, oauth_profile, existing_wa_id),
+                )
+                conn.commit()
+                self.console.print(f"[dim]   Updated login credentials for existing user[/dim]")
+
+            conn.close()
+            return True
+
+        except Exception as e:
+            self.console.print(f"[red]❌ Failed to setup OAuth user: {e}[/red]")
+            import traceback
+
+            if self.config.verbose:
+                self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            return False
+
+    def _get_oauth_user_token(self) -> Optional[str]:
+        """Get fresh API key for OAuth test user by logging in as them."""
+        try:
+            # Login as the OAuth test user using password authentication
+            # This will create an API key in the auth service's in-memory store
+            response = requests.post(
+                f"{self.config.base_url}/v1/auth/login",
+                json={"username": "qa_oauth_user", "password": "qa_test_oauth_password_temp"},
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                api_key = response.json()["access_token"]
+                user_id = response.json()["user_id"]
+                self.console.print(f"[green]✅ Logged in as OAuth user (user_id: {user_id})[/green]")
+                return api_key
+            else:
+                self.console.print(f"[yellow]⚠️  Failed to login as OAuth user: {response.status_code}[/yellow]")
+                if self.config.verbose:
+                    self.console.print(f"[dim]Response: {response.text[:200]}[/dim]")
+                return None
+
+        except Exception as e:
+            self.console.print(f"[red]❌ Error logging in as OAuth user: {e}[/red]")
+            import traceback
+
+            if self.config.verbose:
+                self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            return None
+
+    def _run_sdk_modules(self, modules: List[QAModule]) -> bool:
+        """Run SDK-based test modules (consent, billing, etc.)."""
+        from ciris_sdk.client import CIRISClient
+
+        from .modules import (
+            AIRTests,
+            BillingTests,
+            ConsentTests,
+            DSARTests,
+            MCPTests,
+            MessageIDDebugTests,
+            PartnershipTests,
+        )
+        from .modules.accord_metrics_tests import AccordMetricsTests
+        from .modules.adapter_autoload_tests import AdapterAutoloadTests
+        from .modules.agent_mode_tests import AgentModeTests
+        from .modules.adapter_availability_tests import AdapterAvailabilityTests
+        from .modules.adapter_config_tests import AdapterConfigTests
+        from .modules.adapter_manifest_tests import AdapterManifestTests
+        from .modules.billing_integration_tests import BillingIntegrationTests
+        from .modules.cirisnode_tests import CIRISNodeTests
+        from .modules.cognitive_state_api_tests import CognitiveStateAPITests
+        from .modules.context_enrichment_tests import ContextEnrichmentTests
+        from .modules.deferral_taxonomy_tests import DeferralTaxonomyTests
+        from .modules.deferral_tests import DeferralTestModule
+        from .modules.degraded_mode_tests import DegradedModeTests
+        from .modules.dream_live_tests import DreamLiveTests
+        from .modules.dsar_multi_source_tests import DSARMultiSourceTests
+        from .modules.dsar_ticket_workflow_tests import DSARTicketWorkflowTests
+        from .modules.filter_tests import FilterTestModule
+        from .modules.handler_tests import HandlerTestModule
+        from .modules.homeassistant_agentic_tests import HomeAssistantAgenticTests
+        from .modules.hosted_tools_tests import HostedToolsTests
+        from .modules.identity_update_tests import IdentityUpdateTests
+        from .modules.licensed_agent_tests import LicensedAgentTests
+        from .modules.mcp_tests import MCPTests
+        from .modules.memory_benchmark_tests import MemoryBenchmarkTests
+        from .modules.model_eval_tests import ModelEvalTests
+        from .modules.parallel_locales_tests import ParallelLocalesTests
+        from .modules.safety_battery import SafetyBatteryTests
+        from .modules.safety_interpret import SafetyInterpretTests
+        from .modules.play_live_tests import PlayLiveTests
+        from .modules.reddit_tests import RedditTests
+        from .modules.secrets_encryption_tests import SecretsEncryptionTests
+        from .modules.solitude_live_tests import SolitudeLiveTests
+        from .modules.sql_external_data_tests import SQLExternalDataTests
+        from .modules.state_transition_tests import StateTransitionTests
+        from .modules.system_messages_tests import SystemMessagesTests
+        from .modules.utility_adapters_tests import UtilityAdaptersTests
+        from .modules.vision_tests import VisionTests
+        from .modules.wallet_tests import WalletTests
+
+        all_passed = True
+
+        # Map modules to test classes
+        module_map = {
+            QAModule.CONSENT: ConsentTests,
+            QAModule.DSAR: DSARTests,
+            QAModule.DSAR_MULTI_SOURCE: DSARMultiSourceTests,
+            QAModule.DSAR_TICKET_WORKFLOW: DSARTicketWorkflowTests,
+            QAModule.PARTNERSHIP: PartnershipTests,
+            QAModule.BILLING: BillingTests,
+            QAModule.BILLING_INTEGRATION: BillingIntegrationTests,
+            QAModule.MESSAGE_ID_DEBUG: MessageIDDebugTests,
+            QAModule.REDDIT: RedditTests,
+            QAModule.SQL_EXTERNAL_DATA: SQLExternalDataTests,
+            QAModule.STATE_TRANSITIONS: StateTransitionTests,
+            QAModule.COGNITIVE_STATE_API: CognitiveStateAPITests,
+            QAModule.MCP: MCPTests,
+            QAModule.ADAPTER_CONFIG: AdapterConfigTests,
+            QAModule.ADAPTER_AUTOLOAD: AdapterAutoloadTests,
+            QAModule.ADAPTER_MANIFEST: AdapterManifestTests,
+            QAModule.ADAPTER_AVAILABILITY: AdapterAvailabilityTests,
+            QAModule.IDENTITY_UPDATE: IdentityUpdateTests,
+            QAModule.CONTEXT_ENRICHMENT: ContextEnrichmentTests,
+            QAModule.VISION: VisionTests,
+            QAModule.AIR: AIRTests,
+            QAModule.ACCORD_METRICS: AccordMetricsTests,
+            QAModule.AGENT_MODE: AgentModeTests,
+            QAModule.SYSTEM_MESSAGES: SystemMessagesTests,
+            QAModule.HOSTED_TOOLS: HostedToolsTests,
+            QAModule.UTILITY_ADAPTERS: UtilityAdaptersTests,
+            QAModule.HOMEASSISTANT_AGENTIC: HomeAssistantAgenticTests,
+            QAModule.DEFERRAL_TAXONOMY: DeferralTaxonomyTests,
+            QAModule.CIRISNODE: CIRISNodeTests,
+            QAModule.LICENSED_AGENT: LicensedAgentTests,
+            QAModule.SOLITUDE_LIVE: SolitudeLiveTests,
+            QAModule.PLAY_LIVE: PlayLiveTests,
+            QAModule.DREAM_LIVE: DreamLiveTests,
+            QAModule.FILTERS: FilterTestModule,
+            QAModule.HANDLERS: HandlerTestModule,
+            QAModule.DEFERRAL: DeferralTestModule,
+            QAModule.WALLET: WalletTests,
+            QAModule.DEGRADED_MODE: DegradedModeTests,
+            QAModule.MODEL_EVAL: ModelEvalTests,
+            QAModule.PARALLEL_LOCALES: ParallelLocalesTests,
+            QAModule.SAFETY_BATTERY: SafetyBatteryTests,
+            QAModule.SAFETY_INTERPRET: SafetyInterpretTests,
+            QAModule.SECRETS_ENCRYPTION: SecretsEncryptionTests,
+            QAModule.MEMORY_BENCHMARK: MemoryBenchmarkTests,
+        }
+
+        async def run_module(module: QAModule, auth_token: Optional[str] = None):
+            """Run a single SDK module with optional custom auth token."""
+            test_class = module_map.get(module)
+            if not test_class:
+                self.console.print(f"[red]❌ Unknown SDK module: {module.value}[/red]")
+                return False
+
+            # Use custom token if provided, otherwise use admin token
+            token_to_use = auth_token if auth_token else self.token
+
+            # Create SDK client with authentication
+            # Use longer timeout for Reddit operations (e.g., get_user_context can be slow)
+            # Model-eval interact() calls block server-side until the full
+            # DMA chain + conscience + SPEAK finishes, which is minutes under
+            # live LLM load. Give the SDK plenty of headroom so httpx doesn't
+            # cut the connection before the server responds.
+            #
+            # 1800s budget (raised from 900s in 2.7.4): Together gemma-4 has
+            # ~15% tail-latency at 90s per direct DMA call; a single
+            # interact() runs PDMA + CSDMA + DSDMA + IDMA + ASPDMA + conscience
+            # checks, potentially across multiple PONDER thoughts, so 5 thoughts
+            # × 5 LLM stages × tail-latency can compound past 900s on slow
+            # provider draws. Override via CIRIS_QA_SDK_TIMEOUT env if needed.
+            try:
+                _model_eval_sdk_timeout = float(os.environ.get("CIRIS_QA_SDK_TIMEOUT", "1800"))
+            except (TypeError, ValueError):
+                _model_eval_sdk_timeout = 1800.0
+            sdk_timeout = _model_eval_sdk_timeout if module == QAModule.MODEL_EVAL else 120.0
+
+            # No-server modules (e.g. safety_interpret) talk to an
+            # external API directly — don't try to open a CIRISClient
+            # to a server that isn't running.
+            from .modules._module_metadata import get_metadata as _md_lookup
+            _module_needs_server = getattr(_md_lookup(module), "requires_ciris_server", True)
+
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def _client_ctx():
+                if not _module_needs_server:
+                    yield None
+                    return
+                # use_auth_store=False is REQUIRED for --parallel-backends.
+                # The SDK's AuthStore is a shared filesystem cache
+                # (~/.ciris/auth.json); two backend legs running concurrently
+                # do read-modify-write on that one file and corrupt/cross
+                # each other's tokens → "Invalid API key" 401s on whichever
+                # leg loses the race (adapter_autoload/config/availability/
+                # context_enrichment). QA always sets the token explicitly,
+                # so the store is pure downside — disable it entirely.
+                async with CIRISClient(
+                    base_url=self.config.base_url,
+                    timeout=sdk_timeout,
+                    use_auth_store=False,
+                ) as _c:
+                    _c._transport.set_api_key(token_to_use, persist=False)
+                    # Pin the client-level attr too — adapter QA modules read
+                    # the token back via client.api_key for raw requests().
+                    _c.api_key = token_to_use
+                    # Diagnostic: which token identity this module's client
+                    # carries — correlate with the server's validate_api_key
+                    # [AUTH SERVICE DEBUG] line (matched on the …suffix).
+                    # Plain print() — rich markup would eat a "[TOKEN]" tag.
+                    _tok_suffix = (token_to_use or "")[-12:]
+                    print(
+                        f"QA_TOKEN_TRACE sdk_module={module.value} client_token_suffix=...{_tok_suffix}",
+                        flush=True,
+                    )
+                    yield _c
+
+            async with _client_ctx() as client:
+
+                # Instantiate and run test module
+                # Special handling for AccordMetricsTests - pass live_lens config +
+                # backend-namespaced trace dir (qa_reports/<backend>/) so parallel
+                # backends don't clobber each other's hash-keyed trace files.
+                if module == QAModule.ACCORD_METRICS:
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        live_lens=self.config.live_lens,
+                        qa_reports_dir=self.server_manager.qa_reports_dir,
+                    )
+                # Special handling for CIRISNodeTests - pass live_node config
+                elif module == QAModule.CIRISNODE:
+                    test_instance = test_class(client, self.console, live_node=getattr(self.config, "live_node", False))
+                # Special handling for LicensedAgentTests - pass live_portal config
+                elif module == QAModule.LICENSED_AGENT:
+                    test_instance = test_class(
+                        client, self.console, live_portal=getattr(self.config, "live_portal", False)
+                    )
+                elif module == QAModule.FILTERS:
+                    # FilterTestModule inherits from BaseTestModule and supports fail_fast
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        fail_fast=self.config.fail_fast,
+                        test_timeout=self.config.test_timeout,
+                    )
+                elif module == QAModule.MEMORY_BENCHMARK:
+                    # Memory benchmark supports concurrent channels for faster testing
+                    concurrent_channels = getattr(self.config, "concurrent_channels", 4)
+                    message_count = getattr(self.config, "message_count", 100)
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        fail_fast=self.config.fail_fast,
+                        test_timeout=self.config.test_timeout,
+                        message_count=message_count,
+                        concurrent_channels=concurrent_channels,
+                    )
+                elif module == QAModule.MODEL_EVAL:
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        languages=getattr(self.config, "model_eval_languages", ["am", "zh", "en", "es"]),
+                        max_concurrency=getattr(self.config, "model_eval_concurrency", 4),
+                        profile_memory=getattr(self.config, "model_eval_profile_memory", True),
+                        api_port=self.config.api_port,
+                        question_categories=getattr(self.config, "model_eval_question_categories", []),
+                        questions_file=getattr(self.config, "model_eval_questions_file", None),
+                    )
+                elif module == QAModule.DEFERRAL_TAXONOMY:
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        fail_fast=self.config.fail_fast,
+                        test_timeout=self.config.test_timeout,
+                    )
+                elif module == QAModule.SAFETY_BATTERY:
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        lang=getattr(self.config, "safety_battery_lang", "am"),
+                        domain=getattr(self.config, "safety_battery_domain", "mental_health"),
+                        template_id=getattr(self.config, "safety_battery_template", "default"),
+                        model=self.config.live_model,
+                        live_base_url=self.config.live_base_url,
+                        live_provider=self.config.live_provider,
+                        api_port=self.config.api_port,
+                    )
+                elif module == QAModule.SAFETY_INTERPRET:
+                    from pathlib import Path as _Path
+                    _cap = getattr(self.config, "safety_interpret_capture_dir", None)
+                    _crit = getattr(self.config, "safety_interpret_criteria_file", None)
+                    _key = getattr(self.config, "safety_interpret_openrouter_key_file", None)
+                    _model = getattr(self.config, "safety_interpret_judge_model", None)
+                    test_instance = test_class(
+                        client,
+                        self.console,
+                        capture_dir=_Path(_cap) if _cap else None,
+                        criteria_file=_Path(_crit) if _crit else None,
+                        openrouter_key_file=_Path(_key) if _key else None,
+                        judge_model=_model,
+                        api_port=self.config.api_port,
+                    )
+                else:
+                    test_instance = test_class(client, self.console)
+
+                _mod_t0 = time.time()
+                results = await test_instance.run()
+                # Real wall time for this SDK module (accumulate — a module
+                # can run twice across a re-auth retry).
+                self._module_wall[module.value] = self._module_wall.get(module.value, 0.0) + (
+                    time.time() - _mod_t0
+                )
+
+                # Store results in runner's results dict
+                for result in results:
+                    test_name = result["test"]
+                    passed = "PASS" in result["status"]
+
+                    self.results[f"{module.value}::{test_name}"] = {
+                        "success": passed,
+                        "status": result["status"],
+                        "error": result.get("error"),
+                        "duration": 0.0,  # SDK tests don't track individual durations
+                    }
+
+                # Check if all tests passed. Use the SAME "passed" definition
+                # as the self.results bookkeeping above (`"PASS" in status`) —
+                # an exact `== "✅ PASS"` here diverged from it: a PASS-variant
+                # status counted as Passed in the Total/Passed/Failed summary
+                # yet made this return False, failing the whole leg with
+                # Failed=0 (the exit-1-on-green bug).
+                return all("PASS" in r["status"] for r in results)
+
+        # Run all SDK modules sequentially (they use async internally)
+        for module in modules:
+            self.console.print(f"\n📋 Running {module.value} SDK tests...")
+            try:
+                # Special handling for BILLING_INTEGRATION - uses OAuth user token
+                if module == QAModule.BILLING_INTEGRATION:
+                    # OAuth user was already setup before server start
+                    # Get fresh API key for OAuth user
+                    oauth_token = self._get_oauth_user_token()
+                    if not oauth_token:
+                        self.console.print(f"[red]❌ Failed to get OAuth token for {module.value}[/red]")
+                        all_passed = False
+                        continue
+
+                    # Run with OAuth token
+                    module_passed = asyncio.run(run_module(module, auth_token=oauth_token))
+                else:
+                    # Run with admin token
+                    module_passed = asyncio.run(run_module(module))
+
+                # Diagnostic auth gate — if this SDK module corrupted the
+                # session token (an auth/logout/refresh test, a revocation,
+                # etc.), log loudly here named to this module instead of
+                # leaving every later module with a mystery "Invalid API
+                # key" 401. The SDK phase has no equivalent of the HTTP
+                # loop's token_invalidating_tests re-auth, so this gate is
+                # ALSO the SDK phase's restore point: it re-authenticates,
+                # so downstream modules run clean and the leg isn't derailed
+                # by one token-mutating module. Not a leg failure — modules
+                # like `sdk`/`auth` invalidate the token by design; the loud
+                # line is the signal, the re-auth is the fix.
+                self._assert_token_valid(f"SDK module '{module.value}'")
+
+                # Check for task appending warnings after SDK module completes
+                task_warnings = self._check_task_appending_warnings(module.value)
+                if task_warnings:
+                    if self.config.verbose:
+                        self.console.print(
+                            f"[yellow]⚠️  Found {len(task_warnings)} task appending warnings during {module.value}[/yellow]"
+                        )
+                        for warning in task_warnings:
+                            self.console.print(f"[yellow]   {warning}[/yellow]")
+                    # Store warnings in the first test result for this module
+                    # (SDK modules may have multiple tests, but we track warnings at module level)
+                    module_tests = [k for k in self.results.keys() if k.startswith(f"{module.value}::")]
+                    if module_tests:
+                        first_test = module_tests[0]
+                        if "task_appending_warnings" not in self.results[first_test]:
+                            self.results[first_test]["task_appending_warnings"] = []
+                        self.results[first_test]["task_appending_warnings"].extend(task_warnings)
+
+                if not module_passed:
+                    all_passed = False
+            except Exception as e:
+                self.console.print(f"[red]❌ Error running {module.value}: {e}[/red]")
+                import traceback
+
+                if self.config.verbose:
+                    self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
+                all_passed = False
+
+        return all_passed
+
+    def _run_sequential(self, tests: List[QATestCase]) -> bool:
+        """Run tests sequentially."""
+        all_passed = True
+
+        with Progress(
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=self.console
+        ) as progress:
+            task = progress.add_task("Running tests...", total=len(tests))
+
+            for test in tests:
+                progress.update(task, description=f"Testing {test.name}...")
+
+                passed, result = self._run_single_test(test)
+                self.results[f"{test.module.value}::{test.name}"] = result
+
+                # Check if this was a test that invalidated our token
+                token_invalidating_tests = [("logout", "/auth/logout"), ("refresh token", "/auth/refresh")]
+
+                for test_name_pattern, endpoint_pattern in token_invalidating_tests:
+                    if test_name_pattern.lower() in test.name.lower() and endpoint_pattern in test.endpoint:
+                        if self.config.verbose:
+                            self.console.print(f"[yellow]🔄 Re-authenticating after {test.name}...[/yellow]")
+                        # Re-authenticate to restore token for subsequent tests
+                        if not self._authenticate():
+                            self.console.print(f"[red]❌ Failed to re-authenticate after {test.name}[/red]")
+                            all_passed = False
+                        break
+
+                # Diagnostic auth gate — if this test corrupted the session
+                # token in a way the known token_invalidating_tests patterns
+                # above did NOT catch, fail loudly here, named to this test,
+                # instead of a mystery 401 modules later.
+                self._assert_token_valid(f"HTTP test '{test.name}'")
+
+                # Check incidents log after each test for immediate feedback
+                incidents = self._check_incidents_for_test(test.name)
+                if incidents:
+                    result["incidents"] = incidents
+                    if self.config.verbose:
+                        self.console.print(f"[yellow]⚠️  Found {len(incidents)} incidents during {test.name}[/yellow]")
+
+                # Check for task appending warnings (messages appended to existing active tasks)
+                task_warnings = self._check_task_appending_warnings(test.name)
+                if task_warnings:
+                    result["task_appending_warnings"] = task_warnings
+                    if self.config.verbose:
+                        self.console.print(
+                            f"[yellow]⚠️  Found {len(task_warnings)} task appending warnings during {test.name}[/yellow]"
+                        )
+                        for warning in task_warnings:
+                            self.console.print(f"[yellow]   {warning}[/yellow]")
+
+                if not passed:
+                    all_passed = False
+
+                # Note: HANDLERS and FILTERS are now SDK-based and handled in _run_sdk_modules()
+                # No SSE waiting needed here anymore
+
+                progress.advance(task)
+
+        return all_passed
+
+    def _run_parallel(self, tests: List[QATestCase]) -> bool:
+        """Run tests in parallel."""
+        all_passed = True
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            futures = []
+
+            for test in tests:
+                future = executor.submit(self._run_single_test, test)
+                futures.append((test, future))
+
+            with Progress(
+                SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=self.console
+            ) as progress:
+                task = progress.add_task("Running parallel tests...", total=len(tests))
+
+                for test, future in futures:
+                    progress.update(task, description=f"Waiting for {test.name}...")
+
+                    passed, result = future.result(timeout=self.config.timeout)
+                    self.results[f"{test.module.value}::{test.name}"] = result
+
+                    # Check incidents log after each test (note: less precise in parallel mode)
+                    incidents = self._check_incidents_for_test(test.name)
+                    if incidents:
+                        result["incidents"] = incidents
+                        if self.config.verbose:
+                            self.console.print(
+                                f"[yellow]⚠️  Found {len(incidents)} incidents during {test.name}[/yellow]"
+                            )
+
+                    if not passed:
+                        all_passed = False
+
+                    progress.advance(task)
+
+        return all_passed
+
+    def _run_single_test(self, test: QATestCase) -> Tuple[bool, Dict]:
+        """Run a single test case with enhanced validation support."""
+        # Handle repeat_count for multi-execution tests
+        if hasattr(test, "repeat_count") and test.repeat_count > 1:
+            return self._run_repeated_test(test)
+
+        return self._execute_single_test(test)
+
+    def _run_repeated_test(self, test: QATestCase) -> Tuple[bool, Dict]:
+        """Run a test multiple times and aggregate results."""
+        results = []
+        all_passed = True
+
+        # Store auth token in config for custom validators
+        if hasattr(self.config, "_auth_token") is False:
+            self.config._auth_token = self.token
+
+        for i in range(test.repeat_count):
+            passed, result = self._execute_single_test(test)
+            result["execution_number"] = i + 1
+            results.append(result)
+
+            if not passed:
+                all_passed = False
+
+        # Aggregate results
+        aggregated_result = {
+            "success": all_passed,
+            "executions": results,
+            "total_executions": len(results),
+            "successful_executions": sum(1 for r in results if r.get("success")),
+            "duration": sum(r.get("duration", 0) for r in results),
+        }
+
+        return all_passed, aggregated_result
+
+    def _execute_single_test(self, test: QATestCase) -> Tuple[bool, Dict]:
+        """Run a single test case."""
+        headers = {}
+        if test.requires_auth and self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        start_time = time.time()
+
+        for attempt in range(self.config.retry_count):
+            try:
+                if test.method == "GET":
+                    # Special handling for SSE endpoints
+                    if test.endpoint and "reasoning-stream" in test.endpoint:
+                        # SSE endpoint - just verify it connects
+                        response = requests.get(
+                            f"{self.config.base_url}{test.endpoint}",
+                            headers=headers,
+                            stream=True,
+                            timeout=2,  # Short timeout for connection
+                        )
+                        # Close immediately after verifying connection
+                        response.close()
+                    else:
+                        response = requests.get(
+                            f"{self.config.base_url}{test.endpoint}", headers=headers, timeout=test.timeout
+                        )
+                elif test.method == "POST":
+                    response = requests.post(
+                        f"{self.config.base_url}{test.endpoint}",
+                        headers=headers,
+                        json=test.payload,
+                        timeout=test.timeout,
+                    )
+                elif test.method == "PUT":
+                    response = requests.put(
+                        f"{self.config.base_url}{test.endpoint}",
+                        headers=headers,
+                        json=test.payload,
+                        timeout=test.timeout,
+                    )
+                elif test.method == "DELETE":
+                    response = requests.delete(
+                        f"{self.config.base_url}{test.endpoint}", headers=headers, timeout=test.timeout
+                    )
+                elif test.method == "WEBSOCKET":
+                    # WebSocket testing support
+                    if self.config.verbose:
+                        self.console.print(f"[cyan]Testing WebSocket: {test.endpoint}[/cyan]")
+
+                    try:
+                        import websocket
+                    except ImportError:
+                        return False, {
+                            "success": False,
+                            "error": "websocket-client not installed",
+                            "duration": time.time() - start_time,
+                        }
+
+                    # Convert HTTP URL to WebSocket URL
+                    ws_url = self.config.base_url.replace("http://", "ws://").replace("https://", "wss://")
+                    ws_url = f"{ws_url}{test.endpoint}"
+
+                    if self.config.verbose:
+                        self.console.print(f"[cyan]WebSocket URL: {ws_url}[/cyan]")
+
+                    try:
+                        # Add auth header if needed
+                        ws_headers = []
+                        if test.requires_auth and self.token:
+                            ws_headers.append(f"Authorization: Bearer {self.token}")
+
+                        # Try to connect with short timeout
+                        if self.config.verbose:
+                            self.console.print(f"[cyan]Attempting WebSocket connection...[/cyan]")
+
+                        ws = websocket.create_connection(
+                            ws_url, header=ws_headers, timeout=2  # Short timeout for WebSocket handshake
+                        )
+                        ws.close()
+
+                        # WebSocket connected successfully (101 Switching Protocols)
+                        if self.config.verbose:
+                            self.console.print(f"[green]✅ {test.name} - Connected![/green]")
+
+                        result = {
+                            "success": True,
+                            "status_code": 101,
+                            "duration": time.time() - start_time,
+                            "attempts": attempt + 1,
+                            "message": "WebSocket connection established",
+                        }
+                        break  # Success, exit retry loop
+
+                    except websocket.WebSocketException as e:
+                        error_msg = str(e)
+                        if self.config.verbose:
+                            self.console.print(f"[yellow]WebSocket error: {error_msg}[/yellow]")
+
+                        # Check if it's an auth/forbidden error (endpoint exists but auth failed)
+                        if any(code in error_msg for code in ["401", "403", "Handshake status"]):
+                            # This is expected - endpoint exists but requires proper auth
+                            if self.config.verbose:
+                                self.console.print(f"[green]✅ {test.name} (endpoint verified)[/green]")
+
+                            result = {
+                                "success": True,
+                                "status_code": 101,
+                                "duration": time.time() - start_time,
+                                "attempts": attempt + 1,
+                                "message": "WebSocket endpoint verified (auth required)",
+                            }
+                            break  # Success, exit retry loop
+                        else:
+                            # Real error - endpoint might not exist or server error
+                            if attempt == max_attempts - 1:
+                                # Last attempt, fail the test
+                                if self.config.verbose:
+                                    self.console.print(f"[red]❌ {test.name}: {error_msg[:100]}[/red]")
+
+                                return False, {
+                                    "success": False,
+                                    "error": f"WebSocket failed: {error_msg[:200]}",
+                                    "duration": time.time() - start_time,
+                                    "attempts": attempt + 1,
+                                }
+                            else:
+                                # Not last attempt, wait and retry
+                                time.sleep(retry_delay)
+                                continue
+                    except Exception as e:
+                        # Non-WebSocket error
+                        if attempt == max_attempts - 1:
+                            return False, {
+                                "success": False,
+                                "error": f"Unexpected error: {str(e)[:200]}",
+                                "duration": time.time() - start_time,
+                                "attempts": attempt + 1,
+                            }
+                        else:
+                            time.sleep(retry_delay)
+                            continue
+                elif test.method == "CUSTOM":
+                    # Custom method handler for special tests like streaming verification
+                    if test.custom_handler:
+                        # Dispatch to appropriate module based on test module
+                        if test.module == QAModule.HE300_BENCHMARK:
+                            from .modules.he300_benchmark_tests import HE300BenchmarkModule
+
+                            custom_result = HE300BenchmarkModule.run_custom_test(test, self.config, self.token)
+                        elif test.module == QAModule.L4_ATTESTATION:
+                            from .modules.l4_attestation_tests import L4AttestationModule
+
+                            custom_result = L4AttestationModule.run_custom_test(test, self.config, self.token)
+                        else:
+                            # Default to streaming verification module
+                            from .modules.streaming_verification import StreamingVerificationModule
+
+                            custom_result = StreamingVerificationModule.run_custom_test(test, self.config, self.token)
+                        if custom_result["success"]:
+                            # Print validation details
+                            if self.config.verbose:
+                                self.console.print(f"[cyan]{custom_result.get('message', 'Custom test passed')}[/cyan]")
+                                if "details" in custom_result:
+                                    import json
+
+                                    details = custom_result["details"]
+                                    # Print dma_results validation specifically
+                                    if "perform_aspdma_dma_results" in details:
+                                        dma_info = details["perform_aspdma_dma_results"]
+                                        self.console.print(
+                                            f"[cyan]   PERFORM_ASPDMA DMA Results: {dma_info['with_dma_results']}/{dma_info['total_aspdma_steps']} steps have dma_results[/cyan]"
+                                        )
+                                        if dma_info["missing_dma_results"] > 0:
+                                            self.console.print(
+                                                f"[yellow]   ⚠️  {dma_info['missing_dma_results']} PERFORM_ASPDMA steps missing dma_results![/yellow]"
+                                            )
+                            result = {
+                                "success": True,
+                                "status_code": 200,
+                                "duration": time.time() - start_time,
+                                "attempts": attempt + 1,
+                                "custom_result": custom_result,
+                            }
+                        else:
+                            if self.config.verbose:
+                                self.console.print(
+                                    f"[yellow]{custom_result.get('message', 'Custom test failed')}[/yellow]"
+                                )
+                            return False, {
+                                "success": False,
+                                "error": custom_result.get("message", "Custom test failed"),
+                                "duration": time.time() - start_time,
+                                "custom_result": custom_result,
+                            }
+                        break
+                    else:
+                        return False, {
+                            "success": False,
+                            "error": f"Custom handler not found for test: {test.name}",
+                            "duration": time.time() - start_time,
+                        }
+                else:
+                    return False, {
+                        "success": False,
+                        "error": f"Unknown method: {test.method}",
+                        "duration": time.time() - start_time,
+                    }
+
+                # For WebSocket tests, we already have the result set
+                if test.method == "WEBSOCKET":
+                    # Result was set in the WebSocket handler above
+                    pass
+                elif response.status_code == test.expected_status:
+                    result = {
+                        "success": True,
+                        "status_code": response.status_code,
+                        "duration": time.time() - start_time,
+                        "attempts": attempt + 1,
+                    }
+
+                    if self.config.verbose:
+                        try:
+                            result["response"] = response.json()
+                        except:
+                            result["response"] = response.text[:500]
+
+                    # CRITICAL: Update token after successful refresh
+                    # The refresh endpoint revokes the old token and returns a new one
+                    if test.name == "SDK token refresh" and response.status_code == 200:
+                        try:
+                            new_token = response.json().get("access_token")
+                            if new_token:
+                                self.token = new_token
+                                if self.config.verbose:
+                                    self.console.print(f"[yellow]🔄 Updated auth token after refresh[/yellow]")
+                        except Exception as e:
+                            if self.config.verbose:
+                                self.console.print(f"[yellow]⚠️ Failed to update token: {e}[/yellow]")
+
+                    # Enhanced validation support
+                    validation_passed, validation_result = self._validate_response(test, response)
+                    result.update(validation_result)
+
+                    if not validation_passed:
+                        result["success"] = False
+                        if self.config.verbose:
+                            self.console.print(f"[red]❌ {test.name}: Validation failed[/red]")
+                        return False, result
+
+                    if self.config.verbose:
+                        self.console.print(f"[green]✅ {test.name}[/green]")
+
+                    return True, result
+                else:
+                    if attempt < self.config.retry_count - 1:
+                        time.sleep(self.config.retry_delay)
+                        continue
+
+                    result = {
+                        "success": False,
+                        "status_code": response.status_code,
+                        "expected_status": test.expected_status,
+                        "error": response.text[:500],
+                        "duration": time.time() - start_time,
+                        "attempts": attempt + 1,
+                    }
+
+                    if self.config.verbose:
+                        self.console.print(f"[red]❌ {test.name}: {response.status_code}[/red]")
+
+                    return False, result
+
+            except Exception as e:
+                if attempt < self.config.retry_count - 1:
+                    time.sleep(self.config.retry_delay)
+                    continue
+
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "duration": time.time() - start_time,
+                    "attempts": attempt + 1,
+                }
+
+                if self.config.verbose:
+                    self.console.print(f"[red]❌ {test.name}: {e}[/red]")
+
+                return False, result
+
+        # If we got here and result was set (e.g., by WebSocket test breaking loop), return it
+        if "result" in locals() and result:
+            return result.get("success", False), result
+
+        return False, {"success": False, "error": "Max retries exceeded"}
+
+    def _validate_response(self, test: QATestCase, response) -> Tuple[bool, Dict]:
+        """Validate response using validation rules and custom validation."""
+        validation_result = {"validation": {"passed": True, "details": {}, "errors": []}}
+
+        try:
+            # Get response data for validation
+            response_data = None
+            try:
+                response_data = response.json()
+            except:
+                response_data = {"raw_text": response.text}
+
+            # Apply validation rules
+            if hasattr(test, "validation_rules") and test.validation_rules:
+                for rule_name, rule_func in test.validation_rules.items():
+                    try:
+                        rule_passed = rule_func(response_data)
+                        validation_result["validation"]["details"][rule_name] = rule_passed
+
+                        if not rule_passed:
+                            validation_result["validation"]["errors"].append(f"Rule '{rule_name}' failed")
+                            validation_result["validation"]["passed"] = False
+                    except Exception as e:
+                        validation_result["validation"]["errors"].append(f"Rule '{rule_name}' error: {str(e)}")
+                        validation_result["validation"]["passed"] = False
+
+            # Apply custom validation
+            if hasattr(test, "custom_validation") and test.custom_validation:
+                # Store auth token in config for custom validators
+                if hasattr(self.config, "_auth_token") is False:
+                    self.config._auth_token = self.token
+
+                try:
+                    custom_result = test.custom_validation(response, self.config)
+                    validation_result["validation"]["custom"] = custom_result
+
+                    if not custom_result.get("passed", True):
+                        validation_result["validation"]["passed"] = False
+                        validation_result["validation"]["errors"].extend(custom_result.get("errors", []))
+
+                except Exception as e:
+                    validation_result["validation"]["errors"].append(f"Custom validation error: {str(e)}")
+                    validation_result["validation"]["passed"] = False
+
+        except Exception as e:
+            validation_result["validation"]["errors"].append(f"Validation framework error: {str(e)}")
+            validation_result["validation"]["passed"] = False
+
+        return validation_result["validation"]["passed"], validation_result
+
+    def _generate_reports(self):
+        """Generate test reports."""
+        if not self.config.json_output and not self.config.html_report:
+            return
+
+        # Create report directory
+        self.config.report_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # JSON report
+        if self.config.json_output:
+            json_file = self.config.report_dir / f"qa_report_{timestamp}.json"
+            report_data = {
+                "timestamp": timestamp,
+                "config": {
+                    "base_url": self.config.base_url,
+                    "modules": list(set(k.split("::")[0] for k in self.results.keys())),
+                },
+                "results": self.results,
+                "summary": self._get_summary(),
+            }
+
+            with open(json_file, "w") as f:
+                json.dump(report_data, f, indent=2)
+
+            self.console.print(f"📄 JSON report: {json_file}")
+
+        # HTML report
+        if self.config.html_report:
+            html_file = self.config.report_dir / f"qa_report_{timestamp}.html"
+            self._generate_html_report(html_file)
+            self.console.print(f"📄 HTML report: {html_file}")
+
+    def _generate_html_report(self, file_path: Path):
+        """Generate HTML report."""
+        summary = self._get_summary()
+
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CIRIS QA Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        h1 {{ color: #2c3e50; }}
+        .summary {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #3498db; color: white; }}
+        .pass {{ color: #27ae60; font-weight: bold; }}
+        .fail {{ color: #e74c3c; font-weight: bold; }}
+        .module-header {{ background: #95a5a6; color: white; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>CIRIS QA Test Report</h1>
+    <div class="summary">
+        <h2>Summary</h2>
+        <p>Total Tests: {summary['total']}</p>
+        <p>Passed: <span class="pass">{summary['passed']}</span></p>
+        <p>Failed: <span class="fail">{summary['failed']}</span></p>
+        <p>Success Rate: {summary['success_rate']:.1f}%</p>
+    </div>
+
+    <h2>Test Results</h2>
+    <table>
+        <tr>
+            <th>Module</th>
+            <th>Test</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>Details</th>
+        </tr>
+"""
+
+        current_module = None
+        for key in sorted(self.results.keys()):
+            module, test_name = key.split("::")
+            result = self.results[key]
+
+            if module != current_module:
+                html += f'<tr class="module-header"><td colspan="5">{module.upper()}</td></tr>'
+                current_module = module
+
+            status_class = "pass" if result["success"] else "fail"
+            status_text = "✅ PASS" if result["success"] else "❌ FAIL"
+            duration = f"{result.get('duration', 0):.2f}s"
+
+            details = ""
+            if not result["success"]:
+                if "status_code" in result:
+                    details = f"Status: {result['status_code']} (expected {result.get('expected_status', 200)})"
+                else:
+                    details = result.get("error", "Unknown error")[:100]
+
+            html += f"""
+        <tr>
+            <td>{module}</td>
+            <td>{test_name}</td>
+            <td class="{status_class}">{status_text}</td>
+            <td>{duration}</td>
+            <td>{details}</td>
+        </tr>
+"""
+
+        html += """
+    </table>
+</body>
+</html>
+"""
+
+        with open(file_path, "w") as f:
+            f.write(html)
+
+    def _get_summary(self) -> Dict:
+        """Get test summary statistics."""
+        total = len(self.results)
+        passed = sum(1 for r in self.results.values() if r["success"])
+        failed = total - passed
+
+        return {
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "success_rate": (passed / total * 100) if total > 0 else 0,
+        }
+
+    def _print_summary(self, elapsed: float, has_incidents: bool = False):
+        """Print test summary."""
+        summary = self._get_summary()
+
+        # Create summary table
+        table = Table(title="QA Test Summary")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="white")
+
+        table.add_row("Total Tests", str(summary["total"]))
+        table.add_row("Passed", f"[green]{summary['passed']}[/green]")
+        table.add_row("Failed", f"[red]{summary['failed']}[/red]")
+        table.add_row("Success Rate", f"{summary['success_rate']:.1f}%")
+        table.add_row("Duration", f"{elapsed:.2f}s")
+
+        self.console.print("\n")
+        self.console.print(table)
+
+        # Print failed tests if any
+        if summary["failed"] > 0:
+            self.console.print("\n[red]Failed Tests:[/red]")
+            for key, result in self.results.items():
+                if not result["success"]:
+                    # Use maxsplit=1 to handle keys with multiple :: separators
+                    parts = key.split("::", 1)
+                    module = parts[0]
+                    test = parts[1] if len(parts) > 1 else "unknown"
+                    error = result.get("error", "Unknown error")[:100]
+                    self.console.print(f"  • {module}::{test}: {error}")
+
+        # Print tests with incidents
+        tests_with_incidents = []
+        for key, result in self.results.items():
+            if "incidents" in result and result["incidents"]:
+                tests_with_incidents.append((key, result["incidents"]))
+
+        if tests_with_incidents:
+            self.console.print("\n[yellow]Tests with Incidents:[/yellow]")
+            for key, incidents in tests_with_incidents:
+                # Use maxsplit=1 to handle keys with multiple :: separators
+                parts = key.split("::", 1)
+                module = parts[0]
+                test = parts[1] if len(parts) > 1 else "unknown"
+                self.console.print(f"  • {module}::{test}:")
+                for incident in incidents[:3]:  # Show max 3 incidents per test
+                    self.console.print(f"    - {incident[:150]}")
+                if len(incidents) > 3:
+                    self.console.print(f"    ... and {len(incidents) - 3} more")
+
+        # Overall result
+        if summary["failed"] == 0:
+            self.console.print("\n[bold green]✅ All tests passed![/bold green]")
+        else:
+            self.console.print(f"\n[bold red]❌ {summary['failed']} test(s) failed[/bold red]")
+
+    def _update_status_tracker(self, duration_seconds: float):
+        """Update the QA status tracker file with results from this run."""
+        # Group results by module
+        module_results: Dict[str, Dict] = {}
+
+        for key, result in self.results.items():
+            parts = key.split("::", 1)
+            module_name = parts[0]
+
+            if module_name not in module_results:
+                module_results[module_name] = {"passed": 0, "failed": 0, "total": 0}
+
+            module_results[module_name]["total"] += 1
+            if result.get("success", False):
+                module_results[module_name]["passed"] += 1
+            else:
+                module_results[module_name]["failed"] += 1
+
+        # Update each module's status with REAL per-module wall time:
+        #   - SDK modules: timed directly around test_instance.run()
+        #   - HTTP modules: summed from their per-test durations
+        #   - fallback (neither available): even split of the total
+        for module_name, stats in module_results.items():
+            wall = self._module_wall.get(module_name)
+            if wall is None:
+                wall = sum(
+                    (r.get("duration") or 0.0)
+                    for k, r in self.results.items()
+                    if k.split("::", 1)[0] == module_name
+                )
+            if not wall:
+                wall = duration_seconds / len(module_results) if module_results else duration_seconds
+            try:
+                update_module_status(
+                    module_name=module_name,
+                    passed=stats["passed"],
+                    failed=stats["failed"],
+                    total=stats["total"],
+                    duration_seconds=wall,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update status for module {module_name}: {e}")
+
+        if module_results:
+            self.console.print(f"[dim]📊 Updated QA status for {len(module_results)} module(s)[/dim]")
+
+    def _run_multiple_backends(self, modules: List[QAModule]) -> bool:
+        """Run QA tests against multiple database backends sequentially."""
+        start_time = time.time()
+
+        self.console.print(
+            Panel.fit(
+                "[bold cyan]CIRIS QA Test Runner - Multi-Backend Mode[/bold cyan]\n"
+                f"Backends: {', '.join(self.database_backends)}\n"
+                f"Modules: {', '.join(m.value for m in modules)}",
+                title="🧪 Starting Multi-Backend QA Tests",
+            )
+        )
+
+        backend_results = {}
+        all_success = True
+
+        # Run tests for each backend sequentially
+        for backend in self.database_backends:
+            self.console.print(f"\n{'=' * 80}")
+            self.console.print(f"[bold cyan]🔄 Testing {backend.upper()} Backend[/bold cyan]")
+            self.console.print(f"{'=' * 80}\n")
+
+            # Create a new runner instance for this backend with the correct server manager
+            # Use the backend's server manager config which has the correct port
+            backend_config = self.server_managers[backend].config
+            backend_runner = QARunner(backend_config, modules=modules)
+            backend_runner.database_backends = [backend]
+            backend_runner.server_manager = self.server_managers[backend]
+            backend_runner.server_managers = {backend: self.server_managers[backend]}
+
+            # Run tests for this backend
+            success = backend_runner.run(modules)
+            backend_results[backend] = {
+                "success": success,
+                "results": backend_runner.results,
+            }
+
+            if not success:
+                all_success = False
+
+        # Print combined summary
+        elapsed = time.time() - start_time
+        self.console.print(f"\n\n{'=' * 80}")
+        self.console.print("[bold cyan]📊 MULTI-BACKEND TEST SUMMARY[/bold cyan]")
+        self.console.print(f"{'=' * 80}\n")
+
+        # Create comparison table
+        table = Table(title="Backend Comparison")
+        table.add_column("Backend", style="cyan")
+        table.add_column("Status", style="bold")
+        table.add_column("Passed", style="green")
+        table.add_column("Failed", style="red")
+        table.add_column("Total", style="white")
+
+        for backend, data in backend_results.items():
+            results = data["results"]
+            passed = sum(1 for r in results.values() if r.get("success", False))
+            failed = len(results) - passed
+            total = len(results)
+            status = "✅" if data["success"] else "❌"
+
+            table.add_row(backend.upper(), status, str(passed), str(failed), str(total))
+
+        self.console.print(table)
+
+        self.console.print(f"\n[dim]Total Duration: {elapsed:.2f}s[/dim]")
+
+        # Print log locations for each backend
+        self.console.print("\n[cyan]📋 Log Locations:[/cyan]")
+        for backend in self.database_backends:
+            self.console.print(f"[dim]   • {backend}: logs/{backend}/latest.log[/dim]")
+            self.console.print(f"[dim]   • {backend} incidents: logs/{backend}/incidents_latest.log[/dim]")
+
+        if all_success:
+            self.console.print("\n[bold green]✅ All backends passed all tests![/bold green]")
+        else:
+            failed_backends = [b for b, d in backend_results.items() if not d["success"]]
+            self.console.print(f"\n[bold red]❌ Some backends failed: {', '.join(failed_backends)}[/bold red]")
+
+        return all_success
+
+    def _run_parallel_backends(self, modules: List[QAModule]) -> bool:
+        """Run QA tests against multiple database backends — each in its own
+        isolated SUBPROCESS, concurrently.
+
+        Each backend formerly ran as a thread inside this process. Two full
+        QA stacks sharing one Python interpreter cross-contaminate
+        process-global state: a sqlite leg was proven, via the
+        [AUTH SERVICE DEBUG] traces, to send the postgres leg's API key →
+        "Invalid API key" 401s on whichever leg lost the race. A separate
+        subprocess per backend has zero shared mutable state — the cross is
+        structurally impossible — while the backends still run fully in
+        parallel. Each child is a plain single-backend qa_runner invocation.
+        """
+        import subprocess
+        import sys
+
+        start_time = time.time()
+
+        self.console.print(
+            Panel.fit(
+                "[bold cyan]CIRIS QA Test Runner - Parallel Backend Mode (isolated subprocesses)[/bold cyan]\n"
+                f"Backends: {', '.join(self.database_backends)}\n"
+                f"Modules: {', '.join(m.value for m in modules)}",
+                title="🧪 Starting Parallel Backend QA Tests",
+            )
+        )
+
+        backend_port = {
+            b: (self.config.api_port if b == "sqlite" else self.config.postgres_api_port)
+            for b in self.database_backends
+        }
+
+        # Rebuild each child's argv from THIS process's argv — faithfully
+        # forwarding every flag — with the multi-backend / parallel flags
+        # rewritten to one isolated single-backend run on its own port.
+        parent_argv = sys.argv[1:]
+
+        def _child_argv(backend: str) -> List[str]:
+            out: List[str] = []
+            skip = 0
+            for idx, tok in enumerate(parent_argv):
+                if skip > 0:
+                    skip -= 1
+                    continue
+                if tok == "--parallel-backends":
+                    continue
+                if tok in ("--database-backends", "--port", "--url", "--report-dir"):
+                    nxt = idx + 1
+                    while nxt < len(parent_argv) and not parent_argv[nxt].startswith("-"):
+                        skip += 1
+                        nxt += 1
+                    continue
+                out.append(tok)
+            # --port sets api_port (the server's listen port); --url sets
+            # base_url (where the QA client SENDS requests). They are
+            # independent — passing only --port left base_url at the default
+            # :8080, so the postgres child's client targeted the sqlite
+            # child's server. Both MUST point at this backend's own port.
+            port = backend_port[backend]
+            out += [
+                "--database-backends",
+                backend,
+                "--port",
+                str(port),
+                "--url",
+                f"http://localhost:{port}",
+                "--report-dir",
+                f"qa_reports/{backend}",
+            ]
+            return out
+
+        # Signal parallel-backend mode to children via env var. Two full agent
+        # stacks sharing one CI runner halve effective throughput; tests with
+        # hardcoded response/SSE timeouts (air, context_enrichment) need to
+        # scale up under this contention. Sequential / single-backend runs
+        # don't pay the penalty because the env var is unset there.
+        child_env = os.environ.copy()
+        child_env["CIRIS_QA_PARALLEL_BACKENDS"] = "1"
+
+        procs = {}
+        for backend in self.database_backends:
+            child = [sys.executable, "-m", "tools.qa_runner", *_child_argv(backend)]
+            self.console.print(f"[cyan]🔄 Starting {backend.upper()} backend tests (isolated subprocess)...[/cyan]")
+            self.console.print(f"[dim]   $ {' '.join(child)}[/dim]")
+            procs[backend] = subprocess.Popen(child, env=child_env)
+
+        self.console.print("\n[cyan]⏳ Waiting for all backend subprocesses to complete...[/cyan]\n")
+
+        # config.timeout is a PER-TEST budget; a whole backend leg runs many
+        # modules (15-25 min). Give real headroom — the GH job's own
+        # timeout-minutes is the actual outer bound.
+        leg_timeout = max(self.config.timeout * 8, 2400)
+        backend_results = {}
+        for backend, proc in procs.items():
+            try:
+                rc = proc.wait(timeout=leg_timeout)
+                backend_results[backend] = {"success": rc == 0, "detail": f"exit {rc}"}
+                icon = "✅" if rc == 0 else "❌"
+                self.console.print(f"{icon} {backend.upper()} backend subprocess finished (exit {rc})")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                backend_results[backend] = {"success": False, "detail": f"timeout >{leg_timeout}s"}
+                self.console.print(f"[red]❌ {backend.upper()} backend subprocess timed out after {leg_timeout}s[/red]")
+
+        all_success = all(data["success"] for data in backend_results.values())
+
+        elapsed = time.time() - start_time
+        self.console.print(f"\n\n{'=' * 80}")
+        self.console.print("[bold cyan]📊 PARALLEL BACKEND TEST SUMMARY[/bold cyan]")
+        self.console.print(f"{'=' * 80}\n")
+
+        table = Table(title="Backend Comparison (isolated subprocesses)")
+        table.add_column("Backend", style="cyan")
+        table.add_column("Status", style="bold")
+        table.add_column("Result", style="white")
+        for backend, data in backend_results.items():
+            status = "✅ PASS" if data["success"] else "❌ FAIL"
+            table.add_row(backend.upper(), status, data["detail"])
+        self.console.print(table)
+
+        self.console.print(f"\n[dim]Total Duration: {elapsed:.2f}s (parallel, isolated)[/dim]")
+        self.console.print(
+            "[dim]Per-backend test counts + incidents are in each subprocess's own summary above.[/dim]"
+        )
+
+        self.console.print("\n[cyan]📋 Log Locations:[/cyan]")
+        for backend in self.database_backends:
+            self.console.print(f"[dim]   • {backend}: logs/{backend}/latest.log[/dim]")
+            self.console.print(f"[dim]   • {backend} incidents: logs/{backend}/incidents_latest.log[/dim]")
+
+        if all_success:
+            self.console.print("\n[bold green]✅ All backends passed all tests in parallel![/bold green]")
+        else:
+            failed_backends = [b for b, d in backend_results.items() if not d["success"]]
+            self.console.print(f"\n[bold red]❌ Some backends failed: {', '.join(failed_backends)}[/bold red]")
+
+        return all_success
+
+    def spawn_multi_occurrence_servers(
+        self, occurrence_ids: List[str], base_port: int = 9000
+    ) -> Dict[str, "APIServerManager"]:
+        """Spawn multiple API server instances with unique occurrence IDs.
+
+        Args:
+            occurrence_ids: List of occurrence IDs to spawn (e.g., ["occ1", "occ2"])
+            base_port: Base port number (each occurrence gets base_port + index)
+
+        Returns:
+            Dictionary mapping occurrence_id -> APIServerManager
+        """
+        occurrence_managers = {}
+
+        for idx, occ_id in enumerate(occurrence_ids):
+            port = base_port + idx
+
+            # Create config for this occurrence
+            occ_config = QAConfig(
+                base_url=f"http://localhost:{port}",
+                api_port=port,
+                admin_username=self.config.admin_username,
+                admin_password=self.config.admin_password,
+                timeout=self.config.timeout,
+                server_startup_timeout=self.config.server_startup_timeout,
+                mock_llm=self.config.mock_llm,
+                postgres_url=self.config.postgres_url,  # All share same DB
+            )
+
+            # Create server manager with occurrence-specific settings
+            manager = APIServerManager(occ_config, database_backend="postgres")
+            # Store occurrence ID for later use
+            manager._occurrence_id = occ_id
+
+            occurrence_managers[occ_id] = manager
+
+        return occurrence_managers
+
+    def start_occurrence(self, occurrence_id: str, manager: "APIServerManager") -> bool:
+        """Start a single occurrence with unique ID and log directory.
+
+        Args:
+            occurrence_id: Unique occurrence identifier
+            manager: APIServerManager instance
+
+        Returns:
+            True if started successfully
+        """
+        import os
+
+        # Customize environment for this occurrence
+        # Store original values to restore later
+        orig_occ_id = os.environ.get("CIRIS_OCCURRENCE_ID")
+        orig_log_dir = os.environ.get("CIRIS_LOG_DIR")
+
+        os.environ["CIRIS_OCCURRENCE_ID"] = occurrence_id
+        os.environ["CIRIS_LOG_DIR"] = f"logs/occurrence_{occurrence_id}"
+
+        try:
+            success = manager.start()
+            return success
+        finally:
+            # Restore original environment values
+            if orig_occ_id is None:
+                os.environ.pop("CIRIS_OCCURRENCE_ID", None)
+            else:
+                os.environ["CIRIS_OCCURRENCE_ID"] = orig_occ_id
+
+            if orig_log_dir is None:
+                os.environ.pop("CIRIS_LOG_DIR", None)
+            else:
+                os.environ["CIRIS_LOG_DIR"] = orig_log_dir
+
+    def query_shared_tasks_db(self) -> List[Dict]:
+        """Query shared tasks directly from PostgreSQL database.
+
+        Returns:
+            List of shared task dictionaries
+        """
+        from urllib.parse import urlparse
+
+        import psycopg2
+
+        # Parse postgres URL
+        parsed = urlparse(self.config.postgres_url)
+
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            database=parsed.path.lstrip("/"),
+            user=parsed.username,
+            password=parsed.password,
+        )
+
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT task_id, agent_occurrence_id, description, status, created_at
+            FROM tasks
+            WHERE agent_occurrence_id = '__shared__'
+            ORDER BY created_at DESC
+        """
+        )
+
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                {
+                    "task_id": row[0],
+                    "occurrence_id": row[1],
+                    "description": row[2],
+                    "status": row[3],
+                    "created_at": row[4],
+                }
+            )
+
+        cursor.close()
+        conn.close()
+        return results
+
+    def query_all_wakeup_tasks_db(self) -> List[Dict]:
+        """Query ALL wakeup tasks from PostgreSQL database (any occurrence).
+
+        Returns:
+            List of wakeup task dictionaries
+        """
+        from urllib.parse import urlparse
+
+        import psycopg2
+
+        # Parse postgres URL
+        parsed = urlparse(self.config.postgres_url)
+
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            database=parsed.path.lstrip("/"),
+            user=parsed.username,
+            password=parsed.password,
+        )
+
+        cursor = conn.cursor()
+
+        # Debug: Count ALL tasks first
+        cursor.execute("SELECT COUNT(*) FROM tasks")
+        total_tasks = cursor.fetchone()[0]
+        self.console.print(f"[dim]DEBUG: Total tasks in database: {total_tasks}[/dim]")
+
+        # Debug: Show sample task_ids if any exist
+        cursor.execute("SELECT task_id, agent_occurrence_id, status FROM tasks LIMIT 10")
+        sample = cursor.fetchall()
+        if sample:
+            self.console.print(f"[dim]DEBUG: Sample tasks: {sample}[/dim]")
+
+        cursor.execute(
+            """
+            SELECT task_id, agent_occurrence_id, description, status, created_at
+            FROM tasks
+            WHERE task_id LIKE 'WAKEUP%'
+            ORDER BY created_at DESC
+        """
+        )
+
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                {
+                    "task_id": row[0],
+                    "occurrence_id": row[1],
+                    "description": row[2],
+                    "status": row[3],
+                    "created_at": row[4],
+                }
+            )
+
+        cursor.close()
+        conn.close()
+        return results
+
+    def query_thoughts_by_occurrence_db(self) -> Dict[str, int]:
+        """Query thought counts grouped by occurrence from PostgreSQL.
+
+        Returns:
+            Dictionary mapping occurrence_id -> thought count
+        """
+        from urllib.parse import urlparse
+
+        import psycopg2
+
+        # Parse postgres URL
+        parsed = urlparse(self.config.postgres_url)
+
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            database=parsed.path.lstrip("/"),
+            user=parsed.username,
+            password=parsed.password,
+        )
+
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT agent_occurrence_id, COUNT(*) as count
+            FROM thoughts
+            GROUP BY agent_occurrence_id
+        """
+        )
+
+        results = {}
+        for row in cursor.fetchall():
+            results[row[0]] = row[1]
+
+        cursor.close()
+        conn.close()
+        return results
