@@ -43,6 +43,21 @@ adopts to drop its lens-core + its own auth).
 - Substrate floor → **persist v8.4.0 / edge v4.3.0 / verify-family v5.10.0** (the
   §19.7 erasure primitives + `wa_cert` auth substrate).
 
+### Validated
+- **Behavior-correct drop-in proof (`qa/`, `FSD/QA_AGAINST_RUST.md`).** The agent's
+  own Python QA-runner module definitions are run unmodified against a live Rust
+  `ciris-server`: **12/12 fabric-route tests pass, 0 gaps** — including the
+  load-bearing byte-compat proof that a password hash produced by the agent's own
+  `cryptography.PBKDF2HMAC` authenticates against the Rust `verify_password`. The
+  ~30 agent-brain modules are correctly N/A on a headless fabric node. The QA
+  runner stays Python (it is HTTP-driving conformance, not ported).
+
+### Fixed
+- **api-keys / service-token routes are now authz-gated.** `POST/GET/DELETE
+  /v1/auth/api-keys*` and `/v1/auth/service-token/revoke` now require a live
+  session bearer whose role carries `manage_user_permissions` (matching the
+  agent's gate) — the one residual the conformance run surfaced.
+
 ### Notes
 - Companion: **CIRISStatus** becomes a fabric monitoring node (Flows A/B +
   `health:liveness` `scores` + website sockets).

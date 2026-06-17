@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::prelude::Engine;
@@ -24,6 +24,8 @@ use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::roles::Permission;
+use super::session::{resolve_bearer, SessionCaller};
 use super::store;
 
 #[derive(Clone)]
@@ -33,6 +35,40 @@ struct ApiKeyState {
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
+/// Authz gate for the api-key + service-token routes: the caller MUST present a
+/// live session bearer token whose role carries `manage_user_permissions` — the
+/// agent gates these the same way (`routes/auth.py`). Closes the one residual the
+/// QA conformance run flagged (these handlers were ungated). Returns the verified
+/// caller, or a `401`/`403`/`503` response to short-circuit.
+async fn require_manage_users(
+    st: &ApiKeyState,
+    headers: &HeaderMap,
+) -> Result<SessionCaller, Response> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim);
+    let Some(token) = token else {
+        return Err(err(StatusCode::UNAUTHORIZED, "missing bearer session token"));
+    };
+    match resolve_bearer(&st.engine, token).await {
+        Ok(Some(caller))
+            if caller
+                .permissions
+                .contains(&Permission::ManageUserPermissions) =>
+        {
+            Ok(caller)
+        }
+        Ok(Some(_)) => Err(err(
+            StatusCode::FORBIDDEN,
+            "requires manage_user_permissions",
+        )),
+        Ok(None) => Err(err(StatusCode::UNAUTHORIZED, "invalid or expired session")),
+        Err(e) => Err(err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}"))),
+    }
 }
 
 // ─── POST /v1/auth/api-keys ─────────────────────────────────────────────────
@@ -70,8 +106,12 @@ fn mint_api_key() -> (String, String) {
 
 async fn create_api_key(
     State(st): State<ApiKeyState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Err(resp) = require_manage_users(&st, &headers).await {
+        return resp;
+    }
     let req: CreateApiKeyRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
@@ -134,7 +174,10 @@ struct ApiKeyInfo {
     last_used: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-async fn list_api_keys(State(st): State<ApiKeyState>) -> Response {
+async fn list_api_keys(State(st): State<ApiKeyState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_manage_users(&st, &headers).await {
+        return resp;
+    }
     // API-key certs ride `role = observer`; filter the listing to api_key type.
     match store::list_by_role(&st.engine, WaRole::Observer, 1000).await {
         Ok(certs) => {
@@ -157,7 +200,14 @@ async fn list_api_keys(State(st): State<ApiKeyState>) -> Response {
 
 // ─── DELETE /v1/auth/api-keys/{wa_id} ───────────────────────────────────────
 
-async fn revoke_api_key(State(st): State<ApiKeyState>, Path(wa_id): Path<String>) -> Response {
+async fn revoke_api_key(
+    State(st): State<ApiKeyState>,
+    headers: HeaderMap,
+    Path(wa_id): Path<String>,
+) -> Response {
+    if let Err(resp) = require_manage_users(&st, &headers).await {
+        return resp;
+    }
     // Revoke = deactivate (preserve the row for audit — the agent's semantics).
     match store::set_active(&st.engine, &wa_id, false).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -188,8 +238,12 @@ struct ServiceTokenRevokeResponse {
 
 async fn revoke_service_token(
     State(st): State<ApiKeyState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Err(resp) = require_manage_users(&st, &headers).await {
+        return resp;
+    }
     let req: ServiceTokenRevokeRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
