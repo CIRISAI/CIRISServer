@@ -29,6 +29,11 @@
 
 pub mod api_keys;
 pub mod attestation;
+/// ROOT-user bootstrap + first-time-setup (CIRISServer#19): the baked
+/// trust-anchor seed load, admin-eligible auto-mint, and the first-run
+/// `POST /v1/setup/root` claim — the founder-becomes-`SYSTEM_ADMIN` flow that
+/// unblocks owner-gated `POST /v1/federation/peering`.
+pub mod bootstrap;
 pub mod consent;
 pub mod device_auth;
 pub mod erasure;

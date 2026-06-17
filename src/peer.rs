@@ -44,32 +44,58 @@ use crate::config::PeerB;
 /// is admitted without a reserved-prefix role.
 pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 
-/// What A consents to replicate to B — the `capacity:*` attestation family A
+/// What A consents to replicate to B by **default** (boot-env peering, when the
+/// caller supplies no explicit set) — the `capacity:*` attestation family A
 /// produces (the scorer's `capacity:sustained_coherence:v1` and any future
 /// `capacity:*` leaves). The grant payload carries these as the JCS array of
 /// namespace-prefix strings (trailing ":" significant), **sorted ascending +
-/// deduplicated** (see [`attestation_prefixes`]) so consumers agree byte-for-byte.
-const GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:"];
+/// deduplicated** (see [`normalize_prefixes`]) so consumers agree byte-for-byte.
+pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:"];
 
 /// `consent:replication` payload `subject_kind` (CEG 1.0-RC29 §4.2.2.3): a
 /// payload member (NOT an envelope field) declaring the grant's subject shape.
 const SUBJECT_KIND_CONSENT_REPLICATION: &str = "consent_replication";
 
-/// Sorted + deduplicated copy of [`GRANT_ATTESTATION_PREFIXES`] — the byte-for-
-/// byte form that goes into the grant payload so every consumer (and B's mirror)
-/// agrees on the JCS array.
+/// The outcome of [`emit_replication_consent`]: which grant row now exists for
+/// the directed (this node → peer) `consent:replication:v1` consent, and whether
+/// THIS call wrote it (`freshly_emitted == true`) or found a durable existing
+/// grant (idempotent no-op, `freshly_emitted == false`). `attestation_id` /
+/// `content_hash` identify the grant either way, so an owner-authority caller can
+/// echo the same handle on a repeat POST.
+#[derive(Debug, Clone)]
+pub struct ConsentGrant {
+    /// The grant row's `attestation_id`.
+    pub attestation_id: String,
+    /// The grant envelope's `original_content_hash` (the integrity anchor).
+    pub content_hash: String,
+    /// `true` when this call wrote a fresh grant; `false` on an idempotent no-op.
+    pub freshly_emitted: bool,
+}
+
+/// Normalize a caller-supplied (or default) prefix set into the byte-for-byte
+/// form that goes into the grant payload so every consumer (and B's mirror)
+/// agrees on the JCS array: trimmed, empty-dropped, **sorted ascending +
+/// deduplicated**. The owner (via `POST /v1/federation/peering`) or the boot-env
+/// path both flow their prefix set through here so the on-wire shape is identical
+/// regardless of who authored the grant.
 ///
 /// **Narrowing note (RC29 §5.6.8.15):** partial narrowing of the prefix set MUST
 /// go via a `supersedes` attestation carrying a *narrower* set — never a silent
 /// drop. Not implemented here; this helper deliberately does not preclude it.
-fn attestation_prefixes() -> Vec<String> {
-    let mut v: Vec<String> = GRANT_ATTESTATION_PREFIXES
+pub fn normalize_prefixes<S: AsRef<str>>(prefixes: &[S]) -> Vec<String> {
+    let mut v: Vec<String> = prefixes
         .iter()
-        .map(|s| (*s).to_owned())
+        .map(|s| s.as_ref().trim().to_owned())
+        .filter(|s| !s.is_empty())
         .collect();
     v.sort();
     v.dedup();
     v
+}
+
+/// The default prefix set as owned strings (boot-env peering convenience).
+pub fn default_attestation_prefixes() -> Vec<String> {
+    normalize_prefixes(DEFAULT_GRANT_ATTESTATION_PREFIXES)
 }
 
 /// Register Node B's *self-signed* `SignedKeyRecord` in A's federation directory
@@ -129,20 +155,30 @@ pub async fn register_peer_key(engine: &Engine, peer: &PeerB) -> Result<()> {
 ///
 /// **Idempotent**: if A has already emitted a `consent:replication:v1` row
 /// directed at this peer (the grant is durable, not per-boot), this is a no-op
-/// returning `Ok(false)` — `scores` rows are NOT collapsed by dimension on the
-/// federation tier (each `put_attestation` mints a fresh `attestation_id`), so
-/// we guard the emit with a directory lookup rather than blindly re-emitting.
-/// Returns `Ok(true)` when a fresh grant row was written.
+/// returning the existing grant's handle with `freshly_emitted == false` —
+/// `scores` rows are NOT collapsed by dimension on the federation tier (each
+/// `put_attestation` mints a fresh `attestation_id`), so we guard the emit with a
+/// directory lookup rather than blindly re-emitting. Returns a [`ConsentGrant`]
+/// with `freshly_emitted == true` when a fresh grant row was written.
 ///
 /// Revocation (not built here, per the contract) rides the CEG
 /// withdraws/recants structural primitive targeting this grant's
 /// `attestation_id` — the same mechanism CIRISAgent's `build_community_structural`
 /// uses for the community-trust grant.
-pub async fn emit_replication_consent(
+///
+/// `attestation_prefixes` is the caller-supplied namespace-prefix set this node
+/// consents to replicate to the peer (trailing ":" significant). It is
+/// [`normalize_prefixes`]d (trimmed / empty-dropped / sorted-ascending / deduped)
+/// before it lands in the grant payload, so the on-wire JCS array is byte-for-byte
+/// agreed regardless of caller input order. The boot-env path passes
+/// [`default_attestation_prefixes`]; the owner-authority `POST /v1/federation/peering`
+/// path passes the operator's set.
+pub async fn emit_replication_consent<S: AsRef<str>>(
     engine: &Engine,
     node_key_id: &str,
     peer_key_id: &str,
-) -> Result<bool> {
+    attestation_prefixes: &[S],
+) -> Result<ConsentGrant> {
     let directory = engine.federation_directory();
 
     // Idempotency guard: has A already granted replication consent to this peer?
@@ -150,7 +186,7 @@ pub async fn emit_replication_consent(
         .list_attestations_by(node_key_id)
         .await
         .map_err(|e| anyhow::anyhow!("list attestations by {node_key_id}: {e}"))?;
-    let already = existing.iter().any(|a| {
+    let already = existing.iter().find(|a| {
         a.attestation_type == attestation_type::SCORES
             && a.subject_key_ids.iter().any(|s| s == peer_key_id)
             && a.attestation_envelope
@@ -158,12 +194,16 @@ pub async fn emit_replication_consent(
                 .and_then(|d| d.as_str())
                 == Some(CONSENT_DIMENSION)
     });
-    if already {
+    if let Some(existing) = already {
         tracing::debug!(
             peer_key_id,
             "replication-consent grant already present — skipping re-emit (idempotent)"
         );
-        return Ok(false);
+        return Ok(ConsentGrant {
+            attestation_id: existing.attestation_id.clone(),
+            content_hash: existing.original_content_hash.clone(),
+            freshly_emitted: false,
+        });
     }
 
     let now = chrono::Utc::now();
@@ -189,7 +229,7 @@ pub async fn emit_replication_consent(
     //   - attestation_prefixes = the JCS array of namespace-prefix strings A
     //     replicates (trailing ":" significant), sorted ascending + deduped so
     //     consumers agree byte-for-byte.
-    let prefixes = attestation_prefixes();
+    let prefixes = normalize_prefixes(attestation_prefixes);
     let envelope = serde_json::json!({
         "dimension": CONSENT_DIMENSION,
         "attesting_key_id": node_key_id,
@@ -214,6 +254,7 @@ pub async fn emit_replication_consent(
     })?;
     // 2. original_content_hash = hex(SHA-256(canonical)).
     let original_content_hash = hex::encode(Sha256::digest(&canonical));
+    let content_hash = original_content_hash.clone();
     // 3. Hybrid sign (Ed25519 hardware-sealed + ML-DSA-65) over the canonical bytes.
     let sig = engine
         .sign_hybrid(&canonical)
@@ -223,8 +264,9 @@ pub async fn emit_replication_consent(
     let pqc_b64 = B64.encode(&sig.pqc.signature);
 
     // 4. Assemble the FEDERATION-tier, directed row (subject = [B]).
+    let attestation_id = new_uuid_v4();
     let attestation = Attestation {
-        attestation_id: new_uuid_v4(),
+        attestation_id: attestation_id.clone(),
         attesting_key_id: node_key_id.to_owned(),
         attested_key_id: peer_key_id.to_owned(),
         attestation_type: attestation_type::SCORES.to_owned(),
@@ -255,9 +297,14 @@ pub async fn emit_replication_consent(
     tracing::info!(
         peer_key_id,
         dimension = CONSENT_DIMENSION,
-        "emitted directed replication-consent grant (A consents to replicate capacity:* to B)"
+        attestation_id = %attestation_id,
+        "emitted directed replication-consent grant (this node consents to replicate to peer)"
     );
-    Ok(true)
+    Ok(ConsentGrant {
+        attestation_id,
+        content_hash,
+        freshly_emitted: true,
+    })
 }
 
 /// Minimal RFC-4122 v4 row id (no `uuid` dep) — same recipe as

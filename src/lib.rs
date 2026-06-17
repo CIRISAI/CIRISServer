@@ -36,7 +36,23 @@ pub mod auth;
 pub mod benchmarks;
 mod compose;
 mod config;
+/// Owner-directed federation operations (the keystone for on-demand
+/// `consent:replication` peering): `GET /v1/federation/self-key-record` +
+/// `POST /v1/federation/peering`. Each node authors its OWN consent grant
+/// (owner-authority model). Public so the integration test
+/// (`tests/federation_admin.rs`) can drive the router directly.
+pub mod federation_admin;
+/// THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
+/// §0.10): `GET /v1/federation/node-code` — the PUBLIC bootstrap code an operator
+/// reads off the node and hands to a founder's app. Public so the integration
+/// test (`tests/nodecode.rs`) can drive the router directly.
+pub mod federation_nodecode;
 mod import;
+/// The NodeCode codec — a faithful Rust port of the agent's authoritative
+/// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
+/// byte-identically with the agent so a code shared from one app decodes on the
+/// other. Public so the node-code endpoint + the founder's client can use it.
+pub mod nodecode;
 /// Directed-consent federation peering (CIRISServer federation Round 2): mutual
 /// key registration + the `consent:replication:v1` grant that authorizes
 /// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
@@ -257,8 +273,11 @@ mod python {
         // `Edge` at top level too (the agent reaches it as `ciris_edge.Edge`).
         register_edge(py, m)?;
 
-        // TODO: expose the fabric UX handles (trust/consent toggles, NodeCode,
-        // membership) as the wheel API the KMP client consumes (MISSION §3.4).
+        // The NodeCode fabric UX handle (CEG §0.10) is realized: the codec lives
+        // in `crate::nodecode` and the node's own code is served (unauthenticated)
+        // at `GET /v1/federation/node-code` (`crate::federation_nodecode`). The
+        // remaining UX handles (trust/consent toggles, membership) fold into the
+        // wheel API the KMP client consumes as their slices land (MISSION §3.4).
         Ok(())
     }
 }

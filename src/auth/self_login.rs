@@ -144,19 +144,34 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
         delegation_scope: req.delegation_scope,
     };
     match st.engine.self_at_login(input).await {
-        Ok(o) => (
-            StatusCode::OK,
-            Json(SelfLoginResponse {
-                partnership_grant_id: o.partnership_grant_id,
-                partnership_accept_id: o.partnership_accept_id,
-                delegation_id: o.delegation_id,
-                delegation_promoted: o.delegation_promoted,
-                self_dek_granted: o.self_dek_granted,
-                self_dek_excluded: o.self_dek_excluded,
-                transport_destinations_registered: o.transport_destinations_registered,
-            }),
-        )
-            .into_response(),
+        Ok(o) => {
+            // Auto-mint ROOT for an admin-eligible founder identity (CIRISServer#19,
+            // port of `_auto_mint_system_admin_if_needed`): on a successful login the
+            // founder's identity becomes WaRole::Root → UserRole::SystemAdmin, so the
+            // owner-gated POST /v1/federation/peering is reachable. Non-eligible
+            // signers are a no-op; a store failure is logged, never fatal to login
+            // (the agent's `except: warn; user can mint manually`).
+            let eligible = super::bootstrap::is_admin_eligible(&caller.key_id);
+            if let Err(e) =
+                super::bootstrap::auto_mint_root_if_needed(&st.engine, &caller.key_id, eligible)
+                    .await
+            {
+                tracing::warn!(error = %e, identity = %caller.key_id, "auto-mint ROOT on self-login failed (founder can claim manually)");
+            }
+            (
+                StatusCode::OK,
+                Json(SelfLoginResponse {
+                    partnership_grant_id: o.partnership_grant_id,
+                    partnership_accept_id: o.partnership_accept_id,
+                    delegation_id: o.delegation_id,
+                    delegation_promoted: o.delegation_promoted,
+                    self_dek_granted: o.self_dek_granted,
+                    self_dek_excluded: o.self_dek_excluded,
+                    transport_destinations_registered: o.transport_destinations_registered,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("self_at_login: {e}"),

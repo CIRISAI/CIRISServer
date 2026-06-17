@@ -931,14 +931,30 @@ async fn native_apple(State(st): State<OAuthState>, body: axum::body::Bytes) -> 
 async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
     let role = determine_role(&st.engine, ident.email.as_deref()).await;
     match create_oauth_user(&st.engine, &ident, role).await {
-        Ok(user_id) => (
-            StatusCode::OK,
-            Json(CallbackResponse {
-                user_id,
-                role: role.as_str().to_string(),
-            }),
-        )
-            .into_response(),
+        Ok(user_id) => {
+            // Auto-mint ROOT for a SYSTEM_ADMIN OAuth user (CIRISServer#19, port of
+            // `_auto_mint_system_admin_if_needed`): the first OAuth user (setup
+            // wizard) is determined SYSTEM_ADMIN, so the founder's OAuth identity is
+            // elevated to WaRole::Root → UserRole::SystemAdmin, reaching the
+            // owner-gated POST /v1/federation/peering. The user_id (the bound
+            // wa_cert) IS the identity bound; mint is idempotent. Non-admin OAuth
+            // logins are a no-op; a store failure is logged, never fatal to login.
+            if role == UserRole::SystemAdmin {
+                if let Err(e) =
+                    super::bootstrap::auto_mint_root_if_needed(&st.engine, &user_id, true).await
+                {
+                    tracing::warn!(error = %e, user_id = %user_id, "auto-mint ROOT on OAuth login failed (founder can claim manually)");
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(CallbackResponse {
+                    user_id,
+                    role: role.as_str().to_string(),
+                }),
+            )
+                .into_response()
+        }
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
 }

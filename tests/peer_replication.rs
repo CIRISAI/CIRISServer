@@ -301,10 +301,18 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     );
 
     // ── 2. Consent: A emits the directed consent:replication:v1 grant at B ────
-    let emitted = peer::emit_replication_consent(&engine, NODE_A_KEY_ID, NODE_B_KEY_ID)
-        .await
-        .expect("emit replication consent");
-    assert!(emitted, "first emit must write a fresh grant row");
+    let emitted = peer::emit_replication_consent(
+        &engine,
+        NODE_A_KEY_ID,
+        NODE_B_KEY_ID,
+        &peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("emit replication consent");
+    assert!(
+        emitted.freshly_emitted,
+        "first emit must write a fresh grant row"
+    );
 
     // The directed consent row exists: scores, subject = [B], federation tier.
     let by_a = engine
@@ -389,10 +397,19 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     );
 
     // ── Idempotency: a second emit is a no-op (no duplicate grant row) ────────
-    let again = peer::emit_replication_consent(&engine, NODE_A_KEY_ID, NODE_B_KEY_ID)
-        .await
-        .expect("second emit must not error");
-    assert!(!again, "re-emit must be a guarded no-op");
+    let again = peer::emit_replication_consent(
+        &engine,
+        NODE_A_KEY_ID,
+        NODE_B_KEY_ID,
+        &peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("second emit must not error");
+    assert!(!again.freshly_emitted, "re-emit must be a guarded no-op");
+    assert_eq!(
+        again.attestation_id, emitted.attestation_id,
+        "idempotent no-op must echo the existing grant's id"
+    );
     let grants = engine
         .federation_directory()
         .list_attestations_by(NODE_A_KEY_ID)

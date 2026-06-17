@@ -76,6 +76,36 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
 
+    // ── ROOT-user bootstrap (CIRISServer#19) ──────────────────────────────────
+    // Faithful port of the agent's `auth_service.bootstrap_if_needed`: if no ROOT
+    // WA exists, load the baked ROOT trust-anchor seed (env CIRIS_ROOT_SEED_PATH or
+    // CIRIS_ROOT_PUBKEY+CIRIS_ROOT_WA_ID) and store it + a child-of-root SYSTEM WA.
+    // With no seed it is a clean no-op (info-logged) — the first-run
+    // POST /v1/setup/root claim then lets the founder claim ROOT on a fresh node.
+    // Either way the founder's identity becomes WaRole::Root → UserRole::SystemAdmin,
+    // which is what the owner-gated POST /v1/federation/peering requires. Idempotent.
+    match crate::auth::bootstrap::bootstrap_if_needed(&engine).await {
+        Ok(outcome) => tracing::info!(?outcome, "root-user bootstrap evaluated"),
+        // A bad seed must not silently downgrade owner-claim to "open forever"; fail boot.
+        Err(e) => return Err(anyhow::anyhow!("root-user bootstrap: {e}")),
+    }
+
+    // The node's OWN self-signed SignedKeyRecord as JSON — built ONCE at boot
+    // (stable for the node's lifetime), served verbatim by
+    // GET /v1/federation/self-key-record and the public record a peer registers
+    // to admit this node's replicated rows.
+    let self_key_record_json = self_key_record_json(&engine, &cfg).await?;
+
+    // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
+    // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
+    // pubkey of its federation signing key + env-derived transport/alias hints.
+    // Served (unauthenticated) by GET /v1/federation/node-code and used to
+    // identity-pin the first-run ROOT claim (POST /v1/setup/root). Stable for the
+    // node's lifetime.
+    let node_code = node_self_code(&engine, &cfg).await?;
+    let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
+        .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
+
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
     let edge = build_edge(&engine, &cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
@@ -144,6 +174,17 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                 identity_router(identity_json)
                     // login ceremony (self-at-login → user-managed consent)
                     .merge(crate::auth::self_login::router(Arc::clone(&engine), strict))
+                    // first-run ROOT claim (CIRISServer#19): POST /v1/setup/root —
+                    // founder claims ROOT (→ SYSTEM_ADMIN) on a fresh, seedless node.
+                    // Identity-pinned to THIS node's NodeCode (CEG §0.10): the claim
+                    // must carry the node's own key_id+pubkey (the out-of-band code),
+                    // proving the founder reached the intended node, not a spoof.
+                    .merge(crate::auth::bootstrap::router(
+                        Arc::clone(&engine),
+                        strict,
+                        node_code.key_id.clone(),
+                        node_code.pubkey_ed25519_base64.clone(),
+                    ))
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple
@@ -159,6 +200,19 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                     .merge(crate::auth::erasure::router(Arc::clone(&engine), strict))
                     // device-auth setup (scaffold)
                     .merge(crate::auth::device_auth::router(Arc::clone(&engine)))
+                    // owner-directed federation peering: GET self-key-record +
+                    // POST peering (each node authors its OWN consent grant).
+                    .merge(crate::federation_admin::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        self_key_record_json.clone(),
+                    ))
+                    // THIS node's public NodeCode (CEG §0.10): GET
+                    // /v1/federation/node-code — the QR-able bootstrap handle an
+                    // operator reads off the node and hands to a founder's app.
+                    .merge(crate::federation_nodecode::router(
+                        node_code_response_json.clone(),
+                    ))
             },
         )
         .await
@@ -436,6 +490,32 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
     }
 }
 
+/// Serialize THIS node's own self-signed `SignedKeyRecord` to JSON — the public
+/// record `GET /v1/federation/self-key-record` serves and a peer registers (via
+/// its own `POST /v1/federation/peering`) to admit this node's replicated rows.
+/// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
+/// uses, so the GET output round-trips byte-identically through a peer's
+/// `register_federation_key`.
+async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<String> {
+    use ciris_persist::federation::SignedKeyRecord;
+    let record = build_self_key_record(engine, cfg).await?;
+    serde_json::to_string(&SignedKeyRecord { record })
+        .context("serialize this node's self-signed SignedKeyRecord")
+}
+
+/// Build THIS node's own [`NodeCode`](crate::nodecode::NodeCode) (CEG §0.10).
+/// Sourced from the SAME [`build_self_key_record`] assembly the self-key-record +
+/// steward registration use, so the embedded Ed25519 pubkey is exactly this node's
+/// federation signing-key pubkey. Hints come from the env surface
+/// ([`crate::federation_nodecode`]). Built once at boot.
+async fn node_self_code(engine: &Engine, cfg: &ServerConfig) -> Result<crate::nodecode::NodeCode> {
+    let record = build_self_key_record(engine, cfg).await?;
+    Ok(crate::federation_nodecode::build_node_code(
+        &record.key_id,
+        &record.pubkey_ed25519_base64,
+    ))
+}
+
 /// Build Node A's self-signed [`KeyRecord`](ciris_persist::federation::types::KeyRecord)
 /// — `scrub_key_id == key_id`, hybrid proof-of-possession over
 /// `ceg_produce_canonicalize(registration_envelope)`. This is the exact record
@@ -533,7 +613,15 @@ async fn setup_peer_replication(
     crate::peer::register_peer_key(engine, peer).await?;
 
     // 2. Consent: emit the directed consent:replication:v1 grant at B (idempotent).
-    crate::peer::emit_replication_consent(engine, &cfg.key_id, &peer.key_id).await?;
+    //    Boot-env peering uses the DEFAULT prefix set (capacity:*); the owner can
+    //    later author a different set via POST /v1/federation/peering.
+    crate::peer::emit_replication_consent(
+        engine,
+        &cfg.key_id,
+        &peer.key_id,
+        &crate::peer::default_attestation_prefixes(),
+    )
+    .await?;
 
     // 3. Replication: reuse the Edge's Reticulum transport for the runtime.
     let Some(transport) = edge.reticulum_transport() else {
