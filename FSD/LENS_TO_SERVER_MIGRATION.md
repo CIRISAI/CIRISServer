@@ -60,13 +60,27 @@ the shared substrate, queryable from any node.
 
 - **fabric (the lens node):** the epistemic substrate — ingest, corpus, scoring
   (emits `capacity:*`), `system:*` self-report, the **signed / key-scoped** reads,
-  **DSAR**, the **public-keys registry**, and the **access tiers**.
+  the **erasure mechanism** (§19.7 hard-delete / `EjectHardDelete`), the
+  **public-keys registry**, and the **access tiers**. The fabric *performs* erasure;
+  it exposes no public hook for it.
 - **ciris-status (the monitor node):** the public aggregator + health attestor —
   reads `capacity:*`/`system:*`, serves the public scoring + status surface
   ciris.ai consumes, emits `health:liveness` `scores`. See
   [`CIRISStatus/FSD/MONITORING_NODE_DESIGN.md`](https://github.com/CIRISAI/CIRISStatus).
   The fabric node does **not** serve the public website feed.
 - **thin presentation (ciris.ai / Portal):** renders over the monitor's surface.
+
+**GDPR erasure — TWO entry points (both, not either/or), one mechanism.** Right-to-be-
+forgotten reaches the §19.7 hard-delete via **both**:
+1. **DSAR endpoint, surfaced through ciris-status** — the key-scoped, hybrid-signed
+   `dsar/delete` request (CIRISLens `accord_api.py` shape: *only content signed by
+   the requesting key is deleted*), exposed on the public monitor node (not a fabric
+   public hook), which drives the fabric's erasure; **and**
+2. **in-app, CEG-native** — the KMP fabric app lets the data subject emit a signed
+   `withdraws`/revocation against their content directly; the substrate honours it
+   via the same §19.7 descent.
+Both collapse to one substrate mechanism (revocation → `EjectHardDelete` → below the
+recoverability floor), proven by the noise-floor demonstration (CIRISServer#14).
 
 **The DSAR gate (hard).** The §19.7 erasure primitives DSAR needs
 (`evict_fountain_content_hard_delete`, `content_aggregation`,
