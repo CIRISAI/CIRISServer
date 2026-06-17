@@ -116,7 +116,7 @@ capability page at <https://cirisai.github.io/CIRISServer/>, and the §19.7
 noise-floor compliance bench. Below the lens-store disk minimum the node degrades
 to a Reticulum relay node.
 
-Substrate floor: **persist v8.4.0 / edge v4.3.0 / verify-family v5.10.0**
+Substrate floor: **persist v8.6.0 / edge v4.5.0 / verify-family v5.11.0**
 (CEG 1.0-RC12). `ciris-lens-core` is **absorbed in-tree** — the standalone
 CIRISLensCore library and the CIRISLens deployment (Grafana/TimescaleDB/Python
 ingest) retire. Cohabitation + CEG-profile conformance is gated by

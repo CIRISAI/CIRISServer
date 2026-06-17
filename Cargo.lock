@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "5.10.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.10.0#be2511433a2ef14d315571655933ecf9d05699e1"
+version = "5.11.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -838,8 +838,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "4.3.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v4.3.0#ab4f1bc49783faa470472ea577a3f4cf10b37e28"
+version = "4.5.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v4.5.0#86eb59c23bcfdea78760b1f2568ee9bafab2da9d"
 dependencies = [
  "async-trait",
  "axum",
@@ -890,8 +890,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "5.10.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.10.0#be2511433a2ef14d315571655933ecf9d05699e1"
+version = "5.11.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -954,8 +954,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "8.4.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v8.4.0#7b40aae71cc17683f5cfb9553f1d484d267f1970"
+version = "8.6.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v8.6.0#3c73f95c8d4766af6c989eaa292d073905354fd5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1031,8 +1031,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "5.10.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.10.0#be2511433a2ef14d315571655933ecf9d05699e1"
+version = "5.11.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
 dependencies = [
  "android_system_properties",
  "anyhow",

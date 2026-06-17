@@ -4,6 +4,14 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.3.1] — 2026-06-17
+
+Substrate floor → **persist v8.6.0 / edge v4.5.0 / verify-family v5.11.0** —
+the §19.7 forever-memory cross-impl loop closed: `EjectAggregatedTierOnly`
+tier-granular eviction + the unified `EjectionVerdict` surface (edge v4.5.0 ↔
+verify v5.11.0 ↔ persist v8.6.0). Additive; build + full test suite green
+(25 lib + lens-core 352 + integration), no composition-root change.
+
 ## [0.3.0] — 2026-06-16
 
 The integrated fabric node: the **auth subsystem** absorbed, the **one-wheel**
