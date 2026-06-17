@@ -4,6 +4,52 @@ All notable changes to CIRISServer. Format follows [Keep a Changelog](https://ke
 this project uses [Semantic Versioning](https://semver.org/). The minor line tracks
 the fabric-node scope (0.1 lens · 0.5 +registry · 1.0 +node), paced by the CIRISAgent train.
 
+## [0.3.0] — 2026-06-16
+
+The integrated fabric node: the **auth subsystem** absorbed, the **one-wheel**
+re-export surface, and the substrate on the **v8.4.0 / v4.3.0 / v5.10.0** floor.
+This is the node we replace the deployed CIRISLens with (and the wheel CIRISAgent
+adopts to drop its lens-core + its own auth).
+
+### Added
+- **Auth subsystem (`src/auth/`, CIRISServer#9) — the fabric is the single auth
+  authority.** The agent's entire user/WA/OAuth/api-key/service-token surface
+  already lived in one persist table (`wa_cert`), so this is a Python→Rust port
+  over the same rows — **no schema fork, 0 conflicts** (`src/auth/ABSORPTION.md`:
+  33 capabilities mapped). One `x-ciris-*` hybrid request verifier (accepts the
+  identity **or** any admitted occurrence — the consenting user *and* the
+  generating agent are both valid signers); **self-at-login** (§8.1.12.7) as the
+  login ceremony; OAuth front-door (providers/login/callback + native
+  google/apple); sessions/token issuer (replaces OAuth→WA→JWT); the CEG role-set
+  **plus** the agent's `UserRole`/`Permission` model verbatim; api-keys +
+  service-token revocation; attestation; user-signed **consent**; and CEG-native
+  **erasure** (GDPR Art. 17 in-app path → `Engine::evict_actor`). Password KDF,
+  native-token JWKS, and root-signature verification are byte-compatible with the
+  agent's own crypto (verified against agent-produced vectors).
+- **One-wheel re-export (CIRISServer#4):** `ciris_server` re-hosts the persist /
+  edge / lens Python surfaces under one `.so` (one PyO3 type registry —
+  `ciris_server.Engine is ciris_server.persist.Engine`), so CIRISAgent consumes a
+  single wheel and the cross-wheel type-identity bug class (CIRISPersist#109)
+  cannot occur. (`reset_engine` / `init_edge_runtime` re-export hooks pending
+  upstream: CIRISPersist#231, CIRISEdge#156; `ciris-verify` stays a standalone
+  ctypes wheel.)
+- **Noise-floor compliance bench (CIRISServer#14, `tests/noise_floor.rs`):**
+  measured individual-unrecoverability — revocation → hard-delete, the
+  reconstruction cliff at the fountain floor, aggregation-is-erasure.
+- **The fabric app (`app/`, CIRISServer#15):** the CIRISAgent KMP mesh app minus
+  agent cards (identity slice proven; governance/safety surfaces).
+
+### Changed
+- Substrate floor → **persist v8.4.0 / edge v4.3.0 / verify-family v5.10.0** (the
+  §19.7 erasure primitives + `wa_cert` auth substrate).
+
+### Notes
+- Companion: **CIRISStatus** becomes a fabric monitoring node (Flows A/B +
+  `health:liveness` `scores` + website sockets).
+- GDPR erasure is **both** entry points: the DSAR endpoint on the monitor node
+  **and** the in-app CEG-native `withdraws`. Full lens decommission stays gated on
+  the DSAR-via-status endpoint landing (keep the Python DSAR reachable until then).
+
 ## [0.2.6] — 2026-06-16
 
 Substrate floor → **v4.2.0 family** + the **multi-tier ALM relay chain** test

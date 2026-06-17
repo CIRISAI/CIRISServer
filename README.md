@@ -95,18 +95,26 @@ LensClient`.
 
 ## Status
 
-**Shipped (0.2.x) — the lens-only fabric node, hardened.** `ciris-server` boots a
+**Shipped (0.3.0) — the integrated fabric node.** `ciris-server` boots a
 zero-setup node: relay ingest (CEG `AccordEventsBatch` over Reticulum/HTTP) + the
 seven frozen `GET /lens/api/v1/*` read endpoints + the six-key `GET /v1/identity`,
 over one shared persist Engine. Federation signatures are **100% hybrid
 post-quantum** (Ed25519 + ML-DSA-65, hard cut — no classical-only path); the
 sealed-Ed25519 federation seed and the RNS transport identity are TPM/SE/StrongBox
 sealed (software-encrypted fallback) and adopted byte-identically on a CIRISLens
-takeover (no re-key). Also shipped: legacy-trace import (`ciris-server
-import-traces`) and an operator capability surface — the holonomic federation
-scoreboard (`ciris-server scoreboard`) plus an interpreted benchmark/capability
-page at <https://cirisai.github.io/CIRISServer/>. Below the lens-store disk minimum
-the node degrades to a Reticulum relay node.
+takeover (no re-key).
+
+0.3.0 adds the **auth subsystem** (`src/auth/`, CIRISServer#9) — the fabric is the
+single auth authority: one `x-ciris-*` hybrid request verifier, **self-at-login**
+(so consent/erasure are user-signed), OAuth + sessions + roles/perms + api-keys +
+user-signed consent + CEG-native erasure (GDPR Art. 17), all a byte-compatible
+port of the agent's `wa_cert`-backed auth — and the **one-wheel re-export**
+(CIRISServer#4) so CIRISAgent consumes a single `ciris_server` `.so` (one PyO3
+registry). Also shipped: legacy-trace import (`ciris-server import-traces`), the
+holonomic federation scoreboard (`ciris-server scoreboard`) + the interpreted
+capability page at <https://cirisai.github.io/CIRISServer/>, and the §19.7
+noise-floor compliance bench. Below the lens-store disk minimum the node degrades
+to a Reticulum relay node.
 
 Substrate floor: **persist v8.4.0 / edge v4.3.0 / verify-family v5.10.0**
 (CEG 1.0-RC12). `ciris-lens-core` is **absorbed in-tree** — the standalone
