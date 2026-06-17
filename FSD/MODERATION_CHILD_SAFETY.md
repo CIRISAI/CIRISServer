@@ -304,7 +304,190 @@ Load-bearing child-safety + takedown primitives first (they ride shipped cores);
 
 8. **`ModerationEvent` is contributor-reputation, not content-moderation** — persist's shipped `ModerationEvent` (`cirisnode/types.rs:202`) is an *accusation of rogue contributor action* (rogue_vote/coordinated_voting/…), adjudicated by slashing/reconsideration. *Open question:* does content-moderation (a flagged *post*) reuse this Contribution with a content-targeting `allegation_type`, or does it ride purely `takedown_notice` + `detection:*`? **Recommendation:** content actions ride `takedown_notice` + `detection:*`/`cw_class`; `ModerationEvent` stays for participant-conduct adjudication. Confirm.
 
-9. **Age-gate authority for minors** — FERPA/parental authority composes via `delegates_to` (`11_governance.md:119`), i.e. a parent delegating the minor's consent/age scope. Confirm the delegation-spine handles the minor-subject case (delegator = parent, principal = minor) cleanly.
+9. **Age-gate authority for minors** — FERPA/parental authority composes via `delegates_to` (`11_governance.md:119`), i.e. a parent delegating the minor's consent/age scope. Confirm the delegation-spine handles the minor-subject case (delegator = parent, principal = minor) cleanly. **Audit note (§B.5):** this composition assumes a *non-abusive* guardian; the coerced-household case is a named residual, not a closed gap.
+
+**Existence-invariant asks (new — §A / §B):**
+
+10. **[fabric-side, then upstream] `moderation_track_record` dimension** — the auto-promotion ranking signal (§A.3). *Near-term:* compute fabric-side as a consumer composition over the shipped reputation basis (`commitment_fulfillment` / `truth_grounding` / `witness_diversity` + upheld-`reconsideration` count) under a fixed dimension name — **no new primitive** (same workaround pattern as age/rating #2–#3). *Upstream:* canonicalize the dimension name + the deterministic ranking tiebreak (so every node computes the same promotion — no split-brain on "who is the moderator now").
+
+11. **[CEG §7.8] `hard_case:community_unmoderated:{community_key_id}` reserved reason** — the existence gate's fail-secure / rejection emission (§A.2, §A.3 step 4) needs a reserved `hard_case:*` reason so a quiesced/rejected-unmoderated community is **auditable, not silent** (the §10.1.4 anti-soft-censorship discipline). Companion to the shipped `community_membership_change` / `consensus_protocol_violation` reasons. Also useful: `hard_case:community_moderator_promoted:{community_key_id}` for the auto-promotion event. **No new structural primitive** — additions to the §7.8 closed reason set.
+
+12. **[persist `admission.rs`] named-moderator predicate at community admission** — the existence gate (§A.2) is an admission precondition: `community` creation + every membership-change `supersedes` admitted **iff** `named_moderator_present(C)`. This rides the existing `verify_founder_quorum` + owner-binding machinery (no new primitive) but needs the predicate wired into the admission path alongside the `consensus_protocol` and owner-binding checks, plus the auto-promotion trigger on last-moderator-removal events.
+
+---
+
+## 9bis. Spine status update (CEG 1.0-RC19)
+
+This document's §3 / §9 originally flagged `moderate` / `takedown` / `review` as a **substrate gap**. That gap is **now closed upstream**: CEG **§11.10** (1.0-RC19, CIRISRegistry#90) names the three duties as canonical `delegated_scope` kinds and **enforces their admission** — mirroring `consent_revocation` (§3.2.3 rule 3). The normative rule:
+
+> A moderation action is admitted **iff** its `attesting_key_id` is the duty-holder itself, **or** sits on a live `delegates_to` chain bearing the matching scope from the duty-holder … A verifier MUST **reject** (treat as non-authoritative) a `takedown_notice`, `moderation:*` ModerationEvent, or `reconsideration:*` from an actor with no such authority — the duty is **held or delegated, never assumed**. — CEG §11.10
+
+The remaining work is therefore *persist `admission.rs` enforcement → CIRISServer `src/safety/*` wiring*, not a primitive ask. **Accountability ships ahead of capability**: per §11.10, *no media/chat feature ships until this is solved and working.* The sections below build the existence invariant on top of this enforced spine.
+
+---
+
+## A. The named-moderator existence invariant
+
+> **Invariant (normative): a group without a named, accountable moderator cannot exist.**
+> Every multi-party `community` (and any `family` operating beyond the intimate-trust default) MUST, at all times, name at least one **provisioned, accountable identity holding the `moderate` scope for that group**. The group's *existence* — its admission to federation, its ability to emit `holds_bytes:*` and accept members — is gated on this. There is **never** an unmoderated window: an auto-promotion rule fills any gap the instant it opens, and if no eligible moderator can be named, the group **fails secure** (cannot federate/operate). No unmoderated multi-party space, ever.
+
+This is the child-safety load-bearer. Predator playbooks across every surveyed network (§SAFETY_LANDSCAPE) exploit exactly the space CIRIS forbids here: the unmoderated relay, the orphaned room with no admin left, the absentee-admin instance. CIRIS does not "moderate better" in those spaces — it makes them **structurally non-existent**.
+
+### A.1 What it rides (no new primitive)
+
+The invariant is a *composition rule over shipped primitives*, not a new wire shape:
+
+- **`community` subject_kind** (§5.6.8.10) already carries `members[]` with `role: founder | member`, a `consensus_protocol`, and `consensus_protocol_entrenched`. The named moderator is a member who additionally bears the `moderate` scope.
+- **Owner-binding gate** (§5.6.8.10, RC7, CIRISRegistry#83): a `node`/`agent`-role key MUST have a bound **owner** — a `user`-role human with a live `delegates_to(user → key, …)` — *before it may be admitted to any non-`infrastructure` community.* **Authority roots in an accountable human, never a bare node.** The named-moderator invariant is the same principle applied to the *group as a whole*: a community's authority to exist roots in an accountable moderator.
+- **`moderate` delegated_scope** (§11.10, RC19): the enforced authority the named moderator holds. They may exercise it themselves or sub-delegate it (`delegates_to(moderator → agent | trusted_party, scope: moderate)`), depth-capped (§13.3), revocable by `withdraws`.
+- **`moderation_track_record`** — the auto-promotion signal. Built from the shipped reputation basis: `commitment_fulfillment:{prior_contribution_id}` (follow-through on prior duties), `truth_grounding:{subject}` (verdicts that held), `witness_diversity:{contribution_id}` (cross-validated review), and a successful `reconsideration` history (appeals that *upheld* their verdicts). This is a **consumer-side composition over existing `scores` dimensions** — no new primitive. (Open dimension-name ask in §9 #10, mirroring the age/rating workaround: fixed dimension name `moderation_track_record`, fabric-computed.)
+
+### A.2 The existence gate (admission-time)
+
+A substrate evaluating a `community` Contribution (creation, or a `supersedes` membership change) MUST run the **named-moderator predicate** as an admission precondition, alongside the existing `consensus_protocol` and owner-binding checks:
+
+```
+named_moderator_present(community C) :=
+    ∃ m ∈ C.members such that
+        m is owner-bound (a real provisioned user-role identity, or a key
+            with a live delegates_to from one — §5.6.8.10 owner-binding), AND
+        m holds the `moderate` scope for C — either:
+            (a) m is the community founder/creator (creator carries the duty
+                by default — "community = creator's responsibility", §0 spine), OR
+            (b) ∃ live, unrevoked delegates_to(founder|prior_moderator → m,
+                scope ⊇ {moderate}) naming C as principal.
+
+ADMISSION:
+    community admission (and every membership-change supersedes) is admitted
+        IFF named_moderator_present(C).
+    If the predicate is false → REJECT, emit
+        hard_case:community_unmoderated:{community_key_id} (§7.8 reserved,
+        new reason in the closed set — upstream ask §9 #11) into the
+        community scope so the failure is auditable, NOT silent
+        (same anti-soft-censorship discipline as §10.1.4's recipient_excluded).
+```
+
+**Creator carries the duty by default (the §0 spine).** A community cannot be *created* without its creator either holding `moderate` themselves or having named someone who does. There is no "create now, moderate later" path — the door does not open without a named moderator behind it. This closes the unmoderated-creation vector at genesis.
+
+**Family note.** The intimate-trust `family` default (≤ ~20, `founder_only`/`unanimous`, structurally invisible per §10.1.4) is *self-moderating by the founders* — every founder holds the duty over a space only they can see. The invariant **bites when a family operates as a de-facto community** (promotes content to `cohort_scope: community`, or grows past the intimate-trust threshold an operator sets): at that point the named-moderator predicate applies. The honest boundary: a structurally-invisible family is moderated *only* by its own members (see §B.1).
+
+### A.3 Auto-promotion-by-merit (no unmoderated window)
+
+The hard requirement is **continuity** — there must never be even a transient gap. A named moderator can vanish: key revoked, member removed by `supersedes`, owner-binding withdrawn, account erased (`evict_actor`), or simply gone dark. The instant the named-moderator predicate would go false, the substrate runs **auto-promotion**:
+
+```
+On any event that removes/invalidates the last moderate-scope holder of C
+    (withdraws against the delegation, member-removal supersedes, owner
+     unbind, evict_actor, key supersession leaving no scope holder):
+
+  1. CANDIDATE SET := current members of C who are owner-bound AND eligible
+        (not under an open moderation:* allegation, not slashed).
+  2. RANK by moderation_track_record (A.1): commitment_fulfillment desc,
+        then witness_diversity, then upheld-reconsideration count, then
+        tenure (joined_at asc) as a deterministic tiebreak.
+        (Deterministic ⇒ every node computes the same promotion ⇒ no
+         split-brain on "who is the moderator now" — the §safety-vs-censorship
+         "same inputs → same verdict" discipline applied to promotion.)
+  3. AUTO-DELEGATE: emit, under the community's consensus_protocol authority
+        (founder-quorum / the entrenched protocol — NOT a unilateral act),
+        delegates_to(community → top_candidate, scope: moderate).
+        The promotion is itself a signed, attributable, revocable Contribution
+        + hard_case:community_moderator_promoted:{community_key_id}.
+  4. IF candidate set is empty (no eligible member can be named):
+        FAIL SECURE — the community CANNOT continue as a federating space:
+          - substrate ceases to admit new cohort_scope: community content
+            (stops emitting holds_bytes:* for C),
+          - stops admitting new members,
+          - emits hard_case:community_unmoderated:{community_key_id},
+          - existing content is governed under the standard takedown/eviction
+            path; the community is quiesced, not silently running unmoderated.
+        Re-activation requires the consensus_protocol to name a moderator.
+```
+
+The promotion is **never a coup**: it is emitted under the community's own `consensus_protocol` (the same founder-quorum machinery that admits members — `verify_founder_quorum`), is fully signed and audited, and is revocable. Merit fills the gap; the *group's own governance* ratifies; fail-secure is the floor. The auto-promotion is the mechanism that lets the existence-gate be *strict* without bricking real communities whose moderator simply left.
+
+### A.4 Fail-secure, not fail-open — and why that's the right default
+
+The CIRIS default everywhere (`CLAUDE.md` non-maleficence) is fail-*secure*: a missing key denies access, never downgrades protection (§10.1.4's `wrap_algorithm` exclusion is the precedent). The named-moderator invariant inherits it: **the failure mode of "we cannot name an accountable moderator" is the group quiescing, not the group running open.** An unmoderated multi-party space is the predator-enabling state; the design makes it unreachable. This is the deliberate inversion of every surveyed network, all of which fail *open* (a relay/instance/room with no moderator keeps operating).
+
+The honest cost (stated, not hidden): fail-secure can quiesce a *legitimate* community whose moderator left and whose members are all ineligible (e.g. all under allegations, or all bare unowned nodes). That is an availability cost knowingly traded for the safety floor — and it is recoverable (name a moderator → re-activate), unlike the harm an unmoderated window enables.
+
+### A.5 What the invariant does NOT do (honesty)
+
+- It does **not** make moderation *correct* — only *present and accountable*. A named moderator can be lazy, captured, or colluding; §B.4 covers that containment.
+- It does **not** reach **structurally-invisible self/family content** (§10.1.4) — that content is moderated only by its own members, by construction. The invariant narrows the unmoderated surface to *exactly* the irreducible E2EE-equivalent core, and no further (§B.1).
+- It does **not** prevent a determined actor from running a **private off-fabric** group; it governs what can exist *as a CIRIS community*. A predator who wants an unmoderated space must leave the fabric — which is the point: the fabric never hosts one.
+
+---
+
+## B. Anti-predator audit
+
+Honest pass over the model for predator-enabling gaps. Format per gap: **the vector → how the design contains it → residual risk (stated plainly).** The maintainer asked for "you tell me," not reassurance; residuals are real.
+
+### B.1 The hard problem — structural-invisibility (§10.1.4) vs CSAM detection
+
+**The vector.** `cohort_scope: self | family` content **never emits `holds_bytes:*`** and **never federates** — it is delivered member-to-member, optionally at-rest-encrypted (PQC v2). This is **E2EE-equivalent**: a non-member cannot even discover the content exists, let alone fetch it. This is precisely the property offenders exploit on every E2EE network (Signal/Session/SimpleX/Matrix encrypted rooms — see §SAFETY_LANDSCAPE). **A predator's own device and a colluding family-scope are, by construction, a place hash-matching cannot reach.** We must not pretend otherwise.
+
+**How the design contains it (precisely — where detection *can* run):**
+
+1. **The publish/promote boundary is the detection seam.** The moment content crosses *out* of self/family — a `supersedes` promotion to `cohort_scope: community | federation` (§8.1.8.1 Tiered-Scope), or any inline-blob ingress to a shared scope — it emits `holds_bytes:*` and enters the path where `src/safety/hash_match.rs` runs the `PerceptualHashMatcher` (§4.1). **Sharing is the act that exposes content to matching; private holding is not.** Most CSAM harm is *distribution* and *grooming-to-distribution*; the boundary is exactly where the network gains leverage. This mirrors the only honest answer the field has (Matrix scans unencrypted/shared content; nobody scans the private core).
+2. **Client-side, at the producing occurrence, is the *only* place private content is in cleartext** — and it is the one place CIRIS deliberately does **not** mandate scanning, for the same reason Apple abandoned client-side scanning (§SAFETY_LANDSCAPE: the mass-surveillance backdoor it creates, the false-positive and scope-creep risk). The design's position is explicit: hash-matching runs at **share/publish ingress**, not as a mandated client-side scan of private holdings. We inherit the unsolved tension; we do not claim to have solved it.
+3. **Structural-invisibility is content-*holding* confidentiality only** (§10.1.4 normative scope) — it is **NOT** relationship-existence, metadata, or traffic-analysis privacy. So the *graph* around private content is still observable: `delegates_to` edges, membership-change `hard_case:*` events, the *existence and shape* of a family, age-assurance attestations, report attestations naming a canonical-hash subject. **Behavioral/coordination detection (`detection:*`, `ratchet:flag:*`, grooming patterns — §B.3) operates on this observable metadata layer even when the content bytes are invisible.** This is the genuine, non-magical lever the invariant + the metadata grain give us.
+4. **The named-moderator invariant narrows the surface** to *exactly* self/family — every *multi-party* space (`community`) has a named moderator who *can* see community-scoped content and on whom the duty + the hash-match seam land. There is no unmoderated *multi-party* space for a predator to operate a ring in; they are pushed down to self/family, which is small, member-gated, and not a distribution surface.
+
+**Residual risk (honest).** A predator operating purely within self/family scope — solo possession, or a fully-colluding family-scope (e.g. an abuser and a coerced household member) — is **not detectable by the substrate**, exactly as on every E2EE system. Hash-matching cannot run on bytes that never cross the share boundary and are never presented for matching. The containment is: (a) the moment they *distribute*, they hit the seam; (b) the metadata/coordination layer is still visible; (c) NCMEC/CyberTipline + law-enforcement process (device seizure, undercover, victim report) remain the out-of-band path the fabric does not replace. **CIRIS does not solve the private-content problem. No one has. What it does is refuse to *add* unmoderated multi-party spaces on top of that irreducible core** — the opposite of the surveyed networks, which add many.
+
+### B.2 The unmoderated-group vector — closed by the invariant
+
+**The vector.** The single highest-leverage predator structure on decentralized networks: a multi-party space with **no accountable moderator** — an unmoderated Nostr relay, an orphaned Matrix room, an absentee-admin Mastodon instance, an unmonitored group chat. Rings form, content circulates, grooming proceeds, and *no one is responsible*.
+
+**How the design contains it.** §A directly: such a space **cannot exist** as a CIRIS community. The existence gate refuses admission without a named moderator; auto-promotion prevents any transient gap; fail-secure quiesces a group that cannot name one. There is no protocol-conformant unmoderated multi-party CIRIS space. This is the one place CIRIS is *structurally* different from every surveyed network (all of which permit unmoderated spaces — §SAFETY_LANDSCAPE table).
+
+**Residual risk.** (a) The moderator can be *present but negligent/captured* — see §B.4 (presence ≠ diligence; containment is the accountability chain + appeals + canonical authority, not the invariant alone). (b) The self/family core (§B.1) is by-design member-moderated only. (c) A determined ring can run **off-fabric**; CIRIS governs CIRIS communities, not the existence of other software.
+
+### B.3 Grooming / coordination patterns
+
+**The vector.** Grooming is a *behavioral pattern over time* (trust-building, isolation, escalation, off-platform migration), not a single matchable artifact. Hash-matching is blind to it.
+
+**How the design contains it.** The `detection:*` / `ratchet:flag:*` advisory corpus (§6, lens-core `scoring/`) operates on the **observable metadata/behavioral layer** (§B.1 point 3) — message-rate/asymmetry, contact-graph anomalies (an adult node initiating many edges to age-assured-minor nodes), cross-scope migration attempts, `ratchet:flag:harassment_pattern` and sibling pattern flags. Critically, these are **advisory only — `ratchet:flag:*` can NEVER be sole evidence for `slashing:*`; a WA-quorum / named-moderator adjudication is the load-bearing gate** (§6, CEG `05_namespace.md:1175`). Detection *surfaces to the named moderator*; the moderator (or their delegate brain) adjudicates; quorum gates any punitive action. RATCHET is hash-pinned + deterministic, so a flag is reproducible and contestable.
+
+**Residual risk.** Grooming detection is **probabilistic and adversarial** — sophisticated actors throttle to stay under thresholds, migrate off-fabric early (the metadata shows the *attempt* to migrate, not the off-fabric continuation), and groom within structurally-invisible scope where the behavioral signal is thin. False positives are a real harm (an innocent adult-minor mentor relationship flagged). The design's honesty: detection is a *surfacing aid for an accountable human*, never an autonomous verdict — which both limits the false-positive harm and limits the catch rate. No decentralized network has solved grooming detection; CIRIS's contribution is that there is **always a named, accountable human the flag lands on**, which the unmoderated networks lack.
+
+### B.4 Collusion — a predator delegating moderation to a colluding party
+
+**The vector.** The named-moderator invariant requires *a* moderator — what if the predator *is* the moderator, or delegates `moderate` to a colluding party who rubber-stamps the ring? Presence of a moderator ≠ safety if the moderator is captured.
+
+**How the design contains it (defense in depth — no single layer suffices):**
+
+1. **Attribution + the chain.** Every moderation action and every delegation is **signed and traceable** up the `delegates_to` chain to an **owner-bound accountable human** (§5.6.8.10). A colluding moderator is *named and on the record* — there is no anonymous capture. Collusion leaves a signed audit trail.
+2. **Rules are crowdsourced + operational-language-gated; verdicts are deterministic.** Per the CIRIS safety-vs-censorship position, the *rules* a moderator enforces are "public, dated, signed, reversible," proposed and voted by the community — **not the moderator's private discretion** — and every rule must pass the operational-language gate ("checkable without judgment, or it isn't ready"). A captured moderator **cannot quietly invent a permissive rule**: rule-changes are public and voted. And because "same response + same rule → same verdict," a colluding moderator who *fails to act* on content that mechanically violates a public rule is **visibly deviating from the deterministic verdict** — the non-action is itself detectable.
+3. **Appeals with recusal.** Reconsideration (`reconsideration:{grounds}`, §11.10 `review` scope) goes to **a fresh review group with the original adjudicators recused** (safety-vs-censorship position; CEG §8.1.5 fresh-quorum recusal). A colluding moderator cannot sit on the appeal of their own (in)action. `witness_diversity` (jurisdictional + organizational + software-stack diversity, N≥3) raises the bar for a *colluding quorum*.
+4. **Canonical / founder authority + HUMANITY_ACCORD.** Above the community sits `ciris-canonical` (the founder-quorum `infrastructure` trust root) and, at the apex, the §9 HUMANITY_ACCORD 2-of-3. A community whose entire moderation is captured can be reached by the takedown/eviction path and, in the limit (a community structured to systematically host abuse), the constitutional path — neither of which the captured local moderator can block.
+5. **Reputation consequences feed auto-promotion.** A moderator found colluding (via appeal-overturn, `moderation:*` allegation upheld) is slashed / loses `moderation_track_record`, which **demotes them out of the auto-promotion candidate ranking** (§A.3) and surfaces a successor.
+
+**Residual risk (honest).** A **fully-colluding community** — predator-moderator + colluding members + a colluding appeal quorum who all decline to file reports — defeats the *internal* layers, because every internal check ultimately needs *someone* to file a report or appeal. The genuine backstops then are: the **operational-language-gated public rules** (the colluding group still can't make abuse *rule-compliant* without a public, voted, signed rule-change that the wider federation sees), the **observable metadata/coordination layer** (§B.1/§B.3 — a tight collusive ring has anomalous graph structure), **out-of-band reporting** (a victim, a departing member, law enforcement), and **canonical/accord authority from above.** This is the same residual every system has against a fully-closed colluding group; CIRIS's edge is that the collusion is **signed, attributed, and forced to operate against public deterministic rules** rather than in an anonymous unmoderated void. It is *harder and more exposed*, not impossible.
+
+### B.5 Private-group abuse + age-gate evasion
+
+**The vector.** (a) A private `community` (small, invite-only) used to host a ring under a complicit moderator. (b) Age-gate evasion: an adult self-declaring as a minor to enter youth spaces, or a minor declaring adult to bypass protections, or a predator declaring minor to approach minors.
+
+**How the design contains it.**
+
+- **Private community ≠ unmoderated community.** Even a small invite-only `community` is bound by §A: named moderator, accountability chain, public operational-language-gated rules. It is **not** structurally-invisible (only self/family is — §10.1.4); community-scoped content emits `holds_bytes:*` with cleartext provenance and is reachable by the named moderator and the hash-match seam. The "private group" predators rely on elsewhere does not get the §10.1.4 invisibility — it gets the §B.2 invariant. (A predator who wants *true* invisibility must drop to self/family, i.e. §B.1's irreducible core — they cannot have both invisibility *and* multi-party reach inside the fabric.)
+- **Age-assurance is layered, subject-signed, and misdeclaration is adjudicated, never auto-trusted** (§4.2). The ladder `self < provider:{verifier_key}:adult < government:{credential_class}:adult` means a youth space can require a *verified* assurance level, not bare self-declaration — a predator's `self`-declared age does not clear a `provider:`-gated space. **Misdeclaration routes to `moderation:age_assurance_misdeclaration` adjudication** (a `ModerationEvent` + quorum), and an adult who self-declared minor to approach minors is exactly the high-signal event the `detection:*` graph layer surfaces (adult-pattern node with minor self-declaration + edges to verified minors).
+
+**Residual risk (honest).** **Self-level age assurance is unfalsifiable from inside the fabric** — a determined predator self-declaring minor cannot be caught by the assurance mechanism alone; only the *requirement of a verified level* for sensitive spaces, plus the behavioral/graph layer, constrains them. Verified levels (`provider:`/`government:`) depend on **out-of-fabric verifiers** whose own integrity the fabric must trust (a compromised verifier mints false adulthood/minority). And age-assurance for minors composes via parental `delegates_to` (§9 #9) — which assumes a *non-abusive* parent; the coerced-household case (§B.1) is the gap where the delegating "guardian" is the threat. CIRIS narrows age-gate evasion to the verifier-trust and coerced-guardian edges; it does not eliminate them.
+
+### B.6 Audit summary table
+
+| Vector | Primary containment | Fails open elsewhere? | CIRIS residual (honest) |
+|---|---|---|---|
+| Unmoderated multi-party space | §A existence invariant + auto-promotion + fail-secure | **Yes — all surveyed nets** | Self/family core is member-moderated only; off-fabric groups exist |
+| Private self/family CSAM (E2EE-equivalent) | Detection at share/publish seam; metadata layer; NCMEC out-of-band | n/a (universal) | **Unsolved — same as all E2EE; not claimed solved** |
+| Grooming / coordination | `detection:*`/`ratchet:flag:*` advisory → named moderator adjudicates; quorum gates slashing | Mostly yes | Probabilistic, adversarial, off-fabric migration; false-positive harm |
+| Colluding moderator | Signed chain + public op-language rules + deterministic verdicts + recused appeals + canonical/accord | Yes | Fully-closed colluding ring needs out-of-band trigger; harder + exposed, not impossible |
+| Private-group ring | §A applies (private ≠ unmoderated; not §10.1.4-invisible) | Yes | Predator can drop to invisible self/family — but loses multi-party reach |
+| Age-gate evasion | Layered subject-signed assurance + verified-level gates + misdeclaration adjudication + graph layer | Yes | `self`-level unfalsifiable; verifier-trust + coerced-guardian edges remain |
 
 ---
 
@@ -312,4 +495,6 @@ Load-bearing child-safety + takedown primitives first (they ride shipped cores);
 
 Moderation and child-safety are **delegable duties over shipped CEG primitives**, not a centralized moderator role. The fabric provides the primitives + the `delegates_to` scope; any participant exercises a duty themselves, delegates it to their agent, or delegates it to any trusted party — and because `agent = fabric app + agent cards`, the agent inherits these by delegation. Every action is delegate-signed, delegator-traceable, instantly revocable, and coordinated — the structural form of "takedown isn't a coup," with the §9 HUMANITY_ACCORD as the one asymmetry above it all.
 
-The takedown fast-path, `ModerationEvent`, hash-matcher trait, eviction, erasure, and ejection/noise-floor all **ship in the substrate today**; the genuine gaps are the three delegation scope tokens, the age/rating dimensions (workable fabric-side over generic `scores`), and a concrete PDQ matcher adapter. Build the delegation spine + takedown + CSAM first; video last.
+The takedown fast-path, `ModerationEvent`, hash-matcher trait, eviction, erasure, and ejection/noise-floor all **ship in the substrate today**; the three delegation scope tokens (`moderate`/`takedown`/`review`) are **now named + enforced upstream** (CEG §11.10, RC19 — see §9bis), so the remaining work is persist enforcement + fabric wiring, not a primitive ask. The genuine remaining gaps are the age/rating dimensions (workable fabric-side over generic `scores`), the `moderation_track_record`/`hard_case:community_unmoderated` vocabulary the existence invariant needs (§9 #10–#11), and a concrete PDQ matcher adapter. Build the delegation spine + the named-moderator existence gate (§A) + takedown + CSAM first; video last.
+
+**The two child-safety load-bearers are §A and §B.** §A — *a group without a named moderator cannot exist* — is the structural invariant: no unmoderated multi-party space, ever; auto-promotion-by-merit closes any gap; fail-secure is the floor. §B — the anti-predator audit — names each predator-enabling vector, how the design contains it, and the honest residual (the structurally-invisible self/family core is E2EE-equivalent and is **not** claimed solved — it is narrowed to the irreducible minimum and no further). The comparative grounding for both is `FSD/SAFETY_LANDSCAPE.md`: every surveyed network (Nostr, Matrix, Mastodon, Bluesky, IPFS, Signal, Session, SimpleX, Briar) **permits** unmoderated multi-party spaces and fails *open*; CIRIS is the only one that fails *secure* — uniquely suited on governance, while inheriting the universal private-content detection limit.
