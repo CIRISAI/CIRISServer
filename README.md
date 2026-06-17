@@ -108,7 +108,7 @@ scoreboard (`ciris-server scoreboard`) plus an interpreted benchmark/capability
 page at <https://cirisai.github.io/CIRISServer/>. Below the lens-store disk minimum
 the node degrades to a Reticulum relay node.
 
-Substrate floor: **persist v8.2.0 / edge v4.2.0 / verify-family v5.9.0**
+Substrate floor: **persist v8.4.0 / edge v4.3.0 / verify-family v5.10.0**
 (CEG 1.0-RC12). `ciris-lens-core` is **absorbed in-tree** — the standalone
 CIRISLensCore library and the CIRISLens deployment (Grafana/TimescaleDB/Python
 ingest) retire. Cohabitation + CEG-profile conformance is gated by
