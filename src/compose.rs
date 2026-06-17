@@ -84,11 +84,14 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // POST /v1/setup/root claim then lets the founder claim ROOT on a fresh node.
     // Either way the founder's identity becomes WaRole::Root → UserRole::SystemAdmin,
     // which is what the owner-gated POST /v1/federation/peering requires. Idempotent.
-    match crate::auth::bootstrap::bootstrap_if_needed(&engine).await {
-        Ok(outcome) => tracing::info!(?outcome, "root-user bootstrap evaluated"),
+    let bootstrap_outcome = match crate::auth::bootstrap::bootstrap_if_needed(&engine).await {
+        Ok(outcome) => {
+            tracing::info!(?outcome, "root-user bootstrap evaluated");
+            outcome
+        }
         // A bad seed must not silently downgrade owner-claim to "open forever"; fail boot.
         Err(e) => return Err(anyhow::anyhow!("root-user bootstrap: {e}")),
-    }
+    };
 
     // The node's OWN self-signed SignedKeyRecord as JSON — built ONCE at boot
     // (stable for the node's lifetime), served verbatim by
@@ -105,6 +108,32 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     let node_code = node_self_code(&engine, &cfg).await?;
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
+
+    // ── One-time CLAIM PIN — the operator-presence secret for the first-run
+    //    ownership claim (CIRISServer first-run-PIN). On a FRESH, UNCLAIMED boot
+    //    (no ROOT WaCert, no seed → BootstrapOutcome::NoSeedAvailable) mint a
+    //    cryptographically-random, operator-typable PIN, print it in an unmissable
+    //    banner ALONGSIDE the NodeCode, and arm the POST /v1/setup/root route with
+    //    it. If a ROOT already exists (AlreadyBootstrapped / SeededRoot) NO PIN is
+    //    minted — the route is 409-closed anyway. The PIN closes the hole that the
+    //    NodeCode alone is a freely-shareable PUBLIC handle; it is printed ONLY to
+    //    the console/log (optionally CIRIS_CLAIM_PIN_FILE) and is NEVER served over
+    //    any HTTP route.
+    let claim_pin: Option<String> = if bootstrap_outcome
+        == crate::auth::bootstrap::BootstrapOutcome::NoSeedAvailable
+    {
+        let pin = crate::auth::bootstrap::generate_claim_pin();
+        let node_code_str = crate::nodecode::encode(&node_code).map_err(|e| {
+            anyhow::anyhow!("encode this node's NodeCode for the claim banner: {e}")
+        })?;
+        crate::auth::bootstrap::announce_ownership_unclaimed(&node_code_str, &pin);
+        Some(pin)
+    } else {
+        tracing::info!(
+            "node already has a ROOT owner — no first-run claim PIN minted (setup/root is closed)"
+        );
+        None
+    };
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
@@ -184,6 +213,7 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                         strict,
                         node_code.key_id.clone(),
                         node_code.pubkey_ed25519_base64.clone(),
+                        claim_pin.clone(),
                     ))
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))

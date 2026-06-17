@@ -45,7 +45,7 @@
 //! converts, so an operator can drop the agent's `seed/root_pub.json` in verbatim.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -57,9 +57,17 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use super::store;
 use super::verify;
+
+/// Env: an OPTIONAL filesystem path the one-time claim PIN is ALSO written to on a
+/// fresh (unclaimed) boot, for headless ops that cannot scrape the console log. The
+/// default is console/log ONLY — the PIN is the operator-presence secret and is
+/// NEVER served over any HTTP route. When set, the PIN file is written `0600` and
+/// the operator is responsible for removing it after the claim.
+pub const ENV_CLAIM_PIN_FILE: &str = "CIRIS_CLAIM_PIN_FILE";
 
 /// Env: a filesystem path to a `root_pub.json`-shaped seed (the agent's shape).
 pub const ENV_SEED_PATH: &str = "CIRIS_ROOT_SEED_PATH";
@@ -439,6 +447,81 @@ fn root_wa_id_for_identity(identity_key_id: &str) -> String {
     format!("wa-root-{identity_key_id}")
 }
 
+// ─── One-time CLAIM PIN — the operator-presence secret (console-only) ─────────
+
+/// Crockford base32 alphabet (excludes I, L, O, U to stay operator-typable —
+/// no visual confusion with 1/0 and no accidental words).
+const CLAIM_PIN_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Number of PIN characters (rendered as two dash-separated groups of 4).
+const CLAIM_PIN_LEN: usize = 8;
+
+/// Generate a cryptographically-random, operator-typable one-time claim PIN —
+/// [`CLAIM_PIN_LEN`] Crockford-base32 chars rendered `XXXX-XXXX`.
+///
+/// This is the **operator-presence secret** that gates the first-run ownership
+/// claim. It closes the hole that the NodeCode alone is a PUBLIC, freely-shareable
+/// handle (served by `GET /v1/federation/node-code`): knowing the NodeCode is not
+/// enough — the claimant must ALSO present this PIN, which is printed ONLY to the
+/// node's console/log on a fresh boot and NEVER exposed via any HTTP route.
+///
+/// Sourced from `getrandom` (the OS CSPRNG). Rejection-free: the alphabet is
+/// exactly 32 chars, so each random byte maps to one symbol via a 5-bit mask with
+/// zero modulo bias.
+pub fn generate_claim_pin() -> String {
+    let mut bytes = [0u8; CLAIM_PIN_LEN];
+    getrandom::fill(&mut bytes).expect("OS CSPRNG (getrandom) for the one-time claim PIN");
+    let mut chars: Vec<char> = bytes
+        .iter()
+        .map(|b| CLAIM_PIN_ALPHABET[(b & 0x1F) as usize] as char)
+        .collect();
+    // Render as two dash-separated groups of 4 (XXXX-XXXX) for typability.
+    chars.insert(4, '-');
+    chars.into_iter().collect()
+}
+
+/// Print the unmissable "OWNERSHIP UNCLAIMED" banner at startup — the NodeCode (a
+/// PUBLIC handle) PLUS the one-time claim PIN (the console-only operator-presence
+/// secret). Optionally ALSO writes the PIN to [`ENV_CLAIM_PIN_FILE`] (`0600`) for
+/// headless ops. The PIN is NEVER served over HTTP.
+pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str) {
+    tracing::warn!(
+        "\n\
+         ╔══════════════════════════════════════════════════════════════════════╗\n\
+         ║  OWNERSHIP UNCLAIMED — this node has no ROOT owner yet.               ║\n\
+         ║                                                                      ║\n\
+         ║  To claim ownership (POST /v1/setup/root), present BOTH:             ║\n\
+         ║                                                                      ║\n\
+         ║    NodeCode : {node_code}\n\
+         ║    CLAIM PIN: {claim_pin}   (one-time; console-only — NEVER over HTTP)\n\
+         ║                                                                      ║\n\
+         ║  The NodeCode is a PUBLIC handle (GET /v1/federation/node-code).     ║\n\
+         ║  The PIN is the operator-presence secret: it is printed ONLY here    ║\n\
+         ║  and is consumed on the first successful claim.                      ║\n\
+         ╚══════════════════════════════════════════════════════════════════════╝"
+    );
+
+    // Optional headless-ops sink: write the PIN to a 0600 file when configured.
+    if let Ok(path) = std::env::var(ENV_CLAIM_PIN_FILE) {
+        let path = path.trim();
+        if !path.is_empty() {
+            match std::fs::write(path, format!("{claim_pin}\n")) {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                    }
+                    tracing::info!(pin_file = %path, "one-time claim PIN ALSO written to file (0600; remove after claim)");
+                }
+                Err(e) => {
+                    tracing::warn!(pin_file = %path, error = %e, "could not write claim PIN file (PIN remains available on the console)")
+                }
+            }
+        }
+    }
+}
+
 // ─── POST /v1/setup/root — the first-run root-claim route ────────────────────
 
 #[derive(Clone)]
@@ -451,6 +534,12 @@ struct SetupState {
     /// THIS node's raw Ed25519 pubkey (base64) — the second half of the NodeCode
     /// identity pin.
     node_pubkey_ed25519_base64: String,
+    /// The one-time claim PIN minted on a fresh (unclaimed) boot — the
+    /// operator-presence secret. `Some(pin)` while unclaimed-and-armed; set to
+    /// `None` once a ROOT exists at boot (already claimed → no PIN), or CLEARED on
+    /// the first successful claim (consume-once; no replay). Held behind a `Mutex`
+    /// so the claim handler can take it. NEVER reachable via any HTTP route.
+    claim_pin: Arc<Mutex<Option<String>>>,
 }
 
 /// The FRESH founder's self-attested hybrid identity (the claimant's OWN keys).
@@ -503,6 +592,14 @@ struct SetupRootRequest {
     /// NOT the federation directory.
     #[serde(default)]
     founder: Option<Founder>,
+    /// The one-time CLAIM PIN printed to THIS node's console/log on a fresh boot —
+    /// the operator-presence secret (CONSOLE-ONLY; never served over HTTP). It is
+    /// verified (constant-time) against the boot PIN before ROOT is bound, and
+    /// consumed on success. It rides INSIDE the signed body, so it is
+    /// signature-bound (it cannot be stripped/swapped without breaking the hybrid
+    /// PoP signature). REQUIRED.
+    #[serde(default)]
+    claim_pin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -557,11 +654,69 @@ fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Respo
     None
 }
 
+/// Verify the one-time CLAIM PIN in the signed claim body against the boot PIN
+/// held in [`SetupState`], using a CONSTANT-TIME comparison (no early-return on
+/// first-byte mismatch, no length-leaking shortcut beyond the unavoidable
+/// length-equality flag). Returns `None` on a match; `Some(401)` when the PIN is
+/// absent, when no boot PIN is armed (already-claimed / mis-bootstrapped node), or
+/// when it does not match. The PIN is the operator-presence secret: it is printed
+/// ONLY to the console and is NEVER served over any HTTP route.
+fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response> {
+    // The armed boot PIN. A missing/cleared PIN means the route must not admit a
+    // claim (node already claimed at boot, or PIN already consumed) → reject.
+    let armed = match st.claim_pin.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => None,
+    };
+    let Some(expected) = armed else {
+        return Some(err(
+            StatusCode::UNAUTHORIZED,
+            "this node is not armed for a first-run claim (no one-time PIN) — \
+             ownership may already be claimed",
+        ));
+    };
+
+    let Some(supplied) = req.claim_pin.as_deref() else {
+        return Some(err(
+            StatusCode::UNAUTHORIZED,
+            "first-run ROOT claim must carry `claim_pin` (the one-time PIN printed \
+             on this node's console at boot)",
+        ));
+    };
+
+    // Constant-time equality over the raw bytes. `subtle::ConstantTimeEq` requires
+    // equal-length slices to compare byte-by-byte; a length difference is folded in
+    // WITHOUT an early return so the path does not short-circuit on first mismatch.
+    let a = supplied.as_bytes();
+    let b = expected.as_bytes();
+    let len_ok = a.len() == b.len();
+    // Pad/truncate the supplied bytes to the expected length so `ct_eq` always runs
+    // over `expected.len()` bytes (a mismatched length still does full work, then
+    // the `len_ok` flag forces the result false).
+    let mut padded = vec![0u8; b.len()];
+    for (i, slot) in padded.iter_mut().enumerate() {
+        *slot = if i < a.len() { a[i] } else { 0 };
+    }
+    let bytes_eq: bool = padded.ct_eq(b).into();
+    if len_ok && bytes_eq {
+        return None;
+    }
+    Some(err(StatusCode::UNAUTHORIZED, "invalid one-time claim PIN"))
+}
+
 /// `POST /v1/setup/root` — first-time-setup ROOT claim for a FRESH node with no
 /// baked seed.
 ///
-/// # Security model — three independent gates
+/// # Security model — four independent gates
 ///
+/// 0. **One-time CLAIM PIN (operator-presence)** — the claim MUST carry the
+///    `claim_pin` printed to THIS node's console/log on a fresh boot, verified
+///    CONSTANT-TIME against the boot PIN held in [`SetupState`]. The PIN is NEVER
+///    served over any HTTP route, so it proves the claimant has operator-level
+///    access to the node's console — closing the hole that the NodeCode alone is a
+///    PUBLIC, freely-shareable handle. A wrong/missing PIN → `401` (no ROOT). On
+///    success the PIN is CONSUMED (cleared from state) so it cannot be replayed.
+///    The PIN rides inside the signed body, so it is signature-bound.
 /// 1. **First-run only** — allowed ONLY when no ROOT WaCert exists; after a ROOT
 ///    exists the route returns `409 Conflict` (no silent re-claim).
 /// 2. **NodeCode identity-pin (CEG §0.10)** — the claim MUST carry THIS node's
@@ -601,9 +756,13 @@ fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Respo
 ///     "key_id": "...",
 ///     "ed25519_pubkey_b64": "...",
 ///     "ml_dsa_65_pubkey_b64": "..."
-///   }
+///   },
+///   "claim_pin": "XXXX-XXXX"
 /// }
 /// ```
+/// `claim_pin` is the one-time PIN printed to the node's console on a fresh boot
+/// (console-only; NEVER served over HTTP). It is inside the signed body, so the
+/// signature binds it.
 /// (`node_code` may instead be supplied as the decoded `key_id` +
 /// `pubkey_ed25519_base64` pair at the top level — the node-pin half, distinct
 /// from the `founder` object.) The signature MUST cover the body bytes verbatim.
@@ -651,6 +810,17 @@ async fn setup_root(
     //     that names a DIFFERENT node is rejected (400) — closing the spoof where a
     //     founder is tricked into claiming an attacker's node.
     if let Some(resp) = verify_node_code_pin(&st, &req) {
+        return resp;
+    }
+
+    // (0/operator-presence) One-time CLAIM PIN. The claim must carry the PIN that
+    //     was printed to THIS node's console/log on a fresh boot — verified
+    //     CONSTANT-TIME against the boot PIN. The PIN is NEVER served over HTTP, so
+    //     possessing it proves operator-level console access, closing the hole that
+    //     the NodeCode alone is a freely-shareable PUBLIC handle. A wrong/missing
+    //     PIN → 401 (no ROOT minted). The PIN is signature-bound (inside the signed
+    //     body). It is NOT consumed here — only on a fully-successful claim below.
+    if let Some(resp) = verify_claim_pin(&st, &req) {
         return resp;
     }
 
@@ -772,11 +942,17 @@ async fn setup_root(
     };
     match store::upsert(&st.engine, cert).await {
         Ok(()) => {
+            // Consume the one-time PIN: clear it so it can never be replayed. (The
+            // route is also 409-closed now that a ROOT exists — this is defence in
+            // depth + makes the consumed-once invariant directly assertable.)
+            if let Ok(mut guard) = st.claim_pin.lock() {
+                *guard = None;
+            }
             tracing::info!(
                 identity = %founder.key_id,
                 wa_id = %wa_id,
                 "first-run ROOT claim: self-attested founder registered + bound as ROOT \
-                 (founder → SYSTEM_ADMIN)"
+                 (founder → SYSTEM_ADMIN); one-time claim PIN consumed"
             );
             (
                 StatusCode::CREATED,
@@ -865,11 +1041,20 @@ async fn register_founder_key(
 /// `node_key_id` + `node_pubkey_ed25519_base64` are THIS node's steward identity
 /// (the same `key_id` + raw Ed25519 pubkey carried on its NodeCode, CEG §0.10);
 /// the first-run claim is identity-pinned to them (see [`setup_root`]).
+///
+/// `claim_pin` is the one-time operator-presence secret: `Some(pin)` arms the
+/// route for a fresh (unclaimed) node — the boot path mints it via
+/// [`generate_claim_pin`], prints it via [`announce_ownership_unclaimed`], and the
+/// claim is gated on it (constant-time, consumed on success). `None` (an
+/// already-claimed node) leaves the route un-armed — every claim attempt is `401`
+/// (and `409` once the first-run check sees the existing ROOT). The PIN is held in
+/// state ONLY; it is NEVER served over any HTTP route.
 pub fn router(
     engine: Arc<Engine>,
     policy: HybridPolicy,
     node_key_id: String,
     node_pubkey_ed25519_base64: String,
+    claim_pin: Option<String>,
 ) -> Router {
     Router::new()
         .route("/v1/setup/root", axum::routing::post(setup_root))
@@ -878,6 +1063,7 @@ pub fn router(
             policy,
             node_key_id,
             node_pubkey_ed25519_base64,
+            claim_pin: Arc::new(Mutex::new(claim_pin)),
         })
 }
 
