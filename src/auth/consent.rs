@@ -62,12 +62,17 @@ struct ConsentResponse {
 async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes) -> Response {
     let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
         Ok(c) => c,
-        Err(VerifyError::MissingHeader(h)) => return err(StatusCode::UNAUTHORIZED, format!("missing {h}")),
+        Err(VerifyError::MissingHeader(h)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+        }
         Err(VerifyError::NoDirectory) => {
             return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
         }
         Err(VerifyError::SignatureInvalid(e)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("signature verification failed: {e}"))
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("signature verification failed: {e}"),
+            )
         }
     };
 
@@ -87,7 +92,12 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
 
     let directory = match st.engine.sqlite_backend() {
         Some(d) => d,
-        None => return err(StatusCode::SERVICE_UNAVAILABLE, "no SQLite federation directory"),
+        None => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no SQLite federation directory",
+            )
+        }
     };
 
     // The CEG consent envelope. MUST carry a `"dimension"` (the (occurrence,
@@ -109,7 +119,12 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
 
     let attestation_id = match directory.attestation_upsert_local(input).await {
         Ok(id) => id,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("upsert_local: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("upsert_local: {e}"),
+            )
+        }
     };
 
     let promoted = if req.promote {

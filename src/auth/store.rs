@@ -73,7 +73,9 @@ pub fn revocation_backend(
     engine: &Engine,
 ) -> Result<SqliteServiceTokenRevocationBackend, StoreError> {
     let sqlite = engine.sqlite_backend().ok_or(StoreError::NoSqliteBackend)?;
-    Ok(SqliteServiceTokenRevocationBackend::new(sqlite.conn_handle()))
+    Ok(SqliteServiceTokenRevocationBackend::new(
+        sqlite.conn_handle(),
+    ))
 }
 
 /// Look up a WA cert by its OAuth `(provider, external_id)` — the OAuth login

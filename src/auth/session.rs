@@ -136,7 +136,10 @@ fn issue_session_token(wa_id: &str) -> String {
 
 /// Parse the `wa_id` out of an opaque session token (`sess:<wa_id>:<rand>`).
 pub fn wa_id_from_token(token: &str) -> Option<&str> {
-    token.strip_prefix("sess:")?.rsplit_once(':').map(|(id, _)| id)
+    token
+        .strip_prefix("sess:")?
+        .rsplit_once(':')
+        .map(|(id, _)| id)
 }
 
 /// A bearer→session-resolved caller — the fabric analogue of the agent's
@@ -232,7 +235,10 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
 
 async fn logout(State(st): State<SessionState>, headers: HeaderMap) -> Response {
     let Some(wa_id) = bearer(&headers).and_then(|t| wa_id_from_token(t).map(str::to_owned)) else {
-        return err(StatusCode::UNAUTHORIZED, "missing or malformed bearer token");
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "missing or malformed bearer token",
+        );
     };
     // Revoke = mark inactive (the agent's `revoke_api_key` semantics: preserve
     // the row for audit). NOTE: this deactivates the WA cert; a per-session
@@ -257,7 +263,10 @@ struct UserInfo {
 
 async fn me(State(st): State<SessionState>, headers: HeaderMap) -> Response {
     let Some(token) = bearer(&headers) else {
-        return err(StatusCode::UNAUTHORIZED, "missing or malformed bearer token");
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "missing or malformed bearer token",
+        );
     };
     // The bearer→session bridge: resolve the opaque session token to its bound,
     // active `wa_cert` row (revoked/logged-out sessions fail closed here).
@@ -282,7 +291,10 @@ async fn me(State(st): State<SessionState>, headers: HeaderMap) -> Response {
 
 async fn refresh(State(st): State<SessionState>, headers: HeaderMap) -> Response {
     let Some(wa_id) = bearer(&headers).and_then(|t| wa_id_from_token(t).map(str::to_owned)) else {
-        return err(StatusCode::UNAUTHORIZED, "missing or malformed bearer token");
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "missing or malformed bearer token",
+        );
     };
     match store::get(&st.engine, &wa_id).await {
         Ok(Some(c)) if c.active => {
@@ -325,8 +337,16 @@ struct OwnerHint {
 fn mask_email(email: &str) -> String {
     match email.split_once('@') {
         Some((local, domain)) => {
-            let l = local.chars().next().map(|c| c.to_string()).unwrap_or_default();
-            let d = domain.chars().next().map(|c| c.to_string()).unwrap_or_default();
+            let l = local
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            let d = domain
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_default();
             format!("{l}***@{d}***")
         }
         None => "***".to_string(),
@@ -356,7 +376,11 @@ async fn owner_hint(State(st): State<SessionState>) -> Response {
             oauth_provider: c.oauth_provider,
         }
     });
-    (StatusCode::OK, Json(serde_json::json!({ "owner_hint": hint }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "owner_hint": hint })),
+    )
+        .into_response()
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

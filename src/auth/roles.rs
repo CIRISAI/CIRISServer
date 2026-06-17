@@ -437,7 +437,10 @@ mod tests {
         assert_eq!(auth.len(), 19);
         assert_eq!(sa.len(), 22);
         // SYSTEM_ADMIN has the apex permissions; OBSERVER does not.
-        assert!(role_has(UserRole::SystemAdmin, Permission::EmergencyShutdown));
+        assert!(role_has(
+            UserRole::SystemAdmin,
+            Permission::EmergencyShutdown
+        ));
         assert!(!role_has(UserRole::Observer, Permission::EmergencyShutdown));
         assert!(role_has(UserRole::Observer, Permission::SendMessages));
     }
@@ -456,7 +459,9 @@ mod tests {
     fn python_isoformat_matches_cpython() {
         use chrono::TimeZone as _;
         // Whole second ⇒ no fractional part (CPython drops it).
-        let t = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 12, 30, 0).unwrap();
+        let t = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 16, 12, 30, 0)
+            .unwrap();
         assert_eq!(python_isoformat(t), "2026-06-16T12:30:00+00:00");
         // Non-zero microseconds ⇒ 6-digit fraction.
         let t2 = chrono::Utc
@@ -480,7 +485,11 @@ mod tests {
         );
         // Wrong user_id ⇒ fail.
         assert!(!verify_root_signature(
-            pub_b64url, "user-999", WaRole::Root, sig_b64, now
+            pub_b64url,
+            "user-999",
+            WaRole::Root,
+            sig_b64,
+            now
         ));
     }
 
@@ -494,7 +503,9 @@ mod tests {
             "_7z2AZRdkLfnIDtt251Fse2l7brJO_69GIWxCMZvxo8-UavTnjjXWNw0oTnGgh26fSzxO8flTBp2sHXH3HHrBA";
         // Signed against timestamp 2026-06-16T12:30:00+00:00; verify with a `now`
         // 5 minutes later so the candidate lands inside the [now-60min, now] sweep.
-        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 12, 35, 0).unwrap();
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 16, 12, 35, 0)
+            .unwrap();
         assert!(
             verify_root_signature(pub_b64url, "user-123", WaRole::Root, sig_b64url, now),
             "must verify the agent's timestamped MINT_WA signature within the window"
@@ -502,7 +513,11 @@ mod tests {
         // Outside the window (signed >60min ago) ⇒ fail.
         let too_late = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 14, 0, 0).unwrap();
         assert!(!verify_root_signature(
-            pub_b64url, "user-123", WaRole::Root, sig_b64url, too_late
+            pub_b64url,
+            "user-123",
+            WaRole::Root,
+            sig_b64url,
+            too_late
         ));
     }
 }

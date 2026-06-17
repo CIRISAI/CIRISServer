@@ -126,8 +126,13 @@ pub struct OAuthIdentity {
 #[async_trait::async_trait]
 pub trait ProviderClient: Send + Sync {
     /// Build the provider's authorization-redirect URL.
-    fn authorize_url(&self, provider: &str, client_id: &str, state: &str, redirect_uri: &str)
-        -> String;
+    fn authorize_url(
+        &self,
+        provider: &str,
+        client_id: &str,
+        state: &str,
+        redirect_uri: &str,
+    ) -> String;
     /// Exchange an auth `code` for the authenticated human's claims.
     async fn exchange_code(
         &self,
@@ -298,7 +303,10 @@ impl HttpProviderClient {
             .and_then(|v| v.as_str())
             .ok_or("google userinfo missing id")?
             .to_string();
-        let email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let email = info
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let name = info
             .get("name")
             .and_then(|v| v.as_str())
@@ -345,7 +353,10 @@ impl HttpProviderClient {
             .http
             .get("https://api.github.com/user")
             .header(reqwest::header::USER_AGENT, "ciris-server")
-            .header(reqwest::header::AUTHORIZATION, format!("token {access_token}"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("token {access_token}"),
+            )
             .send()
             .await
             .map_err(|e| format!("github user: {e}"))?
@@ -358,19 +369,29 @@ impl HttpProviderClient {
             .get("id")
             .map(|v| v.to_string())
             .ok_or("github user missing id")?;
-        let mut email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let mut email = info
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let name = info
             .get("name")
             .and_then(|v| v.as_str())
             .map(str::to_owned)
-            .or_else(|| info.get("login").and_then(|v| v.as_str()).map(str::to_owned));
+            .or_else(|| {
+                info.get("login")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            });
         // Private email ⇒ fetch the primary from /user/emails (agent parity).
         if email.is_none() {
             if let Ok(resp) = self
                 .http
                 .get("https://api.github.com/user/emails")
                 .header(reqwest::header::USER_AGENT, "ciris-server")
-                .header(reqwest::header::AUTHORIZATION, format!("token {access_token}"))
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("token {access_token}"),
+                )
                 .send()
                 .await
             {
@@ -436,7 +457,10 @@ impl HttpProviderClient {
             .and_then(|v| v.as_str())
             .ok_or("discord user missing id")?
             .to_string();
-        let email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let email = info
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let name = info
             .get("username")
             .and_then(|v| v.as_str())
@@ -475,7 +499,9 @@ impl HttpProviderClient {
         if !allowed_audiences.is_empty() {
             let aud = info.get("aud").and_then(|v| v.as_str()).unwrap_or("");
             if !allowed_audiences.iter().any(|a| a == aud) {
-                return Err("Token was not issued for this application (audience mismatch).".into());
+                return Err(
+                    "Token was not issued for this application (audience mismatch).".into(),
+                );
             }
         }
         // iss
@@ -499,7 +525,10 @@ impl HttpProviderClient {
         Ok(OAuthIdentity {
             provider: "google".into(),
             external_id: sub,
-            email: info.get("email").and_then(|v| v.as_str()).map(str::to_owned),
+            email: info
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             name: info.get("name").and_then(|v| v.as_str()).map(str::to_owned),
         })
     }
@@ -517,7 +546,8 @@ impl HttpProviderClient {
         if allowed_audiences.is_empty() {
             return Err("Apple native auth is not configured for this application.".into());
         }
-        let header = decode_header(id_token).map_err(|_| "Apple could not verify this ID token.")?;
+        let header =
+            decode_header(id_token).map_err(|_| "Apple could not verify this ID token.")?;
         if header.alg != Algorithm::RS256 {
             return Err("Apple could not verify this ID token.".into());
         }
@@ -544,8 +574,14 @@ impl HttpProviderClient {
                 })
             })
             .ok_or("Apple could not verify this ID token.")?;
-        let n = key.get("n").and_then(|v| v.as_str()).ok_or("apple jwk missing n")?;
-        let e = key.get("e").and_then(|v| v.as_str()).ok_or("apple jwk missing e")?;
+        let n = key
+            .get("n")
+            .and_then(|v| v.as_str())
+            .ok_or("apple jwk missing n")?;
+        let e = key
+            .get("e")
+            .and_then(|v| v.as_str())
+            .ok_or("apple jwk missing e")?;
         let decoding_key =
             DecodingKey::from_rsa_components(n, e).map_err(|_| "apple jwk invalid")?;
 
@@ -554,20 +590,21 @@ impl HttpProviderClient {
         validation.set_issuer(&[VALID_APPLE_ISSUER]);
         validation.set_required_spec_claims(&["sub", "aud", "iss", "exp"]);
 
-        let claims: serde_json::Value = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
-            .map_err(|e| match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-                    "Apple ID token has expired.".to_string()
-                }
-                jsonwebtoken::errors::ErrorKind::InvalidAudience => {
-                    "Token was not issued for this application (audience mismatch).".to_string()
-                }
-                jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
-                    "Token was not issued by Apple (issuer mismatch).".to_string()
-                }
-                _ => "Apple could not verify this ID token.".to_string(),
-            })?
-            .claims;
+        let claims: serde_json::Value =
+            decode::<serde_json::Value>(id_token, &decoding_key, &validation)
+                .map_err(|e| match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                        "Apple ID token has expired.".to_string()
+                    }
+                    jsonwebtoken::errors::ErrorKind::InvalidAudience => {
+                        "Token was not issued for this application (audience mismatch).".to_string()
+                    }
+                    jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
+                        "Token was not issued by Apple (issuer mismatch).".to_string()
+                    }
+                    _ => "Apple could not verify this ID token.".to_string(),
+                })?
+                .claims;
 
         let sub = claims
             .get("sub")
@@ -577,8 +614,14 @@ impl HttpProviderClient {
         Ok(OAuthIdentity {
             provider: "apple".into(),
             external_id: sub,
-            email: claims.get("email").and_then(|v| v.as_str()).map(str::to_owned),
-            name: claims.get("name").and_then(|v| v.as_str()).map(str::to_owned),
+            email: claims
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            name: claims
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
         })
     }
 }
@@ -595,7 +638,8 @@ pub async fn create_oauth_user(
     role: UserRole,
 ) -> Result<String, store::StoreError> {
     // Reuse an existing cert if this OAuth identity is already linked.
-    if let Some(existing) = store::get_by_oauth(engine, &ident.provider, &ident.external_id).await? {
+    if let Some(existing) = store::get_by_oauth(engine, &ident.provider, &ident.external_id).await?
+    {
         let _ = store::touch_login(engine, &existing.wa_id).await;
         return Ok(existing.wa_id);
     }
@@ -612,7 +656,10 @@ pub async fn create_oauth_user(
     }
     let cert = WaCert {
         wa_id: wa_id.clone(),
-        name: ident.name.clone().unwrap_or_else(|| ident.external_id.clone()),
+        name: ident
+            .name
+            .clone()
+            .unwrap_or_else(|| ident.external_id.clone()),
         role: wa_role,
         pubkey: String::new(),
         jwt_kid: format!("oauth-kid-{}-{}", ident.provider, ident.external_id),
@@ -673,7 +720,11 @@ async fn list_providers(State(st): State<OAuthState>) -> Response {
             client_id: c.client_id.clone(),
         })
         .collect();
-    (StatusCode::OK, Json(serde_json::json!({ "providers": providers }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "providers": providers })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,7 +851,13 @@ async fn oauth_callback(
     let redirect_uri = oauth_callback_url(&st.callback_base, &provider);
     let ident = match st
         .client
-        .exchange_code(&provider, &client_id, &client_secret, &q.code, &redirect_uri)
+        .exchange_code(
+            &provider,
+            &client_id,
+            &client_secret,
+            &q.code,
+            &redirect_uri,
+        )
         .await
     {
         Ok(i) => i,
@@ -852,7 +909,11 @@ async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response 
         let store = st.providers.lock().unwrap();
         native_audiences(&store, provider)
     };
-    let ident = match st.client.verify_native(provider, &req.id_token, &audiences).await {
+    let ident = match st
+        .client
+        .verify_native(provider, &req.id_token, &audiences)
+        .await
+    {
         Ok(i) => i,
         Err(e) => return err(StatusCode::UNAUTHORIZED, e),
     };
@@ -927,7 +988,12 @@ mod tests {
     #[test]
     fn authorize_url_matches_agent_params() {
         let c = HttpProviderClient::default();
-        let u = c.authorize_url("google", "cid", "st8", "https://app.ciris.ai/v1/auth/oauth/google/callback");
+        let u = c.authorize_url(
+            "google",
+            "cid",
+            "st8",
+            "https://app.ciris.ai/v1/auth/oauth/google/callback",
+        );
         assert!(u.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
         assert!(u.contains("client_id=cid"));
         assert!(u.contains("response_type=code"));

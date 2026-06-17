@@ -52,7 +52,10 @@ async fn require_manage_users(
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(str::trim);
     let Some(token) = token else {
-        return Err(err(StatusCode::UNAUTHORIZED, "missing bearer session token"));
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "missing bearer session token",
+        ));
     };
     match resolve_bearer(&st.engine, token).await {
         Ok(Some(caller))
@@ -192,7 +195,11 @@ async fn list_api_keys(State(st): State<ApiKeyState>, headers: HeaderMap) -> Res
                     last_used: c.last_login,
                 })
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({ "api_keys": keys }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "api_keys": keys })),
+            )
+                .into_response()
         }
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }

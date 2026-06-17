@@ -62,12 +62,17 @@ struct ErasureResponse {
 async fn erasure(State(st): State<ErasureState>, headers: HeaderMap, body: Bytes) -> Response {
     let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
         Ok(c) => c,
-        Err(VerifyError::MissingHeader(h)) => return err(StatusCode::UNAUTHORIZED, format!("missing {h}")),
+        Err(VerifyError::MissingHeader(h)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+        }
         Err(VerifyError::NoDirectory) => {
             return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
         }
         Err(VerifyError::SignatureInvalid(e)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("signature verification failed: {e}"))
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("signature verification failed: {e}"),
+            )
         }
     };
 
@@ -85,7 +90,11 @@ async fn erasure(State(st): State<ErasureState>, headers: HeaderMap, body: Bytes
         );
     }
 
-    match st.engine.evict_actor(&req.attesting_key_id, chrono::Utc::now()).await {
+    match st
+        .engine
+        .evict_actor(&req.attesting_key_id, chrono::Utc::now())
+        .await
+    {
         Ok(report) => (
             StatusCode::OK,
             Json(ErasureResponse {
@@ -96,7 +105,10 @@ async fn erasure(State(st): State<ErasureState>, headers: HeaderMap, body: Bytes
             }),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("evict_actor: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("evict_actor: {e}"),
+        ),
     }
 }
 

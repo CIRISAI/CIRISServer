@@ -124,7 +124,10 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                     // API keys + service-token revocation
                     .merge(crate::auth::api_keys::router(Arc::clone(&engine)))
                     // attestation / consent / erasure (CEG-native)
-                    .merge(crate::auth::attestation::router(Arc::clone(&engine), strict))
+                    .merge(crate::auth::attestation::router(
+                        Arc::clone(&engine),
+                        strict,
+                    ))
                     .merge(crate::auth::consent::router(Arc::clone(&engine), strict))
                     .merge(crate::auth::erasure::router(Arc::clone(&engine), strict))
                     // device-auth setup (scaffold)

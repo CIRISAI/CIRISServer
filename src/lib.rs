@@ -24,8 +24,6 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
-/// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
-pub mod benchmarks;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
 /// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
 /// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), the
@@ -34,6 +32,8 @@ pub mod benchmarks;
 /// `wa_cert` substrate. Public so the wheel exposes the auth API the agent
 /// consumes as a delegate (the single-authority contract).
 pub mod auth;
+/// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
+pub mod benchmarks;
 mod compose;
 mod config;
 mod import;
@@ -154,7 +154,7 @@ mod python {
     fn register_persist(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         use ciris_persist::ffi::pyo3 as persist_pyo3;
         m.add_class::<persist_pyo3::PyEngine>()?; // exposed to Python as `Engine`
-        // Typed exception hierarchy (`from ciris_persist import NotFound, …`).
+                                                  // Typed exception hierarchy (`from ciris_persist import NotFound, …`).
         m.add("PersistError", py.get_type::<persist_pyo3::PersistError>())?;
         m.add("NotFound", py.get_type::<persist_pyo3::NotFound>())?;
         m.add("Conflict", py.get_type::<persist_pyo3::Conflict>())?;
@@ -169,7 +169,10 @@ mod python {
             "EngineUsedAcrossFork",
             py.get_type::<persist_pyo3::EngineUsedAcrossFork>(),
         )?;
-        m.add("LensQueryError", py.get_type::<persist_pyo3::LensQueryError>())?;
+        m.add(
+            "LensQueryError",
+            py.get_type::<persist_pyo3::LensQueryError>(),
+        )?;
         Ok(())
     }
 

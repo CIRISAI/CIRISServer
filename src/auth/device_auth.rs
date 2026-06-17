@@ -156,17 +156,35 @@ async fn connect_node(State(st): State<DeviceAuthState>, body: axum::body::Bytes
         }
     };
 
-    let device_code = data.get("device_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let device_code = data
+        .get("device_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let verification_uri = data
         .get("verification_uri_complete")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let user_code = data.get("user_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let expires_in = data.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(900);
+    let user_code = data
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_in = data
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(900);
     let interval = data.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
 
-    save_device_auth_session(&device_code, &portal_url, &verification_uri, &user_code, expires_in, interval);
+    save_device_auth_session(
+        &device_code,
+        &portal_url,
+        &verification_uri,
+        &user_code,
+        expires_in,
+        interval,
+    );
 
     (
         StatusCode::OK,
@@ -269,11 +287,7 @@ async fn connect_node_status(
     let code = resp.status().as_u16();
     // 428 = authorization_pending (RFC 8628) — keep polling.
     if code == 428 {
-        return (
-            StatusCode::OK,
-            Json(status_only("pending")),
-        )
-            .into_response();
+        return (StatusCode::OK, Json(status_only("pending"))).into_response();
     }
     // 403 = denied — clear the session so the operator can retry.
     if code == 403 {
@@ -296,7 +310,10 @@ async fn connect_node_status(
     // federation surface — recorded here as the completion of pairing. (The
     // public-key registration POST is a follow-on once the keyring signer is wired
     // into this route; the device-grant itself — the gap — is complete.)
-    let agent_record = data.get("agent_record").cloned().unwrap_or(serde_json::Value::Null);
+    let agent_record = data
+        .get("agent_record")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let licensed_package = data
         .get("licensed_package")
         .cloned()

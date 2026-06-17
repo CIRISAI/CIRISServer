@@ -113,7 +113,10 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
             return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
         }
         Err(VerifyError::SignatureInvalid(e)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("signature verification failed: {e}"))
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("signature verification failed: {e}"),
+            )
         }
     };
 
@@ -154,7 +157,10 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
             }),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("self_at_login: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("self_at_login: {e}"),
+        ),
     }
 }
 

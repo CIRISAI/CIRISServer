@@ -58,7 +58,10 @@ pub async fn verify_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    let directory = engine.sqlite_backend().ok_or(VerifyError::NoDirectory)?.clone();
+    let directory = engine
+        .sqlite_backend()
+        .ok_or(VerifyError::NoDirectory)?
+        .clone();
     verify_hybrid_via_directory(
         &*directory,
         body,
@@ -85,7 +88,10 @@ pub async fn signer_acts_for(engine: &Engine, signer: &str, identity_key_id: &st
     let Some(directory) = engine.sqlite_backend() else {
         return false;
     };
-    match directory.list_identity_occurrences_active(identity_key_id).await {
+    match directory
+        .list_identity_occurrences_active(identity_key_id)
+        .await
+    {
         Ok(occs) => occs.iter().any(|o| o.occurrence_key_id == signer),
         Err(_) => false,
     }

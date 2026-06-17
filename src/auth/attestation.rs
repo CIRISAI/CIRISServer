@@ -67,12 +67,17 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
     // Federation-signed request (the producer signs the emit).
     let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
         Ok(c) => c,
-        Err(VerifyError::MissingHeader(h)) => return err(StatusCode::UNAUTHORIZED, format!("missing {h}")),
+        Err(VerifyError::MissingHeader(h)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+        }
         Err(VerifyError::NoDirectory) => {
             return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
         }
         Err(VerifyError::SignatureInvalid(e)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("signature verification failed: {e}"))
+            return err(
+                StatusCode::UNAUTHORIZED,
+                format!("signature verification failed: {e}"),
+            )
         }
     };
 
@@ -92,7 +97,12 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
 
     let directory = match st.engine.sqlite_backend() {
         Some(d) => d,
-        None => return err(StatusCode::SERVICE_UNAVAILABLE, "no SQLite federation directory"),
+        None => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no SQLite federation directory",
+            )
+        }
     };
 
     let input = LocalAttestationInput {
@@ -108,7 +118,12 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
 
     let attestation_id = match directory.attestation_upsert_local(input).await {
         Ok(id) => id,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("upsert_local: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("upsert_local: {e}"),
+            )
+        }
     };
 
     let promoted = if req.promote {
