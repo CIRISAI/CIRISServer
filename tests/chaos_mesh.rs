@@ -141,7 +141,10 @@ fn surviving_subset(holders: &[FountainSymbol], keep: usize, seed: u64) -> Vec<F
         let j = (state >> 33) as usize % (i + 1);
         idx.swap(i, j);
     }
-    idx.into_iter().take(keep).map(|i| holders[i].clone()).collect()
+    idx.into_iter()
+        .take(keep)
+        .map(|i| holders[i].clone())
+        .collect()
 }
 
 #[test]
@@ -149,7 +152,11 @@ fn content_survives_one_third_holder_loss() {
     let cfg = fountain_config();
     let content = fountain_content();
     let enc = fountain_encode(&content, &cfg).expect("substrate fountain_encode");
-    assert_eq!(enc.symbols.len(), TARGET_HOLDERS, "H holders, one symbol each");
+    assert_eq!(
+        enc.symbols.len(),
+        TARGET_HOLDERS,
+        "H holders, one symbol each"
+    );
 
     // Kill a third of the holders (H−N_SOURCE = 10, 33%); the survivors must
     // reconstruct the content BYTE-IDENTICAL through the SUBSTRATE codec — a real
@@ -160,8 +167,13 @@ fn content_survives_one_third_holder_loss() {
     for seed in 0..32u64 {
         let kept = surviving_subset(&enc.symbols, keep, seed);
         let decoded = fountain_decode(&kept, &enc.symbol_hashes, enc.original_content_length, &cfg)
-            .unwrap_or_else(|e| panic!("seed {seed}: {keep}/{TARGET_HOLDERS} must reconstruct: {e:?}"));
-        assert_eq!(decoded, content, "seed {seed}: reconstruction must be byte-identical");
+            .unwrap_or_else(|e| {
+                panic!("seed {seed}: {keep}/{TARGET_HOLDERS} must reconstruct: {e:?}")
+            });
+        assert_eq!(
+            decoded, content,
+            "seed {seed}: reconstruction must be byte-identical"
+        );
     }
 }
 
@@ -196,7 +208,11 @@ fn report_fountain_overhead() {
     let content = fountain_content();
     let enc = fountain_encode(&content, &cfg).expect("encode");
     const TRIALS: u64 = 2000;
-    for keep in [N_SOURCE as usize, N_SOURCE as usize + 1, N_SOURCE as usize + 2] {
+    for keep in [
+        N_SOURCE as usize,
+        N_SOURCE as usize + 1,
+        N_SOURCE as usize + 2,
+    ] {
         let mut ok = 0u64;
         for seed in 0..TRIALS {
             let kept = surviving_subset(&enc.symbols, keep, seed + keep as u64 * 1_000_003);
