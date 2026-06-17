@@ -46,8 +46,18 @@ cirispersist tag v8.4.0 = `~/.cargo/git/checkouts/cirispersist-*/01ae6d1/`:
 - `engine.rs` — `Engine::self_at_login(SelfAtLoginInput) -> SelfAtLoginOutcome` (login ceremony);
   `Engine::sign_hybrid(&[u8]) -> ciris_crypto::HybridSignature` (`:847`);
   `Engine::attestation_promote(id) -> bool` (`:870`, self-contained canonicalize→hybrid-sign→promote);
-  `Engine::evict_fountain_content_hard_delete(content_id, corpus_kind) -> u64` (§19.7 erasure);
+  `Engine::evict_actor(attesting_key_id, now) -> EvictActorReport` (`:1322`, GDPR Art.17 erasure —
+  deletes the actor's `federation_blobs` AND emits §10.1.2 `withdraws`, fail-honest);
   `Engine::sqlite_backend() -> Option<&Arc<SqliteBackend>>`.
+
+  **CORRECTION (verified against the built v8.4.0 checkout `7b40aae`):** the mission's
+  `Engine::evict_fountain_content_hard_delete(content_id, corpus_kind)` is **NOT present** in
+  persist v8.4.0. The shipped erasure primitive is `Engine::evict_actor` (CIRISPersist#125),
+  which is in fact stronger — it bundles the `withdraws` emission with the hard delete, which a
+  per-content call would have left to the caller. `erasure.rs` uses `evict_actor`.
+
+  **Build note:** `wa_cert` / `service_token_revocation` are behind persist cargo features
+  `cirislens_wa_cert` + `cirislens_service_token_revocation` — both now enabled in `Cargo.toml`.
 - `federation/mod.rs:235` — `FederationDirectory::attestation_upsert_local(LocalAttestationInput) -> String`;
   `:225` `put_attestation`; `:804` `list_identity_occurrences_active`.
 - `federation/types.rs:443` — `LocalAttestationInput {attesting_key_id, attested_key_id?,
@@ -91,7 +101,7 @@ cirispersist tag v8.4.0 = `~/.cargo/git/checkouts/cirispersist-*/01ae6d1/`:
 | `setup/reset-device-auth` | clear session file | `device_auth.rs` | **scaffolded** | none |
 | `setup/download-package` | download+checksum+unzip | `device_auth.rs` | **scaffolded** (out of auth core; left as setup-tier TODO) | none |
 | Consent (CEG-native) | `attestation_upsert_local`+`attestation_promote` OR `put_attestation` (federation) | `consent.rs` | **ported** | none |
-| Erasure (GDPR Art.17, §19.7) | `attestation_upsert_local` (withdraws) + `evict_fountain_content_hard_delete` | `erasure.rs` | **ported** | none |
+| Erasure (GDPR Art.17, §19.7) | `Engine::evict_actor` (deletes blobs + emits §10.1.2 withdraws) | `erasure.rs` | **ported** | none — see correction note (the cited `evict_fountain_content_hard_delete` is absent in v8.4.0) |
 | `/v1/self/login` (login ceremony) | `Engine::self_at_login` | `self_login.rs` (pre-existing) | **ported** | none |
 
 ## Coverage summary
