@@ -52,19 +52,60 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 
 // ─── Password verification (caller-side; persist stores the hash opaque) ────
 
+/// PBKDF2 parameters — pinned BYTE-FOR-BYTE to the agent's `_hash_password` /
+/// `_verify_password` (`services/auth_service.py`):
+/// `PBKDF2HMAC(algorithm=SHA256, length=32, salt=secrets.token_bytes(32),
+///  iterations=100000)`; stored as `base64(salt(32) || key(32))` (standard
+/// base64, NOT url-safe). These MUST NOT change or existing `wa_cert`
+/// `password_hash` rows stop authenticating.
+const PBKDF2_SALT_LEN: usize = 32;
+const PBKDF2_KEY_LEN: usize = 32;
+const PBKDF2_ITERATIONS: u32 = 100_000;
+
+/// Hash a password the agent's way: `base64(salt(32) || PBKDF2-HMAC-SHA256(
+/// password, salt, 100_000, dklen=32))`. The salt is freshly random per call
+/// (so re-hashing the same password yields a different string — exactly the
+/// agent's `secrets.token_bytes(32)` behaviour). Used by the user-create helper.
+pub fn hash_password(password: &str) -> String {
+    use base64::Engine as _;
+    let mut salt = [0u8; PBKDF2_SALT_LEN];
+    let _ = getrandom::fill(&mut salt);
+    let mut key = [0u8; PBKDF2_KEY_LEN];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, PBKDF2_ITERATIONS, &mut key);
+    let mut blob = Vec::with_capacity(PBKDF2_SALT_LEN + PBKDF2_KEY_LEN);
+    blob.extend_from_slice(&salt);
+    blob.extend_from_slice(&key);
+    base64::engine::general_purpose::STANDARD.encode(blob)
+}
+
 /// Verify a presented password against a stored hash.
 ///
-/// persist stores `password_hash` opaque — it never hashes/verifies (confirmed
-/// NOT FOUND in the substrate; that is caller-side). The agent used PBKDF2-
-/// SHA256 (100k). To be byte-compatible with already-minted agent rows the
-/// fabric MUST use the same KDF; the exact parameters are a migration-time pin.
-///
-/// TODO(CIRISServer#9): pin the PBKDF2-SHA256(100k) parameters to match the
-/// agent's `verify_user_password` so existing rows authenticate unchanged.
-pub fn verify_password(_presented: &str, stored_hash: &str) -> bool {
-    // Placeholder: a real verify wires pbkdf2/bcrypt here. We refuse empty
-    // hashes outright (no password set ⇒ no password login).
-    !stored_hash.is_empty()
+/// Byte-compatible port of the agent's `_verify_password`: standard-base64
+/// decode the stored hash, split `salt(32) || stored_key(32)`, re-derive
+/// PBKDF2-HMAC-SHA256(password, salt, 100_000, dklen=32) and constant-time
+/// compare. Any malformed hash (wrong length, bad base64) → `false`, matching
+/// the agent's `except: return False`. Empty hash → `false` (no password set ⇒
+/// no password login).
+pub fn verify_password(presented: &str, stored_hash: &str) -> bool {
+    use base64::Engine as _;
+    use subtle::ConstantTimeEq as _;
+    if stored_hash.is_empty() {
+        return false;
+    }
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(stored_hash) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    // The agent slices [:32] / [32:]; a short blob yields a too-short stored_key
+    // that can never equal a 32-byte derived key, so reject anything that isn't
+    // exactly salt+key length (this is stricter only against corrupt rows).
+    if decoded.len() != PBKDF2_SALT_LEN + PBKDF2_KEY_LEN {
+        return false;
+    }
+    let (salt, stored_key) = decoded.split_at(PBKDF2_SALT_LEN);
+    let mut key = [0u8; PBKDF2_KEY_LEN];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(presented.as_bytes(), salt, PBKDF2_ITERATIONS, &mut key);
+    key.ct_eq(stored_key).into()
 }
 
 // ─── POST /v1/auth/login ────────────────────────────────────────────────────
@@ -94,8 +135,57 @@ fn issue_session_token(wa_id: &str) -> String {
 }
 
 /// Parse the `wa_id` out of an opaque session token (`sess:<wa_id>:<rand>`).
-fn wa_id_from_token(token: &str) -> Option<&str> {
+pub fn wa_id_from_token(token: &str) -> Option<&str> {
     token.strip_prefix("sess:")?.rsplit_once(':').map(|(id, _)| id)
+}
+
+/// A bearer→session-resolved caller — the fabric analogue of the agent's
+/// `AuthContext`. Returned by [`resolve_bearer`] when a presented bearer token is
+/// a live fabric session.
+#[derive(Debug, Clone)]
+pub struct SessionCaller {
+    /// The authenticated `wa_id` (the absorbed login identifier).
+    pub wa_id: String,
+    /// The caller's display name (`wa_cert.name`).
+    pub name: String,
+    /// The API role bridged from `wa_cert.role`.
+    pub role: UserRole,
+    /// The effective permission set for the role.
+    pub permissions: Vec<Permission>,
+}
+
+/// The bearer→session bridge (CIRISServer#9, gap #6).
+///
+/// Where the agent's `dependencies/auth.py` accepted a bearer **JWT**, the fabric
+/// is the single token issuer and accepts its own opaque **session** token. This
+/// resolves a raw bearer token (the value AFTER `Bearer `) to a [`SessionCaller`]:
+///
+/// 1. it MUST be a fabric session token (`sess:<wa_id>:<rand>`) — anything else
+///    (API key, `service:` token, `username:password`) is NOT a session and
+///    returns `Ok(None)` so the caller can fall through to those other auth modes
+///    exactly as the agent's dispatch chain did;
+/// 2. the bound `wa_cert` row must exist and be `active` — a logged-out/revoked
+///    session (`set_active(false)`) fails closed (`Ok(None)`).
+pub async fn resolve_bearer(
+    engine: &Engine,
+    bearer_token: &str,
+) -> Result<Option<SessionCaller>, store::StoreError> {
+    let Some(wa_id) = wa_id_from_token(bearer_token) else {
+        return Ok(None); // not a session token — let other auth modes handle it.
+    };
+    let Some(cert) = store::get(engine, wa_id).await? else {
+        return Ok(None);
+    };
+    if !cert.active {
+        return Ok(None);
+    }
+    let role = UserRole::from_wa_role(cert.role);
+    Ok(Some(SessionCaller {
+        wa_id: cert.wa_id,
+        name: cert.name,
+        role,
+        permissions: permissions_for(role),
+    }))
 }
 
 async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Response {
@@ -166,25 +256,24 @@ struct UserInfo {
 }
 
 async fn me(State(st): State<SessionState>, headers: HeaderMap) -> Response {
-    let Some(wa_id) = bearer(&headers).and_then(|t| wa_id_from_token(t).map(str::to_owned)) else {
+    let Some(token) = bearer(&headers) else {
         return err(StatusCode::UNAUTHORIZED, "missing or malformed bearer token");
     };
-    match store::get(&st.engine, &wa_id).await {
-        Ok(Some(c)) => {
-            let role = UserRole::from_wa_role(c.role);
-            (
-                StatusCode::OK,
-                Json(UserInfo {
-                    user_id: c.wa_id.clone(),
-                    username: c.name,
-                    role: role.as_str().to_string(),
-                    permissions: permissions_for(role),
-                    active: c.active,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => err(StatusCode::UNAUTHORIZED, "unknown session"),
+    // The bearer→session bridge: resolve the opaque session token to its bound,
+    // active `wa_cert` row (revoked/logged-out sessions fail closed here).
+    match resolve_bearer(&st.engine, token).await {
+        Ok(Some(caller)) => (
+            StatusCode::OK,
+            Json(UserInfo {
+                user_id: caller.wa_id,
+                username: caller.name,
+                role: caller.role.as_str().to_string(),
+                permissions: caller.permissions,
+                active: true,
+            }),
+        )
+            .into_response(),
+        Ok(None) => err(StatusCode::UNAUTHORIZED, "unknown or inactive session"),
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
 }
@@ -306,5 +395,42 @@ mod tests {
     fn email_masking_is_gdpr_safe() {
         assert_eq!(mask_email("alice@example.com"), "a***@e***");
         assert_eq!(mask_email("nodomain"), "***");
+    }
+
+    /// Byte-compat vector produced by the AGENT'S OWN KDF
+    /// (`cryptography.PBKDF2HMAC(SHA256, length=32, salt=bytes(range(32)),
+    /// iterations=100000).derive(b"correct horse battery staple")`, then
+    /// `base64.b64encode(salt + key)`). If this fails, existing agent
+    /// `password_hash` rows would stop authenticating after migration.
+    #[test]
+    fn verify_password_matches_agent_pbkdf2_vector() {
+        let agent_hash =
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh/viXCJThHDAjg+nTGyIJeRecLolkEA86maUs3Hzm+fdw==";
+        assert!(
+            verify_password("correct horse battery staple", agent_hash),
+            "must verify the agent-produced PBKDF2-SHA256(100k) hash"
+        );
+        assert!(
+            !verify_password("wrong password", agent_hash),
+            "wrong password must fail"
+        );
+    }
+
+    #[test]
+    fn hash_password_round_trips_and_is_salted() {
+        let h1 = hash_password("hunter2");
+        let h2 = hash_password("hunter2");
+        // Fresh random salt each call ⇒ different stored strings (agent parity).
+        assert_ne!(h1, h2);
+        assert!(verify_password("hunter2", &h1));
+        assert!(verify_password("hunter2", &h2));
+        assert!(!verify_password("hunter3", &h1));
+    }
+
+    #[test]
+    fn verify_password_rejects_malformed_hashes() {
+        assert!(!verify_password("x", ""), "empty hash ⇒ no password login");
+        assert!(!verify_password("x", "not base64 !!!"));
+        assert!(!verify_password("x", "dG9vc2hvcnQ="), "too-short blob"); // "tooshort"
     }
 }

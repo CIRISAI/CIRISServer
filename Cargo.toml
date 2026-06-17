@@ -111,6 +111,25 @@ getrandom  = "0.3"   # mint the ML-DSA-65 federation seed on first boot (hybrid 
 chrono     = { version = "0.4", features = ["serde"] }
 sha2       = "0.10"
 hex        = "0.4"
+# Auth gap-close (CIRISServer#9, src/auth): the byte-compatible password KDF +
+# the OAuth/native/device-auth outbound-HTTP + JWKS-verify halves. All already in
+# the lock as substrate-transitive deps (reqwest/jsonwebtoken via edge+verify;
+# pbkdf2/hmac/ed25519-dalek via the crypto family) — pinned here so the auth
+# subsystem owns them directly, no new resolution.
+# - pbkdf2 + hmac: reproduce the agent's PBKDF2-HMAC-SHA256(100k) password hash
+#   (auth_service.py `_hash_password`/`_verify_password`) byte-for-byte.
+# - ed25519-dalek: verify the ROOT mint signature (the agent's `verify_root_signature`).
+# - jsonwebtoken: Apple Sign-In RS256 JWKS verification.
+# - reqwest (rustls): Google tokeninfo / OAuth code→token / Apple JWKS / Portal HTTP.
+# - urlencoding: build the provider authorize-URL query string (matches urlencode).
+pbkdf2     = { version = "0.12", default-features = false }
+hmac       = "0.12"
+subtle     = "2"     # constant-time password-hash compare (the agent's hmac.compare_digest)
+ed25519-dalek = "2"
+jsonwebtoken  = "9"
+urlencoding   = "2"
+async-trait   = "0.1"  # the ProviderClient HTTP seam (async fn in trait)
+reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

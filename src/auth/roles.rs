@@ -276,19 +276,140 @@ pub fn user_role_to_wa_role(role: UserRole) -> WaRole {
     }
 }
 
-/// Verify a ROOT mint signature (port of `auth_service.verify_root_signature`).
-///
-/// The agent verified an Ed25519 signature over `MINT_WA:{user_id}:{wa_role}:
-/// {timestamp}` against a pinned `root_pub.json`. In the fabric the trust root is
-/// the fabric's own federation identity, so the pinned key source is a policy
-/// decision (fabric signing pubkey vs. an explicit `root_pub.json`).
-///
-/// TODO(CIRISServer#9): wire the Ed25519 verify against the pinned ROOT pubkey
-/// (load from the fabric identity dir) with the agent's ±60-minute timestamp
-/// skew tolerance. Scaffolded: the message construction is fixed here so the
-/// verify is a drop-in.
+/// The agent's ROOT mint message: `MINT_WA:{user_id}:{wa_role}:{timestamp}`
+/// (`wa_role` is the lowercase persist token, `timestamp` an ISO-8601 instant).
 pub fn root_mint_message(user_id: &str, wa_role: WaRole, timestamp: &str) -> String {
     format!("MINT_WA:{user_id}:{}:{timestamp}", wa_role.as_sql_str())
+}
+
+/// The timestamp-free fallback message (`MINT_WA:{user_id}:{wa_role}`) the agent
+/// also accepts for signatures produced by its offline signing script.
+fn root_mint_message_no_ts(user_id: &str, wa_role: WaRole) -> String {
+    format!("MINT_WA:{user_id}:{}", wa_role.as_sql_str())
+}
+
+/// Decode the agent's `root_pub.json` `pubkey` field (base64url, MAY be missing
+/// padding — the agent re-pads with `"=" * (4 - len % 4)`) into a verifying key.
+fn parse_root_pubkey(pubkey_b64url: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::Engine as _;
+    // base64url WITH padding tolerated; the URL_SAFE engine here is forgiving of
+    // already-padded input, and we re-pad to a multiple of 4 to mirror the agent.
+    let mut s = pubkey_b64url.to_string();
+    let rem = s.len() % 4;
+    if rem != 0 {
+        s.push_str(&"=".repeat(4 - rem));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE.decode(&s).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()
+}
+
+/// Render a UTC instant the way Python's `datetime.isoformat()` does for a
+/// tz-aware UTC datetime: `YYYY-MM-DDTHH:MM:SS+00:00`, with `.ffffff` inserted
+/// ONLY when microseconds are non-zero. The agent signs/verifies against this
+/// exact string, so byte-for-byte parity matters.
+fn python_isoformat(t: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::Timelike as _;
+    let micros = t.nanosecond() / 1_000;
+    if micros == 0 {
+        t.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
+    } else {
+        format!("{}.{:06}+00:00", t.format("%Y-%m-%dT%H:%M:%S"), micros)
+    }
+}
+
+/// The ROOT public key the fabric pins as its mint trust root. Matches the
+/// agent's `seed/root_pub.json` shape (the `pubkey` field is the only one the
+/// verify reads).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RootPubKey {
+    /// Base64url-encoded Ed25519 public key.
+    pub pubkey: String,
+}
+
+impl RootPubKey {
+    /// Load the pinned ROOT pubkey from a `root_pub.json`-shaped file (the fabric
+    /// identity dir's equivalent of the agent's `seed/root_pub.json`).
+    pub fn load(path: &std::path::Path) -> std::io::Result<RootPubKey> {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// Verify a ROOT mint signature — byte-compatible port of
+/// `auth_service.verify_root_signature`.
+///
+/// The agent Ed25519-verifies `signature` (base64 OR base64url) against the
+/// pinned ROOT pubkey over the message `MINT_WA:{user_id}:{wa_role}:{timestamp}`,
+/// trying every whole-minute ISO timestamp in the **last 60 minutes** (its
+/// skew-tolerance window), then a timestamp-free fallback
+/// (`MINT_WA:{user_id}:{wa_role}`) for offline-signed mints. Any decode/verify
+/// failure across all candidates → `false` (the agent's `except: continue` /
+/// `return False`).
+///
+/// `now` is injected for deterministic testing; production callers pass
+/// `chrono::Utc::now()`.
+pub fn verify_root_signature(
+    root_pubkey_b64url: &str,
+    user_id: &str,
+    wa_role: WaRole,
+    signature: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    use base64::Engine as _;
+    use ed25519_dalek::Verifier as _;
+
+    let Some(vk) = parse_root_pubkey(root_pubkey_b64url) else {
+        return false;
+    };
+
+    // Decode the signature both ways the agent accepts; gather the candidates.
+    let mut sig_candidates: Vec<ed25519_dalek::Signature> = Vec::new();
+    // standard base64
+    if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(signature) {
+        if let Ok(sig) = ed25519_dalek::Signature::from_slice(&b) {
+            sig_candidates.push(sig);
+        }
+    }
+    // url-safe base64 (re-padded, as the agent does)
+    {
+        let mut s = signature.to_string();
+        let rem = s.len() % 4;
+        if rem != 0 {
+            s.push_str(&"=".repeat(4 - rem));
+        }
+        if let Ok(b) = base64::engine::general_purpose::URL_SAFE.decode(&s) {
+            if let Ok(sig) = ed25519_dalek::Signature::from_slice(&b) {
+                sig_candidates.push(sig);
+            }
+        }
+    }
+    if sig_candidates.is_empty() {
+        return false;
+    }
+
+    let try_msg = |msg: &str| -> bool {
+        sig_candidates
+            .iter()
+            .any(|sig| vk.verify(msg.as_bytes(), sig).is_ok())
+    };
+
+    // Timestamped messages over the last 60 minutes (the agent's window). The
+    // agent builds each candidate as `(now - minutes_ago).isoformat()`, so the
+    // wire form must match Python's `datetime.isoformat()` EXACTLY: it omits the
+    // fractional part entirely when microseconds == 0, else renders 6 digits;
+    // a UTC offset is `+00:00`. We reproduce both cases.
+    for minutes_ago in 0..60i64 {
+        let t = now - chrono::Duration::minutes(minutes_ago);
+        let timestamp = python_isoformat(t);
+        if try_msg(&root_mint_message(user_id, wa_role, &timestamp)) {
+            return true;
+        }
+    }
+
+    // Timestamp-free fallback (offline signing script).
+    try_msg(&root_mint_message_no_ts(user_id, wa_role))
 }
 
 #[cfg(test)]
@@ -329,5 +450,59 @@ mod tests {
             UserRole::Authority
         );
         assert_eq!(UserRole::from_wa_role(WaRole::Observer), UserRole::Observer);
+    }
+
+    #[test]
+    fn python_isoformat_matches_cpython() {
+        use chrono::TimeZone as _;
+        // Whole second ⇒ no fractional part (CPython drops it).
+        let t = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 12, 30, 0).unwrap();
+        assert_eq!(python_isoformat(t), "2026-06-16T12:30:00+00:00");
+        // Non-zero microseconds ⇒ 6-digit fraction.
+        let t2 = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 16, 12, 30, 0)
+            .unwrap()
+            + chrono::Duration::microseconds(123456);
+        assert_eq!(python_isoformat(t2), "2026-06-16T12:30:00.123456+00:00");
+    }
+
+    /// Vectors produced by the AGENT'S OWN ed25519 path
+    /// (`cryptography.ed25519`, seed = `bytes(range(32))`). The no-timestamp
+    /// message is the deterministic offline-signing path the agent accepts.
+    #[test]
+    fn verify_root_signature_no_timestamp_vector() {
+        let pub_b64url = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+        let sig_b64 = "9yo4Wmwi/RmNKWHYZ+02G6gcw6hOXaAJ0f8vcNX/VhwnNBZUMZMioV6XthLZuWg1EIFV3APz36REHN0MKPa+Dw==";
+        let now = chrono::Utc::now();
+        assert!(
+            verify_root_signature(pub_b64url, "user-123", WaRole::Root, sig_b64, now),
+            "must verify the agent's no-timestamp MINT_WA signature"
+        );
+        // Wrong user_id ⇒ fail.
+        assert!(!verify_root_signature(
+            pub_b64url, "user-999", WaRole::Root, sig_b64, now
+        ));
+    }
+
+    /// The timestamped path: the agent's signing-time `isoformat()` must fall
+    /// within our 60-minute reconstruction window. Signed at `now - 0min`.
+    #[test]
+    fn verify_root_signature_timestamped_vector() {
+        use chrono::TimeZone as _;
+        let pub_b64url = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+        let sig_b64url =
+            "_7z2AZRdkLfnIDtt251Fse2l7brJO_69GIWxCMZvxo8-UavTnjjXWNw0oTnGgh26fSzxO8flTBp2sHXH3HHrBA";
+        // Signed against timestamp 2026-06-16T12:30:00+00:00; verify with a `now`
+        // 5 minutes later so the candidate lands inside the [now-60min, now] sweep.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 12, 35, 0).unwrap();
+        assert!(
+            verify_root_signature(pub_b64url, "user-123", WaRole::Root, sig_b64url, now),
+            "must verify the agent's timestamped MINT_WA signature within the window"
+        );
+        // Outside the window (signed >60min ago) ⇒ fail.
+        let too_late = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 14, 0, 0).unwrap();
+        assert!(!verify_root_signature(
+            pub_b64url, "user-123", WaRole::Root, sig_b64url, too_late
+        ));
     }
 }

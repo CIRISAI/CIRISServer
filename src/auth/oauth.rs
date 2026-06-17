@@ -71,6 +71,20 @@ struct OAuthState {
     csrf: Arc<Mutex<CsrfStore>>,
     providers: Arc<Mutex<ProviderConfigStore>>,
     client: Arc<dyn ProviderClient>,
+    /// Base URL the OAuth callback is registered under (e.g.
+    /// `https://app.ciris.ai`); the per-provider callback path is appended. The
+    /// agent reads `OAUTH_CALLBACK_BASE_URL`.
+    callback_base: String,
+}
+
+/// The per-provider OAuth callback URL (the agent's `get_oauth_callback_url`):
+/// `{base}/v1/auth/oauth/{provider}/callback`. This MUST match the
+/// `redirect_uri` the provider has registered and the one sent at authorize time.
+fn oauth_callback_url(base: &str, provider: &str) -> String {
+    format!(
+        "{}/v1/auth/oauth/{provider}/callback",
+        base.trim_end_matches('/')
+    )
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -106,30 +120,55 @@ pub struct OAuthIdentity {
 }
 
 /// The provider HTTP seam: authz-URL construction, code→token exchange + userinfo,
-/// and native id_token verification. The substrate write path
-/// ([`create_oauth_user`]) is ported; these outbound calls are scaffolded.
+/// and native id_token verification. The default impl ([`HttpProviderClient`])
+/// performs the real provider HTTP; the trait is kept so tests can substitute a
+/// stub without live providers.
+#[async_trait::async_trait]
 pub trait ProviderClient: Send + Sync {
     /// Build the provider's authorization-redirect URL.
     fn authorize_url(&self, provider: &str, client_id: &str, state: &str, redirect_uri: &str)
         -> String;
     /// Exchange an auth `code` for the authenticated human's claims.
-    fn exchange_code(
+    async fn exchange_code(
         &self,
         provider: &str,
         cfg_client_id: &str,
         cfg_client_secret: &str,
         code: &str,
+        redirect_uri: &str,
     ) -> Result<OAuthIdentity, String>;
     /// Verify a native SDK id_token (Google tokeninfo / Apple JWKS RS256).
-    fn verify_native(&self, provider: &str, id_token: &str) -> Result<OAuthIdentity, String>;
+    async fn verify_native(
+        &self,
+        provider: &str,
+        id_token: &str,
+        allowed_audiences: &[String],
+    ) -> Result<OAuthIdentity, String>;
 }
 
-/// Default client — TODOs for the actual provider HTTP. The authz URL is real
-/// (it's just URL assembly); exchange + native verify return a clear scaffold
-/// error so the route shape is testable without live providers.
-struct ScaffoldProviderClient;
+/// The real provider HTTP client (CIRISServer#9, gaps #2/#3). Reproduces the
+/// agent's `_handle_{google,github,discord}_oauth` code→token→userinfo flows and
+/// the `_verify_{google,apple}_id_token` native paths over `reqwest` (rustls).
+pub struct HttpProviderClient {
+    http: reqwest::Client,
+}
 
-impl ProviderClient for ScaffoldProviderClient {
+impl Default for HttpProviderClient {
+    fn default() -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("reqwest client"),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderClient for HttpProviderClient {
+    /// Matches `routes/auth.py` `oauth_login`: the per-provider authorize base +
+    /// query params (`urllib.parse.urlencode`). Google adds `access_type=offline`
+    /// + `prompt=consent`; scopes are provider-specific.
     fn authorize_url(
         &self,
         provider: &str,
@@ -137,31 +176,410 @@ impl ProviderClient for ScaffoldProviderClient {
         state: &str,
         redirect_uri: &str,
     ) -> String {
-        let base = match provider {
-            "google" => "https://accounts.google.com/o/oauth2/v2/auth",
-            "github" => "https://github.com/login/oauth/authorize",
-            "discord" => "https://discord.com/api/oauth2/authorize",
-            _ => "https://example.invalid/authorize",
-        };
-        format!(
-            "{base}?client_id={client_id}&response_type=code&scope=openid%20email%20profile\
-             &state={state}&redirect_uri={redirect_uri}"
-        )
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        match provider {
+            "google" => format!(
+                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}\
+                 &response_type=code&scope={}&state={}&access_type=offline&prompt=consent",
+                enc(client_id),
+                enc(redirect_uri),
+                enc("openid email profile"),
+                enc(state),
+            ),
+            "github" => format!(
+                "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}\
+                 &scope={}&state={}",
+                enc(client_id),
+                enc(redirect_uri),
+                enc("read:user user:email"),
+                enc(state),
+            ),
+            "discord" => format!(
+                "https://discord.com/api/oauth2/authorize?client_id={}&redirect_uri={}\
+                 &response_type=code&scope={}&state={}",
+                enc(client_id),
+                enc(redirect_uri),
+                enc("identify email"),
+                enc(state),
+            ),
+            _ => format!("https://example.invalid/authorize?state={}", enc(state)),
+        }
     }
-    fn exchange_code(
+
+    async fn exchange_code(
         &self,
-        _provider: &str,
-        _cfg_client_id: &str,
-        _cfg_client_secret: &str,
-        _code: &str,
+        provider: &str,
+        client_id: &str,
+        client_secret: &str,
+        code: &str,
+        redirect_uri: &str,
     ) -> Result<OAuthIdentity, String> {
-        // TODO(CIRISServer#9): POST the token endpoint, then GET userinfo. The
-        // post-exchange substrate write (create_oauth_user) below is ported.
-        Err("oauth code exchange not yet wired (provider HTTP scaffold)".into())
+        match provider {
+            "google" => {
+                self.exchange_google(client_id, client_secret, code, redirect_uri)
+                    .await
+            }
+            "github" => {
+                self.exchange_github(client_id, client_secret, code, redirect_uri)
+                    .await
+            }
+            "discord" => {
+                self.exchange_discord(client_id, client_secret, code, redirect_uri)
+                    .await
+            }
+            other => Err(format!("unsupported OAuth provider: {other}")),
+        }
     }
-    fn verify_native(&self, _provider: &str, _id_token: &str) -> Result<OAuthIdentity, String> {
-        // TODO(CIRISServer#9): Google tokeninfo / Apple JWKS RS256 verification.
-        Err("native token verification not yet wired (JWKS scaffold)".into())
+
+    async fn verify_native(
+        &self,
+        provider: &str,
+        id_token: &str,
+        allowed_audiences: &[String],
+    ) -> Result<OAuthIdentity, String> {
+        match provider {
+            "google" => self.verify_google_native(id_token, allowed_audiences).await,
+            "apple" => self.verify_apple_native(id_token, allowed_audiences).await,
+            other => Err(format!("unsupported native provider: {other}")),
+        }
+    }
+}
+
+// Valid issuers / endpoints — pinned to match the agent (routes/auth.py).
+const VALID_GOOGLE_ISSUERS: [&str; 2] = ["accounts.google.com", "https://accounts.google.com"];
+const VALID_APPLE_ISSUER: &str = "https://appleid.apple.com";
+const APPLE_JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
+
+impl HttpProviderClient {
+    async fn exchange_google(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        code: &str,
+        redirect_uri: &str,
+    ) -> Result<OAuthIdentity, String> {
+        // POST https://oauth2.googleapis.com/token (form), then GET userinfo.
+        let token: serde_json::Value = self
+            .http
+            .post("https://oauth2.googleapis.com/token")
+            .form(&[
+                ("code", code),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("redirect_uri", redirect_uri),
+                ("grant_type", "authorization_code"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("google token endpoint: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("google token endpoint: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("google token decode: {e}"))?;
+        let access_token = token
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or("google token response missing access_token")?;
+        let info: serde_json::Value = self
+            .http
+            .get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("google userinfo: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("google userinfo: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("google userinfo decode: {e}"))?;
+        let external_id = info
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("google userinfo missing id")?
+            .to_string();
+        let email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let name = info
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| email.clone());
+        Ok(OAuthIdentity {
+            provider: "google".into(),
+            external_id,
+            email,
+            name,
+        })
+    }
+
+    async fn exchange_github(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        code: &str,
+        redirect_uri: &str,
+    ) -> Result<OAuthIdentity, String> {
+        let token: serde_json::Value = self
+            .http
+            .post("https://github.com/login/oauth/access_token")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .form(&[
+                ("code", code),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("redirect_uri", redirect_uri),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("github token endpoint: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("github token endpoint: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("github token decode: {e}"))?;
+        let access_token = token
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or("github token response missing access_token")?;
+        let info: serde_json::Value = self
+            .http
+            .get("https://api.github.com/user")
+            .header(reqwest::header::USER_AGENT, "ciris-server")
+            .header(reqwest::header::AUTHORIZATION, format!("token {access_token}"))
+            .send()
+            .await
+            .map_err(|e| format!("github user: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("github user: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("github user decode: {e}"))?;
+        let external_id = info
+            .get("id")
+            .map(|v| v.to_string())
+            .ok_or("github user missing id")?;
+        let mut email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let name = info
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| info.get("login").and_then(|v| v.as_str()).map(str::to_owned));
+        // Private email ⇒ fetch the primary from /user/emails (agent parity).
+        if email.is_none() {
+            if let Ok(resp) = self
+                .http
+                .get("https://api.github.com/user/emails")
+                .header(reqwest::header::USER_AGENT, "ciris-server")
+                .header(reqwest::header::AUTHORIZATION, format!("token {access_token}"))
+                .send()
+                .await
+            {
+                if let Ok(emails) = resp.json::<Vec<serde_json::Value>>().await {
+                    email = emails
+                        .iter()
+                        .find(|e| e.get("primary").and_then(|p| p.as_bool()) == Some(true))
+                        .and_then(|e| e.get("email").and_then(|v| v.as_str()).map(str::to_owned));
+                }
+            }
+        }
+        Ok(OAuthIdentity {
+            provider: "github".into(),
+            external_id,
+            email,
+            name,
+        })
+    }
+
+    async fn exchange_discord(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        code: &str,
+        redirect_uri: &str,
+    ) -> Result<OAuthIdentity, String> {
+        let token: serde_json::Value = self
+            .http
+            .post("https://discord.com/api/oauth2/token")
+            .form(&[
+                ("code", code),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("redirect_uri", redirect_uri),
+                ("grant_type", "authorization_code"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("discord token endpoint: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("discord token endpoint: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("discord token decode: {e}"))?;
+        let access_token = token
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or("discord token response missing access_token")?;
+        let info: serde_json::Value = self
+            .http
+            .get("https://discord.com/api/users/@me")
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("discord user: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("discord user: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("discord user decode: {e}"))?;
+        let external_id = info
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("discord user missing id")?
+            .to_string();
+        let email = info.get("email").and_then(|v| v.as_str()).map(str::to_owned);
+        let name = info
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| email.clone());
+        Ok(OAuthIdentity {
+            provider: "discord".into(),
+            external_id,
+            email,
+            name,
+        })
+    }
+
+    /// Google native id_token verify — `_verify_google_id_token`: GET
+    /// `oauth2.googleapis.com/tokeninfo?id_token=…`, then validate aud (if any
+    /// configured audiences), iss ∈ google issuers, exp, and require `sub`.
+    async fn verify_google_native(
+        &self,
+        id_token: &str,
+        allowed_audiences: &[String],
+    ) -> Result<OAuthIdentity, String> {
+        let info: serde_json::Value = self
+            .http
+            .get("https://oauth2.googleapis.com/tokeninfo")
+            .query(&[("id_token", id_token)])
+            .send()
+            .await
+            .map_err(|e| format!("google tokeninfo: {e}"))?
+            .error_for_status()
+            .map_err(|_| "Google could not verify this ID token.".to_string())?
+            .json()
+            .await
+            .map_err(|e| format!("google tokeninfo decode: {e}"))?;
+
+        // aud — skipped when no audiences configured (the agent's on-device mode).
+        if !allowed_audiences.is_empty() {
+            let aud = info.get("aud").and_then(|v| v.as_str()).unwrap_or("");
+            if !allowed_audiences.iter().any(|a| a == aud) {
+                return Err("Token was not issued for this application (audience mismatch).".into());
+            }
+        }
+        // iss
+        let iss = info.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+        if !VALID_GOOGLE_ISSUERS.contains(&iss) {
+            return Err("Token was not issued by Google (issuer mismatch).".into());
+        }
+        // exp (string seconds in tokeninfo)
+        if let Some(exp) = info.get("exp").and_then(|v| v.as_str()) {
+            if let Ok(exp_ts) = exp.parse::<i64>() {
+                if exp_ts < chrono::Utc::now().timestamp() {
+                    return Err("Google ID token has expired.".into());
+                }
+            }
+        }
+        let sub = info
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .ok_or("Google ID token missing user ID (sub claim).")?
+            .to_string();
+        Ok(OAuthIdentity {
+            provider: "google".into(),
+            external_id: sub,
+            email: info.get("email").and_then(|v| v.as_str()).map(str::to_owned),
+            name: info.get("name").and_then(|v| v.as_str()).map(str::to_owned),
+        })
+    }
+
+    /// Apple native id_token verify — `_verify_apple_id_token`: fetch Apple JWKS,
+    /// select the RS256 key by the token's `kid`, then RS256-verify with
+    /// aud ∈ configured audiences, iss = appleid.apple.com, require sub/aud/iss/exp.
+    async fn verify_apple_native(
+        &self,
+        id_token: &str,
+        allowed_audiences: &[String],
+    ) -> Result<OAuthIdentity, String> {
+        use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+
+        if allowed_audiences.is_empty() {
+            return Err("Apple native auth is not configured for this application.".into());
+        }
+        let header = decode_header(id_token).map_err(|_| "Apple could not verify this ID token.")?;
+        if header.alg != Algorithm::RS256 {
+            return Err("Apple could not verify this ID token.".into());
+        }
+        let kid = header.kid.ok_or("Apple could not verify this ID token.")?;
+
+        let jwks: serde_json::Value = self
+            .http
+            .get(APPLE_JWKS_URL)
+            .send()
+            .await
+            .map_err(|e| format!("apple jwks: {e}"))?
+            .error_for_status()
+            .map_err(|_| "Apple verification service unavailable. Please try again.".to_string())?
+            .json()
+            .await
+            .map_err(|e| format!("apple jwks decode: {e}"))?;
+        let key = jwks
+            .get("keys")
+            .and_then(|k| k.as_array())
+            .and_then(|keys| {
+                keys.iter().find(|j| {
+                    j.get("kid").and_then(|v| v.as_str()) == Some(kid.as_str())
+                        && j.get("kty").and_then(|v| v.as_str()) == Some("RSA")
+                })
+            })
+            .ok_or("Apple could not verify this ID token.")?;
+        let n = key.get("n").and_then(|v| v.as_str()).ok_or("apple jwk missing n")?;
+        let e = key.get("e").and_then(|v| v.as_str()).ok_or("apple jwk missing e")?;
+        let decoding_key =
+            DecodingKey::from_rsa_components(n, e).map_err(|_| "apple jwk invalid")?;
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(allowed_audiences);
+        validation.set_issuer(&[VALID_APPLE_ISSUER]);
+        validation.set_required_spec_claims(&["sub", "aud", "iss", "exp"]);
+
+        let claims: serde_json::Value = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                    "Apple ID token has expired.".to_string()
+                }
+                jsonwebtoken::errors::ErrorKind::InvalidAudience => {
+                    "Token was not issued for this application (audience mismatch).".to_string()
+                }
+                jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
+                    "Token was not issued by Apple (issuer mismatch).".to_string()
+                }
+                _ => "Apple could not verify this ID token.".to_string(),
+            })?
+            .claims;
+
+        let sub = claims
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .ok_or("Apple ID token missing user ID (sub claim).")?
+            .to_string();
+        Ok(OAuthIdentity {
+            provider: "apple".into(),
+            external_id: sub,
+            email: claims.get("email").and_then(|v| v.as_str()).map(str::to_owned),
+            name: claims.get("name").and_then(|v| v.as_str()).map(str::to_owned),
+        })
     }
 }
 
@@ -317,9 +735,15 @@ async fn oauth_login(
         let mut csrf = st.csrf.lock().unwrap();
         csrf.issue()
     };
+    // The provider redirect_uri is ALWAYS our registered callback (not the
+    // app-supplied post-login `redirect_uri`, which is validated above and would
+    // be carried separately in real deployments). This matches the agent, which
+    // always sends `get_oauth_callback_url(provider)` to the provider.
+    let _ = redirect_uri;
+    let callback = oauth_callback_url(&st.callback_base, &provider);
     let url = st
         .client
-        .authorize_url(&provider, &client_id, &state, &redirect_uri);
+        .authorize_url(&provider, &client_id, &state, &callback);
     axum::response::Redirect::temporary(&url).into_response()
 }
 
@@ -373,9 +797,11 @@ async fn oauth_callback(
             None => return err(StatusCode::NOT_FOUND, "provider not configured"),
         }
     };
+    let redirect_uri = oauth_callback_url(&st.callback_base, &provider);
     let ident = match st
         .client
-        .exchange_code(&provider, &client_id, &client_secret, &q.code)
+        .exchange_code(&provider, &client_id, &client_secret, &q.code, &redirect_uri)
+        .await
     {
         Ok(i) => i,
         Err(e) => return err(StatusCode::BAD_GATEWAY, e),
@@ -390,12 +816,43 @@ struct NativeTokenRequest {
     id_token: String,
 }
 
+/// Gather the allowed native audiences for `provider` from its stored config —
+/// matching the agent's `_get_allowed_audiences_from_config` (google reads
+/// `client_id`+`android_client_id`) and `_get_allowed_apple_audiences_from_config`
+/// (apple reads `client_id`/`ios_client_id`/`native_client_id`/`bundle_id`).
+fn native_audiences(store: &ProviderConfigStore, provider: &str) -> Vec<String> {
+    let Some(cfg) = store.by_provider.get(provider) else {
+        return Vec::new();
+    };
+    let mut auds = Vec::new();
+    if !cfg.client_id.is_empty() {
+        auds.push(cfg.client_id.clone());
+    }
+    let fields: &[&str] = match provider {
+        "google" => &["android_client_id"],
+        "apple" => &["ios_client_id", "native_client_id", "bundle_id"],
+        _ => &[],
+    };
+    for f in fields {
+        if let Some(v) = cfg.metadata.get(*f).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                auds.push(v.to_string());
+            }
+        }
+    }
+    auds
+}
+
 async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response {
     let req: NativeTokenRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
     };
-    let ident = match st.client.verify_native(provider, &req.id_token) {
+    let audiences = {
+        let store = st.providers.lock().unwrap();
+        native_audiences(&store, provider)
+    };
+    let ident = match st.client.verify_native(provider, &req.id_token, &audiences).await {
         Ok(i) => i,
         Err(e) => return err(StatusCode::UNAUTHORIZED, e),
     };
@@ -427,11 +884,14 @@ async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
 
 /// The OAuth front-door router.
 pub fn router(engine: Arc<Engine>) -> Router {
+    let callback_base = std::env::var("OAUTH_CALLBACK_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string());
     let st = OAuthState {
         engine,
         csrf: Arc::new(Mutex::new(CsrfStore::default())),
         providers: Arc::new(Mutex::new(ProviderConfigStore::default())),
-        client: Arc::new(ScaffoldProviderClient),
+        client: Arc::new(HttpProviderClient::default()),
+        callback_base,
     };
     Router::new()
         .route(
@@ -462,6 +922,32 @@ mod tests {
         assert!(s.consume(&t), "issued token must verify once");
         assert!(!s.consume(&t), "token must not be reusable");
         assert!(!s.consume("never-issued"));
+    }
+
+    #[test]
+    fn authorize_url_matches_agent_params() {
+        let c = HttpProviderClient::default();
+        let u = c.authorize_url("google", "cid", "st8", "https://app.ciris.ai/v1/auth/oauth/google/callback");
+        assert!(u.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(u.contains("client_id=cid"));
+        assert!(u.contains("response_type=code"));
+        assert!(u.contains("scope=openid%20email%20profile"));
+        assert!(u.contains("state=st8"));
+        assert!(u.contains("access_type=offline"));
+        assert!(u.contains("prompt=consent"));
+        assert!(u.contains("redirect_uri=https%3A%2F%2Fapp.ciris.ai"));
+        // github uses its own scope set.
+        let g = c.authorize_url("github", "cid", "st8", "https://x/cb");
+        assert!(g.starts_with("https://github.com/login/oauth/authorize?"));
+        assert!(g.contains("scope=read%3Auser%20user%3Aemail"));
+    }
+
+    #[test]
+    fn callback_url_is_per_provider() {
+        assert_eq!(
+            oauth_callback_url("https://app.ciris.ai/", "google"),
+            "https://app.ciris.ai/v1/auth/oauth/google/callback"
+        );
     }
 
     #[test]
