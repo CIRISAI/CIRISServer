@@ -37,11 +37,22 @@ pub mod benchmarks;
 mod compose;
 mod config;
 mod import;
+/// Directed-consent federation peering (CIRISServer federation Round 2): mutual
+/// key registration + the `consent:replication:v1` grant that authorizes
+/// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
+/// Public so the integration test (`tests/peer_replication.rs`) can drive the
+/// admission + consent-emit logic directly.
+pub mod peer;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
+/// The capacity score→emit pipeline — a periodic task that derives per-agent
+/// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
+/// (CIRISServer federation Round 1, deliverable 2). Public so the integration
+/// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
+pub mod scorer;
 
-pub use config::{Mode, ServerConfig, Slices};
+pub use config::{Mode, PeerB, ServerConfig, Slices};
 
 use anyhow::Result;
 
@@ -69,6 +80,19 @@ pub async fn import_traces(dump_dir: &str) -> Result<()> {
 /// substrate/holonomic tiers are honest "gated" stubs until their data lands.
 pub fn scoreboard_json() -> String {
     benchmarks::Scoreboard::modeled(benchmarks::FountainPolicy::REFERENCE).to_json()
+}
+
+/// Emit the holonomic federation scoreboard with the **substrate tier promoted to
+/// MEASURED** from a criterion output directory (`target/criterion`). Reads
+/// criterion's own `estimates.json` per bench and derives `aead_throughput_per_core`,
+/// `alm_tree_depth_vs_n`, `replication_ingest_per_sec`, and `stream_fanout_core_frac`
+/// from the real median time/iter — "numbers through the fabric." Any metric whose
+/// bench didn't run falls back to gated; `mls_commit_barrier`/`cold_join_burst_latency`
+/// and the whole holonomic tier stay gated (no bench grounds them).
+pub fn scoreboard_json_with_criterion(criterion_dir: &str) -> String {
+    benchmarks::Scoreboard::modeled(benchmarks::FountainPolicy::REFERENCE)
+        .with_criterion_dir(criterion_dir)
+        .to_json()
 }
 
 /// Initialize tracing (shared by the binary and the wheel entry point).

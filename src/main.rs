@@ -20,10 +20,29 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("usage: ciris-server import-traces <dump-dir>"))?;
             ciris_server::import_traces(&dump_dir).await
         }
-        // `ciris-server scoreboard` — print the holonomic federation scoreboard
-        // (modeled capacity/survival; CIRISServer#12/#13) as JSON and exit.
+        // `ciris-server scoreboard [--criterion-dir <dir>]` — print the holonomic
+        // federation scoreboard (CIRISServer#12/#13) as JSON and exit. With
+        // `--criterion-dir` the substrate tier is promoted to MEASURED from real
+        // criterion bench output; without it the board stays all-modeled/gated.
         Some("scoreboard") => {
-            println!("{}", ciris_server::scoreboard_json());
+            let mut criterion_dir: Option<String> = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--criterion-dir" => {
+                        criterion_dir = Some(args.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: scoreboard --criterion-dir <dir>")
+                        })?);
+                    }
+                    other if other.starts_with("--criterion-dir=") => {
+                        criterion_dir = Some(other["--criterion-dir=".len()..].to_string());
+                    }
+                    other => return Err(anyhow::anyhow!("unknown scoreboard arg: {other}")),
+                }
+            }
+            match criterion_dir {
+                Some(dir) => println!("{}", ciris_server::scoreboard_json_with_criterion(&dir)),
+                None => println!("{}", ciris_server::scoreboard_json()),
+            }
             Ok(())
         }
         // Default: boot the fabric node.

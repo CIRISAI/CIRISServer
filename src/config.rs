@@ -90,6 +90,33 @@ impl Capabilities {
     }
 }
 
+/// A federation peer the node bidirectionally replicates with under **directed
+/// consent** (NOT in-group trust) — the canonical example being Node B
+/// (`ciris-status`), which is OUT of the canonical CIRIS infrastructure
+/// community. Sourced from the optional `CIRIS_PEER_B_*` env; when unset the
+/// node skips peer registration + replication entirely (logged at info).
+///
+/// **v8.8.0 admission-gate shape (CEG 1.0-RC29 §5.6.8.15):** A admits B's key
+/// through `Engine::register_federation_key`, which is fail-secure — it REQUIRES
+/// B's own *self-signed* `SignedKeyRecord` (proof-of-possession). A can no longer
+/// mint B's row from raw pubkeys, so the config carries B's exported
+/// `SignedKeyRecord` as JSON (`CIRIS_PEER_B_KEY_RECORD`), deserialized into
+/// [`PeerB::key_record`]. The peer's `key_id` is also carried separately
+/// (`CIRIS_PEER_B_KEY_ID`) for the replication-peer wiring (and consistency-
+/// checked against the record). Both nodes are on persist v8.8.0, so the serde
+/// shape matches byte-for-byte (the cross-repo peering contract).
+#[derive(Debug, Clone)]
+pub struct PeerB {
+    /// The peer's federation `key_id` (Node B's `ciris-status` identity) — used
+    /// for replication-peer wiring; matches `key_record.record.key_id`.
+    pub key_id: String,
+    /// Node B's self-signed `SignedKeyRecord` (proof-of-possession), as exported
+    /// by B and supplied via `CIRIS_PEER_B_KEY_RECORD`. Passed verbatim to
+    /// `Engine::register_federation_key`, which verifies B's signature
+    /// (fail-secure) before admitting the key.
+    pub key_record: ciris_persist::federation::types::SignedKeyRecord,
+}
+
 /// The fully-resolved node configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -103,6 +130,9 @@ pub struct ServerConfig {
     pub mode: Mode,
     pub slices: Slices,
     pub lens_store_min_gib: u64,
+    /// Optional directed-consent replication peer (Node B / `ciris-status`).
+    /// `Some` only when the full `CIRIS_PEER_B_*` trio is present.
+    pub peer_b: Option<PeerB>,
 }
 
 impl ServerConfig {
@@ -150,6 +180,12 @@ impl ServerConfig {
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(DEFAULT_LENS_STORE_MIN_GIB);
 
+        // Directed-consent replication peer (Node B / ciris-status). All THREE
+        // env vars must be present, non-empty, for the peer to be admitted —
+        // a partial trio is treated as "no peer" (and warned), never a partial
+        // registration that could not actually replicate or verify.
+        let peer_b = Self::peer_b_from_env();
+
         Ok(Self {
             data_dir,
             identity_dir,
@@ -160,7 +196,63 @@ impl ServerConfig {
             mode,
             slices: Slices::default(),
             lens_store_min_gib,
+            peer_b,
         })
+    }
+
+    /// Parse the optional `CIRIS_PEER_B_*` env into a [`PeerB`]. `None` when the
+    /// pair is absent; a *partial* config (or a record that fails to deserialize,
+    /// or a `key_id` mismatch) logs a warning and yields `None` (we never
+    /// half-register a peer whose self-signed record we can't fully carry).
+    ///
+    /// **v8.8.0 shape:** instead of raw pubkeys, B's own *self-signed*
+    /// `SignedKeyRecord` (proof-of-possession) is supplied as JSON via
+    /// `CIRIS_PEER_B_KEY_RECORD` — the v8.8.0 admission gate requires it and
+    /// verifies B's signature fail-secure. `CIRIS_PEER_B_KEY_ID` is still carried
+    /// for replication wiring and is consistency-checked against the record.
+    fn peer_b_from_env() -> Option<PeerB> {
+        let nonempty = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let key_id = nonempty("CIRIS_PEER_B_KEY_ID");
+        let key_record_json = nonempty("CIRIS_PEER_B_KEY_RECORD");
+        match (key_id, key_record_json) {
+            (Some(key_id), Some(json)) => {
+                let key_record: ciris_persist::federation::types::SignedKeyRecord =
+                    match serde_json::from_str(&json) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "CIRIS_PEER_B_KEY_RECORD is not a valid SignedKeyRecord JSON \
+                                 (persist v8.8.0 serde shape) — skipping Node B peering"
+                            );
+                            return None;
+                        }
+                    };
+                if key_record.record.key_id != key_id {
+                    tracing::warn!(
+                        config_key_id = %key_id,
+                        record_key_id = %key_record.record.key_id,
+                        "CIRIS_PEER_B_KEY_ID does not match CIRIS_PEER_B_KEY_RECORD.record.key_id \
+                         — skipping Node B peering (refusing an inconsistent peer config)"
+                    );
+                    return None;
+                }
+                Some(PeerB { key_id, key_record })
+            }
+            (None, None) => None,
+            _ => {
+                tracing::warn!(
+                    "incomplete CIRIS_PEER_B_* env (need both CIRIS_PEER_B_KEY_ID + \
+                     CIRIS_PEER_B_KEY_RECORD) — skipping Node B peer registration + replication"
+                );
+                None
+            }
+        }
     }
 
     pub fn db_path(&self) -> PathBuf {

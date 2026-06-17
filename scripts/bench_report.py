@@ -421,6 +421,36 @@ def render_scoreboard(sb: dict | None) -> str:
         return (f"<li><b>{H(name)}</b> — <code>gated</code> on {H(g.get('gated_on', ''))}: "
                 f"{H(', '.join(g.get('metrics', [])))}</li>")
 
+    # The substrate tier is a HYBRID: measured metrics (promoted from this run's
+    # criterion benches, each with provenance) + a still-gated remainder.
+    sub = sb.get("substrate", {})
+    MEASURED_KEYS = ("aead_throughput_per_core", "alm_tree_depth_vs_n",
+                     "replication_ingest_per_sec", "stream_fanout_core_frac")
+    measured_rows = []
+    for k in MEASURED_KEYS:
+        mm = sub.get(k)
+        if not isinstance(mm, dict) or mm.get("status") != "measured":
+            continue
+        measured_rows.append(
+            f"<tr><td>{H(k)}</td>"
+            f"<td><b>{H(mm.get('value', '—'))}</b> {H(mm.get('unit', ''))}</td>"
+            f"<td><code>{H(mm.get('source_group', ''))}/{H(mm.get('source_id', ''))}</code></td>"
+            f"<td class='note'>{H(mm.get('note', ''))}</td></tr>")
+    if measured_rows:
+        substrate_measured = (
+            '<h3>Substrate — MEASURED (through the fabric) '
+            '<span class="badge measured">MEASURED</span></h3>'
+            '<p class="note">Promoted from this run\'s criterion benches — each value '
+            'traces to a real bench result (group/id), not a modeled target:</p>'
+            '<table><tr><th>metric</th><th>value</th><th>provenance (criterion group/id)</th>'
+            '<th>derivation</th></tr>' + "\n".join(measured_rows) + "</table>")
+    else:
+        substrate_measured = (
+            '<p class="note">Substrate tier: no criterion results supplied this run — '
+            'all substrate metrics gated (run the benches + '
+            '<code>scoreboard --criterion-dir target/criterion</code>).</p>')
+    substrate_gated = gated("substrate (remainder)", sub.get("gated", {})) if sub.get("gated") else ""
+
     return f"""<h2>Holonomic storage — survival of the replicated corpus <span class="badge model">MODEL</span></h2>
 <p>The same holographic property runs the "store" half: content is fountain-split into symbols, any
 sufficient subset reconstructs. Policy <code>N={pol.get('n')} K={pol.get('k')} H={pol.get('h')}</code>;
@@ -433,8 +463,11 @@ it byte-identical — <b>MEASURED</b> at <b>99.6%</b> from any 20/30 (33% loss) 
 swarm-availability assumption, not the codec:</p>
 <table><tr><th>per-peer availability q</th><th>regime</th><th>P(reconstruct)</th></tr>{curve}</table>
 <p class="note">A live node recomputes survival from <i>measured</i> q + observed holders and alarms
-under the 99% floor. Substrate/holonomic tiers are explicit <code>gated</code> stubs (not fabricated):</p>
-<ul>{gated('substrate', sb.get('substrate', {}))}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
+under the 99% floor.</p>
+{substrate_measured}
+<p class="note">The remaining substrate metrics and the holonomic tier are explicit <code>gated</code>
+stubs (not fabricated — no bench grounds them yet):</p>
+<ul>{substrate_gated}{gated('holonomic', sb.get('holonomic', {}))}</ul>"""
 
 
 def render_what() -> str:

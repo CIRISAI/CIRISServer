@@ -101,8 +101,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.6.0", features = ["sqlite", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.5.0", features = ["transport-reticulum", "transport-http"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.8.0", features = ["sqlite", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.5.1", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.11.0" }
@@ -162,7 +162,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.6.0", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v8.8.0", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.11.0", version = "5", features = ["tpm"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
@@ -190,7 +190,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.11.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.5.0", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v4.5.1", features = ["codec-fountain"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]

@@ -63,6 +63,19 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // ── ONE shared persist Engine (hybrid hardware signer — hard cut) ─────────
     let engine = build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
 
+    // ── Self-register Node A's own signing key in the federation directory ────
+    // Required BEFORE any attestation Node A authors will be admitted:
+    // `put_attestation` enforces that BOTH the attesting and attested keys exist
+    // as `federation_keys` rows. Node A is a trust-root substrate process, so it
+    // registers itself as identity_type "steward" through the v8.8.0 canonical
+    // admission gate (`Engine::register_federation_key`, CIRISPersist#234 / CEG
+    // 1.0-RC29 §5.6.8.15): self-signed proof-of-possession, hybrid-verified
+    // fail-secure BEFORE store. Idempotent: a matching row returns Ok; a Conflict
+    // (differing row) is benign and logged at debug. This also LOGS A's own
+    // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
+    // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
+    register_self_key(&engine, &cfg).await?;
+
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
     let edge = build_edge(&engine, &cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
@@ -93,6 +106,20 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     let identity_json = local_identity_json(&engine, edge.local_transport_pubkey())
         .await
         .context("assemble /v1/identity aggregate")?;
+
+    // ── Directed-consent federation peering with Node B (ciris-status) ────────
+    // Bidirectional replication A<->B is authorized by DIRECTED CONSENT
+    // ATTESTATIONS (federation scope) + MUTUAL KEY REGISTRATION — NOT in-group
+    // trust (B is out of the canonical CIRIS infrastructure community). Gated on
+    // the optional CIRIS_PEER_B_KEY_ID + CIRIS_PEER_B_KEY_RECORD env (B's own
+    // self-signed SignedKeyRecord as JSON, per the v8.8.0 admission gate); when
+    // unset the node skips peering.
+    // Built BEFORE edge.run() consumes the Edge: the ReplicationRuntime reuses
+    // the SAME Reticulum transport, and `install_replication_routing` wires the
+    // runtime's registry into the Edge's inbound dispatch (so B's replicated
+    // health:liveness lands in A's corpus). The handle is held for the node's
+    // lifetime so the scheduler task isn't dropped.
+    let _replication = setup_peer_replication(&engine, &edge, &cfg).await?;
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
@@ -138,6 +165,29 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
         .context("start read API")?;
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
         Some(read)
+    } else {
+        None
+    };
+
+    // ── Capacity scorer — the score→emit pipeline (periodic, NOT in the ingest
+    //    hot path). Derives per-agent N_eff from ingested traces and emits
+    //    federation-tier `capacity:*` attestations to Node A's own corpus. Only
+    //    when the host carries the local corpus (no corpus ⇒ nothing to score).
+    //    Cadence + window are config-driven (CIRIS_SERVER_SCORER_*). ───────────
+    let _scorer = if caps.lens_store {
+        let scorer_cfg = crate::scorer::ScorerConfig::from_env();
+        tracing::info!(
+            cadence_secs = scorer_cfg.cadence.as_secs(),
+            window = scorer_cfg.window,
+            sample_gate = scorer_cfg.sample_size_gate,
+            target_n_eff = scorer_cfg.target_n_eff,
+            "capacity scorer spawned (score→emit; capacity:sustained_coherence:v1)"
+        );
+        Some(crate::scorer::spawn(
+            Arc::clone(&engine),
+            cfg.key_id.clone(),
+            scorer_cfg,
+        ))
     } else {
         None
     };
@@ -302,6 +352,227 @@ async fn build_engine(
             .await
             .context("build shared persist Engine (hybrid hardware signer)")?;
     Ok(Arc::new(engine))
+}
+
+/// Register Node A's own federation signing key in the federation directory as
+/// identity_type **"steward"** (a trust-root substrate process) through the
+/// **single canonical admission gate** — `Engine::register_federation_key`
+/// (persist v8.8.0, CIRISPersist#234, CEG 1.0-RC29 §5.6.8.15).
+///
+/// We no longer hand-roll `put_public_key`: the gate is fail-secure — it
+/// `verify_key_registration`s the row (hybrid Ed25519+ML-DSA-65, Strict,
+/// proof-of-possession over `ceg_produce_canonicalize(registration_envelope)`
+/// against `scrub_key_id`'s pubkeys, cross-checking `original_content_hash`)
+/// BEFORE any store. For self-registration `scrub_key_id == key_id`, so A proves
+/// possession of its OWN private keys and the verifier reads the pubkeys straight
+/// off the submitted record. The hybrid Engine signs both halves, so the row
+/// lands PQC-complete.
+///
+/// **Canonicalization MUST be `ceg_produce_canonicalize` (V2/JCS)** — the exact
+/// form `verify_key_registration` re-canonicalizes and hashes against. (The older
+/// `canonicalize_envelope_for_signing` is the Python-compat/strip-signature
+/// writer; it would fail the gate's `original_content_hash` cross-check.)
+///
+/// Idempotent like the agent's bootstrap (edge_runtime.py:148): a row that
+/// already matches returns `Ok(())`; an `Err(Conflict(..))` (a *differing* row
+/// already holds this key_id) is benign here (logged at debug) — re-registering
+/// our own stable identity should never legitimately conflict, and we must not
+/// fail boot over a directory race.
+///
+/// This MUST happen before the scorer (or any other Node-A-authored attestation)
+/// can be admitted: `put_attestation` requires the attesting key to exist as a
+/// `federation_keys` row.
+///
+/// On success the (verified) record is **logged at info as JSON** so an operator
+/// can hand A's self-signed `SignedKeyRecord` to peer B — see [`build_self_key_record`].
+async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
+    use ciris_persist::federation::Error as FederationError;
+    use ciris_persist::federation::SignedKeyRecord;
+
+    let record = build_self_key_record(engine, cfg).await?;
+
+    // Export A's own signed record for the operator to hand to peer B (the
+    // cross-repo peering contract: CIRIS_PEER_B_KEY_RECORD = the peer's
+    // SignedKeyRecord as serde_json). Both nodes on persist v8.8.0, so the serde
+    // shape matches byte-for-byte. Logged BEFORE the (idempotent) register so it
+    // is emitted even when the directory row already exists.
+    match serde_json::to_string(&SignedKeyRecord {
+        record: record.clone(),
+    }) {
+        Ok(json) => tracing::info!(
+            key_id = %cfg.key_id,
+            self_key_record = %json,
+            "Node A's self-signed SignedKeyRecord (hand this JSON to peer B as CIRIS_PEER_B_KEY_RECORD)"
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not serialize Node A's self key record for export")
+        }
+    }
+
+    match engine
+        .register_federation_key(SignedKeyRecord { record })
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                key_id = %cfg.key_id,
+                "registered Node A's own steward key via register_federation_key \
+                 (fail-secure admission gate; hybrid, PQC-complete)"
+            );
+            Ok(())
+        }
+        // Conflict = a differing row already holds this key_id. Benign on a
+        // trust-root self-registration (edge_runtime.py:148 treats it the same):
+        // do not fail boot.
+        Err(FederationError::Conflict(msg)) => {
+            tracing::debug!(
+                key_id = %cfg.key_id,
+                conflict = %msg,
+                "self-registration is a benign conflict (key already present) — continuing"
+            );
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("self-register Node A federation key: {e}")),
+    }
+}
+
+/// Build Node A's self-signed [`KeyRecord`](ciris_persist::federation::types::KeyRecord)
+/// — `scrub_key_id == key_id`, hybrid proof-of-possession over
+/// `ceg_produce_canonicalize(registration_envelope)`. This is the exact record
+/// the v8.8.0 admission gate verifies and that A exports for peer B to register.
+pub(crate) async fn build_self_key_record(
+    engine: &Engine,
+    cfg: &ServerConfig,
+) -> Result<ciris_persist::federation::types::KeyRecord> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use ciris_persist::federation::types::{algorithm, KeyRecord};
+    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
+    use sha2::{Digest, Sha256};
+
+    // Registration envelope (the proof-of-possession signing payload). Minimal +
+    // stable. Canonicalized via the CEG PRODUCE gate (V2/JCS) so it matches the
+    // form `verify_key_registration` re-derives and hash-cross-checks.
+    let envelope = serde_json::json!({ "key_id": cfg.key_id });
+    let canonical = ceg_produce_canonicalize(&envelope)
+        .map_err(|e| anyhow::anyhow!("ceg_produce_canonicalize self-registration envelope: {e}"))?;
+    let original_content_hash = hex::encode(Sha256::digest(&canonical));
+
+    // Hybrid-sign the canonical bytes (Ed25519 hardware-sealed + ML-DSA-65; the
+    // PQC half is bound over canonical || classical_sig inside sign_hybrid). The
+    // signature carries both pubkeys, so the registered row is PQC-complete.
+    let sig = engine
+        .sign_hybrid(&canonical)
+        .await
+        .context("hybrid-sign self-registration envelope")?;
+
+    let now = chrono::Utc::now();
+    Ok(KeyRecord {
+        key_id: cfg.key_id.clone(),
+        pubkey_ed25519_base64: B64.encode(&sig.classical.public_key),
+        pubkey_ml_dsa_65_base64: Some(B64.encode(&sig.pqc.public_key)),
+        algorithm: algorithm::HYBRID.to_owned(),
+        // Node A is a trust-root substrate process → "steward" (published vocab).
+        identity_type: "steward".to_owned(),
+        identity_ref: cfg.key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash,
+        scrub_signature_classical: B64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
+        // Self-signed proof-of-possession: scrub_key_id == key_id.
+        scrub_key_id: cfg.key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(), // server-computed on insert
+        roles: Vec::new(),
+        attestation_evidence: None,
+    })
+}
+
+/// Set up directed-consent replication with Node B (`ciris-status`), if the
+/// `CIRIS_PEER_B_*` env (KEY_ID + KEY_RECORD) is configured. Returns the live
+/// [`ReplicationRuntime`] handle (held by the caller for the node's lifetime so
+/// its scheduler task is not dropped), or `None` when no peer is configured /
+/// the host carries no local corpus.
+///
+/// Steps (Node A side of the shared wire contract):
+///   1. **Admission** — register B's published hybrid key (identity_type
+///      `"witness"`) so B's replicated `health:liveness:*` is admitted.
+///   2. **Consent** — emit the directed `consent:replication:v1` grant at B
+///      (idempotent; the auditable "A consents to replicate capacity:* to B").
+///   3. **Replication** — start a [`ReplicationRuntime`] (peer = B, kind =
+///      `EnvelopeKind::Attestation`, which carries BOTH directions' attestations:
+///      `capacity:*` out, `health:liveness` in) over the SAME Reticulum
+///      transport the Edge already built, then `install_replication_routing` so
+///      the Edge's inbound dispatch routes B's CRPL frames into the runtime's
+///      registry (CIRISEdge#119) — B's `health:liveness` lands in A's corpus.
+///
+/// MUST run BEFORE `edge.run()` consumes the Edge:
+/// `install_replication_routing` is a set-once `OnceLock` consulted by the
+/// inbound loop, and `reticulum_transport()` must be cloned off the live Edge.
+async fn setup_peer_replication(
+    engine: &Arc<Engine>,
+    edge: &Edge,
+    cfg: &ServerConfig,
+) -> Result<Option<ciris_edge::replication::ReplicationRuntime>> {
+    use ciris_edge::replication::{
+        EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig,
+    };
+    use ciris_persist::federation::FederationDirectory;
+
+    let Some(peer) = cfg.peer_b.as_ref() else {
+        tracing::info!(
+            "no CIRIS_PEER_B_* configured — directed-consent replication disabled (single-node)"
+        );
+        return Ok(None);
+    };
+
+    // 1. Admission: register B's witness key (benign Conflict).
+    crate::peer::register_peer_key(engine, peer).await?;
+
+    // 2. Consent: emit the directed consent:replication:v1 grant at B (idempotent).
+    crate::peer::emit_replication_consent(engine, &cfg.key_id, &peer.key_id).await?;
+
+    // 3. Replication: reuse the Edge's Reticulum transport for the runtime.
+    let Some(transport) = edge.reticulum_transport() else {
+        tracing::warn!(
+            "Edge has no Reticulum transport — cannot start replication runtime (peer configured \
+             but no transport)"
+        );
+        return Ok(None);
+    };
+    let directory: Arc<dyn FederationDirectory> = engine
+        .sqlite_backend()
+        .context("replication runtime requires a SQLite-backed Engine")?
+        .clone();
+
+    let peers = vec![ReplicationPeer {
+        peer_key_id: peer.key_id.clone(),
+        // EnvelopeKind::Attestation carries BOTH directions: A's capacity:*
+        // attestations out, B's health:liveness attestations in.
+        kind: EnvelopeKind::Attestation,
+    }];
+    let runtime = ReplicationRuntime::start(
+        directory,
+        transport as Arc<dyn ciris_edge::transport::Transport>,
+        peers,
+        ReplicationRuntimeConfig::default(),
+    )
+    .await;
+
+    // Wire the runtime's registry into the Edge's inbound dispatch (CIRISEdge#119):
+    // inbound CRPL frames from B route to the matching coordinator → B's
+    // health:liveness is applied to A's corpus via the directory put_* admits.
+    edge.install_replication_routing(&runtime);
+
+    tracing::info!(
+        peer_key_id = %peer.key_id,
+        kind = "attestation",
+        "directed-consent replication runtime started + routed into the shared Edge"
+    );
+    Ok(Some(runtime))
 }
 
 /// The one shared **Reticulum** edge runtime over the Engine's `SqliteBackend`

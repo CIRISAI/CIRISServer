@@ -7,6 +7,8 @@
 //! availability `q`; left `None` they yield a pure modeled scoreboard for CI.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Fountain replication policy. `n` = symbols required to reconstruct (content is
 /// split into `n` symbols, each ~`1/n` of the content); `h` = distinct holders
@@ -161,13 +163,129 @@ pub struct GatedTier {
     pub metrics: Vec<&'static str>,
 }
 
+/// A metric grounded in a REAL criterion benchmark result. Every field traces a
+/// number back to the bench that produced it — `source_group`/`source_id` name the
+/// exact criterion group + benchmark id (`target/criterion/<group>/<id>/`), so the
+/// published page can show "numbers through the fabric" without anyone able to
+/// fabricate one (no bench → no `MeasuredMetric`, the metric stays gated). The
+/// `status` field is always `"measured"` so bench_report.py can switch on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MeasuredMetric {
+    pub status: &'static str,
+    pub value: f64,
+    pub unit: &'static str,
+    /// Criterion group (e.g. `av_frame_halves`).
+    pub source_group: &'static str,
+    /// Criterion benchmark id within the group (e.g. `open/16384`).
+    pub source_id: String,
+    /// Human note explaining the derivation (units, what the number means).
+    pub note: &'static str,
+}
+
+impl MeasuredMetric {
+    fn new(
+        value: f64,
+        unit: &'static str,
+        source_group: &'static str,
+        source_id: String,
+        note: &'static str,
+    ) -> Self {
+        MeasuredMetric {
+            status: "measured",
+            value,
+            unit,
+            source_group,
+            source_id,
+            note,
+        }
+    }
+}
+
+/// The substrate tier (AEAD / ALM-relay / replication / stream-fanout). Unlike a
+/// pure [`GatedTier`], this tier is a HYBRID: the four metrics a bench really
+/// measures are promoted to [`MeasuredMetric`] when criterion results are supplied
+/// (`scoreboard --criterion-dir …`), while the remainder that no bench grounds
+/// stays in an honest [`GatedTier`]. With no measurements supplied every measured
+/// slot is `None` → the whole tier reads as gated/modeled (CI for non-bench
+/// contexts and the existing tests stay green).
+#[derive(Debug, Clone, Serialize)]
+pub struct SubstrateTier {
+    /// AEAD open throughput per core — receivers pay open; from `av_frame_halves`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aead_throughput_per_core: Option<MeasuredMetric>,
+    /// Per-relay-hop ALM cost; from `alm_chain_hop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alm_tree_depth_vs_n: Option<MeasuredMetric>,
+    /// Traces/sec a node absorbs; from `replication_ingest/ingest_new`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_ingest_per_sec: Option<MeasuredMetric>,
+    /// Core-fraction to seal N streams at 30 fps; from `stream_fanout_seal_tick`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_fanout_core_frac: Option<MeasuredMetric>,
+    /// The honestly-unmeasured remainder of the substrate tier.
+    pub gated: GatedTier,
+}
+
+impl SubstrateTier {
+    /// The all-gated tier (no benches supplied): every measured slot empty, the
+    /// gated remainder lists every substrate metric. This is what a non-bench
+    /// `scoreboard` invocation emits.
+    fn gated() -> Self {
+        SubstrateTier {
+            aead_throughput_per_core: None,
+            alm_tree_depth_vs_n: None,
+            replication_ingest_per_sec: None,
+            stream_fanout_core_frac: None,
+            gated: GatedTier {
+                status: "gated",
+                gated_on: "no criterion results supplied (run `cargo bench` + \
+                           `scoreboard --criterion-dir target/criterion`)",
+                metrics: vec![
+                    "aead_throughput_per_core",
+                    "alm_tree_depth_vs_n",
+                    "replication_ingest_per_sec",
+                    "stream_fanout_core_frac",
+                    "mls_commit_barrier",
+                    "cold_join_burst_latency",
+                ],
+            },
+        }
+    }
+
+    /// The gated remainder once some metrics may have been promoted to measured:
+    /// only metrics with NO bench stay here, plus any measured metric whose
+    /// criterion result was absent on this run (handled by the caller leaving its
+    /// slot `None`). `mls_commit_barrier`/`cold_join_burst_latency` are ALWAYS here
+    /// — no MLS-commit or cold-join-latency bench exists yet.
+    fn remainder_gated(missing: &[&'static str]) -> GatedTier {
+        let mut metrics: Vec<&'static str> = missing.to_vec();
+        metrics.push("mls_commit_barrier");
+        metrics.push("cold_join_burst_latency");
+        GatedTier {
+            status: "gated",
+            gated_on: "no MLS-commit / cold-join-latency bench yet (the four \
+                       throughput metrics above are measured through the fabric \
+                       when criterion results are supplied)",
+            metrics,
+        }
+    }
+
+    #[cfg(test)]
+    fn any_measured(&self) -> bool {
+        self.aead_throughput_per_core.is_some()
+            || self.alm_tree_depth_vs_n.is_some()
+            || self.replication_ingest_per_sec.is_some()
+            || self.stream_fanout_core_frac.is_some()
+    }
+}
+
 /// The full operator scoreboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct Scoreboard {
     pub schema: &'static str,
     pub policy: FountainPolicy,
     pub storage: StorageTier,
-    pub substrate: GatedTier,
+    pub substrate: SubstrateTier,
     pub holonomic: GatedTier,
 }
 
@@ -239,16 +357,7 @@ impl Scoreboard {
             schema: "ciris-server/holonomic-scoreboard/1",
             policy,
             storage,
-            substrate: GatedTier {
-                status: "gated",
-                gated_on: "edge v4.1.1 NETWORK_CAPACITY_MODEL.md + benches (CIRISEdge PR#147)",
-                metrics: vec![
-                    "aead_throughput_per_core",
-                    "alm_tree_depth_vs_n",
-                    "mls_commit_barrier",
-                    "cold_join_burst_latency",
-                ],
-            },
+            substrate: SubstrateTier::gated(),
             holonomic: GatedTier {
                 status: "gated",
                 gated_on: "fountain/holonomic API wiring (CIRISServer#11) + CIRISRegistry#88 composite model",
@@ -272,6 +381,29 @@ impl Scoreboard {
         self
     }
 
+    /// Overlay REAL substrate measurements read from a criterion output directory
+    /// (`target/criterion`). Each metric is derived from its bench's median time
+    /// estimate (`<group>/<id>/new/estimates.json` → `median.point_estimate`, ns)
+    /// plus the bench's declared throughput. A metric whose criterion result is
+    /// absent stays gated (honest — "bench not run"); the always-ungrounded
+    /// `mls_commit_barrier` / `cold_join_burst_latency` stay gated unconditionally.
+    pub fn with_criterion_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        let est = CriterionEstimates::load(dir.as_ref());
+        self.substrate = build_substrate(&est);
+        self
+    }
+
+    /// Overlay substrate measurements from a pre-extracted map of
+    /// `"<group>/<id>" → median_ns` (the same data `with_criterion_dir` reads off
+    /// disk; this is the seam the tests drive without writing fixture files).
+    pub fn with_measurements(mut self, medians_ns: &BTreeMap<String, f64>) -> Self {
+        let est = CriterionEstimates {
+            medians_ns: medians_ns.clone(),
+        };
+        self.substrate = build_substrate(&est);
+        self
+    }
+
     /// True if any grounded metric is in an alarm state (drives operator alerts).
     pub fn alarming(&self) -> bool {
         self.storage.replication_overhead.alarming()
@@ -285,6 +417,186 @@ impl Scoreboard {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("scoreboard serializes")
     }
+}
+
+// ── Criterion ingestion: real bench numbers → measured substrate metrics ──────
+//
+// We read criterion's OWN stable JSON (`target/criterion/<group>/<id>/new/
+// estimates.json`, where `median.point_estimate` is the median time/iter in ns)
+// rather than re-running benches in-process — the published number is then exactly
+// the one criterion reported on the bench runner.
+
+const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+/// 30 fps frame tick — the rate `stream_fanout` seals N streams at.
+const FPS: f64 = 30.0;
+
+// Representative criterion ids the four measured metrics derive from. These are
+// the provenance strings recorded on each `MeasuredMetric`.
+/// AEAD: receiver open-only, typical 720p inter-frame (16 KiB) — receivers pay open.
+const AEAD_GROUP: &str = "av_frame_halves";
+const AEAD_ID: &str = "open/16384";
+const AEAD_FRAME_BYTES: f64 = 16.0 * 1024.0;
+/// ALM relay: one hop at the blob size (208 B, ~50 kbps blinking-dot @30fps).
+const ALM_GROUP: &str = "alm_chain_hop";
+const ALM_ID: &str = "208";
+/// FSD §3: a 2,000-room is a 3–4-tier ALM tree — report the 4-tier per-frame cost.
+const ALM_DEPTH_TIERS: f64 = 4.0;
+/// Replication: fresh-trace ingest (replication speed).
+const REPL_GROUP: &str = "replication_ingest";
+const REPL_ID: &str = "ingest_new";
+/// Stream fan-out: seal N=2,000 distinct blob streams for one 30fps tick.
+const FANOUT_GROUP: &str = "stream_fanout_seal_tick";
+const FANOUT_ID: &str = "2000";
+
+/// Median time/iter (ns) for each criterion `"<group>/<id>"` benchmark.
+struct CriterionEstimates {
+    medians_ns: BTreeMap<String, f64>,
+}
+
+impl CriterionEstimates {
+    /// Walk `dir` for `**/new/estimates.json`, keying each by its `<group>/<id>`
+    /// path relative to `dir` and recording `median.point_estimate` (ns).
+    fn load(dir: &Path) -> Self {
+        let mut medians_ns = BTreeMap::new();
+        Self::walk(dir, dir, &mut medians_ns);
+        CriterionEstimates { medians_ns }
+    }
+
+    fn walk(root: &Path, cur: &Path, out: &mut BTreeMap<String, f64>) {
+        let Ok(entries) = std::fs::read_dir(cur) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                Self::walk(root, &path, out);
+            } else if path.file_name().and_then(|f| f.to_str()) == Some("estimates.json") {
+                // .../<group>/<id>/new/estimates.json → key = "<group>/<id>".
+                let Some(new_dir) = path.parent() else {
+                    continue;
+                };
+                if new_dir.file_name().and_then(|f| f.to_str()) != Some("new") {
+                    continue;
+                }
+                let Some(id_dir) = new_dir.parent() else {
+                    continue;
+                };
+                let Ok(rel) = id_dir.strip_prefix(root) else {
+                    continue;
+                };
+                let key = rel.to_string_lossy().replace('\\', "/");
+                if key.starts_with("report") {
+                    continue;
+                }
+                if let Some(ns) = read_median_ns(&path) {
+                    out.insert(key, ns);
+                }
+            }
+        }
+    }
+
+    fn median_ns(&self, group: &str, id: &str) -> Option<f64> {
+        self.medians_ns.get(&format!("{group}/{id}")).copied()
+    }
+}
+
+/// Read `median.point_estimate` (ns) from a criterion `estimates.json`.
+fn read_median_ns(path: &Path) -> Option<f64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("median")?.get("point_estimate")?.as_f64()
+}
+
+/// Build the substrate tier from criterion estimates: promote each metric whose
+/// bench ran to a [`MeasuredMetric`]; leave the rest gated. Honest by construction
+/// — a metric exists only if its criterion result does.
+fn build_substrate(est: &CriterionEstimates) -> SubstrateTier {
+    let mut tier = SubstrateTier {
+        aead_throughput_per_core: None,
+        alm_tree_depth_vs_n: None,
+        replication_ingest_per_sec: None,
+        stream_fanout_core_frac: None,
+        gated: GatedTier {
+            status: "gated",
+            gated_on: "",
+            metrics: vec![],
+        },
+    };
+    let mut missing: Vec<&'static str> = Vec::new();
+
+    // aead_throughput_per_core: bytes/s = frame_bytes / (median_ns × 1e-9) → GiB/s.
+    match est.median_ns(AEAD_GROUP, AEAD_ID) {
+        Some(ns) if ns > 0.0 => {
+            let gib_s = (AEAD_FRAME_BYTES / (ns * 1e-9)) / BYTES_PER_GIB;
+            tier.aead_throughput_per_core = Some(MeasuredMetric::new(
+                round2(gib_s),
+                "GiB/s/core",
+                AEAD_GROUP,
+                AEAD_ID.to_string(),
+                "AEAD open throughput per core (receiver open-only, 16 KiB 720p \
+                 inter-frame): frame_bytes ÷ median time/iter",
+            ));
+        }
+        _ => missing.push("aead_throughput_per_core"),
+    }
+
+    // alm_tree_depth_vs_n: per-hop median ns, plus per-frame cost at FSD §3 depth.
+    match est.median_ns(ALM_GROUP, ALM_ID) {
+        Some(ns) if ns > 0.0 => {
+            let per_frame_at_depth_us = (ns * ALM_DEPTH_TIERS) / 1_000.0;
+            tier.alm_tree_depth_vs_n = Some(MeasuredMetric::new(
+                round2(per_frame_at_depth_us),
+                "µs/frame @ 4-tier depth (per-hop = value ÷ 4)",
+                ALM_GROUP,
+                ALM_ID.to_string(),
+                "ALM relay per-frame CPU cost for a 2,000-room (FSD §3: 3–4-tier \
+                 tree): per-hop median (208 B blob) × 4 tiers",
+            ));
+        }
+        _ => missing.push("alm_tree_depth_vs_n"),
+    }
+
+    // replication_ingest_per_sec: traces/sec = 1e9 / median_ns (Throughput::Elements(1)).
+    match est.median_ns(REPL_GROUP, REPL_ID) {
+        Some(ns) if ns > 0.0 => {
+            tier.replication_ingest_per_sec = Some(MeasuredMetric::new(
+                round2(1e9 / ns),
+                "traces/s/core",
+                REPL_GROUP,
+                REPL_ID.to_string(),
+                "Replication ingest rate (fresh signed trace: verify → decompose \
+                 → persist): 1e9 ÷ median time/iter",
+            ));
+        }
+        _ => missing.push("replication_ingest_per_sec"),
+    }
+
+    // stream_fanout_core_frac: core fraction = (median_ns × 1e-9) × 30 fps for N=2000.
+    match est.median_ns(FANOUT_GROUP, FANOUT_ID) {
+        Some(ns) if ns > 0.0 => {
+            let core_frac = (ns * 1e-9) * FPS;
+            tier.stream_fanout_core_frac = Some(MeasuredMetric::new(
+                round4(core_frac),
+                "core-fraction @ N=2000, 30fps",
+                FANOUT_GROUP,
+                FANOUT_ID.to_string(),
+                "Publisher CPU to seal 2,000 blob streams per 30fps tick: \
+                 (median time/iter in s) × 30 fps = fraction of one core",
+            ));
+        }
+        _ => missing.push("stream_fanout_core_frac"),
+    }
+
+    tier.gated = SubstrateTier::remainder_gated(&missing);
+    tier
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
 }
 
 #[cfg(test)]
@@ -370,5 +682,99 @@ mod tests {
         assert!(j.contains("holonomic-scoreboard/1"));
         assert!(j.contains("survival_curve"));
         assert!(j.contains("gated"));
+    }
+
+    #[test]
+    fn substrate_stays_gated_without_measurements() {
+        // No criterion results → every measured slot empty, the tier reads gated.
+        let board = Scoreboard::modeled(FountainPolicy::REFERENCE);
+        assert!(board.substrate.aead_throughput_per_core.is_none());
+        assert!(board.substrate.alm_tree_depth_vs_n.is_none());
+        assert!(board.substrate.replication_ingest_per_sec.is_none());
+        assert!(board.substrate.stream_fanout_core_frac.is_none());
+        assert_eq!(board.substrate.gated.status, "gated");
+        assert!(!board.substrate.any_measured());
+        // The serialized JSON must NOT advertise a measured substrate metric.
+        let j = board.to_json();
+        assert!(!j.contains("\"status\": \"measured\""), "{j}");
+    }
+
+    #[test]
+    fn measurements_populate_and_serialize_substrate() {
+        // Drive the same seam `with_criterion_dir` uses, with realistic median ns.
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("av_frame_halves/open/16384".to_string(), 1_500.0); // ns
+        m.insert("alm_chain_hop/208".to_string(), 120.0);
+        m.insert("replication_ingest/ingest_new".to_string(), 200_000.0);
+        m.insert("stream_fanout_seal_tick/2000".to_string(), 350_000.0);
+
+        let board = Scoreboard::modeled(FountainPolicy::REFERENCE).with_measurements(&m);
+
+        // AEAD: 16384 B / 1500 ns = ~10.18 GiB/s.
+        let aead = board.substrate.aead_throughput_per_core.as_ref().unwrap();
+        assert_eq!(aead.status, "measured");
+        assert_eq!(aead.source_group, "av_frame_halves");
+        assert_eq!(aead.source_id, "open/16384");
+        assert!(approx(aead.value, 10.18, 0.05), "aead {}", aead.value);
+
+        // ALM: 120 ns/hop × 4 tiers = 480 ns = 0.48 µs/frame.
+        let alm = board.substrate.alm_tree_depth_vs_n.as_ref().unwrap();
+        assert_eq!(alm.source_group, "alm_chain_hop");
+        assert_eq!(alm.source_id, "208");
+        assert!(approx(alm.value, 0.48, 1e-6), "alm {}", alm.value);
+
+        // Replication: 1e9 / 200000 ns = 5000 traces/s.
+        let repl = board.substrate.replication_ingest_per_sec.as_ref().unwrap();
+        assert_eq!(repl.source_id, "ingest_new");
+        assert!(approx(repl.value, 5000.0, 1.0), "repl {}", repl.value);
+
+        // Fan-out: 350000 ns = 350 µs; ×30 fps = 0.0105 core-fraction.
+        let fan = board.substrate.stream_fanout_core_frac.as_ref().unwrap();
+        assert_eq!(fan.source_group, "stream_fanout_seal_tick");
+        assert!(approx(fan.value, 0.0105, 1e-6), "fan {}", fan.value);
+
+        // Provenance must survive serialization; mls/cold-join stay gated.
+        let j = board.to_json();
+        assert!(j.contains("\"status\": \"measured\""));
+        assert!(j.contains("av_frame_halves"));
+        assert!(j.contains("mls_commit_barrier"));
+        assert!(j.contains("cold_join_burst_latency"));
+        assert!(board
+            .substrate
+            .gated
+            .metrics
+            .contains(&"mls_commit_barrier"));
+    }
+
+    #[test]
+    fn absent_criterion_result_falls_back_to_gated() {
+        // Only one bench ran → only that metric is measured; the rest stay gated.
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("replication_ingest/ingest_new".to_string(), 200_000.0);
+        let board = Scoreboard::modeled(FountainPolicy::REFERENCE).with_measurements(&m);
+        assert!(board.substrate.replication_ingest_per_sec.is_some());
+        assert!(board.substrate.aead_throughput_per_core.is_none());
+        // The un-run measured metrics fall into the gated remainder, honestly.
+        assert!(board
+            .substrate
+            .gated
+            .metrics
+            .contains(&"aead_throughput_per_core"));
+        assert!(board
+            .substrate
+            .gated
+            .metrics
+            .contains(&"stream_fanout_core_frac"));
+    }
+
+    #[test]
+    fn holonomic_tier_stays_gated() {
+        // The entire holonomic tier is unchanged — no bench grounds it.
+        let board = Scoreboard::modeled(FountainPolicy::REFERENCE);
+        assert_eq!(board.holonomic.status, "gated");
+        assert!(board
+            .holonomic
+            .metrics
+            .contains(&"wholeness_witness_reconciliation"));
     }
 }

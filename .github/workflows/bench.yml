@@ -54,7 +54,11 @@ jobs:
       - name: Run benches (criterion)
         run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain --bench stream_fanout
       - name: Generate holonomic scoreboard (CIRISServer#12/#13)
-        run: cargo run --release --quiet -- scoreboard > scoreboard.json
+        # Pass the criterion dir so the substrate tier is promoted to MEASURED from
+        # the real bench numbers above ("numbers through the fabric"); metrics with
+        # no bench (mls_commit/cold-join, the holonomic tier) stay honestly gated.
+        # Publish-only — not a pass/fail gate (shared runners are noisy).
+        run: cargo run --release --quiet -- scoreboard --criterion-dir target/criterion > scoreboard.json
       - name: Generate interpreted page
         run: |
           BENCH_DATE="$(date -u +%Y-%m-%d)" \
