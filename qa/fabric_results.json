@@ -1,0 +1,627 @@
+[
+  {
+    "module": "auth",
+    "name": "Login with valid credentials",
+    "method": "POST",
+    "endpoint": "/v1/auth/login",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200,
+      "duration": 0.008859395980834961
+    }
+  },
+  {
+    "module": "auth",
+    "name": "Login with invalid credentials",
+    "method": "POST",
+    "endpoint": "/v1/auth/login",
+    "expected_status": 401,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 401,
+      "duration": 0.008861541748046875
+    }
+  },
+  {
+    "module": "auth",
+    "name": "Get current user",
+    "method": "GET",
+    "endpoint": "/v1/auth/me",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200,
+      "duration": 0.0004687309265136719
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK login flow",
+    "method": "POST",
+    "endpoint": "/v1/auth/login",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200,
+      "duration": 0.008777379989624023
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK token refresh",
+    "method": "POST",
+    "endpoint": "/v1/auth/refresh",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200,
+      "duration": 0.000591278076171875
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK error response format",
+    "method": "GET",
+    "endpoint": "/v1/nonexistent",
+    "expected_status": 404,
+    "fabric": false,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 404,
+      "duration": 0.0005266666412353516
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK validation error",
+    "method": "POST",
+    "endpoint": "/v1/agent/interact",
+    "expected_status": 422,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 422,
+      "error": "",
+      "duration": 0.2017819881439209
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK system status",
+    "method": "GET",
+    "endpoint": "/v1/system/health",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20166921615600586
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK pagination",
+    "method": "GET",
+    "endpoint": "/v1/audit/entries?limit=10",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20218896865844727
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK nested object handling",
+    "method": "POST",
+    "endpoint": "/v1/agent/interact",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20168733596801758
+    }
+  },
+  {
+    "module": "sdk",
+    "name": "SDK agent stream endpoint check",
+    "method": "WEBSOCKET",
+    "endpoint": "/v1/agent/stream",
+    "expected_status": 101,
+    "fabric": false,
+    "verdict": "SKIP",
+    "info": {
+      "status_code": null,
+      "note": "websocket (skipped: not served by fabric)"
+    }
+  },
+  {
+    "module": "telemetry",
+    "name": "Unified telemetry",
+    "method": "GET",
+    "endpoint": "/v1/telemetry/unified",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20168352127075195
+    }
+  },
+  {
+    "module": "telemetry",
+    "name": "Service health",
+    "method": "GET",
+    "endpoint": "/v1/system/services",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20188069343566895
+    }
+  },
+  {
+    "module": "telemetry",
+    "name": "System metrics",
+    "method": "GET",
+    "endpoint": "/v1/telemetry/metrics",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20200538635253906
+    }
+  },
+  {
+    "module": "telemetry",
+    "name": "Resource usage",
+    "method": "GET",
+    "endpoint": "/v1/telemetry/resources",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20184564590454102
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Agent status",
+    "method": "GET",
+    "endpoint": "/v1/agent/status",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20233440399169922
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Simple interaction",
+    "method": "POST",
+    "endpoint": "/v1/agent/interact",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20154547691345215
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Complex interaction",
+    "method": "POST",
+    "endpoint": "/v1/agent/interact",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2018897533416748
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Interaction history",
+    "method": "GET",
+    "endpoint": "/v1/agent/history",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20162343978881836
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Message submission - immediate return",
+    "method": "POST",
+    "endpoint": "/v1/agent/message",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20168495178222656
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Message submission - task tracking",
+    "method": "POST",
+    "endpoint": "/v1/agent/message",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2016615867614746
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Message submission - with context",
+    "method": "POST",
+    "endpoint": "/v1/agent/message",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2013847827911377
+    }
+  },
+  {
+    "module": "agent",
+    "name": "Message submission - status check",
+    "method": "POST",
+    "endpoint": "/v1/agent/message",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.201521635055542
+    }
+  },
+  {
+    "module": "system",
+    "name": "System health",
+    "method": "GET",
+    "endpoint": "/v1/system/health",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20160174369812012
+    }
+  },
+  {
+    "module": "system",
+    "name": "List adapters",
+    "method": "GET",
+    "endpoint": "/v1/system/adapters",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20151090621948242
+    }
+  },
+  {
+    "module": "system",
+    "name": "List module types",
+    "method": "GET",
+    "endpoint": "/v1/system/adapters/types",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20162606239318848
+    }
+  },
+  {
+    "module": "system",
+    "name": "Processing queue status",
+    "method": "GET",
+    "endpoint": "/v1/system/runtime/queue",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20129942893981934
+    }
+  },
+  {
+    "module": "system",
+    "name": "System configuration",
+    "method": "GET",
+    "endpoint": "/v1/config",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20169448852539062
+    }
+  },
+  {
+    "module": "memory",
+    "name": "Memory search",
+    "method": "POST",
+    "endpoint": "/v1/memory/query",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20148086547851562
+    }
+  },
+  {
+    "module": "memory",
+    "name": "Memory statistics",
+    "method": "GET",
+    "endpoint": "/v1/memory/stats",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.201460599899292
+    }
+  },
+  {
+    "module": "memory",
+    "name": "Store memory",
+    "method": "POST",
+    "endpoint": "/v1/memory/store",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20218753814697266
+    }
+  },
+  {
+    "module": "audit",
+    "name": "List audit entries",
+    "method": "GET",
+    "endpoint": "/v1/audit/entries",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20160293579101562
+    }
+  },
+  {
+    "module": "audit",
+    "name": "Search audit entries",
+    "method": "POST",
+    "endpoint": "/v1/audit/search",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2016911506652832
+    }
+  },
+  {
+    "module": "audit",
+    "name": "Export audit data",
+    "method": "POST",
+    "endpoint": "/v1/audit/export",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20160841941833496
+    }
+  },
+  {
+    "module": "tools",
+    "name": "List available tools",
+    "method": "GET",
+    "endpoint": "/v1/system/tools",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2017536163330078
+    }
+  },
+  {
+    "module": "guidance",
+    "name": "Request guidance",
+    "method": "POST",
+    "endpoint": "/v1/wa/guidance",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.2014467716217041
+    }
+  },
+  {
+    "module": "guidance",
+    "name": "Get deferrals (guidance history)",
+    "method": "GET",
+    "endpoint": "/v1/wa/deferrals",
+    "expected_status": 200,
+    "fabric": false,
+    "verdict": "N-A ",
+    "info": {
+      "status_code": 404,
+      "expected_status": 200,
+      "error": "",
+      "duration": 0.20152688026428223
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "POST /v1/auth/consent",
+    "method": "POST",
+    "endpoint": "/v1/auth/consent",
+    "expected_status": 401,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 401
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "POST /v1/auth/erasure",
+    "method": "POST",
+    "endpoint": "/v1/auth/erasure",
+    "expected_status": 401,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 401
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "POST /v1/auth/attestation",
+    "method": "POST",
+    "endpoint": "/v1/auth/attestation",
+    "expected_status": 401,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 401
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "POST /v1/self/login",
+    "method": "POST",
+    "endpoint": "/v1/self/login",
+    "expected_status": 401,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 401
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "GET /v1/identity",
+    "method": "GET",
+    "endpoint": "/v1/identity",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "GET /v1/auth/oauth/providers",
+    "method": "GET",
+    "endpoint": "/v1/auth/oauth/providers",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200
+    }
+  },
+  {
+    "module": "ceg-native-fabric",
+    "name": "GET /v1/auth/owner-hint",
+    "method": "GET",
+    "endpoint": "/v1/auth/owner-hint",
+    "expected_status": 200,
+    "fabric": true,
+    "verdict": "PASS",
+    "info": {
+      "status_code": 200
+    }
+  }
+]

@@ -1,0 +1,1562 @@
+"""
+Mobile QA Runner CLI entry point.
+
+Usage:
+    python -m tools.qa_runner.modules.mobile [command] [options]
+
+Commands:
+    test [tests]      - Run UI automation tests (default)
+    pull-logs         - Pull device logs and files for debugging
+    go-screen         - Navigate to a specific app screen and take a screenshot
+    build             - Build and deploy iOS/Android app
+
+Examples:
+    # Run full flow test with test account
+    python -m tools.qa_runner.modules.mobile test full_flow --email ciristest1@gmail.com
+
+    # Run just app launch test
+    python -m tools.qa_runner.modules.mobile test app_launch
+
+    # Run with specific device
+    python -m tools.qa_runner.modules.mobile test full_flow -d emulator-5554
+
+    # Pull device logs
+    python -m tools.qa_runner.modules.mobile pull-logs
+    python -m tools.qa_runner.modules.mobile pull-logs -d R5CRC3BWLRZ -o ./my_logs
+
+    # Navigate to a screen and take screenshot
+    python -m tools.qa_runner.modules.mobile go-screen billing
+    python -m tools.qa_runner.modules.mobile go-screen telemetry -o ./screenshots
+
+    # Build and deploy iOS app
+    python -m tools.qa_runner.modules.mobile build --platform ios
+    python -m tools.qa_runner.modules.mobile build --platform ios --device DEVICE_UDID
+    python -m tools.qa_runner.modules.mobile build --platform ios --simulator
+"""
+
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# Add parent paths for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from tools.qa_runner.modules.mobile.adb_helper import ADBHelper
+from tools.qa_runner.modules.mobile.device_helper import DeviceHelper, Platform, create_device_helper, detect_platform
+from tools.qa_runner.modules.mobile.test_runner import MobileTestConfig, MobileTestRunner
+from tools.qa_runner.modules.mobile.ui_automator import UIAutomator
+
+# Preferred Android device serial - older Samsung without StrongBox, good for testing
+# hardware security fallbacks. When multiple devices are connected, prefer this one.
+PREFERRED_ANDROID_DEVICE = "330016f5b40463cd"
+
+# ========== Screen Registry ==========
+# Extensible registry of app screens and how to navigate to them
+# Format: screen_name -> (menu_text, content_desc, description)
+# menu_text: Text to click in the overflow menu (Settings/Telemetry/etc.)
+# content_desc: Content description to find (for hamburger menu items)
+# description: Human-readable description of the screen
+
+SCREEN_REGISTRY: Dict[str, Tuple[str, Optional[str], str]] = {
+    "interact": (None, None, "Main chat/interaction screen (default)"),
+    "settings": ("Settings", "Settings", "App settings screen"),
+    "billing": ("Buy Credits", "Buy Credits", "Purchase credits screen"),
+    "telemetry": ("Telemetry", "Telemetry", "System telemetry/metrics screen"),
+    "sessions": ("Sessions", "Sessions", "Active sessions screen"),
+    "adapters": ("Adapters", "Adapters", "Adapter management screen"),
+    "wise_authority": ("Wise Authority", "Wise Authority", "Wise Authority deferrals screen"),
+    "audit": ("Audit Trail", "Audit Trail", "System audit trail viewer screen"),
+    "logs": ("Logs", "Logs", "System logs viewer screen"),
+    "memory": ("Memory", "Memory", "Memory/graph database viewer screen"),
+    "config": ("Config", "Config", "Configuration management screen"),
+    "consent": ("Consent", "Consent", "User consent/GDPR management screen"),
+    "system": ("System", "System", "System management/control screen"),
+    "services": ("Services", "Services", "Service status management screen"),
+    "runtime": ("Runtime", "Runtime", "Runtime control panel screen"),
+    "trust": ("Trust and Security", "Trust and Security", "CIRISVerify trust & security attestation screen"),
+}
+
+
+def register_screen(name: str, menu_text: Optional[str], content_desc: Optional[str], description: str) -> None:
+    """
+    Register a new screen for go-screen navigation.
+
+    Args:
+        name: Short name for the screen (used as CLI argument)
+        menu_text: Text to click in the menu to navigate to this screen
+        content_desc: Content description of the menu item (alternative to text)
+        description: Human-readable description
+    """
+    SCREEN_REGISTRY[name] = (menu_text, content_desc, description)
+
+
+def load_secret_file(path: str) -> str:
+    """Load secret from file, stripping whitespace."""
+    expanded = os.path.expanduser(path)
+    if os.path.exists(expanded):
+        with open(expanded) as f:
+            return f.read().strip()
+    return ""
+
+
+def pull_logs_command(args) -> int:
+    """Handle the pull-logs subcommand."""
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile Device Log Collector")
+    print("=" * 60 + "\n")
+
+    # Determine platform
+    platform = getattr(args, "platform", "auto")
+    if platform == "auto":
+        # Try physical iOS devices first (preferred over simulators)
+        try:
+            from .ios.idevice_helper import IDeviceHelper
+
+            phys_helper = IDeviceHelper()
+            phys_devices = phys_helper.get_devices()
+            connected_phys = [d for d in phys_devices if d.state == "device"]
+            if connected_phys:
+                platform = "ios"
+                print(
+                    f"[INFO] Auto-detected physical iOS device: {connected_phys[0].name or connected_phys[0].identifier[:8]}"
+                )
+        except (RuntimeError, Exception):
+            pass
+
+        # Fall back to iOS simulator
+        if platform == "auto":
+            try:
+                from .ios.xcrun_helper import XCRunHelper
+
+                ios_helper = XCRunHelper()
+                ios_devices = ios_helper.get_devices()
+                booted_ios = [d for d in ios_devices if d.state == "booted"]
+                if booted_ios:
+                    platform = "ios"
+                    print("[INFO] Auto-detected iOS simulator")
+            except Exception:
+                pass
+
+        if platform == "auto":
+            platform = "android"
+
+    bundle_id = args.package
+
+    # Auto-detect package: prefer debug over release
+    if bundle_id == "auto" and platform == "android":
+        try:
+            adb_temp = ADBHelper(adb_path=getattr(args, "adb_path", None), device_serial=getattr(args, "device", None))
+            # Check if debug package is installed
+            result = adb_temp._run_adb(["shell", "pm", "list", "packages", "ai.ciris.mobile"])
+            installed_packages = result.stdout.strip().split("\n")
+
+            debug_pkg = "ai.ciris.mobile.debug"
+            release_pkg = "ai.ciris.mobile"
+
+            has_debug = any(debug_pkg in pkg for pkg in installed_packages)
+            has_release = any(f"package:{release_pkg}" == pkg.strip() for pkg in installed_packages)
+
+            if has_debug:
+                bundle_id = debug_pkg
+                print(f"[INFO] Auto-selected DEBUG package: {debug_pkg}")
+            elif has_release:
+                bundle_id = release_pkg
+                print(f"[INFO] Auto-selected RELEASE package: {release_pkg}")
+            else:
+                bundle_id = release_pkg
+                print(f"[WARN] No CIRIS package found, defaulting to: {release_pkg}")
+        except Exception as e:
+            bundle_id = "ai.ciris.mobile"
+            print(f"[WARN] Package auto-detect failed ({e}), using: {bundle_id}")
+    elif bundle_id == "auto":
+        bundle_id = "ai.ciris.mobile"  # Default for iOS
+
+    if platform == "ios":
+        # Try physical device first if device_id looks like physical, or auto-detect
+        helper = None
+        device = None
+        is_physical = False
+
+        # Check for physical devices first
+        try:
+            from .ios.idevice_helper import IDeviceHelper
+
+            phys_helper = IDeviceHelper(device_id=args.device)
+            phys_devices = phys_helper.get_devices()
+            connected = [d for d in phys_devices if d.state == "device"]
+
+            if connected:
+                if args.device:
+                    device = next((d for d in connected if d.identifier == args.device), None)
+                    if device:
+                        helper = phys_helper
+                        is_physical = True
+                else:
+                    device = connected[0]
+                    helper = phys_helper
+                    is_physical = True
+        except RuntimeError:
+            pass  # No physical device tools available
+
+        # Fall back to simulator
+        if not helper:
+            try:
+                from .ios.xcrun_helper import XCRunHelper
+
+                sim_helper = XCRunHelper(device_id=args.device)
+                sim_devices = sim_helper.get_devices()
+                booted = [d for d in sim_devices if d.state == "booted"]
+
+                if booted:
+                    if args.device:
+                        device = next((d for d in booted if d.identifier == args.device), None)
+                    else:
+                        device = booted[0]
+
+                    if device:
+                        helper = sim_helper
+            except Exception:
+                pass
+
+        if not helper or not device:
+            print("[ERROR] No iOS device or simulator found")
+            print("  Physical device: Connect via USB and trust the computer")
+            print("  Simulator: xcrun simctl boot 'iPhone 17 Pro'")
+            if args.device:
+                # List available devices
+                all_devices = []
+                try:
+                    from .ios.idevice_helper import IDeviceHelper
+
+                    all_devices.extend(IDeviceHelper().get_devices())
+                except Exception:
+                    pass
+                try:
+                    from .ios.xcrun_helper import XCRunHelper
+
+                    all_devices.extend([d for d in XCRunHelper().get_devices() if d.state == "booted"])
+                except Exception:
+                    pass
+                if all_devices:
+                    print(f"  Available: {[d.identifier for d in all_devices]}")
+            return 1
+
+        device_type = "Physical Device" if is_physical else "Simulator"
+        print(f"[INFO] iOS {device_type}: {device.name or 'Unknown'} ({device.identifier[:8]}...)")
+        print(f"[INFO] iOS Version: {device.os_version or 'Unknown'}")
+
+        # Pull logs using cross-platform helper
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(args.output_dir) / timestamp
+        collection = helper.pull_logs(str(output_dir), bundle_id)
+
+        print(f"\n[SUCCESS] Logs saved to: {collection.output_dir}")
+        print(f"  App logs: {len(collection.app_logs)} files")
+        print(f"  System logs: {len(collection.system_logs)} files")
+        print(f"  Databases: {len(collection.databases)} files")
+        print(f"  Preferences: {len(collection.preferences)} files")
+
+        # Print quick analysis hints
+        print("\nQuick analysis:")
+        for log in collection.app_logs:
+            if "incidents" in log.name:
+                print(f"  grep -i error {log}  # CHECK THIS FIRST")
+            elif "runtime_status" in log.name or "service_status" in log.name or "startup_status" in log.name:
+                print(f"  cat {log}")
+            elif log.name.endswith(".log"):
+                print(f"  tail -100 {log}")
+        if collection.system_logs:
+            print(f"  grep -i error {collection.system_logs[0]}")
+
+    else:
+        # Android path (original behavior)
+        try:
+            adb = ADBHelper(adb_path=args.adb_path, device_serial=args.device)
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize ADB: {e}")
+            return 1
+
+        # Check device connection
+        devices = adb.get_devices()
+        connected = [d for d in devices if d.state == "device"]
+
+        if not connected:
+            print("[ERROR] No Android devices connected")
+            return 1
+
+        if args.device:
+            device = next((d for d in connected if d.serial == args.device), None)
+            if not device:
+                print(f"[ERROR] Device {args.device} not found")
+                print(f"  Available: {[d.serial for d in connected]}")
+                return 1
+        else:
+            # Prefer PREFERRED_ANDROID_DEVICE if available (older device for broader compat testing)
+            preferred = next((d for d in connected if d.serial == PREFERRED_ANDROID_DEVICE), None)
+            if preferred:
+                device = preferred
+                if len(connected) > 1:
+                    print(f"[INFO] Multiple devices found, using preferred: {device.serial}")
+            else:
+                device = connected[0]
+                if len(connected) > 1:
+                    print(f"[INFO] Multiple devices found, using: {device.serial}")
+                    print(f"  Use -d to specify: {[d.serial for d in connected]}")
+
+        print(f"[INFO] Android Device: {device.serial} ({device.model or 'unknown model'})")
+
+        # Pull logs
+        results = adb.pull_device_logs(output_dir=args.output_dir, package=bundle_id, verbose=True)
+
+        # Print quick analysis hints
+        print("\nQuick analysis:")
+        print(f"  grep -i error {results['output_dir']}/logs/incidents_latest.log")
+        print(f"  tail -100 {results['output_dir']}/logs/latest.log")
+        print(f"  cat {results['output_dir']}/logcat_app.txt | grep -i 'EnvFileUpdater\\|billing\\|token'")
+
+    return 0
+
+
+def go_screen_command(args) -> int:
+    """Handle the go-screen subcommand."""
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile Screen Navigator")
+    print("=" * 60 + "\n")
+
+    screen_name = args.screen.lower()
+
+    # Validate screen name
+    if screen_name not in SCREEN_REGISTRY:
+        print(f"[ERROR] Unknown screen: {screen_name}")
+        print("\nAvailable screens:")
+        for name, (_, _, desc) in SCREEN_REGISTRY.items():
+            print(f"  {name:15} - {desc}")
+        return 1
+
+    menu_text, content_desc, description = SCREEN_REGISTRY[screen_name]
+    print(f"[INFO] Navigating to: {screen_name} ({description})")
+
+    try:
+        adb = ADBHelper(adb_path=args.adb_path, device_serial=args.device)
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize ADB: {e}")
+        return 1
+
+    # Check device connection
+    devices = adb.get_devices()
+    connected = [d for d in devices if d.state == "device"]
+
+    if not connected:
+        print("[ERROR] No devices connected")
+        return 1
+
+    if args.device:
+        device = next((d for d in connected if d.serial == args.device), None)
+        if not device:
+            print(f"[ERROR] Device {args.device} not found")
+            print(f"  Available: {[d.serial for d in connected]}")
+            return 1
+    else:
+        # Prefer PREFERRED_ANDROID_DEVICE if available (older device for broader compat testing)
+        preferred = next((d for d in connected if d.serial == PREFERRED_ANDROID_DEVICE), None)
+        if preferred:
+            device = preferred
+            if len(connected) > 1:
+                print(f"[INFO] Multiple devices found, using preferred: {device.serial}")
+        else:
+            device = connected[0]
+            if len(connected) > 1:
+                print(f"[INFO] Multiple devices found, using: {device.serial}")
+
+    print(f"[INFO] Device: {device.serial} ({device.model or 'unknown model'})")
+
+    # Initialize UI Automator
+    ui = UIAutomator(adb)
+
+    # Ensure app is in foreground
+    package = args.package
+    print(f"[INFO] Bringing {package} to foreground...")
+    adb._run_adb(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"])
+    time.sleep(2)
+
+    # Navigate to the screen
+    if screen_name == "interact":
+        # Already on interact screen by default after app launch
+        print("[INFO] Already on interact screen (default)")
+    else:
+        # Need to open overflow menu and click the screen item
+        print(f"[INFO] Opening overflow menu...")
+
+        # First try to click "More options" (three dots menu) or "More" text
+        ui.refresh_hierarchy()
+
+        # Look for overflow menu button (could be "More options", "More", "MoreVert", etc.)
+        overflow_clicked = False
+        overflow_options = ["More options", "MoreVert", "overflow", "More"]
+
+        for option in overflow_options:
+            element = ui.find_by_content_desc(option, exact=False)
+            if element:
+                print(f"[INFO] Found overflow menu by content_desc: {option}")
+                ui.click(element)
+                overflow_clicked = True
+                time.sleep(0.5)
+                break
+
+        if not overflow_clicked:
+            # Try by text (some UIs show "More" as text)
+            element = ui.find_by_text("More", exact=True)
+            if element:
+                print("[INFO] Found overflow menu by text: More")
+                ui.click(element)
+                overflow_clicked = True
+                time.sleep(0.5)
+
+        if not overflow_clicked:
+            # Try finding by clickable icon in the top bar area
+            elements = ui.get_elements(refresh=True)
+            for elem in elements:
+                if elem.clickable and elem.bounds[1] < 200:  # Top bar area
+                    if "more" in elem.content_desc.lower() or "option" in elem.content_desc.lower():
+                        print(f"[INFO] Found potential overflow: {elem.content_desc}")
+                        ui.click(elem)
+                        overflow_clicked = True
+                        time.sleep(0.5)
+                        break
+
+        if not overflow_clicked:
+            print("[WARN] Could not find overflow menu, trying direct navigation...")
+
+        # Wait for menu to appear and click target
+        time.sleep(0.5)
+        ui.refresh_hierarchy()
+
+        target_clicked = False
+
+        # Try clicking by text first
+        if menu_text:
+            element = ui.find_by_text(menu_text, exact=False)
+            if element:
+                print(f"[INFO] Found menu item by text: {menu_text}")
+                ui.click(element)
+                target_clicked = True
+                time.sleep(1)
+
+        # Try content description if text didn't work
+        if not target_clicked and content_desc:
+            element = ui.find_by_content_desc(content_desc, exact=False)
+            if element:
+                print(f"[INFO] Found menu item by content_desc: {content_desc}")
+                ui.click(element)
+                target_clicked = True
+                time.sleep(1)
+
+        # If still not found, the menu might need to be expanded - try clicking "More" submenu
+        if not target_clicked:
+            print("[INFO] Target not found, trying to expand 'More' submenu...")
+            more_element = ui.find_by_text("More", exact=True)
+            if more_element:
+                print("[INFO] Clicking 'More' to expand submenu")
+                ui.click(more_element)
+                time.sleep(0.5)
+                ui.refresh_hierarchy()
+
+                # Now try again
+                if menu_text:
+                    element = ui.find_by_text(menu_text, exact=False)
+                    if element:
+                        print(f"[INFO] Found menu item in submenu by text: {menu_text}")
+                        ui.click(element)
+                        target_clicked = True
+                        time.sleep(1)
+
+                if not target_clicked and content_desc:
+                    element = ui.find_by_content_desc(content_desc, exact=False)
+                    if element:
+                        print(f"[INFO] Found menu item in submenu by content_desc: {content_desc}")
+                        ui.click(element)
+                        target_clicked = True
+                        time.sleep(1)
+
+        if not target_clicked:
+            print(f"[ERROR] Could not find menu item for screen: {screen_name}")
+            print("[DEBUG] Available text on screen:")
+            screen_texts = ui.get_screen_text()
+            for text in screen_texts[:20]:  # First 20 items
+                print(f"  - {text}")
+            return 1
+
+    # Wait for screen to load
+    time.sleep(1)
+
+    # Take screenshot
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    screenshot_path = output_dir / f"screen_{screen_name}_{timestamp}.png"
+
+    print(f"[INFO] Taking screenshot...")
+    if adb.screenshot(str(screenshot_path)):
+        print(f"[SUCCESS] Screenshot saved: {screenshot_path}")
+        # Print absolute path for easy access
+        print(f"[PATH] {screenshot_path.absolute()}")
+    else:
+        print(f"[ERROR] Failed to take screenshot")
+        return 1
+
+    return 0
+
+
+def build_command(args) -> int:
+    """Handle the build subcommand."""
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile Build & Deploy")
+    print("=" * 60 + "\n")
+
+    platform = args.platform
+
+    if platform == "ios":
+        try:
+            from .ios.build_helper import iOSBuildConfig, iOSBuildHelper
+        except ImportError as e:
+            print(f"[ERROR] Failed to import iOS build helper: {e}")
+            return 1
+
+        # Create config
+        config = iOSBuildConfig(
+            project_dir=Path(__file__).parent.parent.parent.parent.parent / "mobile" / "iosApp",
+            scheme=args.scheme,
+            configuration=args.configuration,
+            prepare_bundle=not args.no_prepare,
+            clean_build=args.clean,
+            verbose=args.verbose,
+        )
+
+        helper = iOSBuildHelper(config)
+
+        # Determine target preference
+        prefer_physical = not args.simulator
+
+        print(f"[INFO] Build configuration:")
+        print(f"  Scheme: {config.scheme}")
+        print(f"  Configuration: {config.configuration}")
+        print(f"  Prepare bundle: {config.prepare_bundle}")
+        print(f"  Clean build: {config.clean_build}")
+        print(f"  Prefer physical device: {prefer_physical}")
+        if args.device:
+            print(f"  Target device: {args.device}")
+        print()
+
+        # Build and run
+        success, device = helper.build_and_run(
+            device_id=args.device,
+            prefer_physical=prefer_physical,
+            prepare_bundle=config.prepare_bundle,
+        )
+
+        if success and device:
+            print(f"\n[SUCCESS] App deployed to {device.name or device.identifier}")
+            return 0
+        elif success:
+            print("\n[SUCCESS] Build completed")
+            return 0
+        else:
+            print("\n[ERROR] Build or deploy failed")
+            return 1
+
+    elif platform == "android":
+        print("[INFO] Building Android APK...")
+        import subprocess
+
+        mobile_dir = Path(__file__).parent.parent.parent.parent.parent / "mobile"
+
+        # Build APK
+        gradle_cmd = ["./gradlew", ":androidApp:assembleDebug"]
+        if args.clean:
+            gradle_cmd = ["./gradlew", "clean", ":androidApp:assembleDebug"]
+
+        result = subprocess.run(gradle_cmd, cwd=mobile_dir, capture_output=not args.verbose, text=True)
+
+        if result.returncode != 0:
+            print(f"[ERROR] Build failed")
+            if not args.verbose and result.stderr:
+                print(result.stderr[-2000:])  # Last 2000 chars
+            return 1
+
+        print("[SUCCESS] APK built successfully")
+        apk_path = mobile_dir / "androidApp/build/outputs/apk/debug/androidApp-debug.apk"
+
+        if not args.build_only:
+            # Install to device
+            try:
+                adb = ADBHelper(adb_path=args.adb_path, device_serial=args.device)
+                devices = adb.get_devices()
+                connected = [d for d in devices if d.state == "device"]
+
+                if not connected:
+                    print("[WARN] No Android devices connected, skipping install")
+                else:
+                    if args.device:
+                        device = next((d for d in connected if d.serial == args.device), connected[0])
+                    else:
+                        # Prefer PREFERRED_ANDROID_DEVICE if available (older device for broader compat testing)
+                        preferred = next((d for d in connected if d.serial == PREFERRED_ANDROID_DEVICE), None)
+                        device = preferred if preferred else connected[0]
+                        if len(connected) > 1:
+                            if preferred:
+                                print(f"[INFO] Multiple devices, using preferred: {device.serial}")
+                            else:
+                                print(f"[INFO] Multiple devices, using: {device.serial}")
+
+                    print(f"[INFO] Installing to {device.serial}...")
+                    adb._run_adb(["install", "-r", str(apk_path)])
+                    print("[SUCCESS] APK installed")
+
+                    if not args.no_launch:
+                        print("[INFO] Launching app...")
+                        adb._run_adb(["shell", "am", "start", "-n", "ai.ciris.mobile/.MainActivity"])
+                        print("[SUCCESS] App launched")
+            except Exception as e:
+                print(f"[WARN] Install/launch failed: {e}")
+                return 1
+
+        return 0
+
+    else:
+        print(f"[ERROR] Unknown platform: {platform}")
+        return 1
+
+
+def portal_command(args) -> int:
+    """Handle the portal subcommand."""
+    from .portal_registration import run_portal_registration
+
+    return run_portal_registration(
+        base_url=args.api_url,
+        portal_url=args.portal_url,
+        username=args.username,
+        password=args.password,
+        wait=args.wait,
+        poll_timeout=args.timeout,
+        poll_interval=args.interval,
+        output_dir=args.output_dir,
+        verbose=args.verbose,
+    )
+
+
+def licensed_agent_command(args) -> int:
+    """Handle the licensed-agent subcommand."""
+    from .first_time_licensed_agent import run_first_time_licensed_agent
+
+    return run_first_time_licensed_agent(
+        base_url=args.api_url,
+        portal_url=args.portal_url,
+        llm_provider=args.llm_provider,
+        llm_api_key=args.llm_key or "",
+        llm_key_file=args.llm_key_file,
+        llm_model=args.llm_model,
+        admin_username=args.username,
+        admin_password=args.password,
+        wait=args.wait,
+        poll_timeout=args.timeout,
+        poll_interval=args.interval,
+        output_dir=args.output_dir,
+        verbose=args.verbose,
+    )
+
+
+def test_ios_physical_command(args) -> int:
+    """Handle iOS physical device test execution."""
+    from .ios.idevice_helper import IDeviceHelper
+    from .ios_physical_test_cases import (
+        PhysicalDeviceUIHelper,
+        test_physical_api_adapters,
+        test_physical_api_health,
+        test_physical_api_telemetry,
+        test_physical_api_verify_status,
+        test_physical_app_state,
+        test_physical_full_check,
+        test_physical_screenshot,
+        test_physical_ui_login,
+    )
+    from .test_cases import TestReport, TestResult
+
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile QA Runner — iOS Physical Device")
+    print("=" * 60)
+
+    # Initialize physical device helper
+    try:
+        helper = IDeviceHelper(device_id=args.device)
+    except RuntimeError as e:
+        print(f"\n[ERROR] {e}")
+        return 1
+
+    # Verify device is connected
+    devices = helper.get_devices()
+    connected = [d for d in devices if d.state == "device"]
+    if not connected:
+        print("\n[ERROR] No physical iOS device connected")
+        print("  Connect device via USB and trust the computer")
+        return 1
+
+    device = connected[0]
+    if args.device:
+        device = next((d for d in connected if d.identifier == args.device), connected[0])
+        helper.device_id = device.identifier
+
+    print(f"\n[INFO] Device: {device.name or 'Unknown'} ({device.identifier[:8]}...)")
+    if device.os_version:
+        print(f"[INFO] iOS {device.os_version}")
+    if device.model:
+        print(f"[INFO] Model: {device.model}")
+
+    ui = PhysicalDeviceUIHelper(helper)
+
+    # Available physical device tests
+    phys_tests = {
+        "screenshot": test_physical_screenshot,
+        "app_state": test_physical_app_state,
+        "api_health": test_physical_api_health,
+        "api_telemetry": test_physical_api_telemetry,
+        "api_verify": test_physical_api_verify_status,
+        "api_adapters": test_physical_api_adapters,
+        "ui_login": test_physical_ui_login,
+        "full_check": test_physical_full_check,
+    }
+
+    # Map simulator test names to physical equivalents for convenience
+    test_name_map = {
+        "app_launch": "app_state",
+        "full_flow": "full_check",
+        "local_login": "ui_login",
+    }
+
+    # Build test config
+    test_config = {
+        "local_port": 18080,
+        "remote_port": 8080,
+    }
+
+    # Determine which tests to run
+    test_names = []
+    for name in args.tests:
+        mapped = test_name_map.get(name, name)
+        if mapped in phys_tests:
+            test_names.append(mapped)
+        else:
+            print(f"\n[WARN] Unknown physical device test: {name}")
+            print(f"  Available: {', '.join(phys_tests.keys())}")
+
+    if not test_names:
+        test_names = ["full_check"]
+
+    print(f"\nTests: {', '.join(test_names)}")
+
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run tests
+    print("\n" + "=" * 60)
+    print("Running Physical Device Tests")
+    print("=" * 60)
+
+    reports = []
+    for test_name in test_names:
+        test_func = phys_tests[test_name]
+        print(f"\n--- Test: {test_name} ---")
+
+        try:
+            report = test_func(helper, ui, test_config)
+            reports.append(report)
+
+            status_icon = {
+                TestResult.PASSED: "PASS",
+                TestResult.FAILED: "FAIL",
+                TestResult.SKIPPED: "SKIP",
+                TestResult.ERROR: "ERR!",
+            }
+            print(f"\n  [{status_icon.get(report.result, '????')}] {report.name} ({report.duration:.1f}s)")
+            if report.message:
+                print(f"        {report.message}")
+
+        except Exception as e:
+            error_report = TestReport(
+                name=test_name,
+                result=TestResult.ERROR,
+                duration=0.0,
+                message=f"Exception: {str(e)}",
+            )
+            reports.append(error_report)
+            print(f"\n  [ERR!] {test_name}: {e}")
+
+    # Clean up port forwarding
+    helper.stop_port_forward()
+
+    # Summary
+    passed = sum(1 for r in reports if r.result == TestResult.PASSED)
+    failed = sum(1 for r in reports if r.result == TestResult.FAILED)
+    errors = sum(1 for r in reports if r.result == TestResult.ERROR)
+
+    print("\n" + "=" * 60)
+    print("Physical Device Test Summary")
+    print("=" * 60)
+    print(f"  Total:   {len(reports)}")
+    print(f"  Passed:  {passed}")
+    print(f"  Failed:  {failed}")
+    print(f"  Errors:  {errors}")
+    print("=" * 60 + "\n")
+
+    # Save results
+    import json as json_mod
+
+    results_path = output_dir / f"ios_physical_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(results_path, "w") as f:
+        json_mod.dump(
+            {
+                "platform": "ios_physical",
+                "device": {
+                    "name": device.name,
+                    "identifier": device.identifier,
+                    "os_version": device.os_version,
+                    "model": device.model,
+                },
+                "reports": [
+                    {"name": r.name, "result": r.result.value, "duration": r.duration, "message": r.message}
+                    for r in reports
+                ],
+                "summary": {"total": len(reports), "passed": passed, "failed": failed, "errors": errors},
+            },
+            f,
+            indent=2,
+        )
+    print(f"Results: {results_path}")
+
+    return 0 if (failed == 0 and errors == 0) else 1
+
+
+def test_ios_command(args) -> int:
+    """Handle iOS simulator test execution."""
+    from .ios.ios_ui_automator import iOSUIAutomator
+    from .ios.xcrun_helper import XCRunHelper
+    from .ios_test_cases import (
+        test_ios_app_launch,
+        test_ios_connect_node,
+        test_ios_connect_node_auth,
+        test_ios_connect_node_error,
+        test_ios_connect_node_welcome,
+        test_ios_full_flow,
+        test_ios_local_login,
+        test_ios_setup_wizard,
+    )
+    from .test_cases import TestReport, TestResult
+
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile QA Runner — iOS Simulator")
+    print("=" * 60)
+
+    # Initialize iOS helpers
+    try:
+        xcrun = XCRunHelper(device_id=args.device)
+    except RuntimeError as e:
+        print(f"\n[ERROR] {e}")
+        return 1
+
+    # Verify simulator is booted
+    if not xcrun.is_device_connected():
+        print("\n[INFO] No booted simulator found, attempting to boot one...")
+        devices = xcrun.get_devices()
+        available = [d for d in devices if d.state == "shutdown"]
+        if available:
+            # Prefer iPhone Pro models
+            target = next(
+                (d for d in available if "Pro" in (d.name or "") and "Max" not in (d.name or "")),
+                available[0],
+            )
+            print(f"[INFO] Booting {target.name} ({target.identifier[:8]}...)...")
+            xcrun.boot_device(target.identifier)
+            if not xcrun.wait_for_device(timeout=60):
+                print("[ERROR] Simulator failed to boot")
+                return 1
+        else:
+            print("[ERROR] No simulators available. Create one in Xcode.")
+            return 1
+
+    devices = xcrun.get_devices()
+    booted = [d for d in devices if d.state == "booted"]
+    if booted:
+        d = booted[0]
+        print(f"\n[INFO] Simulator: {d.name} (iOS {d.os_version}, {d.identifier[:8]}...)")
+
+    ios_ui = iOSUIAutomator(xcrun)
+
+    # Available iOS tests
+    ios_tests = {
+        "app_launch": test_ios_app_launch,
+        "local_login": test_ios_local_login,
+        "setup_wizard": test_ios_setup_wizard,
+        "full_flow": test_ios_full_flow,
+        "connect_node": test_ios_connect_node,
+        "connect_node_welcome": test_ios_connect_node_welcome,
+        "connect_node_auth": test_ios_connect_node_auth,
+        "connect_node_error": test_ios_connect_node_error,
+    }
+
+    # Load secrets
+    llm_api_key = args.llm_key or load_secret_file(args.llm_key_file)
+
+    # Build test config dict
+    test_config = {
+        "llm_api_key": llm_api_key,
+        "llm_provider": args.llm_provider,
+        "node_url": getattr(args, "node_url", "https://node.ciris.ai"),
+        "wait_for_portal_auth": getattr(args, "wait_portal", False),
+        "portal_auth_timeout": getattr(args, "portal_timeout", 300),
+    }
+
+    print(f"\nTests: {', '.join(args.tests)}")
+    if llm_api_key:
+        print(f"LLM key: {'*' * 8}")
+    if "connect_node" in args.tests or "connect_node_auth" in args.tests:
+        print(f"Node URL: {test_config['node_url']}")
+
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run tests
+    print("\n" + "=" * 60)
+    print("Running iOS Tests")
+    print("=" * 60)
+
+    reports = []
+    for test_name in args.tests:
+        if test_name not in ios_tests:
+            print(f"\n[WARN] Unknown iOS test: {test_name}")
+            print(f"  Available: {', '.join(ios_tests.keys())}")
+            continue
+
+        test_func = ios_tests[test_name]
+        print(f"\n--- Test: {test_name} ---")
+
+        try:
+            report = test_func(xcrun, ios_ui, test_config)
+            reports.append(report)
+
+            status_icon = {
+                TestResult.PASSED: "PASS",
+                TestResult.FAILED: "FAIL",
+                TestResult.SKIPPED: "SKIP",
+                TestResult.ERROR: "ERR!",
+            }
+            print(f"\n  [{status_icon.get(report.result, '????')}] {report.name} ({report.duration:.1f}s)")
+            if report.message:
+                print(f"        {report.message}")
+
+        except Exception as e:
+            error_report = TestReport(
+                name=test_name,
+                result=TestResult.ERROR,
+                duration=0.0,
+                message=f"Exception: {str(e)}",
+            )
+            reports.append(error_report)
+            print(f"\n  [ERR!] {test_name}: {e}")
+
+    # Summary
+    passed = sum(1 for r in reports if r.result == TestResult.PASSED)
+    failed = sum(1 for r in reports if r.result == TestResult.FAILED)
+    errors = sum(1 for r in reports if r.result == TestResult.ERROR)
+
+    print("\n" + "=" * 60)
+    print("iOS Test Summary")
+    print("=" * 60)
+    print(f"  Total:   {len(reports)}")
+    print(f"  Passed:  {passed}")
+    print(f"  Failed:  {failed}")
+    print(f"  Errors:  {errors}")
+    print("=" * 60 + "\n")
+
+    # Save results
+    import json
+
+    results_path = output_dir / f"ios_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(results_path, "w") as f:
+        json.dump(
+            {
+                "platform": "ios",
+                "reports": [
+                    {"name": r.name, "result": r.result.value, "duration": r.duration, "message": r.message}
+                    for r in reports
+                ],
+                "summary": {"total": len(reports), "passed": passed, "failed": failed, "errors": errors},
+            },
+            f,
+            indent=2,
+        )
+    print(f"Results: {results_path}")
+
+    return 0 if (failed == 0 and errors == 0) else 1
+
+
+def test_command(args) -> int:
+    """Handle the test subcommand."""
+    # Route to iOS if platform is ios
+    platform = getattr(args, "platform", "android")
+    if platform == "ios":
+        # Auto-detect: prefer physical device over simulator
+        force_simulator = getattr(args, "simulator", False)
+        use_physical = getattr(args, "physical", False)
+
+        if not force_simulator and not use_physical:
+            # Auto-detect physical device
+            try:
+                from .ios.idevice_helper import IDeviceHelper
+
+                phys_helper = IDeviceHelper(device_id=getattr(args, "device", None))
+                phys_devices = phys_helper.get_devices()
+                connected = [d for d in phys_devices if d.state == "device"]
+                if connected:
+                    use_physical = True
+                    print("[INFO] Physical iOS device detected — using physical device tests")
+                    print("       (Use --simulator to force simulator tests)")
+            except (RuntimeError, Exception):
+                pass
+
+        if use_physical and not force_simulator:
+            return test_ios_physical_command(args)
+        return test_ios_command(args)
+
+    print("\n" + "=" * 60)
+    print("CIRIS Mobile QA Runner")
+    print("=" * 60)
+
+    # Build APK if requested
+    if args.build:
+        print("\nBuilding APK...")
+        import subprocess
+
+        result = subprocess.run(
+            ["./gradlew", ":androidApp:assembleDebug"],
+            cwd=Path(__file__).parent.parent.parent.parent.parent / "mobile",
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"Build failed:\n{result.stderr}")
+            return 1
+        print("Build successful!")
+
+    # Load secrets from files
+    test_password = load_secret_file(args.password_file)
+    llm_api_key = args.llm_key or load_secret_file(args.llm_key_file)
+
+    if not test_password:
+        print(f"\nNote: No password file found at {args.password_file}")
+        print("      Google Sign-In will rely on pre-authenticated account on device")
+
+    if not llm_api_key:
+        print(f"\nNote: No LLM API key found at {args.llm_key_file}")
+        print("      Setup wizard will use default/mock LLM")
+
+    # Create config
+    config = MobileTestConfig(
+        device_serial=args.device,
+        adb_path=args.adb_path,
+        apk_path=args.apk,
+        reinstall_app=not args.no_reinstall,
+        clear_data=not args.no_clear,
+        login_mode=args.login_mode,
+        setup_username=args.setup_username,
+        setup_password=args.setup_password,
+        test_email=args.email,
+        test_password=test_password,
+        llm_api_key=llm_api_key,
+        llm_provider=args.llm_provider,
+        test_message=args.message,
+        output_dir=args.output_dir,
+        save_screenshots=not args.no_screenshots,
+        save_logcat=not args.no_logcat,
+        verbose=args.verbose,
+        keep_app_open=args.keep_open,
+    )
+
+    # Print config summary
+    print(f"\nConfiguration:")
+    print(f"  Test email: {config.test_email}")
+    print(f"  LLM provider: {config.llm_provider}")
+    print(f"  LLM API key: {'*' * 8 if llm_api_key else '(not set)'}")
+    print(f"  Tests: {', '.join(args.tests)}")
+    print(f"  Reinstall app: {config.reinstall_app}")
+    print(f"  Clear data: {config.clear_data}")
+
+    # Run tests
+    runner = MobileTestRunner(config)
+
+    if not runner.setup():
+        print("\nSetup failed!")
+        return 1
+
+    try:
+        suite = runner.run_tests(args.tests)
+        return 0 if suite.success else 1
+    finally:
+        runner.teardown()
+
+
+def main():
+    """CLI entry point for mobile QA runner."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="CIRIS Mobile QA Runner - Testing and Debugging Tools",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # ========== pull-logs subcommand ==========
+    pull_parser = subparsers.add_parser(
+        "pull-logs",
+        help="Pull device logs and files for debugging",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Collects from device:
+  - Python logs (latest.log, incidents_latest.log)
+  - Database files (.db)
+  - Shared preferences (.xml)
+  - Logcat output (python, crashes, app logs)
+  - .env file (tokens redacted)
+  - App info and storage usage
+
+Examples:
+  python -m tools.qa_runner.modules.mobile pull-logs
+  python -m tools.qa_runner.modules.mobile pull-logs -d R5CRC3BWLRZ
+  python -m tools.qa_runner.modules.mobile pull-logs -o ./my_logs
+""",
+    )
+    pull_parser.add_argument("--device", "-d", help="Device serial/UDID (uses first device if not specified)")
+    pull_parser.add_argument("--adb-path", help="Path to adb binary (Android only)")
+    pull_parser.add_argument(
+        "--platform",
+        "-p",
+        choices=["android", "ios", "auto"],
+        default="auto",
+        help="Target platform (default: auto-detect)",
+    )
+    pull_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default="mobile_qa_reports",
+        help="Directory for logs (default: mobile_qa_reports)",
+    )
+    pull_parser.add_argument(
+        "--package",
+        default="auto",
+        help="Package/Bundle ID (default: auto - prefers debug over release)",
+    )
+
+    # ========== go-screen subcommand ==========
+    screen_list = "\n".join([f"  {name:15} - {desc}" for name, (_, _, desc) in SCREEN_REGISTRY.items()])
+    go_screen_parser = subparsers.add_parser(
+        "go-screen",
+        help="Navigate to a specific app screen and take a screenshot",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Available screens:
+{screen_list}
+
+Examples:
+  python -m tools.qa_runner.modules.mobile go-screen billing
+  python -m tools.qa_runner.modules.mobile go-screen telemetry -o ./screenshots
+  python -m tools.qa_runner.modules.mobile go-screen settings -d emulator-5554
+""",
+    )
+    go_screen_parser.add_argument(
+        "screen",
+        help="Screen to navigate to (see list above)",
+    )
+    go_screen_parser.add_argument("--device", "-d", help="Device serial number (uses first device if not specified)")
+    go_screen_parser.add_argument("--adb-path", help="Path to adb binary")
+    go_screen_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default="mobile_qa_reports",
+        help="Directory for screenshots (default: mobile_qa_reports)",
+    )
+    go_screen_parser.add_argument(
+        "--package",
+        default="ai.ciris.mobile",
+        help="Android package name (default: ai.ciris.mobile)",
+    )
+
+    # ========== build subcommand ==========
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build and deploy iOS/Android app",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+iOS Build Examples:
+  python -m tools.qa_runner.modules.mobile build --platform ios
+  python -m tools.qa_runner.modules.mobile build --platform ios --device UDID
+  python -m tools.qa_runner.modules.mobile build --platform ios --simulator
+  python -m tools.qa_runner.modules.mobile build --platform ios --clean --verbose
+
+Android Build Examples:
+  python -m tools.qa_runner.modules.mobile build --platform android
+  python -m tools.qa_runner.modules.mobile build --platform android --device emulator-5554
+
+Notes:
+  iOS builds require Xcode and a valid development certificate.
+  For physical devices, ensure the device is connected and trusted.
+  For simulators, one will be auto-selected or booted if needed.
+""",
+    )
+    build_parser.add_argument(
+        "--platform",
+        "-p",
+        choices=["ios", "android"],
+        required=True,
+        help="Target platform (required)",
+    )
+    build_parser.add_argument("--device", "-d", help="Device UDID/serial (auto-selects if not specified)")
+    build_parser.add_argument(
+        "--simulator", "-s", action="store_true", help="Prefer iOS simulator over physical device"
+    )
+    build_parser.add_argument("--scheme", default="iosApp", help="Xcode scheme (default: iosApp)")
+    build_parser.add_argument("--configuration", "-c", default="Debug", help="Build configuration (default: Debug)")
+    build_parser.add_argument("--clean", action="store_true", help="Clean build before building")
+    build_parser.add_argument("--no-prepare", action="store_true", help="Skip Python bundle preparation (iOS)")
+    build_parser.add_argument("--build-only", action="store_true", help="Build only, don't install/launch")
+    build_parser.add_argument("--no-launch", action="store_true", help="Install but don't launch the app")
+    build_parser.add_argument("--adb-path", help="Path to adb binary (Android only)")
+    build_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+
+    # ========== portal subcommand ==========
+    portal_parser = subparsers.add_parser(
+        "portal",
+        help="Test portal.ciris.ai device auth registration flow",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Tests the RFC 8628 device authorization flow against portal.ciris.ai:
+  1. Health check on CIRIS API
+  2. Login to CIRIS API
+  3. POST /v1/setup/connect-node → device code + verification URL
+  4. Poll /v1/setup/connect-node/status
+
+Examples:
+  # Initiate only (print device code, don't wait)
+  python -m tools.qa_runner.modules.mobile portal
+
+  # Initiate and wait for user to complete Portal auth
+  python -m tools.qa_runner.modules.mobile portal --wait
+
+  # Custom Portal URL and timeout
+  python -m tools.qa_runner.modules.mobile portal --portal-url https://portal.ciris.ai --wait --timeout 600
+
+  # Connect to CIRIS API on a different port
+  python -m tools.qa_runner.modules.mobile portal --api-url http://localhost:9000
+""",
+    )
+    portal_parser.add_argument(
+        "--portal-url",
+        default="https://portal.ciris.ai",
+        help="Portal URL for device auth (default: https://portal.ciris.ai)",
+    )
+    portal_parser.add_argument(
+        "--api-url",
+        default="http://localhost:8080",
+        help="CIRIS API base URL (default: http://localhost:8080)",
+    )
+    portal_parser.add_argument(
+        "--username",
+        default="admin",
+        help="CIRIS API username (default: admin)",
+    )
+    portal_parser.add_argument(
+        "--password",
+        default="qa_test_password_12345",
+        help="CIRIS API password (default: qa_test_password_12345)",
+    )
+    portal_parser.add_argument(
+        "--wait",
+        "-w",
+        action="store_true",
+        help="Wait for user to complete Portal authorization (polls until done)",
+    )
+    portal_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Polling timeout in seconds (default: 300)",
+    )
+    portal_parser.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="Polling interval in seconds (default: 5)",
+    )
+    portal_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default="mobile_qa_reports",
+        help="Directory for test reports (default: mobile_qa_reports)",
+    )
+    portal_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+
+    # ========== licensed-agent subcommand ==========
+    la_parser = subparsers.add_parser(
+        "licensed-agent",
+        help="First-time licensed agent E2E: device auth + setup complete + verify",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+End-to-end test for a first-run agent that acquires a license via Portal
+device auth, then completes setup with the provisioned credentials.
+
+Steps:
+  1. Health check / first-run verification
+  2. Enumerate providers, templates, adapters
+  3. POST /v1/setup/connect-node -> device code
+  4. Poll until Portal authorization completes
+  5. POST /v1/setup/complete with provisioned key + LLM config
+  6. Verify login, health, and services online
+
+Examples:
+  # Full E2E with --wait (prompts to authorize in browser)
+  python -m tools.qa_runner.modules.mobile licensed-agent --wait
+
+  # With explicit LLM key
+  python -m tools.qa_runner.modules.mobile licensed-agent --wait --llm-key sk-...
+
+  # Use groq key from file
+  python -m tools.qa_runner.modules.mobile licensed-agent --wait --llm-provider groq --llm-key-file ~/.groq_key
+""",
+    )
+    la_parser.add_argument(
+        "--portal-url",
+        default="https://portal.ciris.ai",
+        help="Portal URL for device auth (default: https://portal.ciris.ai)",
+    )
+    la_parser.add_argument(
+        "--api-url",
+        default="http://localhost:8080",
+        help="CIRIS API base URL (default: http://localhost:8080)",
+    )
+    la_parser.add_argument("--username", default="admin", help="Admin username to create")
+    la_parser.add_argument("--password", default="qa_test_password_12345", help="Admin password to create")
+    la_parser.add_argument("--llm-provider", default="groq", help="LLM provider (default: groq)")
+    la_parser.add_argument("--llm-key", default=None, help="LLM API key (overrides key file)")
+    la_parser.add_argument(
+        "--llm-key-file",
+        default="~/.groq_key",
+        help="Path to file containing LLM API key (default: ~/.groq_key)",
+    )
+    la_parser.add_argument("--llm-model", default=None, help="LLM model name (provider default if omitted)")
+    la_parser.add_argument(
+        "--wait",
+        "-w",
+        action="store_true",
+        help="Wait for Portal authorization (polls until done)",
+    )
+    la_parser.add_argument("--timeout", type=int, default=300, help="Poll timeout in seconds (default: 300)")
+    la_parser.add_argument("--interval", type=int, default=5, help="Poll interval in seconds (default: 5)")
+    la_parser.add_argument(
+        "--output-dir",
+        "-o",
+        default="mobile_qa_reports",
+        help="Directory for test reports (default: mobile_qa_reports)",
+    )
+    la_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+
+    # ========== test subcommand ==========
+    test_parser = subparsers.add_parser(
+        "test",
+        help="Run UI automation tests",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Available tests (Android):
+  app_launch        - Test that app launches and shows login screen
+  google_signin     - Test Google Sign-In flow with test account
+  local_login       - Test local login (BYOK mode)
+  setup_wizard      - Test completing the setup wizard
+  chat_interaction  - Test sending a message and receiving response
+  full_flow         - Run complete end-to-end flow (default)
+
+Available tests (iOS simulator - use --platform ios --simulator):
+  app_launch              - Test that app launches and shows login screen
+  local_login             - Test local login flow
+  setup_wizard            - Test completing the setup wizard
+  full_flow               - Run complete end-to-end flow
+  connect_node            - Full Create Licensed Agent device auth flow
+  connect_node_welcome    - Verify Create Licensed Agent card on WELCOME screen
+  connect_node_auth       - Enter node URL and verify auth screen
+  connect_node_error      - Test error handling for invalid node URL
+
+Available tests (iOS physical device - auto-detected or --physical):
+  screenshot              - Take screenshot and verify OCR works
+  app_state               - Verify app is running via screenshot OCR
+  api_health              - Check API health via iproxy
+  api_telemetry           - Login, check telemetry + service health
+  api_verify              - Check CIRISVerify attestation status
+  api_adapters            - List loaded adapters
+  ui_login                - Real UI login via test-automation server +
+                            navigate Interact -> Telemetry -> Interact
+                            (relaunches app with CIRIS_TEST_MODE=true)
+  full_check              - Run all physical device checks (default)
+
+Examples:
+  # Android tests (default)
+  python -m tools.qa_runner.modules.mobile test full_flow
+  python -m tools.qa_runner.modules.mobile test app_launch --no-reinstall
+
+  # iOS physical device (auto-detected if connected)
+  python -m tools.qa_runner.modules.mobile test --platform ios
+  python -m tools.qa_runner.modules.mobile test full_check --platform ios
+  python -m tools.qa_runner.modules.mobile test api_health api_telemetry --platform ios
+
+  # iOS simulator (force with --simulator)
+  python -m tools.qa_runner.modules.mobile test app_launch --platform ios --simulator
+  python -m tools.qa_runner.modules.mobile test connect_node --platform ios --simulator --node-url https://node.ciris.ai
+""",
+    )
+    test_parser.add_argument(
+        "tests",
+        nargs="*",
+        default=["full_flow"],
+        help="Tests to run (default: full_flow)",
+    )
+    test_parser.add_argument(
+        "--platform",
+        "-p",
+        choices=["android", "ios"],
+        default="android",
+        help="Target platform (default: android)",
+    )
+    test_parser.add_argument("--device", "-d", help="Device serial/UDID (uses default if not specified)")
+    test_parser.add_argument("--adb-path", help="Path to adb binary (Android only)")
+    test_parser.add_argument(
+        "--apk",
+        default="client/androidApp/build/outputs/apk/debug/androidApp-debug.apk",
+        help="Path to APK file",
+    )
+    test_parser.add_argument("--no-reinstall", action="store_true", help="Don't reinstall the app")
+    test_parser.add_argument("--no-clear", action="store_true", help="Don't clear app data before tests")
+    test_parser.add_argument(
+        "--email",
+        default="ciristest1@gmail.com",
+        help="Test Google account email (default: ciristest1@gmail.com)",
+    )
+    test_parser.add_argument(
+        "--password-file",
+        default="~/.ciristest1_password",
+        help="Path to file containing test account password",
+    )
+    test_parser.add_argument(
+        "--login-mode",
+        choices=["local", "google"],
+        default="google",
+        help="First-run login: 'local' creates a local account via the setup wizard "
+        "(fully driveable by the test server); 'google' uses the native overlay (default).",
+    )
+    test_parser.add_argument("--setup-username", default="admin", help="Local account username (login_mode=local)")
+    test_parser.add_argument(
+        "--setup-password", default="qa_test_password_12345", help="Local account password (login_mode=local)"
+    )
+    test_parser.add_argument("--llm-key", help="LLM API key for setup wizard")
+    test_parser.add_argument(
+        "--llm-key-file",
+        default="~/.groq_key",
+        help="Path to file containing LLM API key",
+    )
+    test_parser.add_argument("--llm-provider", default="groq", help="LLM provider for setup")
+    test_parser.add_argument(
+        "--message",
+        default="Hello CIRIS! This is an automated test. Please respond briefly.",
+        help="Test message to send in chat",
+    )
+    test_parser.add_argument(
+        "--output-dir",
+        default="mobile_qa_reports",
+        help="Directory for test reports (default: mobile_qa_reports)",
+    )
+    test_parser.add_argument("--no-screenshots", action="store_true", help="Don't save screenshots")
+    test_parser.add_argument("--no-logcat", action="store_true", help="Don't capture logcat")
+    test_parser.add_argument("--build", "-b", action="store_true", help="Build APK before running tests")
+    test_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    test_parser.add_argument("--keep-open", action="store_true", help="Keep app running after tests (don't force-stop)")
+
+    # iOS physical/simulator selection
+    test_parser.add_argument(
+        "--physical",
+        action="store_true",
+        help="Force physical device tests (auto-detected if device is connected)",
+    )
+    test_parser.add_argument(
+        "--simulator",
+        "-s",
+        action="store_true",
+        help="Force simulator tests even if physical device is connected",
+    )
+
+    # Create Licensed Agent options (iOS)
+    test_parser.add_argument(
+        "--node-url",
+        default="https://portal.ciris.ai",
+        help="Portal URL for connect_node tests (default: https://portal.ciris.ai)",
+    )
+    test_parser.add_argument(
+        "--wait-portal",
+        action="store_true",
+        help="Wait for user to complete Portal auth (connect_node tests)",
+    )
+    test_parser.add_argument(
+        "--portal-timeout",
+        type=int,
+        default=300,
+        help="Portal auth timeout in seconds (default: 300)",
+    )
+
+    args = parser.parse_args()
+
+    # Default to pull-logs if no command specified (backward compat: check if first arg looks like a test name)
+    if args.command is None:
+        # Check if user passed test names directly (backward compatibility)
+        if len(sys.argv) > 1 and sys.argv[1] in [
+            "full_flow",
+            "app_launch",
+            "google_signin",
+            "local_login",
+            "setup_wizard",
+            "chat_interaction",
+        ]:
+            # Reparse with 'test' prepended
+            sys.argv.insert(1, "test")
+            args = parser.parse_args()
+        else:
+            parser.print_help()
+            return 0
+
+    if args.command == "pull-logs":
+        return pull_logs_command(args)
+    elif args.command == "go-screen":
+        return go_screen_command(args)
+    elif args.command == "build":
+        return build_command(args)
+    elif args.command == "test":
+        return test_command(args)
+    elif args.command == "portal":
+        return portal_command(args)
+    elif args.command == "licensed-agent":
+        return licensed_agent_command(args)
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
