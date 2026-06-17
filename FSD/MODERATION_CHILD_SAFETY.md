@@ -161,6 +161,18 @@ All section refs are `/home/emoore/CIRISRegistry/FSD/CEG/`. **No new primitives 
 **Accountability property.** On match → NCMEC CyberTipline obligation (operator action), hash + minimal metadata retained for the federal-legal window only, **no content retention** (§11.4 step 3). Auditable via `hard_case:fast_path_takedown`.
 **Upstream-ask:** concrete matcher (self-hosted PDQ against public feeds) is intentionally out-of-tree — the fabric must ship or pin a `PdqHashMatcher` impl. The trait is ready; the adapter is the gap.
 
+#### 4.1.1 Watchlist auto-detection (opt-in, per-group, by-authority) → `FSD/WATCHLIST_DETECTION.md`
+
+§4.1 designs the *matcher at ingress*. The **watchlist feature** is the opt-in, per-group, by-authority **control over it** + the **auto-fire-of-action**: a `moderate`-scope holder can OPTIONALLY (default OFF) enable one or more watchlists — CSAM hash-DB(s) or other named content lists — for a group they moderate; the fabric then auto-fires the matcher at the publish/share seam and auto-fires the action on a hit (CSAM → `takedown_notice{PerceptualHashCsam}` + the operator's §2258A duty; other lists → a flag/`ModerationEvent`/`detection:*` routed to the named moderator). Every step is signed, attributed to the enabling authority, and on the audit chain. This mirrors Bluesky's hash-match-at-upload → auto-remove → NCMEC peer model (`SAFETY_LANDSCAPE`), adding attribution + revocability.
+
+**No new structural primitive.** The enable is a **config attestation** (the `consent.rs` recipe — `attestation_type: "watchlist_config"`, fixed dimension `watchlist:{id}`, gated on `moderate`/`takedown` via `signer_may_act_in_scope`, revocable by `withdraws`). The detection rides the §11.5 `PerceptualHashMatcher` trait at `put_blob_signing`; the auto-fire rides the §11.4 fast-path (CSAM) or §4.4/§6 (other). **Fabric home:** `src/safety/watchlist.rs` (the enable config + the `on_publish` seam hook) over `src/safety/hash_match.rs`.
+
+**The three-way split (load-bearing):** the **fabric** owns the mechanism; the **operator** owns the (un-shippable, licensed) hash-DB + the §2258A NCMEC report; the **authority** owns the opt-in. **Honest hard parts** (full treatment in the companion doc): (1) hashes are operator-provisioned — you cannot ship IWF/NCMEC; the fabric ships the seam + a reference open-PDQ adapter, never the restricted lists; (2) detection cannot reach §10.1.4 self/family content (the same E2EE limit as §B.1, already enforced in `ceg_egress.rs`); (3) over-blocking is calibrated by AlertOnly shadow mode + the CSAM-auto / other-routes-to-human asymmetry + recused Reconsideration appeals; (4) the §2258A duty is the operator's — fabric emits evidence, operator reports.
+
+**Build priority:** Phase 1.5 — after the delegation spine (Phase 0) and the matcher seam + takedown fast-path (Phase 1), before the gates. **Upstream asks beyond §9:** canonicalize the `watchlist:{id}` config-dimension vocabulary; the reference `PdqHashMatcher` is now a *hard-blocking* consumer (not just a nicety); add `hard_case:watchlist_enabled:{group}` / `hard_case:watchlist_match:{group}` reserved reasons so the enable + match are auditable, never silent.
+
+See **`FSD/WATCHLIST_DETECTION.md`** for the full config primitive, detection runtime, auto-fire path, accountability chain, the honest hard parts, and the build plan.
+
 ### 4.2 Age-assurance (§3 / §5.6.8.3 / §8.1.10-L3)
 
 **CEG primitive:** `age_assurance:{level}` dimension (`self` < `provider:{verifier_key}:adult` < `government:{credential_class}:adult`); the §8.1.10 Layer-3 `age_gate()` composition; `moderation:age_assurance_misdeclaration` adjudication path.
