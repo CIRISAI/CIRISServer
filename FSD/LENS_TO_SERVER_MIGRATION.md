@@ -47,6 +47,35 @@
 manifold conformity, and the detection-event corpus all run inside the node over
 the shared substrate, queryable from any node.
 
+## 1.5 Scope correction — the three-way split + the DSAR gate
+
+> The deployed CIRISLens (`CIRISAI/CIRISLens`) serves **more than** the 7 frozen
+> read endpoints: a **DSAR** erasure surface (GDPR Art. 17 — `POST /dsar/delete`,
+> Ed25519-signed, key-scoped: *only traces signed by the requesting key are
+> deleted*), a **public-keys registry**, the **CIRIS scoring feed** (`/capacity/*`,
+> `/factors/*` — distinct from detection-event `/scores`), and **access tiers**
+> (`public_sample` / `partner_access` / `AccessLevel`). The frozen-7 alone is
+> **not** a complete replacement. Migration completeness requires all of it — but
+> it is split three ways, not absorbed wholesale into one node:
+
+- **fabric (the lens node):** the epistemic substrate — ingest, corpus, scoring
+  (emits `capacity:*`), `system:*` self-report, the **signed / key-scoped** reads,
+  **DSAR**, the **public-keys registry**, and the **access tiers**.
+- **ciris-status (the monitor node):** the public aggregator + health attestor —
+  reads `capacity:*`/`system:*`, serves the public scoring + status surface
+  ciris.ai consumes, emits `health:liveness` `scores`. See
+  [`CIRISStatus/FSD/MONITORING_NODE_DESIGN.md`](https://github.com/CIRISAI/CIRISStatus).
+  The fabric node does **not** serve the public website feed.
+- **thin presentation (ciris.ai / Portal):** renders over the monitor's surface.
+
+**The DSAR gate (hard).** The §19.7 erasure primitives DSAR needs
+(`evict_fountain_content_hard_delete`, `content_aggregation`,
+`EjectionVerdict::EjectHardDelete`) ship in **persist v8.4.0 / verify v5.10.0**;
+the wheel pins **v8.2.0 / v5.9.0**. **Do not decommission CIRISLens until DSAR
+works as designed on the fabric node** (substrate bump → port DSAR + public-keys
++ tiers → CIRISServer#14 noise-floor demonstration). Read-replacement (the 7
+endpoints) can swap first; the Python DSAR path stays reachable until then.
+
 ## 2. Prerequisites
 
 - **`ciris-server` is published on PyPI** (0.2.x, abi3 / CPython 3.10+: manylinux
@@ -167,6 +196,14 @@ After the verification window, tear down: Grafana, TimescaleDB, the FastAPI inge
 service, the OAuth admin UI, and the prod telemetry sidecars
 (Prometheus/Loki/Tempo/Mimir/MinIO). Archive the `*.migrated-<ts>` identity files
 and the read-only TimescaleDB per your retention policy.
+
+**Gate (do NOT skip — §1.5):** decommission only after the **DSAR** erasure
+surface (Art. 17), the public-keys registry, and the access tiers run on the
+fabric node — which is gated on the persist v8.4.0 / verify v5.10.0 bump. Until
+then, keep the CIRISLens DSAR path reachable (you may retire its Grafana /
+ingest / scoring serving earlier — scoring serving moves to the ciris-status
+monitor node). Phasing: (1) read-replacement swap → (2) ciris-status public
+surface → (3) DSAR on fabric → (4) full decommission.
 
 ## 6. Rollback
 The cutover is reversible until decommission: the old deployment runs read-only
