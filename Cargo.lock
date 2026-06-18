@@ -530,9 +530,9 @@ checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bitcoin_hashes"
-version = "0.14.100"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c9901a56e133a1fc86eeb1113e2591f45f4682451ca893bff494d2f88918e3f"
+checksum = "4ed83caece3afc59919481b33b472e1432d1abc4641ed9100be142ef5110b406"
 dependencies = [
  "hex-conservative",
 ]
@@ -644,15 +644,15 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "camino"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
+checksum = "b4ce8d3bd5823c7504d3f579f13e7b2f3da252fcb938c594d5680ee508bf846f"
 dependencies = [
  "serde_core",
 ]
@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "5.11.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
+version = "6.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.0.0#1e894008352a480594adc53c21e6d4a0290862a3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -838,8 +838,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "4.5.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v4.5.1#0a5db46da97b07a3b41b483f9793eff16bb72ce7"
+version = "4.6.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v4.6.0#630d2c7330716927979a4400fc19d86607ecd2f5"
 dependencies = [
  "async-trait",
  "axum",
@@ -890,8 +890,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "5.11.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
+version = "6.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.0.0#1e894008352a480594adc53c21e6d4a0290862a3"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -954,8 +954,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "8.8.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v8.8.0#7af98862097bd4efc79e67af1991ec52c464db46"
+version = "9.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.0.0#c2ee16518698aeccea6c13b622b5aae22b8967ec"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1031,8 +1031,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "5.11.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v5.11.0#4495706b4d7d1c28c7143df6e571b95f38512251"
+version = "6.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.0.0#1e894008352a480594adc53c21e6d4a0290862a3"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1052,8 +1052,10 @@ dependencies = [
  "libc",
  "prost",
  "prost-build",
+ "qrcode",
  "rand 0.8.6",
  "reqwest",
+ "rpassword",
  "rusqlite",
  "rustls 0.21.12",
  "rustls 0.23.40",
@@ -4482,6 +4484,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "qrcodegen"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4982,6 +4990,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a4e1d4b9b938a26d2996af33229f0ca0956c652c1375067f0b45291c1df8417"
 dependencies = [
  "rmp",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -44,13 +44,20 @@ const AGENT_ID_HASH: &str = "agent-alpha";
 /// Stand up Node A: its own in-memory substrate, keyed by a HYBRID node-identity
 /// signer (Ed25519 + ML-DSA-65 software seed) — the scorer hybrid-signs, so the
 /// node's `sign_hybrid` must have a PQC half (production wires this via the
-/// keyring; here we use a deterministic software seed).
-async fn node_a() -> Arc<Engine> {
+/// keyring; here we use a deterministic software seed). Returns its REAL hybrid
+/// public keys (Ed25519 + ML-DSA-65, base64): persist v9.0.0 (CC 5.3.2.4.3.1)
+/// verifies the federation-tier hybrid signature at `put_attestation` against the
+/// registered key, so the scorer's own emit only admits if NODE_KEY_ID is
+/// registered with the SAME pubkeys its signer holds — these are them.
+async fn node_a_with_keys() -> (Arc<Engine>, String, String) {
+    use ciris_keyring::PqcSigner as _;
     let signing_key = SigningKey::from_bytes(&[0xA1; 32]);
+    let ed_pub_b64 = BASE64.encode(signing_key.verifying_key().to_bytes());
     let pqc = Arc::new(
         MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_KEY_ID}-pqc"))
             .expect("node-a ML-DSA-65 seed"),
     );
+    let mldsa_pub_b64 = BASE64.encode(pqc.public_key().await.expect("node-a ML-DSA-65 pubkey"));
     let signer = Arc::new(LocalSigner::from_parts(
         signing_key,
         NODE_KEY_ID.to_string(),
@@ -60,18 +67,34 @@ async fn node_a() -> Arc<Engine> {
     let engine = Engine::with_signer(signer, "sqlite::memory:")
         .await
         .expect("Engine::with_signer (sqlite::memory:) must succeed");
-    Arc::new(engine)
+    (Arc::new(engine), ed_pub_b64, mldsa_pub_b64)
 }
 
 /// Register a peer/agent verifying key into the directory so (a) trace verify
 /// resolves it and (b) `put_attestation`'s attested-key FK resolves it. Mirrors
 /// `replication.rs::cross_register`.
 async fn register_key(engine: &Engine, key_id: &str, ed_pubkey_b64: &str, id_type: &str) {
+    register_key_hybrid(engine, key_id, ed_pubkey_b64, None, id_type).await;
+}
+
+/// Register a key, optionally with its ML-DSA-65 pubkey. The federation-tier
+/// ingest gate (persist v9.0.0) resolves `scrub_key_id`'s pubkeys here to verify
+/// an emitted attestation's hybrid signature, so an attesting node MUST be
+/// registered with its real ML-DSA-65 half (`Some(...)`) for its own emits to
+/// admit. (The attested agent key is FK-only here — never the attester — so it
+/// may register without a PQC half.)
+async fn register_key_hybrid(
+    engine: &Engine,
+    key_id: &str,
+    ed_pubkey_b64: &str,
+    ml_dsa_65_pubkey_b64: Option<&str>,
+    id_type: &str,
+) {
     let now = chrono::Utc::now();
     let record = KeyRecord {
         key_id: key_id.to_string(),
         pubkey_ed25519_base64: ed_pubkey_b64.to_string(),
-        pubkey_ml_dsa_65_base64: None,
+        pubkey_ml_dsa_65_base64: ml_dsa_65_pubkey_b64.map(str::to_string),
         algorithm: algorithm::HYBRID.into(),
         identity_type: id_type.to_string(),
         identity_ref: key_id.to_string(),
@@ -219,7 +242,7 @@ fn build_trace_batch(
 
 #[tokio::test]
 async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
-    let node = node_a().await;
+    let (node, node_ed_pub_b64, node_mldsa_pub_b64) = node_a_with_keys().await;
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
     let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
@@ -227,12 +250,17 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     // ── Precondition: both the attesting (Node A) and attested (agent) keys
     //    must exist as federation_keys rows for put_attestation's FK. Node A's
     //    own key is registered by compose::register_self_key in production; here
-    //    we register both directly. The agent key is also the trace-verify key. ─
-    register_key(
+    //    we register both directly. The agent key is also the trace-verify key.
+    //    persist v9.0.0 (CC 5.3.2.4.3.1) verifies the scorer's emitted
+    //    federation-tier hybrid signature against NODE_KEY_ID's registered
+    //    pubkeys, so Node A must register its REAL Ed25519 + ML-DSA-65 halves
+    //    (its `node` identity_type — CC 1.13.5), not a placeholder. ────────────
+    register_key_hybrid(
         &node,
         NODE_KEY_ID,
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        "steward",
+        &node_ed_pub_b64,
+        Some(&node_mldsa_pub_b64),
+        identity_type::NODE,
     )
     .await;
     register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;

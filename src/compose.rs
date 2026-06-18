@@ -680,10 +680,11 @@ pub(crate) async fn build_self_key_record(
         // holds (this is the node's own self-signed federation identity, the
         // admission anchor for rows it authors); the IDENTITY_TYPE is corrected
         // from "steward" to "node" so the wire-checkable CC 4.4.3.5 invariant
-        // applies (a node-key delegation may carry only infra:* scopes). The
-        // substrate has no identity_type::NODE constant yet (filed upstream);
-        // identity_type is free-form TEXT, so we register the literal "node".
-        identity_type: "node".to_owned(),
+        // applies (a node-key delegation may carry only infra:* scopes).
+        // persist v9.0.0 (CIRISPersist#235 closed) now publishes the canonical
+        // role token `federation::types::identity_type::NODE` ("node"), so the
+        // node + the v9.0.0 node-agency admission gate agree byte-for-byte.
+        identity_type: ciris_persist::federation::types::identity_type::NODE.to_owned(),
         identity_ref: cfg.key_id.clone(),
         valid_from: now,
         valid_until: None,

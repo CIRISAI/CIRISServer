@@ -95,16 +95,38 @@ async fn register_node(engine: &Engine, key_id: &str) {
         .expect("register node key via admission gate");
 }
 
-/// Register a directory key with an arbitrary `identity_type` (put_public_key —
-/// no PoP re-verify), used to stand up a granter of a chosen role.
-async fn register_party(engine: &Engine, key_id: &str, identity_type_str: &str) {
+/// Register a party from a signer, with the signer's REAL hybrid pubkeys, under
+/// `identity_type`. persist v9.0.0's federation-tier ingest gate verifies an
+/// emitted `delegates_to`/`withdraws` against `attesting_key_id`'s registered
+/// pubkeys, so a party that will ATTEST (sign) a federation-tier row must be
+/// registered with the keys it actually signs with. Returns the signer.
+async fn register_party_signed(
+    engine: &Engine,
+    key_id: &str,
+    identity_type_str: &str,
+) -> LocalSigner {
+    use ciris_keyring::PqcSigner as _;
+    let signer = party_signer(key_id);
+    let ed_pub = BASE64.encode(
+        SigningKey::from_bytes(&party_ed_seed(key_id))
+            .verifying_key()
+            .to_bytes(),
+    );
+    let mldsa_pub = {
+        let pqc = MlDsa65SoftwareSigner::from_seed_bytes(
+            &party_pqc_seed(key_id),
+            format!("{key_id}-pqc"),
+        )
+        .expect("party ML-DSA-65 seed");
+        BASE64.encode(pqc.public_key().await.expect("party ML-DSA-65 pubkey"))
+    };
     let now = chrono::Utc::now();
     let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize party envelope");
     let record = KeyRecord {
         key_id: key_id.to_string(),
-        pubkey_ed25519_base64: BASE64.encode([3u8; 32]),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode([4u8; 32])),
+        pubkey_ed25519_base64: ed_pub,
+        pubkey_ml_dsa_65_base64: Some(mldsa_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type_str.to_string(),
         identity_ref: key_id.to_string(),
@@ -125,7 +147,42 @@ async fn register_party(engine: &Engine, key_id: &str, identity_type_str: &str) 
         .federation_directory()
         .put_public_key(SignedKeyRecord { record })
         .await
-        .expect("register party key");
+        .expect("register signed party key");
+    signer
+}
+
+/// Deterministic per-key-id Ed25519 seed for a party signer (distinct from the
+/// node steward's `[0xA1;32]`).
+fn party_ed_seed(key_id: &str) -> [u8; 32] {
+    let mut s = [0xE1u8; 32];
+    for (i, b) in key_id.bytes().enumerate().take(32) {
+        s[i] ^= b;
+    }
+    s
+}
+
+/// Deterministic per-key-id ML-DSA-65 seed for a party signer.
+fn party_pqc_seed(key_id: &str) -> [u8; 32] {
+    let mut s = [0xE2u8; 32];
+    for (i, b) in key_id.bytes().enumerate().take(32) {
+        s[i] ^= b;
+    }
+    s
+}
+
+/// A party's `LocalSigner` (hybrid), matching [`register_party_signed`]'s keys.
+fn party_signer(key_id: &str) -> LocalSigner {
+    let signing_key = SigningKey::from_bytes(&party_ed_seed(key_id));
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&party_pqc_seed(key_id), format!("{key_id}-pqc"))
+            .expect("party ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        signing_key,
+        key_id.to_string(),
+        Some(pqc),
+        Some(format!("{key_id}-pqc")),
+    )
 }
 
 fn infra_scopes() -> Vec<String> {
@@ -163,11 +220,11 @@ fn scopes_are_infra_only_accepts_infra_rejects_agency_and_legacy() {
 async fn emit_owner_binding_refuses_agency_scopes() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
-    register_party(&engine, "owner-user", identity_type::USER).await;
+    let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
     let err = emit_owner_binding(
         &engine,
-        "owner-user",
+        &owner,
         NODE_KEY_ID,
         &["agency:act_on_behalf".to_string()],
     )
@@ -185,14 +242,14 @@ async fn emit_owner_binding_refuses_agency_scopes() {
 async fn is_owner_bound_true_after_user_infra_delegation() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
-    register_party(&engine, "owner-user", identity_type::USER).await;
+    let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
     assert!(
         is_owner_bound(&engine, NODE_KEY_ID).await.is_none(),
         "unbound before any delegation"
     );
 
-    emit_owner_binding(&engine, "owner-user", NODE_KEY_ID, &infra_scopes())
+    emit_owner_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit infra-only owner-binding");
 
@@ -208,9 +265,9 @@ async fn is_owner_bound_false_when_granter_is_not_user_role() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
     // The granter is a NODE-role key, NOT a user — ownership must NOT root in it.
-    register_party(&engine, "other-node", "node").await;
+    let other_node = register_party_signed(&engine, "other-node", identity_type::NODE).await;
 
-    emit_owner_binding(&engine, "other-node", NODE_KEY_ID, &infra_scopes())
+    emit_owner_binding(&engine, &other_node, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit (granter is node-role)");
 
@@ -224,14 +281,14 @@ async fn is_owner_bound_false_when_granter_is_not_user_role() {
 async fn is_owner_bound_false_when_revoked() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
-    register_party(&engine, "owner-user", identity_type::USER).await;
-    emit_owner_binding(&engine, "owner-user", NODE_KEY_ID, &infra_scopes())
+    let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
+    emit_owner_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit owner-binding");
     assert!(is_owner_bound(&engine, NODE_KEY_ID).await.is_some());
 
     // The granter withdraws the binding against the node → ownership ends.
-    emit_withdraws(&engine, "owner-user", NODE_KEY_ID).await;
+    emit_withdraws(&engine, &owner, NODE_KEY_ID).await;
 
     assert!(
         is_owner_bound(&engine, NODE_KEY_ID).await.is_none(),
@@ -240,23 +297,26 @@ async fn is_owner_bound_false_when_revoked() {
 }
 
 /// Emit a `withdraws` from `granter` against `target` (the granter retracts its
-/// delegation). Bytes are node-signed (the substrate does not re-verify scrub).
-async fn emit_withdraws(engine: &Engine, granter: &str, target: &str) {
+/// delegation). Signed by the GRANTER's key — persist v9.0.0 verifies this
+/// federation-tier row against `attesting_key_id` (== granter), so attester ==
+/// signer.
+async fn emit_withdraws(engine: &Engine, granter: &LocalSigner, target: &str) {
+    let granter_key_id = granter.key_id().to_string();
     let now = chrono::Utc::now();
     let envelope = serde_json::json!({
         "kind": "withdraws",
         "dimension": "ownership:withdraw:node:v1",
-        "attesting_key_id": granter,
+        "attesting_key_id": granter_key_id,
         "node_key_id": target,
     });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize withdraws");
-    let sig = engine
+    let sig = granter
         .sign_hybrid(&canonical)
         .await
         .expect("sign withdraws");
     let attestation = Attestation {
-        attestation_id: format!("withdraw-{granter}-{target}"),
-        attesting_key_id: granter.to_string(),
+        attestation_id: format!("withdraw-{granter_key_id}-{target}"),
+        attesting_key_id: granter_key_id.clone(),
         attested_key_id: target.to_string(),
         attestation_type: attestation_type::WITHDRAWS.to_string(),
         weight: None,
@@ -266,7 +326,7 @@ async fn emit_withdraws(engine: &Engine, granter: &str, target: &str) {
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: granter_key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),

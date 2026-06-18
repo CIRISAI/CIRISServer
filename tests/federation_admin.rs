@@ -106,15 +106,32 @@ const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
 /// `Some(owner)` and the serve-only-floor gate on peering passes. The node key
 /// must already be registered ([`register_self`]).
 async fn bind_owner(engine: &Engine) {
-    // Register the responsible party as a `user`-role key (put_public_key does
-    // not re-verify PoP; identity_type "user" is what is_owner_bound checks).
+    // Register the responsible party as a `user`-role key with the user signer's
+    // REAL hybrid pubkeys — persist v9.0.0's federation-tier ingest gate verifies
+    // the owner-binding against `attesting_key_id` (== the user), so the user must
+    // be registered with the keys it actually signs the binding with.
+    use ciris_keyring::PqcSigner as _;
+    let owner_signer = owner_user_signer();
+    let owner_ed_pub = BASE64.encode(
+        SigningKey::from_bytes(&OWNER_ED_SEED)
+            .verifying_key()
+            .to_bytes(),
+    );
+    let owner_mldsa_pub = {
+        let pqc = MlDsa65SoftwareSigner::from_seed_bytes(
+            &OWNER_PQC_SEED,
+            format!("{OWNER_USER_KEY_ID}-pqc"),
+        )
+        .expect("owner ML-DSA-65 seed");
+        BASE64.encode(pqc.public_key().await.expect("owner ML-DSA-65 pubkey"))
+    };
     let now = chrono::Utc::now();
     let envelope = serde_json::json!({ "key_id": OWNER_USER_KEY_ID });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner envelope");
     let record = KeyRecord {
         key_id: OWNER_USER_KEY_ID.to_string(),
-        pubkey_ed25519_base64: BASE64.encode([7u8; 32]),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode([8u8; 32])),
+        pubkey_ed25519_base64: owner_ed_pub,
+        pubkey_ml_dsa_65_base64: Some(owner_mldsa_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::USER.into(),
         identity_ref: OWNER_USER_KEY_ID.to_string(),
@@ -143,12 +160,32 @@ async fn bind_owner(engine: &Engine) {
         .collect();
     ciris_server::auth::ownership::emit_owner_binding(
         engine,
-        OWNER_USER_KEY_ID,
+        &owner_signer,
         NODE_A_KEY_ID,
         &scopes,
     )
     .await
     .expect("emit owner-binding delegates_to(user -> node, infra:*)");
+}
+
+/// The owner user's deterministic Ed25519 / ML-DSA-65 seeds (distinct from the
+/// node steward's `[0xA1;32]`/`[0xA2;32]`).
+const OWNER_ED_SEED: [u8; 32] = [0xF1; 32];
+const OWNER_PQC_SEED: [u8; 32] = [0xF2; 32];
+
+/// The owner user's `LocalSigner` (hybrid) — matches the pubkeys [`bind_owner`]
+/// registers; signs the owner-binding (attester == signer for the v9.0.0 gate).
+fn owner_user_signer() -> LocalSigner {
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&OWNER_PQC_SEED, format!("{OWNER_USER_KEY_ID}-pqc"))
+            .expect("owner ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        SigningKey::from_bytes(&OWNER_ED_SEED),
+        OWNER_USER_KEY_ID.to_string(),
+        Some(pqc),
+        Some(format!("{OWNER_USER_KEY_ID}-pqc")),
+    )
 }
 
 /// Build THIS node's own self-signed `SignedKeyRecord` JSON exactly as

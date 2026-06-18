@@ -44,9 +44,14 @@ use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
 use ciris_persist::federation::types::{attestation_tier, Attestation, SignedAttestation};
 use ciris_persist::federation::FederationDirectory;
-use ciris_persist::prelude::{
-    canonicalize_envelope_for_signing, CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary,
-};
+use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
+// The CEG PRODUCE canonicalizer (V2/JCS). persist v9.0.0's federation-tier
+// ingest gate (CC 5.3.2.4.3.1) re-canonicalizes the emitted attestation envelope
+// through THIS function and Strict-hybrid-verifies the result, so the scorer MUST
+// sign over the SAME `ceg_produce_canonicalize` bytes (matching peer.rs /
+// build_self_key_record) — the legacy `canonicalize_envelope_for_signing`
+// (PythonJsonDumps strip form) produces different bytes and the gate rejects it.
+use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 pub mod n_eff;
 
@@ -276,8 +281,9 @@ async fn score_and_emit(
     });
 
     // ── Emit recipe — modeled on CIRISStatus ceg.rs:182 (emit_liveness) ──────
-    // 1. JCS canonical bytes (the signing basis — CEG §0.9).
-    let canonical = canonicalize_envelope_for_signing(&envelope)
+    // 1. CEG PRODUCE-canonical bytes (V2/JCS — the signing basis, CEG §0.9; the
+    //    SAME form persist v9.0.0's federation-tier ingest gate re-derives).
+    let canonical = ceg_produce_canonicalize(&envelope)
         .map_err(|e| anyhow::anyhow!("canonicalize capacity envelope: {e}"))?;
     // 2. original_content_hash = hex(SHA-256(canonical)).
     let original_content_hash = hex::encode(Sha256::digest(&canonical));

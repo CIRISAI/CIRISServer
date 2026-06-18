@@ -40,7 +40,7 @@ use ciris_persist::federation::types::{
     algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
     SignedAttestation, SignedKeyRecord,
 };
-use ciris_persist::prelude::{canonicalize_envelope_for_signing, Engine, LocalSigner};
+use ciris_persist::prelude::{Engine, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use ciris_server::peer::{self, CONSENT_DIMENSION};
@@ -167,15 +167,21 @@ impl NodeB {
             "stake": "reputational",
             "attested_key_id": subject_key_id,
         });
+        // persist v9.0.0's federation-tier ingest gate (CC 5.3.2.4.3.1) re-derives
+        // the canonical bytes via `ceg_produce_canonicalize` and Strict-hybrid-
+        // verifies: Ed25519 over canonical, ML-DSA-65 over the BOUND form
+        // (canonical || ed_sig). Sign exactly that shape (matches signed_key_record
+        // above / production's LocalSigner::sign_hybrid) — the legacy
+        // `canonicalize_envelope_for_signing` (PythonJsonDumps) + unbound ML-DSA
+        // is what the gate now rejects (original_content_hash mismatch).
         let canonical =
-            canonicalize_envelope_for_signing(&envelope).expect("canonicalize liveness envelope");
+            ceg_produce_canonicalize(&envelope).expect("canonicalize liveness envelope");
         let original_content_hash = hex::encode(Sha256::digest(&canonical));
         let ed_sig = self.ed.sign(&canonical).to_bytes();
-        let pqc_sig = self
-            .mldsa
-            .sign(&canonical)
-            .await
-            .expect("ml-dsa sign liveness");
+        let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
+        bound.extend_from_slice(&canonical);
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign liveness");
 
         let attestation = Attestation {
             attestation_id: "b-liveness-0001".to_string(),

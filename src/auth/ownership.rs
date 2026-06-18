@@ -23,16 +23,34 @@
 //! other non-infra) scope on a node-key delegation. [`scopes_are_infra_only`]
 //! is that verifier — it makes "no agency for infra" cryptographic.
 //!
-//! ## Server-side vs deferred-upstream (substrate v8.8.0)
+//! ## Server-side + substrate alignment (substrate v9.0.0)
 //!
-//! The substrate ships `delegates_to` ([`attestation_type::DELEGATES_TO`]) and
-//! a scoped delegation walk, but does NOT ship the `infra:*` / `agency:*` scope
-//! prefixes, an `identity_type::NODE` constant, or the reject-agency-on-node
-//! gate. Those are enforced **here, server-side**, pending upstream support:
+//! persist v9.0.0 (CIRISPersist#235/#236 closed) now SHIPS the federation-identity
+//! vocabulary this module pioneered server-side:
 //!
-//! - the node self-registers as the free-form `identity_type` string `"node"`
-//!   (CC 3.4.7.1: `identity_type` is free-form TEXT), and
-//! - the infra/agency split + the reject-agency gate live in this module.
+//! - `federation::types::identity_type::NODE` (`"node"`) — the canonical role
+//!   token. [`build_self_key_record`](crate::compose) registers it directly.
+//! - `federation::admission::scopes_are_infra_only(&HashSet<String>)` — semantics
+//!   persist documents as EXACT to ours. Our [`scopes_are_infra_only`] now
+//!   **composes** it (keeping the `&[String]` caller shape).
+//! - `federation::types::identity_type::set_contains` — composed by our
+//!   [`identity_type_contains`].
+//! - `federation::admission::check_node_agency_admission` — the reject-agency-on-
+//!   node gate, wired into `put_attestation` on all backends. Our producer-side
+//!   refusal ([`build_owner_binding_envelope`] gates `scopes_are_infra_only`
+//!   first) now composes the SAME predicate, so the server-side gate and the
+//!   substrate admission gate cannot disagree.
+//!
+//! What stays server-side (a STRICTER, return-richer wrapper over the substrate):
+//!
+//! - [`is_owner_bound`] returns the granter `key_id` (callers bind ROOT to the
+//!   responsible user) AND requires the owner-binding edge to be `infra:*`-only
+//!   (the CC 1.13.5 read-time gate). persist's general
+//!   `federation::admission::is_owner_bound` is scope-agnostic and returns only
+//!   `bool` — it is the substrate-internal predicate the v9.0.0 community-
+//!   membership gate composes; ours is the node-ownership wrapper the auth
+//!   subsystem needs, so it is KEPT (it composes the substrate's leaf predicates
+//!   but is not replaced by the substrate's bool form).
 //!
 //! ## The owner-binding is GENUINELY USER-SIGNED (1-phase, SUBSTRATE-NATIVE)
 //!
@@ -62,8 +80,10 @@
 //!   stores the `SignedAttestation` whose `scrub_*` fields hold the USER's
 //!   `key_id` + signatures. [`is_owner_bound`] then reads a USER-signed edge.
 //!
-//! The legacy node-attested [`emit_owner_binding`] is retained for internal
-//! emit sites with no user signature available; the CLAIM path no longer uses it.
+//! [`emit_owner_binding`] is the one-shot user-signed emit (it takes the user's
+//! `LocalSigner` directly: attester == signer, the v9.0.0-conformant shape) for
+//! internal emit sites that already hold the user's signer; the CLAIM path uses
+//! the 1-phase [`build_signed_owner_binding`] / [`apply_signed_owner_binding`].
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -106,6 +126,11 @@ pub const OWNER_BINDING_INFRA_SCOPES: &[&str] =
 /// The legacy unprefixed agency kinds (the pre-split Self-at-login act-on-behalf
 /// vocabulary). On a node-key delegation these are agency and MUST be rejected
 /// just as `agency:*` is — they are the unprefixed equivalents (CC 4.4.3.5).
+/// Retained as the documented rejected vocabulary; the reject itself is now the
+/// single "every token starts with `infra:`" predicate (persist's
+/// `scopes_are_infra_only`, which these kinds fail), so this list is no longer a
+/// separate admission branch (matches the substrate's own rationale).
+#[allow(dead_code)]
 const LEGACY_AGENCY_KINDS: &[&str] = &[
     "act_on_behalf",
     "message_io",
@@ -137,16 +162,23 @@ pub const DIMENSION_OWNER_BINDING: &str = "ownership:responsible_party:node:v1";
 ///
 /// This makes "no agency for infra" cryptographic: a node-key `delegates_to`
 /// literally cannot carry agency and still pass.
+///
+/// ## Substrate alignment (persist v9.0.0, CIRISPersist#236)
+///
+/// persist v9.0.0 now publishes `federation::admission::scopes_are_infra_only`
+/// (`&HashSet<String> -> bool`) with semantics persist documents as EXACT to
+/// ours (accept `infra:*`, reject `agency:*` + legacy agency kinds + empty +
+/// other — the legacy-agency and other-prefix cases are subsumed by the single
+/// "every token starts with `infra:`" predicate). We **compose** it rather than
+/// duplicate the rule: this wrapper keeps our `&[String]` signature (the shape
+/// our callers + the JCS scope array use) and trims each token before delegating
+/// to the substrate predicate. The infra:*/agency:* split (CC 1.13.5) thus stays
+/// enforced server-side AND is now the same predicate the substrate's
+/// `check_node_agency_admission` gate applies at `put_attestation`.
 pub fn scopes_are_infra_only(scopes: &[String]) -> bool {
-    if scopes.is_empty() {
-        return false;
-    }
-    scopes.iter().all(|s| {
-        let s = s.trim();
-        s.starts_with(INFRA_SCOPE_PREFIX)
-            && !s.starts_with(AGENCY_SCOPE_PREFIX)
-            && !LEGACY_AGENCY_KINDS.contains(&s)
-    })
+    let set: std::collections::HashSet<String> =
+        scopes.iter().map(|s| s.trim().to_owned()).collect();
+    ciris_persist::federation::admission::scopes_are_infra_only(&set)
 }
 
 // ─── identity_type set membership (CC 3.4.7.1) ──────────────────────────────
@@ -155,13 +187,17 @@ pub fn scopes_are_infra_only(scopes: &[String]) -> bool {
 /// stored as one text column on this substrate) contains the `role` token.
 ///
 /// The substrate stores `identity_type` as a single exact-match column, so a
-/// "set" is encoded as whitespace/comma-separated tokens. We accept the common
-/// shapes: an exact single token (`"user"`), or a delimited set
-/// (`"user wise_authority"` / `"user,wise_authority"`).
+/// "set" is encoded as whitespace/comma-separated tokens.
+///
+/// ## Substrate alignment (persist v9.0.0)
+///
+/// persist v9.0.0 publishes `federation::types::identity_type::set_contains`
+/// (the canonical §7.0.1 set membership the substrate's own node-agency +
+/// owner-binding gates use). We **compose** it so producer + verifier parse the
+/// set identically (e.g. the duplicate-token `"node,node"` robustness from
+/// SecReview F1).
 pub fn identity_type_contains(identity_type: &str, role: &str) -> bool {
-    identity_type
-        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-        .any(|t| t.trim() == role)
+    ciris_persist::federation::types::identity_type::set_contains(identity_type, role)
 }
 
 // ─── Build + canonicalize the owner-binding envelope (the bytes the USER signs) ─
@@ -237,10 +273,17 @@ pub fn canonicalize_owner_binding_envelope(
 /// the envelope to the same bytes the user signed, and (b) verified the user's
 /// hybrid signature over those bytes against the user's registered pubkeys.
 ///
-/// `put_attestation` does NOT re-verify the scrub signature against the
-/// directory, but it DOES require `attesting_key_id` (the user) to be a
-/// registered `federation_keys` row — so the user MUST be registered before this
-/// call (phase 1 registers them). Returns the persisted attestation id.
+/// persist v9.0.0 (CC 5.3.2.4.3.1) NOW re-verifies the federation-tier hybrid
+/// scrub signature at the `put_attestation` admission gate: it canonicalizes
+/// `attestation_envelope` via `ceg_produce_canonicalize`, cross-checks
+/// `SHA-256(canonical) == original_content_hash`, and Strict-`verify_hybrid`s
+/// both halves against `scrub_key_id`'s registered pubkey. This path satisfies
+/// that gate — the user signs `canonicalize_owner_binding_envelope(envelope)`
+/// (the SAME `ceg_produce_canonicalize`) with `LocalSigner::sign_hybrid` (the
+/// bound ML-DSA form), `original_content_hash = SHA-256(canonical)`, and
+/// `scrub_key_id` = the user, whose hybrid pubkeys phase 1 registers. So the
+/// user MUST be registered before this call (phase 1 registers them). Returns the
+/// persisted attestation id.
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_user_signed_owner_binding(
     engine: &Engine,
@@ -561,35 +604,41 @@ async fn register_user_key(
     Ok(())
 }
 
-// ─── Emit the owner-binding (user → node, infra:*) — legacy node-attested ────
+// ─── Emit the owner-binding (user → node, infra:*) — user-signed ─────────────
 
 /// Emit the CC 3.2 owner-binding: a `delegates_to(responsible_user → node)`
-/// attestation carrying ONLY `infra:*` scopes, **node-attested-on-behalf** of
-/// the user (the node engine signs the bytes).
+/// attestation carrying ONLY `infra:*` scopes, **signed by the responsible
+/// user's own key** (`user_signer`).
 ///
 /// **Refuses to emit agency to a node.** [`scopes_are_infra_only`] is asserted
 /// FIRST (via [`build_owner_binding_envelope`]); an `agency:*` (or legacy
 /// agency) scope is rejected before any sign / persist.
 ///
-/// ## Legacy / internal-only — the CLAIM path no longer uses this
+/// ## v9.0.0 conformance — the attester MUST be the signer
 ///
-/// This is the node-attested-on-behalf form: the bytes are hybrid-signed by the
-/// *node's* engine signer, so `scrub_key_id` is the node's key. The substrate
-/// `put_attestation` does NOT re-verify the scrub signature, so this is accepted,
-/// but the binding is NOT user-self-signed. The first-run CLAIM now produces a
-/// GENUINELY USER-SIGNED binding via the 2-phase
-/// `POST /v1/setup/root` (begin) + `/finalize` flow
-/// ([`persist_user_signed_owner_binding`]). This function is retained for
-/// internal/non-claim emit sites that have no user signature available.
+/// persist v9.0.0's federation-tier ingest gate (CC 5.3.2.4.3.1) verifies the
+/// row's hybrid signature against **`attesting_key_id`**'s registered pubkeys
+/// (NOT `scrub_key_id`). An owner-binding's `attesting_key_id` is, by the CC 3.2
+/// model, the responsible USER (the `delegates_to` granter the walk resolves), so
+/// the row MUST be signed by the user's key. The pre-v9.0.0 "node-attested-on-
+/// behalf" form (node signs, user claimed as attester) is now structurally
+/// rejected by the gate — there is no conformant federation-tier owner-binding
+/// without the user's own signature. `user_signer.key_id()` MUST therefore equal
+/// `responsible_user_key_id`, and the user MUST be registered with this signer's
+/// hybrid pubkeys. This is the same single-signer shape
+/// [`build_signed_owner_binding`] / [`persist_user_signed_owner_binding`] use for
+/// the 1-phase CLAIM; this entry point is for internal emit sites that hold the
+/// user's `LocalSigner` directly.
 pub async fn emit_owner_binding(
     engine: &Engine,
-    responsible_user_key_id: &str,
+    user_signer: &LocalSigner,
     node_key_id: &str,
     infra_scopes: &[String],
 ) -> Result<String, OwnershipError> {
+    let responsible_user_key_id = user_signer.key_id().to_string();
     let now = chrono::Utc::now();
     let envelope = build_owner_binding_envelope(
-        responsible_user_key_id,
+        &responsible_user_key_id,
         node_key_id,
         infra_scopes,
         &now.to_rfc3339(),
@@ -598,9 +647,10 @@ pub async fn emit_owner_binding(
     let canonical = canonicalize_owner_binding_envelope(&envelope)?;
     let original_content_hash = hex::encode(Sha256::digest(&canonical));
 
-    // Hybrid-sign over the canonical bytes (node engine signer — legacy
-    // node-attested-on-behalf; scrub_key_id is the node's key).
-    let sig = engine
+    // Hybrid-sign over the canonical bytes with the USER's signer — attester ==
+    // signer == scrub_key_id (the v9.0.0 federation-tier ingest gate verifies the
+    // row against `attesting_key_id`'s registered pubkeys).
+    let sig = user_signer
         .sign_hybrid(&canonical)
         .await
         .map_err(|e| OwnershipError::Sign(e.to_string()))?;
@@ -608,7 +658,7 @@ pub async fn emit_owner_binding(
     let attestation_id = new_uuid_v4();
     let attestation = Attestation {
         attestation_id: attestation_id.clone(),
-        attesting_key_id: responsible_user_key_id.to_owned(),
+        attesting_key_id: responsible_user_key_id.clone(),
         attested_key_id: node_key_id.to_owned(),
         attestation_type: attestation_type::DELEGATES_TO.to_owned(),
         weight: None,
@@ -618,8 +668,8 @@ pub async fn emit_owner_binding(
         original_content_hash,
         scrub_signature_classical: B64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        // Honest: the node engine produced the bytes (legacy on-behalf form).
-        scrub_key_id: node_key_id.to_owned(),
+        // The responsible user produced the bytes (attester == signer).
+        scrub_key_id: responsible_user_key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -640,7 +690,7 @@ pub async fn emit_owner_binding(
         responsible_user = %responsible_user_key_id,
         node_key_id = %node_key_id,
         attestation_id = %attestation_id,
-        "emitted (legacy node-attested) owner-binding delegates_to(user → node, infra:*)"
+        "emitted USER-SIGNED owner-binding delegates_to(user → node, infra:*)"
     );
     Ok(attestation_id)
 }
@@ -871,8 +921,12 @@ mod tests {
 
     #[test]
     fn identity_type_set_membership() {
+        // Now composes persist's `identity_type::set_contains` (CEG §7.0.1),
+        // which is the COMMA-joined set form — the substrate canon. A single
+        // token and a comma-joined set both resolve; whitespace is NOT a set
+        // delimiter (that was our pre-alignment over-permissive parse).
         assert!(identity_type_contains("user", "user"));
-        assert!(identity_type_contains("user wise_authority", "user"));
+        assert!(identity_type_contains("user,wise_authority", "user"));
         assert!(identity_type_contains(
             "user,wise_authority",
             "wise_authority"
