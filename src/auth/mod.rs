@@ -39,6 +39,13 @@ pub mod device_auth;
 pub mod erasure;
 pub mod gate;
 pub mod oauth;
+/// Node ownership = the **responsible-party** model (CC 4.4.3.5 + CC 3.2 +
+/// CC 1.13.5): a fabric node has NO agency, so ownership is a `user`-role
+/// responsible party bound by an `infra:*`-only `delegates_to` — NOT the
+/// agent's joint-agency partnership. Carries the infra/agency scope-split
+/// verifier ([`ownership::scopes_are_infra_only`]), the owner-binding emitter,
+/// and the [`ownership::is_owner_bound`] reader.
+pub mod ownership;
 pub mod roles;
 pub mod self_login;
 pub mod session;

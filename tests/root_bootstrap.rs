@@ -276,6 +276,9 @@ fn founder_claim_body(node_key_id: &str, founder_key_id: &str) -> serde_json::Va
         },
         // The one-time operator-presence PIN (signature-bound, inside the body).
         "claim_pin": TEST_CLAIM_PIN,
+        // The responsible-party model (CC 3.2) requires a cohort scope; the
+        // owner-binding is infra:* by default (no explicit infra_scopes).
+        "cohort_scope": "self",
     })
 }
 
@@ -545,7 +548,9 @@ async fn signed_claim_with_pin(
             "key_id": founder_key_id,
             "ed25519_pubkey_b64": BASE64.encode(&probe.classical.public_key),
             "ml_dsa_65_pubkey_b64": BASE64.encode(&probe.pqc.public_key),
-        }
+        },
+        // Responsible-party model (CC 3.2): a cohort scope is required.
+        "cohort_scope": "self",
     });
     if let Some(pin) = claim_pin {
         claim["claim_pin"] = pin.into();

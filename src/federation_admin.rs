@@ -153,6 +153,25 @@ async fn peering(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    // (serve-only floor — CC 3.2 / CC 1.13.5) An UNOWNED node refuses every
+    // owner-op and serves cleartext federation data from the canonical root
+    // ONLY. Federation peering authorizes cross-node data flow, so it requires a
+    // live RESPONSIBLE PARTY bound to THIS node (a `user`-role
+    // `delegates_to(user → node, infra:*)` owner-binding). This gate is
+    // independent of the session/role check below: even a SYSTEM_ADMIN session
+    // cannot peer an owner-unbound node — the node has no accountable party to
+    // root the cross-node authority in.
+    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+        .await
+        .is_err()
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this node has no responsible party (owner-binding) — federation peering refused; \
+             an unowned node serves cleartext from the canonical root only (CC 3.2 / CC 1.13.5). \
+             Claim ownership first via POST /v1/setup/root.",
+        );
+    }
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
     }

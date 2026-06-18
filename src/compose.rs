@@ -66,8 +66,9 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     // ── Self-register Node A's own signing key in the federation directory ────
     // Required BEFORE any attestation Node A authors will be admitted:
     // `put_attestation` enforces that BOTH the attesting and attested keys exist
-    // as `federation_keys` rows. Node A is a trust-root substrate process, so it
-    // registers itself as identity_type "steward" through the v8.8.0 canonical
+    // as `federation_keys` rows. Node A is a fabric NODE (infrastructure, NO
+    // agency — CC 1.13.5), so it registers itself as identity_type "node"
+    // (corrected from "steward") through the v8.8.0 canonical
     // admission gate (`Engine::register_federation_key`, CIRISPersist#234 / CEG
     // 1.0-RC29 §5.6.8.15): self-signed proof-of-possession, hybrid-verified
     // fail-secure BEFORE store. Idempotent: a matching row returns Ok; a Conflict
@@ -119,21 +120,20 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     //    NodeCode alone is a freely-shareable PUBLIC handle; it is printed ONLY to
     //    the console/log (optionally CIRIS_CLAIM_PIN_FILE) and is NEVER served over
     //    any HTTP route.
-    let claim_pin: Option<String> = if bootstrap_outcome
-        == crate::auth::bootstrap::BootstrapOutcome::NoSeedAvailable
-    {
-        let pin = crate::auth::bootstrap::generate_claim_pin();
-        let node_code_str = crate::nodecode::encode(&node_code).map_err(|e| {
-            anyhow::anyhow!("encode this node's NodeCode for the claim banner: {e}")
-        })?;
-        crate::auth::bootstrap::announce_ownership_unclaimed(&node_code_str, &pin);
-        Some(pin)
-    } else {
-        tracing::info!(
+    let claim_pin: Option<String> =
+        if bootstrap_outcome == crate::auth::bootstrap::BootstrapOutcome::NoSeedAvailable {
+            let pin = crate::auth::bootstrap::generate_claim_pin();
+            let node_code_str = crate::nodecode::encode(&node_code).map_err(|e| {
+                anyhow::anyhow!("encode this node's NodeCode for the claim banner: {e}")
+            })?;
+            crate::auth::bootstrap::announce_ownership_unclaimed(&node_code_str, &pin);
+            Some(pin)
+        } else {
+            tracing::info!(
             "node already has a ROOT owner — no first-run claim PIN minted (setup/root is closed)"
         );
-        None
-    };
+            None
+        };
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
@@ -439,7 +439,8 @@ async fn build_engine(
 }
 
 /// Register Node A's own federation signing key in the federation directory as
-/// identity_type **"steward"** (a trust-root substrate process) through the
+/// identity_type **"node"** (a fabric node — infrastructure, NO agency per
+/// CC 1.13.5 / CC 3.4.7.1; corrected from the prior "steward") through the
 /// **single canonical admission gate** — `Engine::register_federation_key`
 /// (persist v8.8.0, CIRISPersist#234, CEG 1.0-RC29 §5.6.8.15).
 ///
@@ -500,7 +501,7 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
         Ok(()) => {
             tracing::info!(
                 key_id = %cfg.key_id,
-                "registered Node A's own steward key via register_federation_key \
+                "registered Node A's own node key via register_federation_key \
                  (fail-secure admission gate; hybrid, PQC-complete)"
             );
             Ok(())
@@ -582,8 +583,15 @@ pub(crate) async fn build_self_key_record(
         pubkey_ed25519_base64: B64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(B64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.to_owned(),
-        // Node A is a trust-root substrate process → "steward" (published vocab).
-        identity_type: "steward".to_owned(),
+        // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure,
+        // NO agency) — NOT a trust-root steward. The canonical-trust note still
+        // holds (this is the node's own self-signed federation identity, the
+        // admission anchor for rows it authors); the IDENTITY_TYPE is corrected
+        // from "steward" to "node" so the wire-checkable CC 4.4.3.5 invariant
+        // applies (a node-key delegation may carry only infra:* scopes). The
+        // substrate has no identity_type::NODE constant yet (filed upstream);
+        // identity_type is free-form TEXT, so we register the literal "node".
+        identity_type: "node".to_owned(),
         identity_ref: cfg.key_id.clone(),
         valid_from: now,
         valid_until: None,

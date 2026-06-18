@@ -592,6 +592,20 @@ struct SetupRootRequest {
     /// NOT the federation directory.
     #[serde(default)]
     founder: Option<Founder>,
+    /// The cohort scope the responsible party claims this node under — one of
+    /// `self` / `family` / `community` (CC 4.4.3.4.1 cohort scopes). REQUIRED:
+    /// it records the membership-standing tier the owner-binding covers. Rides
+    /// inside the signed body, so it is signature-bound. Validated against the
+    /// closed set; anything else → `400`.
+    #[serde(default)]
+    cohort_scope: Option<String>,
+    /// OPTIONAL explicit infra scope set for the owner-binding (CC 4.4.3.5 —
+    /// `infra:*` ONLY). When absent the canonical
+    /// [`ownership::OWNER_BINDING_INFRA_SCOPES`] set is used. Any `agency:*` (or
+    /// legacy agency) scope here is REJECTED (CC 1.13.5): a node delegation
+    /// literally cannot carry agency.
+    #[serde(default)]
+    infra_scopes: Option<Vec<String>>,
     /// The one-time CLAIM PIN printed to THIS node's console/log on a fresh boot —
     /// the operator-presence secret (CONSOLE-ONLY; never served over HTTP). It is
     /// verified (constant-time) against the boot PIN before ROOT is bound, and
@@ -606,10 +620,42 @@ struct SetupRootRequest {
 struct SetupRootResponse {
     /// The ROOT `wa_id` that was claimed.
     wa_id: String,
-    /// The claiming federation identity (`key_id`).
+    /// The claiming federation identity (`key_id`) — the RESPONSIBLE PARTY (a
+    /// `user`-role identity), NOT a bare node.
     identity_key_id: String,
-    /// The bridged API role (`SYSTEM_ADMIN`).
+    /// The bridged API role (`SYSTEM_ADMIN`), derived from the owner-binding.
     role: String,
+    /// The cohort scope the node was claimed under (`self` / `family` /
+    /// `community`).
+    cohort_scope: String,
+    /// The owner-binding `delegates_to(user → node, infra:*)` attestation id (the
+    /// CC 3.2 responsible-party binding that was emitted).
+    owner_binding_attestation_id: String,
+}
+
+/// The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1).
+const COHORT_SCOPES: &[&str] = &["self", "family", "community"];
+
+/// Validate the claimed cohort scope against [`COHORT_SCOPES`]. Returns the
+/// normalized (trimmed) value, or `Err(response)` (a `400`) when absent/invalid.
+/// The error is boxed (`result_large_err`) — an axum `Response` is large and
+/// this is the cold/reject path.
+fn validate_cohort_scope(req: &SetupRootRequest) -> Result<String, Box<Response>> {
+    let Some(raw) = req.cohort_scope.as_deref() else {
+        return Err(Box::new(err(
+            StatusCode::BAD_REQUEST,
+            "first-run ROOT claim must carry `cohort_scope` (one of self|family|community)",
+        )));
+    };
+    let v = raw.trim();
+    if COHORT_SCOPES.contains(&v) {
+        Ok(v.to_string())
+    } else {
+        Err(Box::new(err(
+            StatusCode::BAD_REQUEST,
+            format!("invalid cohort_scope {v:?} — must be one of self|family|community"),
+        )))
+    }
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -706,6 +752,26 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
 
 /// `POST /v1/setup/root` — first-time-setup ROOT claim for a FRESH node with no
 /// baked seed.
+///
+/// # The responsible-party model (CC 4.4.3.5 + CC 3.2 + CC 1.13.5)
+///
+/// A fabric node is `node`-role and MUST NOT have agency ("infrastructure must
+/// not have agency", CC 1.13.5). This claim therefore establishes a RESPONSIBLE
+/// PARTY, not an agency partnership:
+///
+///   - the claimant is the **responsible user** — registered as `identity_type
+///     "user"` (CC 3.2: ownership roots in an accountable human);
+///   - on success the handler emits the structural owner-binding
+///     `delegates_to(user → THIS node, infra:*)`
+///     ([`ownership::emit_owner_binding`]) — `infra:*` scopes ONLY;
+///   - it records the chosen `cohort_scope` (self|family|community); and
+///   - the ROOT WaCert / `SYSTEM_ADMIN` is the *derived* API-role view of that
+///     same responsible party.
+///
+/// Any `agency:*` (or legacy agency) scope in the claim is REJECTED (`400`) — a
+/// node delegation literally cannot carry agency (the CC 1.13.5 wire-checkable
+/// invariant). The AGENT's joint-agency partnership (`agency:*` +
+/// `consent:partnership_grant/accept`) stays in the agent, NOT here.
 ///
 /// # Security model — four independent gates
 ///
@@ -835,6 +901,32 @@ async fn setup_root(
         );
     };
 
+    // (responsible-party model — CC 4.4.3.5 + CC 3.2 + CC 1.13.5)
+    // The claimant is the RESPONSIBLE PARTY, not an agency partner. Two
+    // body-level gates before we spend a signature verify:
+    //   (b) the cohort scope (self|family|community) the node is claimed under, and
+    //   (CC 1.13.5) REFUSE any agency:* (or legacy agency) scope in the claim — a
+    //       node delegation literally cannot carry agency. The owner-binding is
+    //       infra:* ONLY.
+    let cohort_scope = match validate_cohort_scope(&req) {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    let infra_scopes: Vec<String> = match req.infra_scopes.clone() {
+        Some(s) => s,
+        None => super::ownership::OWNER_BINDING_INFRA_SCOPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    if !super::ownership::scopes_are_infra_only(&infra_scopes) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "first-run ROOT claim carries a non-infra (agency:* or legacy-agency) scope — \
+             a node delegation MUST be infra:* ONLY (CC 1.13.5); agency stays in the agent",
+        );
+    }
+
     let signing_key_id = match header_str(&headers, verify::HEADER_KEY_ID) {
         Some(v) => v,
         None => {
@@ -942,6 +1034,32 @@ async fn setup_root(
     };
     match store::upsert(&st.engine, cert).await {
         Ok(()) => {
+            // (responsible-party model, CC 3.2) Emit the owner-binding
+            // delegates_to(responsible_user → THIS node, infra:*). This is the
+            // STRUCTURAL artifact that binds the node UNDER the user's authority
+            // with NO agency (CC 1.13.5); the ROOT WaCert / SystemAdmin above is
+            // the derived API-role view of the SAME responsible party. The scope
+            // set was already proven infra-only (the agency reject gate ran on the
+            // body). A failure here is fatal to the claim's CC-meaning, so surface
+            // it (the ROOT cert exists but is owner-unbound — we report 500 so the
+            // operator re-drives rather than silently leaving a half-bound node).
+            let owner_binding_attestation_id = match super::ownership::emit_owner_binding(
+                &st.engine,
+                &founder.key_id,
+                &st.node_key_id,
+                &infra_scopes,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("ROOT bound but owner-binding emit failed: {e}"),
+                    )
+                }
+            };
+
             // Consume the one-time PIN: clear it so it can never be replayed. (The
             // route is also 409-closed now that a ROOT exists — this is defence in
             // depth + makes the consumed-once invariant directly assertable.)
@@ -951,8 +1069,11 @@ async fn setup_root(
             tracing::info!(
                 identity = %founder.key_id,
                 wa_id = %wa_id,
-                "first-run ROOT claim: self-attested founder registered + bound as ROOT \
-                 (founder → SYSTEM_ADMIN); one-time claim PIN consumed"
+                cohort_scope = %cohort_scope,
+                owner_binding = %owner_binding_attestation_id,
+                "first-run ROOT claim: responsible user registered + owner-binding \
+                 delegates_to(user → node, infra:*) emitted; ROOT/SYSTEM_ADMIN derived; \
+                 one-time claim PIN consumed (CC 3.2 / CC 1.13.5)"
             );
             (
                 StatusCode::CREATED,
@@ -960,6 +1081,8 @@ async fn setup_root(
                     wa_id,
                     identity_key_id: founder.key_id,
                     role: super::roles::UserRole::SystemAdmin.as_str().to_string(),
+                    cohort_scope,
+                    owner_binding_attestation_id,
                 }),
             )
                 .into_response()
@@ -994,9 +1117,15 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
 /// just over the body. So we record the proven identity directly via
 /// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key),
 /// which keeps its own `algorithm == hybrid` + `accord_holder` attestation gates
-/// (a `steward` row needs no attestation). The `scrub_*` fields are populated for
+/// (a `user` row needs no attestation). The `scrub_*` fields are populated for
 /// row-shape completeness (a self-attested envelope + the body signatures); they
 /// are NOT re-verified by `put_public_key`.
+///
+/// **The claimant is the RESPONSIBLE PARTY (CC 3.2): a `user`-role identity, NOT
+/// a steward.** Ownership roots in an accountable human; the node binds UNDER the
+/// user's authority via a later `delegates_to(user → node, infra:*)`. We register
+/// the founder's key as `identity_type "user"` (corrected from the prior
+/// "steward") so [`ownership::is_owner_bound`]'s granter-is-user check resolves.
 async fn register_founder_key(
     engine: &Engine,
     founder: &Founder,
@@ -1011,7 +1140,10 @@ async fn register_founder_key(
         pubkey_ed25519_base64: founder.ed25519_pubkey_b64.clone(),
         pubkey_ml_dsa_65_base64: Some(founder.ml_dsa_65_pubkey_b64.clone()),
         algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
+        // CC 3.2: the responsible party is a `user`-role identity (free-form
+        // TEXT per CC 3.4.7.1). The substrate ships an `identity_type::USER`
+        // constant; we use it (not STEWARD).
+        identity_type: identity_type::USER.into(),
         identity_ref: founder.key_id.clone(),
         valid_from: now,
         valid_until: None,

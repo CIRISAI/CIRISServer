@@ -97,6 +97,60 @@ async fn register_self(engine: &Engine) {
         .expect("register node steward key via admission gate");
 }
 
+/// The responsible-party (owner) user key_id the owner-binding tests use.
+const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
+
+/// Establish the CC 3.2 owner-binding for THIS node: register a `user`-role
+/// responsible party in the directory, then emit
+/// `delegates_to(user → node, infra:*)`. After this, `is_owner_bound(node)` is
+/// `Some(owner)` and the serve-only-floor gate on peering passes. The node key
+/// must already be registered ([`register_self`]).
+async fn bind_owner(engine: &Engine) {
+    // Register the responsible party as a `user`-role key (put_public_key does
+    // not re-verify PoP; identity_type "user" is what is_owner_bound checks).
+    let now = chrono::Utc::now();
+    let envelope = serde_json::json!({ "key_id": OWNER_USER_KEY_ID });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner envelope");
+    let record = KeyRecord {
+        key_id: OWNER_USER_KEY_ID.to_string(),
+        pubkey_ed25519_base64: BASE64.encode([7u8; 32]),
+        pubkey_ml_dsa_65_base64: Some(BASE64.encode([8u8; 32])),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: identity_type::USER.into(),
+        identity_ref: OWNER_USER_KEY_ID.to_string(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
+        scrub_key_id: OWNER_USER_KEY_ID.to_string(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .expect("register responsible-party user key");
+
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ciris_server::auth::ownership::emit_owner_binding(
+        engine,
+        OWNER_USER_KEY_ID,
+        NODE_A_KEY_ID,
+        &scopes,
+    )
+    .await
+    .expect("emit owner-binding delegates_to(user -> node, infra:*)");
+}
+
 /// Build THIS node's own self-signed `SignedKeyRecord` JSON exactly as
 /// `compose::self_key_record_json` does (so the GET served value matches).
 async fn self_key_record_json(engine: &Engine) -> String {
@@ -230,6 +284,9 @@ async fn serve(
 async fn owner_peering_admits_peer_and_authors_directed_consent() {
     let engine = node().await;
     register_self(&engine).await;
+    // Serve-only floor (CC 3.2 / CC 1.13.5): peering requires a responsible party
+    // bound to the node — establish the owner-binding first.
+    bind_owner(&engine).await;
     let skr = self_key_record_json(&engine).await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
     let (base, _h) = serve(Arc::clone(&engine), skr).await;
@@ -332,6 +389,9 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
 async fn unauthorized_caller_is_rejected_and_authors_no_grant() {
     let engine = node().await;
     register_self(&engine).await;
+    // Owner-bind the node so this test exercises the SESSION/ROLE gate (401/403),
+    // not the serve-only-floor gate (which would 403 an unbound node regardless).
+    bind_owner(&engine).await;
     let skr = self_key_record_json(&engine).await;
     // A non-owner (Observer) session + the no-session case.
     let observer = mint_session(&engine, "wa-observer", WaRole::Observer).await;
@@ -440,5 +500,78 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
             .expect("lookup")
             .is_some(),
         "the round-tripped record is admitted on the fresh engine"
+    );
+}
+
+/// Serve-only floor (CC 3.2 / CC 1.13.5): an UNOWNED node (no responsible-party
+/// owner-binding) REFUSES federation peering — even from a SYSTEM_ADMIN session.
+/// The node has no accountable party to root the cross-node authority in, so it
+/// may only serve cleartext from the canonical root.
+#[tokio::test]
+async fn unowned_node_refuses_peering_even_for_system_admin() {
+    let engine = node().await;
+    register_self(&engine).await;
+    // Deliberately DO NOT bind_owner — the node is owner-unbound.
+    assert!(
+        ciris_server::auth::ownership::is_owner_bound(&engine, NODE_A_KEY_ID)
+            .await
+            .is_none(),
+        "precondition: node is owner-unbound"
+    );
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+
+    let peer_record = peer_signed_key_record().await;
+    let body = serde_json::json!({
+        "peer_key_id": PEER_KEY_ID,
+        "peer_key_record": peer_record,
+        "attestation_prefixes": ["capacity:"],
+    });
+
+    let resp = client
+        .post(format!("{base}/v1/federation/peering"))
+        .bearer_auth(&owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST peering (unowned)");
+    assert_eq!(
+        resp.status(),
+        403,
+        "an unowned node must refuse peering (serve-only floor) even for SYSTEM_ADMIN"
+    );
+
+    // No peer admitted, no grant authored.
+    assert!(
+        engine
+            .federation_directory()
+            .lookup_public_key(PEER_KEY_ID)
+            .await
+            .expect("lookup peer")
+            .is_none(),
+        "a floor-refused peering must admit NO peer key"
+    );
+
+    // Now bind an owner and re-POST: it succeeds (the floor lifts).
+    bind_owner(&engine).await;
+    assert!(
+        ciris_server::auth::ownership::is_owner_bound(&engine, NODE_A_KEY_ID)
+            .await
+            .is_some(),
+        "node is owner-bound after bind_owner"
+    );
+    let resp2 = client
+        .post(format!("{base}/v1/federation/peering"))
+        .bearer_auth(&owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST peering (owned)");
+    assert_eq!(
+        resp2.status(),
+        200,
+        "once a responsible party is bound, peering succeeds"
     );
 }
