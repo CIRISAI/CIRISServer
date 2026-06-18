@@ -34,6 +34,13 @@
 pub mod auth;
 /// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
 pub mod benchmarks;
+/// Claim remote ownership — the SUBSTRATE-NATIVE, node-to-node claiming side of
+/// the 1-phase owner-binding (`POST /v1/setup/claim-remote`). The local node
+/// decodes the target NodeCode, builds + hybrid-signs the `delegates_to(user →
+/// target, infra:*)` owner-binding with the responsible USER's key, and POSTs it
+/// to the target's `POST /v1/setup/root`. The app does NO crypto. Public so the
+/// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
+pub mod claim_remote;
 mod compose;
 mod config;
 /// Owner-directed federation operations (the keystone for on-demand

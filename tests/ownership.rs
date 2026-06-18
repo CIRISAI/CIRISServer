@@ -283,24 +283,25 @@ async fn emit_withdraws(engine: &Engine, granter: &str, target: &str) {
         .expect("put withdraws");
 }
 
-// ─── (4) the first-run claim establishes the owner-binding + cohort scope ────
+// ─── (4) the first-run 1-phase claim establishes the owner-binding + cohort ──
 
 fn node_pubkey_b64() -> String {
     let signing_key = SigningKey::from_bytes(&[0xA1; 32]);
     BASE64.encode(signing_key.verifying_key().to_bytes())
 }
 
-fn founder_signer(key_id: &str) -> LocalSigner {
+/// The responsible USER's signer (a distinct keypair from the node steward).
+fn user_signer(key_id: &str) -> LocalSigner {
     let signing_key = SigningKey::from_bytes(&[0xF1; 32]);
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&[0xF2; 32], format!("{key_id}-founder-pqc"))
-            .expect("founder ML-DSA-65 seed"),
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xF2; 32], format!("{key_id}-user-pqc"))
+            .expect("user ML-DSA-65 seed"),
     );
     LocalSigner::from_parts(
         signing_key,
         key_id.to_string(),
         Some(pqc),
-        Some(format!("{key_id}-founder-pqc")),
+        Some(format!("{key_id}-user-pqc")),
     )
 }
 
@@ -337,70 +338,78 @@ fn node_code_string(key_id: &str) -> String {
     ciris_server::nodecode::encode(&nc).expect("encode node code")
 }
 
-/// Build + hybrid-sign a claim body. `extra` members are merged into the body
-/// (e.g. `cohort_scope`, `infra_scopes`). Returns `(body, ed_sig_b64, ml_sig_b64)`.
-async fn signed_claim(
+/// Build the 1-phase claim body: the NodeCode pin + cohort + PIN + a COMPLETE,
+/// user-signed owner-binding built in the substrate (the responsible USER signs
+/// the delegates_to canonical bytes). `extra` members are merged into the body.
+async fn one_phase_claim_body(
     node_key_id: &str,
-    founder_key_id: &str,
-    extra: serde_json::Value,
-) -> (Vec<u8>, String, String) {
-    let fsigner = founder_signer(founder_key_id);
-    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
-    let mut claim = serde_json::json!({
+    user: &LocalSigner,
+    cohort_scope: &str,
+    binding: ciris_server::auth::ownership::SignedOwnerBinding,
+) -> Vec<u8> {
+    let _ = user;
+    let claim = serde_json::json!({
         "node_code": node_code_string(node_key_id),
-        "founder": {
-            "key_id": founder_key_id,
-            "ed25519_pubkey_b64": BASE64.encode(&probe.classical.public_key),
-            "ml_dsa_65_pubkey_b64": BASE64.encode(&probe.pqc.public_key),
-        },
+        "cohort_scope": cohort_scope,
         "claim_pin": TEST_CLAIM_PIN,
+        "owner_binding": binding,
     });
-    if let serde_json::Value::Object(extra_map) = extra {
-        for (k, v) in extra_map {
-            claim[k] = v;
-        }
-    }
-    let body = serde_json::to_vec(&claim).unwrap();
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign body");
-    (
-        body,
-        BASE64.encode(&sig.classical.signature),
-        BASE64.encode(&sig.pqc.signature),
-    )
+    serde_json::to_vec(&claim).unwrap()
 }
 
 #[tokio::test]
 async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     let node_key_id = "ciris-claim-node";
-    let founder_key_id = "ciris-responsible-user";
+    let user_key_id = "ciris-responsible-user";
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    let (body, ed, ml) = signed_claim(
+    // The LOCAL (claiming) node builds + hybrid-signs the owner-binding with the
+    // USER's key (substrate-native — no app crypto).
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
         node_key_id,
-        founder_key_id,
-        serde_json::json!({ "cohort_scope": "family" }),
+        &infra_scopes(),
     )
-    .await;
+    .await
+    .expect("build signed owner-binding");
+    assert_eq!(binding.attesting_key_id, user_key_id);
+    assert_eq!(
+        binding.envelope["node_key_id"], node_key_id,
+        "attests the node"
+    );
+    assert_eq!(
+        binding.envelope["attesting_key_id"], user_key_id,
+        "attests the user"
+    );
+    assert!(
+        binding.envelope["scope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s.as_str().unwrap().starts_with("infra:")),
+        "infra-only delegates_to"
+    );
 
+    // 1-phase POST /v1/setup/root: verify + persist the user-signed binding + bind
+    // ROOT in ONE round-trip.
+    let body = one_phase_claim_body(node_key_id, &user, "family", binding).await;
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed)
-        .header("x-ciris-signature-ml-dsa-65", &ml)
         .body(body)
         .send()
         .await
-        .expect("POST setup/root");
-    assert_eq!(resp.status(), 201, "responsible-party claim must succeed");
-    let json: serde_json::Value = resp.json().await.expect("setup response json");
-    assert_eq!(json["identity_key_id"], founder_key_id);
-    assert_eq!(json["role"], "SYSTEM_ADMIN");
-    assert_eq!(json["cohort_scope"], "family", "cohort scope recorded");
+        .expect("POST setup/root (1-phase)");
+    assert_eq!(resp.status(), 201, "1-phase claim must succeed");
+    let fin: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(fin["identity_key_id"], user_key_id);
+    assert_eq!(fin["cohort_scope"], "family", "cohort scope echoed");
+    assert_eq!(fin["role"], "SYSTEM_ADMIN");
     assert!(
-        json["owner_binding_attestation_id"].as_str().is_some(),
+        fin["owner_binding_attestation_id"].as_str().is_some(),
         "response carries the owner-binding attestation id"
     );
 
@@ -410,94 +419,263 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
         .expect("list roots");
     assert_eq!(roots.len(), 1);
     assert_eq!(UserRole::from_wa_role(roots[0].role), UserRole::SystemAdmin);
-    assert_eq!(roots[0].pubkey, founder_key_id);
+    assert_eq!(roots[0].pubkey, user_key_id);
 
-    // The responsible user is registered as identity_type "user" (not steward).
+    // The responsible user is registered as identity_type "user".
     let user_key = engine
         .federation_directory()
-        .lookup_public_key(founder_key_id)
+        .lookup_public_key(user_key_id)
         .await
         .expect("lookup user")
         .expect("user key present after claim");
     assert_eq!(user_key.identity_type, identity_type::USER);
 
-    // The structural owner-binding exists and resolves: is_owner_bound → the user.
+    // is_owner_bound → the user.
     assert_eq!(
         is_owner_bound(&engine, node_key_id).await.as_deref(),
-        Some(founder_key_id),
+        Some(user_key_id),
         "the claim emitted a live delegates_to(user → node, infra:*) owner-binding"
+    );
+
+    // The persisted delegates_to is GENUINELY USER-SIGNED: scrub_key_id is the
+    // user and its signature verifies against the USER's pubkeys, NOT the node's.
+    let edges = engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+        .expect("inbound edges");
+    let binding_row = edges
+        .iter()
+        .find(|e| e.attestation_type == attestation_type::DELEGATES_TO)
+        .expect("a delegates_to owner-binding exists");
+    assert_eq!(
+        binding_row.scrub_key_id, user_key_id,
+        "scrub_key_id is the USER (genuinely user-signed), not the node"
+    );
+    let canonical =
+        ceg_produce_canonicalize(&binding_row.attestation_envelope).expect("re-canonicalize");
+    let outcome = ciris_persist::prelude::verify_hybrid(
+        &canonical,
+        &binding_row.scrub_signature_classical,
+        binding_row.scrub_signature_pqc.as_deref(),
+        &user_key.pubkey_ed25519_base64,
+        user_key.pubkey_ml_dsa_65_base64.as_deref(),
+        HybridPolicy::Strict,
+        None,
+    );
+    assert!(
+        outcome.is_ok(),
+        "the owner-binding signature verifies against the USER's pubkeys: {outcome:?}"
+    );
+    // And it does NOT verify against the NODE's pubkeys.
+    let node_key = engine
+        .federation_directory()
+        .lookup_public_key(node_key_id)
+        .await
+        .expect("lookup node")
+        .expect("node key present");
+    let against_node = ciris_persist::prelude::verify_hybrid(
+        &canonical,
+        &binding_row.scrub_signature_classical,
+        binding_row.scrub_signature_pqc.as_deref(),
+        &node_key.pubkey_ed25519_base64,
+        node_key.pubkey_ml_dsa_65_base64.as_deref(),
+        HybridPolicy::Strict,
+        None,
+    );
+    assert!(
+        against_node.is_err(),
+        "the owner-binding does NOT verify against the node's pubkeys (it is user-signed)"
     );
 }
 
+/// A claim whose owner-binding is TAMPERED is rejected, and no ROOT is bound:
+///   (a) an agency scope, (b) attested != node, (c) a wrong/forged signature.
 #[tokio::test]
-async fn claim_with_agency_scope_is_rejected() {
-    let node_key_id = "ciris-agency-node";
-    let founder_key_id = "ciris-agency-claimant";
+async fn claim_rejects_tampered_binding_and_signature() {
+    let node_key_id = "ciris-tamper-node";
+    let user_key_id = "ciris-tamper-user";
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    // The claim carries an agency:* scope — a node delegation cannot carry agency.
-    let (body, ed, ml) = signed_claim(
+    let good = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
         node_key_id,
-        founder_key_id,
-        serde_json::json!({
-            "cohort_scope": "self",
-            "infra_scopes": ["agency:act_on_behalf"],
-        }),
+        &infra_scopes(),
     )
-    .await;
+    .await
+    .expect("build binding");
 
+    // (a) Tamper the envelope to carry an agency scope → 400 (and the user's sig is
+    //     over the ORIGINAL canonical bytes, so the structural agency reject fires).
+    let mut agency = good.clone();
+    agency.envelope["scope"] = serde_json::json!(["agency:act_on_behalf"]);
+    let body = one_phase_claim_body(node_key_id, &user, "self", agency).await;
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed)
-        .header("x-ciris-signature-ml-dsa-65", &ml)
         .body(body)
         .send()
         .await
-        .expect("POST setup/root (agency)");
-    assert_eq!(
-        resp.status(),
-        400,
-        "an agency:* scope in the claim must be rejected (CC 1.13.5)"
-    );
-
-    // Rejected ⇒ no ROOT, no owner-binding.
+        .expect("POST (agency)");
+    assert_eq!(resp.status(), 400, "an agency scope is rejected");
     assert!(
         store::list_by_role(&engine, WaRole::Root, 10)
             .await
-            .expect("list roots")
+            .unwrap()
             .is_empty(),
-        "a rejected claim mints no ROOT"
+        "a rejected claim binds no ROOT"
     );
+
+    // (b) Tamper attested node → 400.
+    let mut wrong_node = good.clone();
+    wrong_node.envelope["node_key_id"] = "some-other-node".into();
+    let body = one_phase_claim_body(node_key_id, &user, "self", wrong_node).await;
+    let resp = client
+        .post(format!("{base}/v1/setup/root"))
+        .body(body)
+        .send()
+        .await
+        .expect("POST (wrong node)");
+    assert_eq!(resp.status(), 400, "attested != THIS node is rejected");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // (c) Wrong signature: a DIFFERENT key's pubkeys/sigs (envelope still attests
+    //     the user) → 401 (the supplied sig won't verify against the supplied
+    //     pubkeys after we swap only the signature in).
+    let mut wrong_sig = good.clone();
+    // Re-sign the SAME envelope with an imposter key, but claim it is the user's:
+    // keep attesting_key_id + pubkeys as the user's, swap in the imposter's sig.
+    let imposter = {
+        let signing_key = SigningKey::from_bytes(&[0x77; 32]);
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x88; 32], "imposter-pqc".to_string())
+                .expect("imposter ML-DSA-65 seed"),
+        );
+        LocalSigner::from_parts(
+            signing_key,
+            "ciris-imposter".to_string(),
+            Some(pqc),
+            Some("imposter-pqc".to_string()),
+        )
+    };
+    let canonical = ceg_produce_canonicalize(&good.envelope).expect("canonicalize");
+    let bad = imposter
+        .sign_hybrid(&canonical)
+        .await
+        .expect("imposter sign");
+    wrong_sig.ed25519_sig_b64 = BASE64.encode(&bad.classical.signature);
+    wrong_sig.ml_dsa_65_sig_b64 = BASE64.encode(&bad.pqc.signature);
+    let body = one_phase_claim_body(node_key_id, &user, "self", wrong_sig).await;
+    let resp = client
+        .post(format!("{base}/v1/setup/root"))
+        .body(body)
+        .send()
+        .await
+        .expect("POST (wrong sig)");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a signature that does not verify is rejected"
+    );
+    assert!(
+        store::list_by_role(&engine, WaRole::Root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no ROOT bound on a bad-signature claim"
+    );
+
+    // The node is still unowned after all rejected claims.
     assert!(is_owner_bound(&engine, node_key_id).await.is_none());
+}
+
+#[tokio::test]
+async fn claim_with_agency_scope_built_is_refused_by_builder() {
+    // The producer-side gate: build_signed_owner_binding refuses agency scopes.
+    let user = user_signer("ciris-agency-user");
+    let e = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        "ciris-agency-node",
+        &["agency:act_on_behalf".to_string()],
+    )
+    .await
+    .expect_err("agency scope must be refused at build time");
+    assert!(matches!(e, OwnershipError::AgencyScopeRefused));
 }
 
 #[tokio::test]
 async fn claim_without_cohort_scope_is_rejected() {
     let node_key_id = "ciris-nocohort-node";
-    let founder_key_id = "ciris-nocohort-claimant";
+    let user_key_id = "ciris-nocohort-user";
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        node_key_id,
+        &infra_scopes(),
+    )
+    .await
+    .expect("build binding");
 
     // No cohort_scope member.
-    let (body, ed, ml) = signed_claim(node_key_id, founder_key_id, serde_json::json!({})).await;
+    let claim = serde_json::json!({
+        "node_code": node_code_string(node_key_id),
+        "claim_pin": TEST_CLAIM_PIN,
+        "owner_binding": binding,
+    });
+    let body = serde_json::to_vec(&claim).unwrap();
     let resp = client
         .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed)
-        .header("x-ciris-signature-ml-dsa-65", &ml)
         .body(body)
         .send()
         .await
-        .expect("POST setup/root (no cohort)");
+        .expect("POST (no cohort)");
     assert_eq!(
         resp.status(),
         400,
         "a claim without cohort_scope is rejected"
     );
+}
+
+#[tokio::test]
+async fn claim_with_wrong_pin_is_rejected() {
+    let node_key_id = "ciris-pin-node";
+    let user_key_id = "ciris-pin-user";
+    let engine = node(node_key_id).await;
+    register_node(&engine, node_key_id).await;
+    let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
+    let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        node_key_id,
+        &infra_scopes(),
+    )
+    .await
+    .expect("build binding");
+
+    let claim = serde_json::json!({
+        "node_code": node_code_string(node_key_id),
+        "cohort_scope": "self",
+        "claim_pin": "WRONG-PIN",
+        "owner_binding": binding,
+    });
+    let body = serde_json::to_vec(&claim).unwrap();
+    let resp = client
+        .post(format!("{base}/v1/setup/root"))
+        .body(body)
+        .send()
+        .await
+        .expect("POST (wrong pin)");
+    assert_eq!(resp.status(), 401, "a wrong claim PIN is rejected");
+    assert!(is_owner_bound(&engine, node_key_id).await.is_none());
 }

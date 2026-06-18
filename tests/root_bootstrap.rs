@@ -108,59 +108,6 @@ fn node_pubkey_b64() -> String {
     BASE64.encode(signing_key.verifying_key().to_bytes())
 }
 
-/// A FRESH founder hybrid signer (Ed25519 + ML-DSA-65), distinct from the node's
-/// signer and NOT registered in the directory. Seeded distinctly per `key_id` so
-/// each founder identity is unique. This is the claimant the self-attested
-/// first-run flow admits: the founder presents these pubkeys + proves possession.
-fn founder_signer(key_id: &str) -> LocalSigner {
-    let signing_key = SigningKey::from_bytes(&[0xF1; 32]);
-    let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&[0xF2; 32], format!("{key_id}-founder-pqc"))
-            .expect("founder ML-DSA-65 seed"),
-    );
-    LocalSigner::from_parts(
-        signing_key,
-        key_id.to_string(),
-        Some(pqc),
-        Some(format!("{key_id}-founder-pqc")),
-    )
-}
-
-/// A known, fixed one-time claim PIN the tests arm the router with (the boot path
-/// mints a random one; here we pin a value so a test can supply the correct PIN).
-const TEST_CLAIM_PIN: &str = "TEST-PIN1";
-
-/// Serve the bootstrap (setup) router on an ephemeral port; return its base URL.
-/// Pins the router to the node's identity (`key_id` + its Ed25519 pubkey) and arms
-/// it with the known [`TEST_CLAIM_PIN`].
-async fn serve(engine: Arc<Engine>, node_key_id: &str) -> (String, tokio::task::JoinHandle<()>) {
-    serve_with_pin(engine, node_key_id, Some(TEST_CLAIM_PIN.to_string())).await
-}
-
-/// Serve the bootstrap router armed with an EXPLICIT claim PIN (or `None` for an
-/// un-armed/already-claimed node).
-async fn serve_with_pin(
-    engine: Arc<Engine>,
-    node_key_id: &str,
-    claim_pin: Option<String>,
-) -> (String, tokio::task::JoinHandle<()>) {
-    let app = bootstrap::router(
-        engine,
-        HybridPolicy::Strict,
-        node_key_id.to_string(),
-        node_pubkey_b64(),
-        claim_pin,
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), handle)
-}
-
 // ─── (a) seed → ROOT WaCert; (b) idempotent no-op ───────────────────────────
 
 // The env guard is deliberately held across awaits: it SERIALIZES the
@@ -250,10 +197,58 @@ async fn bootstrap_without_seed_is_a_clean_noop() {
     );
 }
 
-// ─── (c) first-run POST /v1/setup/root claims, second claim rejected ────────
+// ─── (c) first-run 1-phase POST /v1/setup/root claim ─────────────────────────
 
-/// Build THIS node's NodeCode string (CEG §0.10) for the identity-pin — the
-/// out-of-band handle the founder's app holds. Uses the SAME `[0xA1; 32]` seed.
+/// The responsible USER's hybrid signer (Ed25519 + ML-DSA-65), distinct from the
+/// node's signer. The claiming node signs the owner-binding with THIS key (the
+/// 1-phase, substrate-native claim); the user is registered + ROOT bound to it.
+fn user_signer(key_id: &str) -> LocalSigner {
+    let signing_key = SigningKey::from_bytes(&[0xF1; 32]);
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xF2; 32], format!("{key_id}-user-pqc"))
+            .expect("user ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        signing_key,
+        key_id.to_string(),
+        Some(pqc),
+        Some(format!("{key_id}-user-pqc")),
+    )
+}
+
+/// A known, fixed one-time claim PIN the tests arm the router with (the boot path
+/// mints a random one; here we pin a value so a test can supply the correct PIN).
+const TEST_CLAIM_PIN: &str = "TEST-PIN1";
+
+/// Serve the bootstrap (setup) router on an ephemeral port; return its base URL.
+async fn serve(engine: Arc<Engine>, node_key_id: &str) -> (String, tokio::task::JoinHandle<()>) {
+    serve_with_pin(engine, node_key_id, Some(TEST_CLAIM_PIN.to_string())).await
+}
+
+/// Serve the bootstrap router armed with an EXPLICIT claim PIN (or `None`).
+async fn serve_with_pin(
+    engine: Arc<Engine>,
+    node_key_id: &str,
+    claim_pin: Option<String>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = bootstrap::router(
+        engine,
+        HybridPolicy::Strict,
+        node_key_id.to_string(),
+        node_pubkey_b64(),
+        claim_pin,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// THIS node's NodeCode string (CEG §0.10) for the identity-pin.
 fn node_code_string(key_id: &str) -> String {
     let nc = ciris_server::nodecode::NodeCode {
         key_id: key_id.to_string(),
@@ -264,185 +259,165 @@ fn node_code_string(key_id: &str) -> String {
     ciris_server::nodecode::encode(&nc).expect("encode node code")
 }
 
-/// Build the self-attested first-run claim body for `founder_key_id` pinning the
-/// node `node_key_id`. Returns `(body_bytes, ed25519_pubkey_b64, ml_dsa_65_pubkey_b64)`.
-fn founder_claim_body(node_key_id: &str, founder_key_id: &str) -> serde_json::Value {
-    serde_json::json!({
+/// Build the 1-phase claim body for `user` claiming `node_key_id`: the NodeCode
+/// pin + cohort + PIN + a COMPLETE, user-signed owner-binding (built in the
+/// substrate via `build_signed_owner_binding`). `claim_pin`/`cohort` overridable.
+async fn one_phase_body(
+    node_key_id: &str,
+    user: &LocalSigner,
+    claim_pin: Option<&str>,
+    cohort_scope: Option<&str>,
+) -> Vec<u8> {
+    let infra_scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let binding =
+        ciris_server::auth::ownership::build_signed_owner_binding(user, node_key_id, &infra_scopes)
+            .await
+            .expect("build signed owner-binding");
+    let mut claim = serde_json::json!({
         "node_code": node_code_string(node_key_id),
-        "founder": {
-            "key_id": founder_key_id,
-            // Pubkeys are filled in by the caller after signing (they come off the
-            // HybridSignature), so this placeholder is replaced below.
-        },
-        // The one-time operator-presence PIN (signature-bound, inside the body).
-        "claim_pin": TEST_CLAIM_PIN,
-        // The responsible-party model (CC 3.2) requires a cohort scope; the
-        // owner-binding is infra:* by default (no explicit infra_scopes).
-        "cohort_scope": "self",
-    })
+        "owner_binding": binding,
+    });
+    if let Some(pin) = claim_pin {
+        claim["claim_pin"] = pin.into();
+    }
+    if let Some(c) = cohort_scope {
+        claim["cohort_scope"] = c.into();
+    }
+    serde_json::to_vec(&claim).unwrap()
+}
+
+async fn post_claim(
+    client: &reqwest::Client,
+    base: &str,
+    body: Vec<u8>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = client
+        .post(format!("{base}/v1/setup/root"))
+        .body(body)
+        .send()
+        .await
+        .expect("POST setup/root");
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, json)
 }
 
 #[tokio::test]
 async fn first_run_setup_root_claims_then_rejects_second_claim() {
     let node_key_id = "ciris-founder-node";
-    let founder_key_id = "ciris-fresh-founder";
+    let user_key_id = "ciris-fresh-user";
     let engine = node(node_key_id).await;
-    // The NODE's own steward key is registered (so the node has an identity), but
-    // the FOUNDER's key is deliberately NOT in the directory — proving the claim is
-    // self-attested, not directory-resolved.
     register_self(&engine, node_key_id).await;
     assert!(
         engine
             .federation_directory()
-            .lookup_public_key(founder_key_id)
+            .lookup_public_key(user_key_id)
             .await
-            .expect("lookup founder")
+            .expect("lookup user")
             .is_none(),
-        "founder key must be ABSENT from the directory before the claim (self-attested)"
+        "user key must be ABSENT before the claim (registered by the claim)"
     );
 
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    // The founder is a FRESH hybrid identity. The signed body carries the NodeCode
-    // pin (CEG §0.10) AND the founder's OWN pubkeys; the hybrid signature (founder's
-    // keypair) covers the whole body — self-attested proof-of-possession.
-    let fsigner = founder_signer(founder_key_id);
-    let mut claim = founder_claim_body(node_key_id, founder_key_id);
-    // We need the pubkeys, which come off a sign over the FINAL body — so sign a
-    // first time to extract pubkeys, fill them in, then re-sign the final body.
-    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
-    claim["founder"]["ed25519_pubkey_b64"] = BASE64.encode(&probe.classical.public_key).into();
-    claim["founder"]["ml_dsa_65_pubkey_b64"] = BASE64.encode(&probe.pqc.public_key).into();
-    let body = serde_json::to_vec(&claim).unwrap();
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
-    let ed_b64 = BASE64.encode(&sig.classical.signature);
-    let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
+    // 1-phase claim → 201, ROOT bound + user registered.
+    let body = one_phase_body(node_key_id, &user, Some(TEST_CLAIM_PIN), Some("self")).await;
+    let (status, fin) = post_claim(&client, &base, body).await;
+    assert_eq!(status, 201, "1-phase claim must succeed");
+    assert_eq!(fin["identity_key_id"], user_key_id);
+    assert_eq!(fin["role"], "SYSTEM_ADMIN");
 
-    // No ROOT yet → claim succeeds (201) and binds the FOUNDER identity as ROOT.
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body.clone())
-        .send()
-        .await
-        .expect("POST setup/root");
-    assert_eq!(
-        resp.status(),
-        201,
-        "first-run self-attested claim must succeed"
-    );
-    let json: serde_json::Value = resp.json().await.expect("setup response json");
-    assert_eq!(json["identity_key_id"], founder_key_id);
-    assert_eq!(json["role"], "SYSTEM_ADMIN");
-
-    // A ROOT WaCert now exists, bridging to SystemAdmin, bound to the founder.
     let roots = store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("list roots");
-    assert_eq!(roots.len(), 1, "exactly one ROOT after first-run claim");
+        .unwrap();
+    assert_eq!(roots.len(), 1);
     assert_eq!(UserRole::from_wa_role(roots[0].role), UserRole::SystemAdmin);
+    assert_eq!(roots[0].pubkey, user_key_id);
+    // The user key is registered after the claim.
+    assert!(engine
+        .federation_directory()
+        .lookup_public_key(user_key_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    // Second claim (replay) → 409 (no silent re-claim).
+    let body2 = one_phase_body(node_key_id, &user, Some(TEST_CLAIM_PIN), Some("self")).await;
+    let (status3, _) = post_claim(&client, &base, body2).await;
+    assert_eq!(status3, 409, "root already claimed ⇒ replay is 409");
     assert_eq!(
-        roots[0].pubkey, founder_key_id,
-        "ROOT bound to founder.key_id"
-    );
-
-    // The founder's key is now REGISTERED in the directory (admitted thereafter).
-    assert!(
-        engine
-            .federation_directory()
-            .lookup_public_key(founder_key_id)
+        store::list_by_role(&engine, WaRole::Root, 10)
             .await
-            .expect("lookup founder after claim")
-            .is_some(),
-        "founder key must be REGISTERED after a successful claim"
+            .unwrap()
+            .len(),
+        1
     );
-
-    // Second claim → 409 (no silent re-claim).
-    let resp2 = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
-        .await
-        .expect("second POST setup/root");
-    assert_eq!(resp2.status(), 409, "root already claimed ⇒ 409");
-    let roots2 = store::list_by_role(&engine, WaRole::Root, 10)
-        .await
-        .expect("list roots 2");
-    assert_eq!(roots2.len(), 1, "no second ROOT minted");
 }
 
-/// A first-run claim whose hybrid signature is TAMPERED is rejected (401) and
-/// claims NO ROOT — proof-of-possession fails.
+/// A claim whose owner-binding signature is TAMPERED is rejected (401), no ROOT.
 #[tokio::test]
 async fn first_run_setup_root_rejects_tampered_signature() {
     let node_key_id = "ciris-tamper-node";
-    let founder_key_id = "ciris-tamper-founder";
+    let user_key_id = "ciris-tamper-user";
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    let fsigner = founder_signer(founder_key_id);
-    let mut claim = founder_claim_body(node_key_id, founder_key_id);
-    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
-    claim["founder"]["ed25519_pubkey_b64"] = BASE64.encode(&probe.classical.public_key).into();
-    claim["founder"]["ml_dsa_65_pubkey_b64"] = BASE64.encode(&probe.pqc.public_key).into();
-    let body = serde_json::to_vec(&claim).unwrap();
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
-    // Tamper the Ed25519 signature: flip the last byte before base64.
-    let mut ed_sig = sig.classical.signature.clone();
-    *ed_sig.last_mut().unwrap() ^= 0x01;
-    let ed_b64 = BASE64.encode(&ed_sig);
-    let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
+    let infra_scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        node_key_id,
+        &infra_scopes,
+    )
+    .await
+    .expect("build binding");
+    // Tamper the Ed25519 signature: flip the last byte.
+    let mut sig = BASE64.decode(&binding.ed25519_sig_b64).unwrap();
+    *sig.last_mut().unwrap() ^= 0x01;
+    binding.ed25519_sig_b64 = BASE64.encode(&sig);
 
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
+    let claim = serde_json::json!({
+        "node_code": node_code_string(node_key_id),
+        "cohort_scope": "self",
+        "claim_pin": TEST_CLAIM_PIN,
+        "owner_binding": binding,
+    });
+    let (status, _) = post_claim(&client, &base, serde_json::to_vec(&claim).unwrap()).await;
+    assert_eq!(status, 401, "a tampered signature must be rejected");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("POST setup/root (tampered)");
-    assert_eq!(resp.status(), 401, "a tampered signature must be rejected");
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "a rejected (tampered) claim must mint NO ROOT"
-    );
-    assert!(
-        engine
-            .federation_directory()
-            .lookup_public_key(founder_key_id)
-            .await
-            .expect("lookup founder")
-            .is_none(),
-        "a rejected claim must NOT register the founder key"
-    );
+        .unwrap()
+        .is_empty());
+    assert!(engine
+        .federation_directory()
+        .lookup_public_key(user_key_id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
-/// A first-run claim whose NodeCode pins a DIFFERENT node is rejected (400) and
-/// claims NO ROOT — the spoof defense (CEG §0.10). First-run-only still holds:
-/// the route is open (no ROOT yet), but the wrong-node pin closes it for this
-/// claim.
+/// A claim whose NodeCode pins a DIFFERENT node is rejected (400), no ROOT.
 #[tokio::test]
 async fn first_run_setup_root_rejects_wrong_node_pin() {
     let key_id = "ciris-target-node";
-    let founder_key_id = "ciris-wrongpin-founder";
+    let user_key_id = "ciris-wrongpin-user";
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    // A NodeCode for a DIFFERENT node (a spoof the founder was tricked into).
+    // A NodeCode for a DIFFERENT node (a spoof).
     let wrong = ciris_server::nodecode::NodeCode {
         key_id: "some-other-node".to_string(),
         pubkey_ed25519_base64: BASE64.encode([0x42u8; 32]),
@@ -450,289 +425,156 @@ async fn first_run_setup_root_rejects_wrong_node_pin() {
         alias_hint: None,
     };
     let wrong_code = ciris_server::nodecode::encode(&wrong).expect("encode wrong code");
-    // A valid fresh founder — only the node pin is wrong.
-    let fsigner = founder_signer(founder_key_id);
-    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
-    let claim_body = serde_json::json!({
+    let infra_scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let binding =
+        ciris_server::auth::ownership::build_signed_owner_binding(&user, key_id, &infra_scopes)
+            .await
+            .expect("build binding");
+    let claim = serde_json::json!({
         "node_code": wrong_code,
-        "founder": {
-            "key_id": founder_key_id,
-            "ed25519_pubkey_b64": BASE64.encode(&probe.classical.public_key),
-            "ml_dsa_65_pubkey_b64": BASE64.encode(&probe.pqc.public_key),
-        }
+        "cohort_scope": "self",
+        "claim_pin": TEST_CLAIM_PIN,
+        "owner_binding": binding,
     });
-    let body = serde_json::to_vec(&claim_body).unwrap();
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
-    let ed_b64 = BASE64.encode(&sig.classical.signature);
-    let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
-
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
-        .await
-        .expect("POST setup/root (wrong pin)");
+    let (status, _) = post_claim(&client, &base, serde_json::to_vec(&claim).unwrap()).await;
     assert_eq!(
-        resp.status(),
-        400,
+        status, 400,
         "a NodeCode pinning a different node must be rejected"
     );
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "a rejected (wrong-pin) claim must mint NO ROOT"
-    );
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
-/// A first-run claim with NO NodeCode pin is rejected (400) — the pin is
-/// mandatory. First-run-only still holds (no ROOT minted).
+/// A claim with NO NodeCode pin is rejected (400) — the pin is mandatory.
 #[tokio::test]
 async fn first_run_setup_root_requires_a_pin() {
     let key_id = "ciris-pinless-node";
-    let founder_key_id = "ciris-pinless-founder";
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
     let client = reqwest::Client::new();
 
-    // Empty-object body — no pin (the pin check runs first, before the founder).
     let body = serde_json::to_vec(&serde_json::json!({})).unwrap();
-    let fsigner = founder_signer(founder_key_id);
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
-    let ed_b64 = BASE64.encode(&sig.classical.signature);
-    let mldsa_b64 = BASE64.encode(&sig.pqc.signature);
-
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
+    let (status, _) = post_claim(&client, &base, body).await;
+    assert_eq!(status, 400, "a claim with no NodeCode pin is rejected");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("POST setup/root (no pin)");
-    assert_eq!(
-        resp.status(),
-        400,
-        "a claim with no NodeCode pin is rejected"
-    );
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "a pinless claim must mint NO ROOT"
-    );
+        .unwrap()
+        .is_empty());
 }
 
 // ─── one-time CLAIM PIN — the operator-presence secret gate ──────────────────
 
-/// Helper: build a fully-signed first-run claim body for `founder_key_id` pinning
-/// `node_key_id`, with an explicit `claim_pin`. Returns the signed body bytes +
-/// the two signature headers (base64).
-async fn signed_claim_with_pin(
-    node_key_id: &str,
-    founder_key_id: &str,
-    claim_pin: Option<&str>,
-) -> (Vec<u8>, String, String) {
-    let fsigner = founder_signer(founder_key_id);
-    let probe = fsigner.sign_hybrid(b"probe").await.expect("probe sign");
-    let mut claim = serde_json::json!({
-        "node_code": node_code_string(node_key_id),
-        "founder": {
-            "key_id": founder_key_id,
-            "ed25519_pubkey_b64": BASE64.encode(&probe.classical.public_key),
-            "ml_dsa_65_pubkey_b64": BASE64.encode(&probe.pqc.public_key),
-        },
-        // Responsible-party model (CC 3.2): a cohort scope is required.
-        "cohort_scope": "self",
-    });
-    if let Some(pin) = claim_pin {
-        claim["claim_pin"] = pin.into();
-    }
-    let body = serde_json::to_vec(&claim).unwrap();
-    let sig = fsigner.sign_hybrid(&body).await.expect("sign setup body");
-    (
-        body,
-        BASE64.encode(&sig.classical.signature),
-        BASE64.encode(&sig.pqc.signature),
-    )
-}
-
-/// The correct PIN + valid founder sig + correct node pin → 201, ROOT bound. The
-/// happy path is already covered by `first_run_setup_root_claims_then_rejects_second_claim`
-/// (which supplies `TEST_CLAIM_PIN`); this test additionally asserts the PIN is
-/// CONSUMED after a successful claim — a fresh, validly-signed claim with the SAME
-/// correct PIN is now rejected (the route is 409-closed, AND the PIN is cleared).
+/// The correct PIN binds ROOT and the PIN is CONSUMED — a second claim (even with
+/// the same correct PIN) is 409-closed.
 #[tokio::test]
 async fn claim_pin_is_consumed_after_successful_claim() {
     let node_key_id = "ciris-pin-consume-node";
-    let founder_key_id = "ciris-pin-consume-founder";
+    let user_key_id = "ciris-pin-consume-user";
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
-    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await; // armed with TEST_CLAIM_PIN
+    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    let (body, ed_b64, mldsa_b64) =
-        signed_claim_with_pin(node_key_id, founder_key_id, Some(TEST_CLAIM_PIN)).await;
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
-        .await
-        .expect("POST setup/root (correct PIN)");
-    assert_eq!(resp.status(), 201, "correct PIN → claim succeeds");
+    let body = one_phase_body(node_key_id, &user, Some(TEST_CLAIM_PIN), Some("self")).await;
+    let (s, _) = post_claim(&client, &base, body).await;
+    assert_eq!(s, 201, "correct PIN binds ROOT");
     assert_eq!(
         store::list_by_role(&engine, WaRole::Root, 10)
             .await
-            .expect("list roots")
+            .unwrap()
             .len(),
-        1,
-        "exactly one ROOT after a correct-PIN claim"
+        1
     );
 
-    // A second VALID claim (fresh founder, same correct PIN) is now rejected: the
-    // route is first-run-closed (409) AND the PIN was consumed.
-    let (body2, ed2, ml2) =
-        signed_claim_with_pin(node_key_id, "ciris-pin-replayer", Some(TEST_CLAIM_PIN)).await;
-    let resp2 = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", "ciris-pin-replayer")
-        .header("x-ciris-signature-ed25519", &ed2)
-        .header("x-ciris-signature-ml-dsa-65", &ml2)
-        .body(body2)
-        .send()
-        .await
-        .expect("POST setup/root (replay)");
+    // A second claim (fresh user, same correct PIN) → 409 (route first-run-closed).
+    let replayer = user_signer("ciris-pin-replayer");
+    let body2 = one_phase_body(node_key_id, &replayer, Some(TEST_CLAIM_PIN), Some("self")).await;
+    let (sr, _) = post_claim(&client, &base, body2).await;
     assert_eq!(
-        resp2.status(),
-        409,
-        "after a successful claim the route is first-run-closed (PIN also consumed)"
+        sr, 409,
+        "after a successful claim the route is first-run-closed"
     );
     assert_eq!(
         store::list_by_role(&engine, WaRole::Root, 10)
             .await
-            .expect("list roots")
+            .unwrap()
             .len(),
-        1,
-        "no second ROOT minted on replay"
+        1
     );
 }
 
-/// A WRONG PIN (valid founder sig, correct node pin) → 401, NO ROOT minted.
+/// A WRONG PIN → 401, NO ROOT minted, user not registered.
 #[tokio::test]
 async fn claim_with_wrong_pin_is_rejected() {
     let node_key_id = "ciris-wrongpin2-node";
-    let founder_key_id = "ciris-wrongpin2-founder";
+    let user_key_id = "ciris-wrongpin2-user";
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
-    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await; // armed with TEST_CLAIM_PIN
+    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    // A signed claim carrying the WRONG PIN (same length to exercise the
-    // byte-compare path, not just the length flag).
-    let (body, ed_b64, mldsa_b64) =
-        signed_claim_with_pin(node_key_id, founder_key_id, Some("WRNG-PIN0")).await;
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
+    let body = one_phase_body(node_key_id, &user, Some("WRNG-PIN0"), Some("self")).await;
+    let (status, _) = post_claim(&client, &base, body).await;
+    assert_eq!(status, 401, "a wrong PIN is rejected");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("POST setup/root (wrong PIN)");
-    assert_eq!(resp.status(), 401, "a wrong PIN is rejected");
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "a wrong-PIN claim mints NO ROOT"
-    );
-    // The founder key must NOT have been admitted either.
-    assert!(
-        engine
-            .federation_directory()
-            .lookup_public_key(founder_key_id)
-            .await
-            .expect("lookup founder")
-            .is_none(),
-        "a wrong-PIN claim must NOT register the founder key"
-    );
+        .unwrap()
+        .is_empty());
+    assert!(engine
+        .federation_directory()
+        .lookup_public_key(user_key_id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
-/// A MISSING PIN (valid founder sig, correct node pin) → 401, NO ROOT minted.
+/// A MISSING PIN → 401, NO ROOT minted.
 #[tokio::test]
 async fn claim_with_missing_pin_is_rejected() {
     let node_key_id = "ciris-nopin-node";
-    let founder_key_id = "ciris-nopin-founder";
+    let user_key_id = "ciris-nopin-user";
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
-    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await; // armed with TEST_CLAIM_PIN
+    let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    // No `claim_pin` field at all.
-    let (body, ed_b64, mldsa_b64) = signed_claim_with_pin(node_key_id, founder_key_id, None).await;
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
+    let body = one_phase_body(node_key_id, &user, None, Some("self")).await;
+    let (status, _) = post_claim(&client, &base, body).await;
+    assert_eq!(status, 401, "a missing PIN is rejected");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("POST setup/root (missing PIN)");
-    assert_eq!(resp.status(), 401, "a missing PIN is rejected");
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "a missing-PIN claim mints NO ROOT"
-    );
+        .unwrap()
+        .is_empty());
 }
 
-/// An UN-ARMED node (router built with `claim_pin: None`, e.g. already-claimed at
-/// boot) rejects every claim with 401 even with an otherwise-valid signed body —
-/// the PIN gate fails closed when no PIN is armed.
+/// An UN-ARMED node (router built with `claim_pin: None`) rejects every claim with
+/// 401 — the PIN gate fails closed when no PIN is armed.
 #[tokio::test]
 async fn unarmed_node_rejects_claims() {
     let node_key_id = "ciris-unarmed-node";
-    let founder_key_id = "ciris-unarmed-founder";
+    let user_key_id = "ciris-unarmed-user";
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
-    // No ROOT yet, but the router is NOT armed with a PIN.
     let (base, _h) = serve_with_pin(Arc::clone(&engine), node_key_id, None).await;
     let client = reqwest::Client::new();
+    let user = user_signer(user_key_id);
 
-    let (body, ed_b64, mldsa_b64) =
-        signed_claim_with_pin(node_key_id, founder_key_id, Some(TEST_CLAIM_PIN)).await;
-    let resp = client
-        .post(format!("{base}/v1/setup/root"))
-        .header("x-ciris-signing-key-id", founder_key_id)
-        .header("x-ciris-signature-ed25519", &ed_b64)
-        .header("x-ciris-signature-ml-dsa-65", &mldsa_b64)
-        .body(body)
-        .send()
+    let body = one_phase_body(node_key_id, &user, Some(TEST_CLAIM_PIN), Some("self")).await;
+    let (status, _) = post_claim(&client, &base, body).await;
+    assert_eq!(status, 401, "an un-armed node rejects all claims");
+    assert!(store::list_by_role(&engine, WaRole::Root, 10)
         .await
-        .expect("POST setup/root (unarmed)");
-    assert_eq!(resp.status(), 401, "an un-armed node rejects all claims");
-    assert!(
-        store::list_by_role(&engine, WaRole::Root, 10)
-            .await
-            .expect("list roots")
-            .is_empty(),
-        "an un-armed-node claim mints NO ROOT"
-    );
+        .unwrap()
+        .is_empty());
 }
 
 /// Unit: `generate_claim_pin` produces an `XXXX-XXXX` Crockford-base32 PIN, and

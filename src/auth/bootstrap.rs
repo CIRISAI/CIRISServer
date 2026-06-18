@@ -16,17 +16,22 @@
 //!    it as a ROOT WaCert (the agent's `mint_wise_authority(role=ROOT)`), so the
 //!    founder's identity resolves to `UserRole::SystemAdmin`.
 //!
-//! 3. **First-run claim** — `POST /v1/setup/root`: the literal first-time-setup
-//!    flow for a FRESH node with NO baked seed, claimed by a FRESH founder whose
-//!    key is NOT yet in this node's `federation_keys` directory. The founder
-//!    presents their OWN hybrid pubkeys in the body and proves control of them by
-//!    hybrid-signing the body (self-attested proof-of-possession, verified against
-//!    the SUPPLIED pubkeys under `Strict` — NOT the directory). The handler then
-//!    registers the founder's key (admitting it thereafter) and binds ROOT to it.
-//!    The claim is NodeCode-pinned (the founder proves they reached the intended
-//!    node) and first-run-only — once a ROOT exists the route is closed (409). This
-//!    is the only path that needs no offline private key AND no prior directory
-//!    registration — the founder claims the node they just stood up.
+//! 3. **First-run claim** — `POST /v1/setup/root` (1-phase, SUBSTRATE-NATIVE):
+//!    the literal first-time-setup flow for a FRESH node with NO baked seed. The
+//!    claiming party is itself a node running the full substrate (JCS + hybrid
+//!    signing), so it has ALREADY built + JCS-canonicalized + hybrid-SIGNED the
+//!    `delegates_to(responsible user → THIS node, infra:*)` owner-binding with the
+//!    USER's key. The body carries that complete
+//!    [`SignedOwnerBinding`](super::ownership::SignedOwnerBinding); this handler
+//!    verifies it (Strict, against the user's SUPPLIED pubkeys), registers the
+//!    user's key (`identity_type "user"`), persists the genuinely user-signed
+//!    `delegates_to`, and binds ROOT to the user — in ONE round-trip (no
+//!    `/finalize`, no server-returned bytes-to-sign; the canonicalization +
+//!    signing happen in the substrate on the CLAIMING side, never in any app). The
+//!    claim is NodeCode-pinned (the claimant proves they reached the intended
+//!    node) + claim-PIN-gated (operator presence) and first-run-only — once a ROOT
+//!    exists the route is closed (409). The claiming side is driven by
+//!    [`crate::claim_remote`] (`POST /v1/setup/claim-remote` on the LOCAL node).
 //!
 //! Why this makes `POST /v1/federation/peering` reachable: that route is gated by
 //! [`federation_admin::require_owner`] on `UserRole::SystemAdmin` + `FullAccess`.
@@ -48,19 +53,15 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
-use ciris_persist::prelude::{verify_hybrid, Engine, HybridPolicy};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
+use ciris_persist::prelude::{Engine, HybridPolicy};
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use super::store;
-use super::verify;
 
 /// Env: an OPTIONAL filesystem path the one-time claim PIN is ALSO written to on a
 /// fresh (unclaimed) boot, for headless ops that cannot scrape the console log. The
@@ -542,38 +543,21 @@ struct SetupState {
     claim_pin: Arc<Mutex<Option<String>>>,
 }
 
-/// The FRESH founder's self-attested hybrid identity (the claimant's OWN keys).
+/// The 1-phase first-run ROOT-claim request body — the NodeCode identity-pin
+/// (CEG §0.10) PLUS a COMPLETE, already-user-signed owner-binding.
 ///
-/// A fresh founder's key is NOT yet in this node's `federation_keys` directory, so
-/// the claim cannot be verified directory-side. Instead the founder presents their
-/// own public keys here and proves control of them by hybrid-signing the request
-/// body (proof-of-possession). The handler verifies the `x-ciris-*` signature
-/// AGAINST THESE pubkeys (not the directory), then registers this key in
-/// `federation_keys` (self-attested admission) so the founder becomes a real
-/// federation identity, and binds ROOT to `key_id`.
-#[derive(Debug, Deserialize, Clone)]
-struct Founder {
-    /// The founder's federation `key_id` — the identity ROOT is bound to. The
-    /// `x-ciris-signing-key-id` header MUST equal this value.
-    key_id: String,
-    /// The founder's raw Ed25519 public key (base64-standard, 32 bytes).
-    ed25519_pubkey_b64: String,
-    /// The founder's raw ML-DSA-65 public key (base64-standard, 1952 bytes).
-    ml_dsa_65_pubkey_b64: String,
-}
-
-/// The first-run ROOT-claim request body — the NodeCode identity-pin (CEG §0.10)
-/// PLUS the self-attested founder identity.
+/// The claim is SUBSTRATE-NATIVE and 1-phase: the claiming party is itself a node
+/// running the full substrate, so it has already built + JCS-canonicalized +
+/// hybrid-SIGNED the `delegates_to(user → THIS node, infra:*)` owner-binding with
+/// the responsible USER's key ([`ownership::build_signed_owner_binding`]). This
+/// body carries that complete [`SignedOwnerBinding`](ownership::SignedOwnerBinding);
+/// the handler verifies + persists it ([`ownership::apply_signed_owner_binding`])
+/// and binds ROOT — no second round-trip, no server-returned bytes-to-sign.
 ///
-/// The founder MUST prove they reached the INTENDED node (the one whose NodeCode
+/// The claimant MUST prove they reached the INTENDED node (the one whose NodeCode
 /// they hold out-of-band) by supplying that node's identity. Either form is
 /// accepted: the full `CIRIS-V1-...` `node_code` string (decoded server-side), OR
-/// the decoded `key_id` + `pubkey_ed25519_base64` pair directly. The handler
-/// verifies the pin matches THIS node's actual steward identity before admitting
-/// the claim — defeating a spoof where the founder is tricked into claiming a
-/// different node. The request body is ALSO the signed payload (the `x-ciris-*`
-/// hybrid signature covers it), so both the pin AND the founder pubkeys are
-/// signature-bound.
+/// the decoded `key_id` + `pubkey_ed25519_base64` pair directly.
 #[derive(Debug, Deserialize, Default)]
 struct SetupRootRequest {
     /// The node's full `CIRIS-V1-...` NodeCode string (dashes/whitespace/case
@@ -587,49 +571,43 @@ struct SetupRootRequest {
     /// The node's raw Ed25519 pubkey (base64) — the other decoded pin half.
     #[serde(default)]
     pubkey_ed25519_base64: Option<String>,
-    /// The fresh founder's self-attested hybrid identity (the claimant's OWN keys).
-    /// REQUIRED: the claim is verified against these pubkeys (proof-of-possession),
-    /// NOT the federation directory.
-    #[serde(default)]
-    founder: Option<Founder>,
     /// The cohort scope the responsible party claims this node under — one of
     /// `self` / `family` / `community` (CC 4.4.3.4.1 cohort scopes). REQUIRED:
-    /// it records the membership-standing tier the owner-binding covers. Rides
-    /// inside the signed body, so it is signature-bound. Validated against the
-    /// closed set; anything else → `400`.
+    /// it records the membership-standing tier the owner-binding covers.
+    /// Validated against the closed set; anything else → `400`.
     #[serde(default)]
     cohort_scope: Option<String>,
-    /// OPTIONAL explicit infra scope set for the owner-binding (CC 4.4.3.5 —
-    /// `infra:*` ONLY). When absent the canonical
-    /// [`ownership::OWNER_BINDING_INFRA_SCOPES`] set is used. Any `agency:*` (or
-    /// legacy agency) scope here is REJECTED (CC 1.13.5): a node delegation
-    /// literally cannot carry agency.
+    /// The COMPLETE, already-user-signed owner-binding — the
+    /// `delegates_to(user → THIS node, infra:*)` envelope + the user's hybrid
+    /// signatures + the user's `key_id` + pubkeys
+    /// ([`ownership::SignedOwnerBinding`]). REQUIRED: the claim is verified +
+    /// persisted directly from it (the receiver never canonicalizes/signs on the
+    /// user's behalf — the claiming node already did, in its substrate).
     #[serde(default)]
-    infra_scopes: Option<Vec<String>>,
+    owner_binding: Option<super::ownership::SignedOwnerBinding>,
     /// The one-time CLAIM PIN printed to THIS node's console/log on a fresh boot —
     /// the operator-presence secret (CONSOLE-ONLY; never served over HTTP). It is
     /// verified (constant-time) against the boot PIN before ROOT is bound, and
-    /// consumed on success. It rides INSIDE the signed body, so it is
-    /// signature-bound (it cannot be stripped/swapped without breaking the hybrid
-    /// PoP signature). REQUIRED.
+    /// consumed on success. REQUIRED.
     #[serde(default)]
     claim_pin: Option<String>,
 }
 
+/// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
+/// owner-binding persisted.
 #[derive(Debug, Serialize)]
 struct SetupRootResponse {
     /// The ROOT `wa_id` that was claimed.
     wa_id: String,
-    /// The claiming federation identity (`key_id`) — the RESPONSIBLE PARTY (a
-    /// `user`-role identity), NOT a bare node.
+    /// The claiming federation identity (`key_id`) — the RESPONSIBLE PARTY.
     identity_key_id: String,
-    /// The bridged API role (`SYSTEM_ADMIN`), derived from the owner-binding.
-    role: String,
     /// The cohort scope the node was claimed under (`self` / `family` /
     /// `community`).
     cohort_scope: String,
-    /// The owner-binding `delegates_to(user → node, infra:*)` attestation id (the
-    /// CC 3.2 responsible-party binding that was emitted).
+    /// The bridged API role (`SYSTEM_ADMIN`), derived from the owner-binding.
+    role: String,
+    /// The USER-SIGNED owner-binding `delegates_to(user → node, infra:*)`
+    /// attestation id (the CC 3.2 responsible-party binding that was persisted).
     owner_binding_attestation_id: String,
 }
 
@@ -751,96 +729,78 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
 }
 
 /// `POST /v1/setup/root` — first-time-setup ROOT claim for a FRESH node with no
-/// baked seed.
+/// baked seed. **1-phase + SUBSTRATE-NATIVE.**
 ///
 /// # The responsible-party model (CC 4.4.3.5 + CC 3.2 + CC 1.13.5)
 ///
 /// A fabric node is `node`-role and MUST NOT have agency ("infrastructure must
-/// not have agency", CC 1.13.5). This claim therefore establishes a RESPONSIBLE
-/// PARTY, not an agency partnership:
+/// not have agency", CC 1.13.5). This claim establishes a RESPONSIBLE PARTY (a
+/// `user`-role identity), not an agency partnership.
 ///
-///   - the claimant is the **responsible user** — registered as `identity_type
-///     "user"` (CC 3.2: ownership roots in an accountable human);
-///   - on success the handler emits the structural owner-binding
-///     `delegates_to(user → THIS node, infra:*)`
-///     ([`ownership::emit_owner_binding`]) — `infra:*` scopes ONLY;
-///   - it records the chosen `cohort_scope` (self|family|community); and
-///   - the ROOT WaCert / `SYSTEM_ADMIN` is the *derived* API-role view of that
-///     same responsible party.
+/// # 1-phase claim — the client is itself a node (it HAS JCS)
 ///
-/// Any `agency:*` (or legacy agency) scope in the claim is REJECTED (`400`) — a
-/// node delegation literally cannot carry agency (the CC 1.13.5 wire-checkable
-/// invariant). The AGENT's joint-agency partnership (`agency:*` +
-/// `consent:partnership_grant/accept`) stays in the agent, NOT here.
+/// The claiming party runs the full substrate, so it has ALREADY built +
+/// JCS-canonicalized + hybrid-SIGNED the `delegates_to(user → THIS node, infra:*)`
+/// owner-binding with the responsible USER's key
+/// ([`ownership::build_signed_owner_binding`]). The body carries that COMPLETE
+/// [`SignedOwnerBinding`](super::ownership::SignedOwnerBinding) — the envelope +
+/// the user's hybrid signatures + the user's `key_id` + pubkeys. This handler
+/// verifies + persists it ([`ownership::apply_signed_owner_binding`]) and binds
+/// ROOT in ONE round-trip. There is NO server-returned bytes-to-sign and NO
+/// `/finalize` — the canonicalization + signing happened in the substrate on the
+/// CLAIMING side, never in any app.
 ///
-/// # Security model — four independent gates
+/// Any `agency:*` (or legacy agency) scope in the owner-binding is REJECTED
+/// (`400`) — a node delegation literally cannot carry agency (the CC 1.13.5
+/// wire-checkable invariant). The AGENT's joint-agency partnership stays in the
+/// agent, NOT here.
 ///
-/// 0. **One-time CLAIM PIN (operator-presence)** — the claim MUST carry the
-///    `claim_pin` printed to THIS node's console/log on a fresh boot, verified
-///    CONSTANT-TIME against the boot PIN held in [`SetupState`]. The PIN is NEVER
-///    served over any HTTP route, so it proves the claimant has operator-level
-///    access to the node's console — closing the hole that the NodeCode alone is a
-///    PUBLIC, freely-shareable handle. A wrong/missing PIN → `401` (no ROOT). On
-///    success the PIN is CONSUMED (cleared from state) so it cannot be replayed.
-///    The PIN rides inside the signed body, so it is signature-bound.
+/// # Security model — independent gates
+///
 /// 1. **First-run only** — allowed ONLY when no ROOT WaCert exists; after a ROOT
 ///    exists the route returns `409 Conflict` (no silent re-claim).
 /// 2. **NodeCode identity-pin (CEG §0.10)** — the claim MUST carry THIS node's
-///    own NodeCode (or its decoded `key_id` + `pubkey_ed25519_base64`), and the
-///    handler verifies it matches the node's actual steward identity before
-///    admitting the claim. The NodeCode is the OUT-OF-BAND bootstrap handle the
-///    operator reads off the node and hands to the founder's app; pinning it
-///    proves the founder reached the INTENDED node — not a spoof that intercepted
-///    the claim. The pin rides inside the signed body, so it is signature-bound.
-/// 3. **Self-attested hybrid proof-of-possession** — a FRESH founder's key is NOT
-///    yet in this node's `federation_keys` directory, so the claim is NOT verified
-///    directory-side ([`verify::verify_request`]/`verify_hybrid_via_directory`).
-///    Instead the founder presents their OWN pubkeys in the `founder` object and
-///    proves control by hybrid-signing the request body. The handler verifies the
-///    `x-ciris-*` signature AGAINST THOSE pubkeys ([`verify_hybrid`],
-///    [`HybridPolicy::Strict`] — both Ed25519 + ML-DSA-65 REQUIRED, no
-///    classical-only path). This is the CLAIM AUTHORITY (proof-of-possession).
-/// 4. The founder's key is then REGISTERED in `federation_keys` via the canonical
-///    self-attested admission gate
-///    ([`Engine::register_federation_key`](ciris_persist::Engine::register_federation_key)
-///    → `verify_key_registration`, `scrub_key_id == key_id`), so the founder
-///    becomes a real federation identity admitted thereafter. ROOT is then bound to
-///    `founder.key_id`.
+///    own NodeCode (or its decoded `key_id` + `pubkey_ed25519_base64`), verified
+///    against the node's actual steward identity — proving the claimant reached
+///    the INTENDED node, not a spoof.
+/// 3. **One-time CLAIM PIN (operator-presence)** — the claim MUST carry the
+///    `claim_pin` printed to THIS node's console on a fresh boot, verified
+///    CONSTANT-TIME against the boot PIN. The PIN is NEVER served over HTTP, so it
+///    proves operator-level console access. Consumed on a fully-successful claim.
+/// 4. **User-signed owner-binding (the claim authority)** — the
+///    [`SignedOwnerBinding`](super::ownership::SignedOwnerBinding) is validated +
+///    its USER hybrid signature verified over the JCS-canonical bytes of its
+///    envelope against the user's SUPPLIED pubkeys (Strict). The user's key is
+///    then registered (`identity_type "user"`) and the GENUINELY USER-SIGNED
+///    `delegates_to` is persisted ([`ownership::apply_signed_owner_binding`]).
+///    Then ROOT is bound to the responsible user → `SYSTEM_ADMIN`.
 ///
-/// # Wire contract (the parallel client matches this exactly)
+/// # Wire contract
 ///
-/// `POST /v1/setup/root`, headers:
-/// - `x-ciris-signing-key-id`: MUST equal `founder.key_id`
-/// - `x-ciris-signature-ed25519`: base64 Ed25519 over the EXACT serialized body bytes
-/// - `x-ciris-signature-ml-dsa-65`: base64 ML-DSA-65 over the EXACT serialized body bytes
-///
-/// body (JSON):
+/// `POST /v1/setup/root`, body (JSON):
 /// ```json
 /// {
 ///   "node_code": "CIRIS-V1-...",
-///   "founder": {
-///     "key_id": "...",
+///   "cohort_scope": "self|family|community",
+///   "claim_pin": "XXXX-XXXX",
+///   "owner_binding": {
+///     "envelope": { ...the delegates_to(user -> node, infra:*) envelope... },
+///     "attesting_key_id": "<the responsible user key_id>",
 ///     "ed25519_pubkey_b64": "...",
-///     "ml_dsa_65_pubkey_b64": "..."
-///   },
-///   "claim_pin": "XXXX-XXXX"
+///     "ml_dsa_65_pubkey_b64": "...",
+///     "ed25519_sig_b64": "<user sig over JCS(envelope)>",
+///     "ml_dsa_65_sig_b64": "<user sig over JCS(envelope)>"
+///   }
 /// }
 /// ```
-/// `claim_pin` is the one-time PIN printed to the node's console on a fresh boot
-/// (console-only; NEVER served over HTTP). It is inside the signed body, so the
-/// signature binds it.
-/// (`node_code` may instead be supplied as the decoded `key_id` +
-/// `pubkey_ed25519_base64` pair at the top level — the node-pin half, distinct
-/// from the `founder` object.) The signature MUST cover the body bytes verbatim.
+/// No `x-ciris-*` headers: the proof is the user's hybrid signature INSIDE the
+/// owner-binding (over the envelope's canonical bytes), verified against the
+/// user's supplied pubkeys. (`node_code` may instead be supplied as the decoded
+/// `key_id` + `pubkey_ed25519_base64` pair at the top level.)
 ///
-/// This is the path that needs NO offline private key and NO prior directory
-/// registration: the founder claims the node they just stood up (and proved they
-/// reached), self-attesting their fresh identity, becoming `SYSTEM_ADMIN`.
-async fn setup_root(
-    State(st): State<SetupState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
+/// Response (`201 Created`): `{ wa_id, identity_key_id, cohort_scope, role,
+/// owner_binding_attestation_id }`.
+async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Response {
     // (1) Closed once a ROOT exists — checked FIRST so an unsigned probe against an
     //     already-claimed node still gets the clear 409 (no re-claim).
     match store::list_by_role(&st.engine, WaRole::Root, 1).await {
@@ -854,7 +814,6 @@ async fn setup_root(
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
 
-    // Parse the signed body once (the pin + the founder identity both ride here).
     let req: SetupRootRequest = if body.is_empty() {
         SetupRootRequest::default()
     } else {
@@ -870,133 +829,61 @@ async fn setup_root(
     };
 
     // (2) NodeCode identity-pin (CEG §0.10): the claim must carry THIS node's own
-    //     identity (the out-of-band bootstrap handle), proving the founder reached
-    //     the intended node. The pin rides inside the signed body, so it is
-    //     signature-bound. A claim with no pin, an undecodable NodeCode, or a pin
-    //     that names a DIFFERENT node is rejected (400) — closing the spoof where a
-    //     founder is tricked into claiming an attacker's node.
+    //     identity, proving the claimant reached the intended node.
     if let Some(resp) = verify_node_code_pin(&st, &req) {
         return resp;
     }
 
-    // (0/operator-presence) One-time CLAIM PIN. The claim must carry the PIN that
-    //     was printed to THIS node's console/log on a fresh boot — verified
-    //     CONSTANT-TIME against the boot PIN. The PIN is NEVER served over HTTP, so
-    //     possessing it proves operator-level console access, closing the hole that
-    //     the NodeCode alone is a freely-shareable PUBLIC handle. A wrong/missing
-    //     PIN → 401 (no ROOT minted). The PIN is signature-bound (inside the signed
-    //     body). It is NOT consumed here — only on a fully-successful claim below.
+    // (3) One-time CLAIM PIN (operator-presence). Constant-time vs the boot PIN.
+    //     NOT consumed here — only on a fully-successful claim below.
     if let Some(resp) = verify_claim_pin(&st, &req) {
         return resp;
     }
 
-    // (3) Self-attested hybrid proof-of-possession. A FRESH founder is not in the
-    //     directory, so we verify the body signature against the founder's OWN
-    //     pubkeys (NOT the directory) under Strict policy (both sigs required).
-    let Some(founder) = req.founder.clone() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "first-run ROOT claim must carry a `founder` object \
-             { key_id, ed25519_pubkey_b64, ml_dsa_65_pubkey_b64 }",
-        );
-    };
-
-    // (responsible-party model — CC 4.4.3.5 + CC 3.2 + CC 1.13.5)
-    // The claimant is the RESPONSIBLE PARTY, not an agency partner. Two
-    // body-level gates before we spend a signature verify:
-    //   (b) the cohort scope (self|family|community) the node is claimed under, and
-    //   (CC 1.13.5) REFUSE any agency:* (or legacy agency) scope in the claim — a
-    //       node delegation literally cannot carry agency. The owner-binding is
-    //       infra:* ONLY.
+    // The cohort scope (self|family|community) the node is claimed under.
     let cohort_scope = match validate_cohort_scope(&req) {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let infra_scopes: Vec<String> = match req.infra_scopes.clone() {
-        Some(s) => s,
-        None => super::ownership::OWNER_BINDING_INFRA_SCOPES
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
-    if !super::ownership::scopes_are_infra_only(&infra_scopes) {
+
+    // (4) The COMPLETE, already-user-signed owner-binding. The claiming node built
+    //     + canonicalized + hybrid-signed it in ITS substrate; we only verify +
+    //     persist it here (no canonicalize/sign on the user's behalf).
+    let Some(owner_binding) = req.owner_binding.as_ref() else {
         return err(
             StatusCode::BAD_REQUEST,
-            "first-run ROOT claim carries a non-infra (agency:* or legacy-agency) scope — \
-             a node delegation MUST be infra:* ONLY (CC 1.13.5); agency stays in the agent",
+            "first-run ROOT claim must carry a complete `owner_binding` \
+             (the user-signed delegates_to: envelope + signatures + key_id + pubkeys)",
         );
-    }
-
-    let signing_key_id = match header_str(&headers, verify::HEADER_KEY_ID) {
-        Some(v) => v,
-        None => {
-            return err(
-                StatusCode::UNAUTHORIZED,
-                format!("missing {}", verify::HEADER_KEY_ID),
-            )
-        }
-    };
-    // The signing identity MUST be the founder identity (no third-party claim).
-    if signing_key_id != founder.key_id {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            format!(
-                "{} ({signing_key_id}) does not match founder.key_id ({})",
-                verify::HEADER_KEY_ID,
-                founder.key_id
-            ),
-        );
-    }
-    let ed25519_sig = match header_str(&headers, verify::HEADER_ED25519) {
-        Some(v) => v,
-        None => {
-            return err(
-                StatusCode::UNAUTHORIZED,
-                format!("missing {}", verify::HEADER_ED25519),
-            )
-        }
-    };
-    let ml_dsa_65_sig = match header_str(&headers, verify::HEADER_ML_DSA_65) {
-        Some(v) => v,
-        None => {
-            return err(
-                StatusCode::UNAUTHORIZED,
-                format!("missing {} (Strict requires it)", verify::HEADER_ML_DSA_65),
-            )
-        }
     };
 
-    // Verify the hybrid signature over the EXACT body bytes against the founder's
-    // PROVIDED pubkeys — proof-of-possession, not a directory lookup. Uses the
-    // node's configured policy (production default [`HybridPolicy::Strict`]: both
-    // Ed25519 + ML-DSA-65 required; no classical-only path). The ML-DSA-65 header
-    // is required above regardless, so a Strict node never downgrades.
-    if let Err(e) = verify_hybrid(
-        &body,
-        &ed25519_sig,
-        Some(&ml_dsa_65_sig),
-        &founder.ed25519_pubkey_b64,
-        Some(&founder.ml_dsa_65_pubkey_b64),
+    // Validate + verify (Strict hybrid against the user's supplied pubkeys) +
+    // register the user as identity_type "user" + persist the GENUINELY USER-SIGNED
+    // delegates_to(user -> THIS node, infra:*). All crypto in the substrate.
+    let applied = match super::ownership::apply_signed_owner_binding(
+        &st.engine,
+        &st.node_key_id,
         st.policy,
-        None,
-    ) {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            format!("self-attested signature verification failed: {e}"),
-        );
-    }
+        owner_binding,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            // Map the substrate error to the right HTTP status.
+            let code = match e {
+                super::ownership::OwnershipError::AgencyScopeRefused
+                | super::ownership::OwnershipError::Validation(_)
+                | super::ownership::OwnershipError::Canonicalize(_) => StatusCode::BAD_REQUEST,
+                super::ownership::OwnershipError::Verify(_) => StatusCode::UNAUTHORIZED,
+                super::ownership::OwnershipError::Sign(_)
+                | super::ownership::OwnershipError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return err(code, format!("owner-binding rejected: {e}"));
+        }
+    };
 
-    // (4) Register the founder's key in federation_keys via the canonical
-    //     self-attested admission gate (scrub_key_id == key_id). The founder
-    //     becomes a real federation identity admitted thereafter.
-    if let Err(e) = register_founder_key(&st.engine, &founder, &ed25519_sig, &ml_dsa_65_sig).await {
-        return err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("register founder federation key: {e}"),
-        );
-    }
-
-    // (5) Bind this identity as ROOT (race-narrowed: re-check + claim).
+    // (5) Bind this responsible user as ROOT (race-narrowed: re-check + claim).
     if let Ok(v) = store::list_by_role(&st.engine, WaRole::Root, 1).await {
         if !v.is_empty() {
             return err(
@@ -1005,13 +892,14 @@ async fn setup_root(
             );
         }
     }
-    let wa_id = root_wa_id_for_identity(&founder.key_id);
+    let identity_key_id = applied.responsible_user_key_id;
+    let wa_id = root_wa_id_for_identity(&identity_key_id);
     let now = chrono::Utc::now();
     let cert = WaCert {
         wa_id: wa_id.clone(),
-        name: format!("root:{}", founder.key_id),
+        name: format!("root:{identity_key_id}"),
         role: WaRole::Root,
-        pubkey: founder.key_id.clone(),
+        pubkey: identity_key_id.clone(),
         jwt_kid: format!("{wa_id}-jwt"),
         password_hash: None,
         api_key_hash: None,
@@ -1034,137 +922,34 @@ async fn setup_root(
     };
     match store::upsert(&st.engine, cert).await {
         Ok(()) => {
-            // (responsible-party model, CC 3.2) Emit the owner-binding
-            // delegates_to(responsible_user → THIS node, infra:*). This is the
-            // STRUCTURAL artifact that binds the node UNDER the user's authority
-            // with NO agency (CC 1.13.5); the ROOT WaCert / SystemAdmin above is
-            // the derived API-role view of the SAME responsible party. The scope
-            // set was already proven infra-only (the agency reject gate ran on the
-            // body). A failure here is fatal to the claim's CC-meaning, so surface
-            // it (the ROOT cert exists but is owner-unbound — we report 500 so the
-            // operator re-drives rather than silently leaving a half-bound node).
-            let owner_binding_attestation_id = match super::ownership::emit_owner_binding(
-                &st.engine,
-                &founder.key_id,
-                &st.node_key_id,
-                &infra_scopes,
-            )
-            .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("ROOT bound but owner-binding emit failed: {e}"),
-                    )
-                }
-            };
-
-            // Consume the one-time PIN: clear it so it can never be replayed. (The
-            // route is also 409-closed now that a ROOT exists — this is defence in
-            // depth + makes the consumed-once invariant directly assertable.)
+            // Consume the one-time PIN (no replay; route is also 409-closed now).
             if let Ok(mut guard) = st.claim_pin.lock() {
                 *guard = None;
             }
             tracing::info!(
-                identity = %founder.key_id,
+                identity = %identity_key_id,
                 wa_id = %wa_id,
+                node_key_id = %st.node_key_id,
                 cohort_scope = %cohort_scope,
-                owner_binding = %owner_binding_attestation_id,
-                "first-run ROOT claim: responsible user registered + owner-binding \
-                 delegates_to(user → node, infra:*) emitted; ROOT/SYSTEM_ADMIN derived; \
-                 one-time claim PIN consumed (CC 3.2 / CC 1.13.5)"
+                owner_binding = %applied.attestation_id,
+                "first-run ROOT claim (1-phase, substrate-native): USER-SIGNED \
+                 owner-binding persisted; ROOT/SYSTEM_ADMIN bound to the responsible \
+                 user; one-time claim PIN consumed (CC 3.2 / CC 1.13.5)"
             );
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
                     wa_id,
-                    identity_key_id: founder.key_id,
-                    role: super::roles::UserRole::SystemAdmin.as_str().to_string(),
+                    identity_key_id,
                     cohort_scope,
-                    owner_binding_attestation_id,
+                    role: super::roles::UserRole::SystemAdmin.as_str().to_string(),
+                    owner_binding_attestation_id: applied.attestation_id,
                 }),
             )
                 .into_response()
         }
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
-}
-
-/// Read a header as a `String` (UTF-8). `None` if absent or non-UTF-8.
-fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-}
-
-/// Register the fresh founder's hybrid key in `federation_keys` so it is admitted
-/// thereafter (the founder becomes a real federation identity).
-///
-/// ## Why `put_public_key`, not `register_federation_key`
-///
-/// The canonical admission gate
-/// ([`Engine::register_federation_key`](ciris_persist::Engine::register_federation_key)
-/// → `verify_key_registration`) verifies a scrub-signature over the canonical
-/// `registration_envelope` — bytes DISTINCT from the request body. Requiring that
-/// would force the founder's client to produce a SECOND signature (over the
-/// envelope) on top of the body signature, complicating the wire contract.
-///
-/// The proof-of-possession is already established by the handler's step-3
-/// [`verify_hybrid`] (Strict, both sigs) over the request body against THESE same
-/// pubkeys — cryptographically equivalent authority to the envelope scrub-check,
-/// just over the body. So we record the proven identity directly via
-/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key),
-/// which keeps its own `algorithm == hybrid` + `accord_holder` attestation gates
-/// (a `user` row needs no attestation). The `scrub_*` fields are populated for
-/// row-shape completeness (a self-attested envelope + the body signatures); they
-/// are NOT re-verified by `put_public_key`.
-///
-/// **The claimant is the RESPONSIBLE PARTY (CC 3.2): a `user`-role identity, NOT
-/// a steward.** Ownership roots in an accountable human; the node binds UNDER the
-/// user's authority via a later `delegates_to(user → node, infra:*)`. We register
-/// the founder's key as `identity_type "user"` (corrected from the prior
-/// "steward") so [`ownership::is_owner_bound`]'s granter-is-user check resolves.
-async fn register_founder_key(
-    engine: &Engine,
-    founder: &Founder,
-    ed25519_body_sig_b64: &str,
-    ml_dsa_65_body_sig_b64: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": founder.key_id });
-    let canonical = ceg_produce_canonicalize(&envelope)?;
-    let record = KeyRecord {
-        key_id: founder.key_id.clone(),
-        pubkey_ed25519_base64: founder.ed25519_pubkey_b64.clone(),
-        pubkey_ml_dsa_65_base64: Some(founder.ml_dsa_65_pubkey_b64.clone()),
-        algorithm: algorithm::HYBRID.into(),
-        // CC 3.2: the responsible party is a `user`-role identity (free-form
-        // TEXT per CC 3.4.7.1). The substrate ships an `identity_type::USER`
-        // constant; we use it (not STEWARD).
-        identity_type: identity_type::USER.into(),
-        identity_ref: founder.key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        // The founder's body signatures, recorded as scrub material for row-shape
-        // completeness. PoP was already verified over the body in handler step 3.
-        scrub_signature_classical: ed25519_body_sig_b64.to_string(),
-        scrub_signature_pqc: Some(ml_dsa_65_body_sig_b64.to_string()),
-        scrub_key_id: founder.key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        roles: Vec::new(),
-        attestation_evidence: None,
-    };
-    engine
-        .federation_directory()
-        .put_public_key(SignedKeyRecord { record })
-        .await?;
-    Ok(())
 }
 
 /// The first-run setup router — merge onto the read-API listener beside the other
@@ -1181,6 +966,9 @@ async fn register_founder_key(
 /// already-claimed node) leaves the route un-armed — every claim attempt is `401`
 /// (and `409` once the first-run check sees the existing ROOT). The PIN is held in
 /// state ONLY; it is NEVER served over any HTTP route.
+///
+/// 1-phase: there is a single `POST /v1/setup/root` route — no `/finalize` (the
+/// client is itself a node and signs the owner-binding in its own substrate).
 pub fn router(
     engine: Arc<Engine>,
     policy: HybridPolicy,

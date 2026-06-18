@@ -33,13 +33,46 @@
 //! - the node self-registers as the free-form `identity_type` string `"node"`
 //!   (CC 3.4.7.1: `identity_type` is free-form TEXT), and
 //! - the infra/agency split + the reject-agency gate live in this module.
+//!
+//! ## The owner-binding is GENUINELY USER-SIGNED (1-phase, SUBSTRATE-NATIVE)
+//!
+//! The owner-binding asserts that an accountable human is responsible for the
+//! node, so the binding MUST carry the **user's own signature**, not a
+//! node-attested-on-behalf one. Because the claiming party is **itself a node**
+//! running the full substrate (JCS + hybrid signing), the canonicalization +
+//! signing happen IN THE SUBSTRATE ON BOTH ENDS — never in the app. The claim is
+//! therefore **1-phase**:
+//!
+//! - **Claiming side** (the responsible user's LOCAL node):
+//!   [`build_signed_owner_binding`] builds the `delegates_to(user → node,
+//!   infra:*)` envelope ([`build_owner_binding_envelope`]),
+//!   JCS-canonicalizes it ([`canonicalize_owner_binding_envelope`]), HYBRID-SIGNS
+//!   the canonical bytes with the **responsible user's** signer (NOT the node's
+//!   steward signer), and packages the result as a self-describing
+//!   [`SignedOwnerBinding`] (envelope + the user's two signatures + the user's
+//!   `key_id` + pubkeys). The app drives this; the local node does all crypto.
+//!
+//! - **Receiving side** (the node being claimed): `POST /v1/setup/root` accepts
+//!   that complete [`SignedOwnerBinding`] and [`apply_signed_owner_binding`]
+//!   validates it (node = this node, scopes infra-only, purpose
+//!   `responsible_for`, attesting key is the claiming user), re-canonicalizes the
+//!   envelope to re-derive the exact signed bytes, verifies the user's hybrid
+//!   signature over them against the user's SUPPLIED pubkeys (Strict), registers
+//!   the user's key (`identity_type "user"`), then [`persist_user_signed_owner_binding`]
+//!   stores the `SignedAttestation` whose `scrub_*` fields hold the USER's
+//!   `key_id` + signatures. [`is_owner_bound`] then reads a USER-signed edge.
+//!
+//! The legacy node-attested [`emit_owner_binding`] is retained for internal
+//! emit sites with no user signature available; the CLAIM path no longer uses it.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, Attestation, SignedAttestation,
+    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
+    SignedAttestation, SignedKeyRecord,
 };
-use ciris_persist::prelude::Engine;
+use ciris_persist::prelude::{verify_hybrid, Engine, HybridPolicy, LocalSigner};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // ─── The CC 4.4.3.5 reserved two-prefix scope split ─────────────────────────
@@ -131,40 +164,35 @@ pub fn identity_type_contains(identity_type: &str, role: &str) -> bool {
         .any(|t| t.trim() == role)
 }
 
-// ─── Emit the owner-binding (user → node, infra:*) ──────────────────────────
+// ─── Build + canonicalize the owner-binding envelope (the bytes the USER signs) ─
 
-/// Emit the CC 3.2 owner-binding: a `delegates_to(responsible_user → node)`
-/// attestation carrying ONLY `infra:*` scopes.
+/// Build the CC 3.2 owner-binding `delegates_to(responsible_user → node)`
+/// envelope (user → node, infra-only) — the `serde_json::Value` that is JCS-
+/// canonicalized into the bytes the responsible party signs.
 ///
-/// **Refuses to emit agency to a node.** [`scopes_are_infra_only`] is asserted
-/// FIRST; an `agency:*` (or legacy agency) scope is rejected before any sign /
-/// persist — the CC 1.13.5 invariant is enforced on the *producer* side too, not
-/// only the verifier side.
+/// **Refuses to build an agency binding.** [`scopes_are_infra_only`] is asserted
+/// FIRST; an `agency:*` (or legacy agency) scope is rejected before the envelope
+/// is shaped — the CC 1.13.5 invariant on the *producer* side. The scope set is
+/// sorted + deduped so the JCS bytes are deterministic for a given (user, node,
+/// scope-set, asserted_at).
 ///
-/// Modeled on `peer.rs::emit_replication_consent` (the canonicalize →
-/// hybrid-sign → `put_attestation` recipe) and the `self_at_login`
-/// `delegates_to` envelope shape, but with the user→node + infra-only profile.
+/// `asserted_at` is threaded IN as an explicit RFC-3339 string so the same
+/// envelope (and therefore the same canonical bytes) can be rebuilt/echoed
+/// across the 2-phase claim: phase 1 stamps `asserted_at = now`, returns the
+/// envelope + its canonical bytes; phase 2 re-canonicalizes the SAME envelope
+/// the client echoed back (no fresh timestamp) so the bytes match what the user
+/// signed.
 ///
-/// ## Substrate-expressiveness note (deferred upstream)
-///
-/// The delegation walk reads edges via `list_attestations_by(issuer)` /
-/// `list_attestations_for(target)`, keyed on `attesting_key_id`. For the walk to
-/// resolve the user as the issuer we set `attesting_key_id =
-/// responsible_user_key_id`. The bytes are hybrid-signed by the *node's* engine
-/// signer (the server has no access to the user's private key at emit time), so
-/// `scrub_key_id` is recorded honestly as the node's key. The substrate
-/// `put_attestation` does NOT re-verify the scrub signature against
-/// `attesting_key_id`, so this is accepted today — but it means the owner-binding
-/// is node-attested-on-behalf-of-the-user rather than user-self-signed. A
-/// substrate that lets the user co-sign the binding (or a client-supplied,
-/// user-signed `delegates_to`) is the principled fix (filed upstream).
-pub async fn emit_owner_binding(
-    engine: &Engine,
+/// The `scope` array is the shape the substrate delegation walk's
+/// scope-containment predicate reads; `attesting_key_id` is the user (so the
+/// walk resolves the user → node edge); `attested_key_id` is the node.
+pub fn build_owner_binding_envelope(
     responsible_user_key_id: &str,
     node_key_id: &str,
     infra_scopes: &[String],
-) -> Result<String, OwnershipError> {
-    // CC 1.13.5: refuse to emit agency to a node — the producer-side gate.
+    asserted_at_rfc3339: &str,
+) -> Result<serde_json::Value, OwnershipError> {
+    // CC 1.13.5: refuse to build an agency binding — the producer-side gate.
     if !scopes_are_infra_only(infra_scopes) {
         return Err(OwnershipError::AgencyScopeRefused);
     }
@@ -173,27 +201,405 @@ pub async fn emit_owner_binding(
     scopes.sort();
     scopes.dedup();
 
-    let now = chrono::Utc::now();
-
-    // The owner-binding `delegates_to` envelope (user → node, infra-only). The
-    // `scope` array is the shape the substrate delegation walk's
-    // scope-containment predicate reads.
-    let envelope = serde_json::json!({
+    Ok(serde_json::json!({
         "kind": "delegates_to",
         "dimension": DIMENSION_OWNER_BINDING,
         "attesting_key_id": responsible_user_key_id,
         "node_key_id": node_key_id,
         "delegation_purpose": OWNER_BINDING_PURPOSE,
         "scope": scopes,
-        "asserted_at": now.to_rfc3339(),
-    });
+        "asserted_at": asserted_at_rfc3339,
+    }))
+}
 
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?;
+/// JCS-canonicalize an owner-binding envelope into the exact bytes the user
+/// signs (and the server re-derives in phase 2). This is the SAME
+/// `ceg_produce_canonicalize` the attestation sign-path uses, so the client
+/// never needs JCS: it signs the server-provided canonical bytes verbatim.
+pub fn canonicalize_owner_binding_envelope(
+    envelope: &serde_json::Value,
+) -> Result<Vec<u8>, OwnershipError> {
+    ciris_persist::verify::canonical::ceg_produce_canonicalize(envelope)
+        .map_err(|e| OwnershipError::Canonicalize(e.to_string()))
+}
+
+// ─── Assemble + persist a USER-SIGNED owner-binding (phase 2) ────────────────
+
+/// Assemble a [`SignedAttestation`] from a user-built `delegates_to` envelope
+/// PLUS the responsible party's OWN hybrid signatures over its canonical bytes,
+/// and persist it via `put_attestation` — so the stored owner-binding is
+/// GENUINELY USER-SIGNED ([`is_owner_bound`] then reads a user-signed edge).
+///
+/// This is the principled fix for the prior node-attested-on-behalf binding:
+/// the `scrub_*` fields carry the USER's `key_id` + the user's Ed25519 + ML-DSA-65
+/// signatures (not the node engine's), so the responsible party cryptographically
+/// asserts their own ownership. The caller MUST have already (a) re-canonicalized
+/// the envelope to the same bytes the user signed, and (b) verified the user's
+/// hybrid signature over those bytes against the user's registered pubkeys.
+///
+/// `put_attestation` does NOT re-verify the scrub signature against the
+/// directory, but it DOES require `attesting_key_id` (the user) to be a
+/// registered `federation_keys` row — so the user MUST be registered before this
+/// call (phase 1 registers them). Returns the persisted attestation id.
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_user_signed_owner_binding(
+    engine: &Engine,
+    envelope: serde_json::Value,
+    responsible_user_key_id: &str,
+    node_key_id: &str,
+    canonical: &[u8],
+    user_ed25519_sig_b64: &str,
+    user_ml_dsa_65_sig_b64: &str,
+) -> Result<String, OwnershipError> {
+    let now = chrono::Utc::now();
+    let original_content_hash = hex::encode(Sha256::digest(canonical));
+
+    let attestation_id = new_uuid_v4();
+    let attestation = Attestation {
+        attestation_id: attestation_id.clone(),
+        // Issuer = the responsible user (the delegation walk resolves the
+        // user → node edge via list_attestations_by(user) / _for(node)).
+        attesting_key_id: responsible_user_key_id.to_owned(),
+        attested_key_id: node_key_id.to_owned(),
+        attestation_type: attestation_type::DELEGATES_TO.to_owned(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash,
+        // GENUINELY USER-SIGNED: the responsible party's OWN hybrid signatures
+        // over the canonical bytes, with scrub_key_id = the user's key. The
+        // owner-binding now cryptographically asserts the user's own ownership.
+        scrub_signature_classical: user_ed25519_sig_b64.to_owned(),
+        scrub_signature_pqc: Some(user_ml_dsa_65_sig_b64.to_owned()),
+        scrub_key_id: responsible_user_key_id.to_owned(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![node_key_id.to_owned()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_owned(),
+        tier: attestation_tier::FEDERATION.to_owned(),
+        promoted_at: None,
+    };
+
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+
+    tracing::info!(
+        responsible_user = %responsible_user_key_id,
+        node_key_id = %node_key_id,
+        attestation_id = %attestation_id,
+        "persisted USER-SIGNED owner-binding delegates_to(user → node, infra:*) — \
+         responsible party asserts own ownership (CC 3.2 / CC 1.13.5)"
+    );
+    Ok(attestation_id)
+}
+
+// ─── SUBSTRATE-NATIVE 1-phase owner-binding (build on the claiming node, ─────
+//     apply on the node being claimed) ──────────────────────────────────────
+
+/// A COMPLETE, already-user-signed owner-binding — the self-describing wire
+/// object the claiming node hands the node being claimed in the 1-phase
+/// `POST /v1/setup/root` body.
+///
+/// It bundles everything the receiver needs to verify + persist a GENUINELY
+/// USER-SIGNED `delegates_to(user → node, infra:*)` WITHOUT the receiver (or any
+/// app) ever canonicalizing/signing on the user's behalf:
+///
+/// - `envelope` — the `delegates_to` envelope the user signed
+///   ([`build_owner_binding_envelope`]); the receiver re-canonicalizes IT
+///   ([`canonicalize_owner_binding_envelope`]) to re-derive the exact signed
+///   bytes (so nothing in the envelope can be tampered without breaking the sig);
+/// - `attesting_key_id` — the responsible USER's `key_id` (the
+///   `delegates_to` granter; MUST equal `envelope.attesting_key_id`);
+/// - `ed25519_pubkey_b64` / `ml_dsa_65_pubkey_b64` — the user's hybrid PUBLIC
+///   keys (the receiver registers them as the `user`-role identity AND verifies
+///   the signatures against them);
+/// - `ed25519_sig_b64` / `ml_dsa_65_sig_b64` — the user's hybrid SIGNATURES over
+///   the JCS-canonical bytes of `envelope` (produced by the substrate signer on
+///   the claiming node).
+///
+/// Both the build side ([`build_signed_owner_binding`]) and the apply side
+/// ([`apply_signed_owner_binding`]) live in the substrate, so the app needs NO
+/// crypto code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedOwnerBinding {
+    /// The `delegates_to(user → node, infra:*)` envelope the user signed.
+    pub envelope: serde_json::Value,
+    /// The responsible user's `key_id` (the granter). MUST equal
+    /// `envelope.attesting_key_id`.
+    pub attesting_key_id: String,
+    /// The user's raw Ed25519 public key (base64-standard, 32 bytes).
+    pub ed25519_pubkey_b64: String,
+    /// The user's raw ML-DSA-65 public key (base64-standard).
+    pub ml_dsa_65_pubkey_b64: String,
+    /// The user's Ed25519 signature over the JCS-canonical bytes of `envelope`.
+    pub ed25519_sig_b64: String,
+    /// The user's ML-DSA-65 signature over the JCS-canonical bytes of `envelope`.
+    pub ml_dsa_65_sig_b64: String,
+}
+
+/// **Claiming side (substrate-native).** Build a COMPLETE, user-signed
+/// owner-binding on the responsible user's LOCAL node: build the
+/// `delegates_to(user → target node, infra:*)` envelope, JCS-canonicalize it,
+/// and HYBRID-SIGN the canonical bytes with the **responsible USER's** signer
+/// (`user_signer` — NOT the node's steward signer). Returns a
+/// [`SignedOwnerBinding`] the app POSTs verbatim to the target's
+/// `POST /v1/setup/root`. All crypto happens in the substrate here; the app
+/// supplies only inputs.
+///
+/// `user_signer` carries the user's `key_id` + hybrid keypair; its public keys
+/// are read straight off the produced [`HybridSignature`](ciris_crypto::HybridSignature),
+/// so the receiver registers exactly the keys that signed.
+///
+/// Refuses to build an agency binding ([`build_owner_binding_envelope`] gates
+/// `scopes_are_infra_only` first — CC 1.13.5).
+pub async fn build_signed_owner_binding(
+    user_signer: &LocalSigner,
+    node_key_id: &str,
+    infra_scopes: &[String],
+) -> Result<SignedOwnerBinding, OwnershipError> {
+    let user_key_id = user_signer.key_id().to_string();
+    let now = chrono::Utc::now();
+    let envelope =
+        build_owner_binding_envelope(&user_key_id, node_key_id, infra_scopes, &now.to_rfc3339())?;
+    let canonical = canonicalize_owner_binding_envelope(&envelope)?;
+
+    // HYBRID-sign the canonical bytes with the USER's signer (the responsible
+    // party's key) — the substrate produces both halves + carries both pubkeys.
+    let sig = user_signer
+        .sign_hybrid(&canonical)
+        .await
+        .map_err(|e| OwnershipError::Sign(e.to_string()))?;
+
+    Ok(SignedOwnerBinding {
+        envelope,
+        attesting_key_id: user_key_id,
+        ed25519_pubkey_b64: B64.encode(&sig.classical.public_key),
+        ml_dsa_65_pubkey_b64: B64.encode(&sig.pqc.public_key),
+        ed25519_sig_b64: B64.encode(&sig.classical.signature),
+        ml_dsa_65_sig_b64: B64.encode(&sig.pqc.signature),
+    })
+}
+
+/// The outcome of [`apply_signed_owner_binding`]: the responsible user and the
+/// persisted owner-binding row id, so the caller can bind ROOT to the user.
+#[derive(Debug, Clone)]
+pub struct AppliedOwnerBinding {
+    /// The responsible user's `key_id` ROOT is bound to.
+    pub responsible_user_key_id: String,
+    /// The persisted `delegates_to` owner-binding attestation id.
+    pub attestation_id: String,
+}
+
+/// **Receiving side (the node being claimed).** Validate a complete, user-signed
+/// [`SignedOwnerBinding`] against THIS node, verify the user's hybrid signature
+/// over the JCS-canonical bytes of its envelope (Strict), register the user's
+/// key as `identity_type "user"`, and persist the GENUINELY USER-SIGNED
+/// `delegates_to` via [`persist_user_signed_owner_binding`]. Returns the
+/// responsible user + the persisted attestation id (the caller binds ROOT).
+///
+/// Validation (all enforced; any failure → `Err`, nothing persisted):
+/// - `envelope.node_key_id` == `this_node_key_id` (CC: attests THIS node);
+/// - `envelope.delegation_purpose` == [`OWNER_BINDING_PURPOSE`];
+/// - `envelope.scope` is infra-only ([`scopes_are_infra_only`] — REJECT agency,
+///   CC 1.13.5);
+/// - `envelope.attesting_key_id` == `binding.attesting_key_id` (the claiming
+///   user; no third-party / mismatched granter);
+/// - the user's hybrid signature verifies over `canonicalize(envelope)` against
+///   the SUPPLIED user pubkeys ([`verify_hybrid`], Strict — both halves).
+///
+/// The user's key is registered through
+/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
+/// as `identity_type "user"` BEFORE persisting the binding (so
+/// `put_attestation`'s attesting-key-exists FK is satisfied and
+/// [`is_owner_bound`]'s granter-is-user check resolves).
+pub async fn apply_signed_owner_binding(
+    engine: &Engine,
+    this_node_key_id: &str,
+    policy: HybridPolicy,
+    binding: &SignedOwnerBinding,
+) -> Result<AppliedOwnerBinding, OwnershipError> {
+    let envelope = &binding.envelope;
+
+    // ── Structural validation (independent of the signature) ──────────────────
+    let attested_node = envelope
+        .get("node_key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if attested_node != this_node_key_id {
+        return Err(OwnershipError::Validation(
+            "owner-binding does not attest THIS node (node_key_id mismatch)".into(),
+        ));
+    }
+    let purpose = envelope
+        .get("delegation_purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if purpose != OWNER_BINDING_PURPOSE {
+        return Err(OwnershipError::Validation(format!(
+            "owner-binding delegation_purpose must be {OWNER_BINDING_PURPOSE:?}"
+        )));
+    }
+    let scopes = scope_set_of(envelope);
+    // CC 1.13.5: REJECT agency on a node delegation.
+    if !scopes_are_infra_only(&scopes) {
+        return Err(OwnershipError::AgencyScopeRefused);
+    }
+    let env_attesting = envelope
+        .get("attesting_key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if env_attesting.is_empty() || env_attesting != binding.attesting_key_id {
+        return Err(OwnershipError::Validation(
+            "owner-binding envelope attesting_key_id is empty or does not match the \
+             claiming user (binding.attesting_key_id)"
+                .into(),
+        ));
+    }
+
+    // ── Re-canonicalize → the EXACT bytes the user signed ─────────────────────
+    let canonical = canonicalize_owner_binding_envelope(envelope)?;
+
+    // ── Verify the USER's hybrid signature over those bytes against the ───────
+    //    user's SUPPLIED pubkeys (Strict — both halves). PoP for the binding.
+    verify_hybrid(
+        &canonical,
+        &binding.ed25519_sig_b64,
+        Some(&binding.ml_dsa_65_sig_b64),
+        &binding.ed25519_pubkey_b64,
+        Some(&binding.ml_dsa_65_pubkey_b64),
+        policy,
+        None,
+    )
+    .map_err(|e| OwnershipError::Verify(e.to_string()))?;
+
+    // ── Register the user's key as identity_type "user" (CC 3.2) ──────────────
+    register_user_key(engine, binding).await?;
+
+    // ── Persist the GENUINELY USER-SIGNED delegates_to ────────────────────────
+    let attestation_id = persist_user_signed_owner_binding(
+        engine,
+        envelope.clone(),
+        &binding.attesting_key_id,
+        this_node_key_id,
+        &canonical,
+        &binding.ed25519_sig_b64,
+        &binding.ml_dsa_65_sig_b64,
+    )
+    .await?;
+
+    Ok(AppliedOwnerBinding {
+        responsible_user_key_id: binding.attesting_key_id.clone(),
+        attestation_id,
+    })
+}
+
+/// Register the claiming user's hybrid key in `federation_keys` as
+/// `identity_type "user"` (CC 3.2: ownership roots in an accountable human) via
+/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key).
+///
+/// The proof-of-possession is already established by [`apply_signed_owner_binding`]'s
+/// [`verify_hybrid`] over the owner-binding canonical bytes against THESE pubkeys,
+/// so we record the proven identity directly (rather than requiring a SECOND
+/// registration-envelope signature for `register_federation_key`). The `scrub_*`
+/// fields carry a self-attested envelope hash + the binding signatures for
+/// row-shape completeness; they are NOT re-verified by `put_public_key`.
+/// Idempotent for a matching row.
+async fn register_user_key(
+    engine: &Engine,
+    binding: &SignedOwnerBinding,
+) -> Result<(), OwnershipError> {
+    // If the user is already registered as a `user`-role identity, no-op (a
+    // re-applied binding must not fail on the FK gate).
+    if let Ok(Some(existing)) = engine
+        .federation_directory()
+        .lookup_public_key(&binding.attesting_key_id)
+        .await
+    {
+        if identity_type_contains(&existing.identity_type, "user") {
+            return Ok(());
+        }
+    }
+
+    let now = chrono::Utc::now();
+    let reg_envelope = serde_json::json!({ "key_id": binding.attesting_key_id });
+    let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
+    let record = KeyRecord {
+        key_id: binding.attesting_key_id.clone(),
+        pubkey_ed25519_base64: binding.ed25519_pubkey_b64.clone(),
+        pubkey_ml_dsa_65_base64: Some(binding.ml_dsa_65_pubkey_b64.clone()),
+        algorithm: algorithm::HYBRID.into(),
+        // CC 3.2 / CC 3.4.7.1: the responsible party is a `user`-role identity.
+        identity_type: identity_type::USER.into(),
+        identity_ref: binding.attesting_key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: reg_envelope,
+        original_content_hash: hex::encode(Sha256::digest(&reg_canonical)),
+        // The user's owner-binding signatures (over the binding canonical bytes),
+        // recorded as scrub material for row-shape completeness. PoP was verified
+        // by apply_signed_owner_binding over those same bytes.
+        scrub_signature_classical: binding.ed25519_sig_b64.clone(),
+        scrub_signature_pqc: Some(binding.ml_dsa_65_sig_b64.clone()),
+        scrub_key_id: binding.attesting_key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    Ok(())
+}
+
+// ─── Emit the owner-binding (user → node, infra:*) — legacy node-attested ────
+
+/// Emit the CC 3.2 owner-binding: a `delegates_to(responsible_user → node)`
+/// attestation carrying ONLY `infra:*` scopes, **node-attested-on-behalf** of
+/// the user (the node engine signs the bytes).
+///
+/// **Refuses to emit agency to a node.** [`scopes_are_infra_only`] is asserted
+/// FIRST (via [`build_owner_binding_envelope`]); an `agency:*` (or legacy
+/// agency) scope is rejected before any sign / persist.
+///
+/// ## Legacy / internal-only — the CLAIM path no longer uses this
+///
+/// This is the node-attested-on-behalf form: the bytes are hybrid-signed by the
+/// *node's* engine signer, so `scrub_key_id` is the node's key. The substrate
+/// `put_attestation` does NOT re-verify the scrub signature, so this is accepted,
+/// but the binding is NOT user-self-signed. The first-run CLAIM now produces a
+/// GENUINELY USER-SIGNED binding via the 2-phase
+/// `POST /v1/setup/root` (begin) + `/finalize` flow
+/// ([`persist_user_signed_owner_binding`]). This function is retained for
+/// internal/non-claim emit sites that have no user signature available.
+pub async fn emit_owner_binding(
+    engine: &Engine,
+    responsible_user_key_id: &str,
+    node_key_id: &str,
+    infra_scopes: &[String],
+) -> Result<String, OwnershipError> {
+    let now = chrono::Utc::now();
+    let envelope = build_owner_binding_envelope(
+        responsible_user_key_id,
+        node_key_id,
+        infra_scopes,
+        &now.to_rfc3339(),
+    )?;
+
+    let canonical = canonicalize_owner_binding_envelope(&envelope)?;
     let original_content_hash = hex::encode(Sha256::digest(&canonical));
 
-    // Hybrid-sign over the canonical bytes (node engine signer — see the
-    // substrate-expressiveness note above; scrub_key_id is the node's key).
+    // Hybrid-sign over the canonical bytes (node engine signer — legacy
+    // node-attested-on-behalf; scrub_key_id is the node's key).
     let sig = engine
         .sign_hybrid(&canonical)
         .await
@@ -202,8 +608,6 @@ pub async fn emit_owner_binding(
     let attestation_id = new_uuid_v4();
     let attestation = Attestation {
         attestation_id: attestation_id.clone(),
-        // Issuer = the responsible user (so the delegation walk resolves the
-        // user → node edge via list_attestations_by(user) / _for(node)).
         attesting_key_id: responsible_user_key_id.to_owned(),
         attested_key_id: node_key_id.to_owned(),
         attestation_type: attestation_type::DELEGATES_TO.to_owned(),
@@ -214,8 +618,7 @@ pub async fn emit_owner_binding(
         original_content_hash,
         scrub_signature_classical: B64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        // Honest: the node engine produced the bytes (the user's private key is
-        // not available server-side at emit time).
+        // Honest: the node engine produced the bytes (legacy on-behalf form).
         scrub_key_id: node_key_id.to_owned(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
@@ -237,8 +640,7 @@ pub async fn emit_owner_binding(
         responsible_user = %responsible_user_key_id,
         node_key_id = %node_key_id,
         attestation_id = %attestation_id,
-        scopes = ?scopes,
-        "emitted owner-binding delegates_to(user → node, infra:*) — responsible-party model (CC 3.2)"
+        "emitted (legacy node-attested) owner-binding delegates_to(user → node, infra:*)"
     );
     Ok(attestation_id)
 }
@@ -391,6 +793,12 @@ pub enum OwnershipError {
     Sign(String),
     /// Persisting the binding (`put_attestation`) failed.
     Persist(String),
+    /// The supplied owner-binding failed structural validation (wrong node,
+    /// purpose, mismatched attesting key, …).
+    Validation(String),
+    /// The user's hybrid signature over the owner-binding canonical bytes did
+    /// not verify against the supplied pubkeys.
+    Verify(String),
 }
 
 impl std::fmt::Display for OwnershipError {
@@ -404,6 +812,8 @@ impl std::fmt::Display for OwnershipError {
             OwnershipError::Canonicalize(e) => write!(f, "canonicalize owner-binding: {e}"),
             OwnershipError::Sign(e) => write!(f, "hybrid-sign owner-binding: {e}"),
             OwnershipError::Persist(e) => write!(f, "persist owner-binding: {e}"),
+            OwnershipError::Validation(e) => write!(f, "owner-binding validation: {e}"),
+            OwnershipError::Verify(e) => write!(f, "owner-binding signature verify: {e}"),
         }
     }
 }

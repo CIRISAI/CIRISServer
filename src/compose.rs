@@ -184,6 +184,14 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
     let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
 
+    // ── The responsible-USER signer for POST /v1/setup/claim-remote (the
+    //    SUBSTRATE-NATIVE node-to-node claiming side). The LOCAL node signs the
+    //    delegates_to(user → target, infra:*) owner-binding with the USER's key
+    //    (NOT the node steward signer); the app does NO crypto. `None` when no
+    //    user identity is configured — claim-remote is then not wired. See
+    //    `user_identity_signer` for the keyring/YubiKey gap. ─────────────────────
+    let claim_remote_user_signer = user_identity_signer(&cfg)?;
+
     // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
     //    when the host meets the lens-store minimum. ───────────────────────────
     let read = if caps.lens_store {
@@ -215,6 +223,21 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                         node_code.pubkey_ed25519_base64.clone(),
                         claim_pin.clone(),
                     ))
+                    // claim REMOTE ownership (substrate-native, node-to-node):
+                    // POST /v1/setup/claim-remote — the LOCAL node decodes the
+                    // target NodeCode, builds + hybrid-signs the owner-binding
+                    // with the responsible USER's key, and POSTs it to the
+                    // target's POST /v1/setup/root. Owner-gated. Only wired when a
+                    // responsible-user identity is configured (else an empty
+                    // router — the local node has no user key to sign as).
+                    .merge(match claim_remote_user_signer.clone() {
+                        Some(user_signer) => crate::claim_remote::router(
+                            Arc::clone(&engine),
+                            node_code.key_id.clone(),
+                            user_signer,
+                        ),
+                        None => axum::Router::new(),
+                    })
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple
@@ -336,6 +359,75 @@ fn identity_router(identity_json: String) -> axum::Router {
             }
         }),
     )
+}
+
+/// Env: a path to a 32-byte Ed25519 seed for the **responsible USER's** identity
+/// (the human who claims remote nodes). Distinct from the node steward seed.
+const ENV_USER_ED25519_SEED: &str = "CIRIS_USER_ED25519_SEED_PATH";
+/// Env: a path to a 32-byte ML-DSA-65 seed for the responsible USER's identity.
+const ENV_USER_ML_DSA_SEED: &str = "CIRIS_USER_ML_DSA_65_SEED_PATH";
+/// Env: the responsible USER's federation `key_id` (the owner-binding granter).
+const ENV_USER_KEY_ID: &str = "CIRIS_USER_KEY_ID";
+
+/// The responsible **USER's** hybrid signer used by `POST /v1/setup/claim-remote`
+/// to sign the `delegates_to(user → target, infra:*)` owner-binding — NOT the
+/// node's steward signer (the owner-binding asserts an accountable *human* is
+/// responsible).
+///
+/// Wired from a config-provided user keypair (`CIRIS_USER_KEY_ID` +
+/// `CIRIS_USER_ED25519_SEED_PATH` + `CIRIS_USER_ML_DSA_65_SEED_PATH`). When the
+/// user-key env is ABSENT, claim-remote is NOT wired (returns `None`) — the local
+/// node has no responsible-user identity to sign as, so it cannot claim a remote
+/// node on a human's behalf.
+///
+/// **KEYRING GAP (file upstream — likely a `ciris-keyring` ask):** the substrate
+/// `Engine` holds only ONE `LocalSigner` (the node steward), and `ciris-keyring`
+/// v5.11.0 ships NO user-identity / YubiKey(PKCS#11) signer accessor. So the
+/// user key here is a plaintext software seed (`LocalSigner::from_parts`), not a
+/// hardware-custodied human key. A `ciris-keyring` user-identity / PKCS#11
+/// accessor would let the responsible human's owner-binding signature be
+/// hardware-custodied by the human rather than co-resident with the node.
+pub(crate) fn user_identity_signer(
+    _cfg: &ServerConfig,
+) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
+    use ciris_persist::prelude::LocalSigner;
+    let (Ok(user_key_id), Ok(ed_path), Ok(ml_path)) = (
+        std::env::var(ENV_USER_KEY_ID),
+        std::env::var(ENV_USER_ED25519_SEED),
+        std::env::var(ENV_USER_ML_DSA_SEED),
+    ) else {
+        tracing::info!(
+            "no responsible-user identity ({ENV_USER_KEY_ID} + {ENV_USER_ED25519_SEED} + \
+             {ENV_USER_ML_DSA_SEED}) — POST /v1/setup/claim-remote disabled (no user key to \
+             sign owner-bindings as). KEYRING GAP: no user-identity/YubiKey accessor exists."
+        );
+        return Ok(None);
+    };
+
+    let ed_bytes = std::fs::read(ed_path.trim())
+        .with_context(|| format!("read user ed25519 seed {}", ed_path.trim()))?;
+    let ed_seed: [u8; 32] = ed_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{ENV_USER_ED25519_SEED} must be a 32-byte ed25519 seed"))?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&ed_seed);
+
+    let pqc_alias = format!("{user_key_id}-pqc");
+    let pqc = MlDsa65SoftwareSigner::from_seed_file(ml_path.trim(), pqc_alias.clone())
+        .map_err(|e| anyhow::anyhow!("load user ML-DSA-65 seed {}: {e}", ml_path.trim()))?;
+
+    let signer = LocalSigner::from_parts(
+        signing_key,
+        user_key_id.clone(),
+        Some(Arc::new(pqc)),
+        Some(pqc_alias),
+    );
+    tracing::warn!(
+        user_key_id = %user_key_id,
+        "responsible-user signer wired for claim-remote (PLAINTEXT software seed — \
+         KEYRING GAP: no user-identity/YubiKey custody yet)"
+    );
+    Ok(Some(Arc::new(signer)))
 }
 
 /// The node's **post-quantum** federation signing half — ML-DSA-65 — so the
