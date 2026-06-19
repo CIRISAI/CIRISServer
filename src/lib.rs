@@ -49,6 +49,11 @@ pub mod benchmarks;
 pub mod claim_remote;
 mod compose;
 mod config;
+/// **Config-as-CEG HTTP** (Server 0.5 Phase 1) — the owner-gated `/v1/config`
+/// surface over [`graph_config`]. A config WRITE is gated the SAME way federation
+/// peering is (serve-only floor + SYSTEM_ADMIN owner session). Public so the
+/// integration test (`tests/graph_config.rs`) can drive the router directly.
+pub mod config_api;
 /// Owner-directed federation operations (the keystone for on-demand
 /// `consent:replication` peering): `GET /v1/federation/self-key-record` +
 /// `POST /v1/federation/peering`. Each node authors its OWN consent grant
@@ -60,6 +65,12 @@ pub mod federation_admin;
 /// reads off the node and hands to a founder's app. Public so the integration
 /// test (`tests/nodecode.rs`) can drive the router directly.
 pub mod federation_nodecode;
+/// **Config-as-CEG** (Server 0.5 Phase 1) — a signed, owner-gated GraphConfig
+/// service over the CEG, mirroring CIRISAgent's `GraphConfigService` but
+/// hybrid-signed + owner-gated. Config entries are self-attested `config:v1`
+/// `scores` rows (latest-wins by version). Public so the integration test
+/// (`tests/graph_config.rs`) can drive the store directly.
+pub mod graph_config;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
 /// identity via ciris-server (the founder's goal, CIRISServer#21 /
 /// CIRISVerify#80). `mint_user_identity` opens the user's Ed25519 signing half
@@ -115,6 +126,10 @@ pub mod safety;
 pub mod scorer;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
+
+/// The config-as-CEG schema types (Server 0.5 Phase 1) — re-exported at the crate
+/// root for downstream/test use.
+pub use graph_config::{ConfigEntry, ConfigScope, ConfigValue};
 
 // The adapter seam's public surface — what a downstream crate (CIRISStatus)
 // imports to be "ciris-server + an adapter".

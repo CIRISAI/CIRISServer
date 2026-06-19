@@ -327,6 +327,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // itself never touches the runtime; this is just a signal.
                         replication.as_ref().map(|_| Arc::clone(&reconcile_notify)),
                     ))
+                    // CONFIG-AS-CEG (Server 0.5 Phase 1): the owner-gated
+                    // /v1/config surface over the signed GraphConfig store. A
+                    // write is gated the SAME way peering is (serve-only floor +
+                    // SYSTEM_ADMIN owner session). Phase 1 adds the store + API
+                    // only — it removes no env var; the Phase-2 config reconciler
+                    // wires the notify (None for now).
+                    .merge(crate::config_api::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        None,
+                    ))
                     // THIS node's public NodeCode (CEG §0.10): GET
                     // /v1/federation/node-code — the QR-able bootstrap handle an
                     // operator reads off the node and hands to a founder's app.
@@ -1119,11 +1130,11 @@ async fn build_edge(
     Ok(edge)
 }
 
-/// Authority slice — folds in at **Server 0.5** (CIRISRegistry#76). Attaches to
+/// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76). Attaches to
 /// the shared Edge (the node's single identity) + serves the registry trust
-/// surface over the shared Engine. SCAFFOLD.
+/// surface over the shared Engine. SCAFFOLD. (0.5 is config-as-CEG; registry is 0.6.)
 async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
-    todo!("registry slice (Server 0.5) — pin ciris-registry-core (CIRISRegistry#76) + attach to the shared Edge")
+    todo!("registry slice (Server 0.6) — pin ciris-registry-core (CIRISRegistry#76) + attach to the shared Edge")
 }
 
 /// Consensus slice — folds in at **Server 1.0** (CIRISNodeCore#38). `install(&edge)`

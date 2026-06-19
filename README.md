@@ -140,7 +140,10 @@ published wheels.
 
 Roadmap (driven by the CIRISAgent train):
 
-- **0.5** (+ registry authority) — agent **~2.9.8**. Prep:
+- **0.5** (config-as-CEG — **zero env vars**) — all node config is signed CEG
+  objects (owner-authored, runtime-reconciled, replicated); the fabric IS the
+  config, the same way the agent IS its graph.
+- **0.6** (+ registry authority) — agent **~2.9.8/9**. Prep:
   [`FSD/REGISTRY_FOLD_DERISK.md`](FSD/REGISTRY_FOLD_DERISK.md), [#2](https://github.com/CIRISAI/CIRISServer/issues/2).
 - **1.0** (+ node consensus — the complete fabric node) — agent **~2.9.10**.
 
