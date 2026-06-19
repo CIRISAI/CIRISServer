@@ -24,6 +24,12 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
+/// The public **adapter seam** — a Rust mirror of CIRISAgent's
+/// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
+/// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
+/// "ciris-server + an adapter": it contributes HTTP routes + a background
+/// lifecycle to the SAME shared core, instead of re-composing the substrate.
+pub mod adapter;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
 /// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
 /// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), the
@@ -103,6 +109,16 @@ pub mod safety;
 pub mod scorer;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
+
+// The adapter seam's public surface — what a downstream crate (CIRISStatus)
+// imports to be "ciris-server + an adapter".
+pub use adapter::{Adapter, AdapterConfig, AdapterContext, AdapterStatus, NoopAdapter};
+pub use compose::{serve, serve_with_adapter};
+
+/// The shared persist `Engine` (re-exported so a downstream adapter crate gets
+/// the EXACT type [`AdapterContext::engine`] carries, without depending on
+/// `ciris-persist` directly or guessing its path).
+pub use ciris_persist::prelude::Engine;
 
 use anyhow::Result;
 

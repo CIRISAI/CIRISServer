@@ -112,6 +112,13 @@ pip install "ciris-server==0.3.0"            # or restore the 0.3.0 binary
 ```
 The v0.4.9 corpus is forward-compatible reads; a downgrade loses ingest + the new surfaces but keeps identity.
 
-## 10. (Optional) status node
+## 10. (Optional) status node — now `ciris-server` + a `StatusAdapter`
 
-If upgrading the status node (B) in the same pass, it follows the same family floor (persist v9.0.2 / edge v5.0.0 / verify v6.2.0) and the same identity-continuity rule; it consumes A's `capacity:*` via consent:replication into its **own** corpus (no shared-DB read). See `CIRISStatus` deploy docs.
+The status node (B) is **no longer a parallel implementation**. As of CIRISStatus **v0.2.0** it *is* a `ciris-server` node plus a thin `StatusAdapter` (mirroring CIRISAgent's adapter model: the agent = `ciris-server` + brain; the status node = `ciris-server` + status adapter). All the fabric — engine, edge, **consent:replication**, NodeCode, ownership, safety, NAT-traversal — comes from `ciris-server`'s `serve_with_adapter()`; the adapter only adds the status page (the uptime probes, the Flow-A roster, `/api/v1/scoring`, the live SSE/WS) and emits `health:liveness:v1`.
+
+Consequences for the upgrade:
+- **Same family floor + identity-continuity rule** as the lens node (persist v9.0.2 / edge v5.0.0 / verify v6.2.0; keep `CIRIS_HOME` → same `key_id`, no re-key).
+- **Config is now `ciris-server`'s** (`ciris_server::ServerConfig::from_env()`): `CIRIS_SERVER_LISTEN_ADDR`, `CIRIS_HOME`, `CIRIS_DB_URL`, the `CIRIS_PEER_*` consent-replication env. The **old `STATUS_*` env is gone** (`STATUS_CORPUS_DSN`, `STATUS_NODE_*`, `STATUS_PEER_A_*`, `STATUS_REPLICATION_*`, `--features fabric`). The adapter keeps only probe-targets / poll-cadence / CORS env.
+- B consumes A's `capacity:*` via **consent:replication into its OWN corpus** (no shared-DB read); the status page reads that own corpus. The roster is empty until replication delivers — expected.
+- The status page is served from the node's **read API listener (`:4243`)** — the adapter's routers merge there. Point the status reverse-proxy at `:4243`.
+- **Release note:** CIRISStatus currently path-deps `ciris-server`; the published v0.2.0 pins the `ciris-server` **git tag** carrying the adapter seam (bump + tag `ciris-server` first, then repin + tag CIRISStatus). See `CIRISStatus/DEPLOY.md`.

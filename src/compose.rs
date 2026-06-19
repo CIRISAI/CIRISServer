@@ -32,14 +32,26 @@ use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
 use ciris_persist::prelude::Engine;
 use tokio::sync::watch;
 
+use crate::adapter::{Adapter, AdapterContext, NoopAdapter};
 use crate::config::{Capabilities, ServerConfig};
 
 /// Re-announce cadence for the local Reticulum destination (Leviculum default).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Boot the node: build the shared Engine + Reticulum Edge, attach the active
-/// slices the host can support, serve until shutdown.
+/// Boot the node with the default ([`NoopAdapter`]) — the byte-identical
+/// pre-seam composition: build the shared Engine + Reticulum Edge, attach the
+/// active slices the host can support, serve until shutdown.
 pub async fn serve(cfg: ServerConfig) -> Result<()> {
+    serve_with_adapter(cfg, Arc::new(NoopAdapter)).await
+}
+
+/// Boot the node with a downstream [`Adapter`] folded into the SAME shared core
+/// (one persist `Engine` + one Reticulum `Edge`): the adapter's routers merge
+/// onto the read-API listener, its `start` runs before the lifecycle, its
+/// `run_lifecycle` runs as a supervised background task, and its `stop` runs on
+/// shutdown. This is the "ciris-server + an adapter" seam (MISSION §1.2); the
+/// default [`serve`] passes [`NoopAdapter`], so existing behavior is unchanged.
+pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
     let caps = Capabilities::detect(&cfg);
@@ -66,6 +78,15 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 
     // ── ONE shared persist Engine (hybrid hardware signer — hard cut) ─────────
     let engine = build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
+
+    // ── The ADAPTER SEAM's shared-core handle (mirror of the agent adapter's
+    //    `runtime`). Built ONCE the Engine exists; captured by clone into both
+    //    the read-API router closure (adapter.routers) and the lifecycle task. ─
+    let adapter_ctx = AdapterContext {
+        engine: Arc::clone(&engine),
+        key_id: cfg.key_id.clone(),
+        cfg: cfg.clone(),
+    };
 
     // ── Self-register Node A's own signing key in the federation directory ────
     // Required BEFORE any attestation Node A authors will be admitted:
@@ -212,7 +233,11 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
             {
                 use ciris_persist::prelude::HybridPolicy;
                 let strict = HybridPolicy::Strict;
-                identity_router(identity_json)
+                // Capture the adapter + its shared-core handle for the move
+                // closure (the seam: fold the adapter's routers in below).
+                let adapter = Arc::clone(&adapter);
+                let adapter_ctx = adapter_ctx.clone();
+                let r = identity_router(identity_json)
                     // login ceremony (self-at-login → user-managed consent)
                     .merge(crate::auth::self_login::router(Arc::clone(&engine), strict))
                     // first-run ROOT claim (CIRISServer#19): POST /v1/setup/root —
@@ -297,7 +322,16 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                     // SAME Engine::receive_and_persist verify-before-persist path the
                     // Reticulum relay uses (LensCoreHandler). Unauthenticated like the
                     // relay — the per-trace CEG signature IS the auth.
-                    .merge(crate::ingest_http::router(Arc::clone(&engine)))
+                    .merge(crate::ingest_http::router(Arc::clone(&engine)));
+                // ── ADAPTER SEAM (get_services_to_register) ──────────────────
+                // Fold the downstream adapter's HTTP surface onto the SAME
+                // read-API listener, AFTER all built-in routers. NoopAdapter
+                // contributes none, so the default merged Router is unchanged.
+                let mut r = r;
+                for ar in adapter.routers(&adapter_ctx) {
+                    r = r.merge(ar);
+                }
+                r
             },
         )
         .await
@@ -331,6 +365,27 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
         None
     };
 
+    // ── ADAPTER SEAM (start + run_lifecycle) ──────────────────────────────────
+    // Mirror of the agent adapter contract: `start()` is the one-shot setup run
+    // BEFORE the long-running lifecycle, then `run_lifecycle(agent_task)` runs as
+    // a supervised background task that returns when its shutdown watch flips to
+    // `true`. NoopAdapter's defaults make both no-ops, so the default boot is
+    // unchanged.
+    adapter
+        .start(&adapter_ctx)
+        .await
+        .context("adapter start()")?;
+    let (adapter_sd_tx, adapter_sd_rx) = watch::channel(false);
+    let adapter_join = tokio::spawn({
+        let a = Arc::clone(&adapter);
+        let ctx = adapter_ctx.clone();
+        async move {
+            if let Err(e) = a.run_lifecycle(&ctx, adapter_sd_rx).await {
+                tracing::error!(error = %e, "adapter lifecycle ended with error");
+            }
+        }
+    });
+
     tracing::info!(
         ret = %cfg.listen_addr,
         mode = ?cfg.mode,
@@ -341,6 +396,13 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     if let Some(read) = read {
         read.shutdown().await.context("shutdown lens read API")?;
     }
+    // ── ADAPTER SEAM teardown (stop) ──────────────────────────────────────────
+    // Signal the lifecycle to return, run the adapter's `stop()`, and join the
+    // lifecycle task — around the edge teardown so the adapter unwinds with the
+    // rest of the shared core.
+    let _ = adapter_sd_tx.send(true);
+    let _ = adapter.stop().await;
+    let _ = adapter_join.await;
     let _ = edge_shutdown_tx.send(true);
     let _ = edge_join.await;
     Ok(())
