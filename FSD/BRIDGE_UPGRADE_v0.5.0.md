@@ -121,8 +121,20 @@ pip install "ciris-server==0.4.15"   # the last env-based release; restore the *
 ```
 Identity files are untouched (no re-key) either way.
 
-## 11. ⚠ Operator action — canonical mesh peers
-`CANONICAL_BOOTSTRAP_PEERS` (src/config_reconcile.rs) ships **empty**. For a canonical
-deploy, either fill it with the canonical CIRIS Reticulum entry `host:port` addresses
-(code) or author `net.bootstrap_peers` as a `config:*` object per node. Until then,
-cross-host nodes rely on Reticulum announce discovery over a shared interface.
+## 11. Canonical mesh peers — A first, registry next (0.6)
+The canonical mesh grows in a fixed order, and `CANONICAL_BOOTSTRAP_PEERS`
+(src/config_reconcile.rs) is **empty by design** for 0.5:
+1. **Node A (lens) is the first canonical peer / seed** — the origin. It needs no
+   bootstrap entry itself. Every other node **discovers the mesh by dialing A**; this
+   runbook is where A's address is established and where you point the next node at it.
+2-3. **The two registry nodes (Server 0.6)** become the stable canonical anchors —
+   that is when the const is baked to `["<A>:4242","<registry1>:4242","<registry2>:4242"]`.
+
+So for a 0.5 deploy, **point each new node at A via a `config:*` object** (no compiled-in
+IP needed yet). E.g. on the status node B, after claiming ownership:
+```sh
+curl -X POST https://<status-node>/v1/config \
+  -d '{"key":"net.bootstrap_peers","value":["<node-A-host>:4242"]}'
+```
+Node A itself runs with the empty default (it is the seed). At 0.6 the registry anchors
+are added to the baked const and fresh nodes self-join with zero input.
