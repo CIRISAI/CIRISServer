@@ -326,9 +326,18 @@ mod python {
     /// otherwise boots a zero-setup node (mode = server, trusts `ciris-canonical`).
     #[pyfunction]
     #[pyo3(name = "main")]
-    fn py_main() -> PyResult<()> {
+    fn py_main(py: Python<'_>) -> PyResult<()> {
         crate::init_tracing();
-        let mut args = std::env::args().skip(1);
+        // Read PYTHON's `sys.argv`, NOT Rust's `std::env::args()`. Under the
+        // pip console-script the OS process is `python <script-path> <args…>`, so
+        // `std::env::args()` carries the interpreter + the script path as spurious
+        // leading positionals — `skip(1)` drops only the interpreter, leaving the
+        // script path to land as `unknown serve arg: /usr/local/bin/ciris-server`
+        // (CIRISServer#32; every wheel invocation, incl. --help, crashed). Python
+        // sets `sys.argv[0]` = the program and `sys.argv[1:]` = the real args, so
+        // `skip(1)` here yields exactly the user args — matching the binary path.
+        let argv: Vec<String> = py.import("sys")?.getattr("argv")?.extract()?;
+        let mut args = argv.into_iter().skip(1);
         let first = args.next();
         match first.as_deref() {
             Some("import-traces") => {
