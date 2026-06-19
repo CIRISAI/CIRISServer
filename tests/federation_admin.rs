@@ -306,7 +306,12 @@ async fn serve(
     engine: Arc<Engine>,
     self_key_record_json: String,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let app = federation_admin::router(engine, NODE_A_KEY_ID.to_string(), self_key_record_json);
+    let app = federation_admin::router(
+        engine,
+        NODE_A_KEY_ID.to_string(),
+        self_key_record_json,
+        None,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

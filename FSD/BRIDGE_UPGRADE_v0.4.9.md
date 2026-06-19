@@ -58,10 +58,31 @@ CIRIS_SERVER_TRANSPORT_NODE=1               # forward inbound for NAT'd/mobile e
 CIRIS_SERVER_STORE_AND_FORWARD=1            # store-and-forward for asleep edges (SAF)
 # Identity dirs (defaults are $CIRIS_HOME/{data,identity}); RET identity:
 CIRIS_SERVER_RET_IDENTITY_PATH=$CIRIS_HOME/identity/<the-existing>.rid
-# Feed the status node (optional): replicate this node's capacity:* to ciris-status.
+# Feed the status node — OPTIONAL BOOTSTRAP ONLY (v0.4.12+): replication is now
+# CONSENT-DRIVEN. The owner creates a `consent:replication` object (via the desktop
+# client / `POST /v1/federation/peering`) and the node's reconcile loop converges
+# the live replication runtime to it. `CIRIS_PEER_B_*` is now just a convenience
+# that WRITES THAT SAME consent object at boot — it is no longer the mechanism.
 CIRIS_PEER_B_KEY_ID=<status node's key_id>
 CIRIS_PEER_B_KEY_RECORD=<status node's self-signed SignedKeyRecord JSON>
+# Reconcile cadence for the CEG-driven replication reconciler (default 30s). The
+# loop also fires immediately on a peering write (Notify nudge), so this is just
+# the steady-state convergence interval.
+CIRIS_SERVER_REPLICATION_RECONCILE_SECS=30
 ```
+
+> ### Replication is consent-driven (v0.4.12 — CEG-driven reconciler)
+> The corpus's `consent:replication` objects ARE the desired replication topology.
+> The API (`POST /v1/federation/peering`) only ever **writes CEG** (admits the peer
+> key + emits this node's directed `consent:replication:v1` grant); a **reconcile
+> loop** converges the live `ReplicationRuntime` to the consent objects. The owner
+> sets up peering on demand from the desktop client / the peering endpoint —
+> `CIRIS_PEER_B_*` is now an **optional boot bootstrap** that just writes a consent
+> object so the env path flows through the same reconcile path as an owner-authored
+> grant. **Honest interim note (edge v5.0.1):** a consent created at runtime
+> registers the peer for **inbound** immediately, but the node begins **active pull
+> only after the next restart** (boot re-derives the Initiator set from CEG), until
+> the runtime Initiator-add lands — **CIRISEdge#173**.
 **Corpus:** there is **no `CIRIS_DB_URL`/DSN env** — ciris-server always uses a SQLite corpus at `$CIRIS_HOME/data/ciris_engine.db` (override only the *directory* via `CIRIS_SERVER_DATA_DIR`). (Postgres is compiled in but not env-selectable; the migration lands on the SQLite corpus.)
 The read API on **`:4243`** serves: `GET /v1/identity`, `GET /lens/api/v1/*` (the 7 frozen reads), `GET /v1/federation/node-code`, `POST /lens-api/api/v1/accord/events` (ingest), `/v1/safety/*`, `/v1/setup/*`.
 
@@ -136,7 +157,7 @@ CIRIS_SERVER_BOOTSTRAP_PEERS=<lens-node-host>:4242   # find A on the mesh
 CIRIS_PEER_B_KEY_ID=<lens node A's key_id>           # the peer = A
 CIRIS_PEER_B_KEY_RECORD=<A's self-signed SignedKeyRecord JSON>
 ```
-(The peer slot is named `CIRIS_PEER_B_*` on both sides — it means "the one peer." On A it points at the status node; on the status node it points at A. Each node registers the other + emits its own directed `consent:replication` grant; replication then rides Reticulum.)
+(The peer slot is named `CIRIS_PEER_B_*` on both sides — it means "the one peer." On A it points at the status node; on the status node it points at A. As of v0.4.12 this env is an **optional bootstrap**: each side just WRITES its own directed `consent:replication` grant from it at boot, and the **CEG-driven reconcile loop** converges the live runtime to those consent objects. Equivalently, the owner authors the grant on demand via `POST /v1/federation/peering` from the desktop client — same consent object, no env needed. Replication then rides Reticulum; per **CIRISEdge#173**, a runtime-created consent is inbound-active immediately but pull-active after the next restart on edge v5.0.1.)
 
 - The status page is served from the node's **read API listener (`:4243`)** — the adapter's routers merge there. Point the status reverse-proxy at `:4243`.
 - Identity continuity: if the status node already had a federation identity, keep its `CIRIS_HOME`/identity → same `key_id` (no re-key, and A's `CIRIS_PEER_B_*` keeps matching).

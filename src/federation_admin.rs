@@ -55,6 +55,13 @@ struct FederationAdminState {
     /// THIS node's own self-signed `SignedKeyRecord` as JSON — built ONCE at boot
     /// from the node's signer (stable for the node's lifetime), served verbatim.
     self_key_record_json: Arc<String>,
+    /// Nudge for the CEG-driven replication reconciler
+    /// ([`crate::replication_reconcile`]). After a successful consent write this
+    /// handler fires `notify_one()` so the reconcile loop converges promptly —
+    /// it NEVER touches the runtime itself (the architecture rule: the API writes
+    /// CEG, the runtime is CEG-driven). `None` when no runtime exists to converge
+    /// (no transport) — the consent CEG is still written.
+    reconcile_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -146,6 +153,9 @@ struct PeeringResponse {
     /// The normalized prefix set the grant carries (echo of the request, sorted +
     /// deduped).
     attestation_prefixes: Vec<String>,
+    /// Human-readable note that the consent was recorded as CEG and the node's
+    /// reconcile loop (NOT this API call) converges the live runtime to it.
+    reconciler_note: String,
 }
 
 async fn peering(
@@ -223,6 +233,15 @@ async fn peering(
         }
     };
 
+    // ── Nudge the CEG-driven reconciler ───────────────────────────────────────
+    // The handler does NOT touch the runtime (the architecture rule). It only
+    // signals "CEG changed, reconcile now"; the reconcile loop reads the consent
+    // objects back and converges the live runtime to them. A no-op when no runtime
+    // exists (no transport) — the consent CEG is durable either way.
+    if let Some(notify) = st.reconcile_notify.as_ref() {
+        notify.notify_one();
+    }
+
     (
         StatusCode::OK,
         Json(PeeringResponse {
@@ -231,6 +250,11 @@ async fn peering(
             grant_content_hash: grant.content_hash,
             freshly_emitted: grant.freshly_emitted,
             attestation_prefixes: crate::peer::normalize_prefixes(&req.attestation_prefixes),
+            reconciler_note: "consent:replication recorded; the node's reconcile loop will \
+                              converge the live replication runtime to it (runtime Initiator-add \
+                              pending CIRISEdge#173 — inbound is immediate, active pull after the \
+                              next restart on edge v5.0.1)"
+                .to_owned(),
         }),
     )
         .into_response()
@@ -239,11 +263,24 @@ async fn peering(
 /// The owner-directed federation-operations router — merge onto the control API
 /// listener beside the other auth routers. `self_key_record_json` is THIS node's
 /// own self-signed `SignedKeyRecord` JSON, built once at boot.
-pub fn router(engine: Arc<Engine>, node_key_id: String, self_key_record_json: String) -> Router {
+///
+/// `reconcile_notify` is the CEG-driven reconciler's nudge ([`crate::replication_reconcile`]):
+/// after a successful consent write, the peering handler fires it so convergence is
+/// prompt. It is `None` when no replication runtime exists (no transport) — the
+/// consent CEG is still written; there is just no runtime to converge. **The
+/// handler never touches the runtime** — this is the only coupling, and it is a
+/// one-way signal, not a runtime call.
+pub fn router(
+    engine: Arc<Engine>,
+    node_key_id: String,
+    self_key_record_json: String,
+    reconcile_notify: Option<Arc<tokio::sync::Notify>>,
+) -> Router {
     let state = FederationAdminState {
         engine,
         node_key_id,
         self_key_record_json: Arc::new(self_key_record_json),
+        reconcile_notify,
     };
     Router::new()
         .route(

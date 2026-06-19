@@ -201,13 +201,37 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Built BEFORE edge.run() consumes the Edge: the ReplicationRuntime reuses
     // the SAME Reticulum transport, and `install_replication_routing` wires the
     // runtime's registry into the Edge's inbound dispatch (so B's replicated
-    // health:liveness lands in A's corpus). The handle is held for the node's
-    // lifetime so the scheduler task isn't dropped.
-    let _replication = setup_peer_replication(&engine, &edge, &cfg).await?;
+    // health:liveness lands in A's corpus). The handle (an Arc) is held for the
+    // node's lifetime AND shared with the CEG-driven reconcile loop below.
+    let replication = setup_peer_replication(&engine, &edge, &cfg).await?;
+
+    // ── CEG-driven reconcile nudge ────────────────────────────────────────────
+    // The peering API (POST /v1/federation/peering) NEVER touches the runtime — it
+    // writes a consent:replication CEG object and fires this Notify so the
+    // reconcile loop converges promptly instead of waiting for the next cadence
+    // tick. When there is no runtime (no transport) the API still writes CEG; the
+    // notify target is then `None`.
+    let reconcile_notify = Arc::new(tokio::sync::Notify::new());
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
     let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
+
+    // ── The CEG-driven replication reconcile loop ─────────────────────────────
+    // Converges the live ReplicationRuntime to the corpus's consent:replication
+    // objects (the desired topology). Driven by a cadence tick
+    // (CIRIS_SERVER_REPLICATION_RECONCILE_SECS, default 30) AND the Notify the
+    // peering API fires after a CEG write. Spawned only when a runtime exists.
+    let (reconcile_sd_tx, reconcile_sd_rx) = watch::channel(false);
+    let reconcile_join = replication.as_ref().map(|runtime| {
+        crate::replication_reconcile::spawn(
+            Arc::clone(&engine),
+            cfg.key_id.clone(),
+            Arc::clone(runtime),
+            Arc::clone(&reconcile_notify),
+            reconcile_sd_rx,
+        )
+    });
 
     // ── The responsible-USER signer for POST /v1/setup/claim-remote (the
     //    SUBSTRATE-NATIVE node-to-node claiming side). The LOCAL node signs the
@@ -298,6 +322,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                         self_key_record_json.clone(),
+                        // Nudge the reconciler after a consent write (CEG changed)
+                        // — but ONLY when a runtime exists to converge. The handler
+                        // itself never touches the runtime; this is just a signal.
+                        replication.as_ref().map(|_| Arc::clone(&reconcile_notify)),
                     ))
                     // THIS node's public NodeCode (CEG §0.10): GET
                     // /v1/federation/node-code — the QR-able bootstrap handle an
@@ -403,6 +431,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let _ = adapter_sd_tx.send(true);
     let _ = adapter.stop().await;
     let _ = adapter_join.await;
+    // Tear down the CEG-driven reconcile loop (if it was spawned).
+    let _ = reconcile_sd_tx.send(true);
+    if let Some(join) = reconcile_join {
+        let _ = join.await;
+    }
     let _ = edge_shutdown_tx.send(true);
     let _ = edge_join.await;
     Ok(())
@@ -842,63 +875,53 @@ pub(crate) async fn build_self_key_record(
     })
 }
 
-/// Set up directed-consent replication with Node B (`ciris-status`), if the
-/// `CIRIS_PEER_B_*` env (KEY_ID + KEY_RECORD) is configured. Returns the live
-/// [`ReplicationRuntime`] handle (held by the caller for the node's lifetime so
-/// its scheduler task is not dropped), or `None` when no peer is configured /
-/// the host carries no local corpus.
+/// Set up **CEG-driven** directed-consent replication. The corpus's
+/// `consent:replication` objects ARE the desired replication topology
+/// ([`crate::peer::replication_peers_from_consent`]); this function derives the
+/// boot Initiator set from them and starts the single long-lived
+/// [`ReplicationRuntime`]. The reconcile loop ([`crate::replication_reconcile`])
+/// then converges the runtime to the consent objects on an ongoing basis.
+///
+/// Returns the live runtime as an `Arc` (held by the caller for the node's
+/// lifetime so its scheduler task is not dropped AND shared with the reconcile
+/// loop), or `None` when the host carries no Reticulum transport / no SQLite
+/// corpus (the read API can still write CEG; there is just nothing to converge).
 ///
 /// Steps (Node A side of the shared wire contract):
-///   1. **Admission** — register B's published hybrid key (identity_type
-///      `"witness"`) so B's replicated `health:liveness:*` is admitted.
-///   2. **Consent** — emit the directed `consent:replication:v1` grant at B
-///      (idempotent; the auditable "A consents to replicate capacity:* to B").
-///   3. **Replication** — start a [`ReplicationRuntime`] (peer = B, kind =
-///      `EnvelopeKind::Attestation`, which carries BOTH directions' attestations:
-///      `capacity:*` out, `health:liveness` in) over the SAME Reticulum
-///      transport the Edge already built, then `install_replication_routing` so
-///      the Edge's inbound dispatch routes B's CRPL frames into the runtime's
-///      registry (CIRISEdge#119) — B's `health:liveness` lands in A's corpus.
+///   0. **Optional env bootstrap** — if `CIRIS_PEER_B_*` is configured, admit B's
+///      key + emit the `consent:replication:v1` grant FIRST, so the env peer
+///      becomes a NORMAL consent CEG object that flows through the SAME
+///      consent-derived path as any owner-authored grant (no downstream
+///      special-casing). `CIRIS_PEER_B_*` is now only a convenience bootstrap, not
+///      the mechanism.
+///   1. **Desired Initiator set from CEG** — read the admitted
+///      `consent:replication` subjects back out of the corpus. An unadmitted
+///      consent subject is skipped + warned (can't replicate with an unknown key).
+///   2. **Always start the runtime** — even when the desired set is empty — so the
+///      registry + inbound routing exist for the reconciler to hot-add into. The
+///      runtime is started ONCE on the single long-lived transport;
+///      `install_replication_routing` is called EXACTLY ONCE (it is a set-once
+///      `OnceLock` — first call wins), and the runtime is NEVER rebuilt.
 ///
-/// MUST run BEFORE `edge.run()` consumes the Edge:
-/// `install_replication_routing` is a set-once `OnceLock` consulted by the
-/// inbound loop, and `reticulum_transport()` must be cloned off the live Edge.
+/// MUST run BEFORE `edge.run()` consumes the Edge: `install_replication_routing`
+/// is consulted by the inbound loop, and `reticulum_transport()` must be cloned
+/// off the live Edge.
 async fn setup_peer_replication(
     engine: &Arc<Engine>,
     edge: &Edge,
     cfg: &ServerConfig,
-) -> Result<Option<ciris_edge::replication::ReplicationRuntime>> {
+) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
     use ciris_edge::replication::{
         EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig,
     };
     use ciris_persist::federation::FederationDirectory;
 
-    let Some(peer) = cfg.peer_b.as_ref() else {
-        tracing::info!(
-            "no CIRIS_PEER_B_* configured — directed-consent replication disabled (single-node)"
-        );
-        return Ok(None);
-    };
-
-    // 1. Admission: register B's witness key (benign Conflict).
-    crate::peer::register_peer_key(engine, peer).await?;
-
-    // 2. Consent: emit the directed consent:replication:v1 grant at B (idempotent).
-    //    Boot-env peering uses the DEFAULT prefix set (capacity:*); the owner can
-    //    later author a different set via POST /v1/federation/peering.
-    crate::peer::emit_replication_consent(
-        engine,
-        &cfg.key_id,
-        &peer.key_id,
-        &crate::peer::default_attestation_prefixes(),
-    )
-    .await?;
-
-    // 3. Replication: reuse the Edge's Reticulum transport for the runtime.
+    // Require a Reticulum transport to run replication at all. Without it the read
+    // API still writes CEG (consent objects), there is just no runtime to converge.
     let Some(transport) = edge.reticulum_transport() else {
         tracing::warn!(
-            "Edge has no Reticulum transport — cannot start replication runtime (peer configured \
-             but no transport)"
+            "Edge has no Reticulum transport — replication runtime not started (the peering API \
+             can still write consent CEG; there is no runtime to converge)"
         );
         return Ok(None);
     };
@@ -907,12 +930,59 @@ async fn setup_peer_replication(
         .context("replication runtime requires a SQLite-backed Engine")?
         .clone();
 
-    let peers = vec![ReplicationPeer {
-        peer_key_id: peer.key_id.clone(),
-        // EnvelopeKind::Attestation carries BOTH directions: A's capacity:*
-        // attestations out, B's health:liveness attestations in.
-        kind: EnvelopeKind::Attestation,
-    }];
+    // 0. Optional env bootstrap — fold CIRIS_PEER_B_* into the corpus as a normal
+    //    consent object so it flows through the same CEG-derived path downstream.
+    if let Some(peer) = cfg.peer_b.as_ref() {
+        crate::peer::register_peer_key(engine, peer).await?;
+        crate::peer::emit_replication_consent(
+            engine,
+            &cfg.key_id,
+            &peer.key_id,
+            &crate::peer::default_attestation_prefixes(),
+        )
+        .await?;
+        tracing::info!(
+            peer_key_id = %peer.key_id,
+            "CIRIS_PEER_B_* bootstrapped into a consent:replication object (now flows through the \
+             CEG-driven reconcile path; the env is an optional convenience, not the mechanism)"
+        );
+    } else {
+        tracing::info!(
+            "no CIRIS_PEER_B_* configured — replication topology is owner-authored consent only \
+             (POST /v1/federation/peering)"
+        );
+    }
+
+    // 1. Desired Initiator set from CEG — admitted consent:replication subjects.
+    let consented = crate::peer::replication_peers_from_consent(engine, &cfg.key_id).await?;
+    let mut desired: Vec<String> = Vec::with_capacity(consented.len());
+    for peer in consented {
+        match directory.lookup_public_key(&peer).await {
+            Ok(Some(_)) => desired.push(peer),
+            Ok(None) => tracing::warn!(
+                peer_key_id = %peer,
+                "consent:replication for an UNADMITTED peer key at boot — skipping (register the \
+                 peer's self-signed key via POST /v1/federation/peering)"
+            ),
+            Err(e) => tracing::warn!(
+                peer_key_id = %peer,
+                error = %e,
+                "directory lookup for a consent peer failed at boot — skipping it"
+            ),
+        }
+    }
+
+    // 2. Always start the ONE long-lived runtime (even with an empty desired set)
+    //    so the registry + routing exist for the reconciler's hot-add.
+    //    EnvelopeKind::Attestation carries BOTH directions: capacity:* out,
+    //    health:liveness in.
+    let peers: Vec<ReplicationPeer> = desired
+        .iter()
+        .map(|p| ReplicationPeer {
+            peer_key_id: p.clone(),
+            kind: EnvelopeKind::Attestation,
+        })
+        .collect();
     let runtime = ReplicationRuntime::start(
         directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
@@ -921,17 +991,19 @@ async fn setup_peer_replication(
     )
     .await;
 
-    // Wire the runtime's registry into the Edge's inbound dispatch (CIRISEdge#119):
-    // inbound CRPL frames from B route to the matching coordinator → B's
-    // health:liveness is applied to A's corpus via the directory put_* admits.
+    // Wire the runtime's registry into the Edge's inbound dispatch (CIRISEdge#119) —
+    // EXACTLY ONCE on the single long-lived runtime (set-once OnceLock; never
+    // rebuild the runtime).
     edge.install_replication_routing(&runtime);
 
     tracing::info!(
-        peer_key_id = %peer.key_id,
-        kind = "attestation",
-        "directed-consent replication runtime started + routed into the shared Edge"
+        initiator_peers = desired.len(),
+        "CEG-driven replication runtime started + routed into the shared Edge ({} consent-derived \
+         Initiator peers; reconciler converges the rest, runtime Initiator-add pending \
+         CIRISEdge#173)",
+        desired.len(),
     );
-    Ok(Some(runtime))
+    Ok(Some(Arc::new(runtime)))
 }
 
 /// The one shared **Reticulum** edge runtime over the Engine's `SqliteBackend`

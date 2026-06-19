@@ -93,6 +93,12 @@ pub mod peer;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
+/// The **CEG-driven replication reconciler** (the controller loop): the corpus's
+/// `consent:replication` objects ARE the desired replication topology, and this
+/// loop converges the live `ReplicationRuntime` to them. The API never touches
+/// the runtime — it writes CEG and nudges this loop. Public so the integration
+/// test (`tests/replication_reconcile.rs`) can drive `reconcile_once` directly.
+pub mod replication_reconcile;
 /// The substrate **safety foundation** (CIRISServer#20) — moderation +
 /// child-safety as first-class fabric primitives, built AHEAD of content
 /// features: age-assurance + the protective age-gate, moderation as a delegable

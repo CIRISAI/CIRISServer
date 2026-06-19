@@ -307,6 +307,54 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
     })
 }
 
+/// Read this node's **desired replication topology back out of the corpus**: the
+/// set of peer `key_id`s this node has authored a `consent:replication:v1` grant
+/// for. This is the CEG-driven reconciler's source of truth — the consent objects
+/// in the corpus ARE the desired Initiator/Responder set
+/// ([`crate::replication_reconcile`]).
+///
+/// A `consent:replication` grant is the EXACT row [`emit_replication_consent`]
+/// writes: a `scores` attestation authored by `node_key_id` whose
+/// `attestation_envelope["dimension"] == CONSENT_DIMENSION`. The peers are the
+/// `subject_key_ids` carried on those rows (each grant is directed at a single
+/// peer, but we union across all grant rows). The returned set is **sorted +
+/// deduped** so callers (and the reconciler's set-difference) are deterministic.
+///
+/// The match logic is the same predicate [`emit_replication_consent`]'s
+/// idempotency guard uses (`SCORES` + the consent dimension), so a row read here
+/// is exactly a row that emit would treat as an existing grant.
+///
+// TODO(consent revocation): RC29 §5.6.8.15 models grant revocation via the CEG
+// withdraws/recants structural primitive targeting the grant's `attestation_id`
+// (the same mechanism CIRISAgent's `build_community_structural` uses). No such
+// supersede/withdraw filter is applied here yet — **presence == active**. When
+// the withdraw primitive is honored on the federation tier, this reader must drop
+// any grant whose `attestation_id` is withdrawn before unioning the subjects.
+pub async fn replication_peers_from_consent(
+    engine: &std::sync::Arc<Engine>,
+    node_key_id: &str,
+) -> Result<Vec<String>> {
+    let rows = engine
+        .federation_directory()
+        .list_attestations_by(node_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("list attestations by {node_key_id}: {e}"))?;
+    let mut peers: Vec<String> = rows
+        .iter()
+        .filter(|a| {
+            a.attestation_type == attestation_type::SCORES
+                && a.attestation_envelope
+                    .get("dimension")
+                    .and_then(|d| d.as_str())
+                    == Some(CONSENT_DIMENSION)
+        })
+        .flat_map(|a| a.subject_key_ids.iter().cloned())
+        .collect();
+    peers.sort();
+    peers.dedup();
+    Ok(peers)
+}
+
 /// Minimal RFC-4122 v4 row id (no `uuid` dep) — same recipe as
 /// `scorer.rs::new_uuid_v4`. The content hash is the integrity anchor, not this id.
 fn new_uuid_v4() -> String {
