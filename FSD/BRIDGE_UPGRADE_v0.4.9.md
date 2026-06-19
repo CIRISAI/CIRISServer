@@ -1,5 +1,11 @@
 # Bridge upgrade — ciris-server `0.3.0` → `v0.4.9`
 
+> **⚠ SUPERSEDED for the config/boot model by [`BRIDGE_UPGRADE_v0.5.0.md`](BRIDGE_UPGRADE_v0.5.0.md).**
+> Server **0.5 removed all config env vars** — a node now boots from `--home`/`--key-id`
+> CLI flags and resolves config from signed `config:*` CEG objects. The `CIRIS_*` env
+> tables below apply ONLY to 0.4.x; for v0.5.0+ follow the 0.5 runbook. The Caddy
+> ingest route (§5) and the `401`-until-agent-fold window (§6) still apply.
+>
 > **Audience:** the bridge / ops upgrading the deployed lens node (and, optionally,
 > the status node) to the v0.4.9 family floor. This is the **2.9.7 fold** release.
 > **Identity is preserved — no re-key.** Companion: [`LENS_TO_SERVER_MIGRATION.md`](LENS_TO_SERVER_MIGRATION.md).
