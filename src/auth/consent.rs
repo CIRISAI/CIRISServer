@@ -19,7 +19,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::types::LocalAttestationInput;
+use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         expires_at: None,
         attestation_envelope: envelope,
         subject_key_ids: req.subject_key_ids,
-        cohort_scope: "self".to_string(),
+        cohort_scope: cohort_scope::SELF.to_string(),
     };
 
     let attestation_id = match directory.attestation_upsert_local(input).await {

@@ -53,8 +53,14 @@ use crate::auth::session::{resolve_bearer, SessionCaller};
 use crate::nodecode;
 
 /// The cohort scopes a node may be claimed under (CC 4.4.3.4.1). Mirrors the
-/// receiving side's closed set; validated before any node-to-node call.
-const COHORT_SCOPES: &[&str] = &["self", "family", "community"];
+/// receiving side's closed set; validated before any node-to-node call. The
+/// 3-value restriction is intentional (a narrower subset of the persist
+/// `cohort_scope` vocabulary).
+const COHORT_SCOPES: &[&str] = &[
+    ciris_persist::federation::types::cohort_scope::SELF,
+    ciris_persist::federation::types::cohort_scope::FAMILY,
+    ciris_persist::federation::types::cohort_scope::COMMUNITY,
+];
 
 /// Errors the claim-remote build/execute pipeline can surface.
 #[derive(Debug)]

@@ -71,7 +71,10 @@ pub async fn run(dump_dir: &str) -> Result<()> {
     // only — pre-verified, exempt from the hybrid-required ingest gate
     // (CIRISPersist#225 legacy carve-out).
     let pqc = federation_pqc_signer(&cfg)?;
-    let pqc_key_id = format!("{}-pqc", cfg.key_id);
+    // KEYSTORE alias for the PQC blob (matches `federation_pqc_signer`). The
+    // import path uses `ServerConfig::defaults()` and never derives a key_id, so
+    // here `keystore_alias == key_id`; using the alias keeps it correct + explicit.
+    let pqc_key_id = format!("{}-pqc", cfg.keystore_alias);
     let engine =
         Engine::with_hardware_signer_hybrid(signer, Some(pqc), Some(pqc_key_id), &cfg.dsn())
             .await

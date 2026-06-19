@@ -167,6 +167,21 @@ pub struct ServerConfig {
     /// Reticulum mesh bootstrap peers. Baked default ([`CANONICAL_BOOTSTRAP_PEERS`])
     /// until overwritten from `config:* net.bootstrap_peers` at boot.
     pub bootstrap_peers: Vec<SocketAddr>,
+    /// The **on-disk keystore alias** — the RAW `--key-id` label (e.g.
+    /// `ciris-server`). Names the sealed seed / PQC / user / transport keystore
+    /// BLOBS (`<alias>.ed25519.seed.blob`, `<alias>.master.key`, `{alias}-pqc`,
+    /// `{alias}-user`). It MUST stay the raw label and stable across boots, or the
+    /// existing sealed blobs become unreachable → silent re-key / identity loss
+    /// (CIRISServer#27, FSD-003). DISTINCT from [`Self::key_id`].
+    pub keystore_alias: String,
+    /// The **federation-directory / wire** identity. From boot this is the
+    /// FSD-003 fingerprinted form
+    /// `ciris_verify_core::fedcode::derive_key_id(keystore_alias, ed25519_pubkey)`
+    /// = `"<label>-<10char-b32(sha256(pubkey))>"` — collision-free + verifiable
+    /// from the pubkey. `from_home` seeds it with the raw label; it is REPLACED
+    /// with the derived value in [`crate::compose::serve_with_adapter`] once the
+    /// node's federation pubkey is known. NEVER use this to name a keystore blob
+    /// (use [`Self::keystore_alias`]).
     pub key_id: String,
     pub occurrence_id: String,
     pub slices: Slices,
@@ -198,7 +213,14 @@ impl ServerConfig {
                 .map(|s| s.to_string()),
         );
 
-        // occurrence_id derives from key_id (a stable per-node id) — no env.
+        // The keystore alias is the RAW `--key-id` label — it names the on-disk
+        // sealed keystore blobs and MUST stay stable across boots (re-key risk).
+        let keystore_alias = key_id.clone();
+
+        // occurrence_id mirrors the wire identity. At `from_home` time the pubkey
+        // is not yet known, so it seeds from the raw label; both `key_id` and
+        // `occurrence_id` are replaced with the FSD-003 derived value at boot
+        // (see `compose::serve_with_adapter`, CIRISServer#27).
         let occurrence_id = key_id.clone();
 
         Ok(Self {
@@ -207,6 +229,7 @@ impl ServerConfig {
             identity_dir,
             listen_addr,
             bootstrap_peers,
+            keystore_alias,
             key_id,
             occurrence_id,
             slices: Slices::default(),

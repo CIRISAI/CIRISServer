@@ -41,7 +41,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::admission;
-use ciris_persist::federation::types::{attestation_type, LocalAttestationInput};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
@@ -167,7 +167,7 @@ pub async fn emit_moderation_event(
         expires_at: None,
         attestation_envelope: envelope,
         subject_key_ids: target_key_ids.to_vec(),
-        cohort_scope: "self".to_owned(),
+        cohort_scope: cohort_scope::SELF.to_owned(),
     };
     let attestation_id = directory
         .attestation_upsert_local(input)

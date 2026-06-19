@@ -43,7 +43,9 @@ use tokio::sync::watch;
 
 use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
-use ciris_persist::federation::types::{attestation_tier, Attestation, SignedAttestation};
+use ciris_persist::federation::types::{
+    attestation_tier, cohort_scope, Attestation, SignedAttestation,
+};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
 // The CEG PRODUCE canonicalizer (V2/JCS). persist v9.0.0's federation-tier
@@ -278,7 +280,7 @@ async fn score_and_emit(
         "target_n_eff": cfg.target_n_eff,
         "asserted_at": now.to_rfc3339(),
         "valid_until": valid_until.to_rfc3339(),
-        "cohort_scope": "federation",
+        "cohort_scope": cohort_scope::FEDERATION,
     });
 
     // ── Emit recipe — modeled on CIRISStatus ceg.rs:182 (emit_liveness) ──────
@@ -298,7 +300,7 @@ async fn score_and_emit(
 
     // 4. Assemble the FEDERATION-tier row.
     let attestation = Attestation {
-        attestation_id: new_uuid_v4(),
+        attestation_id: crate::ids::new_id(),
         attesting_key_id: node_key_id.to_owned(),
         attested_key_id: attested_key_id.to_owned(),
         attestation_type: ATTESTATION_TYPE_SCORES.to_owned(),
@@ -315,7 +317,7 @@ async fn score_and_emit(
         persist_row_hash: String::new(), // server-computed on insert
         subject_key_ids: vec![attested_key_id.to_owned()],
         withdraws_admission_rule: None,
-        cohort_scope: "federation".to_owned(),
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
         tier: attestation_tier::FEDERATION.to_owned(),
         promoted_at: None,
     };
@@ -334,23 +336,4 @@ async fn score_and_emit(
         "emitted capacity:sustained_coherence:v1 attestation",
     );
     Ok(true)
-}
-
-/// Minimal RFC-4122 v4 row id (no `uuid` dep) — mirrors ceg.rs's `uuid_v4`. The
-/// content hash is the integrity anchor, not this id.
-fn new_uuid_v4() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    let t = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
-    let a = t ^ (n.rotate_left(17));
-    let b = t.rotate_left(31) ^ n;
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (a >> 32) as u32,
-        (a >> 16) as u16,
-        (a as u16) & 0x0fff,
-        ((b >> 48) as u16 & 0x3fff) | 0x8000,
-        b & 0xffff_ffff_ffff,
-    )
 }

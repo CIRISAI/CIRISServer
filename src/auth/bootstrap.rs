@@ -541,7 +541,13 @@ struct SetupRootResponse {
 }
 
 /// The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1).
-const COHORT_SCOPES: &[&str] = &["self", "family", "community"];
+/// The 3-value restriction is intentional (a narrower subset of the persist
+/// `cohort_scope` vocabulary).
+const COHORT_SCOPES: &[&str] = &[
+    ciris_persist::federation::types::cohort_scope::SELF,
+    ciris_persist::federation::types::cohort_scope::FAMILY,
+    ciris_persist::federation::types::cohort_scope::COMMUNITY,
+];
 
 /// Validate the claimed cohort scope against [`COHORT_SCOPES`]. Returns the
 /// normalized (trimmed) value, or `Err(response)` (a `400`) when absent/invalid.

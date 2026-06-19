@@ -79,17 +79,19 @@ pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:4242";
 /// addresses a fresh node dials at boot. Was `CIRIS_SERVER_BOOTSTRAP_PEERS`.
 ///
 /// **EMPTY BY DESIGN — populated as the canonical anchors come online.** The
-/// canonical mesh grows in a fixed order:
-///   1. **Node A (the lens node)** is the FIRST canonical peer / seed. It is the
-///      origin — it needs no bootstrap entry itself; every other node discovers the
-///      mesh by dialing A. A's address is established when A deploys (the bridge
-///      runbook), so until 0.6 a node reaches A operationally via a
-///      `net.bootstrap_peers` config:* object (the runbook authors it) rather than a
-///      compiled-in IP — no invented address ships in the binary.
-///   2-3. **The two registry nodes (Server 0.6)** become the stable, well-known
-///      canonical anchors. THAT is when this const is baked to
-///      `["<A>:4242", "<registry1>:4242", "<registry2>:4242"]` — addresses worth
-///      compiling in because they are long-lived and operator-independent.
+/// canonical mesh grows in a fixed order.
+///
+/// FIRST — **Node A (the lens node)** is the FIRST canonical peer / seed. It is the
+/// origin: it needs no bootstrap entry itself; every other node discovers the mesh
+/// by dialing A. A's address is established when A deploys (the bridge runbook), so
+/// until 0.6 a node reaches A operationally via a `net.bootstrap_peers` config:*
+/// object (the runbook authors it) rather than a compiled-in IP — no invented
+/// address ships in the binary.
+///
+/// THEN — **the two registry nodes (Server 0.6)** become the stable, well-known
+/// canonical anchors. That is when this const is baked to
+/// `["<A>:4242", "<registry1>:4242", "<registry2>:4242"]` — addresses worth
+/// compiling in because they are long-lived and operator-independent.
 ///
 /// So: empty here is correct for 0.5 (the runbook discovers the first canonical
 /// peer, A); fill this const at 0.6 once the registry anchors exist.

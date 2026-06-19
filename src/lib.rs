@@ -91,6 +91,9 @@ pub mod graph_config;
 /// CLI subcommand, the `POST /v1/self/identity` endpoint, and the integration
 /// test can drive it.
 pub mod identity;
+/// A single cosmetic-id helper (`new_id`) shared by the attestation builders —
+/// replaces the per-module hand-rolled `new_uuid_v4` copies.
+pub mod ids;
 mod import;
 /// HTTP trace-ingest endpoint (the `listen+1` relay runbook §3.4 promised) — the
 /// legacy lens-python path `POST /lens-api/api/v1/accord/events` (+ a canonical
@@ -186,6 +189,55 @@ pub async fn run_default() -> Result<()> {
     .await
 }
 
+/// Parse the default-serve flags `--home <path>` and `--key-id <name>` (both
+/// optional; `--flag=value` also accepted). `leading` is the first token already
+/// pulled off the iterator by the caller's subcommand match (itself a flag on the
+/// serve path; `None` for a bare invocation). Unknown args are an error — fail
+/// loud, NEVER silently ignore a misspelled flag on the security-relevant serve
+/// path. Shared by BOTH entry points (the `ciris-server` binary AND the PyO3 wheel
+/// `main`) so the wheel honors `--home`/`--key-id` identically — without this the
+/// wheel fell through to `run_default()` and ignored the flags (CIRISServer#27).
+pub fn parse_serve_flags(
+    leading: Option<String>,
+    rest: impl Iterator<Item = String>,
+) -> Result<(std::path::PathBuf, String)> {
+    let mut home: Option<String> = None;
+    let mut key_id: Option<String> = None;
+
+    let take_value = |arg: &str,
+                      eq_value: Option<String>,
+                      it: &mut dyn Iterator<Item = String>|
+     -> Result<String> {
+        match eq_value {
+            Some(v) => Ok(v),
+            None => it
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("{arg} needs a value")),
+        }
+    };
+
+    let mut it = leading.into_iter().chain(rest);
+    while let Some(arg) = it.next() {
+        let (name, eq_value) = match arg.split_once('=') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (arg.clone(), None),
+        };
+        match name.as_str() {
+            "--home" => home = Some(take_value("--home", eq_value, &mut it)?),
+            "--key-id" => key_id = Some(take_value("--key-id", eq_value, &mut it)?),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unknown serve arg: {other} (usage: ciris-server [--home <path>] [--key-id <name>])"
+                ))
+            }
+        }
+    }
+
+    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
+    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
+    Ok((std::path::PathBuf::from(home), key_id))
+}
+
 /// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
 /// CEG objects (the `import-traces <dump-dir>` subcommand). See `src/import.rs`.
 pub async fn import_traces(dump_dir: &str) -> Result<()> {
@@ -216,9 +268,10 @@ pub async fn provision_user_identity(
     // a CLI flag, not the old CIRIS_USER_SEED_DIR env).
     let seed_dir = seed_dir_override.unwrap_or_else(|| user_seed_dir(cfg));
     std::fs::create_dir_all(&seed_dir)?;
-    // The user-identity alias: a stable default distinct from the node key_id
-    // (Server 0.5: convention, not env).
-    let alias = format!("{}-user", cfg.key_id);
+    // The user-identity alias: a stable default distinct from the node identity
+    // (Server 0.5: convention, not env). This names the on-disk user KEYSTORE
+    // blob, so it derives from the RAW keystore_alias (NOT the derived key_id).
+    let alias = format!("{}-user", cfg.keystore_alias);
     identity::mint_user_identity(backend, &alias, label.as_deref(), seed_dir).await
 }
 
@@ -276,7 +329,8 @@ mod python {
     fn py_main() -> PyResult<()> {
         crate::init_tracing();
         let mut args = std::env::args().skip(1);
-        match args.next().as_deref() {
+        let first = args.next();
+        match first.as_deref() {
             Some("import-traces") => {
                 let dir = args.next().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
@@ -285,7 +339,16 @@ mod python {
                 })?;
                 rt_block_on(crate::import_traces(&dir))
             }
-            _ => rt_block_on(crate::run_default()),
+            // Default-serve path. `first` is the already-consumed first token (a
+            // leading flag like `--home`/`--key-id`, or `None` for a bare boot).
+            // Parse it the SAME way the binary does so the WHEEL honors the flags
+            // — without this it fell through to run_default() and ignored
+            // --home/--key-id, minting the bare "ciris-server" label (CIRISServer#27).
+            _ => {
+                let (home, key_id) = crate::parse_serve_flags(first, args)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                rt_block_on(crate::run(home, key_id))
+            }
         }
     }
 

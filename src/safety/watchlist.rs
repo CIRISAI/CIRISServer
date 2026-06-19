@@ -56,7 +56,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::types::{attestation_type, LocalAttestationInput};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
@@ -191,7 +191,7 @@ pub async fn enable_watchlist(
         expires_at: None,
         attestation_envelope: envelope,
         subject_key_ids: vec![enable.group_key_id.clone()],
-        cohort_scope: "self".to_owned(),
+        cohort_scope: cohort_scope::SELF.to_owned(),
     };
     let attestation_id = directory
         .attestation_upsert_local(input)
@@ -234,7 +234,7 @@ pub async fn disable_watchlist(
         expires_at: None,
         attestation_envelope: envelope,
         subject_key_ids: vec![group_key_id.to_owned()],
-        cohort_scope: "self".to_owned(),
+        cohort_scope: cohort_scope::SELF.to_owned(),
     };
     let attestation_id = directory
         .attestation_upsert_local(input)

@@ -77,7 +77,33 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(&cfg)?;
 
     // ── ONE shared persist Engine (hybrid hardware signer — hard cut) ─────────
+    // build_engine + the federation/pqc/user signers above all key their KEYSTORE
+    // blobs off `cfg.keystore_alias` (the RAW --key-id label) — so they MUST run
+    // BEFORE the key_id derivation below, which leaves `keystore_alias` untouched.
     let engine = build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
+
+    // ── Derive the FSD-003 fingerprinted federation key_id (CIRISServer#27) ────
+    // `cfg.key_id` started as the BARE label (== keystore_alias). Replace it with
+    // the WIRE/DIRECTORY identity `derive_key_id(label, ed25519_pubkey)` =
+    // `"<label>-<10char-b32(sha256(pubkey))>"`, derivable + verifiable from the
+    // node's own federation pubkey. From here on every wire/directory surface
+    // (KeyRecord.key_id, attestation author, NodeCode, config:*/consent author,
+    // AdapterContext.key_id, occurrence_id, edge announce id) carries the derived
+    // value; the KEYSTORE alias stays the raw label (no re-key). This re-keys the
+    // node's directory ROW vs. a prior bare-"ciris-server" deploy — intended (#27).
+    let ed_pub = signer
+        .public_key()
+        .await
+        .context("read node ed25519 pubkey for key_id derivation")?;
+    let mut cfg = cfg;
+    cfg.key_id = ciris_verify_core::fedcode::derive_key_id(&cfg.keystore_alias, &ed_pub);
+    cfg.occurrence_id = cfg.key_id.clone();
+    let cfg = cfg;
+    tracing::info!(
+        key_id = %cfg.key_id,
+        keystore_alias = %cfg.keystore_alias,
+        "derived node federation key_id (FSD-003 label-fingerprint; CIRISServer#27)"
+    );
 
     // ── The ADAPTER SEAM's shared-core handle (mirror of the agent adapter's
     //    `runtime`). Built ONCE the Engine exists; captured by clone into both
@@ -379,7 +405,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // in the app drives it.
                     .merge(crate::identity::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        // The user-identity mint alias is `<keystore_alias>-user`
+                        // (a KEYSTORE blob) — pass the RAW label so the minted
+                        // blob matches what `user_identity_signer` re-opens.
+                        cfg.keystore_alias.clone(),
                         crate::user_seed_dir(&cfg),
                     ))
                     // sessions/tokens: login / logout / me / refresh / owner-hint
@@ -617,10 +646,11 @@ fn identity_router(identity_json: String) -> axum::Router {
 pub(crate) async fn user_identity_signer(
     cfg: &ServerConfig,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
-    // The conventional responsible-user identity: alias `<node key_id>-user`, seed
-    // under the conventional user seed dir (what `ciris-server identity create`
-    // mints by default).
-    let user_key_id = format!("{}-user", cfg.key_id);
+    // The conventional responsible-user identity: alias `<keystore_alias>-user`,
+    // seed under the conventional user seed dir (what `ciris-server identity
+    // create` mints by default). KEYSTORE alias — the RAW label, NOT the derived
+    // key_id — so it matches the on-disk user keystore blob the mint wrote.
+    let user_key_id = format!("{}-user", cfg.keystore_alias);
     let seed_dir = crate::user_seed_dir(cfg);
 
     // Detect the minted user identity by its on-disk Ed25519 seed
@@ -663,7 +693,8 @@ pub(crate) async fn user_identity_signer(
 /// stays hardware-sealed ([`federation_signer`]); together they hybrid-sign.
 pub(crate) fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSigner>> {
     let path = cfg.identity_dir.join("ml_dsa_65.seed");
-    let alias = format!("{}-pqc", cfg.key_id);
+    // KEYSTORE alias (the PQC keystore blob) — RAW label, NOT the derived key_id.
+    let alias = format!("{}-pqc", cfg.keystore_alias);
     let signer = if path.exists() {
         // Adopt an existing ML-DSA-65 seed (migration: the steward/lens PQC half).
         let s = MlDsa65SoftwareSigner::from_seed_file(&path, alias)
@@ -711,7 +742,7 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
             )
         })?;
         let signer =
-            SealedEd25519Signer::adopt(cfg.key_id.clone(), cfg.identity_dir.clone(), &seed)
+            SealedEd25519Signer::adopt(cfg.keystore_alias.clone(), cfg.identity_dir.clone(), &seed)
                 .map_err(|e| {
                     anyhow::anyhow!("adopt existing federation seed into the keystore: {e}")
                 })?;
@@ -726,7 +757,7 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         );
         Ok(Box::new(signer))
     } else {
-        get_platform_ed25519_signer(&cfg.key_id, cfg.identity_dir.clone())
+        get_platform_ed25519_signer(&cfg.keystore_alias, cfg.identity_dir.clone())
             .map_err(|e| anyhow::anyhow!("open sealed-Ed25519 federation signer: {e}"))
     }
 }
@@ -745,7 +776,9 @@ async fn build_engine(
     signer: Arc<dyn HardwareSigner>,
     pqc: Arc<dyn PqcSigner>,
 ) -> Result<Arc<Engine>> {
-    let pqc_key_id = format!("{}-pqc", cfg.key_id);
+    // The PQC signer's KEYSTORE alias — must match `federation_pqc_signer`'s
+    // `{keystore_alias}-pqc`, so it is the RAW label, NOT the derived key_id.
+    let pqc_key_id = format!("{}-pqc", cfg.keystore_alias);
     let engine =
         Engine::with_hardware_signer_hybrid(signer, Some(pqc), Some(pqc_key_id), &cfg.dsn())
             .await
@@ -1093,7 +1126,7 @@ async fn build_edge(
     std::fs::create_dir_all(&keyring_dir)
         .with_context(|| format!("create {}", keyring_dir.display()))?;
     let transport_keystore: Arc<dyn TransportIdentityKeystore> = Arc::new(
-        BlobTransportKeystore::platform(cfg.key_id.clone(), keyring_dir.clone())
+        BlobTransportKeystore::platform(cfg.keystore_alias.clone(), keyring_dir.clone())
             .map_err(|e| anyhow::anyhow!("open transport-identity keystore: {e}"))?,
     );
     tracing::info!(

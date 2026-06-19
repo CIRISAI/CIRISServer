@@ -68,58 +68,10 @@ async fn main() -> Result<()> {
             // `first` is the already-consumed first token (Some for the default
             // serve path with a leading flag, None for a bare `ciris-server`).
             let leading = first.map(|s| s.to_string());
-            let (home, key_id) = parse_serve_flags(leading, args)?;
+            let (home, key_id) = ciris_server::parse_serve_flags(leading, args)?;
             ciris_server::run(home, key_id).await
         }
     }
-}
-
-/// Parse the default-serve flags: `--home <path>` and `--key-id <name>` (both
-/// optional; `--flag=value` also accepted). `leading` is the first token already
-/// pulled off the iterator by the subcommand match (it is itself a flag on the
-/// serve path). Unknown args are an error (fail loud, never silently ignore a
-/// misspelled flag on the security-relevant serve path).
-fn parse_serve_flags(
-    leading: Option<String>,
-    rest: impl Iterator<Item = String>,
-) -> Result<(std::path::PathBuf, String)> {
-    use ciris_server::config::{DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
-
-    let mut home: Option<String> = None;
-    let mut key_id: Option<String> = None;
-
-    let take_value = |arg: &str,
-                      eq_value: Option<String>,
-                      it: &mut dyn Iterator<Item = String>|
-     -> Result<String> {
-        match eq_value {
-            Some(v) => Ok(v),
-            None => it
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("{arg} needs a value")),
-        }
-    };
-
-    let mut it = leading.into_iter().chain(rest);
-    while let Some(arg) = it.next() {
-        let (name, eq_value) = match arg.split_once('=') {
-            Some((n, v)) => (n.to_string(), Some(v.to_string())),
-            None => (arg.clone(), None),
-        };
-        match name.as_str() {
-            "--home" => home = Some(take_value("--home", eq_value, &mut it)?),
-            "--key-id" => key_id = Some(take_value("--key-id", eq_value, &mut it)?),
-            other => {
-                return Err(anyhow::anyhow!(
-                    "unknown serve arg: {other} (usage: ciris-server [--home <path>] [--key-id <name>])"
-                ))
-            }
-        }
-    }
-
-    let home = home.unwrap_or_else(|| DEFAULT_CIRIS_HOME.to_string());
-    let key_id = key_id.unwrap_or_else(|| DEFAULT_KEY_ID.to_string());
-    Ok((std::path::PathBuf::from(home), key_id))
 }
 
 /// Parse the `identity create` flags and mint the USER federation identity.

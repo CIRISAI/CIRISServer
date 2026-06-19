@@ -88,8 +88,8 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
+    KeyRecord, SignedAttestation, SignedKeyRecord,
 };
 use ciris_persist::prelude::{verify_hybrid, Engine, HybridPolicy, LocalSigner};
 use serde::{Deserialize, Serialize};
@@ -297,7 +297,7 @@ pub async fn persist_user_signed_owner_binding(
     let now = chrono::Utc::now();
     let original_content_hash = hex::encode(Sha256::digest(canonical));
 
-    let attestation_id = new_uuid_v4();
+    let attestation_id = crate::ids::new_id();
     let attestation = Attestation {
         attestation_id: attestation_id.clone(),
         // Issuer = the responsible user (the delegation walk resolves the
@@ -321,7 +321,7 @@ pub async fn persist_user_signed_owner_binding(
         persist_row_hash: String::new(),
         subject_key_ids: vec![node_key_id.to_owned()],
         withdraws_admission_rule: None,
-        cohort_scope: "federation".to_owned(),
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
         tier: attestation_tier::FEDERATION.to_owned(),
         promoted_at: None,
     };
@@ -655,7 +655,7 @@ pub async fn emit_owner_binding(
         .await
         .map_err(|e| OwnershipError::Sign(e.to_string()))?;
 
-    let attestation_id = new_uuid_v4();
+    let attestation_id = crate::ids::new_id();
     let attestation = Attestation {
         attestation_id: attestation_id.clone(),
         attesting_key_id: responsible_user_key_id.clone(),
@@ -675,7 +675,7 @@ pub async fn emit_owner_binding(
         persist_row_hash: String::new(),
         subject_key_ids: vec![node_key_id.to_owned()],
         withdraws_admission_rule: None,
-        cohort_scope: "federation".to_owned(),
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
         tier: attestation_tier::FEDERATION.to_owned(),
         promoted_at: None,
     };
@@ -774,26 +774,6 @@ pub async fn is_owner_bound(engine: &Engine, node_key_id: &str) -> Option<String
         return Some(granter);
     }
     None
-}
-
-/// Minimal RFC-4122 v4 row id (no `uuid` dep) — same recipe as
-/// `peer.rs::new_uuid_v4` / `scorer.rs::new_uuid_v4`. The content hash is the
-/// integrity anchor, not this id.
-fn new_uuid_v4() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    let t = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
-    let a = t ^ (n.rotate_left(17));
-    let b = t.rotate_left(31) ^ n;
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (a >> 32) as u32,
-        (a >> 16) as u16,
-        (a as u16) & 0x0fff,
-        ((b >> 48) as u16 & 0x3fff) | 0x8000,
-        b & 0xffff_ffff_ffff,
-    )
 }
 
 /// The scope set declared by a `delegates_to` envelope's `scope` field (bare

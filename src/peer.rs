@@ -29,7 +29,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, Attestation, SignedAttestation,
+    attestation_tier, attestation_type, cohort_scope, Attestation, SignedAttestation,
 };
 use ciris_persist::federation::Error as FederationError;
 use ciris_persist::prelude::Engine;
@@ -235,7 +235,7 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
         "attesting_key_id": node_key_id,
         "subject_key_ids": [peer_key_id],
         "score": 1.0,
-        "cohort_scope": "federation",
+        "cohort_scope": cohort_scope::FEDERATION,
         "witness_relation": "self",
         "topical_relation": "bilateral_pair",
         "asserted_at": now.to_rfc3339(),
@@ -264,7 +264,7 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
     let pqc_b64 = B64.encode(&sig.pqc.signature);
 
     // 4. Assemble the FEDERATION-tier, directed row (subject = [B]).
-    let attestation_id = new_uuid_v4();
+    let attestation_id = crate::ids::new_id();
     let attestation = Attestation {
         attestation_id: attestation_id.clone(),
         attesting_key_id: node_key_id.to_owned(),
@@ -284,7 +284,7 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
         // Directed: this consent is bilateral A→B, never broadcast.
         subject_key_ids: vec![peer_key_id.to_owned()],
         withdraws_admission_rule: None,
-        cohort_scope: "federation".to_owned(),
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
         tier: attestation_tier::FEDERATION.to_owned(),
         promoted_at: None,
     };
@@ -353,23 +353,4 @@ pub async fn replication_peers_from_consent(
     peers.sort();
     peers.dedup();
     Ok(peers)
-}
-
-/// Minimal RFC-4122 v4 row id (no `uuid` dep) — same recipe as
-/// `scorer.rs::new_uuid_v4`. The content hash is the integrity anchor, not this id.
-fn new_uuid_v4() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    let t = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
-    let a = t ^ (n.rotate_left(17));
-    let b = t.rotate_left(31) ^ n;
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (a >> 32) as u32,
-        (a >> 16) as u16,
-        (a as u16) & 0x0fff,
-        ((b >> 48) as u16 & 0x3fff) | 0x8000,
-        b & 0xffff_ffff_ffff,
-    )
 }
