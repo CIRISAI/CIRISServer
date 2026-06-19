@@ -36,6 +36,13 @@ pub mod attestation;
 pub mod bootstrap;
 pub mod consent;
 pub mod device_auth;
+/// Node-side device-authorization grant (RFC 8628 shape): an external client/agent
+/// is authorized to act on the OWNER's behalf via the node API. The owner approves
+/// a human-typeable `user_code` from a hardware-backed (YubiKey/TPM) fed-ID
+/// session; the issued DELEGATED token carries the owner's AUTHORITY and the
+/// client's ATTRIBUTION (`SessionCaller.actor`). The mirror-direction of
+/// [`device_auth`] (which is THIS node as a client of a Portal's grant).
+pub mod device_grant;
 pub mod erasure;
 pub mod gate;
 pub mod oauth;

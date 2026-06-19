@@ -422,6 +422,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     ))
                     // API keys + service-token revocation
                     .merge(crate::auth::api_keys::router(Arc::clone(&engine)))
+                    // device-authorization grant (RFC 8628 shape): authorize an
+                    // external client/agent to act on the OWNER's behalf via the
+                    // node API. code → owner-approve (hardware fed-ID session) →
+                    // poll → DELEGATED token (owner authority + actor attribution).
+                    .merge(crate::auth::device_grant::router(Arc::clone(&engine)))
                     // attestation / consent / erasure (CEG-native)
                     .merge(crate::auth::attestation::router(
                         Arc::clone(&engine),
@@ -616,7 +621,10 @@ async fn local_identity_json(
     // an internal storage label, not the federation identity).
     let mut v = serde_json::to_value(&aggregate).context("serialize LocalIdentityAggregate")?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("key_id".into(), serde_json::Value::String(wire_key_id.to_string()));
+        obj.insert(
+            "key_id".into(),
+            serde_json::Value::String(wire_key_id.to_string()),
+        );
         if obj.get("pqc_key_id").is_some_and(|p| !p.is_null()) {
             obj.insert(
                 "pqc_key_id".into(),

@@ -15,7 +15,9 @@
 //! - `POST /v1/auth/refresh`   — re-issue a session token.
 //! - `GET  /v1/auth/owner-hint`— unauth'd founding-owner hint (masked).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -155,6 +157,80 @@ pub struct SessionCaller {
     pub role: UserRole,
     /// The effective permission set for the role.
     pub permissions: Vec<Permission>,
+    /// ATTRIBUTION (CIRISServer device-grant): the distinct ACTOR a delegated
+    /// device-grant token acts AS. `None` for a normal owner/user session (the
+    /// principal IS the actor); `Some(client_id)` for a delegated token issued by
+    /// the RFC-8628-shaped device-authorization grant — the caller wields the
+    /// owner's AUTHORITY (`wa_id`/`role`/`permissions` are the owner's) but every
+    /// action is attributable to this actor, NOT to the owner directly.
+    pub actor: Option<String>,
+}
+
+// ─── Delegated device-grant token registry (CIRISServer device-grant) ─────────
+//
+// A delegated token is an opaque random bearer registered HERE when the owner
+// approves a device-authorization grant (see `super::device_grant`). It is NOT a
+// `wa_cert` session row — it is an in-process grant of the owner's authority to a
+// distinct actor (the `client_id`). Kept in-process (MVP, matching the manager's
+// in-memory device-code store); a node restart drops outstanding delegations.
+
+/// A live delegated grant: the owner's authority + the actor it is attributed to.
+#[derive(Debug, Clone)]
+pub struct DelegatedGrant {
+    /// The PRINCIPAL — the approving owner's `wa_id`. The delegated caller acts
+    /// with this identity's authority.
+    pub owner_wa_id: String,
+    /// The owner's role at approval time — the authority the actor wields.
+    pub owner_role: UserRole,
+    /// The ACTOR — the `client_id` the grant was issued to (attribution).
+    pub client_id: String,
+    /// The granted scope (informational; e.g. `owner:act-on-behalf`).
+    pub scope: String,
+    /// Unix-epoch seconds after which the delegated token is expired.
+    pub expires_at: u64,
+}
+
+/// The opaque-delegated-token prefix. A delegated token is `dgrant:<rand>` — a
+/// random opaque handle into [`DELEGATED_GRANTS`] (the owner_wa_id / client_id
+/// live in the registry, NOT in the token string, so the token leaks nothing).
+pub const DELEGATED_TOKEN_PREFIX: &str = "dgrant:";
+
+static DELEGATED_GRANTS: LazyLock<Mutex<HashMap<String, DelegatedGrant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Current unix-epoch seconds.
+pub(crate) fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Register a delegated grant and return its opaque bearer token (`dgrant:<rand>`).
+/// Called by `super::device_grant` when the owner approves + the client polls.
+pub fn register_delegated_grant(grant: DelegatedGrant) -> String {
+    use base64::Engine as _;
+    let mut raw = [0u8; 24];
+    let _ = getrandom::fill(&mut raw);
+    let r = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+    let token = format!("{DELEGATED_TOKEN_PREFIX}{r}");
+    DELEGATED_GRANTS
+        .lock()
+        .expect("delegated grants lock")
+        .insert(token.clone(), grant);
+    token
+}
+
+/// Resolve a delegated token to its live, unexpired grant (expired entries are
+/// pruned on access). Returns `None` for an unknown or expired token.
+fn lookup_delegated_grant(token: &str) -> Option<DelegatedGrant> {
+    let mut map = DELEGATED_GRANTS.lock().expect("delegated grants lock");
+    let grant = map.get(token)?.clone();
+    if grant.expires_at <= now_unix() {
+        map.remove(token);
+        return None;
+    }
+    Some(grant)
 }
 
 /// The bearer→session bridge (CIRISServer#9, gap #6).
@@ -173,6 +249,31 @@ pub async fn resolve_bearer(
     engine: &Engine,
     bearer_token: &str,
 ) -> Result<Option<SessionCaller>, store::StoreError> {
+    // (0) A DELEGATED device-grant token (`dgrant:<rand>`) resolves to a caller
+    // wielding the OWNER's authority but ATTRIBUTED to the actor (`client_id`).
+    // This is the "auth an agent to act on my behalf" path: principal = owner,
+    // actor = client. Checked first because it is a distinct, self-contained
+    // token namespace that never touches the wa_cert store.
+    if bearer_token.starts_with(DELEGATED_TOKEN_PREFIX) {
+        let Some(grant) = lookup_delegated_grant(bearer_token) else {
+            return Ok(None); // unknown or expired delegated token — fail closed.
+        };
+        // Attribution: every authorized action under this token is logged with the
+        // distinct actor and the owner it acts on behalf of.
+        tracing::info!(
+            actor = %grant.client_id,
+            on_behalf_of = %grant.owner_wa_id,
+            "delegated device-grant caller"
+        );
+        return Ok(Some(SessionCaller {
+            wa_id: grant.owner_wa_id,      // PRINCIPAL: the owner's identity.
+            name: grant.client_id.clone(), // display = the acting client.
+            role: grant.owner_role,        // AUTHORITY: the owner's role.
+            permissions: permissions_for(grant.owner_role),
+            actor: Some(grant.client_id), // ATTRIBUTION: the distinct actor.
+        }));
+    }
+
     let Some(wa_id) = wa_id_from_token(bearer_token) else {
         return Ok(None); // not a session token — let other auth modes handle it.
     };
@@ -188,6 +289,7 @@ pub async fn resolve_bearer(
         name: cert.name,
         role,
         permissions: permissions_for(role),
+        actor: None, // a normal session: the principal IS the actor.
     }))
 }
 
