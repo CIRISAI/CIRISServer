@@ -17,7 +17,7 @@
 
 | Area | 0.3.0 (deployed) | v0.4.9 |
 |---|---|---|
-| Family floor | persist 7.x / verify 5.x / edge 3.x | **persist v9.0.3 + verify v6.2.0 + edge v5.0.1** (ciris-server ≥ v0.4.11; v9.0.3/v5.0.1 are wheel-metadata fixes over v9.0.2/v5.0.0) |
+| Family floor | persist 7.x / verify 5.x / edge 3.x | **persist v9.0.3 + verify v6.2.0 + edge v5.1.0** (ciris-server ≥ v0.4.13; edge v5.0.1 → v5.1.0 adds runtime peer control so replication is fully no-restart — CIRISEdge#173) |
 | Trace ingest | **read-only — POST 404s** | **HTTP relay ingest** (`POST /lens-api/api/v1/accord/events`) + Reticulum relay |
 | Trace wire | Ed25519 / Python-compat | **JCS hybrid** (`3.0.0` / RFC 8785, Ed25519 + ML-DSA-65) — hard cut |
 | NAT traversal | none | **Transport-node + store-and-forward** (default on) |
@@ -79,10 +79,11 @@ CIRIS_SERVER_REPLICATION_RECONCILE_SECS=30
 > sets up peering on demand from the desktop client / the peering endpoint —
 > `CIRIS_PEER_B_*` is now an **optional boot bootstrap** that just writes a consent
 > object so the env path flows through the same reconcile path as an owner-authored
-> grant. **Honest interim note (edge v5.0.1):** a consent created at runtime
-> registers the peer for **inbound** immediately, but the node begins **active pull
-> only after the next restart** (boot re-derives the Initiator set from CEG), until
-> the runtime Initiator-add lands — **CIRISEdge#173**.
+> grant. **Replication is fully runtime (edge v5.1.0):** an owner-authored
+> `consent:replication` object converges the live `ReplicationRuntime` **immediately
+> — no restart**. The reconcile loop drives `ReplicationRuntime::set_peers`, which
+> hot-adds the peer as an active **Initiator** (scheduler-driven pull) and removes
+> revoked peers — all at runtime (**CIRISEdge#173 resolved** in v5.1.0).
 **Corpus:** there is **no `CIRIS_DB_URL`/DSN env** — ciris-server always uses a SQLite corpus at `$CIRIS_HOME/data/ciris_engine.db` (override only the *directory* via `CIRIS_SERVER_DATA_DIR`). (Postgres is compiled in but not env-selectable; the migration lands on the SQLite corpus.)
 The read API on **`:4243`** serves: `GET /v1/identity`, `GET /lens/api/v1/*` (the 7 frozen reads), `GET /v1/federation/node-code`, `POST /lens-api/api/v1/accord/events` (ingest), `/v1/safety/*`, `/v1/setup/*`.
 
@@ -141,7 +142,7 @@ The v0.4.9 corpus is forward-compatible reads; a downgrade loses ingest + the ne
 The status node (B) is **no longer a parallel implementation**. As of CIRISStatus **v0.2.0** it *is* a `ciris-server` node plus a thin `StatusAdapter` (mirroring CIRISAgent's adapter model: the agent = `ciris-server` + brain; the status node = `ciris-server` + status adapter). All the fabric — engine, edge, **consent:replication**, NodeCode, ownership, safety, NAT-traversal — comes from `ciris-server`'s `serve_with_adapter()`; the adapter only adds the status page (the uptime probes, the Flow-A roster, `/api/v1/scoring`, the live SSE/WS) and emits `health:liveness:v1`.
 
 Consequences for the upgrade:
-- **Same family floor** as the lens node (persist v9.0.3 / edge v5.0.1 / verify v6.2.0). Deploy the image **`ghcr.io/cirisai/cirisstatus:v0.2.3`** (multi-arch; `:latest` tracks it).
+- **Same family floor** as the lens node (persist v9.0.3 / edge v5.1.0 / verify v6.2.0). Deploy the image **`ghcr.io/cirisai/cirisstatus:v0.2.3`** (multi-arch; `:latest` tracks it).
 - **Config is now `ciris-server`'s** (`ciris_server::ServerConfig::from_env()`). The **old `STATUS_*` env is gone** (`STATUS_CORPUS_DSN`, `STATUS_NODE_*`, `STATUS_PEER_A_*`, `STATUS_REPLICATION_*`, `--features fabric`). The adapter keeps only probe-targets / poll-cadence / CORS env.
 
 > ### ⚠ The status node has its OWN corpus — never point it at the lens node's DB
@@ -157,7 +158,7 @@ CIRIS_SERVER_BOOTSTRAP_PEERS=<lens-node-host>:4242   # find A on the mesh
 CIRIS_PEER_B_KEY_ID=<lens node A's key_id>           # the peer = A
 CIRIS_PEER_B_KEY_RECORD=<A's self-signed SignedKeyRecord JSON>
 ```
-(The peer slot is named `CIRIS_PEER_B_*` on both sides — it means "the one peer." On A it points at the status node; on the status node it points at A. As of v0.4.12 this env is an **optional bootstrap**: each side just WRITES its own directed `consent:replication` grant from it at boot, and the **CEG-driven reconcile loop** converges the live runtime to those consent objects. Equivalently, the owner authors the grant on demand via `POST /v1/federation/peering` from the desktop client — same consent object, no env needed. Replication then rides Reticulum; per **CIRISEdge#173**, a runtime-created consent is inbound-active immediately but pull-active after the next restart on edge v5.0.1.)
+(The peer slot is named `CIRIS_PEER_B_*` on both sides — it means "the one peer." On A it points at the status node; on the status node it points at A. As of v0.4.12 this env is an **optional bootstrap**: each side just WRITES its own directed `consent:replication` grant from it at boot, and the **CEG-driven reconcile loop** converges the live runtime to those consent objects. Equivalently, the owner authors the grant on demand via `POST /v1/federation/peering` from the desktop client — same consent object, no env needed. Replication then rides Reticulum; on edge v5.1.0 a runtime-created consent converges the live runtime **immediately — pull-active with no restart**, via `set_peers` (**CIRISEdge#173 resolved**).)
 
 - The status page is served from the node's **read API listener (`:4243`)** — the adapter's routers merge there. Point the status reverse-proxy at `:4243`.
 - Identity continuity: if the status node already had a federation identity, keep its `CIRIS_HOME`/identity → same `key_id` (no re-key, and A's `CIRIS_PEER_B_*` keeps matching).

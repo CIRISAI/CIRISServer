@@ -8,10 +8,12 @@
 //!   1. [`peer::replication_peers_from_consent`] returns exactly the subjects of
 //!      the node's `consent:replication:v1` rows and IGNORES other attestations
 //!      (a non-consent `scores` row authored by the same node is not a peer).
-//!   2. [`replication_reconcile::reconcile_once`]:
-//!      - REGISTERS a newly-consented **admitted** peer into the runtime registry
-//!        (Attestation kind, hot-added Responder);
-//!      - DEREGISTERS a peer whose consent grant is gone;
+//!   2. [`replication_reconcile::reconcile_once`] drives `ReplicationRuntime::
+//!      set_peers` (edge v5.1.0) to diff-converge the live Initiator set:
+//!      - ADDS a newly-consented **admitted** peer as an active **Initiator**
+//!        (Attestation kind — registered, scheduler-driven pull, no restart);
+//!      - REMOVES a peer whose consent grant is gone (its Initiator stops + its
+//!        inbound routing is deregistered);
 //!      - SKIPS a consented-but-UNADMITTED peer (no directory key → can't replicate).
 //!
 //! The Node-A substrate + the peer admission gate are driven exactly as the other
@@ -365,12 +367,13 @@ async fn reconcile_registers_new_and_deregisters_gone() {
         .await
         .expect("reconcile_once must not error");
 
-    // peer-new registered (desired − current); peer-stale deregistered
-    // (current − desired, its consent is gone).
+    // peer-new added as an ACTIVE Initiator (desired − current); peer-stale
+    // removed (current − desired, its consent is gone) — both at runtime, via
+    // set_peers, no restart.
     assert_eq!(
         attestation_keys(&runtime).await,
         vec!["peer-new".to_string()],
-        "after reconcile: peer-new registered, peer-stale deregistered"
+        "after reconcile: peer-new is a live Initiator, peer-stale removed"
     );
 
     // Idempotent: a second reconcile with no CEG change leaves the set unchanged.
@@ -413,6 +416,6 @@ async fn reconcile_only_registers_admitted_consent_subjects() {
     assert_eq!(
         attestation_keys(&runtime).await,
         vec!["peer-ok".to_string()],
-        "an admitted consent subject is registered for inbound"
+        "an admitted consent subject becomes a live Initiator at runtime"
     );
 }

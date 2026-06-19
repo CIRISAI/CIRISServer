@@ -973,9 +973,11 @@ async fn setup_peer_replication(
     }
 
     // 2. Always start the ONE long-lived runtime (even with an empty desired set)
-    //    so the registry + routing exist for the reconciler's hot-add.
+    //    so the registry + routing exist for the reconciler's runtime hot-add.
     //    EnvelopeKind::Attestation carries BOTH directions: capacity:* out,
-    //    health:liveness in.
+    //    health:liveness in. v5.1.0 `start` installs the scheduler control channel
+    //    unconditionally, so the runtime accepts `set_peers` mutation with no
+    //    extra opt-in (CIRISEdge#173 resolved).
     let peers: Vec<ReplicationPeer> = desired
         .iter()
         .map(|p| ReplicationPeer {
@@ -996,11 +998,18 @@ async fn setup_peer_replication(
     // rebuild the runtime).
     edge.install_replication_routing(&runtime);
 
+    // OPT-IN to the v5.1.0 scheduler control channel so the reconciler can mutate
+    // the live Initiator set at runtime (register_initiator_peer / remove_peer /
+    // set_peers). In edge v5.1.0 `ReplicationRuntime::start` already installs the
+    // control channel unconditionally — the runtime exposes no separate public
+    // `install_control_channel`; the orchestrator is always-on after `start`, so
+    // there is nothing further to call here (CIRISEdge#173 resolved).
+
     tracing::info!(
         initiator_peers = desired.len(),
         "CEG-driven replication runtime started + routed into the shared Edge ({} consent-derived \
-         Initiator peers; reconciler converges the rest, runtime Initiator-add pending \
-         CIRISEdge#173)",
+         Initiator peers; reconciler converges the rest at runtime via set_peers — no restart, \
+         CIRISEdge#173 resolved)",
         desired.len(),
     );
     Ok(Some(Arc::new(runtime)))

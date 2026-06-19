@@ -250,10 +250,10 @@ async fn peering(
             grant_content_hash: grant.content_hash,
             freshly_emitted: grant.freshly_emitted,
             attestation_prefixes: crate::peer::normalize_prefixes(&req.attestation_prefixes),
-            reconciler_note: "consent:replication recorded; the node's reconcile loop will \
-                              converge the live replication runtime to it (runtime Initiator-add \
-                              pending CIRISEdge#173 — inbound is immediate, active pull after the \
-                              next restart on edge v5.0.1)"
+            reconciler_note: "consent:replication recorded; the node's reconcile loop converges \
+                              the live replication runtime to it at runtime via set_peers — the \
+                              peer becomes an active Initiator immediately, no restart (edge \
+                              v5.1.0, CIRISEdge#173 resolved)"
                 .to_owned(),
         }),
     )

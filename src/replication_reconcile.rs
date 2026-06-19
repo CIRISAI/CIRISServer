@@ -11,28 +11,27 @@
 //! ([`crate::peer::replication_peers_from_consent`]); this loop is the single
 //! place that mutates the runtime registry to match them.
 //!
-//! ## What converges (and the honest interim gap)
+//! ## What converges (fully runtime — no restart)
 //!
-//! Each reconcile diffs the desired peer set (admitted `consent:replication`
-//! subjects) against the runtime's currently-registered `Attestation`-kind peers:
+//! Each reconcile computes the desired peer set (admitted `consent:replication`
+//! subjects) and hands it to [`ReplicationRuntime::set_peers`], which
+//! diff-converges the runtime's **live Initiator set** (adds first, then removes):
 //!
-//!   - **newly consented** → [`ReplicationRuntime::register_peer`], which hot-adds
-//!     a **Responder** (inbound routing). Inbound replication from that peer works
-//!     immediately. ACTIVE INITIATION (the scheduler-driven pull) is derived from
-//!     CEG only at boot today, so a runtime-added peer begins active pull after
-//!     the next node restart, until the runtime Initiator-add lands
-//!     (**CIRISEdge#173**).
-//!   - **consent gone** → [`ReplicationRegistry::deregister`] for the
-//!     `Attestation` kind.
+//!   - **newly consented** → an active **Initiator** coordinator is spawned at
+//!     runtime (scheduler-driven active pull begins immediately — no restart).
+//!   - **consent gone** → the matching Initiator's scheduled rounds stop and its
+//!     inbound routing is deregistered.
+//!
+//! This uses edge v5.1.0's runtime peer-control API; the interim
+//! "active pull only after restart" gap (**CIRISEdge#173**) is resolved.
 //!
 //! The loop is robust: a directory read error logs + skips the tick and never
 //! panics the controller.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ciris_edge::replication::{EnvelopeKind, ReplicationRuntime};
+use ciris_edge::replication::{EnvelopeKind, ReplicationPeer, ReplicationRuntime};
 use ciris_persist::prelude::Engine;
 use tokio::sync::{watch, Notify};
 
@@ -52,16 +51,18 @@ fn reconcile_interval() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Run **one** reconcile pass: converge the runtime's registered
-/// `Attestation`-kind peers to the admitted `consent:replication` subjects in the
-/// corpus. Factored out of the loop so tests can drive a single deterministic
-/// step ([`crate::replication_reconcile::reconcile_once`]).
+/// Run **one** reconcile pass: converge the runtime's live `Attestation`-kind
+/// **Initiator** set to the admitted `consent:replication` subjects in the corpus.
+/// Factored out of the loop so tests can drive a single deterministic step
+/// ([`crate::replication_reconcile::reconcile_once`]).
 ///
 /// - `desired` = [`crate::peer::replication_peers_from_consent`] **filtered to
 ///   peers whose key is admitted in the directory** (we cannot replicate with an
 ///   unknown key — an unadmitted consent subject is skipped + warned).
-/// - `current` = the runtime registry's `Attestation`-kind keys.
-/// - register the `desired − current`; deregister the `current − desired`.
+/// - hand `desired` to [`ReplicationRuntime::set_peers`], which diff-converges the
+///   live Initiator coordinators (adds first, then removes). Newly consented peers
+///   begin active pull immediately; revoked peers stop — all at runtime, no
+///   restart (edge v5.1.0, CIRISEdge#173 resolved).
 ///
 /// A directory read error returns `Err` (the caller logs + skips the tick); this
 /// fn itself never panics.
@@ -75,13 +76,16 @@ pub async fn reconcile_once(
 
     // Admission filter: only peers whose key is a verified federation_keys row
     // can be replicated with (the runtime would have no key to route/verify).
+    // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
+    // health:liveness in).
     let directory = engine.federation_directory();
-    let mut desired: HashSet<String> = HashSet::new();
+    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len());
     for peer in consented {
         match directory.lookup_public_key(&peer).await {
-            Ok(Some(_)) => {
-                desired.insert(peer);
-            }
+            Ok(Some(_)) => desired.push(ReplicationPeer {
+                peer_key_id: peer,
+                kind: EnvelopeKind::Attestation,
+            }),
             Ok(None) => tracing::warn!(
                 peer_key_id = %peer,
                 "consent:replication observed for an UNADMITTED peer key — skipping reconcile for \
@@ -95,39 +99,20 @@ pub async fn reconcile_once(
         }
     }
 
-    // Current Attestation-kind registrations on the live runtime.
-    let current: HashSet<String> = runtime
-        .registry()
-        .registered_keys()
-        .await
-        .into_iter()
-        .filter(|(_, kind)| *kind == EnvelopeKind::Attestation)
-        .map(|(peer, _)| peer)
-        .collect();
-
-    // desired − current → register for inbound (Responder hot-add).
-    for peer in desired.difference(&current) {
-        runtime
-            .register_peer(peer.clone(), EnvelopeKind::Attestation)
-            .await;
-        tracing::info!(
-            peer_key_id = %peer,
-            "consent:replication for {peer} observed → registered for inbound. Active initiation \
-             begins after next restart until runtime Initiator-add lands (CIRISEdge#173).",
-        );
+    // Diff-converge the live Initiator set to the desired consent peers. Adds
+    // become active Initiators (scheduler-driven pull) at runtime; removals stop
+    // their rounds + drop inbound routing — all without a restart.
+    let count = desired.len();
+    if let Err(e) = runtime.set_peers(desired).await {
+        // The runtime's scheduler has stopped (shutdown) — surface so the caller
+        // logs + skips; the controller never panics.
+        anyhow::bail!("replication set_peers failed to converge: {e}");
     }
 
-    // current − desired → consent revoked / gone → deregister.
-    for peer in current.difference(&desired) {
-        runtime
-            .registry()
-            .deregister(peer, EnvelopeKind::Attestation)
-            .await;
-        tracing::info!(
-            peer_key_id = %peer,
-            "consent:replication for {peer} revoked → deregistered.",
-        );
-    }
+    tracing::info!(
+        consent_peers = count,
+        "replication converged to {count} consent peers",
+    );
 
     Ok(())
 }
@@ -151,7 +136,8 @@ pub fn spawn(
         tracing::info!(
             period_secs = period.as_secs(),
             "CEG-driven replication reconciler started (consent objects are the topology; \
-             API writes CEG, this loop converges; runtime Initiator-add pending CIRISEdge#173)"
+             API writes CEG, this loop converges the live runtime via set_peers — no restart, \
+             CIRISEdge#173 resolved)"
         );
 
         // An initial reconcile is already implied by the first immediate
