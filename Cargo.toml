@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.4.10"   # 0.1 = lens-only (agent ~2.9.7); 0.3 = +auth subsystem / one-wheel; 0.4 = +federation peering/identity (capacity scoring, consent:replication, register_federation_key gate, root-bootstrap, NodeCode); 0.4.1 = self-attested first-run root claim (#887); 0.4.2 = one-time claim PIN; 0.4.3 = CC-compliant ownership (infra:* responsible-party owner-binding, no agency, serve-only-until-owned); 0.4.4 = substrate-native user-signed owner-binding — 1-phase /v1/setup/root + the local node's /v1/setup/claim-remote (client is a node; crypto only in the substrate); 0.4.10 = Adapter seam (trait + AdapterContext + serve_with_adapter, mirrors CIRISAgent BaseAdapterProtocol — ciris-status = ciris-server + StatusAdapter); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward on breakage.
+version = "0.4.11"   # 0.1 = lens-only (agent ~2.9.7); 0.3 = +auth subsystem / one-wheel; 0.4 = +federation peering/identity (capacity scoring, consent:replication, register_federation_key gate, root-bootstrap, NodeCode); 0.4.1 = self-attested first-run root claim (#887); 0.4.2 = one-time claim PIN; 0.4.3 = CC-compliant ownership (infra:* responsible-party owner-binding, no agency, serve-only-until-owned); 0.4.4 = substrate-native user-signed owner-binding — 1-phase /v1/setup/root + the local node's /v1/setup/claim-remote (client is a node; crypto only in the substrate); 0.4.10 = Adapter seam (trait + AdapterContext + serve_with_adapter, mirrors CIRISAgent BaseAdapterProtocol — ciris-status = ciris-server + StatusAdapter); 0.4.11 = substrate floor edge v5.0.1 + persist v9.0.3 (wheel Requires-Dist metadata fix, #241/#242; Rust source unchanged); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -110,8 +110,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v9.0.2", features = ["sqlite", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v5.0.0", features = ["transport-reticulum", "transport-http"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v9.0.3", features = ["sqlite", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v5.0.1", features = ["transport-reticulum", "transport-http"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # v6.0.0 (NOT v6.1.0): persist v9.0.0 transitively pins verify v6.0.0; pinning
@@ -173,7 +173,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v9.0.2", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v9.0.3", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v6.2.0", version = "6", features = ["tpm"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
@@ -206,7 +206,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v6.2.0"
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v5.0.0", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v5.0.1", features = ["codec-fountain"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]

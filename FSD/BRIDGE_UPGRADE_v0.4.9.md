@@ -17,7 +17,7 @@
 
 | Area | 0.3.0 (deployed) | v0.4.9 |
 |---|---|---|
-| Family floor | persist 7.x / verify 5.x / edge 3.x | **persist v9.0.2 + verify v6.2.0 + edge v5.0.0** |
+| Family floor | persist 7.x / verify 5.x / edge 3.x | **persist v9.0.3 + verify v6.2.0 + edge v5.0.1** (ciris-server ≥ v0.4.11; v9.0.3/v5.0.1 are wheel-metadata fixes over v9.0.2/v5.0.0) |
 | Trace ingest | **read-only — POST 404s** | **HTTP relay ingest** (`POST /lens-api/api/v1/accord/events`) + Reticulum relay |
 | Trace wire | Ed25519 / Python-compat | **JCS hybrid** (`3.0.0` / RFC 8785, Ed25519 + ML-DSA-65) — hard cut |
 | NAT traversal | none | **Transport-node + store-and-forward** (default on) |
@@ -77,7 +77,7 @@ Canonical alias for new emitters: `POST /v1/ingest/accord-events`.
 
 ## 6. ⚠ Expected: traces `401` until the agent fold ships (NOT a regression)
 
-persist v9.0.2 is a **hybrid hard-cut** — it rejects classical-only Ed25519 traces (`verify_hybrid_required` / `verify_hybrid_failed` → HTTP `401`). The **deployed `CIRIS-AccordMetrics` emitter signs classical-only**, so right after the upgrade:
+persist v9.x is a **hybrid hard-cut** — it rejects classical-only Ed25519 traces (`verify_hybrid_required` / `verify_hybrid_failed` → HTTP `401`). The **deployed `CIRIS-AccordMetrics` emitter signs classical-only**, so right after the upgrade:
 
 - the 404s become **`401`s** (good — the request now reaches the node; it's the signature tier that's rejecting), and
 - traces resume persisting the moment the agent runs the **2.9.7 fold** (`pip install ciris-server==0.4.9`, swap `from ciris_lens_core import …` → `from ciris_server import …`). **lenscore is what signs traces**, so the swap upgrades the emitter to **JCS-hybrid 3.0.0** by construction — no separate emitter patch.
@@ -117,7 +117,7 @@ The v0.4.9 corpus is forward-compatible reads; a downgrade loses ingest + the ne
 The status node (B) is **no longer a parallel implementation**. As of CIRISStatus **v0.2.0** it *is* a `ciris-server` node plus a thin `StatusAdapter` (mirroring CIRISAgent's adapter model: the agent = `ciris-server` + brain; the status node = `ciris-server` + status adapter). All the fabric — engine, edge, **consent:replication**, NodeCode, ownership, safety, NAT-traversal — comes from `ciris-server`'s `serve_with_adapter()`; the adapter only adds the status page (the uptime probes, the Flow-A roster, `/api/v1/scoring`, the live SSE/WS) and emits `health:liveness:v1`.
 
 Consequences for the upgrade:
-- **Same family floor + identity-continuity rule** as the lens node (persist v9.0.2 / edge v5.0.0 / verify v6.2.0; keep `CIRIS_HOME` → same `key_id`, no re-key).
+- **Same family floor + identity-continuity rule** as the lens node (persist v9.0.3 / edge v5.0.1 / verify v6.2.0; keep `CIRIS_HOME` → same `key_id`, no re-key).
 - **Config is now `ciris-server`'s** (`ciris_server::ServerConfig::from_env()`): `CIRIS_SERVER_LISTEN_ADDR`, `CIRIS_HOME`, `CIRIS_DB_URL`, the `CIRIS_PEER_*` consent-replication env. The **old `STATUS_*` env is gone** (`STATUS_CORPUS_DSN`, `STATUS_NODE_*`, `STATUS_PEER_A_*`, `STATUS_REPLICATION_*`, `--features fabric`). The adapter keeps only probe-targets / poll-cadence / CORS env.
 - B consumes A's `capacity:*` via **consent:replication into its OWN corpus** (no shared-DB read); the status page reads that own corpus. The roster is empty until replication delivers — expected.
 - The status page is served from the node's **read API listener (`:4243`)** — the adapter's routers merge there. Point the status reverse-proxy at `:4243`.
