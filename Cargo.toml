@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.4.6"   # 0.1 = lens-only (agent ~2.9.7); 0.3 = +auth subsystem / one-wheel; 0.4 = +federation peering/identity (capacity scoring, consent:replication, register_federation_key gate, root-bootstrap, NodeCode); 0.4.1 = self-attested first-run root claim (#887); 0.4.2 = one-time claim PIN; 0.4.3 = CC-compliant ownership (infra:* responsible-party owner-binding, no agency, serve-only-until-owned); 0.4.4 = substrate-native user-signed owner-binding — 1-phase /v1/setup/root + the local node's /v1/setup/claim-remote (client is a node; crypto only in the substrate); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward on breakage.
+version = "0.4.7"   # 0.1 = lens-only (agent ~2.9.7); 0.3 = +auth subsystem / one-wheel; 0.4 = +federation peering/identity (capacity scoring, consent:replication, register_federation_key gate, root-bootstrap, NodeCode); 0.4.1 = self-attested first-run root claim (#887); 0.4.2 = one-time claim PIN; 0.4.3 = CC-compliant ownership (infra:* responsible-party owner-binding, no agency, serve-only-until-owned); 0.4.4 = substrate-native user-signed owner-binding — 1-phase /v1/setup/root + the local node's /v1/setup/claim-remote (client is a node; crypto only in the substrate); 0.5 = +registry (~2.9.8); 1.0 = +node (~2.9.10). Patch forward on breakage.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -191,6 +191,11 @@ base64        = "0.22"
 chrono        = { version = "0.4", features = ["serde"] }
 serde_json    = "1"
 criterion     = { version = "0.5", features = ["async_tokio"] }
+# Drive the merged axum Router in-process for the HTTP trace-ingest test
+# (tests/ingest_http.rs): `ServiceExt::oneshot` + read the response body. tower
+# 0.5 / http-body-util 0.1 match axum 0.8's floor (already in-tree transitively).
+tower            = { version = "0.5", features = ["util"] }
+http-body-util   = "0.1"
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).

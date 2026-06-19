@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1015,6 +1015,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac 0.12.1",
+ "http-body-util",
  "jsonwebtoken",
  "pbkdf2",
  "pyo3",
@@ -1025,6 +1026,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "urlencoding",

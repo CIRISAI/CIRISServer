@@ -285,6 +285,15 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                     // per-group watchlist config (the matcher defers to the
                     // NodeCore content seam). Built AHEAD of media/social content.
                     .merge(crate::safety::router(Arc::clone(&engine), strict))
+                    // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
+                    // POST /lens-api/api/v1/accord/events (legacy path, forwarded
+                    // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events
+                    // (canonical alias). The agent's CIRIS-AccordMetrics/1.0 emitter
+                    // ships a signed AccordEventsBatch JSON; this feeds it to the
+                    // SAME Engine::receive_and_persist verify-before-persist path the
+                    // Reticulum relay uses (LensCoreHandler). Unauthenticated like the
+                    // relay — the per-trace CEG signature IS the auth.
+                    .merge(crate::ingest_http::router(Arc::clone(&engine)))
             },
         )
         .await

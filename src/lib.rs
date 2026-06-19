@@ -65,6 +65,14 @@ pub mod federation_nodecode;
 /// test can drive it.
 pub mod identity;
 mod import;
+/// HTTP trace-ingest endpoint (the `listen+1` relay runbook §3.4 promised) — the
+/// legacy lens-python path `POST /lens-api/api/v1/accord/events` (+ a canonical
+/// alias) re-opened on the read-API listener. Deserializes the agent emitter's
+/// signed `AccordEventsBatch` JSON and feeds it to the SAME verify-before-persist
+/// path the Reticulum relay uses (`Engine::receive_and_persist`); the CEG
+/// signature is the auth, so it is unauthenticated like the relay. Public so the
+/// integration test (`tests/ingest_http.rs`) can drive the router directly.
+pub mod ingest_http;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the
