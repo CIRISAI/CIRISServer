@@ -52,14 +52,17 @@ Keep the existing values; the new toggles default correctly for a public fabric 
 ```sh
 CIRIS_HOME=/opt/ciris                       # unchanged → same data/ + identity/ → same key_id (no re-key)
 CIRIS_SERVER_LISTEN_ADDR=0.0.0.0:4242       # Reticulum node port (public warm-link target). read API = listen+1 = :4243
-CIRIS_DB_URL=postgres://...                 # if Postgres; omit for the default SQLite corpus under data/
 CIRIS_SERVER_MODE=server                    # default
 # NAT-traversal (NEW, default ON for a public node — leave on):
 CIRIS_SERVER_TRANSPORT_NODE=1               # forward inbound for NAT'd/mobile edges (Reticulum Transport node)
 CIRIS_SERVER_STORE_AND_FORWARD=1            # store-and-forward for asleep edges (SAF)
 # Identity dirs (defaults are $CIRIS_HOME/{data,identity}); RET identity:
 CIRIS_SERVER_RET_IDENTITY_PATH=$CIRIS_HOME/identity/<the-existing>.rid
+# Feed the status node (optional): replicate this node's capacity:* to ciris-status.
+CIRIS_PEER_B_KEY_ID=<status node's key_id>
+CIRIS_PEER_B_KEY_RECORD=<status node's self-signed SignedKeyRecord JSON>
 ```
+**Corpus:** there is **no `CIRIS_DB_URL`/DSN env** — ciris-server always uses a SQLite corpus at `$CIRIS_HOME/data/ciris_engine.db` (override only the *directory* via `CIRIS_SERVER_DATA_DIR`). (Postgres is compiled in but not env-selectable; the migration lands on the SQLite corpus.)
 The read API on **`:4243`** serves: `GET /v1/identity`, `GET /lens/api/v1/*` (the 7 frozen reads), `GET /v1/federation/node-code`, `POST /lens-api/api/v1/accord/events` (ingest), `/v1/safety/*`, `/v1/setup/*`.
 
 ## 5. Caddy — the HTTP trace-ingest route (the 404 fix)
@@ -117,8 +120,24 @@ The v0.4.9 corpus is forward-compatible reads; a downgrade loses ingest + the ne
 The status node (B) is **no longer a parallel implementation**. As of CIRISStatus **v0.2.0** it *is* a `ciris-server` node plus a thin `StatusAdapter` (mirroring CIRISAgent's adapter model: the agent = `ciris-server` + brain; the status node = `ciris-server` + status adapter). All the fabric — engine, edge, **consent:replication**, NodeCode, ownership, safety, NAT-traversal — comes from `ciris-server`'s `serve_with_adapter()`; the adapter only adds the status page (the uptime probes, the Flow-A roster, `/api/v1/scoring`, the live SSE/WS) and emits `health:liveness:v1`.
 
 Consequences for the upgrade:
-- **Same family floor + identity-continuity rule** as the lens node (persist v9.0.3 / edge v5.0.1 / verify v6.2.0; keep `CIRIS_HOME` → same `key_id`, no re-key).
-- **Config is now `ciris-server`'s** (`ciris_server::ServerConfig::from_env()`): `CIRIS_SERVER_LISTEN_ADDR`, `CIRIS_HOME`, `CIRIS_DB_URL`, the `CIRIS_PEER_*` consent-replication env. The **old `STATUS_*` env is gone** (`STATUS_CORPUS_DSN`, `STATUS_NODE_*`, `STATUS_PEER_A_*`, `STATUS_REPLICATION_*`, `--features fabric`). The adapter keeps only probe-targets / poll-cadence / CORS env.
-- B consumes A's `capacity:*` via **consent:replication into its OWN corpus** (no shared-DB read); the status page reads that own corpus. The roster is empty until replication delivers — expected.
+- **Same family floor** as the lens node (persist v9.0.3 / edge v5.0.1 / verify v6.2.0). Deploy the image **`ghcr.io/cirisai/cirisstatus:v0.2.3`** (multi-arch; `:latest` tracks it).
+- **Config is now `ciris-server`'s** (`ciris_server::ServerConfig::from_env()`). The **old `STATUS_*` env is gone** (`STATUS_CORPUS_DSN`, `STATUS_NODE_*`, `STATUS_PEER_A_*`, `STATUS_REPLICATION_*`, `--features fabric`). The adapter keeps only probe-targets / poll-cadence / CORS env.
+
+> ### ⚠ The status node has its OWN corpus — never point it at the lens node's DB
+> This is the regression to avoid (the old "Node B reads Node A's DSN" model). There is **no DSN/`CIRIS_DB_URL` env**: ciris-server always writes a SQLite corpus at `$CIRIS_HOME/data/ciris_engine.db`. So the status node's corpus is simply its **own** `CIRIS_HOME` (its own container volume) — **distinct from the lens node's**. Do **not** share `CIRIS_HOME`/`CIRIS_SERVER_DATA_DIR`, and do **not** bind-mount the lens node's `data/` into the status node. Node A's `capacity:*` arrives **only** via consent:replication (below), into B's own DB. The roster is empty until replication delivers — expected, not a misconfig.
+
+Status-node env:
+```sh
+CIRIS_HOME=/opt/ciris-status                 # the status node's OWN home/volume (NOT the lens node's)
+CIRIS_SERVER_LISTEN_ADDR=0.0.0.0:4242        # its own Reticulum node; read API (the status page) = :4243
+CIRIS_SERVER_KEY_ID=ciris-status             # its own federation key_id
+# Reach + replicate-with the lens node (Node A) over Reticulum — directed consent:replication:
+CIRIS_SERVER_BOOTSTRAP_PEERS=<lens-node-host>:4242   # find A on the mesh
+CIRIS_PEER_B_KEY_ID=<lens node A's key_id>           # the peer = A
+CIRIS_PEER_B_KEY_RECORD=<A's self-signed SignedKeyRecord JSON>
+```
+(The peer slot is named `CIRIS_PEER_B_*` on both sides — it means "the one peer." On A it points at the status node; on the status node it points at A. Each node registers the other + emits its own directed `consent:replication` grant; replication then rides Reticulum.)
+
 - The status page is served from the node's **read API listener (`:4243`)** — the adapter's routers merge there. Point the status reverse-proxy at `:4243`.
-- **Release note:** CIRISStatus currently path-deps `ciris-server`; the published v0.2.0 pins the `ciris-server` **git tag** carrying the adapter seam (bump + tag `ciris-server` first, then repin + tag CIRISStatus). See `CIRISStatus/DEPLOY.md`.
+- Identity continuity: if the status node already had a federation identity, keep its `CIRIS_HOME`/identity → same `key_id` (no re-key, and A's `CIRIS_PEER_B_*` keeps matching).
+- See `CIRISStatus/DEPLOY.md` for the full deploy (docker-compose + the `SignedKeyRecord` exchange).
