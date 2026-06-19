@@ -79,6 +79,15 @@ pub mod peer;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
+/// The substrate **safety foundation** (CIRISServer#20) — moderation +
+/// child-safety as first-class fabric primitives, built AHEAD of content
+/// features: age-assurance + the protective age-gate, moderation as a delegable
+/// DUTY (composing persist v9.0.0's §11.10 admit-iff gate), the CC 4.5.4
+/// named-moderator existence invariant (fail-secure + merit auto-promotion), and
+/// the opt-in per-group watchlist config + duty/authority gate + publish-seam
+/// hook (the matcher defers to the NodeCore content seam). Public so the
+/// integration test (`tests/safety.rs`) can drive the modules + routers directly.
+pub mod safety;
 /// The capacity score→emit pipeline — a periodic task that derives per-agent
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration

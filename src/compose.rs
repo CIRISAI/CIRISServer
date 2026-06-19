@@ -276,6 +276,15 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                     .merge(crate::federation_nodecode::router(
                         node_code_response_json.clone(),
                     ))
+                    // The SAFETY FOUNDATION (CIRISServer#20): the /v1/safety/*
+                    // surface the client safety cards drive — age-assurance +
+                    // the protective age-gate, moderation as a delegable DUTY
+                    // (the §11.10 admit-iff gate, composed from persist v9.0.0),
+                    // the CC 4.5.4 named-moderator existence invariant
+                    // (fail-secure + merit auto-promotion), and the opt-in
+                    // per-group watchlist config (the matcher defers to the
+                    // NodeCore content seam). Built AHEAD of media/social content.
+                    .merge(crate::safety::router(Arc::clone(&engine), strict))
             },
         )
         .await
