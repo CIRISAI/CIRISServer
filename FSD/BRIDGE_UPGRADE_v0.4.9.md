@@ -1,0 +1,117 @@
+# Bridge upgrade — ciris-server `0.3.0` → `v0.4.9`
+
+> **Audience:** the bridge / ops upgrading the deployed lens node (and, optionally,
+> the status node) to the v0.4.9 family floor. This is the **2.9.7 fold** release.
+> **Identity is preserved — no re-key.** Companion: [`LENS_TO_SERVER_MIGRATION.md`](LENS_TO_SERVER_MIGRATION.md).
+
+## 0. TL;DR
+
+1. **Back up** the corpus DB + the identity files (`*.rid`, `ed25519.seed`).
+2. Install **`ciris-server==0.4.9`** (wheel) or drop the `x86_64-unknown-linux-gnu` binary.
+3. Keep the **same `CIRIS_HOME` / identity dir** → same `key_id` + RNS dest (no re-key).
+4. Add the **Caddy HTTP-ingest route** (the trace 404 fix).
+5. Start, **verify** (`/v1/identity` 200 same `key_id`; ingest accepts a hybrid batch; transport-node + SAF up).
+6. **Expect trace `401` until the agent ships the 2.9.7 fold** (hybrid signing rides in the lenscore→ciris-server swap — see §6). This is correct, not a regression.
+
+## 1. What changes `0.3.0` → `v0.4.9`
+
+| Area | 0.3.0 (deployed) | v0.4.9 |
+|---|---|---|
+| Family floor | persist 7.x / verify 5.x / edge 3.x | **persist v9.0.2 + verify v6.2.0 + edge v5.0.0** |
+| Trace ingest | **read-only — POST 404s** | **HTTP relay ingest** (`POST /lens-api/api/v1/accord/events`) + Reticulum relay |
+| Trace wire | Ed25519 / Python-compat | **JCS hybrid** (`3.0.0` / RFC 8785, Ed25519 + ML-DSA-65) — hard cut |
+| NAT traversal | none | **Transport-node + store-and-forward** (default on) |
+| Identity / ownership | — | YubiKey fed-ID mint, NodeCode + PIN claim, CC owner-binding |
+| Safety | — | `src/safety/*` — age-gate, moderation duty, named-moderator, watchlist |
+
+## 2. Pre-flight (do NOT skip)
+
+```sh
+# Back up the corpus + identity (identity carries over byte-identically — but back up anyway)
+cp -a "$CIRIS_HOME"/data        "$CIRIS_HOME"/data.bak.0.3.0          # SQLite corpus (or pg_dump if Postgres)
+cp -a "$CIRIS_HOME"/identity    "$CIRIS_HOME"/identity.bak.0.3.0      # *.rid + ed25519.seed (the federation address)
+ciris-server --version 2>/dev/null || true                            # record the current version for rollback
+```
+Identity continuity: v0.4.9 adopts the existing `*.rid` (RNS transport) + `ed25519.seed` (federation signing, TPM-sealed on adoption) **byte-identically** — the node keeps the **same `key_id` and RNS destination hash**. No re-key, no re-announce churn.
+
+## 3. Install v0.4.9
+
+```sh
+# Option A — wheel (the agent/most deploys)
+pip install --upgrade "ciris-server==0.4.9"
+
+# Option B — release binary (headless host)
+#   download ciris-server-x86_64-unknown-linux-gnu from the v0.4.9 GitHub release, chmod +x, place on PATH
+```
+(armv7 + aarch64-musl wheels are not published — known, non-blocking; use x86_64/aarch64-gnu or the binary.)
+
+## 4. Environment
+
+Keep the existing values; the new toggles default correctly for a public fabric node.
+
+```sh
+CIRIS_HOME=/opt/ciris                       # unchanged → same data/ + identity/ → same key_id (no re-key)
+CIRIS_SERVER_LISTEN_ADDR=0.0.0.0:4242       # Reticulum node port (public warm-link target). read API = listen+1 = :4243
+CIRIS_DB_URL=postgres://...                 # if Postgres; omit for the default SQLite corpus under data/
+CIRIS_SERVER_MODE=server                    # default
+# NAT-traversal (NEW, default ON for a public node — leave on):
+CIRIS_SERVER_TRANSPORT_NODE=1               # forward inbound for NAT'd/mobile edges (Reticulum Transport node)
+CIRIS_SERVER_STORE_AND_FORWARD=1            # store-and-forward for asleep edges (SAF)
+# Identity dirs (defaults are $CIRIS_HOME/{data,identity}); RET identity:
+CIRIS_SERVER_RET_IDENTITY_PATH=$CIRIS_HOME/identity/<the-existing>.rid
+```
+The read API on **`:4243`** serves: `GET /v1/identity`, `GET /lens/api/v1/*` (the 7 frozen reads), `GET /v1/federation/node-code`, `POST /lens-api/api/v1/accord/events` (ingest), `/v1/safety/*`, `/v1/setup/*`.
+
+## 5. Caddy — the HTTP trace-ingest route (the 404 fix)
+
+The emitter's legacy POST path now lands directly on the node — **no path rewrite**:
+
+```caddy
+# bridge Caddyfile — route the legacy trace POST to the v0.4.9 read API
+reverse_proxy /lens-api/api/v1/accord/events ciris-server:4243
+# (existing reads stay as-is)
+reverse_proxy /lens/api/v1/*   ciris-server:4243
+reverse_proxy /v1/identity     ciris-server:4243
+```
+Canonical alias for new emitters: `POST /v1/ingest/accord-events`.
+
+## 6. ⚠ Expected: traces `401` until the agent fold ships (NOT a regression)
+
+persist v9.0.2 is a **hybrid hard-cut** — it rejects classical-only Ed25519 traces (`verify_hybrid_required` / `verify_hybrid_failed` → HTTP `401`). The **deployed `CIRIS-AccordMetrics` emitter signs classical-only**, so right after the upgrade:
+
+- the 404s become **`401`s** (good — the request now reaches the node; it's the signature tier that's rejecting), and
+- traces resume persisting the moment the agent runs the **2.9.7 fold** (`pip install ciris-server==0.4.9`, swap `from ciris_lens_core import …` → `from ciris_server import …`). **lenscore is what signs traces**, so the swap upgrades the emitter to **JCS-hybrid 3.0.0** by construction — no separate emitter patch.
+
+So: upgrade the node now (unblocks the path); the agent fold (same release) completes signing. A `401` window before the agent fold is correct.
+
+## 7. Verify
+
+```sh
+# identity continuity — SAME key_id as 0.3.0:
+curl -s http://127.0.0.1:4243/v1/identity | jq .signer_key_id
+# read endpoints answer:
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4243/lens/api/v1/scores      # 200
+# the node's public bootstrap handle:
+curl -s http://127.0.0.1:4243/v1/federation/node-code | jq .code                       # CIRIS-V2-...
+# ingest is live (a hybrid-signed batch → 200; a classical-only one → 401, as in §6):
+#   tail the logs for "read API up", "transport_node=true", store-and-forward enabled, and
+#   (on a fresh/unclaimed node) the "OWNERSHIP UNCLAIMED" banner with the NodeCode + one-time claim PIN.
+```
+Reticulum: `:4242` bound (UDP+TCP); `transport_node=true` + SAF in the boot log.
+
+## 8. Ownership (founder, separate step)
+
+On a fresh/unclaimed node the boot log prints **OWNERSHIP UNCLAIMED** with the NodeCode + a one-time **claim PIN** (console/log only). The founder claims it from the app/CLI (mint a YubiKey fed-ID, then NodeCode + PIN → `/v1/setup/claim-remote`). The PIN is **never** served over HTTP. An upgraded node that already carried an owner-bound identity stays owned.
+
+## 9. Rollback
+
+```sh
+pip install "ciris-server==0.3.0"            # or restore the 0.3.0 binary
+# identity files are untouched (no re-key) — restore data.bak only if the corpus migration must be reverted
+# remove the Caddy ingest route line; the node returns to read-only
+```
+The v0.4.9 corpus is forward-compatible reads; a downgrade loses ingest + the new surfaces but keeps identity.
+
+## 10. (Optional) status node
+
+If upgrading the status node (B) in the same pass, it follows the same family floor (persist v9.0.2 / edge v5.0.0 / verify v6.2.0) and the same identity-continuity rule; it consumes A's `capacity:*` via consent:replication into its **own** corpus (no shared-DB read). See `CIRISStatus` deploy docs.
