@@ -14,9 +14,10 @@
 //!
 //! The code is built ONCE at boot from THIS node's steward `key_id` + the raw
 //! Ed25519 pubkey of its federation signing key (the same pubkey carried on the
-//! self-signed `SignedKeyRecord`), plus a `transport_hint` (`CIRIS_TRANSPORT_HINT`,
-//! falling back to the node's public base URL env) and an optional `alias_hint`
-//! (`CIRIS_NODE_ALIAS`). It is stable for the node's lifetime and served verbatim.
+//! self-signed `SignedKeyRecord`), plus an optional `transport_hint` and an
+//! optional `alias_hint` (Server 0.5: the `node.alias` config:* object, resolved
+//! at boot — no `CIRIS_NODE_ALIAS` env). It is stable for the node's lifetime and
+//! served verbatim.
 
 use std::sync::Arc;
 
@@ -27,53 +28,36 @@ use axum::Router;
 
 use crate::nodecode::{self, NodeCode};
 
-/// Env: an explicit transport hint embedded in this node's NodeCode (e.g. a
-/// `tcp://host:port` or `https://host` a peer's UI shows on first contact). Not
-/// authoritative — Edge resolves real transports via its own discovery.
-pub const ENV_TRANSPORT_HINT: &str = "CIRIS_TRANSPORT_HINT";
-/// Env: a public base URL used as the transport hint when [`ENV_TRANSPORT_HINT`]
-/// is unset (the node's reachable HTTP address).
-pub const ENV_PUBLIC_BASE_URL: &str = "CIRIS_PUBLIC_BASE_URL";
-/// Env: a human-readable alias the node suggests for itself in the NodeCode.
-pub const ENV_NODE_ALIAS: &str = "CIRIS_NODE_ALIAS";
-
 #[derive(Clone)]
 struct NodeCodeState {
     /// The pre-rendered response JSON — built once at boot, served verbatim.
     response_json: Arc<String>,
 }
 
-/// Resolve the transport hint from the env surface: explicit `CIRIS_TRANSPORT_HINT`,
-/// else the node's public base URL, else none.
-fn transport_hint_from_env() -> Option<String> {
-    for key in [ENV_TRANSPORT_HINT, ENV_PUBLIC_BASE_URL] {
-        if let Ok(v) = std::env::var(key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// The alias hint from `CIRIS_NODE_ALIAS`, if set + non-empty.
-fn alias_hint_from_env() -> Option<String> {
-    std::env::var(ENV_NODE_ALIAS)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+/// Normalize an optional hint string: trimmed, `None` when empty.
+fn nonempty(hint: Option<String>) -> Option<String> {
+    hint.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// Build THIS node's [`NodeCode`] from its steward `key_id` + raw Ed25519 pubkey
-/// (base64) + env-derived hints. The pubkey is the same `pubkey_ed25519_base64`
+/// (base64) + boot-resolved hints. The pubkey is the same `pubkey_ed25519_base64`
 /// carried on the self-signed `SignedKeyRecord` (the federation signing key).
-pub fn build_node_code(key_id: &str, pubkey_ed25519_base64: &str) -> NodeCode {
+///
+/// `alias_hint` is the boot-resolved `node.alias` config:* value (Server 0.5 — no
+/// `CIRIS_NODE_ALIAS` env); `transport_hint` is an optional reachability hint a
+/// peer's UI may show on first contact (not authoritative — Edge resolves real
+/// transports via its own discovery).
+pub fn build_node_code(
+    key_id: &str,
+    pubkey_ed25519_base64: &str,
+    alias_hint: Option<String>,
+    transport_hint: Option<String>,
+) -> NodeCode {
     NodeCode {
         key_id: key_id.to_string(),
         pubkey_ed25519_base64: pubkey_ed25519_base64.to_string(),
-        transport_hint: transport_hint_from_env(),
-        alias_hint: alias_hint_from_env(),
+        transport_hint: nonempty(transport_hint),
+        alias_hint: nonempty(alias_hint),
     }
 }
 

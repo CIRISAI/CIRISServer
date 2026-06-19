@@ -15,8 +15,9 @@ edge v3.2.0, verify v5.2.0 are tagged + on PyPI; CIRISServer is re-pinned to the
 there is **no edge-tag gate left**. The only remaining cross-repo work is the **family
 co-bump** of the cores: **[CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)**
 is the LIVE blocker (it alone unblocks the lens-only 0.1 node), then
-[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (0.5) and
-[CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) (1.0). Full task
+[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (**0.6**) and
+[CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) (1.0). Server **0.5
+is config-as-CEG (zero env)** — no core co-bump, an in-repo increment. Full task
 graph, dependencies, and GANTT in [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
 **Crate identifier (target)**: `ciris-server` (a thin composition *binary* — it
 authors no primitives; it composes `ciris-registry-core` + `ciris-lens-core`
@@ -25,10 +26,12 @@ authors no primitives; it composes `ciris-registry-core` + `ciris-lens-core`
 (`lens` + `registry-us` + `registry-eu`), each a fabric node, replicating via
 CEG/RET. Any operator MAY run one (the stewardship covenant: the work belongs to
 whoever keeps it running, not to a name).
-**Last updated**: 2026-06-14 (substrate floor SHIPPED — persist 6.5.0 / edge 3.2.0 /
-verify 5.2.0, re-pinned, no gate left; roadmap is three increments 0.1 lens-only → 0.5
-+registry → 1.0 +node on the agent train; 0.1 retires the standalone lens server;
-pip-installable node, modes client/proxy/server default server; see
+**Last updated**: 2026-06-19 (Server 0.5 = **config-as-CEG (zero env)** shipped — the
+node boots with NO environment variables: one `--home` flag + `--key-id`, all other
+config is baked constants or signed `config:*` CEG resolved at boot; roadmap is now four
+increments 0.1 lens-only → **0.5 config-as-CEG (zero env)** → **0.6 +registry** → 1.0
++node on the agent train; 0.1 retires the standalone lens server; pip-installable node,
+modes client/proxy/server default server; see
 [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md)).
 Preceded by the 2026-06-12 initial charter and the design discussion
 in CIRISRegistry, the [#62](https://github.com/CIRISAI/CIRISRegistry/issues/62)
@@ -393,6 +396,37 @@ attestation reads for deployments above the public-accountability threshold. The
 infrastructure that *holds* the audit corpus is the infrastructure that *publishes*
 it.
 
+### 3.5 Config-as-CEG (0.5): the fabric IS the config — zero env vars
+
+Server 0.5 closes the loop on §3.4's "zero setup": the node boots with **zero
+environment variables**. The entire bootstrap floor is *conventions + one CLI flag*
+— `--home <path>` (the data root; default `/var/lib/ciris`) plus `--key-id <name>`
+(the federation-key label; default `ciris-server`). Everything under `home` is
+derived by convention (`home/data`, `home/identity`, `home/claim_pin`), and
+**every other knob is config**: either a baked constant or a **signed `config:*`
+CEG object** — owner-authored, runtime-reconciled, and replicated like any other
+CEG row.
+
+There is no separate config file and no env surface: the corpus's `config:*`
+objects ARE the desired runtime configuration. The migrated knobs — transport
+posture (`mode`, `transport.*`), the scorer cadence/window/gates, the replication
+cadence, and the boot-structural network knobs (`net.listen_addr`,
+`net.bootstrap_peers`), the node alias, the admin-eligibility allowlist
+(`auth.admin_key_ids`), and the OAuth callback base — are resolved at boot from
+signed CEG (baked default per absent key) and hot-reconciled at runtime where the
+consumer allows. A write is **owner-gated exactly as federation peering is** (the
+serve-only-until-owned floor + a SYSTEM_ADMIN owner session): the API never
+touches the runtime — it writes a signed `config:v1` row and the reconcile loop
+converges the live snapshot. Because config is CEG, it inherits CEG's properties
+for free — hybrid-signed, attributable, revocable, and replicated to consenting
+peers. The fabric IS the config.
+
+Ownership stays the secure default: a fresh node has **no baked root** — it trusts
+`ciris-canonical` (per the constitution) and the founder claims ROOT via the
+first-run `POST /v1/setup/root` flow (NodeCode + a one-time console PIN). The
+serve-only-until-owned floor and the owner-binding gate are unchanged; 0.5 only
+removed the environment from the bootstrap path.
+
 ---
 
 ## 4. Dependencies & gating
@@ -408,7 +442,10 @@ persist majors):
 
 - **LIVE blocker (0.1)** — co-bump `ciris-lens-core` ([CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)):
   version-only; `attach_handler` unchanged. This alone unblocks the lens-only node.
-- **0.5** — co-bump `ciris-registry-core` ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76); narrowed to co-bump, no API change — we adapt).
+- **0.5** — config-as-CEG (zero env). **No core co-bump** — an in-repo increment
+  (the fabric IS the config; all config is signed `config:*` CEG, owner-authored,
+  runtime-reconciled, replicated). See §3.4.
+- **0.6** — co-bump `ciris-registry-core` ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76); narrowed to co-bump, no API change — we adapt).
 - **1.0** — co-bump + de-stub `ciris-node-core` ([CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38)).
 
 **No core API change is needed (adapt, don't fix):** `attach_handler` is unchanged;
@@ -416,9 +453,10 @@ registry wires via `build_client(Some(engine))` + `http::serve(..., transport_pu
 edge is built in-Rust via lens-core's `ret_relay` pattern (single-process ⇒ no leader
 election; CIRISEdge#106 closed). MSRV floor **1.86** (verify); pyo3 0.29 transitively.
 
-**Sequencing:** three increments on the agent train (§5) — **0.1 lens-only** (~2.9.7,
-which also retires the standalone CIRISLens server), **0.5 + registry** (~2.9.8), **1.0
-+ node** (~2.9.10). Then cut the three canonical nodes (`lens` + `registry-us` +
+**Sequencing:** four increments on the agent train (§5) — **0.1 lens-only** (~2.9.7,
+which also retires the standalone CIRISLens server), **0.5 config-as-CEG / zero env**
+(in-repo, no core co-bump), **0.6 + registry** (~2.9.8/9), **1.0 + node** (~2.9.10).
+Then cut the three canonical nodes (`lens` + `registry-us` +
 `registry-eu`) over to `ciris-server`.
 
 ---
@@ -434,20 +472,23 @@ built once, not a per-shape fold built twice.
 |---|---|---|---|
 | **2.9.6** ✅ | — | + `ciris-lens-core` | LensCore cohabits the agent — proves the pattern. [Deployed] |
 | **~2.9.7** | **Server 0.1** | lens-only | The agent's direct lens-core cohabitation is **replaced by CIRISServer (lens-only)** — the agent depends on the `ciris-server` wheel — and the **standalone CIRISLens server retires** in the same move (Grafana/TimescaleDB/Python ingest gone). Smallest fabric node; proves the wheel/compose/pip path. Blocker: CIRISLensCore#53 only. [Spec] |
-| **~2.9.8** | **Server 0.5** | lens + **registry** | Registry-core was slated to fold into the *agent* at 2.9.8 — **superseded**: the agent adopts **CIRISServer 0.5** (the lens+registry fabric node) as its composition instead of a bespoke agent fold. [Spec — gated §4] |
+| **(in-repo)** | **Server 0.5** | lens (**config-as-CEG**) | **Config-as-CEG / zero env.** The node boots with NO environment variables — one `--home` flag + `--key-id`, all other config is baked constants or signed `config:*` CEG (owner-authored, runtime-reconciled, replicated). No core co-bump; an in-repo increment that hardens the composition before registry folds in. [Shipped] |
+| **~2.9.8/9** | **Server 0.6** | lens + **registry** | Registry-core was slated to fold into the *agent* at 2.9.8 — **superseded**: the agent adopts **CIRISServer 0.6** (the lens+registry fabric node) as its composition instead of a bespoke agent fold. [Spec — gated §4] |
 | **2.9.9** | — | (same) | **Cleanup**: retire the half-built agent-2.9.8 registry-fold scaffolding; align the agent onto the shared composition. [Spec] |
 | **2.9.10** | **Server 1.0** | registry + lens + **node** | The **node fold completes the fabric node** — **CIRISServer 1.0** is the full three-core node; the agent adopts the complete composition instead of folding node itself. Gated additionally on node-core readiness. [Spec] |
 
-**Why lens-only first, then +registry, then +node.** Server 0.1 ships the single
-*ready* core (lens, proven in 2.9.6) — the smallest possible fabric node, which also
-lets the standalone lens server retire in the same move. Server 0.5 adds registry.
-`ciris-node-core` (the least-mature sibling) is held to Server 1.0 / 2.9.10: a third
-rlib over the same singletons, no structural change.
+**Why lens-only first, then config-as-CEG, then +registry, then +node.** Server 0.1
+ships the single *ready* core (lens, proven in 2.9.6) — the smallest possible fabric
+node, which also lets the standalone lens server retire in the same move. Server 0.5
+makes the composition self-configuring (zero env; the fabric IS the config) before any
+authority folds in. Server 0.6 adds registry. `ciris-node-core` (the least-mature
+sibling) is held to Server 1.0 / 2.9.10: a third rlib over the same singletons, no
+structural change.
 
 **Why the supersession.** Registry-core was always going to cohabit; the fabric-node
 realization only changed its *home*. Folding it into the agent specifically would
 have built the registry cohabitation twice (once for the agent, once for the
-canonical servers). Server 0.5 establishes the lens+registry composition once, and
+canonical servers). Server 0.6 establishes the lens+registry composition once, and
 because `agent = fabric node + brain` the agent adopts the *same* composition. This
 **resolves §6's "composition home"**: the Server release is where the one shared
 composition is defined; the agent consumes it. Server and agent move in lockstep —
@@ -477,7 +518,7 @@ long as both exist.
 - **Headless WBD routing** (confirmed 2026-06-13). `ciris-node-core` already carries
   the `route_deferral` routing / Wise-Authority surface, confirming routing-to-WAs is a
   **fabric-node responsibility**, distinct from the agent's deferral *origination*. This
-  is **Server 1.0** scope (the node fold — agent 2.9.10), wired after the 0.5 lens+registry node.
+  is **Server 1.0** scope (the node fold — agent 2.9.10), wired after the 0.6 lens+registry node.
 - **Surface scope** — the fabric node serves registry gRPC/HTTP + the lens read
   surface + `/v1/identity`. The central ingest API / TimescaleDB / Grafana are
   **retired**, not kept as a sidecar (§1.2); observation is substrate-resident and
@@ -509,4 +550,4 @@ This document is updated:
 - On every lifecycle-stage transition (Spec → Impl → Deployed (canonical)).
 - On every CIRISAccord revision affecting the fabric node's mission.
 
-Last updated: 2026-06-14 (substrate floor shipped — persist 6.5.0 / edge 3.2.0 / verify 5.2.0, re-pinned, no gate left; roadmap = three increments 0.1 lens-only → 0.5 +registry → 1.0 +node on the agent train; 0.1 retires the standalone lens server; pip-installable node, modes client/proxy/server default server. See FSD/SERVER_1.0_PLAN.md). Preceded by the 2026-06-12 initial charter.
+Last updated: 2026-06-19 (Server 0.5 = config-as-CEG / zero env shipped — the node boots with NO environment variables: one `--home` flag + `--key-id`, all other config is baked constants or signed `config:*` CEG resolved at boot; roadmap = four increments 0.1 lens-only → 0.5 config-as-CEG (zero env) → 0.6 +registry → 1.0 +node on the agent train; 0.1 retires the standalone lens server; pip-installable node, modes client/proxy/server default server. See FSD/SERVER_1.0_PLAN.md). Preceded by the 2026-06-14 substrate-floor update and the 2026-06-12 initial charter.

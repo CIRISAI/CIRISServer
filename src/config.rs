@@ -1,9 +1,15 @@
 //! Zero-setup configuration for the fabric node.
 //!
-//! `ciris-server` boots with **no wizard**: every field has a sensible default
-//! (mirrored from CIRISAgent — MISSION §3.4) and an env override. Defaults:
-//! data `~/ciris/data`, a SQLite corpus, mint-on-first-boot identity, listen
-//! `0.0.0.0:4242` (the Reticulum node port), mode = `server`.
+//! **Server 0.5 — zero env vars.** `ciris-server` boots with NO environment
+//! variables. The bootstrap floor is *conventions + a single `--home` flag*
+//! (plus `--key-id`); everything else is either a baked constant or a signed
+//! `config:*` CEG object (resolved at boot by [`crate::config_reconcile`]).
+//!
+//! The ONE input is the data root ([`DEFAULT_CIRIS_HOME`], overridable with
+//! `--home`). Everything under it is derived by convention:
+//!   - `home/data`      — the corpus / SQLite Engine + the lens store gate;
+//!   - `home/identity`  — the node + user federation keys, keyring, RET identity;
+//!   - `home/claim_pin` — the optional one-time claim-PIN sink (conventional).
 //!
 //! Installing the server means a server. There is **no refusal gate** — instead
 //! heavier features gate behind realistic resource minimums ([`Capabilities`]):
@@ -13,7 +19,26 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+
+/// The baked default data root (a **server convention**, not an env). `--home
+/// <path>` on the serve path overrides it. Everything the node needs is derived
+/// from this single root by convention (see the module docs).
+pub const DEFAULT_CIRIS_HOME: &str = "/var/lib/ciris";
+
+/// The baked default federation `key_id` (labels the node's minted federation
+/// key). `--key-id <name>` on the serve path overrides it (the status-node deploy
+/// passes `--key-id ciris-status`).
+///
+/// This cannot be a `config:*` CEG read: the key_id labels the federation key
+/// that is minted at boot BEFORE the corpus exists.
+// TODO(0.6+): derive key_id from the minted identity fingerprint for guaranteed uniqueness
+pub const DEFAULT_KEY_ID: &str = "ciris-server";
+
+/// The conventional federation-identity seed filename (under `identity_dir`).
+const SEED_FILENAME: &str = "ed25519.seed";
+/// The conventional Reticulum transport-identity filename (under `identity_dir`).
+const RET_IDENTITY_FILENAME: &str = "reticulum.identity";
 
 /// Minimum free disk (GiB) to run the local lens corpus + read API. Below this
 /// the node still runs as a Reticulum relay node.
@@ -22,9 +47,8 @@ use anyhow::{Context, Result};
 /// runtime-tunable knobs, this gate is read by [`Capabilities::detect`] BEFORE the
 /// Engine/corpus is open — so it CANNOT be sourced from a `config:*` CEG object
 /// (there is no corpus to read yet). It is a **pre-corpus structural gate**:
-/// whether the host even mounts a corpus. So it is no longer env
-/// (`CIRIS_SERVER_LENS_STORE_MIN_GIB` is deleted), no longer CEG — just this
-/// constant. (Acceptable under "no env": a structural pre-corpus value.)
+/// whether the host even mounts a corpus. So it is no longer env, no longer CEG —
+/// just this constant. (Acceptable under "no env": a structural pre-corpus value.)
 pub const DEFAULT_LENS_STORE_MIN_GIB: u64 = 5;
 
 /// Transport posture (the agent's `AgentMode`). **Orthogonal** to the §3.3
@@ -55,7 +79,7 @@ impl Mode {
     }
 }
 
-/// Which composed slices are active. **0.1 ships lens-only**; registry (0.5) and
+/// Which composed slices are active. **0.1 ships lens-only**; registry (0.6) and
 /// node (1.0) fold in as their co-bumps land (CIRISRegistry#76 / CIRISNodeCore#38).
 #[derive(Debug, Clone, Copy)]
 pub struct Slices {
@@ -101,99 +125,84 @@ impl Capabilities {
 /// A federation peer the node bidirectionally replicates with under **directed
 /// consent** (NOT in-group trust) — the canonical example being Node B
 /// (`ciris-status`), which is OUT of the canonical CIRIS infrastructure
-/// community. Sourced from the optional `CIRIS_PEER_B_*` env; when unset the
-/// node skips peer registration + replication entirely (logged at info).
+/// community.
 ///
-/// **v8.8.0 admission-gate shape (CEG 1.0-RC29 §5.6.8.15):** A admits B's key
-/// through `Engine::register_federation_key`, which is fail-secure — it REQUIRES
-/// B's own *self-signed* `SignedKeyRecord` (proof-of-possession). A can no longer
-/// mint B's row from raw pubkeys, so the config carries B's exported
-/// `SignedKeyRecord` as JSON (`CIRIS_PEER_B_KEY_RECORD`), deserialized into
-/// [`PeerB::key_record`]. The peer's `key_id` is also carried separately
-/// (`CIRIS_PEER_B_KEY_ID`) for the replication-peer wiring (and consistency-
-/// checked against the record). Both nodes are on persist v8.8.0, so the serde
-/// shape matches byte-for-byte (the cross-repo peering contract).
+/// **Server 0.5: owner-authored, not env.** A peer is admitted ONLY through
+/// `POST /v1/federation/peering` (owner-gated) — the operator supplies the peer's
+/// own self-signed `SignedKeyRecord` in the request body. The prior
+/// `CIRIS_PEER_B_*` env-seed boot path is deleted (zero env vars); this struct is
+/// the in-memory shape the runtime peering handler builds and hands to
+/// [`crate::peer::register_peer_key`].
+///
+/// **admission-gate shape (CEG 1.0-RC29 §5.6.8.15):** A admits B's key through
+/// `Engine::register_federation_key`, which is fail-secure — it REQUIRES B's own
+/// *self-signed* `SignedKeyRecord` (proof-of-possession). A can no longer mint B's
+/// row from raw pubkeys, so the peer carries B's exported `SignedKeyRecord`.
 #[derive(Debug, Clone)]
 pub struct PeerB {
-    /// The peer's federation `key_id` (Node B's `ciris-status` identity) — used
-    /// for replication-peer wiring; matches `key_record.record.key_id`.
+    /// The peer's federation `key_id` — used for replication-peer wiring; matches
+    /// `key_record.record.key_id`.
     pub key_id: String,
-    /// Node B's self-signed `SignedKeyRecord` (proof-of-possession), as exported
-    /// by B and supplied via `CIRIS_PEER_B_KEY_RECORD`. Passed verbatim to
-    /// `Engine::register_federation_key`, which verifies B's signature
-    /// (fail-secure) before admitting the key.
+    /// The peer's self-signed `SignedKeyRecord` (proof-of-possession). Passed
+    /// verbatim to `Engine::register_federation_key`, which verifies the peer's
+    /// signature (fail-secure) before admitting the key.
     pub key_record: ciris_persist::federation::types::SignedKeyRecord,
 }
 
 /// The fully-resolved node configuration.
+///
+/// Built from the **conventions + CLI** ([`ServerConfig::from_home`]) — NO env.
+/// The boot-structural network knobs (`listen_addr`, `bootstrap_peers`) carry
+/// baked defaults here and are overwritten from the resolved `config:*` snapshot
+/// in [`crate::compose`] once the Engine/corpus is open (Server 0.5).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// The data root (the ONE input — [`DEFAULT_CIRIS_HOME`] or `--home`).
+    pub home: PathBuf,
     pub data_dir: PathBuf,
     pub identity_dir: PathBuf,
-    /// The node's primary (Reticulum TCP) listen address.
+    /// The node's primary (Reticulum TCP) listen address. Baked default until
+    /// overwritten from `config:* net.listen_addr` at boot.
     pub listen_addr: SocketAddr,
+    /// Reticulum mesh bootstrap peers. Baked default ([`CANONICAL_BOOTSTRAP_PEERS`])
+    /// until overwritten from `config:* net.bootstrap_peers` at boot.
     pub bootstrap_peers: Vec<SocketAddr>,
     pub key_id: String,
     pub occurrence_id: String,
     pub slices: Slices,
     /// Pre-corpus structural gate: minimum free disk (GiB) to mount the lens
-    /// corpus. A **baked constant** ([`DEFAULT_LENS_STORE_MIN_GIB`]), NOT a
-    /// config:* knob — it is read by [`Capabilities::detect`] before the corpus is
-    /// open, so it cannot be a CEG read (Server 0.5 Phase 2; the env was deleted).
+    /// corpus. A **baked constant** ([`DEFAULT_LENS_STORE_MIN_GIB`]).
     pub lens_store_min_gib: u64,
-    /// Optional directed-consent replication peer (Node B / `ciris-status`).
-    /// `Some` only when the full `CIRIS_PEER_B_*` trio is present.
-    pub peer_b: Option<PeerB>,
 }
 
 impl ServerConfig {
-    /// Build from the environment with zero-setup defaults — no field required.
-    pub fn from_env() -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let ciris_home = std::env::var("CIRIS_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&home).join("ciris"));
+    /// Build from the **conventions + CLI** — the Server 0.5 zero-env constructor.
+    ///
+    /// `home` is the data root (`--home` or [`DEFAULT_CIRIS_HOME`]); `key_id` is
+    /// the federation key label (`--key-id` or [`DEFAULT_KEY_ID`]). Everything
+    /// else is derived by convention or carries a baked default (the network knobs
+    /// are overwritten from `config:*` at boot). No environment variable is read.
+    pub fn from_home(home: PathBuf, key_id: String) -> Result<Self> {
+        let data_dir = home.join("data");
+        let identity_dir = home.join("identity");
 
-        let data_dir = env_path("CIRIS_SERVER_DATA_DIR").unwrap_or_else(|| ciris_home.join("data"));
-        let identity_dir =
-            env_path("CIRIS_SERVER_IDENTITY_DIR").unwrap_or_else(|| ciris_home.join("identity"));
-
-        let listen_addr = std::env::var("CIRIS_SERVER_LISTEN_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:4242".to_string())
+        // Baked default; overwritten from config:* net.listen_addr at boot.
+        let listen_addr = crate::config_reconcile::DEFAULT_LISTEN_ADDR
             .parse()
-            .context("CIRIS_SERVER_LISTEN_ADDR must be host:port")?;
+            .expect("baked DEFAULT_LISTEN_ADDR is a valid host:port");
 
-        let bootstrap_peers = std::env::var("CIRIS_SERVER_BOOTSTRAP_PEERS")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .filter_map(|p| p.parse::<SocketAddr>().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Baked default; overwritten from config:* net.bootstrap_peers at boot.
+        let bootstrap_peers = parse_bootstrap_peers(
+            crate::config_reconcile::CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .map(|s| s.to_string()),
+        );
 
-        let key_id =
-            std::env::var("CIRIS_SERVER_KEY_ID").unwrap_or_else(|_| "ciris-server".to_string());
-
-        let occurrence_id = std::env::var("CIRIS_OCCURRENCE_ID")
-            .or_else(|_| std::env::var("AGENT_OCCURRENCE_ID"))
-            .unwrap_or_else(|_| "default".to_string());
-
-        // Server 0.5 Phase 2: `mode`, `transport.node`, `store_and_forward`, and
-        // the `scorer.*` + `replication.reconcile_secs` knobs are now sourced from
-        // signed `config:*` CEG objects (resolved at boot + hot-applied at runtime
-        // by `crate::config_reconcile`), NOT env. The lens-store minimum is a baked
-        // pre-corpus constant. Their env reads are deleted here.
-
-        // Directed-consent replication peer (Node B / ciris-status). All THREE
-        // env vars must be present, non-empty, for the peer to be admitted —
-        // a partial trio is treated as "no peer" (and warned), never a partial
-        // registration that could not actually replicate or verify.
-        let peer_b = Self::peer_b_from_env();
+        // occurrence_id derives from key_id (a stable per-node id) — no env.
+        let occurrence_id = key_id.clone();
 
         Ok(Self {
+            home,
             data_dir,
             identity_dir,
             listen_addr,
@@ -202,63 +211,17 @@ impl ServerConfig {
             occurrence_id,
             slices: Slices::default(),
             lens_store_min_gib: DEFAULT_LENS_STORE_MIN_GIB,
-            peer_b,
         })
     }
 
-    /// Parse the optional `CIRIS_PEER_B_*` env into a [`PeerB`]. `None` when the
-    /// pair is absent; a *partial* config (or a record that fails to deserialize,
-    /// or a `key_id` mismatch) logs a warning and yields `None` (we never
-    /// half-register a peer whose self-signed record we can't fully carry).
-    ///
-    /// **v8.8.0 shape:** instead of raw pubkeys, B's own *self-signed*
-    /// `SignedKeyRecord` (proof-of-possession) is supplied as JSON via
-    /// `CIRIS_PEER_B_KEY_RECORD` — the v8.8.0 admission gate requires it and
-    /// verifies B's signature fail-secure. `CIRIS_PEER_B_KEY_ID` is still carried
-    /// for replication wiring and is consistency-checked against the record.
-    fn peer_b_from_env() -> Option<PeerB> {
-        let nonempty = |k: &str| {
-            std::env::var(k)
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let key_id = nonempty("CIRIS_PEER_B_KEY_ID");
-        let key_record_json = nonempty("CIRIS_PEER_B_KEY_RECORD");
-        match (key_id, key_record_json) {
-            (Some(key_id), Some(json)) => {
-                let key_record: ciris_persist::federation::types::SignedKeyRecord =
-                    match serde_json::from_str(&json) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "CIRIS_PEER_B_KEY_RECORD is not a valid SignedKeyRecord JSON \
-                                 (persist v8.8.0 serde shape) — skipping Node B peering"
-                            );
-                            return None;
-                        }
-                    };
-                if key_record.record.key_id != key_id {
-                    tracing::warn!(
-                        config_key_id = %key_id,
-                        record_key_id = %key_record.record.key_id,
-                        "CIRIS_PEER_B_KEY_ID does not match CIRIS_PEER_B_KEY_RECORD.record.key_id \
-                         — skipping Node B peering (refusing an inconsistent peer config)"
-                    );
-                    return None;
-                }
-                Some(PeerB { key_id, key_record })
-            }
-            (None, None) => None,
-            _ => {
-                tracing::warn!(
-                    "incomplete CIRIS_PEER_B_* env (need both CIRIS_PEER_B_KEY_ID + \
-                     CIRIS_PEER_B_KEY_RECORD) — skipping Node B peer registration + replication"
-                );
-                None
-            }
-        }
+    /// Convenience: the baked-default node config (home = [`DEFAULT_CIRIS_HOME`],
+    /// key_id = [`DEFAULT_KEY_ID`]). Used by the non-serve entry points
+    /// (`identity create`) that don't take the serve flags.
+    pub fn defaults() -> Result<Self> {
+        Self::from_home(
+            PathBuf::from(DEFAULT_CIRIS_HOME),
+            DEFAULT_KEY_ID.to_string(),
+        )
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -271,21 +234,25 @@ impl ServerConfig {
     }
 
     /// The ed25519 seed both the persist Engine signer and the edge transport
-    /// signer load — one federation identity per node.
+    /// signer load — one federation identity per node (conventional path).
     pub fn seed_path(&self) -> PathBuf {
-        self.identity_dir.join("ed25519.seed")
+        self.identity_dir.join(SEED_FILENAME)
     }
 
-    /// The Reticulum transport-tier dual-key identity (64-byte X25519‖Ed25519;
-    /// distinct from the federation key). On first run the transport mints it
-    /// here; when migrating from an existing deployment (agent/lens/registry),
-    /// point `CIRIS_SERVER_RET_IDENTITY_PATH` at its `*.rid` and the keystore
-    /// adopts it byte-identically (preserving the destination hash), archiving
-    /// the original to `*.migrated-<ts>`.
+    /// The Reticulum transport-tier dual-key identity (`<identity_dir>/<conventional>.rid`
+    /// — 64-byte X25519‖Ed25519; distinct from the federation key). On first run
+    /// the transport mints it here; an existing deployment's `*.rid` at this
+    /// conventional path is adopted byte-identically (preserving the destination
+    /// hash), archiving the original to `*.migrated-<ts>`.
     pub fn ret_identity_path(&self) -> PathBuf {
-        std::env::var("CIRIS_SERVER_RET_IDENTITY_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| self.identity_dir.join("reticulum.identity"))
+        self.identity_dir.join(RET_IDENTITY_FILENAME)
+    }
+
+    /// The conventional one-time claim-PIN sink path (`home/claim_pin`). On a
+    /// fresh boot the PIN is ALSO written here (`0600`) for headless ops; it is
+    /// never served over HTTP (see [`crate::auth::bootstrap`]).
+    pub fn claim_pin_file(&self) -> PathBuf {
+        self.home.join("claim_pin")
     }
 
     /// Storage dir for the hardware-backed transport-identity keystore
@@ -303,6 +270,7 @@ impl ServerConfig {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
+        use anyhow::Context;
         std::fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("create {}", self.data_dir.display()))?;
         std::fs::create_dir_all(&self.identity_dir)
@@ -311,6 +279,20 @@ impl ServerConfig {
     }
 }
 
-fn env_path(k: &str) -> Option<PathBuf> {
-    std::env::var(k).ok().map(PathBuf::from)
+/// Parse a sequence of `host:port` strings into [`SocketAddr`]s, skipping (and
+/// warning on) any invalid entry — the same lenient parse the old env path used,
+/// reused for both the baked default and the `config:*` boot read.
+pub fn parse_bootstrap_peers(entries: impl IntoIterator<Item = String>) -> Vec<SocketAddr> {
+    entries
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| match p.parse::<SocketAddr>() {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!(peer = %p, error = %e, "skipping invalid bootstrap peer (must be host:port)");
+                None
+            }
+        })
+        .collect()
 }

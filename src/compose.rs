@@ -115,18 +115,38 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let initial_config = crate::config_reconcile::resolve(&engine, &cfg.key_id).await;
     tracing::info!(
         ?initial_config,
-        "resolved initial config:* snapshot (Server 0.5 Phase 2 — knobs now live in CEG, not env)"
+        "resolved initial config:* snapshot (Server 0.5 — knobs now live in CEG, not env)"
     );
+
+    // Apply the boot-structural NETWORK knobs from the resolved snapshot onto the
+    // node config BEFORE the edge is built. `net.listen_addr` / `net.bootstrap_peers`
+    // were env (CIRIS_SERVER_LISTEN_ADDR / CIRIS_SERVER_BOOTSTRAP_PEERS); they are
+    // now config:* objects with baked defaults. A malformed listen_addr falls back
+    // to the value `from_home` already baked in (never wedge boot on a bad row).
+    let mut cfg = cfg;
+    match initial_config.listen_addr.parse::<std::net::SocketAddr>() {
+        Ok(addr) => cfg.listen_addr = addr,
+        Err(e) => tracing::warn!(
+            value = %initial_config.listen_addr,
+            error = %e,
+            "config:* net.listen_addr is not a valid host:port — keeping the baked default"
+        ),
+    }
+    cfg.bootstrap_peers =
+        crate::config::parse_bootstrap_peers(initial_config.bootstrap_peers.iter().cloned());
+    let cfg = cfg;
+
     let (config_tx, config_rx) = watch::channel(initial_config.clone());
 
     // ── ROOT-user bootstrap (CIRISServer#19) ──────────────────────────────────
-    // Faithful port of the agent's `auth_service.bootstrap_if_needed`: if no ROOT
-    // WA exists, load the baked ROOT trust-anchor seed (env CIRIS_ROOT_SEED_PATH or
-    // CIRIS_ROOT_PUBKEY+CIRIS_ROOT_WA_ID) and store it + a child-of-root SYSTEM WA.
-    // With no seed it is a clean no-op (info-logged) — the first-run
-    // POST /v1/setup/root claim then lets the founder claim ROOT on a fresh node.
-    // Either way the founder's identity becomes WaRole::Root → UserRole::SystemAdmin,
-    // which is what the owner-gated POST /v1/federation/peering requires. Idempotent.
+    // Server 0.5 (zero env): a fresh node has NO baked root — it trusts
+    // ciris-canonical (per the constitution) and the FOUNDER claims ROOT via the
+    // first-run POST /v1/setup/root (NodeCode + one-time PIN) flow. The prior
+    // env-seed pre-seed branch (CIRIS_ROOT_*) is deleted, so this is always a clean
+    // no-op-then-claim: `bootstrap_if_needed` returns NoSeedAvailable and the
+    // serve-only-until-owned floor + the require_owner_bound gate stay EXACTLY as-is.
+    // On a successful claim the founder's identity becomes WaRole::Root →
+    // UserRole::SystemAdmin, which is what the owner-gated peering requires. Idempotent.
     let bootstrap_outcome = match crate::auth::bootstrap::bootstrap_if_needed(&engine).await {
         Ok(outcome) => {
             tracing::info!(?outcome, "root-user bootstrap evaluated");
@@ -144,11 +164,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
-    // pubkey of its federation signing key + env-derived transport/alias hints.
+    // pubkey of its federation signing key + the config:* node.alias hint.
     // Served (unauthenticated) by GET /v1/federation/node-code and used to
     // identity-pin the first-run ROOT claim (POST /v1/setup/root). Stable for the
     // node's lifetime.
-    let node_code = node_self_code(&engine, &cfg).await?;
+    // The node alias hint comes from the resolved config:* `node.alias` (Server
+    // 0.5 — no CIRIS_NODE_ALIAS env); falls back to the node key_id when unset.
+    let node_alias = if initial_config.node_alias.trim().is_empty() {
+        cfg.key_id.clone()
+    } else {
+        initial_config.node_alias.clone()
+    };
+    let node_code = node_self_code(&engine, &cfg, Some(node_alias)).await?;
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
 
@@ -160,15 +187,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    it. If a ROOT already exists (AlreadyBootstrapped / SeededRoot) NO PIN is
     //    minted — the route is 409-closed anyway. The PIN closes the hole that the
     //    NodeCode alone is a freely-shareable PUBLIC handle; it is printed ONLY to
-    //    the console/log (optionally CIRIS_CLAIM_PIN_FILE) and is NEVER served over
-    //    any HTTP route.
+    //    the console/log (and ALSO to the conventional `home/claim_pin` file for
+    //    headless ops) and is NEVER served over any HTTP route.
     let claim_pin: Option<String> =
         if bootstrap_outcome == crate::auth::bootstrap::BootstrapOutcome::NoSeedAvailable {
             let pin = crate::auth::bootstrap::generate_claim_pin();
             let node_code_str = crate::nodecode::encode(&node_code).map_err(|e| {
                 anyhow::anyhow!("encode this node's NodeCode for the claim banner: {e}")
             })?;
-            crate::auth::bootstrap::announce_ownership_unclaimed(&node_code_str, &pin);
+            crate::auth::bootstrap::announce_ownership_unclaimed(
+                &node_code_str,
+                &pin,
+                Some(cfg.claim_pin_file()),
+            );
             Some(pin)
         } else {
             tracing::info!(
@@ -306,8 +337,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 let adapter = Arc::clone(&adapter);
                 let adapter_ctx = adapter_ctx.clone();
                 let r = identity_router(identity_json)
-                    // login ceremony (self-at-login → user-managed consent)
-                    .merge(crate::auth::self_login::router(Arc::clone(&engine), strict))
+                    // login ceremony (self-at-login → user-managed consent). The
+                    // admin-eligibility allowlist is the boot-resolved config:*
+                    // auth.admin_key_ids (Server 0.5 — replaces CIRIS_ADMIN_KEY_IDS).
+                    .merge(crate::auth::self_login::router(
+                        Arc::clone(&engine),
+                        strict,
+                        initial_config.admin_key_ids.clone(),
+                    ))
                     // first-run ROOT claim (CIRISServer#19): POST /v1/setup/root —
                     // founder claims ROOT (→ SYSTEM_ADMIN) on a fresh, seedless node.
                     // Identity-pinned to THIS node's NodeCode (CEG §0.10): the claim
@@ -347,8 +384,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     ))
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
-                    // OAuth front-door + native google/apple
-                    .merge(crate::auth::oauth::router(Arc::clone(&engine)))
+                    // OAuth front-door + native google/apple. The callback base
+                    // is the boot-resolved config:* auth.oauth_callback_base_url
+                    // (Server 0.5 — replaces OAUTH_CALLBACK_BASE_URL).
+                    .merge(crate::auth::oauth::router(
+                        Arc::clone(&engine),
+                        initial_config.oauth_callback_base_url.clone(),
+                    ))
                     // API keys + service-token revocation
                     .merge(crate::auth::api_keys::router(Arc::clone(&engine)))
                     // attestation / consent / erasure (CEG-native)
@@ -358,8 +400,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     ))
                     .merge(crate::auth::consent::router(Arc::clone(&engine), strict))
                     .merge(crate::auth::erasure::router(Arc::clone(&engine), strict))
-                    // device-auth setup (scaffold)
-                    .merge(crate::auth::device_auth::router(Arc::clone(&engine)))
+                    // device-auth setup (scaffold). The session file lives under
+                    // the node home (Server 0.5 — no CIRIS_HOME/$HOME env).
+                    .merge(crate::auth::device_auth::router(
+                        Arc::clone(&engine),
+                        cfg.home.clone(),
+                    ))
                     // owner-directed federation peering: GET self-key-record +
                     // POST peering (each node authors its OWN consent grant).
                     .merge(crate::federation_admin::router(
@@ -550,117 +596,59 @@ fn identity_router(identity_json: String) -> axum::Router {
     )
 }
 
-/// Env: a path to a 32-byte Ed25519 seed for the **responsible USER's** identity
-/// (the human who claims remote nodes). Distinct from the node steward seed.
-const ENV_USER_ED25519_SEED: &str = "CIRIS_USER_ED25519_SEED_PATH";
-/// Env: a path to a 32-byte ML-DSA-65 seed for the responsible USER's identity.
-const ENV_USER_ML_DSA_SEED: &str = "CIRIS_USER_ML_DSA_65_SEED_PATH";
-/// Env: the responsible USER's federation `key_id` (the owner-binding granter).
-const ENV_USER_KEY_ID: &str = "CIRIS_USER_KEY_ID";
-
 /// The responsible **USER's** hybrid signer used by `POST /v1/setup/claim-remote`
 /// to sign the `delegates_to(user → target, infra:*)` owner-binding — NOT the
 /// node's steward signer (the owner-binding asserts an accountable *human* is
 /// responsible).
 ///
-/// Resolved in PRIORITY ORDER:
+/// **Server 0.5 (zero env): the user identity comes from the conventional path,
+/// not env.** The responsible-user identity is minted by `ciris-server identity
+/// create` into the conventional user seed dir ([`crate::user_seed_dir`]) under
+/// the conventional alias `<node key_id>-user`. This function detects that minted
+/// identity by its on-disk seed and, when present, wires the
+/// hardware/software-backed [`LocalSigner`] for it (the Ed25519 half stays
+/// custodied per the backend the mint used; the ML-DSA-65 half is the sealed PQC
+/// signer re-opened under the user key_id).
 ///
-/// 1. **Hardware-backed minted user identity (verify v6.0.0).** When
-///    `CIRIS_USER_BACKEND` ∈ {`pkcs11`, `platform-sealed`, `software`} is set
-///    (and `CIRIS_USER_KEY_ID` names the minted identity), the signer is composed
-///    from the keyring's `get_user_identity_signer` via
-///    `LocalSigner::from_hardware_parts` — the Ed25519 half stays
-///    hardware-custodied (YubiKey PKCS#11 / TPM-SE-sealed), the ML-DSA-65 half is
-///    the sealed PQC signer. This is the path the founder's `ciris-server identity
-///    create` mint produces: mint → the node holds the user identity → claim A/B
-///    signs with the user's YubiKey-custodied key.
-/// 2. **Legacy plaintext software seeds.** Falls back to the config-provided user
-///    keypair (`CIRIS_USER_KEY_ID` + `CIRIS_USER_ED25519_SEED_PATH` +
-///    `CIRIS_USER_ML_DSA_65_SEED_PATH`) for back-compat.
-///
-/// When NEITHER is configured, claim-remote is NOT wired (returns `None`) — the
-/// local node has no responsible-user identity to sign as.
+/// When no user identity exists at the conventional path, claim-remote is NOT
+/// wired (returns `None`) — the local node has no responsible-user identity to
+/// sign as (the prior `CIRIS_USER_BACKEND` / `CIRIS_USER_*` env selectors are
+/// deleted). The claim flow itself (`POST /v1/setup/root`) is unaffected.
 pub(crate) async fn user_identity_signer(
     cfg: &ServerConfig,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
-    use ciris_persist::prelude::LocalSigner;
+    // The conventional responsible-user identity: alias `<node key_id>-user`, seed
+    // under the conventional user seed dir (what `ciris-server identity create`
+    // mints by default).
+    let user_key_id = format!("{}-user", cfg.key_id);
+    let seed_dir = crate::user_seed_dir(cfg);
 
-    // 1. Hardware-backed minted user identity (the verify v6.0.0 path).
-    if let Ok(backend_name) = std::env::var("CIRIS_USER_BACKEND") {
-        let backend = match backend_name.trim() {
-            "software" => Some(crate::identity::UserIdentityBackend::Software),
-            "platform-sealed" | "platform_sealed" => {
-                Some(crate::identity::UserIdentityBackend::PlatformSealed)
-            }
-            "pkcs11" | "yubikey" => Some(crate::identity::UserIdentityBackend::Pkcs11(
-                crate::identity::Pkcs11Options::default(),
-            )),
-            other => {
-                tracing::warn!(
-                    "CIRIS_USER_BACKEND={other:?} is not pkcs11|platform-sealed|software — \
-                     ignoring the hardware user-identity path"
-                );
-                None
-            }
-        };
-        if let Some(backend) = backend {
-            let user_key_id =
-                std::env::var(ENV_USER_KEY_ID).unwrap_or_else(|_| format!("{}-user", cfg.key_id));
-            let seed_dir = crate::user_seed_dir(cfg);
-            let signer = crate::identity::hardware_user_local_signer(
-                backend.clone(),
-                &user_key_id,
-                seed_dir,
-            )
-            .await?;
-            tracing::info!(
-                user_key_id = %user_key_id,
-                backend = backend.label(),
-                "responsible-user signer wired for claim-remote (HARDWARE-ROOTED user identity — \
-                 verify v6.0.0 get_user_identity_signer; YubiKey custody on the pkcs11 backend)"
-            );
-            return Ok(Some(Arc::new(signer)));
-        }
-    }
-
-    // 2. Legacy plaintext software seeds (back-compat).
-    let (Ok(user_key_id), Ok(ed_path), Ok(ml_path)) = (
-        std::env::var(ENV_USER_KEY_ID),
-        std::env::var(ENV_USER_ED25519_SEED),
-        std::env::var(ENV_USER_ML_DSA_SEED),
-    ) else {
+    // Detect the minted user identity by its on-disk Ed25519 seed
+    // (`<seed_dir>/<user_key_id>.ed25519.seed`, written by the software mint).
+    let seed_path = seed_dir.join(format!("{user_key_id}.ed25519.seed"));
+    if !seed_path.exists() {
         tracing::info!(
-            "no responsible-user identity — set CIRIS_USER_BACKEND (pkcs11|platform-sealed|\
-             software) for a hardware-rooted user identity (mint via `ciris-server identity \
-             create`), or the legacy {ENV_USER_KEY_ID} + {ENV_USER_ED25519_SEED} + \
-             {ENV_USER_ML_DSA_SEED} software seeds. POST /v1/setup/claim-remote stays disabled \
-             until one is configured."
+            user_seed = %seed_path.display(),
+            "no responsible-user identity at the conventional path — mint one via \
+             `ciris-server identity create` to enable POST /v1/setup/claim-remote \
+             (it stays disabled until then; the first-run claim POST /v1/setup/root \
+             is unaffected)"
         );
         return Ok(None);
-    };
+    }
 
-    let ed_bytes = std::fs::read(ed_path.trim())
-        .with_context(|| format!("read user ed25519 seed {}", ed_path.trim()))?;
-    let ed_seed: [u8; 32] = ed_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("{ENV_USER_ED25519_SEED} must be a 32-byte ed25519 seed"))?;
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&ed_seed);
-
-    let pqc_alias = format!("{user_key_id}-pqc");
-    let pqc = MlDsa65SoftwareSigner::from_seed_file(ml_path.trim(), pqc_alias.clone())
-        .map_err(|e| anyhow::anyhow!("load user ML-DSA-65 seed {}: {e}", ml_path.trim()))?;
-
-    let signer = LocalSigner::from_parts(
-        signing_key,
-        user_key_id.clone(),
-        Some(Arc::new(pqc)),
-        Some(pqc_alias),
-    );
-    tracing::warn!(
+    // Software-backed by convention (the `ciris-server identity create` default).
+    // The Ed25519 seed + the sealed ML-DSA-65 half are re-opened under user_key_id.
+    let signer = crate::identity::hardware_user_local_signer(
+        crate::identity::UserIdentityBackend::Software,
+        &user_key_id,
+        seed_dir,
+    )
+    .await?;
+    tracing::info!(
         user_key_id = %user_key_id,
-        "responsible-user signer wired for claim-remote (LEGACY plaintext software seed — \
-         prefer CIRIS_USER_BACKEND=pkcs11 for YubiKey custody: `ciris-server identity create`)"
+        "responsible-user signer wired for claim-remote (minted user identity at the \
+         conventional path — Server 0.5, no env)"
     );
     Ok(Some(Arc::new(signer)))
 }
@@ -864,13 +852,22 @@ async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<Str
 /// Build THIS node's own [`NodeCode`](crate::nodecode::NodeCode) (CEG §0.10).
 /// Sourced from the SAME [`build_self_key_record`] assembly the self-key-record +
 /// steward registration use, so the embedded Ed25519 pubkey is exactly this node's
-/// federation signing-key pubkey. Hints come from the env surface
-/// ([`crate::federation_nodecode`]). Built once at boot.
-async fn node_self_code(engine: &Engine, cfg: &ServerConfig) -> Result<crate::nodecode::NodeCode> {
+/// federation signing-key pubkey. The alias hint is the resolved config:*
+/// `node.alias` (Server 0.5 — no env). Built once at boot.
+async fn node_self_code(
+    engine: &Engine,
+    cfg: &ServerConfig,
+    alias_hint: Option<String>,
+) -> Result<crate::nodecode::NodeCode> {
     let record = build_self_key_record(engine, cfg).await?;
     Ok(crate::federation_nodecode::build_node_code(
         &record.key_id,
         &record.pubkey_ed25519_base64,
+        alias_hint,
+        // No transport hint on the zero-env boot path (the prior CIRIS_TRANSPORT_HINT
+        // / CIRIS_PUBLIC_BASE_URL envs are deleted; Edge resolves real transports
+        // via its own discovery). A future config:* key can carry it if needed.
+        None,
     ))
 }
 
@@ -992,28 +989,14 @@ async fn setup_peer_replication(
         .context("replication runtime requires a SQLite-backed Engine")?
         .clone();
 
-    // 0. Optional env bootstrap — fold CIRIS_PEER_B_* into the corpus as a normal
-    //    consent object so it flows through the same CEG-derived path downstream.
-    if let Some(peer) = cfg.peer_b.as_ref() {
-        crate::peer::register_peer_key(engine, peer).await?;
-        crate::peer::emit_replication_consent(
-            engine,
-            &cfg.key_id,
-            &peer.key_id,
-            &crate::peer::default_attestation_prefixes(),
-        )
-        .await?;
-        tracing::info!(
-            peer_key_id = %peer.key_id,
-            "CIRIS_PEER_B_* bootstrapped into a consent:replication object (now flows through the \
-             CEG-driven reconcile path; the env is an optional convenience, not the mechanism)"
-        );
-    } else {
-        tracing::info!(
-            "no CIRIS_PEER_B_* configured — replication topology is owner-authored consent only \
-             (POST /v1/federation/peering)"
-        );
-    }
+    // Server 0.5 (zero env): there is NO env peer-bootstrap branch. The replication
+    // topology is owner-authored consent ONLY — a peer is admitted + a
+    // consent:replication object emitted via the owner-gated POST
+    // /v1/federation/peering. The prior CIRIS_PEER_B_* env-seed branch is deleted.
+    tracing::info!(
+        "replication topology is owner-authored consent only (POST /v1/federation/peering) — \
+         zero env (Server 0.5)"
+    );
 
     // 1. Desired Initiator set from CEG — admitted consent:replication subjects.
     let consented = crate::peer::replication_peers_from_consent(engine, &cfg.key_id).await?;

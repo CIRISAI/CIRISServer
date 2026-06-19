@@ -35,6 +35,10 @@ use super::verify::{self, VerifyError};
 struct SelfLoginState {
     engine: Arc<Engine>,
     policy: HybridPolicy,
+    /// Admin-eligible federation `key_id`s (the auto-mint eligibility allowlist),
+    /// resolved at boot from the `auth.admin_key_ids` config:* object (Server 0.5
+    /// — no env). Threaded into [`super::bootstrap::is_admin_eligible`].
+    admin_key_ids: Arc<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +155,7 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
             // owner-gated POST /v1/federation/peering is reachable. Non-eligible
             // signers are a no-op; a store failure is logged, never fatal to login
             // (the agent's `except: warn; user can mint manually`).
-            let eligible = super::bootstrap::is_admin_eligible(&caller.key_id);
+            let eligible = super::bootstrap::is_admin_eligible(&caller.key_id, &st.admin_key_ids);
             if let Err(e) =
                 super::bootstrap::auto_mint_root_if_needed(&st.engine, &caller.key_id, eligible)
                     .await
@@ -181,8 +185,16 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
 
 /// The `/v1/self/login` router — merge onto the read-API listener alongside
 /// `/v1/identity`. Default [`HybridPolicy::Strict`] (no classical-only path).
-pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> Router {
+///
+/// `admin_key_ids` is the boot-resolved `auth.admin_key_ids` config:* allowlist
+/// (Server 0.5 — replaces the `CIRIS_ADMIN_KEY_IDS` / `CIRIS_ROOT_KEY_ID` env):
+/// an identity in it is auto-minted as ROOT → SYSTEM_ADMIN on first self-login.
+pub fn router(engine: Arc<Engine>, policy: HybridPolicy, admin_key_ids: Vec<String>) -> Router {
     Router::new()
         .route("/v1/self/login", axum::routing::post(self_login))
-        .with_state(SelfLoginState { engine, policy })
+        .with_state(SelfLoginState {
+            engine,
+            policy,
+            admin_key_ids: Arc::new(admin_key_ids),
+        })
 }

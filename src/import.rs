@@ -62,7 +62,7 @@ const COMPONENTS: &[(&str, &str, &str, &str)] = &[
 
 /// Entry point for the `import-traces` subcommand.
 pub async fn run(dump_dir: &str) -> Result<()> {
-    let cfg = ServerConfig::from_env()?;
+    let cfg = ServerConfig::defaults()?;
     cfg.ensure_dirs()?;
     let signer: Arc<dyn ciris_keyring::HardwareSigner> = Arc::from(federation_signer(&cfg)?);
     // Hard cut to hybrid (CIRISVerify#75): even the legacy-import Engine signs its

@@ -49,7 +49,7 @@
 //! `active: bool`. [`RootSeed`] deserializes the agent's exact on-disk shape and
 //! converts, so an operator can drop the agent's `seed/root_pub.json` in verbatim.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -62,24 +62,6 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use super::store;
-
-/// Env: an OPTIONAL filesystem path the one-time claim PIN is ALSO written to on a
-/// fresh (unclaimed) boot, for headless ops that cannot scrape the console log. The
-/// default is console/log ONLY — the PIN is the operator-presence secret and is
-/// NEVER served over any HTTP route. When set, the PIN file is written `0600` and
-/// the operator is responsible for removing it after the claim.
-pub const ENV_CLAIM_PIN_FILE: &str = "CIRIS_CLAIM_PIN_FILE";
-
-/// Env: a filesystem path to a `root_pub.json`-shaped seed (the agent's shape).
-pub const ENV_SEED_PATH: &str = "CIRIS_ROOT_SEED_PATH";
-/// Env: the ROOT public key (base64/base64url Ed25519) — the seed-less inline form.
-pub const ENV_ROOT_PUBKEY: &str = "CIRIS_ROOT_PUBKEY";
-/// Env: the ROOT `wa_id` paired with [`ENV_ROOT_PUBKEY`].
-pub const ENV_ROOT_WA_ID: &str = "CIRIS_ROOT_WA_ID";
-/// Env: the ROOT identity `key_id` an auto-mint binds to (the founder's federation key).
-pub const ENV_ROOT_KEY_ID: &str = "CIRIS_ROOT_KEY_ID";
-/// Env: a comma-separated allowlist of admin-eligible `key_id`s (auto-mint gate).
-pub const ENV_ADMIN_KEY_IDS: &str = "CIRIS_ADMIN_KEY_IDS";
 
 /// The agent's `seed/root_pub.json` on-disk shape. Field-compatible with the
 /// agent so its seed file drops in verbatim:
@@ -126,7 +108,9 @@ fn default_active_int() -> i64 {
 pub enum BootstrapOutcome {
     /// A ROOT WaCert already existed — no-op (idempotent re-run).
     AlreadyBootstrapped,
-    /// A baked seed was loaded and a ROOT WaCert was stored.
+    /// A baked seed was loaded and a ROOT WaCert was stored. **Server 0.5: never
+    /// produced on the boot path** (which always takes the no-seed claim route);
+    /// retained for an explicit seed-import tool ([`root_cert_from_seed`]).
     SeededRoot,
     /// No ROOT and no seed configured — first-run root-claim is available.
     NoSeedAvailable,
@@ -196,7 +180,10 @@ fn parse_created(created: Option<&str>) -> chrono::DateTime<chrono::Utc> {
 /// pinned to [`WaRole::Root`]; `token_type` to [`TokenType::Standard`]; `scopes`
 /// to the seed's set (default `["*"]`). The pubkey is stored verbatim — it is the
 /// founder's OFFLINE-held anchor, never a private key.
-fn root_cert_from_seed(seed: &RootSeed) -> Result<WaCert, BootstrapError> {
+///
+/// **Server 0.5: a pub utility for an explicit seed-import tool, NOT the boot
+/// path** (which always takes the no-seed claim route). See [`load_seed_file`].
+pub fn root_cert_from_seed(seed: &RootSeed) -> Result<WaCert, BootstrapError> {
     if seed.role != "root" {
         return Err(BootstrapError::NotRoot(seed.role.clone()));
     }
@@ -231,109 +218,32 @@ fn root_cert_from_seed(seed: &RootSeed) -> Result<WaCert, BootstrapError> {
     })
 }
 
-/// Resolve a [`RootSeed`] from the configured env surface, mirroring the agent's
-/// "load the baked seed" step:
-///
-/// 1. `CIRIS_ROOT_SEED_PATH` → a `root_pub.json`-shaped file (agent verbatim);
-/// 2. else `CIRIS_ROOT_PUBKEY` + `CIRIS_ROOT_WA_ID` → an inline anchor;
-/// 3. else `None` (no seed; first-run root-claim is available).
-fn load_seed_from_env() -> Result<Option<RootSeed>, BootstrapError> {
-    if let Ok(path) = std::env::var(ENV_SEED_PATH) {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return load_seed_file(Path::new(trimmed)).map(Some);
-        }
-    }
-    if let (Ok(pubkey), Ok(wa_id)) = (
-        std::env::var(ENV_ROOT_PUBKEY),
-        std::env::var(ENV_ROOT_WA_ID),
-    ) {
-        if !pubkey.trim().is_empty() && !wa_id.trim().is_empty() {
-            return Ok(Some(RootSeed {
-                wa_id: wa_id.trim().to_string(),
-                name: "ciris_root".to_string(),
-                role: "root".to_string(),
-                pubkey: pubkey.trim().to_string(),
-                jwt_kid: None,
-                scopes_json: None,
-                created: None,
-                active: 1,
-                token_type: None,
-            }));
-        }
-    }
-    Ok(None)
-}
-
 /// Read + parse a `root_pub.json`-shaped seed file (the agent's shape).
+///
+/// **Server 0.5 (zero env): NOT called at boot.** A fresh node has no baked root —
+/// it trusts `ciris-canonical` (per the constitution) and the founder claims ROOT
+/// via the first-run `POST /v1/setup/root` (NodeCode + one-time PIN) flow. This
+/// parser is retained as a pub utility (and for the seed-shape unit tests) so an
+/// out-of-band tool can still read the agent's seed shape; the boot path no longer
+/// pre-seeds a root from env or file.
 pub fn load_seed_file(path: &Path) -> Result<RootSeed, BootstrapError> {
     let content = std::fs::read_to_string(path).map_err(BootstrapError::Io)?;
     serde_json::from_str(&content).map_err(BootstrapError::Parse)
 }
 
-/// **`bootstrap_if_needed`** — the startup ROOT bootstrap (port of
-/// `service.py:bootstrap_if_needed`).
-///
-/// If a ROOT WaCert already exists, this is a no-op ([`BootstrapOutcome::AlreadyBootstrapped`])
-/// — idempotent across reboots, exactly like the agent's `has_root` short-circuit.
-/// Otherwise it resolves a seed from the env surface ([`load_seed_from_env`]) and,
-/// if present, stores it as the ROOT trust anchor + ensures a SYSTEM WA exists as a
-/// CHILD of root. With no seed it logs and returns [`BootstrapOutcome::NoSeedAvailable`]
-/// (no panic) — the first-run `POST /v1/setup/root` claim remains available.
-pub async fn bootstrap_if_needed(engine: &Engine) -> Result<BootstrapOutcome, BootstrapError> {
-    // `list_by_role` returns only ACTIVE certs — mirrors the agent's `has_root`.
-    let existing = store::list_by_role(engine, WaRole::Root, 1).await?;
-    if !existing.is_empty() {
-        tracing::debug!("root WA already present — bootstrap is a no-op (idempotent)");
-        return Ok(BootstrapOutcome::AlreadyBootstrapped);
-    }
-
-    let Some(seed) = load_seed_from_env()? else {
-        tracing::info!(
-            "no root seed ({ENV_SEED_PATH} / {ENV_ROOT_PUBKEY}+{ENV_ROOT_WA_ID}); \
-             first-run root-claim available at POST /v1/setup/root"
-        );
-        return Ok(BootstrapOutcome::NoSeedAvailable);
-    };
-
-    let cert = root_cert_from_seed(&seed)?;
-    let root_wa_id = cert.wa_id.clone();
-    store::upsert(engine, cert).await?;
-    tracing::info!(wa_id = %root_wa_id, "loaded baked ROOT WA trust anchor (offline-held private key)");
-
-    // Ensure a SYSTEM WA exists as a CHILD of root (the agent's
-    // `_create_system_wa_certificate(root.wa_id)`). The substrate CAN express the
-    // child-of-root link via `parent_wa_id` (self-FK) + `parent_signature`.
-    ensure_system_wa(engine, &root_wa_id).await?;
-
-    Ok(BootstrapOutcome::SeededRoot)
-}
-
-/// Ensure the SYSTEM WA exists as a child of `root_wa_id` (port of
-/// `_create_system_wa_certificate`). Idempotent: a present SYSTEM WA is a no-op.
-///
-/// Faithfulness note: the agent's `_create_system_wa_certificate` MINTS a fresh
-/// keypair for the system WA and signs the parent link with the system key. Here
-/// the fabric stores the parent linkage (`parent_wa_id = root`) but does NOT mint
-/// a signing keypair — the substrate row carries no private material and the
-/// fabric is the single token issuer (sessions, not per-WA JWTs), so a system
-/// signing key has no consumer on this side yet. The CHILD-OF-ROOT relationship
-/// IS expressed; the keypair-mint is the one piece deferred (it lights up when the
-/// node slice that signs as SYSTEM lands). The SYSTEM WA rides `WaRole::Authority`
-/// (it is not the root-of-trust itself).
-async fn ensure_system_wa(engine: &Engine, root_wa_id: &str) -> Result<(), BootstrapError> {
-    let system_wa_id = "wa-system-00";
-    if store::get(engine, system_wa_id).await?.is_some() {
-        return Ok(());
-    }
+/// Build a SYSTEM WA child-of-root row from a seeded ROOT (port of
+/// `_create_system_wa_certificate`). Retained as a pub utility for an explicit
+/// seed-import tool; **not called on the zero-env boot path** (which always takes
+/// the no-seed claim route). See [`load_seed_file`].
+pub fn system_wa_cert(root_wa_id: &str) -> WaCert {
     let now = chrono::Utc::now();
-    let cert = WaCert {
-        wa_id: system_wa_id.to_string(),
+    WaCert {
+        wa_id: "wa-system-00".to_string(),
         name: "ciris_system".to_string(),
         role: WaRole::Authority,
         // The substrate requires a non-empty pubkey. No keypair is minted on this
-        // side (see the doc comment) — a deterministic placeholder marks the row as
-        // keyless (the fabric is the single token issuer; this WA has no per-WA JWT).
+        // side — a deterministic placeholder marks the row as keyless (the fabric
+        // is the single token issuer; this WA has no per-WA JWT).
         pubkey: format!("system-of:{root_wa_id}"),
         jwt_kid: "wa-jwt-system00".to_string(),
         password_hash: None,
@@ -344,7 +254,6 @@ async fn ensure_system_wa(engine: &Engine, root_wa_id: &str) -> Result<(), Boots
         veilid_id: None,
         auto_minted: true,
         parent_wa_id: Some(root_wa_id.to_string()),
-        // No keypair is minted on this side (see the doc comment) → no signature.
         parent_signature: None,
         scopes: serde_json::json!(["*"]),
         custom_permissions: None,
@@ -355,30 +264,52 @@ async fn ensure_system_wa(engine: &Engine, root_wa_id: &str) -> Result<(), Boots
         created: now,
         last_login: None,
         active: true,
-    };
-    store::upsert(engine, cert).await?;
-    tracing::info!(parent = %root_wa_id, "ensured SYSTEM WA as child of root");
-    Ok(())
+    }
 }
 
-/// True if `key_id` is admin-eligible: it matches the configured root identity
-/// (`CIRIS_ROOT_KEY_ID`) OR appears in the `CIRIS_ADMIN_KEY_IDS` allowlist
-/// (comma-separated). This is the fabric analogue of the agent's
+/// **`bootstrap_if_needed`** — the startup ROOT bootstrap.
+///
+/// **Server 0.5 (zero env): always the no-seed (claim) path.** The prior env-seed
+/// pre-seed branch (`CIRIS_ROOT_SEED_PATH` / `CIRIS_ROOT_PUBKEY`+`CIRIS_ROOT_WA_ID`)
+/// is DELETED. The behavior is now:
+///   - if a ROOT WaCert already exists → no-op
+///     ([`BootstrapOutcome::AlreadyBootstrapped`]), idempotent across reboots
+///     (the agent's `has_root` short-circuit);
+///   - otherwise → [`BootstrapOutcome::NoSeedAvailable`] (a clean no-op): the
+///     node trusts `ciris-canonical` and the founder claims ROOT via the first-run
+///     `POST /v1/setup/root` (NodeCode + one-time PIN) flow.
+///
+/// The serve-only-until-owned floor + the `require_owner_bound` gate are UNCHANGED
+/// — this function only stopped pre-seeding a root from env.
+pub async fn bootstrap_if_needed(engine: &Engine) -> Result<BootstrapOutcome, BootstrapError> {
+    // `list_by_role` returns only ACTIVE certs — mirrors the agent's `has_root`.
+    let existing = store::list_by_role(engine, WaRole::Root, 1).await?;
+    if !existing.is_empty() {
+        tracing::debug!("root WA already present — bootstrap is a no-op (idempotent)");
+        return Ok(BootstrapOutcome::AlreadyBootstrapped);
+    }
+
+    tracing::info!(
+        "no ROOT owner — first-run root-claim available at POST /v1/setup/root \
+         (NodeCode + one-time PIN); the node trusts ciris-canonical until claimed (Server 0.5)"
+    );
+    Ok(BootstrapOutcome::NoSeedAvailable)
+}
+
+/// True if `key_id` is admin-eligible: it appears in `admin_key_ids` (the
+/// operator-declared allowlist). This is the fabric analogue of the agent's
 /// `oauth_user.role == SYSTEM_ADMIN` eligibility check — on the federation side an
 /// identity's eligibility is operator-declared, not OAuth-email-derived.
-pub fn is_admin_eligible(key_id: &str) -> bool {
-    if let Ok(root) = std::env::var(ENV_ROOT_KEY_ID) {
-        if root.trim() == key_id {
-            return true;
-        }
-    }
-    if let Ok(list) = std::env::var(ENV_ADMIN_KEY_IDS) {
-        return list
-            .split(',')
-            .map(str::trim)
-            .any(|k| !k.is_empty() && k == key_id);
-    }
-    false
+///
+/// **Server 0.5 (zero env):** the allowlist is no longer read from
+/// `CIRIS_ADMIN_KEY_IDS` / `CIRIS_ROOT_KEY_ID`. It is resolved at boot from the
+/// `auth.admin_key_ids` config:* object and threaded into the self-login router as
+/// state, then passed here.
+pub fn is_admin_eligible(key_id: &str, admin_key_ids: &[String]) -> bool {
+    admin_key_ids
+        .iter()
+        .map(|k| k.trim())
+        .any(|k| !k.is_empty() && k == key_id)
 }
 
 /// **`auto_mint_root_if_needed`** — port of `routes/auth.py:_auto_mint_system_admin_if_needed`.
@@ -482,9 +413,10 @@ pub fn generate_claim_pin() -> String {
 
 /// Print the unmissable "OWNERSHIP UNCLAIMED" banner at startup — the NodeCode (a
 /// PUBLIC handle) PLUS the one-time claim PIN (the console-only operator-presence
-/// secret). Optionally ALSO writes the PIN to [`ENV_CLAIM_PIN_FILE`] (`0600`) for
-/// headless ops. The PIN is NEVER served over HTTP.
-pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str) {
+/// secret). When `pin_file` is `Some`, ALSO writes the PIN to that path (`0600`)
+/// for headless ops (Server 0.5: the conventional `home/claim_pin` path, NOT an
+/// env). The PIN is NEVER served over HTTP.
+pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str, pin_file: Option<PathBuf>) {
     tracing::warn!(
         "\n\
          ╔══════════════════════════════════════════════════════════════════════╗\n\
@@ -501,23 +433,20 @@ pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str) {
          ╚══════════════════════════════════════════════════════════════════════╝"
     );
 
-    // Optional headless-ops sink: write the PIN to a 0600 file when configured.
-    if let Ok(path) = std::env::var(ENV_CLAIM_PIN_FILE) {
-        let path = path.trim();
-        if !path.is_empty() {
-            match std::fs::write(path, format!("{claim_pin}\n")) {
-                Ok(()) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ =
-                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-                    }
-                    tracing::info!(pin_file = %path, "one-time claim PIN ALSO written to file (0600; remove after claim)");
+    // Optional headless-ops sink: write the PIN to a 0600 file when a path is
+    // supplied (the conventional `home/claim_pin`; Server 0.5 — not env).
+    if let Some(path) = pin_file {
+        match std::fs::write(&path, format!("{claim_pin}\n")) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
-                Err(e) => {
-                    tracing::warn!(pin_file = %path, error = %e, "could not write claim PIN file (PIN remains available on the console)")
-                }
+                tracing::info!(pin_file = %path.display(), "one-time claim PIN ALSO written to file (0600; remove after claim)");
+            }
+            Err(e) => {
+                tracing::warn!(pin_file = %path.display(), error = %e, "could not write claim PIN file (PIN remains available on the console)")
             }
         }
     }

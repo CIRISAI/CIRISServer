@@ -71,6 +71,21 @@ pub const DEFAULT_REPLICATION_RECONCILE_SECS: u64 = 30;
 /// server: installing the server means a server.
 pub const DEFAULT_MODE: &str = "server";
 
+/// Default for `net.listen_addr` — the Reticulum node port. Was
+/// `CIRIS_SERVER_LISTEN_ADDR`. Boot-structural (binds the edge).
+pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:4242";
+
+/// Default for `net.bootstrap_peers` — the canonical CIRIS Reticulum mesh entry
+/// addresses. Was `CIRIS_SERVER_BOOTSTRAP_PEERS`.
+///
+/// **FLAG (operator action required):** this is intentionally EMPTY. The canonical
+/// CIRIS Reticulum mesh entry `host:port` addresses belong here so a fresh node can
+/// dial into the mesh at boot. Until they are filled, the node relies on Reticulum
+/// announce discovery on shared interfaces (LAN / configured peers via the
+/// `net.bootstrap_peers` config:* object). An operator running a canonical node
+/// SHOULD either fill this const or author a `net.bootstrap_peers` config:* object.
+pub const CANONICAL_BOOTSTRAP_PEERS: &[&str] = &[];
+
 /// The config reconciler's own tick cadence (seconds). Config resolution is cheap
 /// and decoupled from the replication topology cadence, so it runs on a fixed
 /// short period plus the `Notify` nudge.
@@ -94,6 +109,16 @@ pub const KEY_SCORER_TARGET_N_EFF: &str = "scorer.target_n_eff";
 pub const KEY_REPLICATION_RECONCILE_SECS: &str = "replication.reconcile_secs";
 /// `mode` — the node transport posture (client/proxy/server).
 pub const KEY_MODE: &str = "mode";
+/// `net.listen_addr` — the Reticulum node listen address (boot-structural).
+pub const KEY_LISTEN_ADDR: &str = "net.listen_addr";
+/// `net.bootstrap_peers` — Reticulum mesh entry addresses (boot-structural, list).
+pub const KEY_BOOTSTRAP_PEERS: &str = "net.bootstrap_peers";
+/// `node.alias` — the human-readable alias the node suggests for itself.
+pub const KEY_NODE_ALIAS: &str = "node.alias";
+/// `auth.admin_key_ids` — admin-eligible federation `key_id`s (auto-mint gate, list).
+pub const KEY_ADMIN_KEY_IDS: &str = "auth.admin_key_ids";
+/// `auth.oauth_callback_base_url` — the OAuth front-door callback base URL.
+pub const KEY_OAUTH_CALLBACK_BASE_URL: &str = "auth.oauth_callback_base_url";
 
 /// The resolved, runtime-tunable configuration — the migrated knobs, read at boot
 /// for the initial snapshot AND on every reconcile tick. [`Default`] is the baked
@@ -116,6 +141,23 @@ pub struct ResolvedConfig {
     pub replication_reconcile_secs: u64,
     /// `mode` (boot-structural). The node transport posture string.
     pub mode: String,
+    /// `net.listen_addr` (boot-structural). The Reticulum node listen address
+    /// (the raw `host:port` string; parsed at the build site, baked default on a
+    /// malformed value).
+    pub listen_addr: String,
+    /// `net.bootstrap_peers` (boot-structural). Reticulum mesh entry `host:port`
+    /// strings; parsed to `SocketAddr` at the build site (invalid entries skipped
+    /// + warned).
+    pub bootstrap_peers: Vec<String>,
+    /// `node.alias` (boot-structural). The human-readable alias the node suggests
+    /// for itself in its NodeCode (empty = none).
+    pub node_alias: String,
+    /// `auth.admin_key_ids` (boot-structural). Admin-eligible federation `key_id`s
+    /// (the auto-mint eligibility allowlist).
+    pub admin_key_ids: Vec<String>,
+    /// `auth.oauth_callback_base_url` (boot-structural). The OAuth front-door
+    /// callback base URL (empty = the baked localhost default at the build site).
+    pub oauth_callback_base_url: String,
 }
 
 impl Default for ResolvedConfig {
@@ -129,6 +171,14 @@ impl Default for ResolvedConfig {
             scorer_target_n_eff: DEFAULT_SCORER_TARGET_N_EFF,
             replication_reconcile_secs: DEFAULT_REPLICATION_RECONCILE_SECS,
             mode: DEFAULT_MODE.to_owned(),
+            listen_addr: DEFAULT_LISTEN_ADDR.to_owned(),
+            bootstrap_peers: CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            node_alias: String::new(),
+            admin_key_ids: Vec::new(),
+            oauth_callback_base_url: String::new(),
         }
     }
 }
@@ -217,6 +267,34 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
         .flatten()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.mode);
+    let listen_addr = graph_config::get_str(engine, node_key_id, KEY_LISTEN_ADDR)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(d.listen_addr);
+    let bootstrap_peers = graph_config::get_str_list(engine, node_key_id, KEY_BOOTSTRAP_PEERS)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.bootstrap_peers);
+    // `node.alias` defaults to empty (the build site falls back to key_id).
+    let node_alias = graph_config::get_str(engine, node_key_id, KEY_NODE_ALIAS)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.node_alias);
+    let admin_key_ids = graph_config::get_str_list(engine, node_key_id, KEY_ADMIN_KEY_IDS)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.admin_key_ids);
+    let oauth_callback_base_url =
+        graph_config::get_str(engine, node_key_id, KEY_OAUTH_CALLBACK_BASE_URL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(d.oauth_callback_base_url);
 
     ResolvedConfig {
         transport_node,
@@ -227,6 +305,11 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
         scorer_target_n_eff,
         replication_reconcile_secs,
         mode,
+        listen_addr,
+        bootstrap_peers,
+        node_alias,
+        admin_key_ids,
+        oauth_callback_base_url,
     }
 }
 

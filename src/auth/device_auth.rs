@@ -18,9 +18,9 @@
 //! from validated components only (scheme+netloc), never the raw user string
 //! (CVE-2023-24329 class). `http` is allowed only for `localhost`/`127.0.0.1`.
 //!
-//! The session is persisted to `${CIRIS_HOME:-~/.ciris}/.device_auth_session.json`
-//! exactly like the agent, so an in-flight pairing survives a restart and
-//! `reset-device-auth` clears the SAME file.
+//! The session is persisted to `home/.device_auth_session.json` (Server 0.5: the
+//! node data root, not `CIRIS_HOME`/`$HOME`), so an in-flight pairing survives a
+//! restart and `reset-device-auth` clears the SAME file.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,21 +75,19 @@ pub fn validate_portal_url(raw: &str) -> Result<String, String> {
     Ok(base)
 }
 
-/// The device-auth session file path (`${CIRIS_HOME:-~/.ciris}/.device_auth_session.json`),
-/// matching the agent's `_get_device_auth_session_path`.
-fn device_auth_session_path() -> PathBuf {
-    let home = std::env::var("CIRIS_HOME").unwrap_or_else(|_| {
-        let h = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{h}/.ciris")
-    });
-    PathBuf::from(home).join(".device_auth_session.json")
-}
+/// The conventional device-auth session filename under the node's home (Server
+/// 0.5: `home/.device_auth_session.json` — no `CIRIS_HOME`/`$HOME` env). Mirrors
+/// the agent's `_get_device_auth_session_path`, repointed to the node home.
+const DEVICE_AUTH_SESSION_FILE: &str = ".device_auth_session.json";
 
 #[derive(Clone)]
 struct DeviceAuthState {
     #[allow(dead_code)] // the substrate touch lands when pairing writes a node identity.
     engine: Arc<Engine>,
     http: reqwest::Client,
+    /// The device-auth session file path (`home/.device_auth_session.json`),
+    /// derived from the node home at boot (Server 0.5 — no env).
+    session_path: PathBuf,
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -178,6 +176,7 @@ async fn connect_node(State(st): State<DeviceAuthState>, body: axum::body::Bytes
     let interval = data.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
 
     save_device_auth_session(
+        &st.session_path,
         &device_code,
         &portal_url,
         &verification_uri,
@@ -201,7 +200,9 @@ async fn connect_node(State(st): State<DeviceAuthState>, body: axum::body::Bytes
 }
 
 /// Persist the in-flight device-auth session (agent's `_save_device_auth_session`).
+#[allow(clippy::too_many_arguments)]
 fn save_device_auth_session(
+    path: &PathBuf,
     device_code: &str,
     portal_url: &str,
     verification_uri_complete: &str,
@@ -220,16 +221,15 @@ fn save_device_auth_session(
         "expires_at": now + expires_in as f64,
         "created_at": now,
     });
-    let path = device_auth_session_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, serde_json::to_vec(&session).unwrap_or_default());
+    let _ = std::fs::write(path, serde_json::to_vec(&session).unwrap_or_default());
 }
 
 /// Clear the persisted device-auth session (agent's `_clear_device_auth_session`).
-fn clear_device_auth_session() {
-    let _ = std::fs::remove_file(device_auth_session_path());
+fn clear_device_auth_session(path: &PathBuf) {
+    let _ = std::fs::remove_file(path);
 }
 
 // ─── GET /v1/setup/connect-node/status ──────────────────────────────────────
@@ -291,7 +291,7 @@ async fn connect_node_status(
     }
     // 403 = denied — clear the session so the operator can retry.
     if code == 403 {
-        clear_device_auth_session();
+        clear_device_auth_session(&st.session_path);
         return (StatusCode::OK, Json(status_only("error"))).into_response();
     }
     if code != 200 {
@@ -319,7 +319,7 @@ async fn connect_node_status(
         .cloned()
         .unwrap_or(serde_json::Value::Object(Default::default()));
 
-    clear_device_auth_session();
+    clear_device_auth_session(&st.session_path);
 
     let resp = ConnectNodeStatusResponse {
         status: "complete".into(),
@@ -349,8 +349,8 @@ fn status_only(s: &str) -> ConnectNodeStatusResponse {
 
 /// Clear the device-auth session state (agent's `reset_device_auth`). No auth —
 /// it only affects local session state.
-async fn reset_device_auth() -> Response {
-    clear_device_auth_session();
+async fn reset_device_auth(State(st): State<DeviceAuthState>) -> Response {
+    clear_device_auth_session(&st.session_path);
     (
         StatusCode::OK,
         Json(serde_json::json!({ "status": "reset", "message": "Device auth session cleared" })),
@@ -358,13 +358,15 @@ async fn reset_device_auth() -> Response {
         .into_response()
 }
 
-/// The device-auth router.
-pub fn router(engine: Arc<Engine>) -> Router {
+/// The device-auth router. `home` is the node data root (Server 0.5 — the
+/// device-auth session file is `home/.device_auth_session.json`, not env-derived).
+pub fn router(engine: Arc<Engine>, home: PathBuf) -> Router {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none()) // SSRF: no redirect-following.
         .build()
         .expect("reqwest client");
+    let session_path = home.join(DEVICE_AUTH_SESSION_FILE);
     Router::new()
         .route("/v1/setup/connect-node", axum::routing::post(connect_node))
         .route(
@@ -375,7 +377,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
             "/v1/setup/reset-device-auth",
             axum::routing::post(reset_device_auth),
         )
-        .with_state(DeviceAuthState { engine, http })
+        .with_state(DeviceAuthState {
+            engine,
+            http,
+            session_path,
+        })
 }
 
 #[cfg(test)]

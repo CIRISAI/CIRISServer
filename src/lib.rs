@@ -48,7 +48,10 @@ pub mod benchmarks;
 /// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
 pub mod claim_remote;
 mod compose;
-mod config;
+/// Zero-setup node configuration (Server 0.5 — conventions + CLI, NO env). Public
+/// so the binary's flag parser can read the baked-default constants
+/// ([`config::DEFAULT_CIRIS_HOME`] / [`config::DEFAULT_KEY_ID`]).
+pub mod config;
 /// **Config-as-CEG HTTP** (Server 0.5 Phase 1) — the owner-gated `/v1/config`
 /// surface over [`graph_config`]. A config WRITE is gated the SAME way federation
 /// peering is (serve-only floor + SYSTEM_ADMIN owner session). Public so the
@@ -154,16 +157,33 @@ pub use ciris_persist::prelude::Engine;
 
 use anyhow::Result;
 
-/// Run the fabric node: load zero-setup config, compose the active slices, serve.
-pub async fn run() -> Result<()> {
-    let cfg = ServerConfig::from_env()?;
+/// Run the fabric node from the **conventions + CLI** (Server 0.5 zero-env):
+/// `home` is the data root (`--home` or [`config::DEFAULT_CIRIS_HOME`]); `key_id`
+/// is the federation key label (`--key-id` or [`config::DEFAULT_KEY_ID`]). All
+/// other config is baked constants or `config:*` CEG resolved at boot.
+pub async fn run(home: std::path::PathBuf, key_id: String) -> Result<()> {
+    let cfg = ServerConfig::from_home(home, key_id)?;
     tracing::info!(
+        home = %cfg.home.display(),
         data_dir = %cfg.data_dir.display(),
         listen = %cfg.listen_addr,
-        "CIRISServer (the fabric node) starting — lens-only (0.1); mode + runtime knobs resolve \
-         from config:* CEG at boot (Server 0.5 Phase 2)"
+        key_id = %cfg.key_id,
+        "CIRISServer (the fabric node) starting — lens-only (0.1); ZERO env vars: home is the one \
+         input (--home), all other config is baked constants or config:* CEG resolved at boot \
+         (Server 0.5)"
     );
     compose::serve(cfg).await
+}
+
+/// Run with the baked defaults (home = [`config::DEFAULT_CIRIS_HOME`], key_id =
+/// [`config::DEFAULT_KEY_ID`]) — the entry point for hosts that take no flags
+/// (the PyO3 wheel `main`).
+pub async fn run_default() -> Result<()> {
+    run(
+        std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME),
+        config::DEFAULT_KEY_ID.to_string(),
+    )
+    .await
 }
 
 /// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
@@ -174,11 +194,10 @@ pub async fn import_traces(dump_dir: &str) -> Result<()> {
 
 /// The user-identity seed directory — DISTINCT from the node steward's
 /// `identity_dir` (the human's signing key must NOT be co-resident with the node
-/// key). Defaults to `<identity_dir>/user`, override with `CIRIS_USER_SEED_DIR`.
+/// key). The **conventional** path `<identity_dir>/user` (Server 0.5: no env). The
+/// `ciris-server identity create` CLI mints into here.
 pub fn user_seed_dir(cfg: &ServerConfig) -> std::path::PathBuf {
-    std::env::var("CIRIS_USER_SEED_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| cfg.identity_dir.join("user"))
+    cfg.identity_dir.join("user")
 }
 
 /// Drive `ciris-server identity create` — the founder's "mint my YubiKey-backed
@@ -187,17 +206,19 @@ pub fn user_seed_dir(cfg: &ServerConfig) -> std::path::PathBuf {
 /// and returns the minted identity (the caller prints it). Public so both the
 /// binary and the wheel CLI can call it.
 pub async fn provision_user_identity(
+    cfg: &ServerConfig,
     backend: identity::UserIdentityBackend,
     label: Option<String>,
+    seed_dir_override: Option<std::path::PathBuf>,
 ) -> Result<identity::MintedUserIdentity> {
-    let cfg = ServerConfig::from_env()?;
     cfg.ensure_dirs()?;
-    let seed_dir = user_seed_dir(&cfg);
+    // `--seed-dir` overrides the conventional per-user seed location (Server 0.5:
+    // a CLI flag, not the old CIRIS_USER_SEED_DIR env).
+    let seed_dir = seed_dir_override.unwrap_or_else(|| user_seed_dir(cfg));
     std::fs::create_dir_all(&seed_dir)?;
-    // The user-identity alias: the configured user key_id if set, else a stable
-    // default distinct from the node key_id.
-    let alias =
-        std::env::var("CIRIS_USER_KEY_ID").unwrap_or_else(|_| format!("{}-user", cfg.key_id));
+    // The user-identity alias: a stable default distinct from the node key_id
+    // (Server 0.5: convention, not env).
+    let alias = format!("{}-user", cfg.key_id);
     identity::mint_user_identity(backend, &alias, label.as_deref(), seed_dir).await
 }
 
@@ -264,13 +285,13 @@ mod python {
                 })?;
                 rt_block_on(crate::import_traces(&dir))
             }
-            _ => rt_block_on(crate::run()),
+            _ => rt_block_on(crate::run_default()),
         }
     }
 
     /// `ciris_server.import_traces(dump_dir)` — programmatic legacy-trace import
     /// for a pip-only bridge (the CIRISLens TimescaleDB dump → persist corpus as
-    /// CEG objects). Reads `CIRIS_HOME`/DSN from the environment, same as the node.
+    /// CEG objects). Uses the baked-default home convention, same as the node.
     #[pyfunction]
     #[pyo3(name = "import_traces")]
     fn py_import_traces(dump_dir: String) -> PyResult<()> {

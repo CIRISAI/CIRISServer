@@ -15,7 +15,7 @@
 //! `UserRole::SystemAdmin`. `WaRole::Root → SystemAdmin`, so each path here makes
 //! the founder the owner — closing the gap that blocked peering.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -33,16 +33,6 @@ use ciris_server::auth::bootstrap::{
 };
 use ciris_server::auth::roles::UserRole;
 use ciris_server::auth::store;
-
-/// Serializes the env-touching tests (process-global `CIRIS_ROOT_*` env). A guard
-/// that recovers from a poisoned lock (a panicking test must not cascade-fail the
-/// rest — each env test fully sets the vars it reads).
-fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
 
 /// An in-memory substrate keyed by a HYBRID node-identity signer (so `sign_hybrid`
 /// works for the setup/root signature path). `key_id` is the node's federation id.
@@ -108,22 +98,21 @@ fn node_pubkey_b64() -> String {
     BASE64.encode(signing_key.verifying_key().to_bytes())
 }
 
-// ─── (a) seed → ROOT WaCert; (b) idempotent no-op ───────────────────────────
+// ─── (a) seed-import utility → ROOT WaCert; (b) idempotent no-op ─────────────
 
-// The env guard is deliberately held across awaits: it SERIALIZES the
-// process-global `CIRIS_ROOT_*` env across these tests (that's the whole point),
-// and the std Mutex is uncontended-by-design (one env test at a time) so no
-// deadlock can arise. An async Mutex would defeat the serialization intent.
-#[allow(clippy::await_holding_lock)]
+// Server 0.5 (zero env): the boot path NEVER pre-seeds a root from env/file — it
+// always takes the no-seed claim route. The seed-import *utilities*
+// (`root_cert_from_seed` + `system_wa_cert`) are still exercised here directly (an
+// explicit out-of-band import tool, NOT the boot path) to keep coverage of the
+// agent's `root_pub.json` shape; AFTER seeding, `bootstrap_if_needed` is the
+// idempotent no-op it must remain when a ROOT already exists.
 #[tokio::test]
-async fn seed_bootstrap_creates_root_then_is_idempotent() {
-    let _guard = env_guard();
+async fn seed_import_utility_creates_root_then_bootstrap_is_idempotent_noop() {
     let engine = node("ciris-seed-node").await;
 
-    // Write the agent's root_pub.json shape to a unique temp file.
-    let seed_path =
-        std::env::temp_dir().join(format!("ciris_root_seed_{}.json", std::process::id()));
-    let seed = serde_json::json!({
+    // The agent's root_pub.json shape, parsed by the pub utility (no env/file boot
+    // read — we deserialize the shape directly, mirroring an import tool).
+    let seed: bootstrap::RootSeed = serde_json::from_value(serde_json::json!({
         "wa_id": "wa-2025-06-14-ROOT00",
         "name": "ciris_root",
         "role": "root",
@@ -133,57 +122,50 @@ async fn seed_bootstrap_creates_root_then_is_idempotent() {
         "created": "2025-06-16T20:55:42.680865Z",
         "active": 1,
         "token_type": "standard"
-    });
-    std::fs::write(&seed_path, serde_json::to_vec_pretty(&seed).unwrap()).unwrap();
-    std::env::set_var(bootstrap::ENV_SEED_PATH, &seed_path);
-    // Ensure the inline-pubkey path doesn't interfere.
-    std::env::remove_var(bootstrap::ENV_ROOT_PUBKEY);
-    std::env::remove_var(bootstrap::ENV_ROOT_WA_ID);
+    }))
+    .expect("parse agent root_pub.json shape");
 
-    // (a) Fresh engine → seed loaded.
-    let outcome = bootstrap_if_needed(&engine).await.expect("bootstrap");
-    assert_eq!(outcome, BootstrapOutcome::SeededRoot);
+    // (a) Import via the pub utilities (the boot path no longer does this).
+    let cert = bootstrap::root_cert_from_seed(&seed).expect("root cert from seed");
+    store::upsert(&engine, cert).await.expect("upsert root");
+    store::upsert(&engine, bootstrap::system_wa_cert("wa-2025-06-14-ROOT00"))
+        .await
+        .expect("upsert system wa");
 
     let roots = store::list_by_role(&engine, WaRole::Root, 10)
         .await
         .expect("list roots");
-    assert_eq!(
-        roots.len(),
-        1,
-        "exactly one ROOT WaCert after seed bootstrap"
-    );
+    assert_eq!(roots.len(), 1, "exactly one ROOT WaCert after seed import");
     let root = &roots[0];
     assert_eq!(root.wa_id, "wa-2025-06-14-ROOT00");
     assert_eq!(root.role, WaRole::Root);
     assert!(root.active);
     // Role bridges to the owner role.
     assert_eq!(UserRole::from_wa_role(root.role), UserRole::SystemAdmin);
-    // A child-of-root SYSTEM WA was ensured.
+    // A child-of-root SYSTEM WA was created.
     let system = store::get(&engine, "wa-system-00")
         .await
         .expect("get system wa")
         .expect("system wa present");
     assert_eq!(system.parent_wa_id.as_deref(), Some("wa-2025-06-14-ROOT00"));
 
-    // (b) Second bootstrap with a ROOT present → idempotent no-op.
-    let outcome2 = bootstrap_if_needed(&engine).await.expect("bootstrap 2");
-    assert_eq!(outcome2, BootstrapOutcome::AlreadyBootstrapped);
+    // (b) bootstrap_if_needed with a ROOT present → idempotent no-op (unchanged).
+    let outcome = bootstrap_if_needed(&engine).await.expect("bootstrap");
+    assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
     let roots2 = store::list_by_role(&engine, WaRole::Root, 10)
         .await
         .expect("list roots 2");
-    assert_eq!(roots2.len(), 1, "no duplicate ROOT after re-bootstrap");
-
-    std::env::remove_var(bootstrap::ENV_SEED_PATH);
-    let _ = std::fs::remove_file(&seed_path);
+    assert_eq!(
+        roots2.len(),
+        1,
+        "no duplicate ROOT after bootstrap_if_needed"
+    );
 }
 
-#[allow(clippy::await_holding_lock)]
+// Server 0.5 (zero env): a fresh node ALWAYS takes the no-seed (claim) path — the
+// boot bootstrap is a clean no-op-then-claim with NO env reads.
 #[tokio::test]
-async fn bootstrap_without_seed_is_a_clean_noop() {
-    let _guard = env_guard();
-    std::env::remove_var(bootstrap::ENV_SEED_PATH);
-    std::env::remove_var(bootstrap::ENV_ROOT_PUBKEY);
-    std::env::remove_var(bootstrap::ENV_ROOT_WA_ID);
+async fn bootstrap_on_fresh_node_is_a_clean_noseed_noop() {
     let engine = node("ciris-noseed-node").await;
 
     let outcome = bootstrap_if_needed(&engine).await.expect("bootstrap");
@@ -193,7 +175,7 @@ async fn bootstrap_without_seed_is_a_clean_noop() {
         .expect("list roots");
     assert!(
         roots.is_empty(),
-        "no seed ⇒ no ROOT (first-run claim available)"
+        "fresh node ⇒ no ROOT (first-run claim available at POST /v1/setup/root)"
     );
 }
 
@@ -645,20 +627,17 @@ async fn auto_mint_elevates_admin_eligible_identity() {
     );
 }
 
+// Server 0.5 (zero env): admin eligibility is the boot-resolved config:*
+// `auth.admin_key_ids` allowlist, passed as a slice (no CIRIS_ADMIN_KEY_IDS /
+// CIRIS_ROOT_KEY_ID env).
 #[tokio::test]
-async fn admin_eligibility_reads_env_allowlist() {
-    let _guard = env_guard();
-    std::env::set_var(bootstrap::ENV_ADMIN_KEY_IDS, "alice, bob ,carol");
-    std::env::remove_var(bootstrap::ENV_ROOT_KEY_ID);
-    assert!(is_admin_eligible("alice"));
-    assert!(is_admin_eligible("bob"), "whitespace is trimmed");
-    assert!(is_admin_eligible("carol"));
-    assert!(!is_admin_eligible("mallory"));
-    std::env::remove_var(bootstrap::ENV_ADMIN_KEY_IDS);
+async fn admin_eligibility_reads_config_allowlist() {
+    let allow: Vec<String> = vec!["alice".into(), " bob ".into(), "carol".into()];
+    assert!(is_admin_eligible("alice", &allow));
+    assert!(is_admin_eligible("bob", &allow), "whitespace is trimmed");
+    assert!(is_admin_eligible("carol", &allow));
+    assert!(!is_admin_eligible("mallory", &allow));
 
-    // The CIRIS_ROOT_KEY_ID single-identity path.
-    std::env::set_var(bootstrap::ENV_ROOT_KEY_ID, "the-founder");
-    assert!(is_admin_eligible("the-founder"));
-    assert!(!is_admin_eligible("someone-else"));
-    std::env::remove_var(bootstrap::ENV_ROOT_KEY_ID);
+    // An empty allowlist admits no one.
+    assert!(!is_admin_eligible("alice", &[]));
 }

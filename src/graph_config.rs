@@ -121,6 +121,25 @@ impl ConfigValue {
             _ => None,
         }
     }
+    /// The list value as `Vec<String>`, iff this is a [`ConfigValue::List`] —
+    /// every element coerced to its string form (a JSON string yields its inner
+    /// value; other scalars yield their JSON text). Non-list values yield `None`.
+    /// Used by the boot reads for list-valued config:* keys (`net.bootstrap_peers`,
+    /// `auth.admin_key_ids`).
+    pub fn as_str_list(&self) -> Option<Vec<String>> {
+        match self {
+            ConfigValue::List(items) => Some(
+                items
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// Where a config key lives on the trust/authority spectrum.
@@ -455,6 +474,19 @@ pub async fn get_bool(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Res
     Ok(get_config(engine, node_key_id, key)
         .await?
         .and_then(|e| e.value.as_bool()))
+}
+
+/// Typed convenience: the latest list value for `key` as `Vec<String>` (iff it is
+/// a [`ConfigValue::List`]). Used by the boot reads for list-valued config:* keys
+/// (`net.bootstrap_peers`, `auth.admin_key_ids`).
+pub async fn get_str_list(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    key: &str,
+) -> Result<Option<Vec<String>>> {
+    Ok(get_config(engine, node_key_id, key)
+        .await?
+        .and_then(|e| e.value.as_str_list()))
 }
 
 /// Minimal RFC-4122 v4 row id (no `uuid` dep) — same recipe as

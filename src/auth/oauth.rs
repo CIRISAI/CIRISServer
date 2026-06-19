@@ -959,10 +959,21 @@ async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
     }
 }
 
+/// The default OAuth callback base URL when `auth.oauth_callback_base_url` is
+/// unset (an empty config:* value). Was the `OAUTH_CALLBACK_BASE_URL` env fallback.
+pub const DEFAULT_OAUTH_CALLBACK_BASE_URL: &str = "http://localhost:8080";
+
 /// The OAuth front-door router.
-pub fn router(engine: Arc<Engine>) -> Router {
-    let callback_base = std::env::var("OAUTH_CALLBACK_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+///
+/// `callback_base` is the boot-resolved `auth.oauth_callback_base_url` config:*
+/// value (Server 0.5 — replaces the `OAUTH_CALLBACK_BASE_URL` env); an empty value
+/// falls back to [`DEFAULT_OAUTH_CALLBACK_BASE_URL`].
+pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
+    let callback_base = if callback_base.trim().is_empty() {
+        DEFAULT_OAUTH_CALLBACK_BASE_URL.to_string()
+    } else {
+        callback_base
+    };
     let st = OAuthState {
         engine,
         csrf: Arc::new(Mutex::new(CsrfStore::default())),

@@ -34,7 +34,7 @@ async fn serve(response_json: String) -> (String, tokio::task::JoinHandle<()>) {
 async fn node_code_endpoint_decodes_to_this_nodes_identity() {
     // The node's own identity: key_id + a fixed 32-byte Ed25519 pubkey.
     let pubkey = BASE64.encode([0x11u8; 32]);
-    let nc = build_node_code(NODE_KEY_ID, &pubkey);
+    let nc = build_node_code(NODE_KEY_ID, &pubkey, None, None);
     let json = render_response_json(&nc).expect("render node-code response");
     let (base, _h) = serve(json).await;
     let client = reqwest::Client::new();

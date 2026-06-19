@@ -57,9 +57,69 @@ async fn main() -> Result<()> {
                 other
             )),
         },
-        // Default: boot the fabric node.
-        _ => ciris_server::run().await,
+        // `ciris-server identity create ...` consumed the first arg already; the
+        // default arm boots the fabric node. The default-serve path takes the ONLY
+        // two bootstrap inputs (Server 0.5 zero-env): `--home <path>` (the data
+        // root; default DEFAULT_CIRIS_HOME) and `--key-id <name>` (the federation
+        // key label; default DEFAULT_KEY_ID — the status-node deploy passes
+        // `--key-id ciris-status`). Everything else is baked constants or config:*
+        // CEG resolved at boot.
+        first => {
+            // `first` is the already-consumed first token (Some for the default
+            // serve path with a leading flag, None for a bare `ciris-server`).
+            let leading = first.map(|s| s.to_string());
+            let (home, key_id) = parse_serve_flags(leading, args)?;
+            ciris_server::run(home, key_id).await
+        }
     }
+}
+
+/// Parse the default-serve flags: `--home <path>` and `--key-id <name>` (both
+/// optional; `--flag=value` also accepted). `leading` is the first token already
+/// pulled off the iterator by the subcommand match (it is itself a flag on the
+/// serve path). Unknown args are an error (fail loud, never silently ignore a
+/// misspelled flag on the security-relevant serve path).
+fn parse_serve_flags(
+    leading: Option<String>,
+    rest: impl Iterator<Item = String>,
+) -> Result<(std::path::PathBuf, String)> {
+    use ciris_server::config::{DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
+
+    let mut home: Option<String> = None;
+    let mut key_id: Option<String> = None;
+
+    let take_value = |arg: &str,
+                      eq_value: Option<String>,
+                      it: &mut dyn Iterator<Item = String>|
+     -> Result<String> {
+        match eq_value {
+            Some(v) => Ok(v),
+            None => it
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("{arg} needs a value")),
+        }
+    };
+
+    let mut it = leading.into_iter().chain(rest);
+    while let Some(arg) = it.next() {
+        let (name, eq_value) = match arg.split_once('=') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (arg.clone(), None),
+        };
+        match name.as_str() {
+            "--home" => home = Some(take_value("--home", eq_value, &mut it)?),
+            "--key-id" => key_id = Some(take_value("--key-id", eq_value, &mut it)?),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unknown serve arg: {other} (usage: ciris-server [--home <path>] [--key-id <name>])"
+                ))
+            }
+        }
+    }
+
+    let home = home.unwrap_or_else(|| DEFAULT_CIRIS_HOME.to_string());
+    let key_id = key_id.unwrap_or_else(|| DEFAULT_KEY_ID.to_string());
+    Ok((std::path::PathBuf::from(home), key_id))
 }
 
 /// Parse the `identity create` flags and mint the USER federation identity.
@@ -72,9 +132,23 @@ async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<(
     let mut seed_dir: Option<String> = None;
     let mut pkcs11_module: Option<String> = None;
     let mut provision = false;
+    let mut home: Option<String> = None;
+    let mut key_id: Option<String> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--home" => {
+                home = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--home needs a value"))?,
+                );
+            }
+            "--key-id" => {
+                key_id = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--key-id needs a value"))?,
+                );
+            }
             "--backend" => {
                 backend_name = args
                     .next()
@@ -108,11 +182,6 @@ async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<(
         }
     }
 
-    // `--seed-dir` overrides the per-user seed location for this run.
-    if let Some(dir) = &seed_dir {
-        std::env::set_var("CIRIS_USER_SEED_DIR", dir);
-    }
-
     let backend = match backend_name.as_str() {
         "software" => UserIdentityBackend::Software,
         "platform-sealed" | "platform_sealed" => UserIdentityBackend::PlatformSealed,
@@ -134,7 +203,16 @@ async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<(
         }
     };
 
-    let minted = ciris_server::provision_user_identity(backend, label).await?;
+    // Build the node config from the conventions + flags (Server 0.5 zero-env).
+    let cfg = ciris_server::ServerConfig::from_home(
+        std::path::PathBuf::from(
+            home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
+        ),
+        key_id.unwrap_or_else(|| ciris_server::config::DEFAULT_KEY_ID.to_string()),
+    )?;
+    let seed_dir_override = seed_dir.map(std::path::PathBuf::from);
+    let minted =
+        ciris_server::provision_user_identity(&cfg, backend, label, seed_dir_override).await?;
 
     println!("✅ Your YubiKey-backed federation USER identity is minted.");
     println!();
