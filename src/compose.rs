@@ -190,7 +190,7 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
     //    (NOT the node steward signer); the app does NO crypto. `None` when no
     //    user identity is configured — claim-remote is then not wired. See
     //    `user_identity_signer` for the keyring/YubiKey gap. ─────────────────────
-    let claim_remote_user_signer = user_identity_signer(&cfg)?;
+    let claim_remote_user_signer = user_identity_signer(&cfg).await?;
 
     // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
     //    when the host meets the lens-store minimum. ───────────────────────────
@@ -238,6 +238,16 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
                         ),
                         None => axum::Router::new(),
                     })
+                    // provision/ensure the local node's USER federation identity
+                    // (CIRISServer#21): POST /v1/self/identity — mints a hardware-
+                    // rooted (YubiKey / TPM-SE / software) user identity + returns
+                    // its key_id + fedcode. Owner-gated; the federation-ID wizard
+                    // in the app drives it.
+                    .merge(crate::identity::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple
@@ -374,32 +384,78 @@ const ENV_USER_KEY_ID: &str = "CIRIS_USER_KEY_ID";
 /// node's steward signer (the owner-binding asserts an accountable *human* is
 /// responsible).
 ///
-/// Wired from a config-provided user keypair (`CIRIS_USER_KEY_ID` +
-/// `CIRIS_USER_ED25519_SEED_PATH` + `CIRIS_USER_ML_DSA_65_SEED_PATH`). When the
-/// user-key env is ABSENT, claim-remote is NOT wired (returns `None`) — the local
-/// node has no responsible-user identity to sign as, so it cannot claim a remote
-/// node on a human's behalf.
+/// Resolved in PRIORITY ORDER:
 ///
-/// **KEYRING GAP (file upstream — likely a `ciris-keyring` ask):** the substrate
-/// `Engine` holds only ONE `LocalSigner` (the node steward), and `ciris-keyring`
-/// v5.11.0 ships NO user-identity / YubiKey(PKCS#11) signer accessor. So the
-/// user key here is a plaintext software seed (`LocalSigner::from_parts`), not a
-/// hardware-custodied human key. A `ciris-keyring` user-identity / PKCS#11
-/// accessor would let the responsible human's owner-binding signature be
-/// hardware-custodied by the human rather than co-resident with the node.
-pub(crate) fn user_identity_signer(
-    _cfg: &ServerConfig,
+/// 1. **Hardware-backed minted user identity (verify v6.0.0).** When
+///    `CIRIS_USER_BACKEND` ∈ {`pkcs11`, `platform-sealed`, `software`} is set
+///    (and `CIRIS_USER_KEY_ID` names the minted identity), the signer is composed
+///    from the keyring's `get_user_identity_signer` via
+///    `LocalSigner::from_hardware_parts` — the Ed25519 half stays
+///    hardware-custodied (YubiKey PKCS#11 / TPM-SE-sealed), the ML-DSA-65 half is
+///    the sealed PQC signer. This is the path the founder's `ciris-server identity
+///    create` mint produces: mint → the node holds the user identity → claim A/B
+///    signs with the user's YubiKey-custodied key.
+/// 2. **Legacy plaintext software seeds.** Falls back to the config-provided user
+///    keypair (`CIRIS_USER_KEY_ID` + `CIRIS_USER_ED25519_SEED_PATH` +
+///    `CIRIS_USER_ML_DSA_65_SEED_PATH`) for back-compat.
+///
+/// When NEITHER is configured, claim-remote is NOT wired (returns `None`) — the
+/// local node has no responsible-user identity to sign as.
+pub(crate) async fn user_identity_signer(
+    cfg: &ServerConfig,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
     use ciris_persist::prelude::LocalSigner;
+
+    // 1. Hardware-backed minted user identity (the verify v6.0.0 path).
+    if let Ok(backend_name) = std::env::var("CIRIS_USER_BACKEND") {
+        let backend = match backend_name.trim() {
+            "software" => Some(crate::identity::UserIdentityBackend::Software),
+            "platform-sealed" | "platform_sealed" => {
+                Some(crate::identity::UserIdentityBackend::PlatformSealed)
+            }
+            "pkcs11" | "yubikey" => Some(crate::identity::UserIdentityBackend::Pkcs11(
+                crate::identity::Pkcs11Options::default(),
+            )),
+            other => {
+                tracing::warn!(
+                    "CIRIS_USER_BACKEND={other:?} is not pkcs11|platform-sealed|software — \
+                     ignoring the hardware user-identity path"
+                );
+                None
+            }
+        };
+        if let Some(backend) = backend {
+            let user_key_id =
+                std::env::var(ENV_USER_KEY_ID).unwrap_or_else(|_| format!("{}-user", cfg.key_id));
+            let seed_dir = crate::user_seed_dir(cfg);
+            let signer = crate::identity::hardware_user_local_signer(
+                backend.clone(),
+                &user_key_id,
+                seed_dir,
+            )
+            .await?;
+            tracing::info!(
+                user_key_id = %user_key_id,
+                backend = backend.label(),
+                "responsible-user signer wired for claim-remote (HARDWARE-ROOTED user identity — \
+                 verify v6.0.0 get_user_identity_signer; YubiKey custody on the pkcs11 backend)"
+            );
+            return Ok(Some(Arc::new(signer)));
+        }
+    }
+
+    // 2. Legacy plaintext software seeds (back-compat).
     let (Ok(user_key_id), Ok(ed_path), Ok(ml_path)) = (
         std::env::var(ENV_USER_KEY_ID),
         std::env::var(ENV_USER_ED25519_SEED),
         std::env::var(ENV_USER_ML_DSA_SEED),
     ) else {
         tracing::info!(
-            "no responsible-user identity ({ENV_USER_KEY_ID} + {ENV_USER_ED25519_SEED} + \
-             {ENV_USER_ML_DSA_SEED}) — POST /v1/setup/claim-remote disabled (no user key to \
-             sign owner-bindings as). KEYRING GAP: no user-identity/YubiKey accessor exists."
+            "no responsible-user identity — set CIRIS_USER_BACKEND (pkcs11|platform-sealed|\
+             software) for a hardware-rooted user identity (mint via `ciris-server identity \
+             create`), or the legacy {ENV_USER_KEY_ID} + {ENV_USER_ED25519_SEED} + \
+             {ENV_USER_ML_DSA_SEED} software seeds. POST /v1/setup/claim-remote stays disabled \
+             until one is configured."
         );
         return Ok(None);
     };
@@ -424,8 +480,8 @@ pub(crate) fn user_identity_signer(
     );
     tracing::warn!(
         user_key_id = %user_key_id,
-        "responsible-user signer wired for claim-remote (PLAINTEXT software seed — \
-         KEYRING GAP: no user-identity/YubiKey custody yet)"
+        "responsible-user signer wired for claim-remote (LEGACY plaintext software seed — \
+         prefer CIRIS_USER_BACKEND=pkcs11 for YubiKey custody: `ciris-server identity create`)"
     );
     Ok(Some(Arc::new(signer)))
 }

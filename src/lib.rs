@@ -54,6 +54,16 @@ pub mod federation_admin;
 /// reads off the node and hands to a founder's app. Public so the integration
 /// test (`tests/nodecode.rs`) can drive the router directly.
 pub mod federation_nodecode;
+/// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
+/// identity via ciris-server (the founder's goal, CIRISServer#21 /
+/// CIRISVerify#80). `mint_user_identity` opens the user's Ed25519 signing half
+/// for the chosen backend, calls verify v6.0.0 `create_federation_identity`
+/// (which attaches the sealed ML-DSA-65 half + emits the genesis CEG object),
+/// and returns the user `key_id` + the `CIRIS-V2-` usercode. The minted identity
+/// also composes into the `POST /v1/setup/claim-remote` signer. Public so the
+/// CLI subcommand, the `POST /v1/self/identity` endpoint, and the integration
+/// test can drive it.
+pub mod identity;
 mod import;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
@@ -95,6 +105,35 @@ pub async fn run() -> Result<()> {
 /// CEG objects (the `import-traces <dump-dir>` subcommand). See `src/import.rs`.
 pub async fn import_traces(dump_dir: &str) -> Result<()> {
     import::run(dump_dir).await
+}
+
+/// The user-identity seed directory — DISTINCT from the node steward's
+/// `identity_dir` (the human's signing key must NOT be co-resident with the node
+/// key). Defaults to `<identity_dir>/user`, override with `CIRIS_USER_SEED_DIR`.
+pub fn user_seed_dir(cfg: &ServerConfig) -> std::path::PathBuf {
+    std::env::var("CIRIS_USER_SEED_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| cfg.identity_dir.join("user"))
+}
+
+/// Drive `ciris-server identity create` — the founder's "mint my YubiKey-backed
+/// federation ID via ciris-server" command. Mints the USER identity for `backend`
+/// (defaulting the alias/seed-dir from config), persists the genesis CEG object,
+/// and returns the minted identity (the caller prints it). Public so both the
+/// binary and the wheel CLI can call it.
+pub async fn provision_user_identity(
+    backend: identity::UserIdentityBackend,
+    label: Option<String>,
+) -> Result<identity::MintedUserIdentity> {
+    let cfg = ServerConfig::from_env()?;
+    cfg.ensure_dirs()?;
+    let seed_dir = user_seed_dir(&cfg);
+    std::fs::create_dir_all(&seed_dir)?;
+    // The user-identity alias: the configured user key_id if set, else a stable
+    // default distinct from the node key_id.
+    let alias =
+        std::env::var("CIRIS_USER_KEY_ID").unwrap_or_else(|_| format!("{}-user", cfg.key_id));
+    identity::mint_user_identity(backend, &alias, label.as_deref(), seed_dir).await
 }
 
 /// Emit the **modeled** holonomic federation scoreboard (CIRISServer#12/#13) as

@@ -46,18 +46,28 @@ them. The handles (MISSION §3.4):
 
 - **Substrate handles** — the node's federation identity (`/v1/identity`),
   federation-directory reads, content fetch, replication / health.
-- **Fabric handles** — the per-role × per-axis **trust/consent toggles**,
+- **Fabric handles** — **federation-identity minting** (a hardware-rooted, YubiKey-
+  or TPM/SE-sealed user identity → a `CIRIS-V2-` *fedcode*), **node ownership**
+  (claim a node with its **NodeCode** + one-time PIN; the responsible owner-binding
+  is `infra:*`, never agency), the per-role × per-axis **trust/consent toggles**,
   **trust-graph management** (untrust, re-root, create/join groups),
-  **canonical-group membership + voting**, **self/family occurrence
-  attachment**, and the **NodeCode** QR-able peer-bootstrap shorthand.
+  **canonical-group membership + voting**, **self/family occurrence attachment**,
+  and **consent-object** setup between peers (`consent:replication`).
 
-Those handles are consumed by **rich clients** — [CIRISPortal](https://github.com/CIRISAI/CIRISPortal)
-and [CIRISNode](https://github.com/CIRISAI/CIRISNode), and **chiefly the
-[CIRISAgent](https://github.com/CIRISAI/CIRISAgent) client**, the Kotlin
-Multiplatform (KMP) UI through which most people meet the fabric. The
-infrastructure that *holds* the audit corpus is the surface that *publishes* it
-(redacted PDMA logs / WBD tickets / attestation reads, per the Accord's
-transparency requirement).
+Those handles are consumed by **rich clients**. Just like CIRISAgent, CIRISServer
+can run **fully headless** (the `ciris-server` binary + a CLI: e.g. `ciris-server
+identity create --backend pkcs11` mints a YubiKey-backed federation ID) **and** it
+exposes a **rich client** — **the same [CIRISAgent](https://github.com/CIRISAI/CIRISAgent)
+Kotlin-Multiplatform app, minus the agent (brain) cards.** The app *is a node*: it
+runs a local fabric node and drives it (all crypto stays in the substrate, never
+in the UI). It surfaces the **fabric cards** — create-your-federation-ID (mint the
+hardware-rooted ID from the desktop app), claim-a-node (NodeCode + PIN), the
+consent-objects card, the node switcher, and the holonomic scoreboard — **without**
+the reasoning/chat cards an agent adds. (Other rich clients:
+[CIRISPortal](https://github.com/CIRISAI/CIRISPortal),
+[CIRISNode](https://github.com/CIRISAI/CIRISNode).) The infrastructure that *holds*
+the audit corpus is the surface that *publishes* it (redacted PDMA logs / WBD
+tickets / attestation reads, per the Accord's transparency requirement).
 
 ## What it replaces
 
@@ -82,6 +92,11 @@ CIRISAgent.
 ```sh
 pip install ciris-server      # the PyO3 abi3 wheel (or build the binary: cargo build --release)
 ciris-server                  # boots a zero-setup node — mode=server, trusts ciris-canonical, no wizard
+                              # on a fresh (unclaimed) node it prints its NodeCode + one-time claim PIN
+
+# Headless: mint a hardware-rooted federation ID (or do it from the desktop app)
+ciris-server identity create --backend pkcs11   # YubiKey-backed; --backend platform-sealed (TPM/SE) | software (dev)
+                                                # prints your CIRIS-V2- fedcode + key_id
 ```
 
 Defaults need no setup: data under `$CIRIS_HOME`, SQLite corpus (Postgres via
