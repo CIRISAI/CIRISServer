@@ -76,9 +76,11 @@ sealed class NavSurface(
 
     object Tools : NavSurface("tools", "Tools", CIRISIcons.tools,
         labelKey = "nav.surface.tools",)
+    // Node form: Services is a node-infra keeper; the agent-only Tools child is
+    // dropped from the surfaced tree (the Tools object remains defined for
+    // route compatibility).
     object Services : NavSurface(
         id = "services", label = "Services", icon = CIRISIcons.bus,
-        children = listOf(Tools),
         labelKey = "nav.surface.services",)
 
     object Logs : NavSurface("logs", "Logs", CIRISIcons.log,
@@ -376,20 +378,33 @@ data class NavGroup(
     val labelKey: String? = null,
 )
 
-val AGENT_GROUP = NavGroup(
-    id = "agent",
-    label = "Agent",
+/**
+ * The node-observation group (was "Agent"). This client is the standalone,
+ * AI-free CIRIS node client (agent optional): the pure agent/brain cards
+ * (Interact/Sessions, Tickets/Scheduler, Tools, Skills, LLM/Agent settings,
+ * the agent task Memory card) are pruned from the nav. The keepers are the
+ * generic node-observation + node-infra surfaces:
+ *   - GraphMemory (the memory graph) and WiseAuthority (escalations/deferrals)
+ *     moved here from the old Agent group.
+ *   - Telemetry (+ Logs), Services, and System/Runtime/Config — node-infra,
+ *     surfaced directly (previously buried under the agent Settings sub-tree).
+ * The dropped NavSurface objects remain defined (route compatibility) but are
+ * no longer surfaced in any group.
+ */
+val NODE_GROUP = NavGroup(
+    id = "node",
+    label = "Node",
     icon = CIRISIcons.identity,
     surfaces = listOf(
-        NavSurface.Interact,        // + Sessions
-        NavSurface.Tickets,         // + Scheduler
-        NavSurface.Services,        // + Tools
-        NavSurface.Telemetry,       // + Logs
-        NavSurface.Memory,          // + Graph
-        NavSurface.WiseAuthority,
-        NavSurface.AgentSettings,   // + LLM, System, Runtime, Config, Skills
+        NavSurface.GraphMemory,     // memory graph (moved from Agent)
+        NavSurface.WiseAuthority,   // escalations / deferrals (moved from Agent)
+        NavSurface.Telemetry,       // + Logs (node-infra)
+        NavSurface.Services,        // node-infra (Tools child dropped)
+        NavSurface.System,          // node-infra (lifted out of agent Settings)
+        NavSurface.Runtime,         // node-infra (lifted out of agent Settings)
+        NavSurface.Config,          // node-infra (lifted out of agent Settings)
     ),
-        labelKey = "nav.group.agent",)
+        labelKey = "nav.group.node",)
 
 /**
  * The holistic SAFETY group — safety built in FIRST, ahead of content
@@ -439,7 +454,8 @@ val COMMONS_GROUP = NavGroup(
     icon = CIRISIcons.globe,
     accentHex = "#C96A38", // CIRISColors.BusTool — shares the federation accent
     surfaces = listOf(
-        NavSurface.LayerAgent,
+        // LayerAgent (Agent/Self) dropped from the nav for the AI-free node
+        // client; the object remains defined for route compatibility.
         NavSurface.LayerFamily,
         NavSurface.LayerLocalCommunity,
         NavSurface.LayerGlobalCommunities,
@@ -454,19 +470,16 @@ val COMMONS_GROUP = NavGroup(
 // (redundant with LayerGlobalCommons) and "Trust Topology" (subsumed by the
 // per-scope Trust sections + NetworkTrustGraph) were removed entirely.
 
-val CLIENT_GROUP = NavGroup(
-    id = "client",
-    label = "Client",
-    icon = CIRISIcons.home,
-    surfaces = listOf(
-        NavSurface.AgentsList,
-        NavSurface.ClientInterface,
-    ),
-        labelKey = "nav.group.client",)
+// CLIENT_GROUP removed for the AI-free node client — both its surfaces
+// (AgentsList, ClientInterface) are pure agent/client cards and were dropped.
+// The NavSurface objects (NavSurface.AgentsList, NavSurface.ClientInterface)
+// remain defined for route compatibility.
 
 /** All groups in display order. The scale-organized Commons group absorbs what
- *  used to be the separate Federation group (deleted 2.9.6). */
-val EPISTEMIC_NAV_GROUPS = listOf(AGENT_GROUP, SAFETY_GROUP, MANAGE_GROUP, COMMONS_GROUP, CLIENT_GROUP)
+ *  used to be the separate Federation group (deleted 2.9.6). The former "Agent"
+ *  group is now the node-observation "Node" group; the "Client" group is dropped
+ *  (standalone AI-free node client). */
+val EPISTEMIC_NAV_GROUPS = listOf(NODE_GROUP, SAFETY_GROUP, MANAGE_GROUP, COMMONS_GROUP)
 
 /**
  * Walk the entire surface tree (depth-first) — used by routers needing the

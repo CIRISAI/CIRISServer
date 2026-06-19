@@ -1,1 +1,30 @@
+# ── Build / tooling ──
+build/
+*/build/
+.gradle/
+.kotlin/
 kotlin-js-store/
+local.properties
+test_logs/
+*.hprof
+
+# ── Bundled runtime BINARIES + media — large, stale, regeneratable; NOT source. ──
+# The mobile targets package a local node + (optionally) the agent at BUILD time;
+# the AI-free CIRIS node client does not vendor those. Desktop launches the node
+# as a separate process. Regenerate for a real mobile/iOS build.
+androidApp/wheels/
+androidApp/src/main/assets/bin/
+**/jniLibs/
+iosApp/app_packages_native/
+iosApp/Resources/
+iosApp/Frameworks/
+iosApp/Resources.zip
+*.whl
+*.so
+*.dylib
+*.a
+*.xcframework/
+*.framework/
+*.mp4
+*.jar
+!gradle/wrapper/gradle-wrapper.jar

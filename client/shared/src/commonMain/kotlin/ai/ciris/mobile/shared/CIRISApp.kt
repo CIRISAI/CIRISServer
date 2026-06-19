@@ -790,7 +790,7 @@ fun CIRISApp(
                 startupViewModel.setKeepTimerAlive(false)
 
                 interactViewModel.startPolling() // Start polling now that token is set
-                currentScreen = Screen.Interact
+                currentScreen = HOME_SCREEN
                 return@LaunchedEffect
             }
 
@@ -833,7 +833,7 @@ fun CIRISApp(
                 platformLog(TAG, "[INFO] Not first run in HA Addon mode - using ingress auth directly")
                 startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_ready"))
                 interactViewModel.startPolling()
-                currentScreen = Screen.Interact
+                currentScreen = HOME_SCREEN
             } else {
                 // Not first run, normal mode - try to load stored token and check if valid/refresh if needed
                 platformLog(TAG, "[INFO] Not first run, attempting to load and validate stored token")
@@ -1027,7 +1027,7 @@ fun CIRISApp(
                                     }
                                 }
 
-                                currentScreen = Screen.Interact
+                                currentScreen = HOME_SCREEN
                             } else {
                                 // Token invalid and couldn't refresh - need interactive login
                                 PlatformLogger.i(TAG, " Token invalid/expired and silent refresh failed - redirecting to login")
@@ -1293,8 +1293,8 @@ fun CIRISApp(
 
                                                     isLoginLoading = false
                                                     loginStatusMessage = null
-                                                    platformLog(TAG, "[INFO] Navigating to Screen.Interact")
-                                                    currentScreen = Screen.Interact
+                                                    platformLog(TAG, "[INFO] Navigating to home (node) screen")
+                                                    currentScreen = HOME_SCREEN
                                                 } catch (e: Exception) {
                                                     platformLog(TAG, "[ERROR] Token exchange failed: ${e::class.simpleName}: ${e.message}")
                                                     isLoginLoading = false
@@ -1455,7 +1455,7 @@ fun CIRISApp(
 
                                 isLoginLoading = false
                                 loginStatusMessage = null
-                                currentScreen = Screen.Interact
+                                currentScreen = HOME_SCREEN
                             } catch (e: Exception) {
                                 platformLog(TAG, "[ERROR] Local login failed: ${e::class.simpleName}: ${e.message}")
                                 isLoginLoading = false
@@ -1537,7 +1537,7 @@ fun CIRISApp(
                             "[INFO][onFederationSignIn] Signing in with existing federation identity key_id=$federationIdentityKeyId",
                         )
                         loginErrorMessage = null
-                        currentScreen = Screen.Interact
+                        currentScreen = HOME_SCREEN
                     },
                     onCreateFederationIdentity = {
                         // No identity yet — run the FEDERATION_IDENTITY_SETUP wizard,
@@ -3979,6 +3979,15 @@ private fun CIRISTopBar(
         )
     )
 }
+
+/**
+ * The default post-auth landing screen. For the standalone AI-free node client
+ * the agent chat (Screen.Interact) is no longer a surfaced nav card, so the app
+ * opens on the node-management surface (the Nodes card, NavSurface.Nodes). The
+ * Interact screen object remains defined and reachable; it is simply not the
+ * landing destination and not in the sidebar.
+ */
+private val HOME_SCREEN: Screen = Screen.ManageNodes
 
 /**
  * Navigation screens
