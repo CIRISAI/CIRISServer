@@ -123,6 +123,20 @@ pub struct CompleteTrace {
     pub components: Vec<TraceComponent>,
     pub signature: Option<String>,
     pub signature_key_id: Option<String>,
+    /// ML-DSA-65 (FIPS 204) signature half of the hybrid trace seal,
+    /// STANDARD base64. Signed over the bound input `canonical ‖
+    /// ed25519_sig` (the bound-hybrid construction persist's
+    /// `verify_trace_hybrid` reconstructs). `None` until the hybrid seal
+    /// stamps it; the trace-tier hard cut (CIRISPersist#225) rejects a
+    /// classical-only trace at `VerifyMode::Full` admission.
+    pub signature_ml_dsa_65: Option<String>,
+    /// Producer's ML-DSA-65 public key, STANDARD base64 (1952 raw bytes).
+    /// Rides the trace envelope because the `accord_public_keys`
+    /// directory is Ed25519-only; bound into the hybrid verify. `None`
+    /// together with [`signature_ml_dsa_65`](Self::signature_ml_dsa_65).
+    pub pubkey_ml_dsa_65: Option<String>,
+    /// Identifier of the ML-DSA-65 signing key (stored verbatim).
+    pub pqc_key_id: Option<String>,
     pub trace_level: Option<String>,
     pub trace_schema_version: String,
     /// 6-field cohort-taxonomy block (2.7.9+). Required on the wire at
@@ -241,6 +255,9 @@ impl PartialTraceStore {
                 components: Vec::new(),
                 signature: None,
                 signature_key_id: None,
+                signature_ml_dsa_65: None,
+                pubkey_ml_dsa_65: None,
+                pqc_key_id: None,
                 trace_level: ev.trace_level.clone(),
                 trace_schema_version: TRACE_SCHEMA_VERSION.to_string(),
                 deployment_profile: None,

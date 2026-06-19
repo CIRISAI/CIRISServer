@@ -118,6 +118,23 @@ fn trace_to_wire_json(trace: &CompleteTrace) -> Value {
     // but build_batch_bytes refuses unsigned traces, so they're Some here.
     obj.insert("signature".into(), json!(trace.signature));
     obj.insert("signature_key_id".into(), json!(trace.signature_key_id));
+    // Hybrid (ML-DSA-65) half + producer PQC pubkey. Required for the
+    // trace-tier hard cut (CIRISPersist#225): persist's `VerifyMode::Full`
+    // runs `verify_trace_hybrid` under `HybridPolicy::Strict` and the
+    // producer's ML-DSA-65 pubkey rides the envelope (the directory is
+    // Ed25519-only). Emitted ONLY when set, matching persist's
+    // `skip_serializing_if = "Option::is_none"` on these fields — so an
+    // Ed25519-only seal stays byte-identical on the wire (and is rejected
+    // by the hard cut, as intended).
+    if let Some(sig) = &trace.signature_ml_dsa_65 {
+        obj.insert("signature_ml_dsa_65".into(), json!(sig));
+    }
+    if let Some(pk) = &trace.pubkey_ml_dsa_65 {
+        obj.insert("pubkey_ml_dsa_65".into(), json!(pk));
+    }
+    if let Some(id) = &trace.pqc_key_id {
+        obj.insert("pqc_key_id".into(), json!(id));
+    }
     Value::Object(obj)
 }
 
@@ -233,6 +250,9 @@ mod tests {
             ],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("generic".into()),
             trace_schema_version: TRACE_SCHEMA_VERSION.into(),
             deployment_profile: Some(json!({
@@ -389,6 +409,9 @@ mod tests {
             ],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("generic".into()),
             trace_schema_version: "3.0.0".into(),
             deployment_profile: Some(serde_json::json!({
@@ -491,5 +514,74 @@ mod tests {
             "3.0.0 JCS-signed trace must fail verify under PythonJsonDumpsCanonicalizer \
              (the dispatch mismatch mints invalid signatures on non-ASCII — CIRISAgent#871 trap)"
         );
+    }
+
+    // ── CIRISPersist#225: 3.0.0 / JCS HYBRID round-trip proof ───────────────
+
+    /// THE 3.0.0 hybrid wire proof (the trace-tier hard cut, CIRISPersist#225):
+    ///
+    /// A `"3.0.0"` trace that lens-core seals with the bound HYBRID signature
+    /// (Ed25519 + ML-DSA-65, via `LocalSigner::sign_hybrid` +
+    /// `seal::apply_hybrid_signature`) and wraps must round-trip through
+    /// persist's `BatchEnvelope::from_json` AND pass persist's
+    /// `verify_trace_hybrid` under `HybridPolicy::Strict` with the JCS
+    /// canonicalizer — the exact admission gate `VerifyMode::Full` runs.
+    ///
+    /// This is the regression guard for the `verify_hybrid_base64` break:
+    /// the seal frames every signature/pubkey field as STANDARD base64 (the
+    /// alphabet persist's hybrid gate decodes), and stamps the ML-DSA-65 half
+    /// + producer pubkey the Strict policy requires.
+    #[tokio::test]
+    async fn batch_300_hybrid_round_trips_through_persist_verify_trace_hybrid() {
+        use std::sync::Arc;
+
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use ciris_persist::prelude::LocalSigner;
+        use ciris_persist::schema::{BatchEnvelope, BatchEvent};
+        use ciris_persist::verify::canonical::{canonicalizer_for, JcsCanonicalizer};
+        use ciris_persist::verify::ed25519::{canon_version_for_trace_schema, verify_trace_hybrid};
+        use ciris_persist::verify::{HybridPolicy, VerifyOutcome};
+        use ed25519_dalek::SigningKey;
+
+        // Hybrid LocalSigner: Ed25519 + ML-DSA-65 (deterministic seeds).
+        let sk = SigningKey::from_bytes(&[225u8; 32]);
+        let vk = sk.verifying_key();
+        let pqc = ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(&[226u8; 32], "hyb-pqc")
+            .expect("ml-dsa seed");
+        let signer = LocalSigner::from_parts(
+            sk,
+            "hybrid-host-key".into(),
+            Some(Arc::new(pqc) as Arc<dyn ciris_keyring::PqcSigner>),
+            Some("hyb-pqc".into()),
+        );
+
+        // Seal: canonical bytes (JCS-dispatched for 3.0.0) → bound hybrid sign.
+        let mut trace = sealed_300_trace();
+        let canonical = seal::canonical_bytes(&trace).expect("canonicalize 3.0.0");
+        let hybrid = signer.sign_hybrid(&canonical).await.expect("hybrid sign");
+        seal::apply_hybrid_signature(
+            &mut trace,
+            &hybrid.classical.signature,
+            "hybrid-host-key",
+            &hybrid.pqc.signature,
+            &hybrid.pqc.public_key,
+            "hyb-pqc",
+        );
+
+        // Wrap → persist parse.
+        let bytes = build_batch_bytes(&[trace], &provenance_300()).expect("build hybrid batch");
+        let env = BatchEnvelope::from_json(&bytes)
+            .expect("persist must parse a lens-core-built 3.0.0 hybrid batch");
+        let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];
+
+        // The exact admission gate: V2Jcs canonicalizer + Strict hybrid policy.
+        let canon = canonicalizer_for(canon_version_for_trace_schema("3.0.0"));
+        let ed25519_pubkey_b64 = B64.encode(vk.to_bytes());
+        let outcome = verify_trace_hybrid(ptrace, canon, &ed25519_pubkey_b64, HybridPolicy::Strict)
+            .expect("persist verify_trace_hybrid must accept a 3.0.0 hybrid-sealed lens trace");
+        assert_eq!(outcome, VerifyOutcome::HybridVerified);
+
+        // Sanity: the canon we built equals JCS for 3.0.0 (dispatch live).
+        let _ = JcsCanonicalizer; // type-name lock; JCS is the 3.x canonicalizer.
     }
 }

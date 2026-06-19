@@ -3,16 +3,22 @@
 //!
 //! # The signature-critical contract
 //!
-//! When `ACTION_RESULT` seals a trace, lens-core canonicalizes it,
-//! **Ed25519**-signs the canonical bytes (via the host `Engine`'s
-//! signing identity), and persists it. (Trace signing is Ed25519-only —
-//! the hybrid Ed25519+ML-DSA-65 pair is the detection-event /
-//! attestation surface, not traces.) The **canonical bytes must be
-//! byte-identical** to what every federation verifier recomputes, or
-//! the signature fails to verify. This module owns the canonical-
-//! envelope *structure*; the byte serialization is delegated to
-//! persist's **version-aware dispatch** — `canon_version_for_trace_schema`
-//! + `canonicalizer_for` (CIRISPersist#171 / v4.6.0 / v4.15.0 #871).
+//! When `ACTION_RESULT` seals a trace, lens-core canonicalizes it and
+//! **hybrid**-signs the canonical bytes (Ed25519 + ML-DSA-65, via the
+//! host `Engine::sign_hybrid`). persist's trace-tier hard cut
+//! (CIRISPersist#225: `VerifyMode::Full` → `verify_trace_hybrid` under
+//! `HybridPolicy::Strict`) REJECTS a classical-only trace at admission —
+//! the durable, replicated, kept-for-posterity corpus outlives Ed25519,
+//! so an HNDL forge-later adversary must not be able to mint backdated
+//! traces. (The Ed25519-only [`apply_signature`] / [`sign_trace`] /
+//! [`verify_trace_signature`] primitives remain for the classical verify
+//! path + back-compat tests, but a federation-admissible seal is hybrid.)
+//! The **canonical bytes must be byte-identical** to what every
+//! federation verifier recomputes, or the signature fails to verify. This
+//! module owns the canonical-envelope *structure*; the byte serialization
+//! is delegated to persist's **version-aware dispatch** —
+//! `canon_version_for_trace_schema` + `canonicalizer_for`
+//! (CIRISPersist#171 / v4.6.0 / v4.15.0 #871).
 //!
 //! # JCS / 3.0.0 era (CIRISLensCore#43.2)
 //!
@@ -58,12 +64,13 @@
 //! # This module
 //!
 //! The pure, signature-critical core: [`build_canonical_envelope`] /
-//! [`canonical_bytes`] (the signed bytes) + [`apply_signature`] /
-//! [`verify_trace_signature`] (Ed25519 stamp + the federation-verifier
-//! algorithm). No Engine, no I/O — fully unit-tested incl. a sign→verify
-//! round-trip. The thin async glue (`engine.local_sign(canonical_bytes)`
-//! → `apply_signature` → `receive_and_persist`) lands with the Engine
-//! integration (Cut 4).
+//! [`canonical_bytes`] (the signed bytes) + the stamps
+//! [`apply_signature`] (Ed25519-only) / [`apply_hybrid_signature`]
+//! (Ed25519 + ML-DSA-65) + [`verify_trace_signature`] (the Ed25519
+//! federation-verifier algorithm). No Engine, no I/O — fully unit-tested
+//! incl. sign→verify round-trips. The async glue that hybrid-signs via
+//! `Engine::sign_hybrid` and calls `receive_and_persist` lives in
+//! `capture::client` (`hybrid_sign_trace_via_engine` / `seal_sign_wrap`).
 
 use serde_json::{json, Map, Value};
 
@@ -200,29 +207,74 @@ pub fn canonical_bytes(trace: &CompleteTrace) -> Result<Vec<u8>, String> {
 
 // ── Signature application + verification ────────────────────────────
 //
-// Trace signing is **Ed25519-only** over the canonical bytes (NOT a
-// hybrid Ed25519+ML-DSA pair — that is the detection-event / attestation
-// surface). The signature is stored URL-safe-base64-no-pad, the
-// `signature_key_id` names the signing key. This mirrors CIRISAgent's
-// `Ed25519TraceSigner.sign_trace` (`unified_key.sign_base64(message)`) +
-// `verify_trace` (`Ed25519.verify(sig, message)`) exactly, so a trace
-// lens-core seals verifies under the agent's verify path and vice-versa.
+// Trace signing is a **bound hybrid** (Ed25519 + ML-DSA-65) over the
+// canonical bytes. persist's trace-tier hard cut (CIRISPersist#225,
+// `VerifyMode::Full` → `verify_trace_hybrid` under `HybridPolicy::Strict`)
+// REJECTS a classical-only trace at admission — the durable, replicated,
+// kept-for-posterity corpus outlives Ed25519, so an HNDL forge-later
+// adversary must not be able to mint backdated traces. Both signature
+// halves + the producer's ML-DSA-65 pubkey ride the trace envelope.
+//
+// **Base64 framing (the CIRISPersist#225 trap this module fixes):**
+// every signature/pubkey field is **STANDARD** base64. persist's hybrid
+// gate (`verify::hybrid::verify_hybrid` → `decode_b64_fixed`) decodes
+// STANDARD ONLY; URL-safe-no-pad base64-rejects there with
+// `verify_hybrid_base64` BEFORE any crypto runs. The Ed25519-only path
+// (`verify_trace` → `decode_signature`) accepts any alphabet, so STANDARD
+// satisfies BOTH — URL-safe-no-pad satisfies only the Ed25519-only path.
+//
+// The bound-hybrid construction: Ed25519 signs `canonical`; ML-DSA-65
+// signs `canonical ‖ ed25519_sig` (prevents classical-half stripping).
+// This mirrors persist's own `LocalSigner::sign_hybrid` /
+// `verify_trace_hybrid` byte-for-byte (lens-core never rolls crypto).
 
-/// Encode an Ed25519 signature for the `CompleteTrace.signature` field:
-/// URL-safe base64, no padding — the form CIRISAgent's `verify_trace`
-/// decodes (it re-appends `==` before `urlsafe_b64decode`).
+/// Encode a signature/pubkey for a `CompleteTrace` field: **STANDARD**
+/// base64 (with padding) — the alphabet persist's hybrid trace-tier gate
+/// (`verify::hybrid::verify_hybrid`, STANDARD-only) decodes. persist's
+/// Ed25519-only `verify_trace` accepts any alphabet, so STANDARD
+/// satisfies BOTH verify paths; URL-safe-no-pad does NOT (it
+/// base64-rejects at the hybrid gate → `verify_hybrid_base64`). Matches
+/// persist's producer-side `hybrid_sign_trace` reference exactly.
 pub fn encode_signature(sig_bytes: &[u8]) -> String {
     use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig_bytes)
+    base64::engine::general_purpose::STANDARD.encode(sig_bytes)
 }
 
-/// Stamp a computed signature onto a sealed trace. Pure — the caller
-/// (the Engine-coupled `sign_trace`, Cut 3b glue) obtains `sig_bytes`
-/// from `engine.local_sign(canonical_bytes(trace))` and the host's
-/// signing `key_id`.
+/// Stamp a computed **Ed25519** signature onto a sealed trace (classical
+/// half only). Pure. For a federation-admissible trace use
+/// [`apply_hybrid_signature`] — the classical-only stamp is rejected by
+/// persist's `VerifyMode::Full` hybrid hard cut (CIRISPersist#225).
+/// Retained for the Ed25519-only verify path + back-compat unit tests.
 pub fn apply_signature(trace: &mut CompleteTrace, sig_bytes: &[u8], key_id: &str) {
     trace.signature = Some(encode_signature(sig_bytes));
     trace.signature_key_id = Some(key_id.to_string());
+}
+
+/// Stamp a computed **hybrid** (Ed25519 + ML-DSA-65) signature onto a
+/// sealed trace — the federation-admissible seal. Stamps all five fields
+/// persist's `verify_trace_hybrid` reads: the Ed25519 `signature` (+
+/// `signature_key_id`), the `signature_ml_dsa_65` half, the producer's
+/// `pubkey_ml_dsa_65` (rides the envelope; the directory is Ed25519-only),
+/// and `pqc_key_id`. All raw byte inputs are STANDARD-base64 framed.
+///
+/// `ed25519_sig` is over `canonical`; `ml_dsa_65_sig` is over the bound
+/// input `canonical ‖ ed25519_sig`. The caller (the Engine-coupled
+/// hybrid signer glue) obtains both halves + the PQC pubkey from
+/// `Engine::sign_hybrid`, which builds exactly this bound shape.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_hybrid_signature(
+    trace: &mut CompleteTrace,
+    ed25519_sig: &[u8],
+    key_id: &str,
+    ml_dsa_65_sig: &[u8],
+    pubkey_ml_dsa_65: &[u8],
+    pqc_key_id: &str,
+) {
+    trace.signature = Some(encode_signature(ed25519_sig));
+    trace.signature_key_id = Some(key_id.to_string());
+    trace.signature_ml_dsa_65 = Some(encode_signature(ml_dsa_65_sig));
+    trace.pubkey_ml_dsa_65 = Some(encode_signature(pubkey_ml_dsa_65));
+    trace.pqc_key_id = Some(pqc_key_id.to_string());
 }
 
 /// Verify a sealed trace's Ed25519 signature against `verifying_key`,
@@ -242,7 +294,15 @@ pub fn verify_trace_signature(
     let Some(sig_b64) = &trace.signature else {
         return false;
     };
-    let Ok(sig_raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig_b64) else {
+    // Decode any alphabet persist accepts (`verify::ed25519::decode_signature`):
+    // STANDARD (our seal stamp, hybrid-gate-compatible) then URL-safe
+    // (legacy / agent `urlsafe_b64encode`). Fail-closed if none decode.
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+    let Ok(sig_raw) = STANDARD
+        .decode(sig_b64)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(sig_b64))
+        .or_else(|_| URL_SAFE.decode(sig_b64))
+    else {
         return false;
     };
     let Ok(sig_arr) = <[u8; 64]>::try_from(sig_raw.as_slice()) else {
@@ -337,6 +397,9 @@ mod tests {
             ],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("FULL_TRACES".into()),
             trace_schema_version: TRACE_SCHEMA_VERSION.into(),
             deployment_profile: None,
@@ -461,6 +524,9 @@ mod tests {
             }],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("GENERIC".into()),
             trace_schema_version: "2.7.9".into(), // V1Python path — explicit
             deployment_profile: None,
@@ -482,14 +548,24 @@ mod tests {
     }
 
     #[test]
-    fn encode_signature_is_urlsafe_no_pad() {
-        // 64-byte Ed25519 sig → 86-char URL-safe base64, no '=' padding,
-        // no '+'/'/' (the form the agent's verify_trace decodes).
+    fn encode_signature_is_standard_base64() {
+        // 64-byte Ed25519 sig → 88-char STANDARD base64 (padded). STANDARD
+        // is the alphabet persist's hybrid trace-tier gate decodes
+        // (STANDARD-only); URL-safe-no-pad base64-rejects there. Decodes
+        // back to the original 64 bytes round-trip.
+        use base64::Engine as _;
         let sig = [0xFBu8; 64];
         let enc = encode_signature(&sig);
-        assert_eq!(enc.len(), 86);
-        assert!(!enc.contains('='));
-        assert!(!enc.contains('+') && !enc.contains('/'));
+        assert_eq!(
+            enc.len(),
+            88,
+            "STANDARD base64 of 64 bytes is 88 chars (padded)"
+        );
+        assert!(enc.ends_with("=="), "64 bytes → two '=' pad chars");
+        let back = base64::engine::general_purpose::STANDARD
+            .decode(&enc)
+            .expect("STANDARD decodes our stamp");
+        assert_eq!(back, sig);
     }
 
     #[test]
@@ -674,6 +750,9 @@ mod tests {
             components,
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: spec.trace_level,
             trace_schema_version: spec.trace_schema_version,
             deployment_profile: spec.deployment_profile,
@@ -739,6 +818,9 @@ mod tests {
             }],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("GENERIC".into()),
             trace_schema_version: "2.7.9".into(),
             deployment_profile: None,

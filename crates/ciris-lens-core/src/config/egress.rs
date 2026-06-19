@@ -829,6 +829,9 @@ mod tests {
             ],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("full_traces".into()),
             trace_schema_version: TRACE_SCHEMA_VERSION.into(),
             deployment_profile: Some(serde_json::json!({
@@ -934,6 +937,9 @@ mod tests {
             }],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("generic".into()),
             trace_schema_version: TRACE_SCHEMA_VERSION.into(),
             deployment_profile: Some(serde_json::json!({

@@ -603,9 +603,14 @@ impl PyLensClient {
     ///   (**cohabitation path**, CIRISLensCore#43.1 P0 fix). When provided,
     ///   sign+persist are driven via its Python methods — cross-wheel-safe.
     ///   Pass `None` (default) for the single-wheel / sovereign path.
-    /// - `trace_schema_version` — wire schema version string (default `"2.7.9"`).
+    /// - `trace_schema_version` — wire schema version string (default `"3.0.0"`).
+    ///   `"3.0.0"`+ (major ≥ 3) signs over **RFC 8785 JCS** (`V2Jcs`) — the
+    ///   post-#871 CEG-native canonical form the whole fabric is on; legacy
+    ///   `"2.x"` is Python-compat (`V1Python`). persist's ingest dispatches the
+    ///   verifier by this version (`canon_version_for_trace_schema`), so the
+    ///   batch is a JCS CEG object end-to-end.
     /// - `deployment_profile` — operator 6-field cohort dict; required on the
-    ///   wire at schema 2.7.9. Pass `None` only for non-production / dev.
+    ///   wire at schema 3.0.0. Pass `None` only for non-production / dev.
     /// - `consent_attesting_key_id` — key ID for CEG-based consent resolution.
     ///   `None` → config-only path (2.9.6 interim). Has no effect when
     ///   `engine=` is provided (follow-up: CIRISEdge#85).
@@ -628,7 +633,7 @@ impl PyLensClient {
         consent_timestamp,
         trace_level,
         engine = None,
-        trace_schema_version = "2.7.9".to_string(),
+        trace_schema_version = "3.0.0".to_string(),
         deployment_profile = None,
         consent_attesting_key_id = None,
         local_copy_dir = None,

@@ -82,11 +82,22 @@ use ciris_persist::scrub::NullScrubber;
 
 fn test_signer(seed: u8, key_id: &str) -> Arc<LocalSigner> {
     let signing_key = SigningKey::from_bytes(&[seed; 32]);
+    // Configure the ML-DSA-65 (PQC) half so the Engine can hybrid-sign
+    // traces. persist's trace-tier hard cut (CIRISPersist#225,
+    // VerifyMode::Full → verify_trace_hybrid under HybridPolicy::Strict)
+    // REJECTS a classical-only trace at admission, so a sovereign client
+    // that means to persist MUST carry an ML-DSA-65 identity. Deterministic
+    // seed for reproducibility.
+    let pqc_signer = ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+        &[seed.wrapping_add(1); 32],
+        format!("{key_id}-pqc"),
+    )
+    .expect("ml-dsa seed length checked");
     Arc::new(LocalSigner::from_parts(
         signing_key,
         key_id.to_string(),
-        None,
-        None,
+        Some(Arc::new(pqc_signer) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{key_id}-pqc")),
     ))
 }
 

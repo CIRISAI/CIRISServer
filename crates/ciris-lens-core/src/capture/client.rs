@@ -74,7 +74,7 @@ use super::consent::{ConsentConfig, ConsentError, ConsentResolution};
 use super::correlation::CorrelationMetadata;
 use super::partial::CompleteTrace;
 use super::partial::{CaptureOutcome, InboundEvent, PartialTraceStore};
-use super::seal::{apply_signature, canonical_bytes, TraceSealError};
+use super::seal::{self, apply_signature, canonical_bytes, TraceSealError};
 
 use crate::config::UpstreamLens;
 
@@ -132,6 +132,14 @@ pub enum SealSignError {
     /// hardware error, or authentication required.
     #[error("hardware sign: {0}")]
     HardwareSign(String),
+
+    /// `Engine::sign_hybrid` failed — no `LocalSigner` (the Engine was
+    /// built via `from_shared`), no PQC identity configured
+    /// (`PqcNotConfigured` — an Ed25519-only deployment cannot produce
+    /// the ML-DSA-65 half the trace-tier hard cut requires), or the
+    /// underlying signer errored.
+    #[error("hybrid sign: {0}")]
+    HybridSign(String),
 
     /// Wraps [`TraceSealError`] for the (rare) path where a
     /// `LocalSigner` is composed directly (e.g., in tests via
@@ -253,17 +261,59 @@ pub async fn sign_trace_via_hardware_signer(
     Ok(())
 }
 
+// ── hybrid_sign_trace_via_engine ─────────────────────────────────────
+
+/// Hybrid-sign (Ed25519 + ML-DSA-65) a sealed trace via the Engine's
+/// `LocalSigner`, the federation-admissible seal path.
+///
+/// Computes `seal::canonical_bytes` (the federation-wide canonical bytes
+/// authority) and hands them to [`Engine::sign_hybrid`], which produces
+/// the bound-hybrid signature — Ed25519 over `canonical`, ML-DSA-65 over
+/// `canonical ‖ ed25519_sig` — plus both public keys. The five resulting
+/// fields are stamped via [`seal::apply_hybrid_signature`] (all STANDARD
+/// base64). The trace then passes persist's `VerifyMode::Full`
+/// `verify_trace_hybrid` under `HybridPolicy::Strict` (CIRISPersist#225
+/// trace-tier hard cut).
+///
+/// `signature_key_id` uses the Engine signer's current alias (the
+/// Ed25519 key persist resolves from `accord_public_keys`); the
+/// ML-DSA-65 `pqc_key_id` uses the LocalSigner's `pqc_key_id`, falling
+/// back to the classical alias when the PQC key has no distinct id.
+async fn hybrid_sign_trace_via_engine(
+    engine: &Engine,
+    trace: &mut CompleteTrace,
+) -> Result<(), SealSignError> {
+    let bytes = canonical_bytes(trace).map_err(SealSignError::Canonicalize)?;
+    let hybrid = engine
+        .sign_hybrid(&bytes)
+        .await
+        .map_err(|e| SealSignError::HybridSign(e.to_string()))?;
+    // The Ed25519 key_id is the producer's federation alias persist
+    // resolves from `accord_public_keys`. `pqc_key_id` is verbatim
+    // metadata persist stores but the hybrid verify does not consult
+    // (the producer's ML-DSA-65 pubkey rides the envelope and is bound
+    // into the verify); the Engine exposes no separate PQC alias
+    // accessor, so we label it with the same federation alias.
+    let key_id = engine.signer().current_alias().to_owned();
+    seal::apply_hybrid_signature(
+        trace,
+        &hybrid.classical.signature,
+        &key_id,
+        &hybrid.pqc.signature,
+        &hybrid.pqc.public_key,
+        &key_id,
+    );
+    Ok(())
+}
+
 // ── seal_sign_wrap ───────────────────────────────────────────────────
 
-/// Stamp missing fields, sign via `HardwareSigner`, and wrap the
-/// signed trace into `BatchEnvelope` wire bytes ready for
+/// Stamp missing fields, hybrid-sign via the Engine's `LocalSigner`, and
+/// wrap the signed trace into `BatchEnvelope` wire bytes ready for
 /// `Engine::receive_and_persist` (and federation fan-out).
 ///
 /// Separated from the async `capture_event` path so it can be tested
-/// independently (see `tests::seal_sign_wrap_*` below). The test
-/// harness exercises this with a `LocalSigner`-backed
-/// `sign_trace_via_hardware_signer` mock that skips the real
-/// `HardwareSigner` I/O.
+/// independently (see `tests::seal_sign_wrap_*` below).
 ///
 /// Steps:
 ///
@@ -271,7 +321,7 @@ pub async fn sign_trace_via_hardware_signer(
 ///    one (2.7.9 required cohort block).
 /// 2. Stamp `trace_level` if absent (fallback from
 ///    [`BatchProvenance::trace_level`]).
-/// 3. Sign via [`sign_trace_via_hardware_signer`].
+/// 3. Hybrid-sign via [`hybrid_sign_trace_via_engine`].
 /// 4. Wrap into `BatchEnvelope` bytes via [`build_batch_bytes`].
 ///
 /// # Design note — deployment_profile stamp
@@ -283,7 +333,7 @@ pub async fn sign_trace_via_hardware_signer(
 /// whose `THOUGHT_START` event already carried a non-None
 /// `deployment_profile` (future multi-hop scenario) keeps its own.
 async fn seal_sign_wrap(
-    signer: &dyn HardwareSigner,
+    engine: &Engine,
     trace: &mut CompleteTrace,
     provenance: &BatchProvenance,
     deployment_profile: Option<&serde_json::Value>,
@@ -296,8 +346,8 @@ async fn seal_sign_wrap(
     if trace.trace_level.is_none() {
         trace.trace_level = Some(provenance.trace_level.clone());
     }
-    // 3. Sign.
-    sign_trace_via_hardware_signer(signer, trace).await?;
+    // 3. Hybrid-sign (Ed25519 + ML-DSA-65 — the trace-tier hard cut).
+    hybrid_sign_trace_via_engine(engine, trace).await?;
     // 4. Batch → bytes.
     let bytes = build_batch_bytes(std::slice::from_ref(trace), provenance)?;
     Ok(bytes)
@@ -632,9 +682,11 @@ impl CaptureClient {
             } => {
                 let trace_id = trace.trace_id.clone();
 
-                // Sign + wrap (async, lock released).
+                // Sign + wrap (async, lock released). Hybrid-signs via the
+                // Engine's LocalSigner so the trace carries both halves the
+                // CIRISPersist#225 trace-tier hard cut requires.
                 let bytes = seal_sign_wrap(
-                    self.engine.signer().as_ref(),
+                    self.engine.as_ref(),
                     &mut trace,
                     &provenance,
                     deployment_profile.as_ref(),
@@ -788,6 +840,9 @@ mod tests {
             ],
             signature: None,
             signature_key_id: None,
+            signature_ml_dsa_65: None,
+            pubkey_ml_dsa_65: None,
+            pqc_key_id: None,
             trace_level: Some("generic".into()),
             trace_schema_version: TRACE_SCHEMA_VERSION.into(),
             deployment_profile: Some(deployment_profile()),
