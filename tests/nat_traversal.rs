@@ -24,58 +24,25 @@ use ciris_edge::transport::reticulum::ReticulumTransportConfig;
 use ciris_edge::transport::store_and_forward::{
     MemoryStoreAndForward, StoreAndForward, StoreAndForwardConfig,
 };
-use ciris_server::ServerConfig;
+use ciris_server::ResolvedConfig;
 
-/// Env vars are process-global; run the env-driven cases serially inside ONE
-/// test so they cannot race other tests in this binary. Each case sets, reads,
-/// and clears its own keys.
+/// Server 0.5 Phase 2 — `transport.node` + `transport.store_and_forward` migrated
+/// from env (`CIRIS_SERVER_TRANSPORT_NODE` / `CIRIS_SERVER_STORE_AND_FORWARD`,
+/// both DELETED) onto signed `config:*` CEG objects. The baked DEFAULT for both is
+/// ON: a public fabric node binding `0.0.0.0:4242` relays + propagates by default
+/// (CIRISServer#24). An operator opts OUT now by writing `config:*` (not env);
+/// `resolve()` (covered in `tests/config_reconcile.rs`) reflects the override.
 #[test]
-fn transport_and_saf_env_default_on_and_opt_out() {
-    // The keys we toggle. Save + restore any pre-existing values.
-    const TN: &str = "CIRIS_SERVER_TRANSPORT_NODE";
-    const SAF: &str = "CIRIS_SERVER_STORE_AND_FORWARD";
-    let saved_tn = std::env::var(TN).ok();
-    let saved_saf = std::env::var(SAF).ok();
-
-    // (a) ABSENT → default ON. A public fabric node relays + propagates by default.
-    std::env::remove_var(TN);
-    std::env::remove_var(SAF);
-    let cfg = ServerConfig::from_env().expect("from_env (defaults)");
+fn transport_and_saf_default_on_in_resolved_config() {
+    let d = ResolvedConfig::default();
     assert!(
-        cfg.transport_node,
+        d.transport_node,
         "transport-node must DEFAULT ON for a fabric node (CIRISServer#24)"
     );
     assert!(
-        cfg.store_and_forward,
+        d.store_and_forward,
         "store-and-forward must DEFAULT ON for a fabric node (CIRISServer#24)"
     );
-
-    // (b) Explicit opt-OUT via `0` → both off (a non-forwarding leaf).
-    std::env::set_var(TN, "0");
-    std::env::set_var(SAF, "false");
-    let cfg = ServerConfig::from_env().expect("from_env (opt-out)");
-    assert!(!cfg.transport_node, "=0 must disable transport-node");
-    assert!(
-        !cfg.store_and_forward,
-        "=false must disable store-and-forward"
-    );
-
-    // (c) Explicit opt-IN via truthy spellings.
-    std::env::set_var(TN, "on");
-    std::env::set_var(SAF, "1");
-    let cfg = ServerConfig::from_env().expect("from_env (opt-in)");
-    assert!(cfg.transport_node, "=on must enable transport-node");
-    assert!(cfg.store_and_forward, "=1 must enable store-and-forward");
-
-    // Restore environment for any other tests in this binary.
-    match saved_tn {
-        Some(v) => std::env::set_var(TN, v),
-        None => std::env::remove_var(TN),
-    }
-    match saved_saf {
-        Some(v) => std::env::set_var(SAF, v),
-        None => std::env::remove_var(SAF),
-    }
 }
 
 /// `build_edge` sets `ReticulumTransportConfig.enable_transport = cfg.transport_node`.

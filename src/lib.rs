@@ -54,6 +54,13 @@ mod config;
 /// peering is (serve-only floor + SYSTEM_ADMIN owner session). Public so the
 /// integration test (`tests/graph_config.rs`) can drive the router directly.
 pub mod config_api;
+/// **CEG-driven config reconciler** (Server 0.5 Phase 2) — resolves the migrated
+/// runtime-tunable knobs (transport/scorer/replication-cadence/mode) from the
+/// corpus's signed `config:*` objects into a live [`config_reconcile::ResolvedConfig`]
+/// snapshot consumers read (the scorer reads it HOT each cycle). The API never
+/// touches the runtime — it writes CEG and nudges this loop. Public so the
+/// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
+pub mod config_reconcile;
 /// Owner-directed federation operations (the keystone for on-demand
 /// `consent:replication` peering): `GET /v1/federation/self-key-record` +
 /// `POST /v1/federation/peering`. Each node authors its OWN consent grant
@@ -131,6 +138,10 @@ pub use config::{Mode, PeerB, ServerConfig, Slices};
 /// root for downstream/test use.
 pub use graph_config::{ConfigEntry, ConfigScope, ConfigValue};
 
+/// The resolved runtime-tunable config snapshot (Server 0.5 Phase 2) — re-exported
+/// at the crate root for downstream/test use.
+pub use config_reconcile::ResolvedConfig;
+
 // The adapter seam's public surface — what a downstream crate (CIRISStatus)
 // imports to be "ciris-server + an adapter".
 pub use adapter::{Adapter, AdapterConfig, AdapterContext, AdapterStatus, NoopAdapter};
@@ -147,10 +158,10 @@ use anyhow::Result;
 pub async fn run() -> Result<()> {
     let cfg = ServerConfig::from_env()?;
     tracing::info!(
-        mode = ?cfg.mode,
         data_dir = %cfg.data_dir.display(),
         listen = %cfg.listen_addr,
-        "CIRISServer (the fabric node) starting — lens-only (0.1)"
+        "CIRISServer (the fabric node) starting — lens-only (0.1); mode + runtime knobs resolve \
+         from config:* CEG at boot (Server 0.5 Phase 2)"
     );
     compose::serve(cfg).await
 }

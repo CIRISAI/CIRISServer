@@ -29,27 +29,12 @@
 //! panics the controller.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use ciris_edge::replication::{EnvelopeKind, ReplicationPeer, ReplicationRuntime};
 use ciris_persist::prelude::Engine;
 use tokio::sync::{watch, Notify};
 
-/// Default reconcile cadence (seconds) when `CIRIS_SERVER_REPLICATION_RECONCILE_SECS`
-/// is unset / unparsable.
-const DEFAULT_RECONCILE_SECS: u64 = 30;
-
-/// The reconcile cadence, from `CIRIS_SERVER_REPLICATION_RECONCILE_SECS`
-/// (default [`DEFAULT_RECONCILE_SECS`]). A `0` or unparsable value falls back to
-/// the default (a zero-period interval would busy-spin).
-fn reconcile_interval() -> Duration {
-    let secs = std::env::var("CIRIS_SERVER_REPLICATION_RECONCILE_SECS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(DEFAULT_RECONCILE_SECS);
-    Duration::from_secs(secs)
-}
+use crate::config_reconcile::ResolvedConfig;
 
 /// Run **one** reconcile pass: converge the runtime's live `Attestation`-kind
 /// **Initiator** set to the admitted `consent:replication` subjects in the corpus.
@@ -121,15 +106,22 @@ pub async fn reconcile_once(
 /// caller for the node's lifetime). The loop ticks on the configured cadence, on
 /// an explicit `notify` nudge (the peering API fires this after writing CEG so
 /// convergence is prompt), and exits when `shutdown` flips to `true`.
+///
+/// **HOT cadence (Server 0.5 Phase 2):** the reconcile period is sourced from the
+/// live resolved-config snapshot (`config_rx`, `replication.reconcile_secs`) —
+/// previously `CIRIS_SERVER_REPLICATION_RECONCILE_SECS` env. The interval is
+/// rebuilt when the cadence changes, so a `POST /v1/config` retunes it on the next
+/// tick with no restart.
 pub fn spawn(
     engine: Arc<Engine>,
     node_key_id: String,
     runtime: Arc<ReplicationRuntime>,
     notify: Arc<Notify>,
+    config_rx: watch::Receiver<ResolvedConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let period = reconcile_interval();
+        let mut period = config_rx.borrow().replication_reconcile_interval();
         let mut interval = tokio::time::interval(period);
         // Skip missed ticks rather than burst-catch-up if a reconcile runs long.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -137,7 +129,7 @@ pub fn spawn(
             period_secs = period.as_secs(),
             "CEG-driven replication reconciler started (consent objects are the topology; \
              API writes CEG, this loop converges the live runtime via set_peers — no restart, \
-             CIRISEdge#173 resolved)"
+             CIRISEdge#173 resolved; cadence from config:* replication.reconcile_secs)"
         );
 
         // An initial reconcile is already implied by the first immediate
@@ -156,6 +148,19 @@ pub fn spawn(
                     }
                     continue;
                 }
+            }
+
+            // Hot cadence: rebuild the interval if replication.reconcile_secs changed.
+            let live_period = config_rx.borrow().replication_reconcile_interval();
+            if live_period != period {
+                period = live_period;
+                interval = tokio::time::interval(period);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                interval.tick().await; // consume the immediate tick
+                tracing::info!(
+                    period_secs = period.as_secs(),
+                    "replication reconcile cadence retuned from config:* (hot)"
+                );
             }
 
             if let Err(e) = reconcile_once(&engine, &node_key_id, &runtime).await {

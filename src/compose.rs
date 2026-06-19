@@ -102,6 +102,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
 
+    // ── CONFIG-AS-CEG resolution (Server 0.5 Phase 2) ─────────────────────────
+    // Resolve the migrated runtime-tunable knobs from the corpus's signed
+    // `config:*` objects (baked default per absent key) into the initial snapshot,
+    // and publish it on a `watch` channel. Consumers read the LIVE snapshot: the
+    // scorer reads it HOT each cycle (cadence/window/gate/target retune with no
+    // restart); the replication reconciler sources its cadence from it (hot); the
+    // edge transport + posture (`transport.*`, `mode`) are boot-structural — built
+    // once from this snapshot, reconcile on next boot (the value now lives in CEG,
+    // not env). The config reconciler (spawned below) re-resolves + republishes on
+    // its cadence + a `POST /v1/config` nudge.
+    let initial_config = crate::config_reconcile::resolve(&engine, &cfg.key_id).await;
+    tracing::info!(
+        ?initial_config,
+        "resolved initial config:* snapshot (Server 0.5 Phase 2 — knobs now live in CEG, not env)"
+    );
+    let (config_tx, config_rx) = watch::channel(initial_config.clone());
+
     // ── ROOT-user bootstrap (CIRISServer#19) ──────────────────────────────────
     // Faithful port of the agent's `auth_service.bootstrap_if_needed`: if no ROOT
     // WA exists, load the baked ROOT trust-anchor seed (env CIRIS_ROOT_SEED_PATH or
@@ -162,7 +179,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
-    let edge = build_edge(&engine, &cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
+    // Edge transport flags are boot-structural: built ONCE from the resolved
+    // config:* snapshot (transport.node / transport.store_and_forward). Changing
+    // them in CEG reconciles on the next boot.
+    let edge = build_edge(
+        &engine,
+        &cfg,
+        initial_config.transport_node,
+        initial_config.store_and_forward,
+        Arc::clone(&signer),
+        Arc::clone(&pqc),
+    )
+    .await?;
 
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
@@ -174,7 +202,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         tracing::warn!(
             min_gib = cfg.lens_store_min_gib,
             "disk below the lens-store minimum — running as a Reticulum relay node only \
-             (no local corpus / read API); set CIRIS_SERVER_LENS_STORE_MIN_GIB to tune"
+             (no local corpus / read API); free up disk to the baked minimum"
         );
     }
     if cfg.slices.registry {
@@ -229,9 +257,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             cfg.key_id.clone(),
             Arc::clone(runtime),
             Arc::clone(&reconcile_notify),
+            config_rx.clone(),
             reconcile_sd_rx,
         )
     });
+
+    // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
+    // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
+    // own cadence + the SAME `reconcile_notify` the config API fires after a write,
+    // and republishes the live `ResolvedConfig` on `config_tx`. Consumers (scorer,
+    // replication reconciler) read the receiver: scorer knobs are hot; transport /
+    // mode are boot-structural. ONE Notify is shared by config_api + this loop.
+    let (config_sd_tx, config_sd_rx) = watch::channel(false);
+    let config_reconcile_join = crate::config_reconcile::spawn(
+        Arc::clone(&engine),
+        cfg.key_id.clone(),
+        config_tx,
+        Arc::clone(&reconcile_notify),
+        config_sd_rx,
+    );
 
     // ── The responsible-USER signer for POST /v1/setup/claim-remote (the
     //    SUBSTRATE-NATIVE node-to-node claiming side). The LOCAL node signs the
@@ -327,16 +371,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // itself never touches the runtime; this is just a signal.
                         replication.as_ref().map(|_| Arc::clone(&reconcile_notify)),
                     ))
-                    // CONFIG-AS-CEG (Server 0.5 Phase 1): the owner-gated
-                    // /v1/config surface over the signed GraphConfig store. A
-                    // write is gated the SAME way peering is (serve-only floor +
-                    // SYSTEM_ADMIN owner session). Phase 1 adds the store + API
-                    // only — it removes no env var; the Phase-2 config reconciler
-                    // wires the notify (None for now).
+                    // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
+                    // surface over the signed GraphConfig store. A write is gated
+                    // the SAME way peering is (serve-only floor + SYSTEM_ADMIN owner
+                    // session). Phase 2 wires the SHARED reconcile_notify: a
+                    // successful write nudges the config reconciler so the live
+                    // ResolvedConfig snapshot converges promptly (the API never
+                    // touches the runtime — it writes CEG + nudges this loop).
                     .merge(crate::config_api::router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
-                        None,
+                        Some(Arc::clone(&reconcile_notify)),
                     ))
                     // THIS node's public NodeCode (CEG §0.10): GET
                     // /v1/federation/node-code — the QR-able bootstrap handle an
@@ -385,20 +430,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    hot path). Derives per-agent N_eff from ingested traces and emits
     //    federation-tier `capacity:*` attestations to Node A's own corpus. Only
     //    when the host carries the local corpus (no corpus ⇒ nothing to score).
-    //    Cadence + window are config-driven (CIRIS_SERVER_SCORER_*). ───────────
+    //    Cadence + window + gates are config-driven (config:* scorer.*) and HOT:
+    //    the scorer reads the LIVE ResolvedConfig snapshot (config_rx) each cycle,
+    //    so a POST /v1/config retunes the next pass with no restart (Phase 2). ──
     let _scorer = if caps.lens_store {
-        let scorer_cfg = crate::scorer::ScorerConfig::from_env();
+        let scorer_cfg = crate::scorer::ScorerConfig::from_resolved(&initial_config);
         tracing::info!(
             cadence_secs = scorer_cfg.cadence.as_secs(),
             window = scorer_cfg.window,
             sample_gate = scorer_cfg.sample_size_gate,
             target_n_eff = scorer_cfg.target_n_eff,
-            "capacity scorer spawned (score→emit; capacity:sustained_coherence:v1)"
+            "capacity scorer spawned (score→emit; capacity:sustained_coherence:v1; \
+             knobs HOT from config:* scorer.*)"
         );
         Some(crate::scorer::spawn(
             Arc::clone(&engine),
             cfg.key_id.clone(),
-            scorer_cfg,
+            config_rx.clone(),
         ))
     } else {
         None
@@ -427,7 +475,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     tracing::info!(
         ret = %cfg.listen_addr,
-        mode = ?cfg.mode,
+        mode = %initial_config.mode,
         "CIRISServer up as a Reticulum node — ctrl-c to stop"
     );
     tokio::signal::ctrl_c().await.context("await ctrl_c")?;
@@ -447,6 +495,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if let Some(join) = reconcile_join {
         let _ = join.await;
     }
+    // Tear down the CEG-driven config reconcile loop (Server 0.5 Phase 2).
+    let _ = config_sd_tx.send(true);
+    let _ = config_reconcile_join.await;
     let _ = edge_shutdown_tx.send(true);
     let _ = edge_join.await;
     Ok(())
@@ -1033,6 +1084,8 @@ async fn setup_peer_replication(
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
+    transport_node: bool,
+    store_and_forward: bool,
     signer: Arc<dyn HardwareSigner>,
     pqc: Arc<dyn PqcSigner>,
 ) -> Result<Edge> {
@@ -1071,7 +1124,7 @@ async fn build_edge(
     // interfaces, so a NAT'd/mobile edge that holds one outbound TCPClient link
     // to this public node (0.0.0.0:4242) gets its inbound routed back down that
     // link. Default ON for a fabric node (it IS the NAT-traversal infra); the
-    // operator opts out via CIRIS_SERVER_TRANSPORT_NODE=0. (Leviculum's builder
+    // owner opts out via the `transport.node` config:* object (Phase 2). (Leviculum's builder
     // default is true; edge always calls .enable_transport explicitly, so this
     // value is honoured either way.)
     let ret_config = ReticulumTransportConfig {
@@ -1082,7 +1135,7 @@ async fn build_edge(
         local_key_id: cfg.key_id.clone(),
         local_epoch: 0,
         interfaces: vec![],
-        enable_transport: cfg.transport_node,
+        enable_transport: transport_node,
     };
     let ret_auth = ReticulumAuth {
         signer: Some(Arc::clone(&signer)),
@@ -1104,15 +1157,15 @@ async fn build_edge(
     // is a future upgrade. `PendingOrLive` makes a send to an unreachable
     // destination fall back to the queue (returning `Queued`) rather than error.
     // APNs push-to-wake is a mobile/bridge concern and stays out of scope here.
-    if cfg.store_and_forward {
+    if store_and_forward {
         let saf: Arc<dyn StoreAndForward> =
             Arc::new(MemoryStoreAndForward::new(StoreAndForwardConfig::default()));
         transport = transport.with_store_and_forward(saf, PendingDelivery::PendingOrLive);
     }
     let transport = Arc::new(transport);
     tracing::info!(
-        transport_node = cfg.transport_node,
-        store_and_forward = cfg.store_and_forward,
+        transport_node,
+        store_and_forward,
         "reticulum NAT-traversal infra configured (CIRISServer#24): transport-node forwarding + store-and-forward propagation"
     );
     let edge = Edge::builder()

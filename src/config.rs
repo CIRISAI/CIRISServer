@@ -15,10 +15,17 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-/// Default minimum free disk (GiB) to run the local lens corpus + read API.
-/// Below this the node still runs as a Reticulum relay node. Tunable via
-/// `CIRIS_SERVER_LENS_STORE_MIN_GIB`.
-const DEFAULT_LENS_STORE_MIN_GIB: u64 = 5;
+/// Minimum free disk (GiB) to run the local lens corpus + read API. Below this
+/// the node still runs as a Reticulum relay node.
+///
+/// **A baked constant, NOT a config knob (Server 0.5 Phase 2).** Unlike the other
+/// runtime-tunable knobs, this gate is read by [`Capabilities::detect`] BEFORE the
+/// Engine/corpus is open — so it CANNOT be sourced from a `config:*` CEG object
+/// (there is no corpus to read yet). It is a **pre-corpus structural gate**:
+/// whether the host even mounts a corpus. So it is no longer env
+/// (`CIRIS_SERVER_LENS_STORE_MIN_GIB` is deleted), no longer CEG — just this
+/// constant. (Acceptable under "no env": a structural pre-corpus value.)
+pub const DEFAULT_LENS_STORE_MIN_GIB: u64 = 5;
 
 /// Transport posture (the agent's `AgentMode`). **Orthogonal** to the §3.3
 /// self/family/server/agent axis (agency + cohort). CIRISServer defaults to
@@ -36,12 +43,13 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn parse(s: &str) -> Self {
+    /// Parse a posture string (the value carried by the `mode` config:* key, or a
+    /// baked default). Anything else (incl. typos) → server: never silently
+    /// downgrade a node's posture on a malformed value.
+    pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "client" => Mode::Client,
             "proxy" => Mode::Proxy,
-            // Anything else (incl. typos) → server: never silently downgrade a
-            // node's posture on a malformed value.
             _ => Mode::Server,
         }
     }
@@ -127,26 +135,15 @@ pub struct ServerConfig {
     pub bootstrap_peers: Vec<SocketAddr>,
     pub key_id: String,
     pub occurrence_id: String,
-    pub mode: Mode,
     pub slices: Slices,
+    /// Pre-corpus structural gate: minimum free disk (GiB) to mount the lens
+    /// corpus. A **baked constant** ([`DEFAULT_LENS_STORE_MIN_GIB`]), NOT a
+    /// config:* knob — it is read by [`Capabilities::detect`] before the corpus is
+    /// open, so it cannot be a CEG read (Server 0.5 Phase 2; the env was deleted).
     pub lens_store_min_gib: u64,
     /// Optional directed-consent replication peer (Node B / `ciris-status`).
     /// `Some` only when the full `CIRIS_PEER_B_*` trio is present.
     pub peer_b: Option<PeerB>,
-    /// **CIRISEdge#168 / CIRISServer#24** — Reticulum Transport-node mode. When
-    /// `true`, the node forwards inbound packets for non-local destinations
-    /// across its warm interfaces, so a NAT'd/mobile edge that opens one
-    /// outbound TCPClient link to this public node has its inbound traffic
-    /// routed back down that link. DEFAULT **on**: a public fabric node binding
-    /// `0.0.0.0:4242` SHOULD relay (it IS the NAT-traversal infra). Set
-    /// `CIRIS_SERVER_TRANSPORT_NODE=0` to run as a non-forwarding leaf.
-    pub transport_node: bool,
-    /// **CIRISEdge#169 / CIRISServer#24** — store-and-forward propagation. When
-    /// `true`, messages addressed to a currently-unreachable (asleep/offline)
-    /// destination are queued in a bounded per-destination store and drained on
-    /// the destination's wake-up fetch, instead of failing. DEFAULT **on** for a
-    /// fabric node. Set `CIRIS_SERVER_STORE_AND_FORWARD=0` to disable.
-    pub store_and_forward: bool,
 }
 
 impl ServerConfig {
@@ -184,28 +181,17 @@ impl ServerConfig {
             .or_else(|_| std::env::var("AGENT_OCCURRENCE_ID"))
             .unwrap_or_else(|_| "default".to_string());
 
-        let mode = std::env::var("CIRIS_SERVER_MODE")
-            .or_else(|_| std::env::var("AGENT_MODE"))
-            .map(|s| Mode::parse(&s))
-            .unwrap_or_default();
-
-        let lens_store_min_gib = std::env::var("CIRIS_SERVER_LENS_STORE_MIN_GIB")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(DEFAULT_LENS_STORE_MIN_GIB);
+        // Server 0.5 Phase 2: `mode`, `transport.node`, `store_and_forward`, and
+        // the `scorer.*` + `replication.reconcile_secs` knobs are now sourced from
+        // signed `config:*` CEG objects (resolved at boot + hot-applied at runtime
+        // by `crate::config_reconcile`), NOT env. The lens-store minimum is a baked
+        // pre-corpus constant. Their env reads are deleted here.
 
         // Directed-consent replication peer (Node B / ciris-status). All THREE
         // env vars must be present, non-empty, for the peer to be admitted —
         // a partial trio is treated as "no peer" (and warned), never a partial
         // registration that could not actually replicate or verify.
         let peer_b = Self::peer_b_from_env();
-
-        // CIRISServer#24 NAT-traversal infra — DEFAULT ON for a fabric node. A
-        // public node binding 0.0.0.0:4242 relays for NAT'd/mobile edges
-        // (transport-node) and holds mail for asleep edges (store-and-forward).
-        // Operators opt OUT via `=0/false/no/off`.
-        let transport_node = env_bool("CIRIS_SERVER_TRANSPORT_NODE", true);
-        let store_and_forward = env_bool("CIRIS_SERVER_STORE_AND_FORWARD", true);
 
         Ok(Self {
             data_dir,
@@ -214,12 +200,9 @@ impl ServerConfig {
             bootstrap_peers,
             key_id,
             occurrence_id,
-            mode,
             slices: Slices::default(),
-            lens_store_min_gib,
+            lens_store_min_gib: DEFAULT_LENS_STORE_MIN_GIB,
             peer_b,
-            transport_node,
-            store_and_forward,
         })
     }
 
@@ -330,18 +313,4 @@ impl ServerConfig {
 
 fn env_path(k: &str) -> Option<PathBuf> {
     std::env::var(k).ok().map(PathBuf::from)
-}
-
-/// Parse a boolean env toggle with a default. Truthy: `1/true/yes/on`;
-/// falsy: `0/false/no/off` (case-insensitive). Absent or unrecognized →
-/// `default`.
-fn env_bool(k: &str, default: bool) -> bool {
-    match std::env::var(k) {
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => default,
-        },
-        Err(_) => default,
-    }
 }

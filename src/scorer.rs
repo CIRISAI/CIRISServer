@@ -39,6 +39,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
@@ -68,8 +69,10 @@ const ATTESTATION_TYPE_SCORES: &str = "scores";
 /// honest scope (the composite product would otherwise be fabricated).
 const CAPACITY_DIMENSION: &str = "capacity:sustained_coherence:v1";
 
-/// Periodic-scorer configuration. Cadence + window are env-driven with sane
-/// defaults; see [`ScorerConfig::from_env`].
+/// Periodic-scorer configuration. Cadence + window + gates are sourced from the
+/// resolved `config:*` snapshot ([`crate::config_reconcile::ResolvedConfig`]) —
+/// HOT: the scorer re-reads the live snapshot each cycle, so a `POST /v1/config`
+/// retunes the next pass with no restart. See [`ScorerConfig::from_resolved`].
 #[derive(Debug, Clone)]
 pub struct ScorerConfig {
     /// How often the scorer runs.
@@ -105,39 +108,16 @@ impl Default for ScorerConfig {
 }
 
 impl ScorerConfig {
-    /// Build from the environment over the defaults. Every field is optional.
-    ///
-    /// - `CIRIS_SERVER_SCORER_CADENCE_SECS`
-    /// - `CIRIS_SERVER_SCORER_WINDOW`
-    /// - `CIRIS_SERVER_SCORER_SAMPLE_GATE`
-    /// - `CIRIS_SERVER_SCORER_TARGET_N_EFF`
-    pub fn from_env() -> Self {
-        let d = ScorerConfig::default();
-        let cadence = std::env::var("CIRIS_SERVER_SCORER_CADENCE_SECS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|s| *s > 0)
-            .map(Duration::from_secs)
-            .unwrap_or(d.cadence);
-        let window = std::env::var("CIRIS_SERVER_SCORER_WINDOW")
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .filter(|w| (1..=10_000).contains(w))
-            .unwrap_or(d.window);
-        let sample_size_gate = std::env::var("CIRIS_SERVER_SCORER_SAMPLE_GATE")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(d.sample_size_gate);
-        let target_n_eff = std::env::var("CIRIS_SERVER_SCORER_TARGET_N_EFF")
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|t| t.is_finite() && *t > 0.0)
-            .unwrap_or(d.target_n_eff);
+    /// Project the resolved `config:*` snapshot onto a [`ScorerConfig`] — the
+    /// Server 0.5 Phase 2 source of the scorer knobs (the `CIRIS_SERVER_SCORER_*`
+    /// env reads are deleted). The snapshot already validated each value against
+    /// its baked default during [`crate::config_reconcile::resolve`].
+    pub fn from_resolved(r: &crate::config_reconcile::ResolvedConfig) -> Self {
         ScorerConfig {
-            cadence,
-            window,
-            sample_size_gate,
-            target_n_eff,
+            cadence: r.scorer_cadence(),
+            window: r.scorer_window,
+            sample_size_gate: r.scorer_sample_gate,
+            target_n_eff: r.scorer_target_n_eff,
         }
     }
 }
@@ -146,18 +126,39 @@ impl ScorerConfig {
 /// the join handle; the task runs until the runtime drops it (the node's
 /// lifetime). The first pass runs after one `cadence` tick (lets the corpus
 /// accumulate traces post-boot).
+///
+/// **HOT config (Server 0.5 Phase 2):** `config_rx` is the live resolved-config
+/// snapshot. Each cycle reads `*config_rx.borrow()` for the current
+/// [`ScorerConfig`], so a `POST /v1/config` that retunes `scorer.*` applies on the
+/// next pass with NO restart. The sleep period itself tracks the live
+/// `scorer.cadence_secs`: we recompute the interval whenever the cadence changes.
 pub fn spawn(
     engine: Arc<Engine>,
     node_key_id: String,
-    cfg: ScorerConfig,
+    config_rx: watch::Receiver<crate::config_reconcile::ResolvedConfig>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(cfg.cadence);
+        // Track the cadence so we can rebuild the interval when it changes HOT.
+        let mut cadence = ScorerConfig::from_resolved(&config_rx.borrow()).cadence;
+        let mut tick = tokio::time::interval(cadence);
         // The first immediate tick fires at once; skip it so we don't score an
         // empty just-booted corpus.
         tick.tick().await;
         loop {
             tick.tick().await;
+            // Read the LIVE snapshot per cycle (hot) — cadence/window/gate/target.
+            let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
+            if cfg.cadence != cadence {
+                // Cadence changed via CEG — rebuild the interval so the new period
+                // takes effect immediately (skips the already-elapsed first tick).
+                cadence = cfg.cadence;
+                tick = tokio::time::interval(cadence);
+                tick.tick().await;
+                tracing::info!(
+                    cadence_secs = cadence.as_secs(),
+                    "capacity scorer cadence retuned from config:* (hot)"
+                );
+            }
             if let Err(e) = run_pass(&engine, &node_key_id, &cfg).await {
                 tracing::warn!(error = %e, "capacity scorer pass failed (will retry next cadence)");
             }
