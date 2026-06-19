@@ -135,6 +135,11 @@ impl LensCore {
             local_key_id: key_id.clone(),
             local_epoch: 0,
             interfaces: vec![], // legacy TCP path: listen_addr + bootstrap_peers
+            // CIRISEdge#168 (v5.0) — leaf relay role: do NOT forward packets
+            // for non-local destinations. Transport-node mode is a deliberate
+            // composition-root choice (CIRISServer build_edge), not a default
+            // every lens relay inherits.
+            enable_transport: false,
         };
 
         // Auth bundle — wire the federation signer into the

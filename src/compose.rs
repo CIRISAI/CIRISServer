@@ -19,6 +19,10 @@ use anyhow::{Context, Result};
 use ciris_edge::transport::reticulum::{
     ReticulumAuth, ReticulumTransport, ReticulumTransportConfig,
 };
+use ciris_edge::transport::store_and_forward::{
+    MemoryStoreAndForward, StoreAndForward, StoreAndForwardConfig,
+};
+use ciris_edge::transport::PendingDelivery;
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
 use ciris_keyring::{
     get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, MlDsa65SoftwareSigner,
@@ -908,6 +912,14 @@ async fn build_edge(
         "transport-identity keystore opened"
     );
 
+    // CIRISEdge#168 (v5.0) / CIRISServer#24 — Transport-node mode. When on, the
+    // node forwards inbound packets for non-local destinations across its warm
+    // interfaces, so a NAT'd/mobile edge that holds one outbound TCPClient link
+    // to this public node (0.0.0.0:4242) gets its inbound routed back down that
+    // link. Default ON for a fabric node (it IS the NAT-traversal infra); the
+    // operator opts out via CIRIS_SERVER_TRANSPORT_NODE=0. (Leviculum's builder
+    // default is true; edge always calls .enable_transport explicitly, so this
+    // value is honoured either way.)
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
@@ -916,6 +928,7 @@ async fn build_edge(
         local_key_id: cfg.key_id.clone(),
         local_epoch: 0,
         interfaces: vec![],
+        enable_transport: cfg.transport_node,
     };
     let ret_auth = ReticulumAuth {
         signer: Some(Arc::clone(&signer)),
@@ -924,10 +937,29 @@ async fn build_edge(
         transport_identity_keystore: Some(transport_keystore),
         ..ReticulumAuth::default()
     };
-    let transport = Arc::new(
-        ReticulumTransport::new(ret_config, ret_auth)
-            .await
-            .map_err(|e| anyhow::anyhow!("build reticulum transport: {e}"))?,
+    let mut transport = ReticulumTransport::new(ret_config, ret_auth)
+        .await
+        .map_err(|e| anyhow::anyhow!("build reticulum transport: {e}"))?;
+
+    // CIRISEdge#169 (v5.0, §24 propagation) / CIRISServer#24 — store-and-forward.
+    // Messages addressed to a currently-unreachable (asleep/offline) mobile edge
+    // are queued in a bounded per-destination store and drained on the
+    // destination's wake-up fetch, instead of failing. We use edge's own
+    // reference `MemoryStoreAndForward` (bounded: 256 entries/dest, 64 MiB total,
+    // 7-day TTL — its `StoreAndForwardConfig::default`); a persist-backed queue
+    // is a future upgrade. `PendingOrLive` makes a send to an unreachable
+    // destination fall back to the queue (returning `Queued`) rather than error.
+    // APNs push-to-wake is a mobile/bridge concern and stays out of scope here.
+    if cfg.store_and_forward {
+        let saf: Arc<dyn StoreAndForward> =
+            Arc::new(MemoryStoreAndForward::new(StoreAndForwardConfig::default()));
+        transport = transport.with_store_and_forward(saf, PendingDelivery::PendingOrLive);
+    }
+    let transport = Arc::new(transport);
+    tracing::info!(
+        transport_node = cfg.transport_node,
+        store_and_forward = cfg.store_and_forward,
+        "reticulum NAT-traversal infra configured (CIRISServer#24): transport-node forwarding + store-and-forward propagation"
     );
     let edge = Edge::builder()
         .directory(backend.clone())
