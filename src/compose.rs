@@ -272,7 +272,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // The node's identity aggregate (CEG §5.6.8.8.2) for GET /v1/identity —
     // assembled ONCE at boot from the federation signing key + the RNS transport
     // identity (both stable). Captured before edge.run() consumes the Edge.
-    let identity_json = local_identity_json(&engine, edge.local_transport_pubkey())
+    let identity_json = local_identity_json(&engine, edge.local_transport_pubkey(), &cfg.key_id)
         .await
         .context("assemble /v1/identity aggregate")?;
 
@@ -593,6 +593,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 async fn local_identity_json(
     engine: &Engine,
     transport_pubkey: Option<[u8; 64]>,
+    wire_key_id: &str,
 ) -> Result<String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -604,7 +605,26 @@ async fn local_identity_json(
         .local_identity_aggregate(ret_x25519_b64, ret_ed25519_b64)
         .await
         .map_err(|e| anyhow::anyhow!("persist local_identity_aggregate: {e}"))?;
-    serde_json::to_string(&aggregate).context("serialize LocalIdentityAggregate")
+
+    // persist's aggregate reports `key_id`/`pqc_key_id` from the engine's
+    // configured local labels — which are the KEYSTORE alias (the raw `--key-id`),
+    // NOT the derived federation/wire identity. The `federation_keys` row and the
+    // `SignedKeyRecord` both carry the derived `key_id`, so override here so
+    // GET /v1/identity matches the canonical surfaces (CIRISServer#34). The
+    // federation registers the hybrid (Ed25519 + ML-DSA-65) under ONE key_id, so
+    // `pqc_key_id` is that same derived key_id (the keystore `{alias}-pqc` blob is
+    // an internal storage label, not the federation identity).
+    let mut v = serde_json::to_value(&aggregate).context("serialize LocalIdentityAggregate")?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("key_id".into(), serde_json::Value::String(wire_key_id.to_string()));
+        if obj.get("pqc_key_id").is_some_and(|p| !p.is_null()) {
+            obj.insert(
+                "pqc_key_id".into(),
+                serde_json::Value::String(wire_key_id.to_string()),
+            );
+        }
+    }
+    serde_json::to_string(&v).context("serialize identity aggregate JSON")
 }
 
 /// `GET /v1/identity` → the cached identity-aggregate JSON (stable for the
