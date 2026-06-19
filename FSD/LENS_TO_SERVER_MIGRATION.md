@@ -18,6 +18,29 @@
 4. Verify (`/v1/identity` shows the same `key_id`; read endpoints 200; ingest lands).
 5. Tear down Grafana / TimescaleDB / the Python ingest API / the OAuth admin.
 
+> **v0.4.7 — bridge deploy + agent lens-drop-in (current).** Floor = persist v9.0.0 +
+> verify v6.0.0 + edge v4.6.0 (CEG 1.0-RC29). Two consumers:
+>
+> **Bridge deploy.** `pip install ciris-server==0.4.7` (manylinux abi3 wheel) **or** the
+> `ciris-server-x86_64-unknown-linux-gnu` release binary. **HTTP trace ingest is back**
+> (the §3.4 listen+1 relay): the emitter's legacy POST lands directly —
+> Caddy: `reverse_proxy /lens-api/api/v1/accord/events ciris-server:4243` (no path
+> rewrite). The node is a public Reticulum node at `0.0.0.0:4242` (warm-link target +
+> signed announce + `key_id→dest` discovery). **⚠ HYBRID HARD CUT:** persist v9.0.0
+> rejects classical-only Ed25519 traces (`verify_hybrid_required`) — the deployed
+> `CIRIS-AccordMetrics` emitter MUST run the **hybrid-signing agent build** (the in-tree
+> adapter seals hybrid via `LensClient`), or ingest 401s. Mobile inbound-relay +
+> LXMF propagation are edge work (CIRISEdge#168/#169), not in this release.
+>
+> **Agent lens replacement (drop-in).** `pip install ciris-server==0.4.7`, then swap
+> `from ciris_lens_core import …` → `from ciris_server import …`. The wheel re-exports
+> the **complete** lens surface — `LensClient`, `process_trace_batch`, `scrub_trace`,
+> `scrub_traces_batch`, `ner_is_configured`, `install_relay`, `install_node`,
+> `install_ret_relay`, `LensAudit`, `EgressFilter`, `PeerAcl`, `ScoringConfig`,
+> `UxConfig`, `LensNode`, `RetRelay`, `PROJECTION_VERSION` — over ONE shared substrate
+> (one `.so`, one PyO3 registry: `ciris_server.Engine is ciris_persist.Engine`). Drop the
+> `ciris-lens-core` dependency. This is the 2.9.7 fold.
+
 > **Procedure validated** (2026-06-15, on 0.1.x / persist-7 floor): two fresh
 > homes given the *same* planted `ed25519.seed` + `.rid` both booted to the
 > **identical** RNS destination hash — the federation seed is adopted + sealed
