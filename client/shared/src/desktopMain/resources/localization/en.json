@@ -1994,6 +1994,8 @@
     "manage_nodes_no_session": "no session",
     "manage_nodes_claim": "Claim ownership of a node",
     "manage_nodes_claim_note": "Enter a node's code + one-time claim PIN to become its owner. The claim is performed by your local node — the app does no crypto.",
+    "manage_nodes_upgrade_fed_id": "Upgrade this account to a Fed ID",
+    "manage_nodes_upgrade_fed_id_note": "Mint your hardware-rooted federation ID (YubiKey, TPM, or Secure Enclave) and re-root this node on it. Your existing login is preserved. Already on a Fed ID? This is a no-op.",
     "manage_consent_title": "Manage Consent",
     "manage_consent_subtitle": "View and manage the consent objects this device holds.",
     "manage_consent_replication_title": "Replication peering (consent:replication)",

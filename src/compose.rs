@@ -411,6 +411,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             // SELF-claim loopback fallback: this node's own read-API URL,
                             // used when a loopback node's NodeCode carries no transport.
                             format!("http://127.0.0.1:{}", cfg.read_api_addr().port()),
+                            // Hybrid-verify policy for the local upgrade-owner apply.
+                            strict,
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,
