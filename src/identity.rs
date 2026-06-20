@@ -305,6 +305,20 @@ pub async fn mint_user_identity(
     let hardware_type = format!("{:?}", hw_signer.hardware_type());
     let hw_signer: Arc<dyn HardwareSigner> = Arc::from(hw_signer);
 
+    // #247 (CIRISVerify#89): the RECORDED federation key_id is the FSD-003 DERIVED
+    // form `derive_key_id(<alias>, <ed_pub>)` (= `<alias>-<fp>`) — the same scheme
+    // the NODE uses (compose.rs `cfg.key_id`), so a peer can re-derive + verify it
+    // from the pubkey. The keystore ALIAS stays the seed/seal storage key. We read
+    // the pubkey BEFORE the mint to derive the id, then pass `seal_alias = <alias>`
+    // so create_federation_identity seals the ML-DSA half under the alias while
+    // recording the derived id — re-open by the alias reproduces it (no custody
+    // migration / no lockout).
+    let ed_pub_pre = hw_signer
+        .public_key()
+        .await
+        .map_err(|e| anyhow::anyhow!("read user Ed25519 pubkey for key_id derivation: {e}"))?;
+    let derived_key_id = ciris_verify_core::fedcode::derive_key_id(key_id_alias, &ed_pub_pre);
+
     // 2. Mint the hybrid hardware-rooted identity. verify v6.0.0 attaches the
     //    sealed ML-DSA-65 half internally + emits the genesis CEG object + the
     //    fedcode. A touch-required YubiKey blocks on the signature until tapped.
@@ -313,19 +327,14 @@ pub async fn mint_user_identity(
         Arc::clone(&hw_signer),
         // identity_type "user" → FedKind::User (the accountable human).
         "user",
-        // PIN the federation key_id to the user-identity ALIAS so the minted
-        // identity's key_id is stable + predictable, and the sealed ML-DSA-65
-        // half + the software Ed25519 seed (both keyed by this id) re-open under
-        // the SAME id when wiring the claim-remote signer. `label` still flows
-        // into the fedcode's alias_hint.
-        Some(key_id_alias.to_string()),
+        // Record under the DERIVED key_id (#247). `label` flows into the fedcode's
+        // alias_hint.
+        Some(derived_key_id.clone()),
         label,
         &now,
-        // seal_alias (verify v6.6.1, CIRISVerify#89): None ⇒ seal keyed by key_id
-        // (back-compat). The #247 user-key-derived cut sets this to the stable
-        // keystore alias so the RECORDED key_id can be the derived form while the
-        // ML-DSA seal/re-open stays under the alias (no custody migration).
-        None,
+        // seal_alias = the keystore alias: seal/re-open the ML-DSA half (and the
+        // software Ed25519 seed) under `<alias>` while the recorded id is derived.
+        Some(key_id_alias),
     )
     .await
     .map_err(|e| anyhow::anyhow!("create_federation_identity (user): {e}"))?;
@@ -338,14 +347,14 @@ pub async fn mint_user_identity(
         .map_err(|e| anyhow::anyhow!("write genesis CEG object to outbox: {e}"))?;
 
     // The pubkeys for the response: Ed25519 off the signer, ML-DSA-65 off the
-    // sealed PQC half (re-opened from keys_dir, where create_federation_identity
-    // sealed it under `key_id`).
+    // sealed PQC half (re-opened from keys_dir, sealed under the keystore ALIAS
+    // via `seal_alias` — NOT `created.key_id`, which is now the derived form).
     let ed_pub = hw_signer
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user Ed25519 public key: {e}"))?;
     let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
-        &created.key_id,
+        key_id_alias,
         ciris_verify_core::ceg_outbox::keys_dir(),
     )
     .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
@@ -372,8 +381,14 @@ pub async fn mint_user_identity(
 /// `HardwareSigner`), the ML-DSA-65 half is the sealed PQC signer. The resulting
 /// signer's `sign_hybrid` is what `ownership::build_signed_owner_binding` uses.
 ///
-/// `user_key_id` is the federation `key_id` of the minted user identity (e.g.
-/// the one returned by [`mint_user_identity`], surfaced via `CIRIS_USER_KEY_ID`).
+/// `user_key_id` is the keystore ALIAS the identity's seed/seal are stored under
+/// (`<keystore_alias>-user`) — the `derive_key_id` INPUT, not the wire id. The
+/// returned signer's `key_id()` is the #247 DERIVED federation key_id
+/// (`derive_key_id(<alias>, <ed_pub>)`), which is what the identity is RECORDED
+/// under (see [`mint_user_identity`]) — so every `signer.key_id()` downstream
+/// (the owner-binding attester, the age subject, the device-grant owner id) is
+/// the correct registered federation id, while the Ed25519 seed + the sealed
+/// ML-DSA-65 half are still re-opened under the stable alias (no re-key).
 pub async fn hardware_user_local_signer(
     backend: UserIdentityBackend,
     user_key_id: &str,
@@ -381,9 +396,17 @@ pub async fn hardware_user_local_signer(
 ) -> Result<ciris_persist::prelude::LocalSigner> {
     let cfg = user_identity_config(&backend, user_key_id, seed_dir);
     let hw = open_user_signer(&backend, &cfg)?;
+    // Derive the recorded federation key_id from the alias + the opened pubkey
+    // (the value mint recorded the identity under).
+    let ed_pub = hw
+        .public_key()
+        .await
+        .map_err(|e| anyhow::anyhow!("read user Ed25519 pubkey for key_id derivation: {e}"))?;
+    let derived_key_id = ciris_verify_core::fedcode::derive_key_id(user_key_id, &ed_pub);
     let classical: Arc<dyn HardwareSigner> = Arc::from(hw);
 
-    // The ML-DSA-65 half was sealed under `user_key_id` at mint time; re-open it.
+    // The ML-DSA-65 half + the Ed25519 seed were sealed/stored under the ALIAS
+    // (`seal_alias` at mint time); re-open under the alias.
     let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
         user_key_id,
         ciris_verify_core::ceg_outbox::keys_dir(),
@@ -392,9 +415,11 @@ pub async fn hardware_user_local_signer(
     let pqc: Arc<dyn PqcSigner> = Arc::from(pqc);
     let pqc_key_id = format!("{user_key_id}-pqc");
 
+    // key_id = the DERIVED federation id; the Ed25519/ML-DSA blobs stay under the
+    // alias (opened above). `signer.key_id()` is therefore the registered wire id.
     ciris_persist::prelude::LocalSigner::from_hardware_parts(
         classical,
-        user_key_id.to_string(),
+        derived_key_id,
         Some(pqc),
         Some(pqc_key_id),
     )
@@ -734,9 +759,14 @@ mod tests {
         .expect("mint software user identity");
 
         assert_eq!(minted.identity_type, "user");
-        // The federation key_id is pinned to the user-identity alias (stable +
-        // re-openable for the claim-remote signer).
-        assert_eq!(minted.key_id, "ciris-user");
+        // #247: the federation key_id is the DERIVED form `derive_key_id(<alias>,
+        // <ed_pub>)` = `ciris-user-<fp>` (the alias is the seed/seal storage key,
+        // not the wire id). The fedcode below decodes to exactly this derived id.
+        assert!(
+            minted.key_id.starts_with("ciris-user-") && minted.key_id.len() > "ciris-user-".len(),
+            "expected a derived `ciris-user-<fp>` key_id, got {}",
+            minted.key_id
+        );
         // A valid CIRIS-V2- usercode that decodes to FedKind::User + this key_id.
         assert!(
             minted.fedcode.starts_with("CIRIS-V2-"),
@@ -814,13 +844,22 @@ mod tests {
         .expect("mint user identity");
 
         // Compose the hardware-backed user LocalSigner (the claim-remote signer)
-        // under the MINTED key_id, then prove it can hybrid-sign an owner-binding.
-        let signer =
-            hardware_user_local_signer(UserIdentityBackend::Software, &minted.key_id, seed.clone())
-                .await
-                .expect("compose hardware-backed user signer");
+        // by re-opening under the keystore ALIAS (what prod callers pass), then
+        // prove its key_id() is the DERIVED id mint recorded (#247 roundtrip) and
+        // that it can hybrid-sign an owner-binding.
+        let signer = hardware_user_local_signer(
+            UserIdentityBackend::Software,
+            "claim-remote-user",
+            seed.clone(),
+        )
+        .await
+        .expect("compose hardware-backed user signer");
 
-        assert_eq!(signer.key_id(), minted.key_id);
+        assert_eq!(
+            signer.key_id(),
+            minted.key_id,
+            "re-open by alias reproduces the recorded derived key_id"
+        );
 
         // The substrate build/sign path used by POST /v1/setup/claim-remote.
         let infra_scopes: Vec<String> = ownership::OWNER_BINDING_INFRA_SCOPES
