@@ -233,6 +233,25 @@ fn lookup_delegated_grant(token: &str) -> Option<DelegatedGrant> {
     Some(grant)
 }
 
+/// List the LIVE, unexpired delegated grants (expired entries pruned on access).
+/// Backs the owner's "Delegations" surface (`GET /v1/auth/device/grants`). Returns
+/// the grants only — the opaque tokens never leave the registry.
+pub fn list_delegated_grants() -> Vec<DelegatedGrant> {
+    let now = now_unix();
+    let mut map = DELEGATED_GRANTS.lock().expect("delegated grants lock");
+    map.retain(|_, g| g.expires_at > now);
+    map.values().cloned().collect()
+}
+
+/// Revoke every live delegated grant issued to `client_id` (the owner withdrawing
+/// a delegation). Returns the number removed.
+pub fn revoke_delegated_grants_for(client_id: &str) -> usize {
+    let mut map = DELEGATED_GRANTS.lock().expect("delegated grants lock");
+    let before = map.len();
+    map.retain(|_, g| g.client_id != client_id);
+    before - map.len()
+}
+
 /// The bearer→session bridge (CIRISServer#9, gap #6).
 ///
 /// Where the agent's `dependencies/auth.py` accepted a bearer **JWT**, the fabric

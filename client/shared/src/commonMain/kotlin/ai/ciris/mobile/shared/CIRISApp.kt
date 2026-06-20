@@ -647,6 +647,9 @@ fun CIRISApp(
     val consentObjectsViewModel: ConsentObjectsViewModel = viewModel {
         ConsentObjectsViewModel(apiClient, secureStorage)
     }
+    val delegationsViewModel: ai.ciris.mobile.shared.viewmodels.DelegationsViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.DelegationsViewModel(apiClient)
+    }
     val safetyViewModel: ai.ciris.mobile.shared.viewmodels.SafetyViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.SafetyViewModel(apiClient)
     }
@@ -2749,6 +2752,16 @@ fun CIRISApp(
                 )
             }
 
+            Screen.Delegations -> {
+                // Delegations card (Manage group): who the owner has authorized to
+                // act on-behalf (active device-auth grants) + approve-new / revoke.
+                PlatformLogger.d(TAG, "[Screen.Delegations] Rendering delegations screen")
+                DelegationsScreen(
+                    viewModel = delegationsViewModel,
+                    onBack = { currentScreen = Screen.Interact },
+                )
+            }
+
             Screen.Moderation -> {
                 // Holistic SAFETY surface — moderation as a delegable DUTY.
                 // Drives the local node's /v1/safety/{moderation,named-moderator}.
@@ -4078,6 +4091,8 @@ private sealed class Screen {
     object ManageNodes : Screen()
     // Consent management (consent:replication peering + user-data consent).
     object ManageConsent : Screen()
+    // Delegations (device-auth grants — authorize an agent to act on-behalf).
+    object Delegations : Screen()
 
     // Holistic SAFETY surface (CIRISServer v0.4.6 /v1/safety/*) — moderation +
     // child-safety as first-class fabric primitives, built ahead of content.
@@ -4177,6 +4192,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.NetworkOps -> ai.ciris.mobile.shared.ui.nav.NavSurface.NetworkOps
     Screen.ManageNodes -> ai.ciris.mobile.shared.ui.nav.NavSurface.Nodes
     Screen.ManageConsent -> ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent
+    Screen.Delegations -> ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations
     Screen.Moderation -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
     Screen.ChildSafety -> ai.ciris.mobile.shared.ui.nav.NavSurface.ChildSafety
     Screen.Storage -> ai.ciris.mobile.shared.ui.nav.NavSurface.Storage
@@ -4226,6 +4242,7 @@ private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen
     ai.ciris.mobile.shared.ui.nav.NavSurface.NetworkOps -> Screen.NetworkOps
     ai.ciris.mobile.shared.ui.nav.NavSurface.Nodes -> Screen.ManageNodes
     ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent -> Screen.ManageConsent
+    ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations -> Screen.Delegations
     // Safety parent routes to its first child (Moderation); the two leaves map 1:1.
     ai.ciris.mobile.shared.ui.nav.NavSurface.Safety -> Screen.Moderation
     ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation -> Screen.Moderation

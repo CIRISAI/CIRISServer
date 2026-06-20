@@ -1,0 +1,125 @@
+package ai.ciris.mobile.shared.viewmodels
+
+import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.models.federation.DelegationDto
+import ai.ciris.mobile.shared.platform.PlatformLogger
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+/**
+ * Drives the **Delegations** card — the owner's view of who they've authorized to
+ * act on their behalf (active device-authorization grants), plus the approve /
+ * revoke controls.
+ *
+ * The flow: an agent generates a device code out-of-band (`POST
+ * /v1/auth/device/code`) and shows the owner the short `user_code`. The owner
+ * enters it here and approves — the human-consent gate. The local node mints a
+ * delegated `dgrant:` token (the owner's authority, attributed to the agent). The
+ * app drives the LOCAL node only with the owner session; it holds no crypto.
+ */
+class DelegationsViewModel(
+    private val apiClient: CIRISApiClient,
+) : ViewModel() {
+
+    companion object {
+        private const val TAG = "DelegationsVM"
+    }
+
+    private val _delegations = MutableStateFlow<List<DelegationDto>>(emptyList())
+    val delegations: StateFlow<List<DelegationDto>> = _delegations.asStateFlow()
+
+    private val _loading = MutableStateFlow(false)
+    val loading: StateFlow<Boolean> = _loading.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    init {
+        refresh()
+    }
+
+    /** Reload the active delegations from the local node. */
+    fun refresh() {
+        _loading.value = true
+        viewModelScope.launch {
+            try {
+                _delegations.value = apiClient.listDelegations()
+                _error.value = null
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[refresh] ${e.message}")
+                _error.value = "Couldn't load delegations: ${e.message}"
+            } finally {
+                _loading.value = false
+            }
+        }
+    }
+
+    /**
+     * Approve a pending device code the agent showed you. Requires the owner
+     * session (sign in first). On success the agent receives its delegated token.
+     */
+    fun approve(userCode: String) {
+        val code = userCode.trim()
+        if (code.isEmpty()) {
+            _error.value = "Enter the code the agent gave you (e.g. ABCD-1234)."
+            return
+        }
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                apiClient.approveDeviceCode(code)
+                _notice.value = "Approved — the agent is now authorized to act on your behalf."
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[approve] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") -> "Sign in as the owner first, then approve."
+                    msg.contains("404") || msg.contains("unknown user_code") ->
+                        "That code wasn't recognized — check it with the agent (codes expire)."
+                    else -> "Couldn't approve: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** Revoke a delegation (withdraw the agent's authority). */
+    fun revoke(clientId: String) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                apiClient.revokeDelegation(clientId)
+                _notice.value = "Revoked $clientId."
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[revoke] ${e.message}")
+                _error.value = "Couldn't revoke: ${e.message}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun clearMessages() {
+        _error.value = null
+        _notice.value = null
+    }
+}
