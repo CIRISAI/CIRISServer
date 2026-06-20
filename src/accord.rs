@@ -63,9 +63,10 @@ fn err(code: StatusCode, error: &str) -> Response {
 }
 
 /// Require a live OWNER session — the SAME apex gate `POST /v1/federation/peering`
-/// + the device-grant approval use (`SYSTEM_ADMIN` + [`Permission::FullAccess`],
-/// and NOT itself a delegated actor — registering an accord holder is a
-/// constitutional governance act, never a self-amplifying delegated one).
+/// and the device-grant approval use (`SYSTEM_ADMIN` with
+/// [`Permission::FullAccess`], and NOT itself a delegated actor — registering an
+/// accord holder is a constitutional governance act, never a self-amplifying
+/// delegated one).
 async fn require_owner(st: &AccordState, headers: &HeaderMap) -> Result<(), Response> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
