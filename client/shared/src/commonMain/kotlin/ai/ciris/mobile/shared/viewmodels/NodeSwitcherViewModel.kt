@@ -63,15 +63,55 @@ class NodeSwitcherViewModel(
         viewModelScope.launch { reload() }
     }
 
-    /** Reload profiles + active id from the store. */
+    /**
+     * Reload the node list. **CEG-native:** the list is the set of nodes owned by
+     * this fed ID — projected from the local node's `delegates_to(user → node)`
+     * owner-binding objects (`GET /v1/setup/owned-nodes`), NOT a client-side store.
+     * By construction the local node appears once self-claimed. Each CEG entry is
+     * enriched with a stored profile (URL / token / name) matched by pinned key_id;
+     * the local node uses [CIRISApiClient.LOCAL_NODE_URL]. The stored profiles
+     * remain the carrier for reachability (URL/token) — the graph is the source of
+     * truth for WHICH nodes are yours. Falls back to the bare store if the local
+     * node can't be reached.
+     */
     suspend fun reload() {
-        _profiles.value = store.loadProfiles()
-        _activeProfileId.value = store.getActiveProfileId()
-        // If nothing is marked active yet, adopt the apiClient's current URL as
-        // an implicit profile so the switcher always reflects reality.
-        if (_activeProfileId.value == null) {
-            val current = _profiles.value.firstOrNull { it.baseUrl == apiClient.baseUrl }
-            _activeProfileId.value = current?.id
+        val stored = store.loadProfiles()
+        val owned = try {
+            apiClient.getOwnedNodes()
+        } catch (e: Exception) {
+            PlatformLogger.w(TAG, "[reload] owned-nodes unavailable (${e.message}) — falling back to stored profiles")
+            null
+        }
+
+        if (owned != null) {
+            _profiles.value = owned.nodes.map { on ->
+                val match = stored.firstOrNull { it.pinnedKeyId == on.keyId }
+                if (on.isSelf) {
+                    NodeProfile(
+                        id = NodeProfile.idFor(CIRISApiClient.LOCAL_NODE_URL),
+                        name = match?.name?.takeIf { it.isNotBlank() } ?: "This device",
+                        baseUrl = CIRISApiClient.LOCAL_NODE_URL,
+                        sessionToken = match?.sessionToken,
+                        pinnedKeyId = on.keyId,
+                        pinnedPubkeyBase64 = match?.pinnedPubkeyBase64,
+                        isLocal = true,
+                        isOwned = true,
+                    )
+                } else {
+                    // An owned REMOTE node. Use its stored profile (carrying the
+                    // reachable URL/token) when present; otherwise surface a
+                    // URL-less entry — owned per the graph but not yet reachable.
+                    (match ?: NodeProfile(id = on.keyId, name = on.keyId, baseUrl = "", pinnedKeyId = on.keyId))
+                        .copy(isOwned = true)
+                }
+            }
+            _activeProfileId.value = store.getActiveProfileId()
+                ?: _profiles.value.firstOrNull { it.isLocal }?.id
+                ?: _profiles.value.firstOrNull()?.id
+        } else {
+            _profiles.value = stored
+            _activeProfileId.value = store.getActiveProfileId()
+                ?: stored.firstOrNull { it.baseUrl == apiClient.baseUrl }?.id
         }
     }
 

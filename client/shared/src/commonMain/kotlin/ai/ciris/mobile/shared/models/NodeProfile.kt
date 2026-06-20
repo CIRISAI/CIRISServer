@@ -36,6 +36,17 @@ data class NodeProfile(
     val pinnedKeyId: String? = null,
     /** Pinned raw Ed25519 pubkey (base64) of the node — the other half of the pin. */
     val pinnedPubkeyBase64: String? = null,
+    /**
+     * True for THIS device's local node (the one the app launches + drives at
+     * [ai.ciris.mobile.shared.api.CIRISApiClient.LOCAL_NODE_URL]). CEG-derived
+     * entries set this from the owned-nodes `is_self` flag.
+     */
+    val isLocal: Boolean = false,
+    /**
+     * True when this node is owned by the current fed ID (a CEG `delegates_to`
+     * owner-binding is present). Set by the CEG-native owned-nodes projection.
+     */
+    val isOwned: Boolean = false,
 ) {
     /** True if this profile carries an identity pin (added + verified via NodeCode). */
     val isPinned: Boolean get() = !pinnedKeyId.isNullOrBlank() && !pinnedPubkeyBase64.isNullOrBlank()

@@ -65,7 +65,18 @@ enum class SetupStep {
     OPTIONAL_FEATURES,
 
     /**
-     * Step (after OPTIONAL_FEATURES): Federation identity setup.
+     * Account creation (for non-Google users) and confirmation.
+     *
+     * NODE-CLIENT first-run: this is now step 2 (account-first) — the robust,
+     * existing local-account creation step runs BEFORE the federation ID so the
+     * fed-ID and node ownership are associated to the just-created user. Declared
+     * here (ahead of FEDERATION_IDENTITY_SETUP / AGE_RANGE) so the ordinal order
+     * used by the step indicator matches the visual flow.
+     */
+    ACCOUNT_AND_CONFIRMATION,
+
+    /**
+     * Step (after ACCOUNT_AND_CONFIRMATION): Federation identity setup.
      * Roots a federation identity in a hardware key (WebAuthn/FIDO2/Secure
      * Enclave) and performs the CEG self-at-login ceremony via
      * POST /v1/self/login. Optional — can be skipped on platforms without a
@@ -83,11 +94,6 @@ enum class SetupStep {
      * Misdeclaration NEVER slashes — the subject controls their own band.
      */
     AGE_RANGE,
-
-    /**
-     * Step 4: Account creation (for non-Google users) and confirmation.
-     */
-    ACCOUNT_AND_CONFIRMATION,
 
     /**
      * Step 4b (Node flow only): Optional CIRISVerify download and configuration.
@@ -293,9 +299,15 @@ data class FederationIdentitySetupState(
     // ── Mint inputs (driven into the local node's POST /v1/self/identity) ──
     /** Optional human display name → the local node's `label-fingerprint` key_id. */
     val label: String = "",
-    /** Custody backend hint sent to the local node: `pkcs11` | `platform-sealed`
-     *  | `software`. `null` → let the local node use its configured default. */
+    /** Custody backend hint. ALWAYS `null` now — the only option is the SECURE
+     *  one: the substrate auto-picks the most secure custody available
+     *  (YubiKey → TPM/Secure-Enclave → software). The UI exposes no selection. */
     val backend: String? = null,
+    // ── Associate-existing-Fed-ID path (adopt prior crypto — same user) ──
+    /** The user chose "associate existing Fed ID" instead of minting a new one. */
+    val associateExisting: Boolean = false,
+    /** The existing federation key_id (or fedcode) to associate. */
+    val associateKeyId: String = "",
     // ── Mint result (the public surface returned by the local node) ──
     /** True once the local node minted a USER identity (vs only reporting one). */
     val minted: Boolean = false,
@@ -325,6 +337,28 @@ data class AgeRangeSetupState(
     val recorded: Boolean = false,
     /** The `age_self_declared:{band}:v1` dimension the node returned. */
     val dimension: String? = null,
+    val error: String? = null,
+)
+
+/**
+ * State for the LOCAL-node ownership self-claim performed on setup COMPLETE.
+ *
+ * After the local account + federation ID exist, the setup flow drives the LOCAL
+ * node to claim ownership so the just-created user becomes the node's ROOT/owner.
+ * The app holds NO keys: the local node builds + signs the owner-binding in its
+ * substrate (`POST /v1/setup/claim-remote` self-targeted → its own
+ * `/v1/setup/root`). This state only tracks the in-flight/result for the UI.
+ */
+@Serializable
+data class NodeOwnershipClaimState(
+    val inProgress: Boolean = false,
+    /** True once the local node bound this user as ROOT/owner. */
+    val claimed: Boolean = false,
+    /** The bridged role on success (`SYSTEM_ADMIN`). */
+    val role: String? = null,
+    /** The claimed `wa_id` on success. */
+    val waId: String? = null,
+    /** Human-readable failure reason (e.g. "claim PIN not captured"). */
     val error: String? = null,
 )
 
@@ -359,6 +393,9 @@ data class SetupFormState(
     // Age-range step state (AGE_RANGE step — the foundational protective gate)
     val ageRange: AgeRangeSetupState = AgeRangeSetupState(),
 
+    // LOCAL-node ownership self-claim state (driven on setup COMPLETE)
+    val ownershipClaim: NodeOwnershipClaimState = NodeOwnershipClaimState(),
+
     // Google/Apple OAuth state
     val isGoogleAuth: Boolean = false,
     val googleIdToken: String? = null,
@@ -386,8 +423,12 @@ data class SetupFormState(
     @kotlinx.serialization.Transient
     val selectedLocation: LocationSearchResult? = null,
 
-    // LLM mode selection (CIRIS_PROXY or BYOK)
-    val setupMode: SetupMode? = null,
+    // Setup mode. Defaults to LOCAL_ON_DEVICE: this is the AI-free CIRIS NODE
+    // client (agent optional), so there is no LLM/proxy choice — the node always
+    // runs locally. This makes needsLocalAccountStep()=true + showLocalUserFields()
+    // =true, so first-run ALWAYS asks for a local login/account to associate the
+    // fed-ID + node ownership to (the agent inherits this; it only adds the brain).
+    val setupMode: SetupMode? = SetupMode.LOCAL_ON_DEVICE,
 
     // LLM configuration (for BYOK mode)
     val llmProvider: String = "OpenAI",      // "OpenAI", "Anthropic", "LocalAI", "Azure OpenAI"
@@ -399,6 +440,17 @@ data class SetupFormState(
     val username: String = "",
     val email: String = "",
     val userPassword: String = "",
+    val userPasswordConfirm: String = "",
+
+    /**
+     * Secure the local account with a second factor (2FA). The factor is
+     * provided NATIVELY by CIRISVerify — the device's hardware authenticator
+     * (YubiKey → TPM/Secure-Enclave) — and exposed by the local node as the
+     * `hardware_attestation` on the self-login occurrence (`POST /v1/self/login`)
+     * minted in the federation-identity step. Defaults ON; the account step lets
+     * the user opt out (password-only) if they choose.
+     */
+    val secureWith2FA: Boolean = true,
 
     // Accord Metrics opt-in (for AI alignment research)
     // Data shared: reasoning scores, decision patterns, LLM provider/API base URL
@@ -538,8 +590,9 @@ data class SetupFormState(
                     // Google user - no account creation needed
                     true
                 } else {
-                    // Local user - validate username/password
-                    username.isNotEmpty() && userPassword.length >= 8
+                    // Local user - validate username/password (+ confirmation match)
+                    username.isNotEmpty() && userPassword.length >= 8 &&
+                        userPassword == userPasswordConfirm
                 }
             }
 
@@ -670,6 +723,7 @@ data class SetupFormState(
                         username.isEmpty() -> LocalizationHelper.getString("setup_validation_username_required")
                         userPassword.isEmpty() -> LocalizationHelper.getString("setup_validation_password_required")
                         userPassword.length < 8 -> LocalizationHelper.getString("setup_validation_password_length")
+                        userPassword != userPasswordConfirm -> LocalizationHelper.getString("setup_validation_password_mismatch")
                         else -> null
                     }
                 } else {

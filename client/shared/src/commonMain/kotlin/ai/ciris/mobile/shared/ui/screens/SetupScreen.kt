@@ -1,5 +1,6 @@
 package ai.ciris.mobile.shared.ui.screens
 
+import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.localization.localizedString
 import androidx.compose.foundation.layout.imePadding
@@ -153,6 +154,13 @@ fun SetupScreen(
     apiClient: CIRISApiClient,
     onSetupComplete: () -> Unit,
     onBackToLogin: (() -> Unit)? = null,  // Optional callback to return to login screen
+    // The one-time ownership CLAIM PIN / NodeCode captured from the LOCAL node's
+    // console banner (PythonRuntime.localClaimPin / .localNodeCode). Used on setup
+    // COMPLETE to self-claim ownership of the local node for the just-created user.
+    // Default null providers → claim is skipped with an honest error (the PIN is
+    // console-only and not capturable on platforms that don't launch a local node).
+    claimPinProvider: () -> String? = { null },
+    nodeCodeProvider: () -> String? = { null },
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.state.collectAsState()
@@ -187,6 +195,14 @@ fun SetupScreen(
                         viewModel.setUserPassword(request.text)
                     } else {
                         viewModel.setUserPassword(state.userPassword + request.text)
+                    }
+                    TestAutomation.clearTextInputRequest()
+                }
+                "input_password_confirm" -> {
+                    if (request.clearFirst) {
+                        viewModel.setUserPasswordConfirm(request.text)
+                    } else {
+                        viewModel.setUserPasswordConfirm(state.userPasswordConfirm + request.text)
                     }
                     TestAutomation.clearTextInputRequest()
                 }
@@ -365,7 +381,7 @@ fun SetupScreen(
                     SetupStep.AGE_RANGE -> AgeRangeStep(viewModel, state)
                     SetupStep.ACCOUNT_AND_CONFIRMATION -> AccountConfirmationStep(viewModel, state)
                     SetupStep.VERIFY_SETUP -> OptionalFeaturesStep(viewModel, state) // Legacy - redirects to OPTIONAL_FEATURES
-                    SetupStep.COMPLETE -> CompleteStep(onSetupComplete)
+                    SetupStep.COMPLETE -> CompleteStep(onSetupComplete, state.ownershipClaim)
                 }
             }
 
@@ -459,23 +475,34 @@ fun SetupScreen(
                 isNodeFlow = state.isNodeFlow,
                 onNext = {
                     PlatformLogger.i(TAG, " onNext clicked, currentStep=${state.currentStep}, canProceed=${state.canProceedFromCurrentStep()}, isNodeFlow=${state.isNodeFlow}")
-                    // Determine if this is the final step before COMPLETE
-                    // - Normal flow: ACCOUNT_AND_CONFIRMATION is the final step
-                    // - Node flow: OPTIONAL_FEATURES is the final step (skips ACCOUNT_AND_CONFIRMATION)
-                    // - Unified quick setup, OAuth/HA users: QUICK_SETUP is the final step
-                    // - Unified quick setup, BYOK / local-on-device WITHOUT OAuth:
-                    //   QUICK_SETUP is NOT final — `next` advances into
-                    //   ACCOUNT_AND_CONFIRMATION so the user creates their
-                    //   admin account before /v1/setup/complete fires. Without
-                    //   this branch, /v1/setup/complete receives an empty
-                    //   admin_password and the desktop login is broken.
-                    //   (2.7.5 desktop install incident.)
-                    val isFinalStep = state.currentStep == SetupStep.ACCOUNT_AND_CONFIRMATION ||
+                    // Determine if this is the final step before COMPLETE.
+                    // NODE-CLIENT first-run flow (account-first): the order is now
+                    //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP
+                    //   → AGE_RANGE → COMPLETE
+                    // so AGE_RANGE is the final step (account creation now happens
+                    // EARLIER, ahead of the fed-ID, so it is no longer the final
+                    // step). On COMPLETE we ALSO self-claim ownership of the local
+                    // node for the just-created user.
+                    // Legacy/non-node branches retained for the other flows.
+                    val isFinalStep = state.currentStep == SetupStep.AGE_RANGE ||
                         (state.isNodeFlow && state.currentStep == SetupStep.OPTIONAL_FEATURES) ||
                         (state.currentStep == SetupStep.QUICK_SETUP && !state.needsLocalAccountStep())
 
-                    if (isFinalStep) {
-                        // On final step, submit setup to API then advance
+                    if (isFinalStep && !CIRISBuild.HAS_AGENT) {
+                        // NODE CLIENT final step: there is NO agent /v1/setup/complete
+                        // on ciris-server. The fed-ID was already minted (fed-ID step,
+                        // first-run); the automated LAST step is the ownership
+                        // self-claim. Then advance to COMPLETE, which renders the claim
+                        // result (in-progress / owned / retry). Non-blocking — a
+                        // missing PIN or failed claim surfaces in the UI, never traps.
+                        PlatformLogger.i(TAG, " Final step (node client) - self-claiming local node ownership")
+                        viewModel.claimLocalNodeOwnership(
+                            claimPin = claimPinProvider(),
+                            capturedNodeCode = nodeCodeProvider(),
+                        )
+                        viewModel.nextStep()
+                    } else if (isFinalStep) {
+                        // AGENT BUILD: submit setup to the agent API then advance
                         PlatformLogger.i(TAG, " Final step - launching coroutine to submit setup")
                         coroutineScope.launch {
                             PlatformLogger.i(TAG, " Coroutine started - calling viewModel.completeSetup")
@@ -491,7 +518,20 @@ fun SetupScreen(
                                 }
                                 PlatformLogger.i(TAG, " completeSetup returned: success=${result.success}, error=${result.error}")
                                 if (result.success) {
-                                    PlatformLogger.i(TAG, " Setup successful - advancing to next step")
+                                    // CLAIM OWNERSHIP of the LOCAL node: now that the
+                                    // account + fed-ID exist, drive the local node to
+                                    // self-claim so the just-created user becomes its
+                                    // ROOT/owner. The PIN is the console-only PIN the
+                                    // node printed on a fresh boot, captured by
+                                    // PythonRuntime. Non-blocking: a missing PIN or a
+                                    // failed claim surfaces in the completion UI but
+                                    // never traps the user.
+                                    PlatformLogger.i(TAG, " Setup successful - self-claiming local node ownership")
+                                    viewModel.claimLocalNodeOwnership(
+                                        claimPin = claimPinProvider(),
+                                        capturedNodeCode = nodeCodeProvider(),
+                                    )
+                                    PlatformLogger.i(TAG, " Advancing to next step")
                                     viewModel.nextStep()
                                 } else {
                                     PlatformLogger.i(TAG, " ERROR: Setup failed: ${result.error}")
@@ -538,21 +578,15 @@ private fun StepIndicators(
     isNodeFlow: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // Node flow has 4 steps, unified quick setup flow has 2 steps
-    val steps = if (isNodeFlow) {
-        listOf(
-            SetupStep.WELCOME to "1",
-            SetupStep.NODE_AUTH to "2",
-            SetupStep.LLM_CONFIGURATION to "3",
-            SetupStep.OPTIONAL_FEATURES to "4"
-        )
-    } else {
-        // Unified flow: WELCOME → QUICK_SETUP
-        listOf(
-            SetupStep.WELCOME to "1",
-            SetupStep.QUICK_SETUP to "2"
-        )
-    }
+    // Node-client first-run flow (both branches): account-first 4-step path
+    //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP →
+    //   AGE_RANGE  (→ COMPLETE)
+    val steps = listOf(
+        SetupStep.WELCOME to "1",
+        SetupStep.ACCOUNT_AND_CONFIRMATION to "2",
+        SetupStep.FEDERATION_IDENTITY_SETUP to "3",
+        SetupStep.AGE_RANGE to "4"
+    )
 
     Row(
         modifier = modifier.testable("setup_step_indicators"),
@@ -642,9 +676,11 @@ private fun WelcomeStep(
             )
         }
 
-        // Main description
+        // Main description — the node client is AI-free; only the agent build
+        // (CIRISBuild.HAS_AGENT) describes CIRIS as an AI assistant.
         Text(
-            text = localizedString("setup.welcome_desc"),
+            text = if (CIRISBuild.HAS_AGENT) localizedString("setup.welcome_desc")
+                   else localizedString("mobile.setup_welcome_desc_node"),
             color = SetupColors.TextSecondary,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
@@ -652,7 +688,9 @@ private fun WelcomeStep(
             modifier = Modifier.padding(bottom = 24.dp)
         )
 
-        // Status card based on setup mode (CIRIS_PROXY vs BYOK)
+        // Status card based on setup mode (CIRIS_PROXY vs BYOK) — agent-only.
+        // The node client has no LLM, so the AI/key-config card is hidden.
+        if (CIRISBuild.HAS_AGENT) {
         if (isCirisMode) {
             // CIRIS Mode - Google/Apple OAuth signed in
             Surface(
@@ -724,6 +762,7 @@ private fun WelcomeStep(
                 }
             }
         }
+        } // end CIRISBuild.HAS_AGENT (AI/key-config status card)
 
         // What is CIRIS?
         Surface(
@@ -751,7 +790,8 @@ private fun WelcomeStep(
                     )
                 }
                 Text(
-                    text = localizedString("mobile.setup_what_ciris_desc"),
+                    text = if (CIRISBuild.HAS_AGENT) localizedString("mobile.setup_what_ciris_desc")
+                           else localizedString("mobile.setup_what_ciris_desc_node"),
                     color = SetupColors.TextSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
@@ -2423,53 +2463,22 @@ private fun FederationIdentityStep(
                             )
                         )
 
-                        // Backend custody choice. `null` = let the local node use its
-                        // configured default (the recommended path).
+                        // No custody choice: the only option is the SECURE one.
+                        // `backend = null` lets the substrate auto-pick the most
+                        // secure custody available (YubiKey → TPM/Secure-Enclave →
+                        // software), so the user never has to choose. Keep it easy.
                         Text(
-                            text = localizedString("mobile.federation_create_backend_label"),
+                            text = localizedString("mobile.federation_create_secure_note"),
                             color = SetupColors.InfoText,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(bottom = 6.dp)
+                            modifier = Modifier.padding(bottom = 12.dp)
                         )
-                        val backends = listOf(
-                            null to localizedString("mobile.federation_create_backend_default"),
-                            "pkcs11" to localizedString("mobile.federation_create_backend_yubikey"),
-                            "platform-sealed" to localizedString("mobile.federation_create_backend_sealed"),
-                            "software" to localizedString("mobile.federation_create_backend_software"),
-                        )
-                        Column(modifier = Modifier.padding(bottom = 12.dp)) {
-                            backends.forEach { (value, label) ->
-                                val selected = fed.backend == value
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (selected) SetupColors.Primary.copy(alpha = 0.18f) else Color.Transparent,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 2.dp)
-                                        .testableClickable("backend_${value ?: "default"}") {
-                                            viewModel.setFederationBackend(value)
-                                        }
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
-                                    ) {
-                                        RadioButton(
-                                            selected = selected,
-                                            onClick = { viewModel.setFederationBackend(value) },
-                                            enabled = !fed.inProgress,
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = label,
-                                            color = SetupColors.InfoDark,
-                                            fontSize = 13.sp,
-                                        )
-                                    }
-                                }
-                            }
-                        }
+
+                        // Secure with 2FA belongs to the FEDERATION IDENTITY (the
+                        // hardware factor IS the fed-ID's custody), not the local
+                        // login — so the toggle lives here.
+                        SecureWith2FACard(state = state, viewModel = viewModel)
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         Button(
                             onClick = { viewModel.runFederationIdentitySetup() },
@@ -2493,6 +2502,44 @@ private fun FederationIdentityStep(
                                     localizedString("mobile.federation_create_button")
                                 }
                             )
+                        }
+
+                        // ASSOCIATE an EXISTING Fed ID instead of minting a new one
+                        // (adopt prior crypto materials — same user, same auth). The
+                        // choice is always offered; tapping reveals the key_id input.
+                        Spacer(modifier = Modifier.height(10.dp))
+                        TextButton(
+                            onClick = { viewModel.toggleAssociateExisting() },
+                            enabled = !fed.inProgress,
+                            modifier = Modifier.testableClickable("btn_federation_associate_existing") {
+                                viewModel.toggleAssociateExisting()
+                            }
+                        ) {
+                            Text(localizedString("mobile.federation_create_associate"))
+                        }
+                        if (fed.associateExisting) {
+                            OutlinedTextField(
+                                value = fed.associateKeyId,
+                                onValueChange = { viewModel.setAssociateKeyId(it) },
+                                label = { Text(localizedString("mobile.federation_create_associate_hint")) },
+                                singleLine = true,
+                                enabled = !fed.inProgress,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .testable("input_federation_associate_keyid")
+                            )
+                            Button(
+                                onClick = { viewModel.associateExistingFederationId() },
+                                enabled = !fed.inProgress && fed.associateKeyId.isNotBlank(),
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .testableClickable("btn_federation_associate_submit") {
+                                        viewModel.associateExistingFederationId()
+                                    }
+                            ) {
+                                Text(localizedString("mobile.federation_create_associate_button"))
+                            }
                         }
                     }
                 }
@@ -2892,30 +2939,35 @@ private fun AccountConfirmationStep(
             }
         }
 
-        // Setup Summary
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = SetupColors.GrayLight,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = localizedString("mobile.setup_summary"),
-                    color = SetupColors.TextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
+        // Setup Summary — the AI/assistant rows are agent-only (node client is AI-free).
+        // Gated on CIRISBuild.HAS_AGENT so the agent team surfaces it with one flag flip.
+        if (CIRISBuild.HAS_AGENT || state.isGoogleAuth) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = SetupColors.GrayLight,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = localizedString("mobile.setup_summary"),
+                        color = SetupColors.TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
 
-                SummaryRow(
-                    label = "AI",
-                    value = if (state.useCirisProxy()) "Free AI Access (via ${getOAuthProviderName()})" else state.llmProvider
-                )
-                SummaryRow(label = "Assistant", value = viewModel.getSelectedTemplateName())
-                if (state.isGoogleAuth) {
-                    SummaryRow(label = "Sign-in", value = "${getOAuthProviderName()} Account")
+                    if (CIRISBuild.HAS_AGENT) {
+                        SummaryRow(
+                            label = "AI",
+                            value = if (state.useCirisProxy()) "Free AI Access (via ${getOAuthProviderName()})" else state.llmProvider
+                        )
+                        SummaryRow(label = "Assistant", value = viewModel.getSelectedTemplateName())
+                    }
+                    if (state.isGoogleAuth) {
+                        SummaryRow(label = "Sign-in", value = "${getOAuthProviderName()} Account")
+                    }
                 }
             }
         }
@@ -2992,6 +3044,82 @@ private fun AccountConfirmationStep(
                     modifier = Modifier.padding(start = 4.dp, top = 4.dp)
                 )
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = state.userPasswordConfirm,
+                onValueChange = { viewModel.setUserPasswordConfirm(it) },
+                modifier = Modifier.fillMaxWidth().testable("input_password_confirm"),
+                label = { Text(localizedString("mobile.setup_password_confirm_label"), color = SetupColors.TextSecondary) },
+                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = SetupColors.TextPrimary,
+                    unfocusedTextColor = SetupColors.TextPrimary,
+                    focusedBorderColor = SetupColors.Primary,
+                    unfocusedBorderColor = SetupColors.TextSecondary.copy(alpha = 0.5f),
+                    focusedLabelColor = SetupColors.Primary,
+                    unfocusedLabelColor = SetupColors.TextSecondary,
+                    cursorColor = SetupColors.Primary
+                ),
+                singleLine = true
+            )
+
+            if (state.userPasswordConfirm.isNotEmpty() && state.userPassword != state.userPasswordConfirm) {
+                Text(
+                    text = localizedString("mobile.setup_password_mismatch_hint"),
+                    color = SetupColors.ErrorText,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The "Secure with 2FA" affordance — rendered on the FEDERATION-IDENTITY step
+ * (the 2nd factor belongs to the federation identity, not the local login). The
+ * factor is provided NATIVELY by CIRISVerify (the device's hardware authenticator:
+ * YubiKey → TPM / Secure-Enclave) and enrolled as the `hardware_attestation` on
+ * the self-login occurrence when the fed-ID is minted.
+ */
+@Composable
+private fun SecureWith2FACard(
+    state: SetupFormState,
+    viewModel: SetupViewModel,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = SetupColors.GrayLight,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = localizedString("mobile.setup_2fa_title"),
+                    color = SetupColors.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = localizedString("mobile.setup_2fa_desc"),
+                    color = SetupColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = state.secureWith2FA,
+                onCheckedChange = { viewModel.setSecureWith2FA(it) },
+                modifier = Modifier.testableClickable("toggle_secure_2fa") {
+                    viewModel.setSecureWith2FA(!state.secureWith2FA)
+                }
+            )
         }
     }
 }
@@ -3906,11 +4034,17 @@ private fun formatNumber(num: Int): String {
 @Composable
 private fun CompleteStep(
     onSetupComplete: () -> Unit,
+    ownershipClaim: ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState =
+        ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState(),
     modifier: Modifier = Modifier
 ) {
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(2000)
-        onSetupComplete()
+    // Hold here until the LOCAL-node ownership self-claim settles (success or
+    // error), then auto-complete. Bounded so a hung claim never traps the user.
+    LaunchedEffect(ownershipClaim.inProgress) {
+        if (!ownershipClaim.inProgress) {
+            kotlinx.coroutines.delay(2000)
+            onSetupComplete()
+        }
     }
 
     Column(
@@ -3944,6 +4078,43 @@ private fun CompleteStep(
             fontSize = 16.sp,
             textAlign = TextAlign.Center
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // LOCAL-node ownership self-claim status. Success → this node is now
+        // OWNED by the just-created user. Failure → honest reason (e.g. the
+        // console-only claim PIN was not captured); the node can still be claimed
+        // later from the Network surface.
+        when {
+            ownershipClaim.inProgress -> {
+                Text(
+                    text = "Claiming ownership of this node…",
+                    color = SetupColors.TextSecondary,
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.testable("setup_ownership_claiming"),
+                )
+            }
+            ownershipClaim.claimed -> {
+                Text(
+                    text = "You now own this node (${ownershipClaim.role ?: "owner"}).",
+                    color = SetupColors.SuccessDark,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.testable("setup_ownership_claimed"),
+                )
+            }
+            ownershipClaim.error != null -> {
+                Text(
+                    text = "Couldn't claim this node yet: ${ownershipClaim.error}",
+                    color = SetupColors.TextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.testable("setup_ownership_error"),
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -3987,19 +4158,9 @@ private fun NavigationButtons(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Back button - on WELCOME step, go back to Login if callback provided
-            if (currentStep == SetupStep.WELCOME && onBackToLogin != null) {
-                OutlinedButton(
-                    onClick = onBackToLogin,
-                    enabled = !isSubmitting,
-                    modifier = Modifier.weight(1f).testableClickable("btn_back_to_login") { onBackToLogin() },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = SetupColors.TextSecondary
-                    )
-                ) {
-                    Text(localizedString("mobile.setup_back_login"))
-                }
-            } else if (currentStep != SetupStep.WELCOME && currentStep != SetupStep.COMPLETE) {
+            // No back button on WELCOME: this is first-run, there is no prior
+            // login/account to return to (the account is created in the next step).
+            if (currentStep != SetupStep.WELCOME && currentStep != SetupStep.COMPLETE) {
                 OutlinedButton(
                     onClick = onBack,
                     enabled = !isSubmitting,
@@ -4019,7 +4180,7 @@ private fun NavigationButtons(
                     enabled = canProceed && !isSubmitting,
                     // Use equal weights if back button is visible, otherwise double width on WELCOME
                     modifier = Modifier
-                        .weight(if (currentStep == SetupStep.WELCOME && onBackToLogin == null) 2f else 1f)
+                        .weight(if (currentStep == SetupStep.WELCOME) 2f else 1f)
                         .testableClickable("btn_next") { onNext() },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = SetupColors.Primary,
@@ -4033,8 +4194,9 @@ private fun NavigationButtons(
                             strokeWidth = 2.dp
                         )
                     } else {
-                        // Determine button text based on step and flow type
-                        val isFinalStep = currentStep == SetupStep.ACCOUNT_AND_CONFIRMATION ||
+                        // Determine button text based on step and flow type.
+                        // Account-first node flow: AGE_RANGE is the final step.
+                        val isFinalStep = currentStep == SetupStep.AGE_RANGE ||
                             (isNodeFlow && currentStep == SetupStep.OPTIONAL_FEATURES)
                         Text(
                             when {

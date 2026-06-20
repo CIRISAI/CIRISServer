@@ -310,6 +310,15 @@ class SetupViewModel(
         _state.value = _state.value.copy(userPassword = password)
     }
 
+    fun setUserPasswordConfirm(password: String) {
+        _state.value = _state.value.copy(userPasswordConfirm = password)
+    }
+
+    fun setSecureWith2FA(enabled: Boolean) {
+        PlatformLogger.i(TAG, "setSecureWith2FA: 2FA (CIRISVerify hardware factor) ${if (enabled) "ON" else "OFF"}")
+        _state.value = _state.value.copy(secureWith2FA = enabled)
+    }
+
     // ========== Language & Location Preferences ==========
     // Mirrors CLI wizard: ciris_engine/logic/setup/wizard.py:324-395
 
@@ -468,15 +477,24 @@ class SetupViewModel(
             return false
         }
 
+        // NODE CLIENT first-run flow (drives a local ciris-server, NOT the agent).
+        // USER CREATION LEADS: a fresh run creates the founder's local account
+        // FIRST (ACCOUNT_AND_CONFIRMATION — the robust, existing creation step),
+        // THEN mints the founder's hardware-rooted federation ID (now associated to
+        // that just-created user), THEN states the protective age-range gate, then
+        // completes (and on COMPLETE the local node is self-claimed for that user).
+        // The agent setup steps (NODE_AUTH / PREFERENCES / LLM_CONFIGURATION /
+        // OPTIONAL_FEATURES / QUICK_SETUP) are dropped from the node-client path.
+        // BOTH the advanced (isNodeFlow) and the unified branch funnel through the
+        // same account-first sequence:
+        //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP →
+        //   AGE_RANGE → COMPLETE
         val nextStep = if (currentState.isNodeFlow) {
-            // Node flow: WELCOME → NODE_AUTH → PREFERENCES → LLM → OPTIONAL_FEATURES → COMPLETE
-            // (CIRISVerify is always bundled, no install step needed)
             when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.NODE_AUTH
-                SetupStep.NODE_AUTH -> SetupStep.PREFERENCES
-                SetupStep.PREFERENCES -> SetupStep.LLM_CONFIGURATION
-                SetupStep.LLM_CONFIGURATION -> SetupStep.OPTIONAL_FEATURES
-                SetupStep.OPTIONAL_FEATURES -> SetupStep.FEDERATION_IDENTITY_SETUP
+                SetupStep.WELCOME -> SetupStep.ACCOUNT_AND_CONFIRMATION
+                // Account created — now MINT YOUR FEDERATION ID (associated to the
+                // just-created user).
+                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.FEDERATION_IDENTITY_SETUP
                 // You have an ID — now STATE YOUR AGE RANGE (the foundational
                 // protective gate), THEN you're on the fabric.
                 SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.AGE_RANGE
@@ -484,24 +502,12 @@ class SetupViewModel(
                 else -> SetupStep.COMPLETE
             }
         } else {
-            // Unified flow for ALL users (including HA addon):
-            //   WELCOME → QUICK_SETUP → [ACCOUNT_AND_CONFIRMATION] → COMPLETE
-            //
-            // Quick Setup handles CIRIS mode (OAuth covers identity), HA addon
-            // mode (external SUPERVISOR_TOKEN auth), and BYOK / local-on-device.
-            // Non-OAuth, non-HA installs MUST gather username/password before
-            // COMPLETE — otherwise /v1/setup/complete receives an empty
-            // `admin_password` and the desktop login is broken from day 1
-            // (the 2.7.5 desktop-install regression). `needsLocalAccountStep()`
-            // wedges ACCOUNT_AND_CONFIRMATION into the flow only for those
-            // users; OAuth and HA-addon users go straight to COMPLETE as
-            // before.
+            // Unified branch — same account-first node-client flow.
             when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.QUICK_SETUP
-                SetupStep.QUICK_SETUP ->
-                    if (currentState.needsLocalAccountStep()) SetupStep.ACCOUNT_AND_CONFIRMATION
-                    else SetupStep.COMPLETE
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.COMPLETE
+                SetupStep.WELCOME -> SetupStep.ACCOUNT_AND_CONFIRMATION
+                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.FEDERATION_IDENTITY_SETUP
+                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.AGE_RANGE
+                SetupStep.AGE_RANGE -> SetupStep.COMPLETE
                 else -> SetupStep.COMPLETE
             }
         }
@@ -519,31 +525,25 @@ class SetupViewModel(
     fun previousStep() {
         val currentState = _state.value
 
+        // Node-client back-button mirrors the account-first forward path:
+        //   COMPLETE → AGE_RANGE → FEDERATION_IDENTITY_SETUP →
+        //   ACCOUNT_AND_CONFIRMATION → WELCOME
         val prevStep = if (currentState.isNodeFlow) {
-            // Node flow: COMPLETE → OPTIONAL_FEATURES → LLM → PREFERENCES → NODE_AUTH → WELCOME
             when (currentState.currentStep) {
                 SetupStep.WELCOME -> SetupStep.WELCOME
-                SetupStep.NODE_AUTH -> SetupStep.WELCOME
-                SetupStep.PREFERENCES -> SetupStep.NODE_AUTH
-                SetupStep.LLM_CONFIGURATION -> SetupStep.PREFERENCES
-                SetupStep.OPTIONAL_FEATURES -> SetupStep.LLM_CONFIGURATION
-                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.OPTIONAL_FEATURES
+                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.WELCOME
+                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.ACCOUNT_AND_CONFIRMATION
                 SetupStep.AGE_RANGE -> SetupStep.FEDERATION_IDENTITY_SETUP
                 SetupStep.COMPLETE -> SetupStep.AGE_RANGE
                 else -> SetupStep.WELCOME
             }
         } else {
-            // Unified flow back-button. Mirrors the forward path including the
-            // ACCOUNT_AND_CONFIRMATION wedge for non-OAuth installs. From
-            // COMPLETE we step back to ACCOUNT_AND_CONFIRMATION when a local
-            // account was required, otherwise straight to QUICK_SETUP.
             when (currentState.currentStep) {
                 SetupStep.WELCOME -> SetupStep.WELCOME
-                SetupStep.QUICK_SETUP -> SetupStep.WELCOME
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.QUICK_SETUP
-                SetupStep.COMPLETE ->
-                    if (currentState.needsLocalAccountStep()) SetupStep.ACCOUNT_AND_CONFIRMATION
-                    else SetupStep.QUICK_SETUP
+                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.WELCOME
+                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.ACCOUNT_AND_CONFIRMATION
+                SetupStep.AGE_RANGE -> SetupStep.FEDERATION_IDENTITY_SETUP
+                SetupStep.COMPLETE -> SetupStep.AGE_RANGE
                 else -> SetupStep.WELCOME
             }
         }
@@ -628,6 +628,80 @@ class SetupViewModel(
         _state.value = _state.value.copy(
             federationIdentity = _state.value.federationIdentity.copy(backend = backend)
         )
+    }
+
+    /** Toggle the "associate existing Fed ID" path (adopt prior crypto). */
+    fun toggleAssociateExisting() {
+        val fed = _state.value.federationIdentity
+        _state.value = _state.value.copy(
+            federationIdentity = fed.copy(associateExisting = !fed.associateExisting, error = null)
+        )
+    }
+
+    /** The existing federation key_id (or fedcode) the user wants to associate. */
+    fun setAssociateKeyId(value: String) {
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(associateKeyId = value)
+        )
+    }
+
+    /**
+     * **Associate (RECLAIM) an EXISTING federation ID** on this device instead of
+     * minting a fresh one — the "same user, same auth, anywhere" path.
+     *
+     * This is NOT special adopt code: it is how the YubiKey works. The private key
+     * lives on the token and never leaves it; the `key_id` is RE-DERIVED from the
+     * token's public key (`derive_key_id(label, pubkey)` = `<label>-sha256(pubkey)`,
+     * CIRISVerify fedcode). So presenting the SAME YubiKey on ANY node with the same
+     * display label reproduces the SAME fed-ID — no re-keying. We therefore drive
+     * the mint with `backend = pkcs11, provision = false` (open the token, READ the
+     * existing key, derive its id — never generate). The substrate + key + CC
+     * `identity_occurrence` do the rest. Failures are surfaced, never block.
+     */
+    fun associateExistingFederationId() {
+        val client = apiClient as? CIRISApiClient ?: run {
+            _state.value = _state.value.copy(
+                federationIdentity = _state.value.federationIdentity.copy(
+                    error = "Local node unavailable: API client does not support it"
+                )
+            )
+            return
+        }
+        val fed = _state.value.federationIdentity
+        val existing = fed.associateKeyId.trim()
+        if (existing.isBlank()) return
+        _state.value = _state.value.copy(
+            federationIdentity = fed.copy(inProgress = true, error = null)
+        )
+        viewModelScope.launch {
+            try {
+                val res = client.mintUserIdentity(
+                    // RECLAIM: read the existing key off the YubiKey (no keygen),
+                    // re-derive the SAME key_id from the token pubkey.
+                    label = existing,
+                    backend = "pkcs11",
+                    provision = false,
+                    localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                )
+                _state.value = _state.value.copy(
+                    federationIdentity = _state.value.federationIdentity.copy(
+                        inProgress = false,
+                        admitted = true,
+                        minted = true,
+                        hardwareAvailable = true,
+                        identityKeyId = res.keyId,
+                        fedcode = res.fedcode,
+                    )
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    federationIdentity = _state.value.federationIdentity.copy(
+                        inProgress = false,
+                        error = "Associate existing Fed ID failed: ${e.message}",
+                    )
+                )
+            }
+        }
     }
 
     /**
@@ -771,6 +845,116 @@ class SetupViewModel(
                         recorded = false,
                         error = "Couldn't record your age range on this device's local node: " +
                             "${e.message ?: "unknown error"}",
+                    )
+                )
+            }
+        }
+    }
+
+    // ========== LOCAL-node ownership self-claim (on COMPLETE) ===============
+
+    /**
+     * **Claim ownership of THIS device's LOCAL node** so the just-created user
+     * (the federation ID minted in FEDERATION_IDENTITY_SETUP) becomes the node's
+     * ROOT/owner. Called on setup COMPLETE, after the account + fed-ID exist.
+     *
+     * ARCHITECTURE: the app holds NO keys and performs NO crypto. It DRIVES the
+     * LOCAL node's `POST /v1/setup/claim-remote { node_code, claim_pin,
+     * cohort_scope }`. For a SELF-claim the "target" IS the local node: the local
+     * node decodes its own NodeCode (carrying a loopback transport_hint), builds +
+     * JCS-canonicalizes + HYBRID-SIGNS the owner-binding `delegates_to(user →
+     * THIS node, infra:*)` in its substrate with the resident user identity, and
+     * POSTs the signed artifact to its own `/v1/setup/root`. The substrate does
+     * all crypto; the app only supplies {node_code, claim_pin}.
+     *
+     * The one-time [claimPin] is CONSOLE-ONLY — it is read off the node's stdout
+     * by PythonRuntime (the "OWNERSHIP UNCLAIMED" banner) and passed in here. If
+     * it was never captured we surface an honest error and do NOT block the flow
+     * (the node simply stays unclaimed until the user claims it from the network
+     * surface).
+     *
+     * @param claimPin the one-time claim PIN captured from the node's console
+     *        (PythonRuntime.localClaimPin), or null/blank if it was not seen.
+     * @param capturedNodeCode the node's own NodeCode if it was also captured from
+     *        the banner; when null we fetch it via `GET /v1/federation/node-code`.
+     * @param cohortScope the cohort scope to claim under (`self` by default — a
+     *        first-run desktop install is the founder's own node).
+     */
+    fun claimLocalNodeOwnership(
+        claimPin: String?,
+        capturedNodeCode: String? = null,
+        cohortScope: String = "self",
+    ) {
+        val client = apiClient as? CIRISApiClient
+        if (client == null) {
+            _state.value = _state.value.copy(
+                ownershipClaim = _state.value.ownershipClaim.copy(
+                    error = "Local node unavailable: API client does not support it",
+                )
+            )
+            return
+        }
+        if (claimPin.isNullOrBlank()) {
+            // Console-only PIN was never captured — be honest, don't pretend.
+            _state.value = _state.value.copy(
+                ownershipClaim = _state.value.ownershipClaim.copy(
+                    inProgress = false,
+                    claimed = false,
+                    error = "claim PIN not captured — this node's one-time ownership " +
+                        "PIN was not seen on its console. You can claim ownership later " +
+                        "from the Network surface using the PIN printed on the node.",
+                )
+            )
+            return
+        }
+        _state.value = _state.value.copy(
+            ownershipClaim = _state.value.ownershipClaim.copy(inProgress = true, error = null)
+        )
+        viewModelScope.launch {
+            try {
+                // Resolve THIS node's own NodeCode (PUBLIC handle). Prefer the one
+                // captured from the banner; otherwise fetch it from the local node.
+                val nodeCode = capturedNodeCode?.takeIf { it.isNotBlank() }
+                    ?: client.getNodeCode(CIRISApiClient.LOCAL_NODE_URL).code
+
+                // SELF-claim: drive the LOCAL node to claim ITSELF. The local node
+                // decodes its own NodeCode (loopback transport_hint), signs the
+                // owner-binding in its substrate, and POSTs it to its own
+                // /v1/setup/root. Reuses the existing claim-remote client path.
+                val resp = client.claimRemote(
+                    nodeCode = nodeCode,
+                    claimPin = claimPin.trim(),
+                    cohortScope = cohortScope,
+                    localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                )
+                _state.value = _state.value.copy(
+                    ownershipClaim = _state.value.ownershipClaim.copy(
+                        inProgress = false,
+                        claimed = resp.role != null,
+                        role = resp.role,
+                        waId = resp.waId,
+                        error = if (resp.role == null) {
+                            resp.error ?: "Node did not confirm ownership"
+                        } else null,
+                    )
+                )
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "claimLocalNodeOwnership: self-claim via local node failed: ${e.message}")
+                val msg = e.message.orEmpty()
+                val isPinRejection = msg.contains("claim_pin", ignoreCase = true) ||
+                    msg.contains("claim pin", ignoreCase = true) ||
+                    msg.contains("invalid pin", ignoreCase = true)
+                _state.value = _state.value.copy(
+                    ownershipClaim = _state.value.ownershipClaim.copy(
+                        inProgress = false,
+                        claimed = false,
+                        error = if (isPinRejection) {
+                            "The node rejected the claim PIN — it may have already been " +
+                                "claimed or the PIN expired."
+                        } else {
+                            "Couldn't claim ownership of this device's local node: " +
+                                "${e.message ?: "unknown error"}"
+                        },
                     )
                 )
             }

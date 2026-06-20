@@ -776,6 +776,50 @@ pub async fn is_owner_bound(engine: &Engine, node_key_id: &str) -> Option<String
     None
 }
 
+/// **CEG projection — "nodes owned by this fed ID".** The inverse of
+/// [`is_owner_bound`]: every node key_id for which `owner_user_key_id` authored a
+/// live, infra-only, unrevoked `delegates_to(user → node)`. This is the
+/// CEG-native answer to the node list — the owner-bindings ARE the graph, so the
+/// list is a projection over them (no client-side parallel store). By
+/// construction it returns the local node once it has been self-claimed (the
+/// claim persists exactly that `delegates_to`).
+pub async fn nodes_owned_by(engine: &Engine, owner_user_key_id: &str) -> Vec<String> {
+    let directory = engine.federation_directory();
+    let now = chrono::Utc::now();
+    let mut out: Vec<String> = Vec::new();
+    let Ok(rows) = directory.list_attestations_by(owner_user_key_id).await else {
+        return out;
+    };
+    for edge in rows {
+        if edge.attestation_type != attestation_type::DELEGATES_TO {
+            continue;
+        }
+        // CC 1.13.5: infra-only owner-binding (not an agency delegation).
+        if !scopes_are_infra_only(&scope_set_of(&edge.attestation_envelope)) {
+            continue;
+        }
+        if let Some(exp) = edge.expires_at {
+            if exp <= now {
+                continue;
+            }
+        }
+        let Some(node) = edge
+            .attestation_envelope
+            .get("node_key_id")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if delegation_revoked(engine, owner_user_key_id, node).await {
+            continue;
+        }
+        if !out.iter().any(|n| n == node) {
+            out.push(node.to_owned());
+        }
+    }
+    out
+}
+
 /// The scope set declared by a `delegates_to` envelope's `scope` field (bare
 /// string OR array — the two wire shapes the substrate walk accepts).
 fn scope_set_of(envelope: &serde_json::Value) -> Vec<String> {
