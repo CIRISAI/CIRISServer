@@ -1514,6 +1514,44 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Upgrade an existing (already-owned) node to a fed-ID owner-binding** —
+     * `POST {localNodeUrl}/v1/self/upgrade-owner`. The WAs-need-fed-IDs migration:
+     * a node owned the legacy way (a password/OAuth ROOT WA with NO fed-ID) is
+     * re-rooted on a fed-ID by persisting `delegates_to(fed-ID → node)` — the
+     * existing login is PRESERVED (non-destructive owner-binding model).
+     *
+     * PREREQ: a fed-ID must already be minted on the node ([mintUserIdentity]) and
+     * [token] must be the EXISTING owner's session (password/OAuth login). Returns
+     * `{ owner, node_key_id, owner_binding_attestation_id }`.
+     */
+    suspend fun upgradeOwnerToFedId(
+        localNodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): String {
+        val method = "upgradeOwnerToFedId"
+        logInfo(method, "POST $localNodeUrl/v1/self/upgrade-owner")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$localNodeUrl/v1/self/upgrade-owner") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logException(method, RuntimeException("status=${response.status} body=${raw.take(300)}"), "localNodeUrl=$localNodeUrl")
+                throw RuntimeException("upgrade-owner failed: ${response.status}: ${raw.take(200)}")
+            }
+            raw
+        } catch (e: Exception) {
+            logException(method, e, "localNodeUrl=$localNodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO

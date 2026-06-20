@@ -337,6 +337,30 @@ fun ManageNodesScreen(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ── Upgrade to Fed ID (WAs-need-fed-IDs migration) ───────────────
+            // For a node owned the legacy way (a password/OAuth WA with NO fed-ID):
+            // mint the owner's hardware-rooted fed-ID + re-root the node on it
+            // (login preserved). Idempotent on a node that's already fed-ID-rooted.
+            val upgrading by viewModel.upgradeInProgress.collectAsState()
+            OutlinedButton(
+                onClick = { viewModel.upgradeToFedId() },
+                enabled = !upgrading,
+                modifier = Modifier.fillMaxWidth().testable("btn_upgrade_to_fed_id"),
+            ) {
+                if (upgrading) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(localizedString("mobile.manage_nodes_upgrade_fed_id"))
+            }
+            Text(
+                text = localizedString("mobile.manage_nodes_upgrade_fed_id_note"),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

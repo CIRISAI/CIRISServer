@@ -44,7 +44,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::prelude::{Engine, LocalSigner};
+use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::ownership::{self, SignedOwnerBinding, OWNER_BINDING_INFRA_SCOPES};
@@ -258,6 +258,8 @@ struct ClaimRemoteState {
     /// SELF-claim fallback target when a loopback node's NodeCode carries no
     /// `transport_hint`.
     local_self_url: String,
+    /// Hybrid-verify policy for the local upgrade-owner apply (default Strict).
+    policy: HybridPolicy,
     http: reqwest::Client,
 }
 
@@ -403,6 +405,102 @@ async fn claim_remote_handler(
     }
 }
 
+/// `POST /v1/self/upgrade-owner` — **upgrade an existing (already-owned) node to a
+/// fed-ID owner-binding** (the WAs-need-fed-IDs migration; the agent team's 2.9.7).
+///
+/// An existing node may be owned the legacy way — a ROOT WA with a password/OAuth
+/// login but NO fed-ID `delegates_to` owner-binding. This binds that node to a
+/// (already-minted) fed-ID by persisting `delegates_to(fed-ID-user → node, infra:*)`
+/// — the SAME CC 3.2 owner-binding the first-run claim uses, but authorized by the
+/// EXISTING owner's session (not first-run/PIN) and applied locally (no setup/root,
+/// so the existing ROOT is untouched and the password/OAuth login is PRESERVED).
+/// Non-destructive (owner-binding model). After it, `is_owner_bound(node)` resolves
+/// to the fed-ID user, and the node appears in the CEG-native owned-nodes list.
+///
+/// Flow: client logs in as the existing admin → mints the fed-ID
+/// (`POST /v1/self/identity`, owner-gated) → calls this. Loopback + owner-gated.
+async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: HeaderMap) -> Response {
+    // ALWAYS owner-session-gated: a node must already be owned to upgrade how its
+    // ownership is rooted. The existing admin's session authorizes the fed-ID bind.
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    // Resolve the fed-ID signer the client just minted (POST /v1/self/identity).
+    let user_signer = match crate::compose::resolve_user_signer(
+        &st.user_key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no federation ID on this node yet — create one (POST /v1/self/identity) \
+                 before upgrading this account to a fed-ID owner-binding",
+            )
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+
+    // Build + locally apply the user-signed owner-binding (registers the fed-ID as a
+    // `user` identity + persists the delegates_to). Reuses the claim substrate path,
+    // minus the node-to-node HTTP and the first-run ROOT creation.
+    let infra: Vec<String> = OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let binding =
+        match ownership::build_signed_owner_binding(&user_signer, &st.node_key_id, &infra).await {
+            Ok(b) => b,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("build owner-binding: {e}"),
+                )
+            }
+        };
+    match ownership::apply_signed_owner_binding(&st.engine, &st.node_key_id, st.policy, &binding)
+        .await
+    {
+        Ok(applied) => {
+            tracing::info!(
+                responsible_user = %applied.responsible_user_key_id,
+                node_key_id = %st.node_key_id,
+                attestation_id = %applied.attestation_id,
+                "upgrade-owner: existing node re-rooted on a fed-ID owner-binding \
+                 (delegates_to(user → node, infra:*) persisted; legacy login preserved)"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "owner": applied.responsible_user_key_id,
+                    "node_key_id": st.node_key_id,
+                    "owner_binding_attestation_id": applied.attestation_id,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let code = match e {
+                ownership::OwnershipError::AgencyScopeRefused
+                | ownership::OwnershipError::Validation(_)
+                | ownership::OwnershipError::Canonicalize(_) => StatusCode::BAD_REQUEST,
+                ownership::OwnershipError::Verify(_) => StatusCode::UNAUTHORIZED,
+                ownership::OwnershipError::Sign(_) | ownership::OwnershipError::Persist(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            };
+            err(code, format!("upgrade-owner failed: {e}"))
+        }
+    }
+}
+
 /// The claim-remote router — merge onto the control API listener. `user_signer`
 /// is the responsible USER's signer (NOT the node steward signer); see the module
 /// docs for how it is obtained and the keyring/YubiKey gap.
@@ -412,6 +510,7 @@ pub fn router(
     user_key_id: String,
     user_seed_dir: std::path::PathBuf,
     local_self_url: String,
+    policy: HybridPolicy,
 ) -> Router {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -423,12 +522,17 @@ pub fn router(
         user_key_id,
         user_seed_dir,
         local_self_url,
+        policy,
         http,
     };
     Router::new()
         .route(
             "/v1/setup/claim-remote",
             axum::routing::post(claim_remote_handler),
+        )
+        .route(
+            "/v1/self/upgrade-owner",
+            axum::routing::post(upgrade_owner_handler),
         )
         .with_state(state)
 }

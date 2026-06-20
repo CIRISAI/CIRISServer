@@ -207,6 +207,48 @@ class NodeSwitcherViewModel(
 
     fun clearError() { _error.value = null }
 
+    private val _upgradeInProgress = MutableStateFlow(false)
+    val upgradeInProgress: StateFlow<Boolean> = _upgradeInProgress.asStateFlow()
+
+    /**
+     * **Upgrade THIS device's local node to a fed-ID owner-binding** — the
+     * WAs-need-fed-IDs migration (the agent team's 2.9.7). For a node owned the
+     * legacy way (a password/OAuth ROOT WA with NO fed-ID), this mints the owner's
+     * hardware-rooted fed-ID (secure-only: YubiKey → TPM → software, the app does
+     * NO crypto) and re-roots the node on it via `POST /v1/self/upgrade-owner` —
+     * the existing login is PRESERVED (non-destructive owner-binding model).
+     *
+     * Requires the caller to be authenticated as the existing owner (the shared
+     * client carries that session). [associateKeyId] is reserved for the
+     * adopt-existing-fed-ID path (pkcs11/provision=false) — left for the YubiKey
+     * reclaim case; null mints a fresh hardware-rooted fed-ID.
+     */
+    fun upgradeToFedId(label: String? = null) {
+        if (_upgradeInProgress.value) return
+        _upgradeInProgress.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                // 1) Mint the owner's fed-ID on the local node (owner-gated; uses the
+                //    current owner session). Secure-only — substrate auto-picks custody.
+                apiClient.mintUserIdentity(
+                    label = label?.trim()?.ifBlank { null },
+                    backend = null,
+                    localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                )
+                // 2) Re-root the existing node on the just-minted fed-ID.
+                apiClient.upgradeOwnerToFedId(localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
+                PlatformLogger.i(TAG, "[upgradeToFedId] node re-rooted on a fed-ID owner-binding")
+                reload()
+            } catch (e: Exception) {
+                PlatformLogger.e(TAG, "[upgradeToFedId] failed: ${e.message}", e)
+                _error.value = "Couldn't upgrade this account to a Fed ID: ${e.message}"
+            } finally {
+                _upgradeInProgress.value = false
+            }
+        }
+    }
+
     // ─── Connect-by-NodeCode: decode → connect → identity-pin → claim ─────────
     //
     // The secure "become admin of a remote node" bootstrap (CEG §0.10). The
