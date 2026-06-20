@@ -583,14 +583,16 @@ struct GrantSummary {
     attestation_id: String,
 }
 
-/// The owner's LIVE act-on-behalf delegations, read FROM THE GRAPH: outbound
-/// `delegates_to(owner → actor)` edges carrying a non-`infra:*` scope (so node
-/// owner-bindings are excluded), confirmed live via `reachable_under_scope`
-/// (withdraws-aware). Returns `(actor_key_id, scope, attestation_id)`.
-async fn live_delegations(st: &DeviceGrantState) -> Vec<(String, String, String)> {
-    let dir = st.engine.federation_directory();
+/// The owner's LIVE act-on-behalf delegations, read FROM THE GRAPH under the
+/// owner's DERIVED federation key_id (`owner_fed_id` = the signer's `key_id()` —
+/// NOT `st.owner_key_id`, which is the keystore alias the edges are NOT authored
+/// under). Outbound `delegates_to(owner → actor)` edges carrying a non-`infra:*`
+/// scope (so node owner-bindings are excluded), confirmed live via
+/// `reachable_under_scope` (withdraws-aware). Returns `(actor, scope, attestation_id)`.
+async fn live_delegations(engine: &Engine, owner_fed_id: &str) -> Vec<(String, String, String)> {
+    let dir = engine.federation_directory();
     let rows = dir
-        .list_attestations_by(&st.owner_key_id)
+        .list_attestations_by(owner_fed_id)
         .await
         .unwrap_or_default();
     let mut out = Vec::new();
@@ -604,9 +606,8 @@ async fn live_delegations(st: &DeviceGrantState) -> Vec<(String, String, String)
             continue;
         }
         let actor = edge.attested_key_id.clone();
-        if st
-            .engine
-            .reachable_under_scope(&st.owner_key_id, &actor, &scope, DELEGATION_DEPTH)
+        if engine
+            .reachable_under_scope(owner_fed_id, &actor, &scope, DELEGATION_DEPTH)
             .await
             .unwrap_or(false)
         {
@@ -623,7 +624,13 @@ async fn list_grants(State(st): State<DeviceGrantState>, headers: HeaderMap) -> 
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
     }
-    let grants: Vec<GrantSummary> = live_delegations(&st)
+    // The owner's edges are authored under its DERIVED federation key_id; resolve
+    // the signer to learn it (reading the pubkey opens, but does not TOUCH, the key).
+    let owner_signer = match resolve_owner_signer(&st).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let grants: Vec<GrantSummary> = live_delegations(&st.engine, owner_signer.key_id())
         .await
         .into_iter()
         .map(|(client_id, scope, attestation_id)| GrantSummary {
@@ -663,8 +670,15 @@ async fn revoke(
     };
     let client_id = req.client_id.trim().to_string();
 
-    // Find the live edge(s) for this client in the graph.
-    let targets: Vec<String> = live_delegations(&st)
+    // Resolve the owner signer ONCE — its key_id() is the DERIVED id the edges are
+    // authored under (for the graph scan) AND the granter that signs the withdraws.
+    let owner_signer = match resolve_owner_signer(&st).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    // Find the live edge(s) for this client in the graph (under the derived id).
+    let targets: Vec<String> = live_delegations(&st.engine, owner_signer.key_id())
         .await
         .into_iter()
         .filter(|(actor, _, _)| actor == &client_id)
@@ -672,14 +686,9 @@ async fn revoke(
         .collect();
 
     // Emit a signed `withdraws` against each (owner is the original granter →
-    // rule-1 self-revocation; hardware touch on sign). Resolve the signer ONLY if
-    // there's something to revoke.
+    // rule-1 self-revocation; hardware touch on sign).
     let mut revoked = 0usize;
     if !targets.is_empty() {
-        let owner_signer = match resolve_owner_signer(&st).await {
-            Ok(s) => s,
-            Err(resp) => return resp,
-        };
         for target_id in targets {
             let envelope = ciris_persist::federation::withdraws_attestation_envelope(
                 &target_id,

@@ -109,28 +109,36 @@ async fn register_key(
         .expect("register federation key");
 }
 
-/// Mint the LOCAL responsible-owner's fed-ID on disk (software custody) so the
-/// handler's `resolve_user_signer(owner_key_id, seed_dir)` re-opens the SAME
-/// signer at approve/revoke, and admit its USER key into `federation_keys` (with
-/// the REAL minted pubkeys, so the federation-tier attestation verify passes).
-async fn setup_local_owner(engine: &Engine, owner_key_id: &str, seed_dir: &Path) {
+/// Mint the LOCAL responsible-owner's fed-ID on disk (software custody) under the
+/// keystore alias `owner_alias` so the handler's `resolve_user_signer(owner_alias,
+/// seed_dir)` re-opens the SAME signer at approve/revoke. Admits its USER key into
+/// `federation_keys` under the #247 DERIVED key_id (what the signer reports as
+/// `key_id()` and emits under), with the REAL minted pubkeys so the federation-tier
+/// verify passes. Returns the derived federation key_id (the edge issuer / graph id).
+async fn setup_local_owner(engine: &Engine, owner_alias: &str, seed_dir: &Path) -> String {
     let minted = ciris_server::identity::mint_user_identity(
         UserIdentityBackend::Software,
-        owner_key_id,
+        owner_alias,
         Some("Test Owner"),
         seed_dir.to_path_buf(),
     )
     .await
     .expect("mint owner identity");
-    assert_eq!(minted.key_id, owner_key_id, "mint pins the literal key_id");
+    // #247: the recorded key_id is the DERIVED form (alias is the seal storage key).
+    assert!(
+        minted.key_id.starts_with(&format!("{owner_alias}-")),
+        "expected a derived `{owner_alias}-<fp>` key_id, got {}",
+        minted.key_id
+    );
     register_key(
         engine,
-        owner_key_id,
+        &minted.key_id,
         "user",
         &minted.pubkey_ed25519_base64,
         Some(minted.pubkey_ml_dsa_65_base64),
     )
     .await;
+    minted.key_id
 }
 
 /// Register the actor (agent) fed-ID. It is the `attested_key_id` of the edge —
@@ -238,7 +246,9 @@ async fn ceg_native_approve_emits_delegation_token_works_and_revoke_kills_it() {
     let engine = node().await;
     let owner_key_id = "dg-owner-happy";
     let actor_key_id = "dg-actor-happy";
-    setup_local_owner(&engine, owner_key_id, &home).await;
+    // owner_key_id is the keystore ALIAS (the router's resolve key); the owner's
+    // wire/graph id is the #247 DERIVED form mint records + the signer emits under.
+    let owner_fed_id = setup_local_owner(&engine, owner_key_id, &home).await;
     register_actor(&engine, actor_key_id).await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
     let (base, _h) = serve(
@@ -281,7 +291,7 @@ async fn ceg_native_approve_emits_delegation_token_works_and_revoke_kills_it() {
     // The authority is a LIVE edge in the graph.
     assert!(
         engine
-            .reachable_under_scope(owner_key_id, actor_key_id, SCOPE, 4)
+            .reachable_under_scope(&owner_fed_id, actor_key_id, SCOPE, 4)
             .await
             .unwrap(),
         "owner → actor delegation is reachable under the act-on-behalf scope"
@@ -348,7 +358,7 @@ async fn ceg_native_approve_emits_delegation_token_works_and_revoke_kills_it() {
     assert!(rev["revoked"].as_u64().unwrap() >= 1, "≥1 edge withdrawn");
     assert!(
         !engine
-            .reachable_under_scope(owner_key_id, actor_key_id, SCOPE, 4)
+            .reachable_under_scope(&owner_fed_id, actor_key_id, SCOPE, 4)
             .await
             .unwrap(),
         "withdrawn edge is no longer reachable"

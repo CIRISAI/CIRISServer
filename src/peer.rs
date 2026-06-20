@@ -23,15 +23,11 @@
 //! "federation"`, FEDERATION tier, hybrid-signed by the granting node's steward
 //! key, payload recording the grant intent.
 
-use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine as _;
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, cohort_scope, Attestation, SignedAttestation,
-};
-use ciris_persist::federation::Error as FederationError;
+use ciris_persist::federation::types::{attestation_type, cohort_scope};
+use ciris_persist::federation::{EmitAttestationInput, Error as FederationError};
 use ciris_persist::prelude::Engine;
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
@@ -247,52 +243,29 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
         },
     });
 
-    // ── Emit recipe — modeled on scorer.rs / ceg.rs::emit_liveness ───────────
-    // 1. CEG produce-canonical bytes (V2/JCS — the signing basis, CEG §0.9).
+    // ── Emit (CIRISPersist#253 collapse) ─────────────────────────────────────
+    // The hand-rolled canonicalize→hash→hybrid-sign→assemble→put recipe is now
+    // `Engine::emit_attestation_self` (signs with the engine's OWN composed
+    // hardware-hybrid signer; attester/scrub = the node's #247 DERIVED federation
+    // key_id == `node_key_id` here — wire-preserving). `weight = Some(1.0)`
+    // matches the trust model's `unwrap_or(1.0)` default (preserved explicitly).
+    //
+    // `content_hash` (the integrity anchor surfaced to the operator via the
+    // peering admin response) is the SAME JCS canonical hash emit computes
+    // internally — derived here for the ConsentGrant return without a read-back.
     let canonical = ceg_produce_canonicalize(&envelope).map_err(|e| {
         anyhow::anyhow!("ceg_produce_canonicalize replication-consent envelope: {e}")
     })?;
-    // 2. original_content_hash = hex(SHA-256(canonical)).
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let content_hash = original_content_hash.clone();
-    // 3. Hybrid sign (Ed25519 hardware-sealed + ML-DSA-65) over the canonical bytes.
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .context("hybrid-sign replication-consent envelope")?;
-    let classical_b64 = B64.encode(&sig.classical.signature);
-    let pqc_b64 = B64.encode(&sig.pqc.signature);
+    let content_hash = hex::encode(Sha256::digest(&canonical));
 
-    // 4. Assemble the FEDERATION-tier, directed row (subject = [B]).
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: node_key_id.to_owned(),
-        attested_key_id: peer_key_id.to_owned(),
-        attestation_type: attestation_type::SCORES.to_owned(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: classical_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: node_key_id.to_owned(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(), // server-computed on insert
-        // Directed: this consent is bilateral A→B, never broadcast.
-        subject_key_ids: vec![peer_key_id.to_owned()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-
-    directory
-        .put_attestation(SignedAttestation { attestation })
+    let mut input = EmitAttestationInput::with_envelope(attestation_type::SCORES, envelope);
+    input.attested_key_id = Some(peer_key_id.to_owned());
+    input.subject_key_ids = vec![peer_key_id.to_owned()];
+    input.weight = Some(1.0);
+    let attestation_id = engine
+        .emit_attestation_self(input)
         .await
-        .map_err(|e| anyhow::anyhow!("put_attestation(consent:replication:v1): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("emit_attestation_self(consent:replication:v1): {e}"))?;
 
     tracing::info!(
         peer_key_id,

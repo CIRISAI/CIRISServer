@@ -48,28 +48,39 @@ async fn node() -> Arc<Engine> {
 /// Register the node's own steward key (the `put_attestation` attesting-key FK
 /// precondition for any self-attested write). Mirrors
 /// `tests/peer_replication.rs::register_self`.
+/// The node's #247 DERIVED federation key_id — what `set_config` /
+/// `emit_attestation_self` use in prod (`cfg.key_id`); the `NODE_KEY_ID` const
+/// is the keystore ALIAS, not the wire key_id.
+async fn node_key_id(engine: &Engine) -> String {
+    engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id")
+}
+
 async fn register_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_KEY_ID });
+    let key_id = node_key_id(engine).await;
+    let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
         .await
         .expect("self hybrid sign");
     let record = KeyRecord {
-        key_id: NODE_KEY_ID.to_string(),
+        key_id: key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::STEWARD.into(),
-        identity_ref: NODE_KEY_ID.to_string(),
+        identity_ref: key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -87,6 +98,7 @@ async fn register_self(engine: &Engine) {
 async fn each_value_variant_round_trips() {
     let engine = node().await;
     register_self(&engine).await;
+    let nk = node_key_id(&engine).await;
 
     let cases: Vec<(&str, ConfigValue)> = vec![
         ("k.str", ConfigValue::Str("hello".to_string())),
@@ -112,7 +124,7 @@ async fn each_value_variant_round_trips() {
     for (key, value) in &cases {
         let written = graph_config::set_config(
             &engine,
-            NODE_KEY_ID,
+            &nk,
             key,
             value.clone(),
             "owner-user",
@@ -126,7 +138,7 @@ async fn each_value_variant_round_trips() {
             "first write has no previous"
         );
 
-        let read = graph_config::get_config(&engine, NODE_KEY_ID, key)
+        let read = graph_config::get_config(&engine, &nk, key)
             .await
             .expect("get_config")
             .expect("key present after write");
@@ -140,25 +152,19 @@ async fn each_value_variant_round_trips() {
 
     // Typed accessors.
     assert_eq!(
-        graph_config::get_str(&engine, NODE_KEY_ID, "k.str")
-            .await
-            .unwrap(),
+        graph_config::get_str(&engine, &nk, "k.str").await.unwrap(),
         Some("hello".to_string())
     );
     assert_eq!(
-        graph_config::get_i64(&engine, NODE_KEY_ID, "k.i64")
-            .await
-            .unwrap(),
+        graph_config::get_i64(&engine, &nk, "k.i64").await.unwrap(),
         Some(-42)
     );
     assert_eq!(
-        graph_config::get_f64(&engine, NODE_KEY_ID, "k.f64")
-            .await
-            .unwrap(),
+        graph_config::get_f64(&engine, &nk, "k.f64").await.unwrap(),
         Some(1.5)
     );
     assert_eq!(
-        graph_config::get_bool(&engine, NODE_KEY_ID, "k.bool")
+        graph_config::get_bool(&engine, &nk, "k.bool")
             .await
             .unwrap(),
         Some(true)
@@ -171,10 +177,11 @@ async fn each_value_variant_round_trips() {
 async fn set_twice_increments_version_and_chains_previous() {
     let engine = node().await;
     register_self(&engine).await;
+    let nk = node_key_id(&engine).await;
 
     let v1 = graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "tunable.x",
         ConfigValue::I64(1),
         "owner",
@@ -187,7 +194,7 @@ async fn set_twice_increments_version_and_chains_previous() {
 
     let v2 = graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "tunable.x",
         ConfigValue::I64(2),
         "owner",
@@ -201,7 +208,7 @@ async fn set_twice_increments_version_and_chains_previous() {
         "second write chains previous_version to the prior row id"
     );
 
-    let latest = graph_config::get_config(&engine, NODE_KEY_ID, "tunable.x")
+    let latest = graph_config::get_config(&engine, &nk, "tunable.x")
         .await
         .expect("get_config")
         .expect("key present");
@@ -219,11 +226,12 @@ async fn set_twice_increments_version_and_chains_previous() {
 async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     let engine = node().await;
     register_self(&engine).await;
+    let nk = node_key_id(&engine).await;
 
     // Two keys under "replication.", one outside.
     graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "replication.reconcile_secs",
         ConfigValue::I64(30),
         "owner",
@@ -234,7 +242,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     // Overwrite the first key — list must show the latest.
     graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "replication.reconcile_secs",
         ConfigValue::I64(60),
         "owner",
@@ -244,7 +252,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .unwrap();
     graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "replication.max_peers",
         ConfigValue::I64(8),
         "owner",
@@ -254,7 +262,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .unwrap();
     graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "safety.age_gate",
         ConfigValue::Bool(true),
         "owner",
@@ -263,7 +271,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .await
     .unwrap();
 
-    let filtered = graph_config::list_configs(&engine, NODE_KEY_ID, Some("replication."))
+    let filtered = graph_config::list_configs(&engine, &nk, Some("replication."))
         .await
         .expect("list_configs(prefix)");
     assert_eq!(
@@ -287,7 +295,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     );
 
     // No prefix → all three distinct keys.
-    let all = graph_config::list_configs(&engine, NODE_KEY_ID, None)
+    let all = graph_config::list_configs(&engine, &nk, None)
         .await
         .expect("list_configs(None)");
     assert_eq!(all.len(), 3, "all distinct keys, latest-per-key");
@@ -298,10 +306,11 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
 async fn recanted_key_reads_as_absent() {
     let engine = node().await;
     register_self(&engine).await;
+    let nk = node_key_id(&engine).await;
 
     let written = graph_config::set_config(
         &engine,
-        NODE_KEY_ID,
+        &nk,
         "ephemeral.flag",
         ConfigValue::Bool(true),
         "owner",
@@ -312,7 +321,7 @@ async fn recanted_key_reads_as_absent() {
 
     // Present before recant.
     assert!(
-        graph_config::get_config(&engine, NODE_KEY_ID, "ephemeral.flag")
+        graph_config::get_config(&engine, &nk, "ephemeral.flag")
             .await
             .unwrap()
             .is_some(),
@@ -324,13 +333,13 @@ async fn recanted_key_reads_as_absent() {
     // (written.version sanity)
     assert_eq!(written.version, 1);
 
-    let after = graph_config::get_config(&engine, NODE_KEY_ID, "ephemeral.flag")
+    let after = graph_config::get_config(&engine, &nk, "ephemeral.flag")
         .await
         .expect("get_config after recant");
     assert!(after.is_none(), "a recanted key MUST read as absent");
 
     // And it drops out of the listing too.
-    let listed = graph_config::list_configs(&engine, NODE_KEY_ID, None)
+    let listed = graph_config::list_configs(&engine, &nk, None)
         .await
         .unwrap();
     assert!(
@@ -342,9 +351,10 @@ async fn recanted_key_reads_as_absent() {
 /// Find the substrate `attestation_id` of the latest config row for a key (by
 /// reading the raw directory rows the store wrote).
 async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
+    let nk = node_key_id(engine).await;
     let rows = engine
         .federation_directory()
-        .list_attestations_by(NODE_KEY_ID)
+        .list_attestations_by(&nk)
         .await
         .expect("list attestations by node");
     rows.into_iter()
@@ -370,9 +380,10 @@ async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
 /// recognizes.
 async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
     let now = chrono::Utc::now();
+    let nk = node_key_id(engine).await;
     let envelope = serde_json::json!({
         "dimension": "config:v1",
-        "attesting_key_id": NODE_KEY_ID,
+        "attesting_key_id": nk,
         "recants": target_attestation_id,
         "asserted_at": now.to_rfc3339(),
     });
@@ -382,8 +393,8 @@ async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
 
     let attestation = Attestation {
         attestation_id: format!("recant-{target_attestation_id}"),
-        attesting_key_id: NODE_KEY_ID.to_string(),
-        attested_key_id: NODE_KEY_ID.to_string(),
+        attesting_key_id: nk.clone(),
+        attested_key_id: nk.clone(),
         attestation_type: attestation_type::RECANTS.to_string(),
         weight: None,
         asserted_at: now,
@@ -392,7 +403,7 @@ async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
         original_content_hash,
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: nk.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),

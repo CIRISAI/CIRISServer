@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "6.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
+version = "6.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "6.2.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.0#c5fa53426d4c8a9e43fe44d5a24b4664c0c11a09"
+version = "6.2.1"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.1#3dd9317ac20377e71d10136a86d4493e99b311e6"
 dependencies = [
  "async-trait",
  "axum",
@@ -895,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "6.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
+version = "6.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -960,8 +960,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "9.3.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.3.0#3df329a0f8a7e27e5e1ff7bd6eb79120a36ad16c"
+version = "9.4.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.4.0#75a6bc4873d056b89bf72d3879258ba6c0634419"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1040,8 +1040,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "6.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
+version = "6.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
 dependencies = [
  "android_system_properties",
  "anyhow",

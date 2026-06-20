@@ -48,17 +48,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine as _;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, cohort_scope, Attestation, SignedAttestation,
-};
+use ciris_persist::federation::types::{attestation_type, cohort_scope};
+use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 /// The open-vocab config dimension every config row rides on. **Versioned**
 /// (`:v1`) to satisfy persist's `DimensionAdmissionPolicy { require_version_segment:
@@ -390,51 +385,21 @@ pub async fn set_config(
     let now = chrono::Utc::now();
     let envelope = config_envelope(node_key_id, &entry, &now.to_rfc3339());
 
-    // ── Emit recipe — the EXACT path emit_replication_consent uses ───────────
-    // 1. CEG produce-canonical bytes (V2/JCS — the signing basis).
-    let canonical = ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow::anyhow!("ceg_produce_canonicalize config envelope: {e}"))?;
-    // 2. original_content_hash = hex(SHA-256(canonical)).
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    // 3. Hybrid sign (Ed25519 + ML-DSA-65) over the canonical bytes — same signer.
-    let sig = engine
-        .sign_hybrid(&canonical)
+    // ── Emit (CIRISPersist#253 collapse) ─────────────────────────────────────
+    // node-self emit over the engine's OWN composed signer: the hand-rolled
+    // canonicalize→hash→hybrid-sign→assemble→put recipe is now
+    // `Engine::emit_attestation_self`. Attester/scrub = the node's #247 DERIVED
+    // federation key_id (`local_derived_key_id()` == `node_key_id` here —
+    // wire-preserving). The config key lives in the envelope; the subject is the
+    // node itself; `weight = Some(1.0)` matches the prior row.
+    let mut input = EmitAttestationInput::with_envelope(attestation_type::SCORES, envelope);
+    input.attested_key_id = Some(node_key_id.to_owned());
+    input.subject_key_ids = vec![node_key_id.to_owned()];
+    input.weight = Some(1.0);
+    let attestation_id = engine
+        .emit_attestation_self(input)
         .await
-        .context("hybrid-sign config envelope")?;
-    let classical_b64 = B64.encode(&sig.classical.signature);
-    let pqc_b64 = B64.encode(&sig.pqc.signature);
-
-    // 4. Assemble the FEDERATION-tier, self-directed row (the config key lives in
-    //    the envelope, NOT as a subject_key_id — subject is the node itself).
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: node_key_id.to_owned(),
-        attested_key_id: node_key_id.to_owned(),
-        attestation_type: attestation_type::SCORES.to_owned(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: classical_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: node_key_id.to_owned(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(), // server-computed on insert
-        subject_key_ids: vec![node_key_id.to_owned()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .map_err(|e| anyhow::anyhow!("put_attestation(config:v1): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("emit_attestation_self(config:v1): {e}"))?;
 
     tracing::info!(
         key,

@@ -73,28 +73,38 @@ async fn node_a() -> Arc<Engine> {
 
 /// Register Node A's own steward key via the canonical admission gate — the
 /// `put_attestation` attesting-key FK precondition for the consent emit.
+/// The node's #247 DERIVED federation key_id (== `cfg.key_id`, what the consent
+/// emit attests under via `emit_attestation_self`). `NODE_A_KEY_ID` is the alias.
+async fn node_a_key_id(engine: &Engine) -> String {
+    engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node-A federation key_id")
+}
+
 async fn register_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_A_KEY_ID });
+    let key_id = node_a_key_id(engine).await;
+    let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
         .await
         .expect("self hybrid sign");
     let record = KeyRecord {
-        key_id: NODE_A_KEY_ID.to_string(),
+        key_id: key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::STEWARD.into(),
-        identity_ref: NODE_A_KEY_ID.to_string(),
+        identity_ref: key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_A_KEY_ID.to_string(),
+        scrub_key_id: key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -249,6 +259,7 @@ async fn attestation_keys(runtime: &ReplicationRuntime) -> Vec<String> {
 async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
     let engine = node_a().await;
     register_self(&engine).await;
+    let nk = node_a_key_id(&engine).await;
 
     let peer_x = Peer::new("peer-x", 0xB0, 0xB1);
     let peer_y = Peer::new("peer-y", 0xC0, 0xC1);
@@ -258,7 +269,7 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
     // Two consent grants → two peers.
     peer::emit_replication_consent(
         &engine,
-        NODE_A_KEY_ID,
+        &nk,
         &peer_x.key_id,
         &peer::default_attestation_prefixes(),
     )
@@ -266,7 +277,7 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
     .expect("consent x");
     peer::emit_replication_consent(
         &engine,
-        NODE_A_KEY_ID,
+        &nk,
         &peer_y.key_id,
         &peer::default_attestation_prefixes(),
     )
@@ -277,7 +288,7 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
     // subject is peer-x) MUST NOT be read back as a replication peer.
     put_noise_scores(&engine, &peer_x.key_id).await;
 
-    let peers = peer::replication_peers_from_consent(&engine, NODE_A_KEY_ID)
+    let peers = peer::replication_peers_from_consent(&engine, &nk)
         .await
         .expect("read consent peers back");
     assert_eq!(
@@ -291,9 +302,10 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
 /// `subject_key_id`) — proves the reader filters on the dimension, not just type.
 async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
     let now = chrono::Utc::now();
+    let nk = node_a_key_id(engine).await;
     let envelope = serde_json::json!({
         "dimension": "capacity:sustained_coherence:v1",
-        "attesting_key_id": NODE_A_KEY_ID,
+        "attesting_key_id": nk,
         "subject_key_ids": [subject_key_id],
         "score": 0.9,
         "cohort_scope": "federation",
@@ -304,7 +316,7 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
     let sig = engine.sign_hybrid(&canonical).await.expect("sign noise");
     let attestation = Attestation {
         attestation_id: "a-noise-0001".to_string(),
-        attesting_key_id: NODE_A_KEY_ID.to_string(),
+        attesting_key_id: nk.clone(),
         attested_key_id: subject_key_id.to_string(),
         attestation_type: attestation_type::SCORES.to_string(),
         weight: Some(0.9),
@@ -314,7 +326,7 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
         original_content_hash,
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_A_KEY_ID.to_string(),
+        scrub_key_id: nk.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -337,6 +349,7 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
 async fn reconcile_registers_new_and_deregisters_gone() {
     let engine = node_a().await;
     register_self(&engine).await;
+    let nk = node_a_key_id(&engine).await;
 
     let peer_new = Peer::new("peer-new", 0xB0, 0xB1);
     let peer_stale = Peer::new("peer-stale", 0xC0, 0xC1);
@@ -355,7 +368,7 @@ async fn reconcile_registers_new_and_deregisters_gone() {
     // Consent NOW exists for peer-new (admitted) — the desired topology changed.
     peer::emit_replication_consent(
         &engine,
-        NODE_A_KEY_ID,
+        &nk,
         &peer_new.key_id,
         &peer::default_attestation_prefixes(),
     )
@@ -363,7 +376,7 @@ async fn reconcile_registers_new_and_deregisters_gone() {
     .expect("consent peer-new");
 
     // One reconcile pass.
-    replication_reconcile::reconcile_once(&engine, NODE_A_KEY_ID, &runtime)
+    replication_reconcile::reconcile_once(&engine, &nk, &runtime)
         .await
         .expect("reconcile_once must not error");
 
@@ -377,7 +390,7 @@ async fn reconcile_registers_new_and_deregisters_gone() {
     );
 
     // Idempotent: a second reconcile with no CEG change leaves the set unchanged.
-    replication_reconcile::reconcile_once(&engine, NODE_A_KEY_ID, &runtime)
+    replication_reconcile::reconcile_once(&engine, &nk, &runtime)
         .await
         .expect("second reconcile must not error");
     assert_eq!(
@@ -397,12 +410,13 @@ async fn reconcile_registers_new_and_deregisters_gone() {
 async fn reconcile_only_registers_admitted_consent_subjects() {
     let engine = node_a().await;
     register_self(&engine).await;
+    let nk = node_a_key_id(&engine).await;
 
     let peer_ok = Peer::new("peer-ok", 0xB0, 0xB1);
     admit(&engine, &peer_ok).await;
     peer::emit_replication_consent(
         &engine,
-        NODE_A_KEY_ID,
+        &nk,
         &peer_ok.key_id,
         &peer::default_attestation_prefixes(),
     )
@@ -410,7 +424,7 @@ async fn reconcile_only_registers_admitted_consent_subjects() {
     .expect("consent peer-ok");
 
     let runtime = runtime_for(&engine, vec![]).await;
-    replication_reconcile::reconcile_once(&engine, NODE_A_KEY_ID, &runtime)
+    replication_reconcile::reconcile_once(&engine, &nk, &runtime)
         .await
         .expect("reconcile_once must not error");
     assert_eq!(
