@@ -1552,6 +1552,41 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Record the bound owner's self-declared age band** — `POST {localNodeUrl}/v1/self/age`.
+     * The wizard-time, loopback + owner-session path (the app does NO crypto): the
+     * LOCAL node records the self-declared age for its bound owner fed-ID in its
+     * substrate. Run AFTER the claim (the owner must exist) with the owner session.
+     * [band] is `"minor"` | `"adult"`. Returns the raw JSON.
+     */
+    suspend fun setAgeSelf(
+        band: String,
+        localNodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): String {
+        val method = "setAgeSelf"
+        logInfo(method, "POST $localNodeUrl/v1/self/age band=$band")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$localNodeUrl/v1/self/age") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{\"band\":\"$band\"}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logException(method, RuntimeException("status=${response.status} body=${raw.take(300)}"), "localNodeUrl=$localNodeUrl")
+                throw RuntimeException("set-age failed: ${response.status}: ${raw.take(200)}")
+            }
+            raw
+        } catch (e: Exception) {
+            logException(method, e, "localNodeUrl=$localNodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO

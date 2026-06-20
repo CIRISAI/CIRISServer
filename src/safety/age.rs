@@ -97,7 +97,7 @@ impl AgeBand {
         }
     }
 
-    fn from_token(s: &str) -> Option<AgeBand> {
+    pub fn from_token(s: &str) -> Option<AgeBand> {
         match s {
             "minor" => Some(AgeBand::Minor),
             "adult" => Some(AgeBand::Adult),
@@ -240,6 +240,64 @@ pub async fn emit_age_assurance(
     level: AssuranceLevel,
     band: AgeBand,
 ) -> Result<String, String> {
+    emit_age_assurance_inner(engine, subject_key_id, level, band, true).await
+}
+
+/// Local-tier-only variant: persist the self-declared age WITHOUT promoting it to
+/// the federation tier. The LOCAL gate ([`read_age_level`] → `list_attestations_by`)
+/// reads local rows, so this is sufficient for a node enforcing its OWN owner's
+/// age (the wizard self-age). Federation promotion (cross-node visibility) is
+/// skipped — it requires the subject's federation-key shape the local self-age
+/// path doesn't need, and on a fresh node the promote FK-fails.
+pub async fn emit_age_assurance_local(
+    engine: &Engine,
+    subject_key_id: &str,
+    level: AssuranceLevel,
+    band: AgeBand,
+) -> Result<String, String> {
+    emit_age_assurance_inner(engine, subject_key_id, level, band, false).await
+}
+
+/// **CEG-native signed self-declared age.** The subject signs the
+/// `scores` / `age_self_declared:{band}` attestation with their OWN fed-ID
+/// (`signer`) and it lands at federation tier via
+/// [`crate::auth::ownership::emit_signed_attestation`] — a properly-signed CEG
+/// object, readable by `read_age_level` (`list_attestations_by`). This replaces
+/// the unsigned local-upsert + `attestation_promote` path, which is broken on real
+/// nodes (CIRISPersist#247: promote's `scrub_key_id` FK). `signer.key_id()` is the
+/// subject. Use when the node holds the subject's signer (the wizard self-age).
+pub async fn emit_age_assurance_signed(
+    engine: &Engine,
+    signer: &ciris_persist::prelude::LocalSigner,
+    level: AssuranceLevel,
+    band: AgeBand,
+) -> Result<String, String> {
+    let subject = signer.key_id().to_string();
+    let dimension = age_dimension(level, band);
+    let envelope = serde_json::json!({
+        "dimension": dimension,
+        "band": band.as_str(),
+        "level": level.as_str(),
+    });
+    crate::auth::ownership::emit_signed_attestation(
+        engine,
+        signer,
+        attestation_type::SCORES,
+        &subject,
+        envelope,
+        vec![subject.clone()],
+    )
+    .await
+    .map_err(|e| format!("emit signed age assurance: {e}"))
+}
+
+async fn emit_age_assurance_inner(
+    engine: &Engine,
+    subject_key_id: &str,
+    level: AssuranceLevel,
+    band: AgeBand,
+    promote: bool,
+) -> Result<String, String> {
     let directory = engine
         .sqlite_backend()
         .ok_or_else(|| "no SQLite federation directory".to_string())?;
@@ -267,10 +325,12 @@ pub async fn emit_age_assurance(
     // federation (a gate running on any node consumes it). The node co-signs the
     // promotion (the same recipe consent.rs uses). The DECLARED VALUE remains the
     // subject's — promotion is visibility, not authorship.
-    engine
-        .attestation_promote(&attestation_id)
-        .await
-        .map_err(|e| format!("promote age_assurance: {e}"))?;
+    if promote {
+        engine
+            .attestation_promote(&attestation_id)
+            .await
+            .map_err(|e| format!("promote age_assurance: {e}"))?;
+    }
     Ok(attestation_id)
 }
 

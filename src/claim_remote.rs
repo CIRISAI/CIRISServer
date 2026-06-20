@@ -501,6 +501,90 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SetAgeSelfRequest {
+    /// `"minor"` | `"adult"` — the owner's self-declared age band.
+    band: String,
+}
+
+/// `POST /v1/self/age` — record the BOUND OWNER's self-declared age band
+/// (loopback + owner-session-gated). The federation `/v1/safety/age-assurance`
+/// route requires an x-ciris-signed REQUEST (the subject signs), which the app
+/// (no crypto) cannot produce. This wizard-time sibling lets the LOCAL node record
+/// the owner's self-declared age in its substrate: the subject is the node's bound
+/// owner fed-ID ([`ownership::is_owner_bound`]) and
+/// [`crate::safety::age::emit_age_assurance`] persists + node-co-signs the
+/// promotion (no caller signature needed). MUST run AFTER the claim (the owner
+/// must exist), before the wizard closes.
+async fn set_age_self(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // Owner-session-gated: post-claim the node is owned → require_owner enforces a
+    // session (the wizard logs in with the account password before this call).
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: SetAgeSelfRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    let Some(band) = crate::safety::age::AgeBand::from_token(req.band.trim()) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "band must be \"minor\" or \"adult\"",
+        );
+    };
+    // The subject signs their OWN self-declared age with their fed-ID — a
+    // CEG-native, hybrid-signed federation attestation (NOT the unsigned
+    // local-upsert+promote path, broken by CIRISPersist#247). The node holds the
+    // owner's fed-ID signer (resolved at request time, same as the self-claim).
+    let signer = match crate::compose::resolve_user_signer(
+        &st.user_key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return err(
+                StatusCode::CONFLICT,
+                "node has no federation ID yet — create one + claim ownership before setting age",
+            )
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+    let subject = signer.key_id().to_string();
+    match crate::safety::age::emit_age_assurance_signed(
+        &st.engine,
+        &signer,
+        crate::safety::age::AssuranceLevel::SelfDeclared,
+        band,
+    )
+    .await
+    {
+        Ok(attestation_id) => {
+            tracing::info!(subject = %subject, band = %band.as_str(), "self-age recorded (CEG-native, subject-fed-ID-signed; loopback owner session)");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "subject_key_id": subject,
+                    "band": band.as_str(),
+                    "attestation_id": attestation_id,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("set age: {e}")),
+    }
+}
+
 /// The claim-remote router — merge onto the control API listener. `user_signer`
 /// is the responsible USER's signer (NOT the node steward signer); see the module
 /// docs for how it is obtained and the keyring/YubiKey gap.
@@ -534,5 +618,6 @@ pub fn router(
             "/v1/self/upgrade-owner",
             axum::routing::post(upgrade_owner_handler),
         )
+        .route("/v1/self/age", axum::routing::post(set_age_self))
         .with_state(state)
 }

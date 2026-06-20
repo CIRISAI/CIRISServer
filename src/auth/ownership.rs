@@ -695,6 +695,67 @@ pub async fn emit_owner_binding(
     Ok(attestation_id)
 }
 
+/// **Emit a signed, federation-tier CEG attestation.** The ciris-server local
+/// stand-in for [CIRISPersist#248] (until persist exposes a first-class
+/// `Engine::emit_attestation`): canonicalize the envelope
+/// (`ceg_produce_canonicalize`) → hybrid-sign with `signer` → build the
+/// federation-tier [`Attestation`] row (attester == signer == `scrub_key_id`, the
+/// shape the v9.0.0 ingest gate verifies against the signer's REGISTERED key) →
+/// `put_attestation`. Returns the `attestation_id`.
+///
+/// This is the WORKING federation-emit path (the one `emit_owner_binding` uses and
+/// that reads back) — it deliberately does NOT go through `attestation_promote`,
+/// which is currently broken on real nodes ([CIRISPersist#247]: promote writes
+/// `scrub_key_id = signer.current_alias()`, not the derived federation key_id → FK
+/// violation). `signer.key_id()` MUST be the signer's registered (derived) key_id.
+pub async fn emit_signed_attestation(
+    engine: &Engine,
+    signer: &LocalSigner,
+    attestation_type: &str,
+    attested_key_id: &str,
+    envelope: serde_json::Value,
+    subject_key_ids: Vec<String>,
+) -> Result<String, OwnershipError> {
+    let attester = signer.key_id().to_string();
+    let now = chrono::Utc::now();
+    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+        .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?;
+    let original_content_hash = hex::encode(Sha256::digest(&canonical));
+    let sig = signer
+        .sign_hybrid(&canonical)
+        .await
+        .map_err(|e| OwnershipError::Sign(e.to_string()))?;
+    let attestation_id = crate::ids::new_id();
+    let attestation = Attestation {
+        attestation_id: attestation_id.clone(),
+        attesting_key_id: attester.clone(),
+        attested_key_id: attested_key_id.to_owned(),
+        attestation_type: attestation_type.to_owned(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash,
+        scrub_signature_classical: B64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
+        scrub_key_id: attester.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids,
+        withdraws_admission_rule: None,
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
+        tier: attestation_tier::FEDERATION.to_owned(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    Ok(attestation_id)
+}
+
 // ─── Read the owner-binding (is the node owned?) ────────────────────────────
 
 /// Return the responsible user's `key_id` iff a **LIVE, unrevoked**
