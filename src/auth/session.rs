@@ -175,6 +175,14 @@ pub struct SessionCaller {
 // in-memory device-code store); a node restart drops outstanding delegations.
 
 /// A live delegated grant: the owner's authority + the actor it is attributed to.
+///
+/// The bearer token + this registry entry are an **ephemeral session credential**
+/// (like any login session — dropped on restart, TTL-bounded). The DURABLE,
+/// revocable authority behind it is a signed `delegates_to(owner → actor)` CEG
+/// attestation (`super::device_grant` emits it on approve); `owner_key_id` /
+/// `client_id` / `scope` are the edge coordinates so [`resolve_bearer`] can
+/// re-check the GRAPH (`reachable_under_scope`) on every use — an owner who
+/// `withdraws` the edge kills the bearer immediately, not just at TTL.
 #[derive(Debug, Clone)]
 pub struct DelegatedGrant {
     /// The PRINCIPAL — the approving owner's `wa_id`. The delegated caller acts
@@ -182,13 +190,23 @@ pub struct DelegatedGrant {
     pub owner_wa_id: String,
     /// The owner's role at approval time — the authority the actor wields.
     pub owner_role: UserRole,
-    /// The ACTOR — the `client_id` the grant was issued to (attribution).
+    /// The owner's federation key_id — the `attesting_key_id` of the durable
+    /// `delegates_to` edge this bearer is backed by (the graph re-check issuer).
+    pub owner_key_id: String,
+    /// The ACTOR — the `client_id` the grant was issued to (attribution). This is
+    /// the actor's federation key_id (the `attested_key_id` of the edge).
     pub client_id: String,
-    /// The granted scope (informational; e.g. `owner:act-on-behalf`).
+    /// The granted scope (the `delegates_to` edge scope, e.g.
+    /// `owner:act-on-behalf`) — also the scope `reachable_under_scope` re-checks.
     pub scope: String,
     /// Unix-epoch seconds after which the delegated token is expired.
     pub expires_at: u64,
 }
+
+/// Max delegation-chain depth the bearer graph re-check walks. An act-on-behalf
+/// grant is a DIRECT owner→actor edge (depth 1); a small cap leaves room for a
+/// future deputization hop without an unbounded walk on every request.
+const DELEGATION_REACHABILITY_DEPTH: usize = 4;
 
 /// The opaque-delegated-token prefix. A delegated token is `dgrant:<rand>` — a
 /// random opaque handle into [`DELEGATED_GRANTS`] (the owner_wa_id / client_id
@@ -277,6 +295,36 @@ pub async fn resolve_bearer(
         let Some(grant) = lookup_delegated_grant(bearer_token) else {
             return Ok(None); // unknown or expired delegated token — fail closed.
         };
+        // GRAPH RE-CHECK (CEG-native authority): the bearer is only a session
+        // credential — the AUTHORITY is the signed `delegates_to(owner → actor)`
+        // edge. Re-verify it is still LIVE (`reachable_under_scope`, which is
+        // withdraws/recants-aware) on EVERY use, so an owner who revokes the
+        // delegation (emits a `withdraws`) kills the bearer immediately — not
+        // only when the in-memory TTL lapses. Fail closed on a dead/unreachable
+        // edge or a substrate error.
+        match engine
+            .reachable_under_scope(
+                &grant.owner_key_id,
+                &grant.client_id,
+                &grant.scope,
+                DELEGATION_REACHABILITY_DEPTH,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    actor = %grant.client_id,
+                    on_behalf_of = %grant.owner_wa_id,
+                    "delegated device-grant edge no longer reachable (revoked/expired) — rejecting bearer"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "delegation reachability re-check failed — rejecting bearer (fail-closed)");
+                return Ok(None);
+            }
+        }
         // Attribution: every authorized action under this token is logged with the
         // distinct actor and the owner it acts on behalf of.
         tracing::info!(
