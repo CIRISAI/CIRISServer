@@ -26,6 +26,7 @@ import ai.ciris.mobile.shared.models.federation.FederationIdentityResponse
 import ai.ciris.mobile.shared.models.federation.FederationMetricsResponse
 import ai.ciris.mobile.shared.models.federation.MintIdentityRequest
 import ai.ciris.mobile.shared.models.federation.MintedIdentity
+import ai.ciris.mobile.shared.models.federation.OwnedNodesDto
 import ai.ciris.mobile.shared.models.federation.FederationPeerAppearanceUpdateRequest
 import ai.ciris.mobile.shared.models.federation.FederationPeerDetailResponse
 import ai.ciris.mobile.shared.models.federation.FederationPeerListResponse
@@ -190,7 +191,8 @@ private fun ConfigValue.toDisplayString(): String {
  * All methods include comprehensive error logging for debugging.
  */
 class CIRISApiClient(
-    baseUrl: String = "http://127.0.0.1:8080",
+    // Default to the local ciris-server node read API (node base :4242 → API :4243).
+    baseUrl: String = "http://127.0.0.1:4243",
     private var accessToken: String? = null
 ) : CIRISApiClientProtocol {
 
@@ -319,7 +321,7 @@ class CIRISApiClient(
          * substrate; the app only drives it over plain localhost HTTP. The app
          * holds NO federation keys and signs NO federation artifacts in Kotlin.
          */
-        const val LOCAL_NODE_URL = "http://127.0.0.1:8080"
+        const val LOCAL_NODE_URL = "http://127.0.0.1:4243"
 
         // Mask token for logging (show first 8 and last 4 chars)
         private fun maskToken(token: String?): String {
@@ -1273,6 +1275,27 @@ class CIRISApiClient(
     }
 
     /**
+     * Lightweight liveness probe for the local **ciris-server** node read API.
+     *
+     * Issues a raw `GET {nodeUrl}/v1/identity`. Any HTTP response — including a
+     * non-2xx like 404/401 — means the node process is up and serving, so this
+     * returns true. Only a transport/connection failure (node not running)
+     * returns false. Used by startup to degrade gracefully when richer endpoints
+     * (e.g. /v1/setup/status) are unavailable on a node that is otherwise up.
+     */
+    suspend fun isLocalNodeUp(nodeUrl: String = baseUrl): Boolean {
+        val client = federationHttpClient()
+        return try {
+            client.get("$nodeUrl/v1/identity")
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * Drive THIS device's LOCAL node to **mint the founder's hardware-rooted
      * USER federation identity** — `POST {localNodeUrl}/v1/self/identity`.
      *
@@ -1402,6 +1425,30 @@ class CIRISApiClient(
                 throw RuntimeException("node-code fetch failed: ${response.status} for $nodeUrl")
             }
             decodeFederationEnvelope(response.bodyAsText(), NodeCodeShareResponse.serializer())
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The CEG-native node list — `GET {nodeUrl}/v1/setup/owned-nodes`. Returns the
+     * nodes owned by this node's bound owner (its fed ID), PROJECTED from the
+     * `delegates_to(user → node)` owner-binding objects in the graph (NOT a
+     * client-side store). By construction the local node appears once self-claimed.
+     */
+    suspend fun getOwnedNodes(nodeUrl: String = LOCAL_NODE_URL): OwnedNodesDto {
+        val method = "getOwnedNodes"
+        logDebug(method, "GET $nodeUrl/v1/setup/owned-nodes")
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/setup/owned-nodes")
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("owned-nodes fetch failed: ${response.status} for $nodeUrl")
+            }
+            jsonConfig.decodeFromString(OwnedNodesDto.serializer(), response.bodyAsText())
         } catch (e: Exception) {
             logException(method, e, "nodeUrl=$nodeUrl")
             throw e

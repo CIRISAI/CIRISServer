@@ -171,15 +171,22 @@ pub async fn claim_remote(
     target_node_code: &str,
     claim_pin: &str,
     cohort_scope: &str,
+    self_fallback_url: Option<&str>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
     let (nc, owner_binding) = build_claim_for_target(user_signer, target_node_code).await?;
 
+    // The target base URL is the NodeCode's `transport_hint`. A LOOPBACK node (a
+    // desktop/local node with no public transport) carries NO hint — for that
+    // SELF-claim we fall back to the local node's own loopback URL so the founder
+    // can claim the node they're running on.
     let base = nc
         .transport_hint
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| self_fallback_url.map(str::to_owned))
         .ok_or(ClaimRemoteError::NoTransport)?;
     let url = format!("{}/v1/setup/root", base.trim_end_matches('/'));
 
@@ -223,10 +230,17 @@ struct ClaimRemoteState {
     /// logging/symmetry.
     #[allow(dead_code)]
     node_key_id: String,
-    /// The responsible USER's signer (NOT the node steward signer). Wired at
-    /// compose time from a config-provided user key. See the module docs for the
-    /// keyring/YubiKey gap.
-    user_signer: Arc<LocalSigner>,
+    /// Inputs to resolve the responsible USER's signer AT REQUEST TIME (NOT at
+    /// boot). The fed-ID is minted DURING the first-run wizard — after this node
+    /// booted — so a boot-resolved signer would be absent for the very self-claim
+    /// that follows the mint. We re-read the on-disk user seed per request via
+    /// [`crate::compose::resolve_user_signer`].
+    user_key_id: String,
+    user_seed_dir: std::path::PathBuf,
+    /// This node's own loopback read-API URL (e.g. `http://127.0.0.1:4243`) — the
+    /// SELF-claim fallback target when a loopback node's NodeCode carries no
+    /// `transport_hint`.
+    local_self_url: String,
     http: reqwest::Client,
 }
 
@@ -287,20 +301,57 @@ async fn claim_remote_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = require_owner(&st, &headers).await {
-        return resp;
+    // Owner-gated once owned; open during first-run (no ROOT yet) so the founder's
+    // FIRST claim — the act that establishes ownership — is reachable on a fresh
+    // node. The route is loopback-only via the setup-route guard. (`require_owner`'s
+    // result is gate-only — not consumed below — so the bypass is safe.) Mirrors
+    // the agent's require_setup_mode.
+    if !crate::auth::bootstrap::is_first_run(&st.engine).await {
+        if let Err(resp) = require_owner(&st, &headers).await {
+            return resp;
+        }
+    } else {
+        tracing::info!(
+            "claim-remote: first-run (no ROOT) — claiming without an owner session (loopback-only)"
+        );
     }
     let req: ClaimRemoteRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
     };
 
+    // Resolve the responsible-user signer NOW (not at boot): the fed-ID minted
+    // earlier in this same first-run wizard is on disk by the time the automated
+    // self-claim runs. Absent ⇒ the user hasn't created their fed-ID yet.
+    let user_signer = match crate::compose::resolve_user_signer(
+        &st.user_key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no responsible-user identity yet — create your federation ID \
+                 (POST /v1/self/identity) before claiming ownership",
+            )
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+
     match claim_remote(
         &st.http,
-        &st.user_signer,
+        &user_signer,
         &req.node_code,
         &req.claim_pin,
         &req.cohort_scope,
+        Some(st.local_self_url.as_str()),
     )
     .await
     {
@@ -327,7 +378,13 @@ async fn claim_remote_handler(
 /// The claim-remote router — merge onto the control API listener. `user_signer`
 /// is the responsible USER's signer (NOT the node steward signer); see the module
 /// docs for how it is obtained and the keyring/YubiKey gap.
-pub fn router(engine: Arc<Engine>, node_key_id: String, user_signer: Arc<LocalSigner>) -> Router {
+pub fn router(
+    engine: Arc<Engine>,
+    node_key_id: String,
+    user_key_id: String,
+    user_seed_dir: std::path::PathBuf,
+    local_self_url: String,
+) -> Router {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -335,7 +392,9 @@ pub fn router(engine: Arc<Engine>, node_key_id: String, user_signer: Arc<LocalSi
     let state = ClaimRemoteState {
         engine,
         node_key_id,
-        user_signer,
+        user_key_id,
+        user_seed_dir,
+        local_self_url,
         http,
     };
     Router::new()

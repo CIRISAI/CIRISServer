@@ -334,13 +334,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         config_sd_rx,
     );
 
-    // ── The responsible-USER signer for POST /v1/setup/claim-remote (the
-    //    SUBSTRATE-NATIVE node-to-node claiming side). The LOCAL node signs the
-    //    delegates_to(user → target, infra:*) owner-binding with the USER's key
-    //    (NOT the node steward signer); the app does NO crypto. `None` when no
-    //    user identity is configured — claim-remote is then not wired. See
-    //    `user_identity_signer` for the keyring/YubiKey gap. ─────────────────────
-    let claim_remote_user_signer = user_identity_signer(&cfg).await?;
+    // ── The responsible-USER signer for POST /v1/setup/claim-remote is no longer
+    //    resolved at boot (it would be absent on a fresh node — the fed-ID is minted
+    //    DURING the first-run wizard). The claim-remote router resolves it at request
+    //    time from the conventional user-seed path; see `resolve_user_signer`. ─────
 
     // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
     //    when the host meets the lens-store minimum. ───────────────────────────
@@ -376,41 +373,67 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // Identity-pinned to THIS node's NodeCode (CEG §0.10): the claim
                     // must carry the node's own key_id+pubkey (the out-of-band code),
                     // proving the founder reached the intended node, not a spoof.
-                    .merge(crate::auth::bootstrap::router(
-                        Arc::clone(&engine),
-                        strict,
-                        node_code.key_id.clone(),
-                        node_code.pubkey_ed25519_base64.clone(),
-                        claim_pin.clone(),
-                    ))
+                    // Setup/apex routes (bootstrap, claim-remote, self/identity)
+                    // open during first-run WITHOUT an owner session, so they are
+                    // additionally restricted to LOOPBACK peers (the read API binds
+                    // 0.0.0.0; federation reads stay public, these do not).
+                    .merge(
+                        crate::auth::bootstrap::router(
+                            Arc::clone(&engine),
+                            strict,
+                            node_code.key_id.clone(),
+                            node_code.pubkey_ed25519_base64.clone(),
+                            claim_pin.clone(),
+                        )
+                        .layer(axum::middleware::from_fn(
+                            crate::auth::loopback::require_loopback,
+                        )),
+                    )
                     // claim REMOTE ownership (substrate-native, node-to-node):
                     // POST /v1/setup/claim-remote — the LOCAL node decodes the
                     // target NodeCode, builds + hybrid-signs the owner-binding
                     // with the responsible USER's key, and POSTs it to the
-                    // target's POST /v1/setup/root. Owner-gated. Only wired when a
-                    // responsible-user identity is configured (else an empty
-                    // router — the local node has no user key to sign as).
-                    .merge(match claim_remote_user_signer.clone() {
-                        Some(user_signer) => crate::claim_remote::router(
+                    // target's POST /v1/setup/root. Owner-gated once owned; open on
+                    // first-run + loopback. The user signer is resolved at request
+                    // time (see below) so a fed-ID minted during this same wizard is
+                    // available to the self-claim that follows it.
+                    .merge(
+                        crate::claim_remote::router(
                             Arc::clone(&engine),
                             node_code.key_id.clone(),
-                            user_signer,
-                        ),
-                        None => axum::Router::new(),
-                    })
+                            // Resolve the responsible-user signer at REQUEST time from
+                            // these inputs (the fed-ID is minted during the wizard, after
+                            // boot), so the automated self-claim that follows the mint
+                            // finds it. Was a boot-resolved Option (always None on a fresh
+                            // node) — which left claim-remote permanently disabled.
+                            format!("{}-user", cfg.keystore_alias),
+                            crate::user_seed_dir(&cfg),
+                            // SELF-claim loopback fallback: this node's own read-API URL,
+                            // used when a loopback node's NodeCode carries no transport.
+                            format!("http://127.0.0.1:{}", cfg.read_api_addr().port()),
+                        )
+                        .layer(axum::middleware::from_fn(
+                            crate::auth::loopback::require_loopback,
+                        )),
+                    )
                     // provision/ensure the local node's USER federation identity
                     // (CIRISServer#21): POST /v1/self/identity — mints a hardware-
                     // rooted (YubiKey / TPM-SE / software) user identity + returns
                     // its key_id + fedcode. Owner-gated; the federation-ID wizard
                     // in the app drives it.
-                    .merge(crate::identity::router(
-                        Arc::clone(&engine),
-                        // The user-identity mint alias is `<keystore_alias>-user`
-                        // (a KEYSTORE blob) — pass the RAW label so the minted
-                        // blob matches what `user_identity_signer` re-opens.
-                        cfg.keystore_alias.clone(),
-                        crate::user_seed_dir(&cfg),
-                    ))
+                    .merge(
+                        crate::identity::router(
+                            Arc::clone(&engine),
+                            // The user-identity mint alias is `<keystore_alias>-user`
+                            // (a KEYSTORE blob) — pass the RAW label so the minted
+                            // blob matches what `user_identity_signer` re-opens.
+                            cfg.keystore_alias.clone(),
+                            crate::user_seed_dir(&cfg),
+                        )
+                        .layer(axum::middleware::from_fn(
+                            crate::auth::loopback::require_loopback,
+                        )),
+                    )
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple. The callback base
@@ -658,55 +681,42 @@ fn identity_router(identity_json: String) -> axum::Router {
 /// node's steward signer (the owner-binding asserts an accountable *human* is
 /// responsible).
 ///
-/// **Server 0.5 (zero env): the user identity comes from the conventional path,
-/// not env.** The responsible-user identity is minted by `ciris-server identity
-/// create` into the conventional user seed dir ([`crate::user_seed_dir`]) under
-/// the conventional alias `<node key_id>-user`. This function detects that minted
-/// identity by its on-disk seed and, when present, wires the
-/// hardware/software-backed [`LocalSigner`] for it (the Ed25519 half stays
-/// custodied per the backend the mint used; the ML-DSA-65 half is the sealed PQC
-/// signer re-opened under the user key_id).
-///
-/// When no user identity exists at the conventional path, claim-remote is NOT
-/// wired (returns `None`) — the local node has no responsible-user identity to
-/// sign as (the prior `CIRIS_USER_BACKEND` / `CIRIS_USER_*` env selectors are
-/// deleted). The claim flow itself (`POST /v1/setup/root`) is unaffected.
-pub(crate) async fn user_identity_signer(
-    cfg: &ServerConfig,
+/// Resolve the responsible-user signer from its on-disk seed, if present. Pulled
+/// out of [`user_identity_signer`] so `claim-remote` can resolve it **at request
+/// time** rather than only at boot — the fed-ID is minted DURING the first-run
+/// wizard (after boot), so a boot-time resolution would miss it and leave the
+/// self-claim's signer absent. Returns `None` (not an error) when no user seed
+/// exists yet.
+pub(crate) async fn resolve_user_signer(
+    user_key_id: &str,
+    seed_dir: std::path::PathBuf,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
-    // The conventional responsible-user identity: alias `<keystore_alias>-user`,
-    // seed under the conventional user seed dir (what `ciris-server identity
-    // create` mints by default). KEYSTORE alias — the RAW label, NOT the derived
-    // key_id — so it matches the on-disk user keystore blob the mint wrote.
-    let user_key_id = format!("{}-user", cfg.keystore_alias);
-    let seed_dir = crate::user_seed_dir(cfg);
+    // Determine WHICH custody backend minted the identity, so we re-open it the
+    // SAME way (software seed / TPM-sealed / YubiKey). The mint records a marker
+    // (`<seed_dir>/<alias>.backend`); fall back to the software seed file for
+    // identities minted before the marker existed. Absent both ⇒ no fed-ID yet.
+    let software_seed = seed_dir.join(format!("{user_key_id}.ed25519.seed"));
+    let backend = match crate::identity::read_user_backend_marker(&seed_dir, user_key_id) {
+        Some(label) => crate::identity::user_backend_from_label(&label),
+        None if software_seed.exists() => crate::identity::UserIdentityBackend::Software,
+        None => {
+            tracing::info!(
+                seed_dir = %seed_dir.display(),
+                "no responsible-user identity at the conventional path yet — create your \
+                 federation ID (POST /v1/self/identity) to enable POST /v1/setup/claim-remote"
+            );
+            return Ok(None);
+        }
+    };
 
-    // Detect the minted user identity by its on-disk Ed25519 seed
-    // (`<seed_dir>/<user_key_id>.ed25519.seed`, written by the software mint).
-    let seed_path = seed_dir.join(format!("{user_key_id}.ed25519.seed"));
-    if !seed_path.exists() {
-        tracing::info!(
-            user_seed = %seed_path.display(),
-            "no responsible-user identity at the conventional path — mint one via \
-             `ciris-server identity create` to enable POST /v1/setup/claim-remote \
-             (it stays disabled until then; the first-run claim POST /v1/setup/root \
-             is unaffected)"
-        );
-        return Ok(None);
-    }
-
-    // Software-backed by convention (the `ciris-server identity create` default).
-    // The Ed25519 seed + the sealed ML-DSA-65 half are re-opened under user_key_id.
-    let signer = crate::identity::hardware_user_local_signer(
-        crate::identity::UserIdentityBackend::Software,
-        &user_key_id,
-        seed_dir,
-    )
-    .await?;
+    // Re-open the user identity under user_key_id with its recorded backend (the
+    // Ed25519 half per backend; the ML-DSA-65 half is the sealed PQC signer).
+    let signer =
+        crate::identity::hardware_user_local_signer(backend, user_key_id, seed_dir).await?;
     tracing::info!(
         user_key_id = %user_key_id,
-        "responsible-user signer wired for claim-remote (minted user identity at the \
-         conventional path — Server 0.5, no env)"
+        "responsible-user signer resolved for claim-remote (minted user identity at \
+         the conventional path — Server 0.5, no env)"
     );
     Ok(Some(Arc::new(signer)))
 }

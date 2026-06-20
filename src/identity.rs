@@ -88,6 +88,22 @@ impl UserIdentityBackend {
     }
 }
 
+/// Map a custody-backend marker label (written by [`write_user_backend_marker`])
+/// back to a [`UserIdentityBackend`] for RE-OPENING an existing user identity.
+/// YubiKey re-opens with `provision: false` (the key already exists on the token;
+/// reclaiming reads it, never generates). Unknown labels default to the secure
+/// platform-sealed backend.
+pub(crate) fn user_backend_from_label(label: &str) -> UserIdentityBackend {
+    match label {
+        "software" => UserIdentityBackend::Software,
+        "pkcs11-yubikey" | "pkcs11" | "yubikey" => UserIdentityBackend::Pkcs11(Pkcs11Options {
+            provision: false,
+            ..Pkcs11Options::default()
+        }),
+        _ => UserIdentityBackend::PlatformSealed,
+    }
+}
+
 /// PKCS#11 / PIV options for the YubiKey backend (data only — always parseable;
 /// the *signer* is `pkcs11`-feature-gated in `ciris-keyring`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,8 +576,17 @@ async fn self_identity_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = require_owner(&st.engine, &headers).await {
-        return resp;
+    // Apex act — owner-gated ONCE the node is owned. During first-run (no ROOT
+    // yet) there is no owner to authenticate as, and minting the founder's fed-ID
+    // is itself part of becoming the owner, so the gate opens (the route is also
+    // loopback-only via the setup-route guard). Mirrors the agent's
+    // require_setup_mode: open during first-run, owner-gated after.
+    if !crate::auth::bootstrap::is_first_run(&st.engine).await {
+        if let Err(resp) = require_owner(&st.engine, &headers).await {
+            return resp;
+        }
+    } else {
+        tracing::info!("self-identity: first-run (no ROOT) — minting fed-ID without an owner session (loopback-only)");
     }
     let req: SelfIdentityRequest = if body.is_empty() {
         SelfIdentityRequest::default()
@@ -588,24 +613,55 @@ async fn self_identity_handler(
         );
     }
 
+    let backend_label = backend.label();
     match mint_user_identity(backend, &alias, req.label.as_deref(), st.seed_dir.clone()).await {
-        Ok(minted) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "key_id": minted.key_id,
-                "fedcode": minted.fedcode,
-                "identity_type": minted.identity_type,
-                "pubkey_ed25519_base64": minted.pubkey_ed25519_base64,
-                "pubkey_ml_dsa_65_base64": minted.pubkey_ml_dsa_65_base64,
-                "hardware_type": minted.hardware_type,
-            })),
-        )
-            .into_response(),
+        Ok(minted) => {
+            // Record WHICH custody backend minted this identity, so the claim-remote
+            // signer (resolved at request time) re-opens it with the SAME backend
+            // (software seed file / TPM-sealed / YubiKey). Without this, resolution
+            // would guess `software` and miss a platform-sealed or YubiKey mint.
+            write_user_backend_marker(&st.seed_dir, &alias, backend_label);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "key_id": minted.key_id,
+                    "fedcode": minted.fedcode,
+                    "identity_type": minted.identity_type,
+                    "pubkey_ed25519_base64": minted.pubkey_ed25519_base64,
+                    "pubkey_ml_dsa_65_base64": minted.pubkey_ml_dsa_65_base64,
+                    "hardware_type": minted.hardware_type,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => http_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("mint user identity: {e}"),
         ),
     }
+}
+
+/// Path of the per-user-identity custody marker (`<seed_dir>/<alias>.backend`).
+fn user_backend_marker_path(seed_dir: &std::path::Path, alias: &str) -> PathBuf {
+    seed_dir.join(format!("{alias}.backend"))
+}
+
+/// Record which custody backend minted the user identity (best-effort; a failure
+/// to write only degrades claim-remote signer resolution, never the mint itself).
+fn write_user_backend_marker(seed_dir: &std::path::Path, alias: &str, backend_label: &str) {
+    let path = user_backend_marker_path(seed_dir, alias);
+    if let Err(e) = std::fs::write(&path, backend_label) {
+        tracing::warn!(marker = %path.display(), error = %e, "could not write user backend marker");
+    }
+}
+
+/// Read the recorded custody backend for the user identity, if any. Returns the
+/// backend label written by [`write_user_backend_marker`] (e.g. `platform-sealed`).
+pub(crate) fn read_user_backend_marker(seed_dir: &std::path::Path, alias: &str) -> Option<String> {
+    std::fs::read_to_string(user_backend_marker_path(seed_dir, alias))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 /// The `POST /v1/self/identity` router — provision/ensure the local node's USER

@@ -314,7 +314,8 @@ fun interface PurchaseResultCallback {
 @Composable
 fun CIRISApp(
     accessToken: String,
-    baseUrl: String = "http://127.0.0.1:8080",
+    // Default to the local ciris-server node read API (node base :4242 → API :4243).
+    baseUrl: String = "http://127.0.0.1:4243",
     pythonRuntime: PythonRuntime = createPythonRuntime(),
     secureStorage: SecureStorage = createSecureStorage(),
     envFileUpdater: EnvFileUpdater = createEnvFileUpdater(),
@@ -1561,6 +1562,12 @@ fun CIRISApp(
                 SetupScreen(
                     viewModel = setupViewModel,
                     apiClient = apiClient,
+                    // Provide the one-time ownership CLAIM PIN / NodeCode captured
+                    // from the LOCAL node's console banner so the setup flow can
+                    // self-claim ownership of this node on COMPLETE. Console-only:
+                    // PythonRuntime scrapes it from the node stdout it launched.
+                    claimPinProvider = { pythonRuntimeProtocol.localClaimPin.value },
+                    nodeCodeProvider = { pythonRuntimeProtocol.localNodeCode.value },
                     onSetupComplete = {
                         platformLog(TAG, "[INFO] onSetupComplete called - exchanging tokens...")
                         // After setup completes, exchange OAuth ID token for CIRIS access token
@@ -3587,6 +3594,19 @@ private suspend fun checkFirstRunStatus(
             platformLog("checkFirstRunStatus", "[INFO] Got setup status: setup_required=${setupStatus.data.setup_required}")
             return setupStatus.data.setup_required
         } catch (e: Exception) {
+            // FAST-PATH degrade (ciris-server node client): a 404 / deserialize
+            // failure from /v1/setup/status means the node simply does NOT serve the
+            // agent setup-status endpoint (ciris-server has /v1/setup/root +
+            // /v1/setup/claim-remote, not /v1/setup/status). That is NOT transient —
+            // retrying 60× hangs "waiting for backend" ~30s. If the node's read API
+            // answers, treat as fresh first-run IMMEDIATELY → straight to the wizard.
+            val absent = e::class.simpleName?.contains("NoTransformation") == true ||
+                e.message?.contains("404") == true ||
+                e.message?.contains("/v1/setup/status") == true
+            if (absent && isNodeReachable(baseUrl)) {
+                platformLog("checkFirstRunStatus", "[INFO] /v1/setup/status absent (node is ciris-server) + node reachable → first-run (fast degrade)")
+                return true
+            }
             attempts++
             if (attempts <= maxRetries) {
                 platformLog("checkFirstRunStatus", "[INFO] Connection error, retrying in 500ms... (${e::class.simpleName})")
@@ -3594,11 +3614,32 @@ private suspend fun checkFirstRunStatus(
                 kotlinx.coroutines.delay(500)
             } else {
                 platformLog("checkFirstRunStatus", "[ERROR] Failed to check setup status after ${maxRetries + 1} attempts: ${e::class.simpleName}: ${e.message}")
+                // GRACEFUL DEGRADE (ciris-server node client): /v1/setup/status may be
+                // unavailable or shaped differently on a node that is otherwise up.
+                // If the node's read API answers (GET /v1/identity 2xx), treat this
+                // as a fresh first-run so the app reaches the federation-ID wizard
+                // instead of dead-ending on "Backend unreachable".
+                if (isNodeReachable(baseUrl)) {
+                    platformLog("checkFirstRunStatus", "[INFO] Node reachable via /v1/identity but setup status unavailable - treating as first-run")
+                    return true
+                }
                 return null
             }
         }
     }
     return null
+}
+
+/**
+ * Lightweight node-up probe for the local ciris-server read API.
+ * GET /v1/identity returning any 2xx means the node is serving.
+ */
+private suspend fun isNodeReachable(baseUrl: String): Boolean {
+    return try {
+        CIRISApiClient(baseUrl).isLocalNodeUp(baseUrl.trimEnd('/'))
+    } catch (_: Exception) {
+        false
+    }
 }
 
 /**

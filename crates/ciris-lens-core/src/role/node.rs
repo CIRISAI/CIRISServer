@@ -902,12 +902,19 @@ impl LensCore {
                 }
             };
             tracing::info!(%listen_addr, "lens read API listening");
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = http_shutdown_rx.changed().await;
-                })
-                .await
-                .ok();
+            // Attach per-connection peer info so downstream routers can extract
+            // `ConnectInfo<SocketAddr>` (used by ciris-server's loopback guard to
+            // restrict setup/apex routes to localhost). Harmless for routes that
+            // don't read it.
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_rx.changed().await;
+            })
+            .await
+            .ok();
             tracing::info!(%listen_addr, "lens read API stopped");
         });
         Ok(ReadApiHandle {

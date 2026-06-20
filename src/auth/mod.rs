@@ -45,6 +45,7 @@ pub mod device_auth;
 pub mod device_grant;
 pub mod erasure;
 pub mod gate;
+pub mod loopback;
 pub mod oauth;
 /// Node ownership = the **responsible-party** model (CC 4.4.3.5 + CC 3.2 +
 /// CC 1.13.5): a fabric node has NO agency, so ownership is a `user`-role

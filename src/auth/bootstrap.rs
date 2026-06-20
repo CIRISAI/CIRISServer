@@ -296,6 +296,27 @@ pub async fn bootstrap_if_needed(engine: &Engine) -> Result<BootstrapOutcome, Bo
     Ok(BootstrapOutcome::NoSeedAvailable)
 }
 
+/// **First-run signal** — `true` when this node has NO active ROOT owner yet.
+///
+/// The fabric analogue of the agent's `has_root`/`is_first_run`: an unclaimed node
+/// (no ROOT WaCert) is still in first-run setup. The apex/setup routes
+/// (`/v1/self/identity`, `/v1/setup/claim-remote`) are session-gated by
+/// `require_owner` — but on a fresh node there is no owner to authenticate as yet
+/// (and the ROOT minted by `/v1/setup/root` carries `password_hash: None`, so a
+/// just-claimed owner has no session token at all). So those routes open during
+/// first-run (localhost-only, see the loopback guard) and 409/401-close once a ROOT
+/// exists. This mirrors the agent's `require_setup_mode` (setup routes available
+/// ONLY during first-run). A store error fails CLOSED (`false` ⇒ keep the gate).
+pub async fn is_first_run(engine: &Engine) -> bool {
+    match store::list_by_role(engine, WaRole::Root, 1).await {
+        Ok(roots) => roots.is_empty(),
+        Err(e) => {
+            tracing::warn!(error = %e, "is_first_run: ROOT probe failed — treating as NOT first-run (fail-closed)");
+            false
+        }
+    }
+}
+
 /// True if `key_id` is admin-eligible: it appears in `admin_key_ids` (the
 /// operator-declared allowlist). This is the fabric analogue of the agent's
 /// `oauth_user.role == SYSTEM_ADMIN` eligibility check — on the federation side an
@@ -887,6 +908,67 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     }
 }
 
+/// `GET /v1/setup/status` response — the unauthenticated first-run signpost the
+/// client polls to decide whether to show the setup wizard. Mirrors the agent's
+/// `SetupStatusResponse` (the fields the client reads). `setup_required` ==
+/// `is_first_run` here: ciris-server's only setup-needed state is "no ROOT yet"
+/// (the agent's extra `config_exists && !has_admin` recovery case maps onto the
+/// same ROOT-absence signal on the fabric).
+#[derive(Debug, Serialize)]
+struct SetupStatusResponse {
+    is_first_run: bool,
+    setup_required: bool,
+}
+
+/// `GET /v1/setup/owned-nodes` — the CEG-native node list: the nodes owned by
+/// THIS node's bound owner (its fed ID). Projected from the `delegates_to(user →
+/// node)` owner-binding objects in the graph (NOT a client-side store), so the
+/// local node appears by construction once self-claimed. Loopback-gated.
+#[derive(Debug, Serialize)]
+struct OwnedNode {
+    key_id: String,
+    /// True for THIS node (the device the wizard is running on).
+    is_self: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OwnedNodesResponse {
+    /// The bound owner's fed-ID key_id (`null` when the node is unclaimed).
+    owner: Option<String>,
+    nodes: Vec<OwnedNode>,
+}
+
+async fn owned_nodes(State(st): State<SetupState>) -> Response {
+    let owner = super::ownership::is_owner_bound(&st.engine, &st.node_key_id).await;
+    let nodes = match &owner {
+        Some(user) => super::ownership::nodes_owned_by(&st.engine, user)
+            .await
+            .into_iter()
+            .map(|key_id| OwnedNode {
+                is_self: key_id == st.node_key_id,
+                key_id,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    (StatusCode::OK, Json(OwnedNodesResponse { owner, nodes })).into_response()
+}
+
+/// `GET /v1/setup/status` — report whether this node still needs first-run setup.
+/// Loopback-gated with the rest of the setup routes; the co-located client polls
+/// it instead of inferring first-run from a 404 (the prior fast-degrade path).
+async fn setup_status(State(st): State<SetupState>) -> Response {
+    let first_run = is_first_run(&st.engine).await;
+    (
+        StatusCode::OK,
+        Json(SetupStatusResponse {
+            is_first_run: first_run,
+            setup_required: first_run,
+        }),
+    )
+        .into_response()
+}
+
 /// The first-run setup router — merge onto the read-API listener beside the other
 /// auth routers. Federation-signed; default [`HybridPolicy::Strict`].
 ///
@@ -913,6 +995,8 @@ pub fn router(
 ) -> Router {
     Router::new()
         .route("/v1/setup/root", axum::routing::post(setup_root))
+        .route("/v1/setup/status", axum::routing::get(setup_status))
+        .route("/v1/setup/owned-nodes", axum::routing::get(owned_nodes))
         .with_state(SetupState {
             engine,
             policy,

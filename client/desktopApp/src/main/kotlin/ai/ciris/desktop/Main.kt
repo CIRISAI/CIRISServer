@@ -172,7 +172,8 @@ fun main() {
             ) {
                 CIRISApp(
                     accessToken = accessToken,
-                    baseUrl = System.getenv("CIRIS_API_URL") ?: "http://localhost:8080",
+                    // Local ciris-server node read API (node base :4242 → API :4243).
+                    baseUrl = System.getenv("CIRIS_API_URL") ?: "http://127.0.0.1:4243",
                     pythonRuntime = pythonRuntime,
                     secureStorage = createSecureStorage(),
                     envFileUpdater = createEnvFileUpdater(),
