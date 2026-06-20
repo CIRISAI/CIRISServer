@@ -73,25 +73,37 @@ async fn node() -> Arc<Engine> {
 
 /// Register the node's own federation key (the engine's hybrid signer), so
 /// federation-tier rows the node co-signs (promotions) satisfy the FK.
+///
+/// v9.3.0 (#247): `attestation_promote` now writes `scrub_key_id =
+/// engine.local_derived_key_id()` = `derive_key_id(<alias>, <pubkey>)` — the
+/// DERIVED wire key_id, never the raw alias — so the node must register under
+/// that derived id for the promote FK to resolve. This mirrors prod, where
+/// `compose.rs::register_self_key` registers `cfg.key_id = derive_key_id(
+/// keystore_alias, ed_pub)` at boot. (Pre-v9.3.0 promote wrote the bare alias,
+/// so the fixture registered under the literal `NODE_KEY_ID`.)
 async fn register_node_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_KEY_ID });
+    let node_key_id = engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id");
+    let envelope = serde_json::json!({ "key_id": node_key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize node envelope");
     let sig = engine.sign_hybrid(&canonical).await.expect("node sign");
     let record = KeyRecord {
-        key_id: NODE_KEY_ID.to_string(),
+        key_id: node_key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: "node".into(),
-        identity_ref: NODE_KEY_ID.to_string(),
+        identity_ref: node_key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: node_key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -844,5 +856,119 @@ async fn watchlist_publish_hook_is_opt_in_and_defers_the_matcher() {
         watchlist::on_publish(&engine, community).await,
         SeamOutcome::Admit,
         "after disable ⇒ admit again"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// (6) CEG-DX READER REACHABILITY (CIRISPersist#249 Cut B) — prove the v9.3.0
+//     graph readers are reachable through ciris-server's Engine, so future
+//     consumers compose them instead of re-deriving the walks. Mirrors the
+//     CIRISEdge v6.2.0 adoption's active_roster / delegation_reads e2e proofs.
+//     `is_owner_bound`/`nodes_owned_by` already consume `owner_bindings_of`
+//     (this PR's reader collapse); `owner_binding_chain` / `reachable_under_scope`
+//     / `active_{community,family}_members` are proven reachable here for the
+//     consumers that will fold onto them next.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
+    let engine = node().await;
+    let node_key = "ceg-dx-node-a";
+    register_party(&engine, node_key, "node").await;
+    // user → node, infra-only owner-binding (make_owner_bound emits the edge).
+    let owner = make_owner_bound(&engine, node_key).await;
+    let owner_id = owner.key_id().to_string();
+
+    // owner_bindings_of — the human anchor(s) that owner-bind the node.
+    assert_eq!(
+        engine
+            .owner_bindings_of(node_key)
+            .await
+            .expect("owner_bindings_of reachable"),
+        vec![owner_id.clone()],
+        "node owner-bound to the user"
+    );
+    // owner_binding_chain — the resolving path, anchor-first.
+    assert_eq!(
+        engine
+            .owner_binding_chain(node_key)
+            .await
+            .expect("owner_binding_chain reachable"),
+        vec![owner_id.clone(), node_key.to_string()],
+    );
+    // reachable_under_scope — the user reaches the node under the granted scope.
+    assert!(
+        engine
+            .reachable_under_scope(&owner_id, node_key, "infra:membership", 4)
+            .await
+            .expect("reachable_under_scope reachable"),
+        "owner reaches node under infra:membership"
+    );
+    // The server's collapsed reader (now owner_bindings_of-backed) agrees, and
+    // the inverse projection lists the node under the owner.
+    assert_eq!(
+        ciris_server::auth::ownership::is_owner_bound(&engine, node_key).await,
+        Some(owner_id.clone()),
+    );
+    assert_eq!(
+        ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id).await,
+        vec![node_key.to_string()],
+    );
+
+    // Withdraw → every reader reflects the lapse (the §11.10 withdraws/recants
+    // edge-retraction is folded into owner_bindings_of, so the whole projection
+    // collapses, not just the predicate).
+    withdraw_owner_binding(&engine, &owner, node_key).await;
+    assert!(engine.owner_bindings_of(node_key).await.unwrap().is_empty());
+    assert!(engine
+        .owner_binding_chain(node_key)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        ciris_server::auth::ownership::is_owner_bound(&engine, node_key)
+            .await
+            .is_none()
+    );
+    assert!(
+        ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn ceg_dx_active_roster_readers_reachable() {
+    let engine = node().await;
+    // A member must be owner-bound + registered to satisfy put_community admission.
+    register_party(&engine, "ceg-dx-founder", "node").await;
+    make_owner_bound(&engine, "ceg-dx-founder").await;
+    put_community(
+        &engine,
+        "ceg-dx-community",
+        &[("ceg-dx-founder", "founder")],
+    )
+    .await;
+
+    // active_community_members = roster − effective membership revocations.
+    let members = engine
+        .active_community_members("ceg-dx-community")
+        .await
+        .expect("active_community_members reachable");
+    assert!(
+        members.iter().any(|m| m.key_id == "ceg-dx-founder"),
+        "active roster includes the founder; got {members:?}"
+    );
+
+    // active_family_members is wired through the Engine too. It fail-CLOSES on an
+    // unknown family (InvalidArgument, not a silent empty roster) — the point is
+    // the reader is reachable for future consumers, with the correct fail-closed
+    // contract.
+    assert!(
+        engine
+            .active_family_members("ceg-dx-no-such-family")
+            .await
+            .is_err(),
+        "active_family_members reachable + fail-closed on an unknown family"
     );
 }
