@@ -321,6 +321,11 @@ pub async fn mint_user_identity(
         Some(key_id_alias.to_string()),
         label,
         &now,
+        // seal_alias (verify v6.6.1, CIRISVerify#89): None ⇒ seal keyed by key_id
+        // (back-compat). The #247 user-key-derived cut sets this to the stable
+        // keystore alias so the RECORDED key_id can be the derived form while the
+        // ML-DSA seal/re-open stays under the alias (no custody migration).
+        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("create_federation_identity (user): {e}"))?;
