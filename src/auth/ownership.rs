@@ -200,6 +200,23 @@ pub fn identity_type_contains(identity_type: &str, role: &str) -> bool {
     ciris_persist::federation::types::identity_type::set_contains(identity_type, role)
 }
 
+/// The scope set declared by a `delegates_to` envelope's `scope` field (bare
+/// string OR array — the two wire shapes the substrate walk accepts). Used by
+/// the WRITE-side validation gate ([`apply_signed_owner_binding`] /
+/// [`build_owner_binding_envelope`]) to enforce CC 1.13.5 (`infra:*`-only) at
+/// emit time; the READ-side owner-binding check defers entirely to the
+/// substrate's [`Engine::owner_bindings_of`] (#249 Cut B).
+fn scope_set_of(envelope: &serde_json::Value) -> Vec<String> {
+    match envelope.get("scope") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 // ─── Build + canonicalize the owner-binding envelope (the bytes the USER signs) ─
 
 /// Build the CC 3.2 owner-binding `delegates_to(responsible_user → node)`
@@ -758,162 +775,82 @@ pub async fn emit_signed_attestation(
 
 // ─── Read the owner-binding (is the node owned?) ────────────────────────────
 
-/// Return the responsible user's `key_id` iff a **LIVE, unrevoked**
-/// `delegates_to(user → node_key_id)` carrying `infra:*` scope exists whose
-/// granter's `identity_type` set contains `"user"`.
+/// Return the responsible user's `key_id` iff `node_key_id` is owner-bound — a
+/// **LIVE, unrevoked** `delegates_to(user → node_key_id)` whose granter is a
+/// registered `user`-role identity (CC 3.2: ownership roots in an accountable
+/// human, never a bare node). Returns `None` for an UNOWNED node (the
+/// serve-only floor applies).
 ///
-/// This is the CC 3.2 owner-binding reader: it answers "does this node have a
-/// responsible party?" Returns `None` for an UNOWNED node (the serve-only floor
-/// applies).
+/// ## Collapsed onto the substrate (CIRISPersist#249 Cut B)
 ///
-/// ## How it walks (substrate v8.8.0)
+/// This was a hand-rolled inbound-edge walk over `list_attestations_for` +
+/// `lookup_public_key` + a local `delegation_revoked`. v9.3.0 exposes the
+/// purpose-built reader [`Engine::owner_bindings_of`], which enumerates the
+/// same three clauses our walk tested (own user-key / occurrence-of-a-user /
+/// live `delegates_to(U → k)`), with edge expiry **and** the §11.10
+/// `withdraws`/`recants` edge-retraction bucketing folded in. We return the
+/// first anchor it yields.
 ///
-/// The substrate's purpose-built scoped-delegation walk
-/// (`issuer_reaches_target_via_scoped_delegation`) is **private**; the public
-/// surface is `list_attestations_for` / `list_attestations_by` /
-/// `lookup_public_key` / `revocations_for`. We therefore implement the
-/// (depth-1) owner-binding check directly over the inbound edges to the node:
+/// ### Why dropping the read-time `infra:*` re-check is safe
 ///
-/// 1. `list_attestations_for(node_key_id)` — the inbound `delegates_to` edges.
-/// 2. keep `delegates_to` edges whose `scope` is **infra-only**
-///    ([`scopes_are_infra_only`]) — this is the CC 1.13.5 gate applied at READ
-///    time too: an edge that carries agency does NOT confer ownership.
-/// 3. require the granter (`attesting_key_id`) to be a registered key whose
-///    `identity_type` set contains `"user"` (CC 3.2: ownership roots in an
-///    accountable human, never a bare node).
-/// 4. require the edge to be live: not expired and not revoked (a `withdraws` /
-///    `recants` by the granter against the node, or a `revocations_for` row).
-///
-/// ## Where the substrate walk couldn't express this
-///
-/// A user→node owner-binding is, by the CC model, a **direct** (depth-1) edge —
-/// a user is the responsible party, not a transitive sub-delegate — so the
-/// depth-1 inbound scan is sufficient and faithful. A *transitive* responsible
-/// chain (user → org → node) is NOT expressible through the public surface here
-/// (the scoped walk that would express it is private); if the model later allows
-/// indirect responsibility, this needs the substrate to export the scoped walk
-/// (filed upstream).
+/// Our hand-roll re-checked CC 1.13.5 (`scopes_are_infra_only`) at READ time so
+/// an agency-bearing edge wouldn't confer ownership. That check is now
+/// **redundant**: persist's CC 4.4.3.4.3 node-agency gate runs at WRITE time
+/// (`put_attestation` rejects a non-`infra:*` `delegates_to` to a node-only
+/// key), so any `delegates_to(U → node)` that EXISTS already carried only
+/// `infra:*` scope. The write gate is the load-bearing one; re-deriving it on
+/// every read was duplicate work. (`owner_bindings_of` also omits the granter
+/// `valid_until` liveness check our walk did — edge expiry + retraction are the
+/// canonical liveness signals in the §11.10 model.)
 pub async fn is_owner_bound(engine: &Engine, node_key_id: &str) -> Option<String> {
-    let directory = engine.federation_directory();
-    let now = chrono::Utc::now();
-
-    let inbound = directory.list_attestations_for(node_key_id).await.ok()?;
-
-    for edge in inbound {
-        if edge.attestation_type != attestation_type::DELEGATES_TO {
-            continue;
-        }
-        // CC 1.13.5 at read time: an edge that is not infra-only does not own.
-        let scopes = scope_set_of(&edge.attestation_envelope);
-        if !scopes_are_infra_only(&scopes) {
-            continue;
-        }
-        // Liveness: not expired.
-        if let Some(exp) = edge.expires_at {
-            if exp <= now {
-                continue;
-            }
-        }
-        let granter = edge.attesting_key_id.clone();
-        // CC 3.2: the granter must be a registered `user`-role identity.
-        let Ok(Some(granter_key)) = directory.lookup_public_key(&granter).await else {
-            continue;
-        };
-        if !identity_type_contains(&granter_key.identity_type, "user") {
-            continue;
-        }
-        // Liveness: granter key not past its own validity window.
-        if let Some(until) = granter_key.valid_until {
-            if until <= now {
-                continue;
-            }
-        }
-        // Revocation: a withdraws/recants by the granter against the node.
-        if delegation_revoked(engine, &granter, node_key_id).await {
-            continue;
-        }
-        return Some(granter);
-    }
-    None
+    engine
+        .owner_bindings_of(node_key_id)
+        .await
+        .ok()
+        .and_then(|owners| owners.into_iter().next())
 }
 
 /// **CEG projection — "nodes owned by this fed ID".** The inverse of
-/// [`is_owner_bound`]: every node key_id for which `owner_user_key_id` authored a
-/// live, infra-only, unrevoked `delegates_to(user → node)`. This is the
-/// CEG-native answer to the node list — the owner-bindings ARE the graph, so the
-/// list is a projection over them (no client-side parallel store). By
-/// construction it returns the local node once it has been self-claimed (the
-/// claim persists exactly that `delegates_to`).
+/// [`is_owner_bound`]: every node key_id `owner_user_key_id` owner-binds. The
+/// owner-bindings ARE the graph, so the list is a projection over them (no
+/// client-side parallel store). By construction it returns the local node once
+/// it has been self-claimed (the claim persists exactly that `delegates_to`).
+///
+/// ## Collapsed onto the substrate (CIRISPersist#249 Cut B)
+///
+/// persist exposes no "delegations BY a key" reader (only the inbound
+/// [`Engine::delegations_to`] / [`Engine::owner_bindings_of`]), so we still scan
+/// the user's OUTGOING `delegates_to` edges (`list_attestations_by`) to find
+/// candidate recipients — but the liveness / revocation / user-role / infra
+/// logic is no longer hand-walked: each candidate is **confirmed** through
+/// [`Engine::owner_bindings_of`] (which folds all of that in). The recipient is
+/// the edge's `attested_key_id` — persist's canonical recipient field, which the
+/// §11.10 retraction bucketing and `owner_bindings_of` both key on — NOT an
+/// `envelope["node_key_id"]` field (so this stays correct under either the
+/// hand-rolled or the `owner_bind` `delegates_to` envelope shape).
 pub async fn nodes_owned_by(engine: &Engine, owner_user_key_id: &str) -> Vec<String> {
     let directory = engine.federation_directory();
-    let now = chrono::Utc::now();
-    let mut out: Vec<String> = Vec::new();
     let Ok(rows) = directory.list_attestations_by(owner_user_key_id).await else {
-        return out;
+        return Vec::new();
     };
+    let mut out: Vec<String> = Vec::new();
     for edge in rows {
         if edge.attestation_type != attestation_type::DELEGATES_TO {
             continue;
         }
-        // CC 1.13.5: infra-only owner-binding (not an agency delegation).
-        if !scopes_are_infra_only(&scope_set_of(&edge.attestation_envelope)) {
+        let node = edge.attested_key_id;
+        if node.is_empty() || out.iter().any(|n| n == &node) {
             continue;
         }
-        if let Some(exp) = edge.expires_at {
-            if exp <= now {
-                continue;
+        // Confirm via the substrate reader: liveness + withdraws/recants
+        // retraction + the granter being a live user-role anchor.
+        if let Ok(owners) = engine.owner_bindings_of(&node).await {
+            if owners.iter().any(|o| o == owner_user_key_id) {
+                out.push(node);
             }
-        }
-        let Some(node) = edge
-            .attestation_envelope
-            .get("node_key_id")
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        if delegation_revoked(engine, owner_user_key_id, node).await {
-            continue;
-        }
-        if !out.iter().any(|n| n == node) {
-            out.push(node.to_owned());
         }
     }
     out
-}
-
-/// The scope set declared by a `delegates_to` envelope's `scope` field (bare
-/// string OR array — the two wire shapes the substrate walk accepts).
-fn scope_set_of(envelope: &serde_json::Value) -> Vec<String> {
-    match envelope.get("scope") {
-        Some(serde_json::Value::String(s)) => vec![s.clone()],
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// True iff the owner-binding from `granter` to `node_key_id` has been revoked —
-/// by a `withdraws`/`recants` attestation the granter authored against the node,
-/// or by a `revocations_for(node)` row naming the granter as revoker.
-async fn delegation_revoked(engine: &Engine, granter: &str, node_key_id: &str) -> bool {
-    let directory = engine.federation_directory();
-    if let Ok(by_granter) = directory.list_attestations_by(granter).await {
-        for a in by_granter {
-            let is_retraction = a.attestation_type == attestation_type::WITHDRAWS
-                || a.attestation_type == attestation_type::RECANTS;
-            if is_retraction && a.attested_key_id == node_key_id {
-                return true;
-            }
-        }
-    }
-    if let Ok(revs) = directory.revocations_for(node_key_id).await {
-        if !revs.is_empty() {
-            return true;
-        }
-    }
-    false
 }
 
 /// Errors [`emit_owner_binding`] can surface.
