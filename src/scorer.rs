@@ -37,24 +37,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
-use ciris_persist::federation::types::{
-    attestation_tier, cohort_scope, Attestation, SignedAttestation,
-};
-use ciris_persist::federation::FederationDirectory;
+use ciris_persist::federation::types::cohort_scope;
+use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
-// The CEG PRODUCE canonicalizer (V2/JCS). persist v9.0.0's federation-tier
-// ingest gate (CC 5.3.2.4.3.1) re-canonicalizes the emitted attestation envelope
-// through THIS function and Strict-hybrid-verifies the result, so the scorer MUST
-// sign over the SAME `ceg_produce_canonicalize` bytes (matching peer.rs /
-// build_self_key_record) — the legacy `canonicalize_envelope_for_signing`
-// (PythonJsonDumps strip form) produces different bytes and the gate rejects it.
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 pub mod n_eff;
 
@@ -208,16 +197,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         // substrate-backed, the hash is the honest, FK-resolvable subject.)
         let attested_key_id = agent_id_hash.clone();
 
-        match score_and_emit(
-            engine,
-            backend.as_ref(),
-            node_key_id,
-            &attested_key_id,
-            &traces,
-            cfg,
-        )
-        .await
-        {
+        match score_and_emit(engine, node_key_id, &attested_key_id, &traces, cfg).await {
             Ok(true) => emitted += 1,
             Ok(false) => {}
             Err(e) => {
@@ -237,7 +217,6 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
 /// usable feature rows (skipped).
 async fn score_and_emit(
     engine: &Engine,
-    directory: &dyn FederationDirectory,
     node_key_id: &str,
     attested_key_id: &str,
     traces: &[&TraceSummary],
@@ -283,49 +262,23 @@ async fn score_and_emit(
         "cohort_scope": cohort_scope::FEDERATION,
     });
 
-    // ── Emit recipe — modeled on CIRISStatus ceg.rs:182 (emit_liveness) ──────
-    // 1. CEG PRODUCE-canonical bytes (V2/JCS — the signing basis, CEG §0.9; the
-    //    SAME form persist v9.0.0's federation-tier ingest gate re-derives).
-    let canonical = ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow::anyhow!("canonicalize capacity envelope: {e}"))?;
-    // 2. original_content_hash = hex(SHA-256(canonical)).
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    // 3. Hybrid sign (Ed25519 + ML-DSA-65) over the canonical bytes.
-    let sig = engine
-        .sign_hybrid(&canonical)
+    // ── Emit (CIRISPersist#252/#253 collapse) ────────────────────────────────
+    // The hand-rolled canonicalize→hash→hybrid-sign→assemble→put recipe is now
+    // `Engine::emit_attestation_self`: it signs with the engine's OWN composed
+    // (hardware-hybrid) signer and derives the attester/scrub as the node's #247
+    // DERIVED federation key_id (`local_derived_key_id()` == `cfg.key_id` ==
+    // `node_key_id` here — wire-preserving). `weight = Some(score)` (the v9.4.0
+    // #252 surface) keeps the capacity band on the row so the replication trust
+    // model reads the real score, not the `1.0` default.
+    let mut input = EmitAttestationInput::with_envelope(ATTESTATION_TYPE_SCORES, envelope);
+    input.attested_key_id = Some(attested_key_id.to_owned());
+    input.subject_key_ids = vec![attested_key_id.to_owned()];
+    input.weight = Some(score);
+    input.expires_at = Some(valid_until);
+    engine
+        .emit_attestation_self(input)
         .await
-        .context("hybrid-sign capacity envelope")?;
-    let classical_b64 = B64.encode(&sig.classical.signature);
-    let pqc_b64 = B64.encode(&sig.pqc.signature);
-
-    // 4. Assemble the FEDERATION-tier row.
-    let attestation = Attestation {
-        attestation_id: crate::ids::new_id(),
-        attesting_key_id: node_key_id.to_owned(),
-        attested_key_id: attested_key_id.to_owned(),
-        attestation_type: ATTESTATION_TYPE_SCORES.to_owned(),
-        weight: Some(score),
-        asserted_at: now,
-        expires_at: Some(valid_until),
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: classical_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: node_key_id.to_owned(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(), // server-computed on insert
-        subject_key_ids: vec![attested_key_id.to_owned()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-
-    directory
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .map_err(|e| anyhow::anyhow!("put_attestation(capacity): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("emit_attestation_self(capacity): {e}"))?;
 
     tracing::info!(
         attested = %attested_key_id,

@@ -255,9 +255,18 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     //    federation-tier hybrid signature against NODE_KEY_ID's registered
     //    pubkeys, so Node A must register its REAL Ed25519 + ML-DSA-65 halves
     //    (its `node` identity_type — CC 1.13.5), not a placeholder. ────────────
+    // v0.5.14 (#45 collapse): the scorer now emits via Engine::emit_attestation_self,
+    // which attests under the node's #247 DERIVED federation key_id
+    // (local_derived_key_id() = derive_key_id(alias, pubkey)) — exactly what
+    // compose::register_self_key registers in prod. Register under the derived id
+    // (not the bare alias) so the emit FK + signature-verify resolve.
+    let node_key_id = node
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id");
     register_key_hybrid(
         &node,
-        NODE_KEY_ID,
+        &node_key_id,
         &node_ed_pub_b64,
         Some(&node_mldsa_pub_b64),
         identity_type::NODE,
@@ -289,7 +298,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         sample_size_gate: 2,
         target_n_eff: 8.0,
     };
-    let emitted = scorer::run_pass(&node, NODE_KEY_ID, &cfg)
+    let emitted = scorer::run_pass(&node, &node_key_id, &cfg)
         .await
         .expect("scorer pass must succeed");
     assert_eq!(emitted, 1, "exactly one agent should be scored + emitted");
@@ -309,8 +318,8 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     let att = &attestations[0];
 
     assert_eq!(
-        att.attesting_key_id, NODE_KEY_ID,
-        "attesting must be Node A"
+        att.attesting_key_id, node_key_id,
+        "attesting must be Node A (its derived federation key_id)"
     );
     assert_eq!(
         att.attested_key_id, AGENT_KEY_ID,

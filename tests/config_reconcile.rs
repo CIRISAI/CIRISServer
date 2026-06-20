@@ -47,30 +47,44 @@ async fn node() -> Arc<Engine> {
     Arc::new(engine)
 }
 
+/// The node's #247 DERIVED federation key_id — what `set_config` /
+/// `config_reconcile::resolve` (and `compose::register_self_key`) use in prod
+/// (`cfg.key_id`), and what `Engine::emit_attestation_self` attests under. The
+/// bare `NODE_KEY_ID` const is the keystore ALIAS, not the wire key_id.
+async fn node_key_id(engine: &Engine) -> String {
+    engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id")
+}
+
 /// Register the node's own steward key (the `put_attestation` attesting-key FK
 /// precondition for any self-attested write). Mirrors `tests/graph_config.rs`.
+/// Registers under the DERIVED key_id so `emit_attestation_self` (which attests
+/// under `local_derived_key_id()`) resolves the FK + signature-verify.
 async fn register_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_KEY_ID });
+    let key_id = node_key_id(engine).await;
+    let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
         .await
         .expect("self hybrid sign");
     let record = KeyRecord {
-        key_id: NODE_KEY_ID.to_string(),
+        key_id: key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::STEWARD.into(),
-        identity_ref: NODE_KEY_ID.to_string(),
+        identity_ref: key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -84,7 +98,8 @@ async fn register_self(engine: &Engine) {
 }
 
 async fn set(engine: &Arc<Engine>, key: &str, value: ConfigValue) {
-    graph_config::set_config(engine, NODE_KEY_ID, key, value, "owner", ConfigScope::Local)
+    let nk = node_key_id(engine).await;
+    graph_config::set_config(engine, &nk, key, value, "owner", ConfigScope::Local)
         .await
         .unwrap_or_else(|e| panic!("set_config {key}: {e}"));
 }
@@ -95,7 +110,7 @@ async fn resolve_empty_corpus_is_baked_defaults() {
     let engine = node().await;
     register_self(&engine).await;
 
-    let resolved = config_reconcile::resolve(&engine, NODE_KEY_ID).await;
+    let resolved = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
     assert_eq!(
         resolved,
         ResolvedConfig::default(),
@@ -168,7 +183,7 @@ async fn resolve_reflects_overrides_per_key() {
     )
     .await;
 
-    let r = config_reconcile::resolve(&engine, NODE_KEY_ID).await;
+    let r = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
     assert_eq!(r.scorer_cadence_secs, 7, "scorer.cadence_secs override");
     assert_eq!(r.scorer_window, 123);
     assert_eq!(r.scorer_sample_gate, 5);
@@ -217,7 +232,7 @@ async fn resolve_falls_back_on_bad_value_per_key() {
     )
     .await;
 
-    let r = config_reconcile::resolve(&engine, NODE_KEY_ID).await;
+    let r = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
     let d = ResolvedConfig::default();
     assert_eq!(
         r.scorer_cadence_secs, d.scorer_cadence_secs,

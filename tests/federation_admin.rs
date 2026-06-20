@@ -61,30 +61,43 @@ async fn node() -> Arc<Engine> {
     Arc::new(engine)
 }
 
+/// The node's #247 DERIVED federation key_id (== prod's `cfg.key_id` ==
+/// `local_derived_key_id()`, what `emit_attestation_self` attests under). The
+/// `NODE_A_KEY_ID` const is the keystore ALIAS, not the wire key_id — the whole
+/// peering flow (register_self / bind_owner / router) keys off the derived id.
+async fn node_a_key_id(engine: &Engine) -> String {
+    engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node-A federation key_id")
+}
+
 /// Register this node's own steward key via the canonical admission gate — the
-/// `put_attestation` attesting-key FK precondition for the consent emit.
+/// `put_attestation` attesting-key FK precondition for the consent emit. Under
+/// the DERIVED key_id (peer.rs's emit now flows through emit_attestation_self).
 async fn register_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_A_KEY_ID });
+    let key_id = node_a_key_id(engine).await;
+    let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
         .await
         .expect("self hybrid sign");
     let record = KeyRecord {
-        key_id: NODE_A_KEY_ID.to_string(),
+        key_id: key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::STEWARD.into(),
-        identity_ref: NODE_A_KEY_ID.to_string(),
+        identity_ref: key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_A_KEY_ID.to_string(),
+        scrub_key_id: key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -158,14 +171,10 @@ async fn bind_owner(engine: &Engine) {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    ciris_server::auth::ownership::emit_owner_binding(
-        engine,
-        &owner_signer,
-        NODE_A_KEY_ID,
-        &scopes,
-    )
-    .await
-    .expect("emit owner-binding delegates_to(user -> node, infra:*)");
+    let node_key_id = node_a_key_id(engine).await;
+    ciris_server::auth::ownership::emit_owner_binding(engine, &owner_signer, &node_key_id, &scopes)
+        .await
+        .expect("emit owner-binding delegates_to(user -> node, infra:*)");
 }
 
 /// The owner user's deterministic Ed25519 / ML-DSA-65 seeds (distinct from the
@@ -192,26 +201,27 @@ fn owner_user_signer() -> LocalSigner {
 /// `compose::self_key_record_json` does (so the GET served value matches).
 async fn self_key_record_json(engine: &Engine) -> String {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_A_KEY_ID });
+    let key_id = node_a_key_id(engine).await;
+    let envelope = serde_json::json!({ "key_id": key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
         .await
         .expect("self hybrid sign");
     let record = KeyRecord {
-        key_id: NODE_A_KEY_ID.to_string(),
+        key_id: key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::STEWARD.into(),
-        identity_ref: NODE_A_KEY_ID.to_string(),
+        identity_ref: key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_A_KEY_ID.to_string(),
+        scrub_key_id: key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -306,12 +316,8 @@ async fn serve(
     engine: Arc<Engine>,
     self_key_record_json: String,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let app = federation_admin::router(
-        engine,
-        NODE_A_KEY_ID.to_string(),
-        self_key_record_json,
-        None,
-    );
+    let node_key_id = node_a_key_id(&engine).await;
+    let app = federation_admin::router(engine, node_key_id, self_key_record_json, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -380,7 +386,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
     // ── This node authored a directed consent:replication:v1 grant at the peer ─
     let by_node = engine
         .federation_directory()
-        .list_attestations_by(NODE_A_KEY_ID)
+        .list_attestations_by(&node_a_key_id(&engine).await)
         .await
         .expect("list attestations by node");
     let grant = by_node
@@ -393,7 +399,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
         })
         .expect("node must have a consent:replication:v1 grant");
     assert_eq!(grant.attestation_type, attestation_type::SCORES);
-    assert_eq!(grant.attesting_key_id, NODE_A_KEY_ID);
+    assert_eq!(grant.attesting_key_id, node_a_key_id(&engine).await);
     assert_eq!(grant.subject_key_ids, vec![PEER_KEY_ID.to_string()]);
     let prefixes: Vec<String> = grant.attestation_envelope["payload"]["attestation_prefixes"]
         .as_array()
@@ -478,7 +484,7 @@ async fn unauthorized_caller_is_rejected_and_authors_no_grant() {
     );
     let grants = engine
         .federation_directory()
-        .list_attestations_by(NODE_A_KEY_ID)
+        .list_attestations_by(&node_a_key_id(&engine).await)
         .await
         .expect("list attestations by node")
         .into_iter()
@@ -510,7 +516,7 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
     let text = resp.text().await.expect("self-key-record body");
     let record: SignedKeyRecord =
         serde_json::from_str(&text).expect("served body is a SignedKeyRecord");
-    assert_eq!(record.record.key_id, NODE_A_KEY_ID);
+    assert_eq!(record.record.key_id, node_a_key_id(&engine).await);
 
     // It really is an admissible self-signed key record: a FRESH peer engine
     // registers it through the fail-secure admission gate without error.
@@ -537,7 +543,7 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
     assert!(
         peer_engine
             .federation_directory()
-            .lookup_public_key(NODE_A_KEY_ID)
+            .lookup_public_key(&node_a_key_id(&engine).await)
             .await
             .expect("lookup")
             .is_some(),
@@ -555,7 +561,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
     register_self(&engine).await;
     // Deliberately DO NOT bind_owner — the node is owner-unbound.
     assert!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, NODE_A_KEY_ID)
+        ciris_server::auth::ownership::is_owner_bound(&engine, &node_a_key_id(&engine).await)
             .await
             .is_none(),
         "precondition: node is owner-unbound"
@@ -599,7 +605,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
     // Now bind an owner and re-POST: it succeeds (the floor lifts).
     bind_owner(&engine).await;
     assert!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, NODE_A_KEY_ID)
+        ciris_server::auth::ownership::is_owner_bound(&engine, &node_a_key_id(&engine).await)
             .await
             .is_some(),
         "node is owner-bound after bind_owner"
