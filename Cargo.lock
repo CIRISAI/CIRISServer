@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "6.3.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
+version = "6.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -836,12 +836,13 @@ dependencies = [
  "subtle",
  "thiserror 1.0.69",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
 name = "ciris-edge"
-version = "6.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.1.0#302f1145d42f712a7cca7e6900222e045f85bb77"
+version = "6.2.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.0#c5fa53426d4c8a9e43fe44d5a24b4664c0c11a09"
 dependencies = [
  "async-trait",
  "axum",
@@ -894,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "6.3.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
+version = "6.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -959,8 +960,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "9.2.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.2.0#f2b28d20dacf8e901e4ec2f7901553813386cb15"
+version = "9.3.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.3.0#3df329a0f8a7e27e5e1ff7bd6eb79120a36ad16c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -999,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1039,8 +1040,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "6.3.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
+version = "6.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.0#0119ddfbd77c5ca5a7b92c912c507b12764f4fde"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2544,6 +2545,7 @@ checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
 dependencies = [
  "ctutils",
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -3525,6 +3527,7 @@ dependencies = [
  "rand_core 0.10.1",
  "sha3 0.11.0",
  "signature 3.0.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -3549,6 +3552,7 @@ dependencies = [
  "ctutils",
  "hybrid-array",
  "num-traits",
+ "zeroize",
 ]
 
 [[package]]

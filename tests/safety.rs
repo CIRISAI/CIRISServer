@@ -73,25 +73,37 @@ async fn node() -> Arc<Engine> {
 
 /// Register the node's own federation key (the engine's hybrid signer), so
 /// federation-tier rows the node co-signs (promotions) satisfy the FK.
+///
+/// v9.3.0 (#247): `attestation_promote` now writes `scrub_key_id =
+/// engine.local_derived_key_id()` = `derive_key_id(<alias>, <pubkey>)` — the
+/// DERIVED wire key_id, never the raw alias — so the node must register under
+/// that derived id for the promote FK to resolve. This mirrors prod, where
+/// `compose.rs::register_self_key` registers `cfg.key_id = derive_key_id(
+/// keystore_alias, ed_pub)` at boot. (Pre-v9.3.0 promote wrote the bare alias,
+/// so the fixture registered under the literal `NODE_KEY_ID`.)
 async fn register_node_self(engine: &Engine) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": NODE_KEY_ID });
+    let node_key_id = engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id");
+    let envelope = serde_json::json!({ "key_id": node_key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize node envelope");
     let sig = engine.sign_hybrid(&canonical).await.expect("node sign");
     let record = KeyRecord {
-        key_id: NODE_KEY_ID.to_string(),
+        key_id: node_key_id.clone(),
         pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
         algorithm: algorithm::HYBRID.into(),
         identity_type: "node".into(),
-        identity_ref: NODE_KEY_ID.to_string(),
+        identity_ref: node_key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: NODE_KEY_ID.to_string(),
+        scrub_key_id: node_key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
