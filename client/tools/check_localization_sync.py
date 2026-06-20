@@ -2,12 +2,14 @@
 """Guard the vendored CIRIS client localization bundles (CIRISServer copy).
 
 Adapted from CIRISAgent's ``tools/dev/check_localization_sync.py`` for the
-vendored KMP client under ``client/``. The client UI strings live in TWO
-locations that MUST stay byte-identical (the desktopApp copy has historically
-gone stale and shadowed the shared copy):
+vendored KMP client under ``client/``. The client UI strings live in FOUR
+committed runtime bundles that MUST stay byte-identical — one per platform
+loader (any that goes stale ships raw keys at runtime):
 
   - client/shared/src/desktopMain/resources/localization/*.json   (CANONICAL)
-  - client/desktopApp/src/main/resources/localization/*.json
+  - client/desktopApp/src/main/resources/localization/*.json      (desktop pkg)
+  - client/androidApp/src/main/assets/localization/*.json         (Android)
+  - client/iosApp/iosApp/localization/*.json                      (iOS)
 
 ``en.json`` is the source of truth. The supported-language list is read from
 the bundle ``manifest.json`` (never hardcoded).
@@ -53,12 +55,19 @@ from typing import Dict, List, Set, Tuple
 # Repo root: this file lives at <root>/client/tools/check_localization_sync.py
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The two kept-in-sync UI string bundles. The first is canonical; the second
-# is the desktopApp packaging copy that must mirror it exactly.
+# Every COMMITTED runtime localization bundle. The first is canonical; ALL the
+# others are platform packaging/runtime copies that must mirror it byte-for-byte
+# — desktop (JVM), Android (assets), AND iOS (bundle). The Android + iOS loaders
+# read their own committed copies (LocalizationResourceLoader.{android,ios}.kt),
+# so leaving them out of the guard let them ship stale and render raw keys
+# (Codex review, PR #40). The untracked iosApp/Resources/app copy is a build
+# artifact and is intentionally excluded.
 CANONICAL_BUNDLE = "client/shared/src/desktopMain/resources/localization"
 MIRROR_BUNDLES: Tuple[str, ...] = (
     "client/shared/src/desktopMain/resources/localization",
     "client/desktopApp/src/main/resources/localization",
+    "client/androidApp/src/main/assets/localization",
+    "client/iosApp/iosApp/localization",
 )
 
 # Kotlin source set whose literal string keys must resolve against en.json.
@@ -211,6 +220,52 @@ def check_cross_language(bundle: Path, langs: List[str], en_keys: Set[str]) -> L
     return warnings
 
 
+# Runtime interpolation tokens that MUST survive translation verbatim:
+#   {named}       — LocalizationManager named-brace params ({count}, {provider}…)
+#   ${...}        — Kotlin/template interpolation
+#   {0} {1}       — indexed
+#   %s %d %1$s    — printf-style
+_PLACEHOLDER = re.compile(r"\$\{[^}]*\}|\{[A-Za-z0-9_]+\}|%[0-9]*\$?[sd]")
+
+
+def _leaf(obj: dict, dotted: str):
+    cur = obj
+    for part in dotted.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def check_placeholder_parity(bundle: Path, langs: List[str], en: dict) -> List[str]:
+    """WARNING: a translated value must carry the SAME multiset of interpolation
+    placeholders as its en.json source — a dropped/translated ``{count}`` renders
+    unsubstituted at runtime (Codex review, PR #40)."""
+    warnings: List[str] = []
+    en_keys = flatten(en)
+    for lang in langs:
+        if lang == "en":
+            continue
+        f = bundle / f"{lang}.json"
+        if not f.exists():
+            continue
+        data = load_json(f)
+        bad: List[str] = []
+        for key in sorted(en_keys):
+            ev, tv = _leaf(en, key), _leaf(data, key)
+            if not isinstance(ev, str) or not isinstance(tv, str) or tv.strip() == "":
+                continue  # missing/empty is the cross-language check's job
+            if sorted(_PLACEHOLDER.findall(ev)) != sorted(_PLACEHOLDER.findall(tv)):
+                bad.append(key)
+        if bad:
+            warnings.append(
+                f"{lang}.json: {len(bad)} value(s) with placeholder drift "
+                f"({', '.join(bad[:3])}…)"
+            )
+    return warnings
+
+
 def _is_empty(obj: dict, dotted: str) -> bool:
     cur = obj
     for part in dotted.split("."):
@@ -247,7 +302,9 @@ def main() -> int:
     errors += check_mirror_parity()
     errors += check_reference_coverage(en_keys)
 
+    en_doc = load_json(canonical / "en.json")
     warnings = check_cross_language(canonical, langs, en_keys)
+    warnings += check_placeholder_parity(canonical, langs, en_doc)
 
     if errors:
         print("ERRORS (block):")
