@@ -541,6 +541,19 @@ struct SetupRootRequest {
     /// consumed on success. REQUIRED.
     #[serde(default)]
     claim_pin: Option<String>,
+    /// OPTIONAL owner login password. When present, the bound ROOT cert is given a
+    /// `password_hash` so the owner can obtain a SYSTEM_ADMIN **session** via
+    /// `POST /v1/auth/login` (the claim-minted ROOT otherwise has no password and
+    /// no session path — which is what the device-auth grant's `approve` needs).
+    /// Set ONLY on a loopback self-claim (the wizard supplies the account
+    /// password); never required, never echoed.
+    #[serde(default)]
+    owner_password: Option<String>,
+    /// OPTIONAL friendly owner username (e.g. `eric`) — stamped as the ROOT cert's
+    /// `name` so the owner can log in with it (resolved via [`super::store::resolve_login`])
+    /// instead of the derived `wa_id`. Loopback self-claim only.
+    #[serde(default)]
+    owner_username: Option<String>,
 }
 
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
@@ -853,11 +866,26 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     let now = chrono::Utc::now();
     let cert = WaCert {
         wa_id: wa_id.clone(),
-        name: format!("root:{identity_key_id}"),
+        // Friendly owner username (the wizard's account name) when supplied — so
+        // login resolves it via store::resolve_login; else the canonical root tag.
+        name: req
+            .owner_username
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("root:{identity_key_id}")),
         role: WaRole::Root,
         pubkey: identity_key_id.clone(),
         jwt_kid: format!("{wa_id}-jwt"),
-        password_hash: None,
+        // Owner login password (optional): lets the owner obtain a SYSTEM_ADMIN
+        // session via /v1/auth/login (username = this wa_id) — the consent gate the
+        // device-auth grant's `approve` requires. PBKDF2, agent-compatible.
+        password_hash: req
+            .owner_password
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(super::session::hash_password),
         api_key_hash: None,
         oauth_provider: None,
         oauth_external_id: None,

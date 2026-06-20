@@ -926,6 +926,12 @@ class SetupViewModel(
                     claimPin = claimPin.trim(),
                     cohortScope = cohortScope,
                     localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                    // SELF-claim: set the owner's login password + friendly username
+                    // on the ROOT cert so the owner can obtain a SYSTEM_ADMIN session
+                    // (POST /v1/auth/login with EITHER `eric` or the wa_id) — the
+                    // prerequisite for approving a device-auth grant.
+                    ownerPassword = _state.value.userPassword.ifBlank { null },
+                    ownerUsername = _state.value.username.ifBlank { null },
                 )
                 _state.value = _state.value.copy(
                     ownershipClaim = _state.value.ownershipClaim.copy(

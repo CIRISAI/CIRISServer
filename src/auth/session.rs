@@ -299,10 +299,11 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
     };
 
-    // The agent's `_users` cache scanned `wa_cert` by username. The substrate
-    // keys on `wa_id`; the agent treats `wa_id` (or jwt_kid) as the login id.
-    // Here `username` IS the `wa_id` (the absorbed identifier).
-    let cert = match store::get(&st.engine, &req.username).await {
+    // Resolve the login identifier → WA cert the way the agent's `_users` cache
+    // did (multi-key): `wa_id`, OAuth `"<provider>:<external_id>"`, OR the human
+    // `name` (the friendly username the wizard stamps on the owner ROOT). The
+    // session is still issued against the resolved `cert.wa_id`.
+    let cert = match store::resolve_login(&st.engine, &req.username).await {
         Ok(Some(c)) => c,
         Ok(None) => return err(StatusCode::UNAUTHORIZED, "invalid credentials"),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
