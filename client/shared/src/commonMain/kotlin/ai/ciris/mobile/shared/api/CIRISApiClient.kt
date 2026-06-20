@@ -1480,15 +1480,19 @@ class CIRISApiClient(
         cohortScope: String,
         localNodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
+        ownerPassword: String? = null,
+        ownerUsername: String? = null,
     ): ClaimRemoteResponse {
         val method = "claimRemote"
-        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope")
+        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope ownerPw=${ownerPassword != null}")
         val client = federationHttpClient()
         return try {
             val request = ClaimRemoteRequest(
                 nodeCode = nodeCode,
                 claimPin = claimPin,
                 cohortScope = cohortScope,
+                ownerPassword = ownerPassword,
+                ownerUsername = ownerUsername,
             )
             val bodyText = jsonConfig.encodeToString(ClaimRemoteRequest.serializer(), request)
             val response = client.post("$localNodeUrl/v1/setup/claim-remote") {

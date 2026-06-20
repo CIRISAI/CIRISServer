@@ -129,6 +129,15 @@ struct RemoteSetupRootRequest {
     claim_pin: String,
     /// The complete, already-user-signed owner-binding.
     owner_binding: SignedOwnerBinding,
+    /// OPTIONAL owner login password forwarded to the target's setup/root (sets
+    /// the ROOT cert's password_hash → owner session via /v1/auth/login). Only
+    /// sent on a loopback self-claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_password: Option<String>,
+    /// OPTIONAL friendly owner username → the target ROOT cert's `name` (loopback
+    /// self-claim only), so the owner can log in with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_username: Option<String>,
 }
 
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
@@ -165,6 +174,10 @@ pub async fn build_claim_for_target(
 /// `http` is the federation HTTP client (rustls). The target base URL is the
 /// `transport_hint` on the NodeCode (e.g. `https://node.example`); the claim is
 /// POSTed to `{transport_hint}/v1/setup/root`.
+// The claim is a single cohesive operation; its inputs (transport, signer, target
+// code, PIN, scope, self-fallback, owner password + username) are all required and
+// independent — bundling them into a struct would obscure, not clarify.
+#[allow(clippy::too_many_arguments)]
 pub async fn claim_remote(
     http: &reqwest::Client,
     user_signer: &LocalSigner,
@@ -172,6 +185,8 @@ pub async fn claim_remote(
     claim_pin: &str,
     cohort_scope: &str,
     self_fallback_url: Option<&str>,
+    owner_password: Option<&str>,
+    owner_username: Option<&str>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
     let (nc, owner_binding) = build_claim_for_target(user_signer, target_node_code).await?;
@@ -197,6 +212,8 @@ pub async fn claim_remote(
         cohort_scope: cohort,
         claim_pin: claim_pin.to_string(),
         owner_binding,
+        owner_password: owner_password.map(str::to_owned),
+        owner_username: owner_username.map(str::to_owned),
     };
 
     let resp = http
@@ -294,6 +311,15 @@ struct ClaimRemoteRequest {
     claim_pin: String,
     /// The cohort scope to claim the target under (`self` / `family` / `community`).
     cohort_scope: String,
+    /// OPTIONAL owner login password (loopback self-claim only) — forwarded to the
+    /// target's setup/root to set the ROOT cert's password_hash, so the owner can
+    /// get a SYSTEM_ADMIN session (the device-grant approve prerequisite).
+    #[serde(default)]
+    owner_password: Option<String>,
+    /// OPTIONAL friendly owner username (loopback self-claim only) — forwarded so
+    /// the owner can log in with it instead of the derived wa_id.
+    #[serde(default)]
+    owner_username: Option<String>,
 }
 
 async fn claim_remote_handler(
@@ -352,6 +378,8 @@ async fn claim_remote_handler(
         &req.claim_pin,
         &req.cohort_scope,
         Some(st.local_self_url.as_str()),
+        req.owner_password.as_deref(),
+        req.owner_username.as_deref(),
     )
     .await
     {

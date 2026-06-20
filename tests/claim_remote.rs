@@ -234,6 +234,8 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
         TEST_CLAIM_PIN,
         "family",
         None, // no self-fallback: this test drives a real transport_hint target
+        None, // no owner password (this test doesn't exercise the login path)
+        None, // no owner username
     )
     .await
     .expect("L claims T over HTTP");

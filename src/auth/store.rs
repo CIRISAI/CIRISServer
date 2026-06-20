@@ -90,6 +90,47 @@ pub async fn get_by_oauth(
         .await?)
 }
 
+/// Resolve a login identifier to its WA cert — the fabric port of the agent's
+/// multi-key `_users` cache (`auth_service.py`: one user is keyed under its
+/// `wa_id`, its OAuth `"<provider>:<external_id>"` primary key, AND every OAuth
+/// link key). The fabric keys `wa_cert` by `wa_id` ONLY, so the other identifiers
+/// resolve through the typed backend lookups + a human-`name` scan:
+///
+///   1. `wa_id` — the canonical key (`get`).
+///   2. OAuth `"<provider>:<external_id>"` — `get_by_oauth` (the agent's OAuth
+///      primary key).
+///   3. human `name` — the friendly username the wizard stamps on the owner ROOT
+///      (`eric`), so the operator logs in with it, not the derived `wa_id`.
+///
+/// Returns the FIRST match in that precedence. The caller still issues the session
+/// against the resolved `cert.wa_id` (the canonical identity), so the friendly
+/// alias never leaks into the token.
+pub async fn resolve_login(engine: &Engine, ident: &str) -> Result<Option<WaCert>, StoreError> {
+    if let Some(c) = get(engine, ident).await? {
+        return Ok(Some(c));
+    }
+    if let Some((provider, external_id)) = ident.split_once(':') {
+        if !provider.is_empty() && !external_id.is_empty() {
+            if let Some(c) = get_by_oauth(engine, provider, external_id).await? {
+                return Ok(Some(c));
+            }
+        }
+    }
+    // Human-name scan across the active roles (the owner is a ROOT). Names are not
+    // guaranteed unique; the most-recent active match wins (list_by_role orders
+    // created DESC).
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        if let Some(c) = list_by_role(engine, role, 128)
+            .await?
+            .into_iter()
+            .find(|c| c.name == ident)
+        {
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
 /// Point lookup by `wa_id`.
 pub async fn get(engine: &Engine, wa_id: &str) -> Result<Option<WaCert>, StoreError> {
     Ok(wa_cert_backend(engine)?.get_wa_cert(wa_id).await?)
