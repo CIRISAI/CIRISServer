@@ -510,6 +510,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // per-group watchlist config (the matcher defers to the
                     // NodeCore content seam). Built AHEAD of media/social content.
                     .merge(crate::safety::router(Arc::clone(&engine), strict))
+                    // HUMANITY_ACCORD surface (CIRISServer#41): accord-holder
+                    // registry (owner-gated register + cold-start GET
+                    // /v1/accord-holders) + the server-canonical 2-of-3 invocation
+                    // kill-switch (CC 4.2.1 / §9.2.1). The safe-mesh floor.
+                    .merge(crate::accord::router(Arc::clone(&engine)))
                     // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
                     // POST /lens-api/api/v1/accord/events (legacy path, forwarded
                     // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events

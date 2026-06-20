@@ -24,6 +24,10 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
+/// HUMANITY_ACCORD server surface (CIRISServer#41, CC 4.2 / §9.2) — the
+/// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
+/// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
+pub mod accord;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
