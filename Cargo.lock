@@ -812,12 +812,14 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "6.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.2.0#dbbfb705fdc3ff14a39441d53ea71bdd9385e798"
+version = "6.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
 dependencies = [
+ "chacha20poly1305",
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "hmac 0.12.1",
  "k256",
  "ml-dsa",
  "ml-kem",
@@ -838,8 +840,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "5.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v5.1.0#694c502ee36370412f5bcf349f0a1c2dc9721139"
+version = "6.1.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.1.0#302f1145d42f712a7cca7e6900222e045f85bb77"
 dependencies = [
  "async-trait",
  "axum",
@@ -863,6 +865,8 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "qrcodegen",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "raptorq",
  "rcgen",
  "reqwest",
@@ -890,8 +894,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "6.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.2.0#dbbfb705fdc3ff14a39441d53ea71bdd9385e798"
+version = "6.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -955,8 +959,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "9.0.3"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.0.3#87251b590faacfbbc3ebe5dcf764de0c2082e758"
+version = "9.2.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.2.0#f2b28d20dacf8e901e4ec2f7901553813386cb15"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -995,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1035,8 +1039,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "6.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.2.0#dbbfb705fdc3ff14a39441d53ea71bdd9385e798"
+version = "6.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.3.0#47fa35fd816e431a05ca397119e2afda337a2fbb"
 dependencies = [
  "android_system_properties",
  "anyhow",
