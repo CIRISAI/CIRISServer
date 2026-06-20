@@ -919,22 +919,22 @@ async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
     // edge-retraction is folded into owner_bindings_of, so the whole projection
     // collapses, not just the predicate).
     withdraw_owner_binding(&engine, &owner, node_key).await;
-    assert!(engine
-        .owner_bindings_of(node_key)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(engine.owner_bindings_of(node_key).await.unwrap().is_empty());
     assert!(engine
         .owner_binding_chain(node_key)
         .await
         .unwrap()
         .is_empty());
-    assert!(ciris_server::auth::ownership::is_owner_bound(&engine, node_key)
-        .await
-        .is_none());
-    assert!(ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id)
-        .await
-        .is_empty());
+    assert!(
+        ciris_server::auth::ownership::is_owner_bound(&engine, node_key)
+            .await
+            .is_none()
+    );
+    assert!(
+        ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -943,7 +943,12 @@ async fn ceg_dx_active_roster_readers_reachable() {
     // A member must be owner-bound + registered to satisfy put_community admission.
     register_party(&engine, "ceg-dx-founder", "node").await;
     make_owner_bound(&engine, "ceg-dx-founder").await;
-    put_community(&engine, "ceg-dx-community", &[("ceg-dx-founder", "founder")]).await;
+    put_community(
+        &engine,
+        "ceg-dx-community",
+        &[("ceg-dx-founder", "founder")],
+    )
+    .await;
 
     // active_community_members = roster − effective membership revocations.
     let members = engine
