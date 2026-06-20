@@ -20,16 +20,34 @@
 //!    pending → 428, denied → 403, expired → 410, approved → 200 + a DELEGATED
 //!    token carrying the owner's AUTHORITY and the client's ATTRIBUTION.
 //!
-//! Store is in-memory (MVP, matching the manager's in-process dict): a
-//! `device_code → DeviceGrant` map plus a `user_code → device_code` index.
+//! ## CEG-native delegation (the authority is the graph)
+//!
+//! The RFC-8628 handshake (`device_code`↔`user_code`, pending/approved/denied) is
+//! ephemeral protocol state and stays in-memory. But the AUTHORIZATION itself is a
+//! durable, signed, revocable CEG object: on approve the node resolves the LOCAL
+//! owner's federation signer and emits a signed `delegates_to(owner → actor,
+//! [scope])` attestation (`ownership::emit_signed_attestation`). For a
+//! hardware-backed owner identity (YubiKey / TPM / SE) the `sign_hybrid` BLOCKS on
+//! the key being inserted + touched — that physical presence IS the consent.
+//!
+//! - The minted `dgrant:` bearer is only a session credential; its authority is
+//!   re-checked against the graph (`reachable_under_scope`) on every use
+//!   ([`resolve_bearer`]), so a `withdraws` revokes it immediately.
+//! - `GET …/grants` lists the LIVE `delegates_to` edges (the list IS the graph,
+//!   not a parallel store); `POST …/revoke` emits a signed `withdraws`.
+//! - The actor (`client_id`) MUST be a registered federation identity — it is the
+//!   `attested_key_id` of the edge (the put-time FK), so an agent registers its
+//!   fed-ID before requesting a code.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use ciris_persist::federation::types::attestation_type;
 use ciris_persist::prelude::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -43,19 +61,30 @@ const GRANT_TTL_SECS: u64 = 600;
 /// Recommended client poll interval (RFC 8628 `interval`).
 const POLL_INTERVAL_SECS: u64 = 5;
 /// The delegated token's lifetime once minted (1h — a short act-on-behalf window).
+/// The durable `delegates_to` edge outlives it; the bearer is just the session.
 const DELEGATED_TTL_SECS: u64 = 3_600;
-/// Default scope when the client requests none.
+/// Default scope when the client requests none — the act-on-behalf delegation
+/// scope stamped on the `delegates_to` edge + re-checked by `reachable_under_scope`.
 const DEFAULT_SCOPE: &str = "owner:act-on-behalf";
+/// Delegation-chain depth the graph walks re-check (a direct owner→actor edge is
+/// depth 1; small cap leaves room for a future deputization hop).
+const DELEGATION_DEPTH: usize = 4;
 
 /// The approval state of a device grant.
 #[derive(Debug, Clone)]
 enum GrantStatus {
     /// Awaiting the owner's decision.
     Pending,
-    /// The owner approved — carries WHO approved (attribution of the principal).
+    /// The owner approved — carries WHO approved (attribution of the principal)
+    /// and the owner's federation key_id (the `delegates_to` edge issuer, which
+    /// the token graph-gate re-checks). The emitted edge's attestation_id is
+    /// returned to the approver but not stored: revoke resolves the live edge
+    /// from the graph, not from this ephemeral handshake state.
     Approved {
         owner_wa_id: String,
         owner_role: UserRole,
+        /// The owner's federation key_id (the edge's `attesting_key_id`).
+        owner_key_id: String,
     },
     /// The owner explicitly denied.
     Denied,
@@ -79,6 +108,13 @@ struct DeviceGrant {
 #[derive(Clone)]
 struct DeviceGrantState {
     engine: Arc<Engine>,
+    /// The LOCAL responsible-owner's federation key_id (`<keystore_alias>-user`)
+    /// — the issuer of the `delegates_to` edge. Its signer is re-opened at approve
+    /// time from [`Self::seed_dir`] (hardware presence prompted there).
+    owner_key_id: String,
+    /// Where the owner's federation signer is re-opened from (the conventional
+    /// user-seed path); passed to `resolve_user_signer` on approve/revoke.
+    seed_dir: PathBuf,
     /// `device_code → DeviceGrant`.
     grants: Arc<Mutex<HashMap<String, DeviceGrant>>>,
     /// `user_code → device_code` index (the owner approves by user_code).
@@ -86,6 +122,42 @@ struct DeviceGrantState {
     /// Grant TTL in seconds. [`GRANT_TTL_SECS`] in production; overridable for
     /// tests (e.g. `0` to mint an already-expired grant for the 410 path).
     grant_ttl_secs: u64,
+}
+
+/// Resolve the LOCAL owner's federation signer (re-opening its hardware/software
+/// custody from the conventional seed path). For a hardware-backed identity the
+/// caller's subsequent `sign_hybrid` BLOCKS until the key is inserted + touched.
+/// `Err` is a ready-to-return response (no owner fed-ID ⇒ the node cannot sign a
+/// delegation as its owner).
+async fn resolve_owner_signer(
+    st: &DeviceGrantState,
+) -> Result<Arc<ciris_persist::prelude::LocalSigner>, Response> {
+    match crate::compose::resolve_user_signer(&st.owner_key_id, st.seed_dir.clone()).await {
+        Ok(Some(signer)) => Ok(signer),
+        Ok(None) => Err(err(
+            StatusCode::CONFLICT,
+            "owner federation identity is not available on this node — the responsible \
+             owner must hold a fed-ID here to sign a delegation",
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("resolve owner signer: {e}"),
+        )),
+    }
+}
+
+/// The scope string declared on a `delegates_to` envelope (`scope` is an array or
+/// a bare string). Returns the first scope, or empty.
+fn edge_scope(envelope: &serde_json::Value) -> String {
+    match envelope.get("scope") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .first()
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
@@ -144,8 +216,29 @@ async fn device_code(State(st): State<DeviceGrantState>, body: axum::body::Bytes
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
-    if req.client_id.trim().is_empty() {
+    let client_id = req.client_id.trim().to_string();
+    if client_id.is_empty() {
         return err(StatusCode::BAD_REQUEST, "client_id is required");
+    }
+    // The actor (client_id) IS the `attested_key_id` of the durable
+    // `delegates_to` edge approval will emit — it MUST be a registered federation
+    // identity (the put-time FK), so the agent registers its fed-ID first. Fail
+    // here (not at approve) so the client learns immediately.
+    match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&client_id)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_client: the actor (client_id) must be a registered federation \
+                 identity — register the agent's fed-ID before requesting a device code",
+            )
+        }
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     }
     let scope = req.scope.unwrap_or_else(|| DEFAULT_SCOPE.to_string());
     let user_code = gen_user_code();
@@ -154,7 +247,7 @@ async fn device_code(State(st): State<DeviceGrantState>, body: axum::body::Bytes
 
     let grant = DeviceGrant {
         user_code: user_code.clone(),
-        client_id: req.client_id,
+        client_id,
         scope,
         expires_at,
         status: GrantStatus::Pending,
@@ -260,17 +353,75 @@ async fn approve(
     let Some(device_code) = device_code_for_user_code(&st, &req.user_code) else {
         return err(StatusCode::NOT_FOUND, "unknown user_code");
     };
+    // Snapshot the pending grant's coordinates without holding the lock across the
+    // (hardware-blocking) signing await.
+    let (actor_key_id, scope) = {
+        let grants = st.grants.lock().expect("grants lock");
+        let Some(grant) = grants.get(&device_code) else {
+            return err(StatusCode::NOT_FOUND, "unknown user_code");
+        };
+        if grant.expires_at <= now_unix() {
+            return err(StatusCode::GONE, "expired_token");
+        }
+        if matches!(grant.status, GrantStatus::Approved { .. }) {
+            return err(StatusCode::CONFLICT, "already approved");
+        }
+        (grant.client_id.clone(), grant.scope.clone())
+    };
+
+    // Resolve the owner's federation signer (hardware presence prompted on
+    // sign_hybrid below for a YubiKey/TPM/SE-backed identity).
+    let owner_signer = match resolve_owner_signer(&st).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    // Emit the DURABLE, signed `delegates_to(owner → actor, [scope])` — the
+    // act-on-behalf authority lives in the graph, not in memory. Built via the
+    // §11.10-admissible envelope helper + the working user-signed emit path
+    // (attester == the owner's REGISTERED key_id; sub_delegation = false: the
+    // actor may act, not re-delegate). The owner's hardware key is touched HERE.
+    let envelope = ciris_persist::federation::delegates_to_envelope(
+        &actor_key_id,
+        std::slice::from_ref(&scope),
+        false,
+    );
+    let attestation_id = match crate::auth::ownership::emit_signed_attestation(
+        &st.engine,
+        &owner_signer,
+        attestation_type::DELEGATES_TO,
+        &actor_key_id,
+        envelope,
+        vec![actor_key_id.clone()],
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("emit delegates_to(owner→actor): {e}"),
+            )
+        }
+    };
+
+    // Mark approved, carrying the owner identity + the emitted edge (the revoke
+    // target). Re-check the grant under lock (it could have expired/raced).
     let mut grants = st.grants.lock().expect("grants lock");
     let Some(grant) = grants.get_mut(&device_code) else {
         return err(StatusCode::NOT_FOUND, "unknown user_code");
     };
-    if grant.expires_at <= now_unix() {
-        return err(StatusCode::GONE, "expired_token");
-    }
     grant.status = GrantStatus::Approved {
         owner_wa_id: owner.wa_id.clone(),
         owner_role: owner.role,
+        owner_key_id: owner_signer.key_id().to_string(),
     };
+    tracing::info!(
+        actor = %actor_key_id,
+        owner = %owner_signer.key_id(),
+        attestation_id = %attestation_id,
+        "owner approved device grant — emitted signed delegates_to(owner → actor, act-on-behalf)"
+    );
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -278,6 +429,7 @@ async fn approve(
             "user_code": grant.user_code,
             "client_id": grant.client_id,
             "approved_by": owner.wa_id,
+            "delegation_attestation_id": attestation_id,
         })),
     )
         .into_response()
@@ -331,89 +483,153 @@ async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
 
-    // Snapshot the grant (and prune it on the terminal mint/expire paths) without
-    // holding the lock across the response build.
-    let mut grants = st.grants.lock().expect("grants lock");
-    let Some(grant) = grants.get(&req.device_code).cloned() else {
-        // Unknown device_code — RFC 8628 treats this as an invalid grant.
-        return err(StatusCode::BAD_REQUEST, "invalid_grant");
-    };
-    // client_id binding: the poller MUST be the client the code was issued to.
-    if grant.client_id != req.client_id {
-        return err(StatusCode::BAD_REQUEST, "invalid_client");
-    }
-    if grant.expires_at <= now_unix() {
-        grants.remove(&req.device_code);
-        st.user_index
-            .lock()
-            .expect("user_index lock")
-            .remove(&grant.user_code);
-        return err(StatusCode::GONE, "expired_token");
-    }
-
-    match grant.status {
-        GrantStatus::Pending => err(StatusCode::PRECONDITION_REQUIRED, "authorization_pending"),
-        GrantStatus::Denied => err(StatusCode::FORBIDDEN, "access_denied"),
-        GrantStatus::Approved {
-            owner_wa_id,
-            owner_role,
-        } => {
-            // Single-use: consume the grant so a leaked device_code can't re-mint.
+    // All in-memory handshake work happens in this block so the (std, !Send)
+    // MutexGuard is unambiguously dropped BEFORE the graph-gate await below (an
+    // explicit drop() doesn't reliably shorten the async generator's captured
+    // region; a block scope does). Terminal paths (unknown/expired/pending/denied)
+    // return from inside. On approval the handshake grant is consumed (single-use)
+    // and the owner/actor coordinates fall out for the graph gate + mint.
+    let (owner_wa_id, owner_role, owner_key_id, client_id, scope) = {
+        let mut grants = st.grants.lock().expect("grants lock");
+        let Some(grant) = grants.get(&req.device_code).cloned() else {
+            // Unknown device_code — RFC 8628 treats this as an invalid grant.
+            return err(StatusCode::BAD_REQUEST, "invalid_grant");
+        };
+        // client_id binding: the poller MUST be the client the code was issued to.
+        if grant.client_id != req.client_id {
+            return err(StatusCode::BAD_REQUEST, "invalid_client");
+        }
+        if grant.expires_at <= now_unix() {
             grants.remove(&req.device_code);
             st.user_index
                 .lock()
                 .expect("user_index lock")
                 .remove(&grant.user_code);
-            drop(grants);
-
-            // Mint the DELEGATED token: principal = owner authority, actor =
-            // client_id attribution. Registered in the session module's delegated
-            // grants registry so `resolve_bearer` resolves it back to a caller with
-            // the owner's wa_id/role and `actor = Some(client_id)`.
-            let access_token = register_delegated_grant(DelegatedGrant {
+            return err(StatusCode::GONE, "expired_token");
+        }
+        match grant.status {
+            GrantStatus::Pending => {
+                return err(StatusCode::PRECONDITION_REQUIRED, "authorization_pending")
+            }
+            GrantStatus::Denied => return err(StatusCode::FORBIDDEN, "access_denied"),
+            GrantStatus::Approved {
                 owner_wa_id,
                 owner_role,
-                client_id: grant.client_id,
-                scope: grant.scope,
-                expires_at: now_unix() + DELEGATED_TTL_SECS,
-            });
-            (
-                StatusCode::OK,
-                Json(TokenResponse {
-                    access_token,
-                    token_type: "Bearer",
-                    expires_in: DELEGATED_TTL_SECS,
-                }),
-            )
-                .into_response()
+                owner_key_id,
+                ..
+            } => {
+                // Single-use: consume the handshake so a leaked code can't re-mint.
+                grants.remove(&req.device_code);
+                st.user_index
+                    .lock()
+                    .expect("user_index lock")
+                    .remove(&grant.user_code);
+                (
+                    owner_wa_id,
+                    owner_role,
+                    owner_key_id,
+                    grant.client_id,
+                    grant.scope,
+                )
+            }
         }
+    };
+
+    // GRAPH GATE before minting: the durable delegates_to(owner → actor) edge must
+    // be LIVE (not revoked between approve and this poll). reachable_under_scope is
+    // withdraws-aware; a dead edge ⇒ access_denied.
+    match st
+        .engine
+        .reachable_under_scope(&owner_key_id, &client_id, &scope, DELEGATION_DEPTH)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return err(StatusCode::FORBIDDEN, "access_denied"),
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     }
+
+    // Mint the DELEGATED bearer: principal = owner authority, actor = client_id
+    // attribution. Carries owner_key_id so resolve_bearer re-checks the graph on
+    // every use (immediate revocation). The durable authority is the edge; this
+    // bearer is just the ephemeral session credential.
+    let access_token = register_delegated_grant(DelegatedGrant {
+        owner_wa_id,
+        owner_role,
+        owner_key_id,
+        client_id,
+        scope,
+        expires_at: now_unix() + DELEGATED_TTL_SECS,
+    });
+    (
+        StatusCode::OK,
+        Json(TokenResponse {
+            access_token,
+            token_type: "Bearer",
+            expires_in: DELEGATED_TTL_SECS,
+        }),
+    )
+        .into_response()
 }
 
 // ─── GET /v1/auth/device/grants (list) + POST /v1/auth/device/revoke (OWNER) ──
 
 #[derive(Debug, Serialize)]
 struct GrantSummary {
-    /// The actor (agent) the delegation is attributed to.
+    /// The actor (agent) the delegation is attributed to (the edge recipient).
     client_id: String,
     /// The granted scope (e.g. `owner:act-on-behalf`).
     scope: String,
-    /// Unix-epoch seconds the delegated token expires.
-    expires_at: u64,
+    /// The `delegates_to` attestation_id backing the grant (the revoke target).
+    attestation_id: String,
 }
 
-/// `GET /v1/auth/device/grants` — list the owner's LIVE delegations (the active
-/// `dgrant:` grants). Owner-gated; the opaque tokens never leave the registry.
+/// The owner's LIVE act-on-behalf delegations, read FROM THE GRAPH: outbound
+/// `delegates_to(owner → actor)` edges carrying a non-`infra:*` scope (so node
+/// owner-bindings are excluded), confirmed live via `reachable_under_scope`
+/// (withdraws-aware). Returns `(actor_key_id, scope, attestation_id)`.
+async fn live_delegations(st: &DeviceGrantState) -> Vec<(String, String, String)> {
+    let dir = st.engine.federation_directory();
+    let rows = dir
+        .list_attestations_by(&st.owner_key_id)
+        .await
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for edge in rows {
+        if edge.attestation_type != attestation_type::DELEGATES_TO {
+            continue;
+        }
+        let scope = edge_scope(&edge.attestation_envelope);
+        // Skip owner-bindings (infra:*) — those are node ownership, not agency.
+        if scope.is_empty() || scope.starts_with("infra:") {
+            continue;
+        }
+        let actor = edge.attested_key_id.clone();
+        if st
+            .engine
+            .reachable_under_scope(&st.owner_key_id, &actor, &scope, DELEGATION_DEPTH)
+            .await
+            .unwrap_or(false)
+        {
+            out.push((actor, scope, edge.attestation_id));
+        }
+    }
+    out
+}
+
+/// `GET /v1/auth/device/grants` — list the owner's LIVE act-on-behalf delegations.
+/// Owner-gated. The list IS the graph (live `delegates_to` edges), not a parallel
+/// in-memory store.
 async fn list_grants(State(st): State<DeviceGrantState>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
     }
-    let grants: Vec<GrantSummary> = super::session::list_delegated_grants()
+    let grants: Vec<GrantSummary> = live_delegations(&st)
+        .await
         .into_iter()
-        .map(|g| GrantSummary {
-            client_id: g.client_id,
-            scope: g.scope,
-            expires_at: g.expires_at,
+        .map(|(client_id, scope, attestation_id)| GrantSummary {
+            client_id,
+            scope,
+            attestation_id,
         })
         .collect();
     (
@@ -428,8 +644,11 @@ struct RevokeRequest {
     client_id: String,
 }
 
-/// `POST /v1/auth/device/revoke {client_id}` — withdraw all live delegations to a
-/// client. Owner-gated. Returns how many were revoked.
+/// `POST /v1/auth/device/revoke {client_id}` — withdraw the owner's act-on-behalf
+/// delegation(s) to a client. Owner-gated. Emits a signed `withdraws` against each
+/// live `delegates_to(owner → client)` edge (the owner's hardware key is touched
+/// to sign), then drops any in-memory bearer for the client. Returns how many
+/// edges were withdrawn.
 async fn revoke(
     State(st): State<DeviceGrantState>,
     headers: HeaderMap,
@@ -442,10 +661,58 @@ async fn revoke(
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
-    let revoked = super::session::revoke_delegated_grants_for(req.client_id.trim());
+    let client_id = req.client_id.trim().to_string();
+
+    // Find the live edge(s) for this client in the graph.
+    let targets: Vec<String> = live_delegations(&st)
+        .await
+        .into_iter()
+        .filter(|(actor, _, _)| actor == &client_id)
+        .map(|(_, _, attestation_id)| attestation_id)
+        .collect();
+
+    // Emit a signed `withdraws` against each (owner is the original granter →
+    // rule-1 self-revocation; hardware touch on sign). Resolve the signer ONLY if
+    // there's something to revoke.
+    let mut revoked = 0usize;
+    if !targets.is_empty() {
+        let owner_signer = match resolve_owner_signer(&st).await {
+            Ok(s) => s,
+            Err(resp) => return resp,
+        };
+        for target_id in targets {
+            let envelope = ciris_persist::federation::withdraws_attestation_envelope(
+                &target_id,
+                attestation_type::DELEGATES_TO,
+            );
+            match crate::auth::ownership::emit_signed_attestation(
+                &st.engine,
+                &owner_signer,
+                attestation_type::WITHDRAWS,
+                &client_id,
+                envelope,
+                vec![client_id.clone()],
+            )
+            .await
+            {
+                Ok(_) => revoked += 1,
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("emit withdraws(delegates_to {target_id}): {e}"),
+                    )
+                }
+            }
+        }
+    }
+
+    // Drop any ephemeral bearer for the client (the graph re-check would also kill
+    // it on next use, but prune eagerly).
+    super::session::revoke_delegated_grants_for(&client_id);
+
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "revoked": revoked, "client_id": req.client_id })),
+        Json(serde_json::json!({ "revoked": revoked, "client_id": client_id })),
     )
         .into_response()
 }
@@ -455,16 +722,27 @@ async fn revoke(
 /// The device-grant router — merge onto the read-API listener alongside
 /// `session::router` / `api_keys::router` / `self_login::router`. Grants live for
 /// [`GRANT_TTL_SECS`] (RFC 8628 `expires_in`).
-pub fn router(engine: Arc<Engine>) -> Router {
-    router_with_ttl(engine, GRANT_TTL_SECS)
+///
+/// `owner_key_id` is the LOCAL responsible-owner's federation key_id (the issuer
+/// of the `delegates_to` edges) and `seed_dir` is where its signer is re-opened
+/// (hardware presence prompted on approve/revoke).
+pub fn router(engine: Arc<Engine>, owner_key_id: String, seed_dir: PathBuf) -> Router {
+    router_with_ttl(engine, owner_key_id, seed_dir, GRANT_TTL_SECS)
 }
 
 /// Build the router with an explicit grant TTL (seconds). Production uses
 /// [`router`] (600s); a TTL of `0` mints already-expired grants, letting tests
 /// drive the `410 expired_token` poll path deterministically.
-pub fn router_with_ttl(engine: Arc<Engine>, grant_ttl_secs: u64) -> Router {
+pub fn router_with_ttl(
+    engine: Arc<Engine>,
+    owner_key_id: String,
+    seed_dir: PathBuf,
+    grant_ttl_secs: u64,
+) -> Router {
     let state = DeviceGrantState {
         engine,
+        owner_key_id,
+        seed_dir,
         grants: Arc::new(Mutex::new(HashMap::new())),
         user_index: Arc::new(Mutex::new(HashMap::new())),
         grant_ttl_secs,

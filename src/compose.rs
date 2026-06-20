@@ -451,7 +451,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // external client/agent to act on the OWNER's behalf via the
                     // node API. code → owner-approve (hardware fed-ID session) →
                     // poll → DELEGATED token (owner authority + actor attribution).
-                    .merge(crate::auth::device_grant::router(Arc::clone(&engine)))
+                    .merge(crate::auth::device_grant::router(
+                        Arc::clone(&engine),
+                        // The LOCAL responsible-owner's fed-ID (the delegates_to
+                        // issuer) + where its signer re-opens (hardware presence
+                        // prompted on approve/revoke).
+                        format!("{}-user", cfg.keystore_alias),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // attestation / consent / erasure (CEG-native)
                     .merge(crate::auth::attestation::router(
                         Arc::clone(&engine),
