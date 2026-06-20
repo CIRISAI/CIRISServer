@@ -1,0 +1,32 @@
+name: Localization
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  localization:
+    name: Localization guard (vendored client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Stdlib-only guard, no deps required. ERROR-level checks block:
+      #   - every *.json in both localization dirs parses,
+      #   - the two dirs (shared/ + desktopApp/) stay byte-identical (the
+      #     desktopApp copy has historically gone stale and shadowed shared),
+      #   - every localizedString/getString key in commonMain Kotlin resolves
+      #     in en.json (an undefined key renders RAW on every platform).
+      # Cross-language translation drift is a WARNING (graceful English
+      # fallback) and is fixed by the `localize-ui` Claude workflow.
+      - name: Localization guard (mirror parity + reference coverage)
+        run: python3 client/tools/check_localization_sync.py

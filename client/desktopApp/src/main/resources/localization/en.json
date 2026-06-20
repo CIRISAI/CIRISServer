@@ -2013,7 +2013,16 @@
     "manage_consent_idle": "not set",
     "manage_consent_userdata_title": "User-data consent (consent:state)",
     "manage_consent_userdata_desc": "Your data-sharing stream — TEMPORARY / PARTNERED / ANONYMOUS, with revoke. Managed on the Consent surface.",
-    "manage_consent_open_userdata": "Open user-data consent"
+    "manage_consent_open_userdata": "Open user-data consent",
+    "delegations_title": "Delegations",
+    "delegations_subtitle": "People and agents you've authorized to act on your behalf.",
+    "delegations_add_title": "Authorize an agent",
+    "delegations_add_desc": "An agent will show you a short code. Enter it here and approve to let it act on your behalf — with your authority, attributed to it.",
+    "delegations_code_label": "Code (e.g. ABCD-1234)",
+    "delegations_approve": "Approve",
+    "delegations_active_title": "Active delegations",
+    "delegations_empty": "No active delegations. Authorize one above.",
+    "delegations_revoke": "Revoke"
   },
   "conscience": {
     "ponder_attempted": "I attempted to {action}",
@@ -2655,7 +2664,8 @@
       "manage_consent": "Manage Consent",
       "safety": "Safety",
       "moderation": "Moderation",
-      "child_safety": "Child Safety"
+      "child_safety": "Child Safety",
+      "delegations": "Delegations"
     }
   },
   "setup_validation_select_provider": "Select an LLM provider",
