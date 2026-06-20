@@ -390,6 +390,66 @@ async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
     }
 }
 
+// ─── GET /v1/auth/device/grants (list) + POST /v1/auth/device/revoke (OWNER) ──
+
+#[derive(Debug, Serialize)]
+struct GrantSummary {
+    /// The actor (agent) the delegation is attributed to.
+    client_id: String,
+    /// The granted scope (e.g. `owner:act-on-behalf`).
+    scope: String,
+    /// Unix-epoch seconds the delegated token expires.
+    expires_at: u64,
+}
+
+/// `GET /v1/auth/device/grants` — list the owner's LIVE delegations (the active
+/// `dgrant:` grants). Owner-gated; the opaque tokens never leave the registry.
+async fn list_grants(State(st): State<DeviceGrantState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let grants: Vec<GrantSummary> = super::session::list_delegated_grants()
+        .into_iter()
+        .map(|g| GrantSummary {
+            client_id: g.client_id,
+            scope: g.scope,
+            expires_at: g.expires_at,
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "grants": grants })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeRequest {
+    client_id: String,
+}
+
+/// `POST /v1/auth/device/revoke {client_id}` — withdraw all live delegations to a
+/// client. Owner-gated. Returns how many were revoked.
+async fn revoke(
+    State(st): State<DeviceGrantState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: RevokeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let revoked = super::session::revoke_delegated_grants_for(req.client_id.trim());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "revoked": revoked, "client_id": req.client_id })),
+    )
+        .into_response()
+}
+
 // ─── router ───────────────────────────────────────────────────────────────────
 
 /// The device-grant router — merge onto the read-API listener alongside
@@ -414,6 +474,8 @@ pub fn router_with_ttl(engine: Arc<Engine>, grant_ttl_secs: u64) -> Router {
         .route("/v1/auth/device/approve", axum::routing::post(approve))
         .route("/v1/auth/device/deny", axum::routing::post(deny))
         .route("/v1/auth/device/token", axum::routing::post(token))
+        .route("/v1/auth/device/grants", axum::routing::get(list_grants))
+        .route("/v1/auth/device/revoke", axum::routing::post(revoke))
         .with_state(state)
 }
 

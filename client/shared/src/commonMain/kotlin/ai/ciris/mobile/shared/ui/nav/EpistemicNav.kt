@@ -177,6 +177,14 @@ sealed class NavSurface(
     object ManageConsent : NavSurface("manage-consent", "Manage Consent", CIRISIcons.lock,
         labelKey = "nav.surface.manage_consent",)
 
+    /**
+     * Delegations — who the owner has authorized to act on their behalf (active
+     * device-authorization grants), plus approve-a-new / revoke. The
+     * human-consent gate for an agent acting on-behalf-of. Live (no gate).
+     */
+    object Delegations : NavSurface("delegations", "Delegations", CIRISIcons.keySecure,
+        labelKey = "nav.surface.delegations",)
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Safety group — the holistic SAFETY surface (CIRISServer v0.4.6
     // /v1/safety/*). Safety is built in FIRST, ahead of content: a Discord /
@@ -431,6 +439,7 @@ val MANAGE_GROUP = NavGroup(
         NavSurface.HealthReputation,
         NavSurface.Nodes,           // first-class node management (CRUD + switch)
         NavSurface.ManageConsent,   // consent:replication + user-data consent
+        NavSurface.Delegations,     // device-auth grants — authorize an agent on-behalf
         NavSurface.Users,
         NavSurface.Adapters,
         // The substrate operator-infra trio: Edge / Verify / Persist.

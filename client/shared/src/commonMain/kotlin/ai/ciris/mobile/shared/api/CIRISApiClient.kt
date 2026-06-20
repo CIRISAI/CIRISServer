@@ -1587,6 +1587,100 @@ class CIRISApiClient(
         }
     }
 
+    // ─── Delegations (device-authorization grants) — owner authorizes an agent ──
+    //
+    // The owner approves a device code an agent generated out-of-band, minting a
+    // delegated `dgrant:` token (owner authority + actor attribution). These drive
+    // the local node only (owner session); the in-memory grant registry is the
+    // interim home until the substrate-native delegation surface lands.
+
+    /** List the owner's LIVE delegations — `GET {nodeUrl}/v1/auth/device/grants`. */
+    suspend fun listDelegations(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): List<ai.ciris.mobile.shared.models.federation.DelegationDto> {
+        val method = "listDelegations"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/auth/device/grants") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list delegations failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.DelegationsResponse.serializer(),
+                raw,
+            ).grants
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Approve a pending device code — `POST {nodeUrl}/v1/auth/device/approve`.
+     * The owner enters the `user_code` the agent showed them; approving mints the
+     * delegated token. Owner-session-gated; this is the human-consent gate.
+     */
+    suspend fun approveDeviceCode(
+        userCode: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): String {
+        val method = "approveDeviceCode"
+        logInfo(method, "POST $nodeUrl/v1/auth/device/approve user_code=$userCode")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$nodeUrl/v1/auth/device/approve") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{\"user_code\":\"${userCode.trim()}\"}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("approve failed: ${response.status}: ${raw.take(160)}")
+            }
+            raw
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Revoke all delegations to a client — `POST {nodeUrl}/v1/auth/device/revoke`. */
+    suspend fun revokeDelegation(
+        clientId: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): String {
+        val method = "revokeDelegation"
+        logInfo(method, "POST $nodeUrl/v1/auth/device/revoke client_id=$clientId")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$nodeUrl/v1/auth/device/revoke") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{\"client_id\":\"${clientId.trim()}\"}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("revoke failed: ${response.status}: ${raw.take(160)}")
+            }
+            raw
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO
