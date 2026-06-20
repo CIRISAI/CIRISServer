@@ -790,65 +790,18 @@ class SetupViewModel(
      * can be (re)stated from the Safety surface once an ID exists.
      */
     fun setAgeRange(band: AgeBand) {
-        val client = apiClient as? CIRISApiClient
-        // Always reflect the selection immediately for responsive UI.
+        // SELECTION ONLY — do NOT post yet. The age assurance is recorded AFTER the
+        // node claim (the subject is the bound owner's fed-ID, which only exists +
+        // owns post-claim), via the loopback owner endpoint POST /v1/self/age in
+        // [claimLocalNodeOwnership]. Posting here (pre-claim) hit the federation
+        // /v1/safety/age-assurance route, which needs an x-ciris signature the app
+        // (no crypto) can't produce → 401. We just stash the chosen band.
         _state.value = _state.value.copy(
             ageRange = _state.value.ageRange.copy(
                 selectedBandToken = if (band == AgeBand.MINOR) "minor" else "adult",
                 error = null,
             )
         )
-        if (client == null) {
-            _state.value = _state.value.copy(
-                ageRange = _state.value.ageRange.copy(
-                    error = "Local node unavailable: API client does not support it"
-                )
-            )
-            return
-        }
-        val subjectKeyId = _state.value.federationIdentity.identityKeyId
-        if (subjectKeyId.isNullOrBlank()) {
-            // No federation ID yet — we cannot key the assurance. Honest: do NOT
-            // pretend it was recorded. The user can state it later from Safety.
-            _state.value = _state.value.copy(
-                ageRange = _state.value.ageRange.copy(
-                    recorded = false,
-                    error = "No federation identity yet — your age range will be saved once " +
-                        "your ID is created. You can set it from the Safety surface anytime.",
-                )
-            )
-            return
-        }
-        _state.value = _state.value.copy(
-            ageRange = _state.value.ageRange.copy(inProgress = true, error = null)
-        )
-        viewModelScope.launch {
-            try {
-                val resp = client.setAgeAssurance(
-                    subjectKeyId = subjectKeyId,
-                    band = band,
-                    localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
-                )
-                _state.value = _state.value.copy(
-                    ageRange = _state.value.ageRange.copy(
-                        inProgress = false,
-                        recorded = true,
-                        dimension = resp.dimension,
-                        error = null,
-                    )
-                )
-            } catch (e: Exception) {
-                PlatformLogger.w(TAG, "setAgeRange: record via local node failed: ${e.message}")
-                _state.value = _state.value.copy(
-                    ageRange = _state.value.ageRange.copy(
-                        inProgress = false,
-                        recorded = false,
-                        error = "Couldn't record your age range on this device's local node: " +
-                            "${e.message ?: "unknown error"}",
-                    )
-                )
-            }
-        }
     }
 
     // ========== LOCAL-node ownership self-claim (on COMPLETE) ===============
@@ -944,6 +897,43 @@ class SetupViewModel(
                         } else null,
                     )
                 )
+
+                // POST-CLAIM owner sequence (now that the node is owned + the owner
+                // fed-ID exists): (1) log in with the account credential to get the
+                // owner SYSTEM_ADMIN session, then (2) record the age band the user
+                // chose earlier via the loopback owner endpoint POST /v1/self/age.
+                // Both are best-effort — a failure surfaces but never blocks COMPLETE.
+                if (resp.role != null) {
+                    val waId = resp.waId
+                    val password = _state.value.userPassword
+                    if (!waId.isNullOrBlank() && password.isNotBlank()) {
+                        try {
+                            val auth = client.login(waId, password)
+                            client.setAccessToken(auth.access_token)
+                            PlatformLogger.i(TAG, "claimLocalNodeOwnership: owner session established post-claim")
+                        } catch (e: Exception) {
+                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: post-claim owner login failed: ${e.message}")
+                        }
+                    }
+                    val band = _state.value.ageRange.selectedBandToken
+                    if (!band.isNullOrBlank()) {
+                        try {
+                            val r = client.setAgeSelf(band = band, localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
+                            _state.value = _state.value.copy(
+                                ageRange = _state.value.ageRange.copy(recorded = true, error = null)
+                            )
+                            PlatformLogger.i(TAG, "claimLocalNodeOwnership: age band '$band' recorded post-claim ($r)")
+                        } catch (e: Exception) {
+                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: post-claim age record failed: ${e.message}")
+                            _state.value = _state.value.copy(
+                                ageRange = _state.value.ageRange.copy(
+                                    recorded = false,
+                                    error = "Couldn't record your age range yet: ${e.message ?: "unknown error"}",
+                                )
+                            )
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "claimLocalNodeOwnership: self-claim via local node failed: ${e.message}")
                 val msg = e.message.orEmpty()
