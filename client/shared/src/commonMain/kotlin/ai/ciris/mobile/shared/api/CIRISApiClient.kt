@@ -1872,6 +1872,182 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Register an accord holder** — `POST {nodeUrl}/v1/accord/holder`
+     * (owner-session-gated). Admits a holder's self-signed `accord_holder`
+     * [holderRecord] (+ the optional `portable_2fa` [custodyAttestation] from
+     * provisioning, verified against the pinned Yubico root). The two artifacts
+     * are the verbatim ones [provisionAccordHolder] returned; the app never
+     * inspects them. Used by the genesis ceremony to register each of the 6 keys.
+     */
+    suspend fun registerAccordHolder(
+        holderRecord: kotlinx.serialization.json.JsonElement,
+        custodyAttestation: kotlinx.serialization.json.JsonElement? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ) {
+        val method = "registerAccordHolder"
+        logInfo(method, "POST $nodeUrl/v1/accord/holder")
+        val client = federationHttpClient()
+        try {
+            val bodyJson = buildJsonObject {
+                put("key_record", holderRecord)
+                custodyAttestation?.let { put("custody_attestation", it) }
+            }
+            val response = client.post("$nodeUrl/v1/accord/holder") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("register holder failed: ${response.status}: ${raw.take(220)}")
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Build the genesis family envelope** —
+     * `POST {nodeUrl}/v1/accord/genesis/envelope` (owner-gated). Returns the
+     * canonical, JCS-significant envelope over the PRIMARY [memberKeyIds] (fixed
+     * order). The holders co-sign it byte-for-byte; the app NEVER rebuilds it.
+     */
+    suspend fun genesisEnvelope(
+        memberKeyIds: List<String>,
+        familyName: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.GenesisEnvelopeResponse {
+        val method = "genesisEnvelope"
+        logInfo(method, "POST $nodeUrl/v1/accord/genesis/envelope members=${memberKeyIds.size}")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                familyName?.takeIf { it.isNotBlank() }?.let { put("family_name", JsonPrimitive(it)) }
+                put("member_key_ids", JsonArray(memberKeyIds.map { JsonPrimitive(it.trim()) }))
+            }
+            val response = client.post("$nodeUrl/v1/accord/genesis/envelope") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("genesis envelope failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisEnvelopeResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Cosign the genesis family envelope** —
+     * `POST {nodeUrl}/v1/accord/family/cosign` (loopback-only, `pkcs11`-gated).
+     * One PRIMARY holder RE-INSERTS their YubiKey; the node re-opens it + the
+     * USB-wrapped ML-DSA half and cosigns the verbatim [envelope]. The physical
+     * touch IS the holder's consent. Returns `{ signature, member }` — the app
+     * collects them and relays them to [genesisAssemble]. The app does NO crypto.
+     */
+    suspend fun cosignAccordFamily(
+        keyId: String,
+        mldsaUsbPath: String,
+        envelope: kotlinx.serialization.json.JsonElement,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CosignFamilyResponse {
+        val method = "cosignAccordFamily"
+        logInfo(method, "POST $nodeUrl/v1/accord/family/cosign key_id=$keyId usb=$mldsaUsbPath")
+        val client = federationHttpClient()
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(keyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("envelope", envelope)
+                put("pkcs11", pkcs11)
+            }
+            val response = client.post("$nodeUrl/v1/accord/family/cosign") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("cosign family failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CosignFamilyResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Assemble the genesis** — `POST {nodeUrl}/v1/accord/genesis/assemble`
+     * (owner-gated). Verifies the 2-of-3 founder quorum over the verbatim
+     * [envelope] using the collected [founders] (`ThresholdMember`s) + [signatures]
+     * (`ThresholdSignature`s) from [cosignAccordFamily], then returns the assembled
+     * genesis — the cold-start bake artifact (CIRISVerify#107) the operator SAVES.
+     */
+    suspend fun genesisAssemble(
+        envelope: kotlinx.serialization.json.JsonElement,
+        founders: List<kotlinx.serialization.json.JsonElement>,
+        signatures: List<kotlinx.serialization.json.JsonElement>,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.GenesisAssembleResponse {
+        val method = "genesisAssemble"
+        logInfo(method, "POST $nodeUrl/v1/accord/genesis/assemble founders=${founders.size} sigs=${signatures.size}")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                put("envelope", envelope)
+                put("founders", JsonArray(founders))
+                put("signatures", JsonArray(signatures))
+            }
+            val response = client.post("$nodeUrl/v1/accord/genesis/assemble") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("genesis assemble failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisAssembleResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO

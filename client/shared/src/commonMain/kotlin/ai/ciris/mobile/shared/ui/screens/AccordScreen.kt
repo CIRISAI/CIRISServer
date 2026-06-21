@@ -61,6 +61,13 @@ import androidx.compose.ui.unit.sp
 fun AccordScreen(
     viewModel: AccordViewModel,
     onBack: () -> Unit,
+    /**
+     * Open the guided genesis ceremony. Shown ONLY when no accord family is
+     * registered yet (i.e. `getAccordFamily()` 404s) — this is how a founder trio
+     * stands up a NEW mesh's 2-of-3 human kill-switch. When a family exists the
+     * roster is shown as today (no CTA).
+     */
+    onStartCeremony: () -> Unit = {},
 ) {
     val family by viewModel.family.collectAsState()
     val holders by viewModel.holders.collectAsState()
@@ -154,6 +161,40 @@ fun AccordScreen(
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Found-a-new-accord CTA — only when NO family exists yet. This is
+                // the entry to the guided genesis ceremony (6 keys / 3 humans).
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth().testable("accord_ceremony_cta"),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text(
+                            localizedString("mobile.accord_ceremony_cta_title"),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            localizedString("mobile.accord_ceremony_cta_desc"),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = onStartCeremony,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testableClickable("btn_accord_start_ceremony") { onStartCeremony() },
+                        ) {
+                            Icon(CIRISIcons.shield, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(localizedString("mobile.accord_ceremony_cta_btn"))
+                        }
+                    }
+                }
             } else if (fam != null) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),

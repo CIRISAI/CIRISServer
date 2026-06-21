@@ -209,6 +209,20 @@ sealed class NavSurface(
         labelKey = "nav.surface.provision_accord_holder",
     )
 
+    /**
+     * Accord Genesis Ceremony — the foolproof guided wizard (CIRISServer #41) that
+     * stands up a NEW mesh's 2-of-3 human kill-switch: 3 humans, each a primary
+     * SEAT + a cold SPARE (6 keys). Provisions + registers each key, then the 3
+     * primaries cosign the family envelope and the node assembles the genesis (the
+     * cold-start bake artifact). Reachable from the Accord screen ONLY when no
+     * accord family exists yet. Drives the loopback + owner-gated accord endpoints;
+     * the app holds no keys (the re-inserted YubiKey signs). Live (no gate).
+     */
+    object AccordCeremony : NavSurface(
+        id = "accord-ceremony", label = "Genesis Ceremony", icon = CIRISIcons.shield,
+        labelKey = "nav.surface.accord_ceremony",
+    )
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Safety group — the holistic SAFETY surface (CIRISServer v0.4.6
     // /v1/safety/*). Safety is built in FIRST, ahead of content: a Discord /
