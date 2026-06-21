@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "6.7.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
+version = "6.9.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.9.0#3e9c0944e3bbf841c98729e061e4887b362cda6e"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -825,7 +825,7 @@ dependencies = [
  "ml-kem",
  "p256",
  "pbkdf2",
- "pkcs8 0.11.0-rc.11",
+ "pkcs8 0.11.0",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "ring",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "6.2.2"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.2#17af7326504f266fc5b21ec36d07707463ac7c02"
+version = "6.2.3"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.3#9ae72312e801cbe682b15c5fa4778602c7fa36ef"
 dependencies = [
  "async-trait",
  "axum",
@@ -895,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "6.7.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
+version = "6.9.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.9.0#3e9c0944e3bbf841c98729e061e4887b362cda6e"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -960,8 +960,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "9.4.1"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.4.1#5e10ff5507bed53c0b3428c4254ac0ec235cff07"
+version = "9.9.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.9.0#45f7037a85fd9fe0fdc328f0babdf6d9e2470fa4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.24"
+version = "0.5.25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1040,8 +1040,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "6.7.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
+version = "6.9.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.9.0#3e9c0944e3bbf841c98729e061e4887b362cda6e"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -3516,17 +3516,17 @@ dependencies = [
 
 [[package]]
 name = "ml-dsa"
-version = "0.1.0-rc.8"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5b2bb0ad6fa2b40396775bd56f51345171490fef993f46f91a876ecdbdaea55"
+checksum = "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
 dependencies = [
  "const-oid 0.10.2",
+ "crypto-common 0.2.2",
  "ctutils",
  "hybrid-array",
  "module-lattice",
- "pkcs8 0.11.0-rc.11",
- "rand_core 0.10.1",
- "sha3 0.11.0",
+ "pkcs8 0.11.0",
+ "shake",
  "signature 3.0.0",
  "zeroize",
 ]
@@ -4152,9 +4152,9 @@ dependencies = [
 
 [[package]]
 name = "pkcs8"
-version = "0.11.0-rc.11"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12922b6296c06eb741b02d7b5161e3aaa22864af38dfa025a1a3ba3f68c84577"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
  "der 0.8.0",
  "spki 0.8.0",
@@ -5596,6 +5596,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shake"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09057cb2149ad4cbd2da1e26b351f9a4c354219421229c69c3063e6f61947c4a"
+dependencies = [
+ "digest 0.11.3",
+ "keccak 0.2.0",
+ "sponge-cursor",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5721,6 +5732,12 @@ dependencies = [
  "base64ct",
  "der 0.8.0",
 ]
+
+[[package]]
+name = "sponge-cursor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
 name = "stable_deref_trait"
