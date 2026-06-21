@@ -401,6 +401,18 @@ pub struct SignedOwnerBinding {
     pub ed25519_sig_b64: String,
     /// The user's ML-DSA-65 signature over the JCS-canonical bytes of `envelope`.
     pub ml_dsa_65_sig_b64: String,
+    /// The user's Ed25519 signature over the JCS-canonical bytes of the **key
+    /// registration envelope** (`{ "key_id": <user_key_id> }`) — so the user's
+    /// `federation_keys` row can be admitted through the canonical
+    /// [`Engine::register_federation_key`] gate (which re-verifies the scrub
+    /// signature over the registration envelope), not the bypass `put_public_key`
+    /// (CIRISServer#31). `None` for legacy bindings produced before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reg_envelope_ed25519_sig_b64: Option<String>,
+    /// The user's ML-DSA-65 signature over the registration-envelope canonical
+    /// bytes (the PQC half of [`Self::reg_envelope_ed25519_sig_b64`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reg_envelope_ml_dsa_65_sig_b64: Option<String>,
 }
 
 /// **Claiming side (substrate-native).** Build a COMPLETE, user-signed
@@ -436,6 +448,17 @@ pub async fn build_signed_owner_binding(
         .await
         .map_err(|e| OwnershipError::Sign(e.to_string()))?;
 
+    // ALSO sign the key REGISTRATION envelope so the receiver can admit the user's
+    // federation_keys row through the canonical register_federation_key gate
+    // (CIRISServer#31) — the same `{ "key_id" }` PoP shape every other identity
+    // registers under, canonicalized identically (ceg_produce_canonicalize).
+    let reg_envelope = serde_json::json!({ "key_id": user_key_id });
+    let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
+    let reg_sig = user_signer
+        .sign_hybrid(&reg_canonical)
+        .await
+        .map_err(|e| OwnershipError::Sign(e.to_string()))?;
+
     Ok(SignedOwnerBinding {
         envelope,
         attesting_key_id: user_key_id,
@@ -443,6 +466,8 @@ pub async fn build_signed_owner_binding(
         ml_dsa_65_pubkey_b64: B64.encode(&sig.pqc.public_key),
         ed25519_sig_b64: B64.encode(&sig.classical.signature),
         ml_dsa_65_sig_b64: B64.encode(&sig.pqc.signature),
+        reg_envelope_ed25519_sig_b64: Some(B64.encode(&reg_sig.classical.signature)),
+        reg_envelope_ml_dsa_65_sig_b64: Some(B64.encode(&reg_sig.pqc.signature)),
     })
 }
 
@@ -589,6 +614,29 @@ async fn register_user_key(
     let now = chrono::Utc::now();
     let reg_envelope = serde_json::json!({ "key_id": binding.attesting_key_id });
     let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
+
+    // CIRISServer#31: prefer the AUTHORITATIVE admission gate. When the binding
+    // carries a registration-envelope signature (the canonical hybrid PoP over
+    // `{ key_id }` — the SAME shape every other identity registers under), the
+    // scrub signature signs the registration envelope, so the row is admissible
+    // through `Engine::register_federation_key`, which RE-VERIFIES it → a
+    // verifiable row. A legacy binding (no reg sig) falls back to the bypass
+    // `put_public_key` with the owner-binding signatures as scrub material (the
+    // row is PoP-proven by apply_signed_owner_binding's verify_hybrid over the
+    // binding bytes, but is not re-verifiable by the admission gate).
+    let via_gate = match (
+        &binding.reg_envelope_ed25519_sig_b64,
+        &binding.reg_envelope_ml_dsa_65_sig_b64,
+    ) {
+        (Some(ed), Some(pqc)) => Some((ed.clone(), pqc.clone())),
+        _ => None,
+    };
+    let (scrub_ed, scrub_pqc) = via_gate.clone().unwrap_or_else(|| {
+        (
+            binding.ed25519_sig_b64.clone(),
+            binding.ml_dsa_65_sig_b64.clone(),
+        )
+    });
     let record = KeyRecord {
         key_id: binding.attesting_key_id.clone(),
         pubkey_ed25519_base64: binding.ed25519_pubkey_b64.clone(),
@@ -601,11 +649,8 @@ async fn register_user_key(
         valid_until: None,
         registration_envelope: reg_envelope,
         original_content_hash: hex::encode(Sha256::digest(&reg_canonical)),
-        // The user's owner-binding signatures (over the binding canonical bytes),
-        // recorded as scrub material for row-shape completeness. PoP was verified
-        // by apply_signed_owner_binding over those same bytes.
-        scrub_signature_classical: binding.ed25519_sig_b64.clone(),
-        scrub_signature_pqc: Some(binding.ml_dsa_65_sig_b64.clone()),
+        scrub_signature_classical: scrub_ed,
+        scrub_signature_pqc: Some(scrub_pqc),
         scrub_key_id: binding.attesting_key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
@@ -613,11 +658,19 @@ async fn register_user_key(
         roles: Vec::new(),
         attestation_evidence: None,
     };
-    engine
-        .federation_directory()
-        .put_public_key(SignedKeyRecord { record })
-        .await
-        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    let signed = SignedKeyRecord { record };
+    if via_gate.is_some() {
+        engine
+            .register_federation_key(signed)
+            .await
+            .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    } else {
+        engine
+            .federation_directory()
+            .put_public_key(signed)
+            .await
+            .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    }
     Ok(())
 }
 

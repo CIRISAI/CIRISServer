@@ -643,3 +643,59 @@ mod agent_cross_fidelity {
         assert_eq!(decode(AGENT_QR_WITH_HINTS).unwrap(), nc);
     }
 }
+
+/// CIRISServer#29 — pin ciris-server's NodeCode codec against verify's `fedcode`,
+/// the REFERENCE codec (already a dependency via src/identity.rs). The
+/// `agent_cross_fidelity` vectors above pin us to the agent's Python port; this
+/// pins us to `fedcode`, so verify and ciris-server cannot silently diverge on the
+/// `CIRIS-V1-` wire. (Emit stays v1; `fedcode::decode` round-trips legacy v1.)
+#[cfg(test)]
+mod fedcode_cross_fidelity {
+    use super::*;
+    use ciris_verify_core::fedcode;
+
+    #[test]
+    fn nodecode_v1_decodes_identically_through_fedcode() {
+        // With hints.
+        let nc = NodeCode {
+            key_id: "ciris-canonical-node".into(),
+            pubkey_ed25519_base64: B64.encode((1u8..=32).collect::<Vec<u8>>()),
+            transport_hint: Some("https://node.example.org".into()),
+            alias_hint: Some("Node A".into()),
+        };
+        let code = encode(&nc).expect("nodecode encode");
+        let ours = decode(&code).expect("nodecode decode");
+        let theirs = fedcode::decode(&code).expect("fedcode decode (reference codec)");
+        assert_eq!(theirs.key_id, nc.key_id, "key_id divergence");
+        assert_eq!(
+            theirs.pubkey_ed25519_base64, nc.pubkey_ed25519_base64,
+            "pubkey divergence"
+        );
+        assert_eq!(
+            theirs.transport_hint, nc.transport_hint,
+            "transport_hint divergence"
+        );
+        assert_eq!(theirs.alias_hint, nc.alias_hint, "alias_hint divergence");
+        assert!(
+            matches!(theirs.kind, fedcode::FedKind::Node),
+            "a v1 NodeCode must decode as FedKind::Node"
+        );
+        assert_eq!(
+            ours.key_id, theirs.key_id,
+            "ciris-server vs fedcode disagree"
+        );
+
+        // No hints.
+        let nc2 = NodeCode {
+            key_id: "node-a".into(),
+            pubkey_ed25519_base64: B64.encode([7u8; 32]),
+            transport_hint: None,
+            alias_hint: None,
+        };
+        let code2 = encode(&nc2).expect("encode no-hints");
+        let theirs2 = fedcode::decode(&code2).expect("fedcode decode no-hints");
+        assert_eq!(theirs2.key_id, "node-a");
+        assert_eq!(theirs2.transport_hint, None);
+        assert_eq!(theirs2.pubkey_ed25519_base64, nc2.pubkey_ed25519_base64);
+    }
+}
