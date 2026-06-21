@@ -19,16 +19,33 @@
 //!      holder set + an [`InvocationDedup`] anti-replay window. The verify CLI's
 //!      local quorum is advisory; THIS is canonical (against `federation_keys`).
 //!
-//! ## What is NOT here yet (and why the mesh waits)
+//! ## Genesis ceremony + invocation concurrence (v0.5.17, verify v6.7.1)
 //!
-//! The accord keys MUST be held under the **portable high-secure key mode** (FIPS
-//! YubiKey + USB-held ML-DSA, both-keys+PIN+touch — CIRISVerify#91) and the
-//! multi-party genesis ceremony (co-sign → assemble) + family-management UX
-//! (CIRISServer#41 screens 1/2/4) are follow-ons. The canonical mesh stays on the
-//! 0.5.X series — 0.6 (+registry) bakes `CANONICAL_BOOTSTRAP_PEERS` and bootstraps
-//! the mesh, which MUST NOT happen before the accord kill-switch is enforceable
-//! AND its keys are under genuine 2-factor distributed-human custody.
+//! - `POST /v1/accord/genesis/envelope` → `assemble` (`accord_genesis`,
+//!   2-of-3 distinct-founder quorum, fail-closed) → the verified
+//!   `accord_family_genesis` is durably recorded as a node-authored CEG
+//!   attestation (the accord family is FOUNDER-signed — it has no family keypair,
+//!   so it is NOT stored in `federation_families`, whose `family_key_id` FKs to
+//!   `federation_keys`; the signed genesis object IS the record). `GET
+//!   /v1/accord/family` projects the entrenched `quorum:2/3` family from it.
+//! - `POST /v1/accord/invocation` (open) / `…/concur` (advance) + `GET
+//!   /v1/accord/invocations` — the multi-party path that accumulates holder
+//!   cosignatures toward the 2-of-3 (advisory status; `verify-invocation` is
+//!   authoritative against `federation_keys`).
+//!
+//! ## What is NOT here yet (and why the mesh still waits)
+//!
+//! The accord keys are held under verify v6.7.1's **portable high-secure key
+//! mode** (FIPS YubiKey + USB-held ML-DSA — CIRISVerify#91, resolved); the
+//! HOLDER-DEVICE provisioning tool (wiring `UsbWrappedMlDsa65Signer` +
+//! `produce_accord_custody_attestation`) + the KMP ceremony/concurrence UI are
+//! the remaining follow-ons, and the real YubiKey token open is blocked on
+//! CIRISVerify#62 (`get_token_signer` is stubbed). The canonical mesh stays on
+//! 0.5.X — 0.6 (+registry) bakes `CANONICAL_BOOTSTRAP_PEERS` and bootstraps the
+//! mesh, which MUST NOT happen before the kill-switch is enforceable AND the
+//! accord keys are under genuine 2-factor distributed-human custody.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -37,8 +54,15 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use ciris_persist::federation::types::{identity_type, SignedKeyRecord};
+use ciris_persist::federation::types::{identity_type, KeyRecord, SignedKeyRecord};
+use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
+use ciris_verify_core::accord_genesis::{
+    accord_invocation_status, assemble_accord_family_genesis, build_accord_family_envelope,
+    build_accord_invocation_object, parse_accord_invocation, ACCORD_CONSENSUS_PROTOCOL,
+    ACCORD_FAMILY_GENESIS_KIND, ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
+};
+use ciris_verify_core::ceg_outbox::SignedCegObject;
 use ciris_verify_core::humanity_accord::{verify_invocation, Invocation, InvocationDedup};
 use ciris_verify_core::threshold::{ThresholdMember, ThresholdSignature};
 
@@ -56,6 +80,30 @@ struct AccordState {
     /// within its `valid_until`. In-memory (a node restart re-opens the window);
     /// the canonical 2-of-3 holder signatures are the load-bearing check.
     dedup: Arc<Mutex<InvocationDedup>>,
+    /// Pending accord-invocation objects keyed by `(invocation_kind, invocation_id)`
+    /// while holders concur toward the 2-of-3. Ephemeral coordination state (a node
+    /// restart drops in-flight invocations); the durable artifact is the assembled
+    /// invocation's holder cosignatures, re-verifiable against `federation_keys`.
+    pending: Arc<Mutex<HashMap<(String, String), SignedCegObject>>>,
+}
+
+/// Build the registered accord-holder set as `threshold::ThresholdMember`s (the
+/// roster the genesis/invocation producers + `verify_invocation` resolve against).
+async fn registered_holders(engine: &Engine) -> Result<Vec<ThresholdMember>, Response> {
+    let rows: Vec<KeyRecord> = engine
+        .federation_directory()
+        .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
+        .await
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ThresholdMember {
+            member_id: r.key_id,
+            ed25519_public_key_base64: r.pubkey_ed25519_base64,
+            mldsa65_public_key_base64: r.pubkey_ml_dsa_65_base64,
+            role: None,
+        })
+        .collect())
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
@@ -279,11 +327,316 @@ async fn verify_invocation_handler(
     }
 }
 
+// ─── Genesis ceremony (CC 4.2 / §9 — build envelope → assemble 2/3 → entrench) ─
+
+#[derive(Debug, Deserialize)]
+struct GenesisEnvelopeRequest {
+    #[serde(default)]
+    family_name: Option<String>,
+    /// The accord-holder `key_id`s, in a FIXED order (JCS-significant — every
+    /// holder + the assembler MUST co-sign the SAME envelope byte-for-byte).
+    member_key_ids: Vec<String>,
+}
+
+/// `POST /v1/accord/genesis/envelope` (owner-gated) — build the canonical
+/// `accord_family` envelope the holders co-sign. Returns it verbatim; the holders
+/// sign `accord_family_signing_bytes(envelope)` on their OWN tokens.
+async fn genesis_envelope(
+    State(st): State<AccordState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: GenesisEnvelopeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let family_name = req
+        .family_name
+        .unwrap_or_else(|| "HUMANITY_ACCORD".to_string());
+    let envelope = build_accord_family_envelope(
+        HUMANITY_ACCORD_FAMILY_KEY_ID,
+        &family_name,
+        &req.member_key_ids,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "envelope": envelope })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct GenesisAssembleRequest {
+    /// The exact envelope from [`genesis_envelope`] (re-canonicalized; never re-built).
+    envelope: serde_json::Value,
+    /// The founder set (`role: Founder`), one per co-signing holder.
+    founders: Vec<ThresholdMember>,
+    /// The collected founder co-signatures (≥ 2 distinct, 2-of-3).
+    signatures: Vec<ThresholdSignature>,
+}
+
+/// `POST /v1/accord/genesis/assemble` (owner-gated) — verify the 2-of-3 founder
+/// quorum over the envelope ([`assemble_accord_family_genesis`], distinct-key +
+/// founder-role gated, fail-closed) and, on success, ENTRENCH the family as a
+/// `quorum:2/3` `Family` row ([`FederationDirectory::put_family`]). The assembled
+/// genesis `SignedCegObject` is returned for relay/audit. (Holders are registered
+/// separately via `POST /v1/accord/holder`.)
+async fn genesis_assemble(
+    State(st): State<AccordState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: GenesisAssembleRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let now = chrono::Utc::now();
+    let genesis = match assemble_accord_family_genesis(
+        &req.envelope,
+        &req.founders,
+        &req.signatures,
+        &now.to_rfc3339(),
+    ) {
+        Ok(obj) => obj,
+        // Fail-closed: a short/duplicate/non-founder quorum is a 409, not a 500.
+        Err(e) => return err(StatusCode::CONFLICT, &format!("assemble genesis: {e}")),
+    };
+
+    // The verified genesis is durably recorded as a node-authored CEG attestation
+    // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`.
+    // (We do NOT use the federation_families table: its family_key_id FKs to
+    // federation_keys, but the accord family is FOUNDER-signed — it has no family
+    // keypair to register. The signed genesis object IS the durable record.)
+    let member_ids: Vec<String> = req.envelope["members"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("key_id").and_then(|v| v.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut input =
+        EmitAttestationInput::with_envelope(ACCORD_FAMILY_GENESIS_KIND, genesis.body.clone());
+    input.subject_key_ids = member_ids.clone();
+    if let Err(e) = st.engine.emit_attestation_self(input).await {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("record accord family genesis: {e}"),
+        );
+    }
+    tracing::info!(
+        family = %HUMANITY_ACCORD_FAMILY_KEY_ID,
+        holders = member_ids.len(),
+        "assembled + recorded the HUMANITY_ACCORD family genesis (quorum:2/3, entrenched)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "family_key_id": HUMANITY_ACCORD_FAMILY_KEY_ID,
+            "entrenched": true,
+            "consensus_protocol": ACCORD_CONSENSUS_PROTOCOL,
+            "genesis": genesis,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family (cold-start
+/// read), projected from the latest `accord_family_genesis` CEG record. 404 until
+/// genesis is assembled.
+async fn get_family(State(st): State<AccordState>) -> Response {
+    let node_id = match st.engine.local_derived_key_id().await {
+        Ok(id) => id,
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("derive node id: {e}"),
+            )
+        }
+    };
+    let rows = match st
+        .engine
+        .federation_directory()
+        .list_attestations_by(&node_id)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    };
+    // The latest genesis record (by asserted_at); its envelope is the genesis body
+    // `{ family, founder_signatures }` — the `family` is the §9 entrenched envelope.
+    let latest = rows
+        .into_iter()
+        .filter(|a| a.attestation_type == ACCORD_FAMILY_GENESIS_KIND)
+        .max_by_key(|a| a.asserted_at);
+    let Some(att) = latest else {
+        return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet");
+    };
+    let family = &att.attestation_envelope["family"];
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "family_key_id": family.get("family_key_id").cloned().unwrap_or(serde_json::json!(HUMANITY_ACCORD_FAMILY_KEY_ID)),
+            "family_name": family.get("family_name").cloned().unwrap_or(serde_json::Value::Null),
+            "consensus_protocol": family.get("consensus_protocol").cloned().unwrap_or(serde_json::json!(ACCORD_CONSENSUS_PROTOCOL)),
+            "entrenched": family.get("consensus_protocol_entrenched").cloned().unwrap_or(serde_json::json!(true)),
+            "members": family.get("members").cloned().unwrap_or(serde_json::json!([])),
+        })),
+    )
+        .into_response()
+}
+
+// ─── Invocation concurrence (the multi-party path to the 2/3 kill-switch) ──────
+
+#[derive(Debug, Deserialize)]
+struct CreateInvocationRequest {
+    invocation: Invocation,
+    /// The initiating holder's cosignature (produced on the holder's device).
+    signature: ThresholdSignature,
+}
+
+/// `POST /v1/accord/invocation` — open a pending invocation with the initiating
+/// holder's cosignature. The roster is the registered accord-holder set. Returns
+/// the invocation object + its (sub-quorum) status.
+async fn create_invocation(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: CreateInvocationRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let roster = match registered_holders(&st.engine).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let obj = build_accord_invocation_object(
+        HUMANITY_ACCORD_FAMILY_KEY_ID,
+        &roster,
+        &req.invocation,
+        &[req.signature],
+        &now,
+    );
+    let key = (
+        req.invocation.invocation_kind.as_str().to_string(),
+        req.invocation.invocation_id.clone(),
+    );
+    st.pending
+        .lock()
+        .expect("pending lock")
+        .insert(key, obj.clone());
+    invocation_response(&obj)
+}
+
+#[derive(Debug, Deserialize)]
+struct ConcurRequest {
+    invocation_kind: String,
+    invocation_id: String,
+    /// A concurring holder's cosignature (produced on the holder's device).
+    signature: ThresholdSignature,
+}
+
+/// `POST /v1/accord/invocation/concur` — append a concurring holder's cosignature
+/// to a pending invocation, advancing it toward the 2-of-3. The submitted
+/// signature is the holder's (the server holds no holder key); an invalid one
+/// simply does not count toward the quorum that `accord_invocation_status` reads.
+async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: ConcurRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let key = (req.invocation_kind.clone(), req.invocation_id.clone());
+    let existing = {
+        let pending = st.pending.lock().expect("pending lock");
+        pending.get(&key).cloned()
+    };
+    let Some(existing) = existing else {
+        return err(StatusCode::NOT_FOUND, "unknown pending invocation");
+    };
+    let parsed = match parse_accord_invocation(&existing) {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("parse: {e}")),
+    };
+    let mut signatures = parsed.signatures;
+    signatures.push(req.signature);
+    let now = chrono::Utc::now().to_rfc3339();
+    let rebuilt = build_accord_invocation_object(
+        &parsed.family_key_id,
+        &parsed.roster,
+        &parsed.invocation,
+        &signatures,
+        &now,
+    );
+    st.pending
+        .lock()
+        .expect("pending lock")
+        .insert(key, rebuilt.clone());
+    invocation_response(&rebuilt)
+}
+
+/// `GET /v1/accord/invocations` — the pending invocations + their concurrence
+/// status (advisory; the authoritative 2/3 check is `verify-invocation`).
+async fn list_invocations(State(st): State<AccordState>) -> Response {
+    let objs: Vec<SignedCegObject> = st
+        .pending
+        .lock()
+        .expect("pending lock")
+        .values()
+        .cloned()
+        .collect();
+    let invocations: Vec<serde_json::Value> = objs
+        .iter()
+        .filter_map(|o| parse_accord_invocation(o).ok())
+        .filter_map(|p| accord_invocation_status(&p).ok())
+        .map(|s| {
+            serde_json::json!({
+                "invocation_kind": s.invocation_kind,
+                "invocation_id": s.invocation_id,
+                "quorum_met": s.quorum_met,
+                "quorum_threshold": s.quorum_threshold,
+                "valid_signers": s.valid_signers,
+                "roster_member_ids": s.roster_member_ids,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "invocations": invocations })),
+    )
+        .into_response()
+}
+
+/// Build the per-invocation response (object + parsed status).
+fn invocation_response(obj: &SignedCegObject) -> Response {
+    let status = parse_accord_invocation(obj)
+        .ok()
+        .and_then(|p| accord_invocation_status(&p).ok());
+    let (quorum_met, valid_signers, threshold) = match &status {
+        Some(s) => (s.quorum_met, s.valid_signers.clone(), s.quorum_threshold),
+        None => (false, Vec::new(), ACCORD_QUORUM_THRESHOLD),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "invocation": obj,
+            "quorum_met": quorum_met,
+            "valid_signers": valid_signers,
+            "quorum_threshold": threshold,
+        })),
+    )
+        .into_response()
+}
+
 /// The accord router — merge onto the read-API listener.
 pub fn router(engine: Arc<Engine>) -> Router {
     let state = AccordState {
         engine,
         dedup: Arc::new(Mutex::new(InvocationDedup::new())),
+        pending: Arc::new(Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/v1/accord/holder", axum::routing::post(register_holder))
@@ -291,6 +644,29 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/verify-invocation",
             axum::routing::post(verify_invocation_handler),
+        )
+        // genesis ceremony
+        .route(
+            "/v1/accord/genesis/envelope",
+            axum::routing::post(genesis_envelope),
+        )
+        .route(
+            "/v1/accord/genesis/assemble",
+            axum::routing::post(genesis_assemble),
+        )
+        .route("/v1/accord/family", axum::routing::get(get_family))
+        // invocation concurrence
+        .route(
+            "/v1/accord/invocation",
+            axum::routing::post(create_invocation),
+        )
+        .route(
+            "/v1/accord/invocation/concur",
+            axum::routing::post(concur_invocation),
+        )
+        .route(
+            "/v1/accord/invocations",
+            axum::routing::get(list_invocations),
         )
         .with_state(state)
 }
