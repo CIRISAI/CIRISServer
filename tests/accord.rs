@@ -23,6 +23,9 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use ciris_verify_core::humanity_accord::{Invocation, InvocationKind};
 
+use ciris_verify_core::accord_genesis::accord_family_signing_bytes;
+use ciris_verify_core::threshold::{Role, ThresholdMember, ThresholdSignature};
+
 use ciris_server::accord;
 use ciris_server::auth::store;
 
@@ -43,7 +46,49 @@ async fn node() -> Arc<Engine> {
     let engine = Engine::with_signer(signer, "sqlite::memory:")
         .await
         .expect("Engine::with_signer (sqlite::memory:) must succeed");
-    Arc::new(engine)
+    let engine = Arc::new(engine);
+    // Register the node's OWN key (under its DERIVED id) so genesis recording via
+    // emit_attestation_self (attester = the node) satisfies the FK. Mirrors prod
+    // compose::register_self_key + the safety-test fixture.
+    register_node_self(&engine).await;
+    engine
+}
+
+/// Register the node's own federation key under its derived id (the genesis
+/// `accord_family_genesis` record is a node-self attestation).
+async fn register_node_self(engine: &Engine) {
+    let now = chrono::Utc::now();
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .expect("derive node key_id");
+    let envelope = serde_json::json!({ "key_id": key_id });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize node envelope");
+    let sig = engine.sign_hybrid(&canonical).await.expect("node sign");
+    let record = KeyRecord {
+        key_id: key_id.clone(),
+        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
+        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: "node".into(),
+        identity_ref: key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .register_federation_key(SignedKeyRecord { record })
+        .await
+        .expect("register node self key");
 }
 
 /// Mint an active `wa_cert` + return a bound session bearer (`sess:<wa_id>:<rand>`).
@@ -155,6 +200,33 @@ impl Holder {
             attestation_evidence: Some(Self::android_attestation_evidence()),
         };
         SignedKeyRecord { record }
+    }
+
+    /// This holder as a `ThresholdMember` (the genesis founder set / roster).
+    async fn threshold_member(&self, role: Option<Role>) -> ThresholdMember {
+        ThresholdMember {
+            member_id: self.key_id.clone(),
+            ed25519_public_key_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
+            mldsa65_public_key_base64: Some(
+                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
+            ),
+            role,
+        }
+    }
+
+    /// Co-sign the accord family envelope (Ed25519 over JCS signing-bytes; ML-DSA
+    /// over bytes ‖ ed_sig) — a founder's genesis cosignature.
+    async fn family_cosign(&self, envelope: &serde_json::Value) -> ThresholdSignature {
+        let bytes = accord_family_signing_bytes(envelope).expect("family signing bytes");
+        let ed_sig = self.ed.sign(&bytes).to_bytes();
+        let mut bound = bytes.clone();
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa family cosign");
+        ThresholdSignature {
+            member_id: self.key_id.clone(),
+            ed25519_signature_base64: BASE64.encode(ed_sig),
+            mldsa65_signature_base64: Some(BASE64.encode(&pqc_sig)),
+        }
     }
 
     /// Cosign an invocation: Ed25519 over the §9.2.1 canonical bytes, ML-DSA-65
@@ -352,4 +424,158 @@ async fn register_holder_without_owner_session_is_rejected() {
         .await
         .expect("observer");
     assert_eq!(forbidden.status(), 403, "non-owner ⇒ 403");
+}
+
+#[tokio::test]
+async fn genesis_ceremony_assembles_and_entrenches_the_family() {
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-gen-a", 0xA1),
+        Holder::new("accord-gen-b", 0xA2),
+        Holder::new("accord-gen-c", 0xA3),
+    ];
+    for h in &holders {
+        let r = client
+            .post(format!("{base}/v1/accord/holder"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "key_record": h.signed_key_record().await }))
+            .send()
+            .await
+            .expect("register holder");
+        assert_eq!(r.status(), 200);
+    }
+    let member_key_ids: Vec<String> = holders.iter().map(|h| h.key_id.clone()).collect();
+
+    // 1. Build the canonical family envelope.
+    let env_resp: serde_json::Value = client
+        .post(format!("{base}/v1/accord/genesis/envelope"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "family_name": "HUMANITY_ACCORD", "member_key_ids": member_key_ids }))
+        .send()
+        .await
+        .expect("build envelope")
+        .json()
+        .await
+        .unwrap();
+    let envelope = env_resp["envelope"].clone();
+    assert!(envelope.is_object(), "got {env_resp}");
+
+    // 2. The full founder roster + a 2-of-3 co-signature set over the envelope.
+    let mut founders = Vec::new();
+    for h in &holders {
+        founders.push(h.threshold_member(Some(Role::Founder)).await);
+    }
+    let signatures = vec![
+        holders[0].family_cosign(&envelope).await,
+        holders[1].family_cosign(&envelope).await,
+    ];
+
+    // 3. Assemble (2/3 verified) + entrench the family.
+    let asm = client
+        .post(format!("{base}/v1/accord/genesis/assemble"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "envelope": envelope, "founders": founders, "signatures": signatures }))
+        .send()
+        .await
+        .expect("assemble");
+    assert_eq!(
+        asm.status(),
+        200,
+        "assemble must succeed: {}",
+        asm.text().await.unwrap_or_default()
+    );
+    let aj: serde_json::Value = asm.json().await.unwrap();
+    assert_eq!(aj["entrenched"], true);
+    assert_eq!(aj["consensus_protocol"], "quorum:2/3");
+
+    // 4. The entrenched family reads back with all 3 members.
+    let fam: serde_json::Value = client
+        .get(format!("{base}/v1/accord/family"))
+        .send()
+        .await
+        .expect("get family")
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fam["consensus_protocol"], "quorum:2/3");
+    assert_eq!(fam["entrenched"], true);
+    assert_eq!(fam["members"].as_array().unwrap().len(), 3, "got {fam}");
+}
+
+#[tokio::test]
+async fn invocation_concurrence_advances_to_quorum() {
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-inv-a", 0xB1),
+        Holder::new("accord-inv-b", 0xB2),
+        Holder::new("accord-inv-c", 0xB3),
+    ];
+    for h in &holders {
+        client
+            .post(format!("{base}/v1/accord/holder"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "key_record": h.signed_key_record().await }))
+            .send()
+            .await
+            .expect("register holder");
+    }
+
+    let inv = drill_invocation("concur-001");
+
+    // Holder A opens the invocation (1 cosignature — sub-quorum).
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/accord/invocation"))
+        .json(&serde_json::json!({ "invocation": inv, "signature": holders[0].cosign(&inv).await }))
+        .send()
+        .await
+        .expect("create invocation")
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        created["quorum_met"], false,
+        "1-of-3 is sub-quorum; got {created}"
+    );
+
+    // Holder B concurs → 2-of-3 quorum met.
+    let concurred: serde_json::Value = client
+        .post(format!("{base}/v1/accord/invocation/concur"))
+        .json(&serde_json::json!({
+            "invocation_kind": "drill", "invocation_id": "concur-001",
+            "signature": holders[1].cosign(&inv).await,
+        }))
+        .send()
+        .await
+        .expect("concur")
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        concurred["quorum_met"], true,
+        "2-of-3 must meet quorum; got {concurred}"
+    );
+
+    // The pending list reflects the met quorum.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/accord/invocations"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .unwrap();
+    let invs = listed["invocations"].as_array().unwrap();
+    assert!(
+        invs.iter()
+            .any(|i| i["invocation_id"] == "concur-001" && i["quorum_met"] == true),
+        "got {listed}"
+    );
 }
