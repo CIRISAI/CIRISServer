@@ -439,3 +439,133 @@ pub async fn run_membership(report: &mut Report) {
         ),
     );
 }
+
+/// The FULL genesis ceremony, software-key: 3 primaries (→ family SEATS) + 3 cold
+/// spares (→ vaulted, registered-not-seated) + assemble. The reference flow the
+/// guided KMP wizard mirrors (the wizard adds the per-key pkcs11 provisioning the
+/// hardware ceremony needs; the registration + genesis orchestration is this).
+pub async fn run_ceremony(report: &mut Report) {
+    println!("\n\x1b[1m▶ ACCORD — full genesis ceremony (3 humans × {{primary, spare}})\x1b[0m");
+    let m = "ceremony";
+    let engine = node().await;
+    let owner = mint_owner_session(&engine).await;
+    let base = serve(
+        std::sync::Arc::clone(&engine),
+        AccordHalt {
+            home: None,
+            peers: Vec::new(),
+            exit_on_halt: false,
+        },
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // 3 humans, each a primary (seat) + a cold spare (vault).
+    let primaries = [
+        SoftId::new("cer-alice-primary", 0x31),
+        SoftId::new("cer-bob-primary", 0x32),
+        SoftId::new("cer-carol-primary", 0x33),
+    ];
+    let spares = [
+        SoftId::new("cer-alice-spare", 0x34),
+        SoftId::new("cer-bob-spare", 0x35),
+        SoftId::new("cer-carol-spare", 0x36),
+    ];
+    // Walk all 6 keys (A1, A2, B1, B2, C1, C2 order), registering each.
+    let order = [
+        &primaries[0],
+        &spares[0],
+        &primaries[1],
+        &spares[1],
+        &primaries[2],
+        &spares[2],
+    ];
+    let mut all_ok = true;
+    for (i, id) in order.iter().enumerate() {
+        let (s, _) = jpost(
+            &client,
+            format!("{base}/v1/accord/holder"),
+            Some(&owner),
+            serde_json::json!({ "key_record": id.signed_key_record("accord_holder").await }),
+        )
+        .await;
+        all_ok &= s == 200;
+        report.record(
+            m,
+            &format!("key {}/6 registered ({})", i + 1, id.key_id),
+            s == 200,
+            "",
+        );
+    }
+    report.check(m, "all 6 keys registered", all_ok, "");
+
+    // Genesis over the 3 PRIMARIES only (the seats); 2/3 cosign → assemble.
+    let member_ids: Vec<String> = primaries.iter().map(|p| p.key_id.clone()).collect();
+    let (_s, env) = jpost(
+        &client,
+        format!("{base}/v1/accord/genesis/envelope"),
+        Some(&owner),
+        serde_json::json!({ "family_name": "HUMANITY_ACCORD", "member_key_ids": member_ids }),
+    )
+    .await;
+    let envelope = env["envelope"].clone();
+    let mut founders = Vec::new();
+    for p in &primaries {
+        founders.push(p.founder_member().await);
+    }
+    let (s, asm) = jpost(
+        &client,
+        format!("{base}/v1/accord/genesis/assemble"),
+        Some(&owner),
+        serde_json::json!({ "envelope": envelope, "founders": founders,
+            "signatures": [primaries[0].family_cosign(&envelope).await, primaries[1].family_cosign(&envelope).await] }),
+    )
+    .await;
+    report.check(
+        m,
+        "assemble family genesis (2/3 founders)",
+        s == 200,
+        format!("status {s}"),
+    );
+    // The signed genesis is the bake artifact (→ CIRISVerify#107).
+    report.check(
+        m,
+        "genesis object emitted (bake artifact for cold-start root)",
+        asm.get("genesis").is_some(),
+        "",
+    );
+
+    // Roster = the 3 SEATS; all 6 registered; the spares are NOT seats.
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let seats: Vec<String> = roster["holders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["key_id"].as_str().unwrap_or("").to_string())
+        .collect();
+    report.check(
+        m,
+        "3 seats = the 3 primaries",
+        roster["seat_count"] == 3 && seats.iter().all(|s| s.ends_with("-primary")),
+        format!("{seats:?}"),
+    );
+    report.check(
+        m,
+        "6 registered (3 seats + 3 vaulted spares)",
+        roster["registered_total"] == 6,
+        format!("registered={}", roster["registered_total"]),
+    );
+    report.check(
+        m,
+        "spares registered but NOT seats",
+        !seats.iter().any(|s| s.ends_with("-spare")),
+        format!("{seats:?}"),
+    );
+}
