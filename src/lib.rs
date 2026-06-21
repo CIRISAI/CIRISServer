@@ -33,6 +33,9 @@ pub mod accord;
 /// self-signed `accord_holder` record + its `portable_2fa` custody attestation
 /// (FIPS YubiKey Ed25519 + USB-wrapped ML-DSA-65; both-keys + PIN + touch).
 pub mod accord_custody;
+/// HUMANITY_ACCORD operational halt (CIRISServer#41) — the disk-latched full halt
+/// + the startup gate that makes the 2-of-3 kill-switch enforceable (CC 4.2.3).
+pub mod accord_halt;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
