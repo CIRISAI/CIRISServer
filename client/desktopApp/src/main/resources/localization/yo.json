@@ -2022,7 +2022,23 @@
     "delegations_empty": "Kò sí àṣẹ tí ń ṣiṣẹ́. Fún ọ̀kan ní àṣẹ lókè.",
     "delegations_revoke": "Fagilé",
     "delegations_subtitle": "Awọn ènìyàn àti aṣojú tí o ti fún ní àṣẹ láti ṣe nǹkan ní orúkọ rẹ.",
-    "delegations_title": "Awọn Aṣẹ-fifúnni"
+    "delegations_title": "Awọn Aṣẹ-fifúnni",
+    "accord_concur": "Fọwọ́sí",
+    "accord_entrenched": "Tí a fìdí múlẹ̀",
+    "accord_family_empty": "Kò sí ìdílé àdéhùn tí a ti dá sílẹ̀ lórí ojú-ọ̀nà yìí síbẹ̀.",
+    "accord_family_title": "Àdéhùn Ẹ̀dá Ènìyàn",
+    "accord_holder_attested": "Tí a fẹ̀rí hàn nípasẹ̀ FIPS / ohun èlò",
+    "accord_holders_desc": "Àwọn olùdásí àdéhùn tí wọ́n lè fọwọ́sí lórí àwọn ìpè. Ọ̀kọ̀ọ̀kan ni a fẹ̀rí hàn nípasẹ̀ FIPS / ohun èlò.",
+    "accord_holders_empty": "Kò sí olùdásí tí a forúkọsílẹ̀.",
+    "accord_holders_title": "Àwọn Olùdásí",
+    "accord_invocations_empty": "Kò sí ìpè tí ó dúró de.",
+    "accord_invocations_title": "Àwọn Ìpè",
+    "accord_kind_constitutional": "ÌPÌLẸ̀-ÒFIN",
+    "accord_kind_drill": "ÌDÁNRÁWÒ",
+    "accord_kind_notify": "FÌFÍTỌ́NI",
+    "accord_quorum": "Iye tó tó {signed} / {threshold}",
+    "accord_subtitle": "Àdéhùn Ẹ̀dá Ènìyàn — àkójọ ìpìlẹ̀ òfin tí ó dúró ṣinṣin tí wọ́n jọ ní agbára ìparí. Áàpù náà kò ní àwọn kọ́kọ́rọ́ kankan; ojú-ọ̀nà náà ni ó fọwọ́sí.",
+    "accord_title": "Àdéhùn"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -2664,7 +2680,8 @@
       "moderation": "Àmójútó",
       "nodes": "Àwọn Ọkàn-ìpadé",
       "safety": "Ààbò",
-      "delegations": "Awọn Aṣẹ-fifúnni"
+      "delegations": "Awọn Aṣẹ-fifúnni",
+      "accord": "Àdéhùn"
     }
   },
   "setup_validation_select_provider": "Yan olùpèsè LLM",

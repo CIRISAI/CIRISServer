@@ -2256,7 +2256,23 @@
     "delegations_empty": "Chưa có ủy quyền nào đang hoạt động. Hãy ủy quyền một cái ở trên.",
     "delegations_revoke": "Thu hồi",
     "delegations_subtitle": "Những người và tác nhân mà bạn đã cho phép hành động thay mặt bạn.",
-    "delegations_title": "Ủy quyền"
+    "delegations_title": "Ủy quyền",
+    "accord_title": "Accord",
+    "accord_subtitle": "Humanity Accord — danh sách hiến định cố hữu cùng nhau nắm giữ công tắc ngắt khẩn cấp. Ứng dụng không giữ khóa nào; nút mạng mới là bên ký.",
+    "accord_family_title": "Humanity Accord",
+    "accord_family_empty": "Chưa có nhóm accord nào được thiết lập trên nút này.",
+    "accord_entrenched": "Cố hữu",
+    "accord_holders_title": "Bên nắm giữ",
+    "accord_holders_desc": "Các bên nắm giữ accord có thể đồng thuận về các lần kích hoạt. Mỗi bên đều được chứng thực FIPS / phần cứng.",
+    "accord_holders_empty": "Chưa có bên nắm giữ nào được đăng ký.",
+    "accord_holder_attested": "Được chứng thực FIPS / phần cứng",
+    "accord_invocations_title": "Lần kích hoạt",
+    "accord_invocations_empty": "Không có lần kích hoạt nào đang chờ.",
+    "accord_kind_constitutional": "HIẾN ĐỊNH",
+    "accord_kind_notify": "THÔNG BÁO",
+    "accord_kind_drill": "DIỄN TẬP",
+    "accord_quorum": "Số phiếu {signed} / {threshold}",
+    "accord_concur": "Đồng thuận"
   },
   "network": {
     "title": "Mạng",
@@ -2664,7 +2680,8 @@
       "moderation": "Kiểm duyệt",
       "nodes": "Các node",
       "safety": "An toàn",
-      "delegations": "Ủy quyền"
+      "delegations": "Ủy quyền",
+      "accord": "Accord"
     }
   },
   "setup_validation_select_provider": "Chọn nhà cung cấp LLM",

@@ -2022,7 +2022,23 @@
     "delegations_approve": "อนุมัติ",
     "delegations_active_title": "การมอบอำนาจที่ใช้งานอยู่",
     "delegations_empty": "ไม่มีการมอบอำนาจที่ใช้งานอยู่ อนุญาตได้ที่ด้านบน",
-    "delegations_revoke": "เพิกถอน"
+    "delegations_revoke": "เพิกถอน",
+    "accord_title": "ข้อตกลง",
+    "accord_subtitle": "ข้อตกลงเพื่อมวลมนุษยชาติ — คณะผู้ถือสิทธิ์ตามรัฐธรรมนูญที่ฝังตัวไว้ ซึ่งร่วมกันถือสวิตช์หยุดฉุกเฉิน แอปไม่ได้เก็บกุญแจใด ๆ โหนดเป็นผู้ลงนาม",
+    "accord_family_title": "ข้อตกลงเพื่อมวลมนุษยชาติ",
+    "accord_family_empty": "ยังไม่มีการจัดตั้งกลุ่มข้อตกลงบนโหนดนี้",
+    "accord_entrenched": "ฝังตัวแล้ว",
+    "accord_holders_title": "ผู้ถือสิทธิ์",
+    "accord_holders_desc": "ผู้ถือสิทธิ์ข้อตกลงที่อาจให้ความเห็นชอบต่อการเรียกใช้ แต่ละรายได้รับการรับรองด้วย FIPS / ฮาร์ดแวร์",
+    "accord_holders_empty": "ยังไม่มีผู้ถือสิทธิ์ลงทะเบียน",
+    "accord_holder_attested": "รับรองด้วย FIPS / ฮาร์ดแวร์",
+    "accord_invocations_title": "การเรียกใช้",
+    "accord_invocations_empty": "ไม่มีการเรียกใช้ที่รอดำเนินการ",
+    "accord_kind_constitutional": "ตามรัฐธรรมนูญ",
+    "accord_kind_notify": "แจ้งเตือน",
+    "accord_kind_drill": "ฝึกซ้อม",
+    "accord_quorum": "องค์ประชุม {signed} / {threshold}",
+    "accord_concur": "เห็นชอบ"
   },
   "conscience": {
     "ponder_attempted": "ฉันได้พยายามที่จะ {action}",
@@ -2664,7 +2680,8 @@
       "moderation": "การกลั่นกรอง",
       "nodes": "โหนด",
       "safety": "ความปลอดภัย",
-      "delegations": "การมอบอำนาจ"
+      "delegations": "การมอบอำนาจ",
+      "accord": "ข้อตกลง"
     }
   },
   "setup_validation_select_provider": "เลือกผู้ให้บริการ LLM",

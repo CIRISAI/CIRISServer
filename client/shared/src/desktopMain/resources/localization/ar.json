@@ -1930,7 +1930,23 @@
     "delegations_approve": "موافقة",
     "delegations_active_title": "التفويضات النشطة",
     "delegations_empty": "لا توجد تفويضات نشطة. فوّض واحدًا أعلاه.",
-    "delegations_revoke": "إلغاء"
+    "delegations_revoke": "إلغاء",
+    "accord_concur": "موافقة",
+    "accord_entrenched": "راسخ",
+    "accord_family_empty": "لم يُنشأ أي ميثاق عائلي على هذه العقدة بعد.",
+    "accord_family_title": "ميثاق الإنسانية",
+    "accord_holder_attested": "موثَّق عبر FIPS / العتاد",
+    "accord_holders_desc": "حاملو الميثاق الذين يجوز لهم الموافقة على الاستدعاءات. كل منهم موثَّق عبر FIPS / العتاد.",
+    "accord_holders_empty": "لا يوجد حاملون مسجَّلون.",
+    "accord_holders_title": "الحاملون",
+    "accord_invocations_empty": "لا توجد استدعاءات معلّقة.",
+    "accord_invocations_title": "الاستدعاءات",
+    "accord_kind_constitutional": "دستوري",
+    "accord_kind_drill": "تدريب",
+    "accord_kind_notify": "إشعار",
+    "accord_quorum": "النصاب {signed} / {threshold}",
+    "accord_subtitle": "ميثاق الإنسانية — القائمة الدستورية الراسخة التي تحمل مفتاح الإيقاف بشكل مشترك. التطبيق لا يحتفظ بأي مفاتيح؛ العقدة هي التي توقّع.",
+    "accord_title": "الميثاق"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "الإشراف",
       "nodes": "العُقد",
       "safety": "الأمان",
-      "delegations": "التفويضات"
+      "delegations": "التفويضات",
+      "accord": "الميثاق"
     }
   },
   "setup_validation_select_provider": "اختر مزوّد LLM",

@@ -185,6 +185,16 @@ sealed class NavSurface(
     object Delegations : NavSurface("delegations", "Delegations", CIRISIcons.keySecure,
         labelKey = "nav.surface.delegations",)
 
+    /**
+     * Accord — the HUMANITY_ACCORD constitutional surface (CIRISServer #41). The
+     * entrenched accord family + its `quorum:2/3` kill-switch consensus protocol,
+     * the FIPS / hardware-attested holder roster, and the pending invocations
+     * (with the CC 4.2.1 per-kind visual treatment) the local holder may concur
+     * on. Read view + owner-gated concur; the app holds no keys. Live (no gate).
+     */
+    object Accord : NavSurface("accord", "Accord", CIRISIcons.shield,
+        labelKey = "nav.surface.accord",)
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Safety group — the holistic SAFETY surface (CIRISServer v0.4.6
     // /v1/safety/*). Safety is built in FIRST, ahead of content: a Discord /
@@ -440,6 +450,7 @@ val MANAGE_GROUP = NavGroup(
         NavSurface.Nodes,           // first-class node management (CRUD + switch)
         NavSurface.ManageConsent,   // consent:replication + user-data consent
         NavSurface.Delegations,     // device-auth grants — authorize an agent on-behalf
+        NavSurface.Accord,          // HUMANITY_ACCORD — constitutional 2/3 kill-switch
         NavSurface.Users,
         NavSurface.Adapters,
         // The substrate operator-infra trio: Edge / Verify / Persist.

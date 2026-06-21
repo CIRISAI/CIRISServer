@@ -2022,7 +2022,23 @@
     "delegations_approve": "Setujui",
     "delegations_active_title": "Pendelegasian aktif",
     "delegations_empty": "Tidak ada pendelegasian aktif. Izinkan satu di atas.",
-    "delegations_revoke": "Cabut"
+    "delegations_revoke": "Cabut",
+    "accord_concur": "Setujui",
+    "accord_entrenched": "Mengakar",
+    "accord_family_empty": "Belum ada keluarga akord yang dibentuk pada node ini.",
+    "accord_family_title": "Humanity Accord",
+    "accord_holder_attested": "Terverifikasi FIPS / perangkat keras",
+    "accord_holders_desc": "Para pemegang akord yang boleh menyetujui invokasi. Masing-masing terverifikasi FIPS / perangkat keras.",
+    "accord_holders_empty": "Tidak ada pemegang yang terdaftar.",
+    "accord_holders_title": "Pemegang",
+    "accord_invocations_empty": "Tidak ada invokasi yang tertunda.",
+    "accord_invocations_title": "Invokasi",
+    "accord_kind_constitutional": "KONSTITUSIONAL",
+    "accord_kind_drill": "LATIHAN",
+    "accord_kind_notify": "NOTIFIKASI",
+    "accord_quorum": "Kuorum {signed} / {threshold}",
+    "accord_subtitle": "The Humanity Accord — daftar konstitusional yang mengakar yang secara bersama memegang kill-switch. Aplikasi tidak menyimpan kunci; node yang menandatangani.",
+    "accord_title": "Akord"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",
@@ -2664,7 +2680,8 @@
       "moderation": "Moderasi",
       "nodes": "Node",
       "safety": "Keamanan",
-      "delegations": "Pendelegasian"
+      "delegations": "Pendelegasian",
+      "accord": "Akord"
     }
   },
   "setup_validation_select_provider": "Pilih penyedia LLM",

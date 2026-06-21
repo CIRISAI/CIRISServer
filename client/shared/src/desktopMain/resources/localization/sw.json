@@ -1930,7 +1930,23 @@
     "delegations_empty": "Hakuna ukabidhi unaotumika. Idhinisha mmoja hapo juu.",
     "delegations_revoke": "Batilisha",
     "delegations_subtitle": "Watu na mawakala uliowaidhinisha kutenda kwa niaba yako.",
-    "delegations_title": "Ukabidhi"
+    "delegations_title": "Ukabidhi",
+    "accord_title": "Mkataba",
+    "accord_subtitle": "Mkataba wa Ubinadamu — orodha ya kikatiba iliyoimarishwa inayoshikilia kwa pamoja kitufe cha kuzima. Programu haishikilii funguo zozote; nodi ndiyo inayotia saini.",
+    "accord_family_title": "Mkataba wa Ubinadamu",
+    "accord_family_empty": "Hakuna familia ya mkataba iliyoanzishwa kwenye nodi hii bado.",
+    "accord_entrenched": "Imeimarishwa",
+    "accord_holders_title": "Wamiliki",
+    "accord_holders_desc": "Wamiliki wa mkataba ambao wanaweza kukubaliana kuhusu maombi. Kila mmoja amethibitishwa kwa FIPS / maunzi.",
+    "accord_holders_empty": "Hakuna wamiliki waliosajiliwa.",
+    "accord_holder_attested": "Imethibitishwa kwa FIPS / maunzi",
+    "accord_invocations_title": "Maombi",
+    "accord_invocations_empty": "Hakuna maombi yanayosubiri.",
+    "accord_kind_constitutional": "KIKATIBA",
+    "accord_kind_notify": "ARIFA",
+    "accord_kind_drill": "MAZOEZI",
+    "accord_quorum": "Akidi {signed} / {threshold}",
+    "accord_concur": "Kubaliana"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Usimamizi",
       "nodes": "Nodi",
       "safety": "Usalama",
-      "delegations": "Ukabidhi"
+      "delegations": "Ukabidhi",
+      "accord": "Mkataba"
     }
   },
   "setup_validation_select_provider": "Chagua mtoa huduma wa LLM",

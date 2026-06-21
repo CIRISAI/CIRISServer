@@ -1936,7 +1936,23 @@
     "delegations_approve": "تأیید",
     "delegations_active_title": "واگذاری‌های فعال",
     "delegations_empty": "هیچ واگذاری فعالی وجود ندارد. یکی را در بالا اجازه دهید.",
-    "delegations_revoke": "لغو"
+    "delegations_revoke": "لغو",
+    "accord_concur": "توافق",
+    "accord_entrenched": "تثبیت‌شده",
+    "accord_family_empty": "هنوز هیچ خانواده پیمانی روی این گره ایجاد نشده است.",
+    "accord_family_title": "پیمان بشریت",
+    "accord_holder_attested": "تأییدشده با FIPS / سخت‌افزار",
+    "accord_holders_desc": "نگه‌دارندگان پیمان که می‌توانند بر فراخوانی‌ها توافق کنند. هر یک با FIPS / سخت‌افزار تأیید شده است.",
+    "accord_holders_empty": "هیچ نگه‌دارنده‌ای ثبت نشده است.",
+    "accord_holders_title": "نگه‌دارندگان",
+    "accord_invocations_empty": "هیچ فراخوانی در انتظاری وجود ندارد.",
+    "accord_invocations_title": "فراخوانی‌ها",
+    "accord_kind_constitutional": "قانون اساسی",
+    "accord_kind_drill": "تمرین",
+    "accord_kind_notify": "اطلاع‌رسانی",
+    "accord_quorum": "حد نصاب {signed} / {threshold}",
+    "accord_subtitle": "پیمان بشریت — فهرست قانون اساسیِ تثبیت‌شده که به‌طور مشترک کلید توقف اضطراری را در اختیار دارد. برنامه هیچ کلیدی نگه نمی‌دارد؛ گره امضا می‌کند.",
+    "accord_title": "پیمان"
   },
   "prompts": {
     "dma": {
@@ -2670,7 +2686,8 @@
       "moderation": "نظارت",
       "nodes": "گره‌ها",
       "safety": "ایمنی",
-      "delegations": "واگذاری‌ها"
+      "delegations": "واگذاری‌ها",
+      "accord": "پیمان"
     }
   },
   "setup_validation_select_provider": "یک ارائه‌دهنده LLM را انتخاب کنید",

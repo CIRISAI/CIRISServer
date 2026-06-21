@@ -1930,7 +1930,23 @@
     "delegations_approve": "Approva",
     "delegations_active_title": "Deleghe attive",
     "delegations_empty": "Nessuna delega attiva. Autorizzane una qui sopra.",
-    "delegations_revoke": "Revoca"
+    "delegations_revoke": "Revoca",
+    "accord_concur": "Concorda",
+    "accord_entrenched": "Consolidato",
+    "accord_family_empty": "Nessuna famiglia di accordo ancora stabilita su questo nodo.",
+    "accord_family_title": "Accordo dell'Umanità",
+    "accord_holder_attested": "Attestato in FIPS / hardware",
+    "accord_holders_desc": "I detentori dell'accordo che possono concordare sulle invocazioni. Ognuno è attestato in FIPS / hardware.",
+    "accord_holders_empty": "Nessun detentore registrato.",
+    "accord_holders_title": "Detentori",
+    "accord_invocations_empty": "Nessuna invocazione in sospeso.",
+    "accord_invocations_title": "Invocazioni",
+    "accord_kind_constitutional": "COSTITUZIONALE",
+    "accord_kind_drill": "ESERCITAZIONE",
+    "accord_kind_notify": "NOTIFICA",
+    "accord_quorum": "Quorum {signed} / {threshold}",
+    "accord_subtitle": "L'Accordo dell'Umanità — il registro costituzionale consolidato che detiene congiuntamente l'interruttore di emergenza. L'app non detiene chiavi; il nodo firma.",
+    "accord_title": "Accordo"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Moderazione",
       "nodes": "Nodi",
       "safety": "Sicurezza",
-      "delegations": "Deleghe"
+      "delegations": "Deleghe",
+      "accord": "Accordo"
     }
   },
   "setup_validation_select_provider": "Seleziona un provider LLM",

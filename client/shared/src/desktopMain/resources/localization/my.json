@@ -2022,7 +2022,23 @@
     "delegations_empty": "အသက်ဝင်နေသော လွှဲအပ်မှု မရှိပါ။ အပေါ်တွင် တစ်ခု ခွင့်ပြုပါ။",
     "delegations_revoke": "ရုပ်သိမ်းပါ",
     "delegations_subtitle": "သင့်ကိုယ်စား လုပ်ဆောင်ရန် သင်ခွင့်ပြုထားသော လူများနှင့် အေးဂျင့်များ။",
-    "delegations_title": "လွှဲအပ်မှုများ"
+    "delegations_title": "လွှဲအပ်မှုများ",
+    "accord_title": "သဘောတူညီချက်",
+    "accord_subtitle": "လူသားသဘောတူညီချက် — kill-switch ကို ပူးတွဲ ကိုင်ဆောင်ထားသော အမြစ်တွယ်ထားသည့် ဖွဲ့စည်းပုံအခြေခံ စာရင်း။ အက်ပ်တွင် key များ မရှိ၊ node က လက်မှတ်ထိုးသည်။",
+    "accord_family_title": "လူသားသဘောတူညီချက်",
+    "accord_family_empty": "ဤ node တွင် သဘောတူညီချက် မိသားစု မတည်ထောင်ရသေးပါ။",
+    "accord_entrenched": "အမြစ်တွယ်ထားသည်",
+    "accord_holders_title": "ကိုင်ဆောင်သူများ",
+    "accord_holders_desc": "ဆင့်ခေါ်မှုများတွင် သဘောတူနိုင်သော သဘောတူညီချက် ကိုင်ဆောင်သူများ။ တစ်ဦးချင်းစီသည် FIPS / ဟာ့ဒ်ဝဲ-အတည်ပြုထားသည်။",
+    "accord_holders_empty": "ကိုင်ဆောင်သူ မှတ်ပုံတင်ထားခြင်း မရှိပါ။",
+    "accord_holder_attested": "FIPS / ဟာ့ဒ်ဝဲ-အတည်ပြုထားသည်",
+    "accord_invocations_title": "ဆင့်ခေါ်မှုများ",
+    "accord_invocations_empty": "ဆိုင်းငံ့ထားသော ဆင့်ခေါ်မှု မရှိပါ။",
+    "accord_kind_constitutional": "ဖွဲ့စည်းပုံအခြေခံ",
+    "accord_kind_notify": "အသိပေးချက်",
+    "accord_kind_drill": "ဇာတ်တိုက်လေ့ကျင့်မှု",
+    "accord_quorum": "အသင်းဝင်ပြည့်မီမှု {signed} / {threshold}",
+    "accord_concur": "သဘောတူသည်"
   },
   "conscience": {
     "ponder_attempted": "ကျွန်ုပ် {action} ကို ကြိုးစားခဲ့သည်",
@@ -2664,7 +2680,8 @@
       "moderation": "ထိန်းညှိမှု",
       "nodes": "Nodes",
       "safety": "ဘေးကင်းလုံခြုံမှု",
-      "delegations": "လွှဲအပ်မှုများ"
+      "delegations": "လွှဲအပ်မှုများ",
+      "accord": "သဘောတူညီချက်"
     }
   },
   "setup_validation_select_provider": "LLM ဝန်ဆောင်မှုပေးသူကို ရွေးချယ်ပါ",

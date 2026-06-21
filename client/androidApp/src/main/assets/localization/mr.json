@@ -2022,7 +2022,23 @@
     "delegations_approve": "मंजूर करा",
     "delegations_active_title": "सक्रिय प्रतिनिधीत्वे",
     "delegations_empty": "कोणतेही सक्रिय प्रतिनिधीत्व नाही. वरील ठिकाणी एक अधिकृत करा.",
-    "delegations_revoke": "रद्द करा"
+    "delegations_revoke": "रद्द करा",
+    "accord_concur": "सहमती द्या",
+    "accord_entrenched": "प्रस्थापित",
+    "accord_family_empty": "या नोडवर अद्याप कोणतेही accord कुटुंब स्थापित केलेले नाही.",
+    "accord_family_title": "Humanity Accord",
+    "accord_holder_attested": "FIPS / हार्डवेअर-प्रमाणित",
+    "accord_holders_desc": "जे accord धारक आवाहनांवर सहमती देऊ शकतात. प्रत्येक FIPS / हार्डवेअर-प्रमाणित आहे.",
+    "accord_holders_empty": "कोणतेही धारक नोंदणीकृत नाहीत.",
+    "accord_holders_title": "धारक",
+    "accord_invocations_empty": "कोणतीही प्रलंबित आवाहने नाहीत.",
+    "accord_invocations_title": "आवाहने",
+    "accord_kind_constitutional": "घटनात्मक",
+    "accord_kind_drill": "सराव",
+    "accord_kind_notify": "सूचना",
+    "accord_quorum": "कोरम {signed} / {threshold}",
+    "accord_subtitle": "The Humanity Accord — प्रस्थापित घटनात्मक यादी जी संयुक्तपणे kill-switch धारण करते. अॅप कोणत्याही की धारण करत नाही; नोड स्वाक्षरी करतो.",
+    "accord_title": "Accord"
   },
   "conscience": {
     "ponder_attempted": "मी {action} करण्याचा प्रयत्न केला",
@@ -2664,7 +2680,8 @@
       "moderation": "नियंत्रण",
       "nodes": "नोड्स",
       "safety": "सुरक्षा",
-      "delegations": "प्रतिनिधीत्वे"
+      "delegations": "प्रतिनिधीत्वे",
+      "accord": "Accord"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता निवडा",

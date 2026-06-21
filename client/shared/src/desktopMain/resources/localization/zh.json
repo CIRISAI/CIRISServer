@@ -1930,7 +1930,23 @@
     "delegations_empty": "没有活跃的委托。请在上方授权一个。",
     "delegations_revoke": "撤销",
     "delegations_subtitle": "你已授权代表你行事的人员和代理。",
-    "delegations_title": "委托"
+    "delegations_title": "委托",
+    "accord_title": "协约",
+    "accord_subtitle": "人类协约——共同掌握终止开关的固化宪制名册。本应用不持有任何密钥；由节点签名。",
+    "accord_family_title": "人类协约",
+    "accord_family_empty": "此节点上尚未建立协约族。",
+    "accord_entrenched": "已固化",
+    "accord_holders_title": "持有方",
+    "accord_holders_desc": "可对调用表示同意的协约持有方。每一方均经 FIPS / 硬件认证。",
+    "accord_holders_empty": "未注册任何持有方。",
+    "accord_holder_attested": "经 FIPS / 硬件认证",
+    "accord_invocations_title": "调用",
+    "accord_invocations_empty": "没有待处理的调用。",
+    "accord_kind_constitutional": "宪制",
+    "accord_kind_notify": "通知",
+    "accord_kind_drill": "演练",
+    "accord_quorum": "法定人数 {signed} / {threshold}",
+    "accord_concur": "同意"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "管理",
       "nodes": "节点",
       "safety": "安全",
-      "delegations": "委托"
+      "delegations": "委托",
+      "accord": "协约"
     }
   },
   "setup_validation_select_provider": "请选择一个 LLM 提供商",

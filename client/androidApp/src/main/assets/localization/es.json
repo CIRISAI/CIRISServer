@@ -1930,7 +1930,23 @@
     "delegations_empty": "No hay delegaciones activas. Autoriza una arriba.",
     "delegations_revoke": "Revocar",
     "delegations_subtitle": "Personas y agentes que has autorizado para actuar en tu nombre.",
-    "delegations_title": "Delegaciones"
+    "delegations_title": "Delegaciones",
+    "accord_title": "Acuerdo",
+    "accord_subtitle": "El Acuerdo de la Humanidad — la lista constitucional consolidada que sostiene conjuntamente el interruptor de emergencia. La aplicación no guarda claves; el nodo firma.",
+    "accord_family_title": "Acuerdo de la Humanidad",
+    "accord_family_empty": "Aún no se ha establecido ninguna familia de acuerdo en este nodo.",
+    "accord_entrenched": "Consolidado",
+    "accord_holders_title": "Titulares",
+    "accord_holders_desc": "Los titulares del acuerdo que pueden coincidir en las invocaciones. Cada uno está certificado por FIPS / hardware.",
+    "accord_holders_empty": "No hay titulares registrados.",
+    "accord_holder_attested": "Certificado por FIPS / hardware",
+    "accord_invocations_title": "Invocaciones",
+    "accord_invocations_empty": "No hay invocaciones pendientes.",
+    "accord_kind_constitutional": "CONSTITUCIONAL",
+    "accord_kind_notify": "NOTIFICAR",
+    "accord_kind_drill": "SIMULACRO",
+    "accord_quorum": "Cuórum {signed} / {threshold}",
+    "accord_concur": "Coincidir"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Moderación",
       "nodes": "Nodos",
       "safety": "Seguridad",
-      "delegations": "Delegaciones"
+      "delegations": "Delegaciones",
+      "accord": "Acuerdo"
     }
   },
   "setup_validation_select_provider": "Selecciona un proveedor de LLM",

@@ -2022,7 +2022,23 @@
     "delegations_empty": "క్రియాశీల ప్రతినిధ్యాలు లేవు. పైన ఒకదానికి అధికారం ఇవ్వండి.",
     "delegations_revoke": "ఉపసంహరించు",
     "delegations_subtitle": "మీ తరఫున వ్యవహరించడానికి మీరు అధికారం ఇచ్చిన వ్యక్తులు మరియు ఏజెంట్లు.",
-    "delegations_title": "ప్రతినిధ్యాలు"
+    "delegations_title": "ప్రతినిధ్యాలు",
+    "accord_title": "ఒడంబడిక",
+    "accord_subtitle": "హ్యూమానిటీ ఒడంబడిక — కిల్-స్విచ్‌ను సంయుక్తంగా కలిగి ఉండే స్థిరమైన రాజ్యాంగ జాబితా. యాప్ ఎటువంటి కీలను కలిగి ఉండదు; నోడ్ సంతకం చేస్తుంది.",
+    "accord_family_title": "హ్యూమానిటీ ఒడంబడిక",
+    "accord_family_empty": "ఈ నోడ్‌లో ఇంకా ఏ ఒడంబడిక కుటుంబం ఏర్పాటు కాలేదు.",
+    "accord_entrenched": "స్థిరపరచబడింది",
+    "accord_holders_title": "హోల్డర్లు",
+    "accord_holders_desc": "ఇన్వొకేషన్లపై అంగీకరించగల ఒడంబడిక హోల్డర్లు. ప్రతి ఒక్కరూ FIPS / హార్డ్‌వేర్-ధృవీకరించబడ్డారు.",
+    "accord_holders_empty": "ఏ హోల్డర్లు నమోదు కాలేదు.",
+    "accord_holder_attested": "FIPS / హార్డ్‌వేర్-ధృవీకరించబడింది",
+    "accord_invocations_title": "ఇన్వొకేషన్లు",
+    "accord_invocations_empty": "పెండింగ్‌లో ఏ ఇన్వొకేషన్లు లేవు.",
+    "accord_kind_constitutional": "రాజ్యాంగపరమైనది",
+    "accord_kind_notify": "తెలియజేయి",
+    "accord_kind_drill": "డ్రిల్",
+    "accord_quorum": "కోరం {signed} / {threshold}",
+    "accord_concur": "అంగీకరించు"
   },
   "conscience": {
     "ponder_attempted": "నేను {action} చేయడానికి ప్రయత్నించాను",
@@ -2664,7 +2680,8 @@
       "moderation": "మోడరేషన్",
       "nodes": "నోడ్‌లు",
       "safety": "భద్రత",
-      "delegations": "ప్రతినిధ్యాలు"
+      "delegations": "ప్రతినిధ్యాలు",
+      "accord": "ఒడంబడిక"
     }
   },
   "setup_validation_select_provider": "ఒక LLM ప్రొవైడర్‌ను ఎంచుకోండి",

@@ -2022,7 +2022,23 @@
     "delegations_approve": "ਮਨਜ਼ੂਰ ਕਰੋ",
     "delegations_active_title": "ਸਰਗਰਮ ਸੌਂਪਣੀਆਂ",
     "delegations_empty": "ਕੋਈ ਸਰਗਰਮ ਸੌਂਪਣੀ ਨਹੀਂ। ਉੱਪਰ ਇੱਕ ਨੂੰ ਅਧਿਕਾਰ ਦਿਓ।",
-    "delegations_revoke": "ਰੱਦ ਕਰੋ"
+    "delegations_revoke": "ਰੱਦ ਕਰੋ",
+    "accord_title": "ਅਕੋਰਡ",
+    "accord_subtitle": "ਹਿਊਮੈਨਿਟੀ ਅਕੋਰਡ — ਪੱਕੀ ਸੰਵਿਧਾਨਕ ਸੂਚੀ ਜੋ ਮਿਲ ਕੇ ਕਿੱਲ-ਸਵਿੱਚ ਰੱਖਦੀ ਹੈ। ਐਪ ਕੋਈ ਕੁੰਜੀ ਨਹੀਂ ਰੱਖਦੀ; ਨੋਡ ਦਸਤਖ਼ਤ ਕਰਦਾ ਹੈ।",
+    "accord_family_title": "ਹਿਊਮੈਨਿਟੀ ਅਕੋਰਡ",
+    "accord_family_empty": "ਇਸ ਨੋਡ ਉੱਤੇ ਅਜੇ ਕੋਈ ਅਕੋਰਡ ਪਰਿਵਾਰ ਸਥਾਪਤ ਨਹੀਂ ਹੈ।",
+    "accord_entrenched": "ਪੱਕਾ ਕੀਤਾ ਗਿਆ",
+    "accord_holders_title": "ਧਾਰਕ",
+    "accord_holders_desc": "ਉਹ ਅਕੋਰਡ ਧਾਰਕ ਜੋ ਸੰਮਨਾਂ ਉੱਤੇ ਸਹਿਮਤੀ ਦੇ ਸਕਦੇ ਹਨ। ਹਰ ਇੱਕ FIPS / ਹਾਰਡਵੇਅਰ-ਪ੍ਰਮਾਣਿਤ ਹੈ।",
+    "accord_holders_empty": "ਕੋਈ ਧਾਰਕ ਰਜਿਸਟਰ ਨਹੀਂ ਹੈ।",
+    "accord_holder_attested": "FIPS / ਹਾਰਡਵੇਅਰ-ਪ੍ਰਮਾਣਿਤ",
+    "accord_invocations_title": "ਸੰਮਨ",
+    "accord_invocations_empty": "ਕੋਈ ਬਕਾਇਆ ਸੰਮਨ ਨਹੀਂ।",
+    "accord_kind_constitutional": "ਸੰਵਿਧਾਨਕ",
+    "accord_kind_notify": "ਸੂਚਿਤ ਕਰੋ",
+    "accord_kind_drill": "ਅਭਿਆਸ",
+    "accord_quorum": "ਕੋਰਮ {signed} / {threshold}",
+    "accord_concur": "ਸਹਿਮਤ"
   },
   "conscience": {
     "ponder_attempted": "ਮੈਂ {action} ਕਰਨ ਦੀ ਕੋਸ਼ਿਸ਼ ਕੀਤੀ",
@@ -2664,7 +2680,8 @@
       "moderation": "ਸੰਚਾਲਨ",
       "nodes": "ਨੋਡਾਂ",
       "safety": "ਸੁਰੱਖਿਆ",
-      "delegations": "ਸੌਂਪਣੀਆਂ"
+      "delegations": "ਸੌਂਪਣੀਆਂ",
+      "accord": "ਅਕੋਰਡ"
     }
   },
   "setup_validation_select_provider": "ਇੱਕ LLM ਪ੍ਰਦਾਤਾ ਚੁਣੋ",
