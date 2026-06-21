@@ -1930,7 +1930,23 @@
     "delegations_empty": "Etkin yetkilendirme yok. Yukarıdan bir tane yetkilendirin.",
     "delegations_revoke": "İptal et",
     "delegations_subtitle": "Sizin adınıza işlem yapmaya yetki verdiğiniz kişiler ve aracılar.",
-    "delegations_title": "Yetkilendirmeler"
+    "delegations_title": "Yetkilendirmeler",
+    "accord_title": "Mutabakat",
+    "accord_subtitle": "İnsanlık Mutabakatı — acil durdurma anahtarını ortaklaşa elinde tutan yerleşik anayasal kadro. Uygulama hiçbir anahtar tutmaz; düğüm imzalar.",
+    "accord_family_title": "İnsanlık Mutabakatı",
+    "accord_family_empty": "Bu düğümde henüz bir mutabakat ailesi oluşturulmadı.",
+    "accord_entrenched": "Yerleşik",
+    "accord_holders_title": "Tutucular",
+    "accord_holders_desc": "Çağrılar üzerinde mutabık kalabilecek mutabakat tutucuları. Her biri FIPS / donanım onaylıdır.",
+    "accord_holders_empty": "Kayıtlı tutucu yok.",
+    "accord_holder_attested": "FIPS / donanım onaylı",
+    "accord_invocations_title": "Çağrılar",
+    "accord_invocations_empty": "Bekleyen çağrı yok.",
+    "accord_kind_constitutional": "ANAYASAL",
+    "accord_kind_notify": "BİLDİRİM",
+    "accord_kind_drill": "TATBİKAT",
+    "accord_quorum": "Yeter sayı {signed} / {threshold}",
+    "accord_concur": "Mutabık ol"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Moderasyon",
       "nodes": "Düğümler",
       "safety": "Güvenlik",
-      "delegations": "Yetkilendirmeler"
+      "delegations": "Yetkilendirmeler",
+      "accord": "Mutabakat"
     }
   },
   "setup_validation_select_provider": "Bir LLM sağlayıcısı seçin",

@@ -1930,7 +1930,23 @@
     "delegations_approve": "承認",
     "delegations_active_title": "有効な委任",
     "delegations_empty": "有効な委任はありません。上で承認してください。",
-    "delegations_revoke": "取り消す"
+    "delegations_revoke": "取り消す",
+    "accord_title": "アコード",
+    "accord_subtitle": "ヒューマニティ・アコード — キルスイッチを共同で保持する確立された憲法的名簿。アプリは鍵を保持せず、ノードが署名します。",
+    "accord_family_title": "ヒューマニティ・アコード",
+    "accord_family_empty": "このノードにはまだアコードファミリーが確立されていません。",
+    "accord_entrenched": "確立済み",
+    "accord_holders_title": "ホルダー",
+    "accord_holders_desc": "発動に同意できるアコードホルダー。各ホルダーは FIPS / ハードウェア証明済みです。",
+    "accord_holders_empty": "登録されたホルダーはありません。",
+    "accord_holder_attested": "FIPS / ハードウェア証明済み",
+    "accord_invocations_title": "発動",
+    "accord_invocations_empty": "保留中の発動はありません。",
+    "accord_kind_constitutional": "憲法的",
+    "accord_kind_notify": "通知",
+    "accord_kind_drill": "訓練",
+    "accord_quorum": "定足数 {signed} / {threshold}",
+    "accord_concur": "同意する"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "モデレーション",
       "nodes": "ノード",
       "safety": "安全性",
-      "delegations": "委任"
+      "delegations": "委任",
+      "accord": "アコード"
     }
   },
   "setup_validation_select_provider": "LLMプロバイダーを選択してください",

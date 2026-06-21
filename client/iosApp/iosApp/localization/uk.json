@@ -1930,7 +1930,23 @@
     "delegations_approve": "Підтвердити",
     "delegations_active_title": "Активні делегування",
     "delegations_empty": "Немає активних делегувань. Авторизуйте одне вище.",
-    "delegations_revoke": "Відкликати"
+    "delegations_revoke": "Відкликати",
+    "accord_title": "Угода",
+    "accord_subtitle": "Угода Людства — закріплений конституційний склад, який спільно тримає аварійний вимикач. Застосунок не зберігає ключів; підписує вузол.",
+    "accord_family_title": "Угода Людства",
+    "accord_family_empty": "На цьому вузлі ще не встановлено родини угоди.",
+    "accord_entrenched": "Закріплено",
+    "accord_holders_title": "Тримачі",
+    "accord_holders_desc": "Тримачі угоди, які можуть погоджувати виклики. Кожен має FIPS / апаратне підтвердження.",
+    "accord_holders_empty": "Тримачів не зареєстровано.",
+    "accord_holder_attested": "FIPS / апаратне підтвердження",
+    "accord_invocations_title": "Виклики",
+    "accord_invocations_empty": "Немає очікуваних викликів.",
+    "accord_kind_constitutional": "КОНСТИТУЦІЙНИЙ",
+    "accord_kind_notify": "СПОВІЩЕННЯ",
+    "accord_kind_drill": "НАВЧАННЯ",
+    "accord_quorum": "Кворум {signed} / {threshold}",
+    "accord_concur": "Погодити"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Модерація",
       "nodes": "Вузли",
       "safety": "Безпека",
-      "delegations": "Делегування"
+      "delegations": "Делегування",
+      "accord": "Угода"
     }
   },
   "setup_validation_select_provider": "Виберіть провайдера LLM",

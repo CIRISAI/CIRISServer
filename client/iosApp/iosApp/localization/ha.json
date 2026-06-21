@@ -2022,7 +2022,23 @@
     "delegations_approve": "Amince",
     "delegations_active_title": "Wakilcin da ke aiki",
     "delegations_empty": "Babu wakilcin da ke aiki. Ba da izini ga ɗaya a sama.",
-    "delegations_revoke": "Soke"
+    "delegations_revoke": "Soke",
+    "accord_concur": "Yarda",
+    "accord_entrenched": "An tabbatar",
+    "accord_family_empty": "Babu iyalin yarjejeniya da aka kafa a wannan node ɗin har yanzu.",
+    "accord_family_title": "Yarjejeniyar Bil'adama",
+    "accord_holder_attested": "An tabbatar ta FIPS / kayan aiki",
+    "accord_holders_desc": "Masu riƙe yarjejeniya waɗanda za su iya yarda kan kiraye-kiraye. Kowanne an tabbatar da shi ta FIPS / kayan aiki.",
+    "accord_holders_empty": "Babu masu riƙewa da aka rajista.",
+    "accord_holders_title": "Masu riƙewa",
+    "accord_invocations_empty": "Babu kiraye-kiraye masu jira.",
+    "accord_invocations_title": "Kiraye-kiraye",
+    "accord_kind_constitutional": "TSARIN MULKI",
+    "accord_kind_drill": "HORO",
+    "accord_kind_notify": "SANARWA",
+    "accord_quorum": "Adadin da ake buƙata {signed} / {threshold}",
+    "accord_subtitle": "Yarjejeniyar Bil'adama — jerin tsarin mulki da aka tabbatar wanda ke riƙe da maɓallin kashewa tare. App ɗin ba ya riƙe maɓallai ba; node ɗin yana sa hannu.",
+    "accord_title": "Yarjejeniya"
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",
@@ -2664,7 +2680,8 @@
       "moderation": "Daidaitawa",
       "nodes": "Kumburai",
       "safety": "Tsaro",
-      "delegations": "Wakilci"
+      "delegations": "Wakilci",
+      "accord": "Yarjejeniya"
     }
   },
   "setup_validation_select_provider": "Zaɓi mai bayar da LLM",

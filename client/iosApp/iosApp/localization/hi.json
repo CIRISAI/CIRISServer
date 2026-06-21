@@ -1930,7 +1930,23 @@
     "delegations_empty": "कोई सक्रिय प्रत्यायोजन नहीं। ऊपर किसी एक को प्राधिकृत करें।",
     "delegations_revoke": "रद्द करें",
     "delegations_subtitle": "वे लोग और एजेंट जिन्हें आपने अपनी ओर से कार्य करने के लिए प्राधिकृत किया है।",
-    "delegations_title": "प्रत्यायोजन"
+    "delegations_title": "प्रत्यायोजन",
+    "accord_concur": "सहमत",
+    "accord_entrenched": "स्थापित",
+    "accord_family_empty": "इस नोड पर अभी तक कोई समझौता परिवार स्थापित नहीं हुआ है।",
+    "accord_family_title": "Humanity Accord",
+    "accord_holder_attested": "FIPS / हार्डवेयर-प्रमाणित",
+    "accord_holders_desc": "समझौता धारक जो आह्वानों पर सहमति दे सकते हैं। प्रत्येक FIPS / हार्डवेयर-प्रमाणित है।",
+    "accord_holders_empty": "कोई धारक पंजीकृत नहीं है।",
+    "accord_holders_title": "धारक",
+    "accord_invocations_empty": "कोई लंबित आह्वान नहीं है।",
+    "accord_invocations_title": "आह्वान",
+    "accord_kind_constitutional": "संवैधानिक",
+    "accord_kind_drill": "अभ्यास",
+    "accord_kind_notify": "सूचित करें",
+    "accord_quorum": "कोरम {signed} / {threshold}",
+    "accord_subtitle": "The Humanity Accord — स्थापित संवैधानिक सूची जो संयुक्त रूप से किल-स्विच रखती है। ऐप कोई कुंजी नहीं रखता; नोड हस्ताक्षर करता है।",
+    "accord_title": "समझौता"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "मॉडरेशन",
       "nodes": "नोड्स",
       "safety": "सुरक्षा",
-      "delegations": "प्रत्यायोजन"
+      "delegations": "प्रत्यायोजन",
+      "accord": "समझौता"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता चुनें",

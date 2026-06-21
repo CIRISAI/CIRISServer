@@ -1930,7 +1930,23 @@
     "delegations_empty": "ምንም ንቁ ውክልናዎች የሉም። ከላይ አንዱን ይፍቀዱ።",
     "delegations_revoke": "ሻር",
     "delegations_subtitle": "በእርስዎ ስም እንዲሰሩ የፈቀዱላቸው ሰዎች እና ወኪሎች።",
-    "delegations_title": "ውክልናዎች"
+    "delegations_title": "ውክልናዎች",
+    "accord_concur": "ተስማማ",
+    "accord_entrenched": "የተደላደለ",
+    "accord_family_empty": "በዚህ መስቀለኛ ላይ እስካሁን ምንም የስምምነት ቤተሰብ አልተቋቋመም።",
+    "accord_family_title": "የሰብአዊነት ስምምነት",
+    "accord_holder_attested": "በFIPS / በሃርድዌር የተረጋገጠ",
+    "accord_holders_desc": "በጥሪዎች ላይ ሊስማሙ የሚችሉ የስምምነት ያዢዎች። እያንዳንዱ በFIPS / በሃርድዌር የተረጋገጠ ነው።",
+    "accord_holders_empty": "ምንም ያዢዎች አልተመዘገቡም።",
+    "accord_holders_title": "ያዢዎች",
+    "accord_invocations_empty": "በመጠባበቅ ላይ ያሉ ጥሪዎች የሉም።",
+    "accord_invocations_title": "ጥሪዎች",
+    "accord_kind_constitutional": "ሕገ-መንግሥታዊ",
+    "accord_kind_drill": "ልምምድ",
+    "accord_kind_notify": "ማሳወቅ",
+    "accord_quorum": "ምልአተ-ጉባኤ {signed} / {threshold}",
+    "accord_subtitle": "የሰብአዊነት ስምምነት — የግድያ-ማብሪያውን በጋራ የሚይዘው የተደላደለ ሕገ-መንግሥታዊ ዝርዝር። መተግበሪያው ምንም ቁልፍ አይዝም፤ መስቀለኛው ይፈርማል።",
+    "accord_title": "ስምምነት"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "safety": "ደህንነት",
       "moderation": "ቁጥጥር",
       "child_safety": "የልጆች ደህንነት",
-      "delegations": "ውክልናዎች"
+      "delegations": "ውክልናዎች",
+      "accord": "ስምምነት"
     }
   },
   "setup_validation_select_provider": "የLLM አቅራቢ ይምረጡ",

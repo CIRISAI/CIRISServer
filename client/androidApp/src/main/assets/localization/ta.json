@@ -2022,7 +2022,23 @@
     "delegations_empty": "செயலில் உள்ள ஒப்படைப்புகள் இல்லை. மேலே ஒன்றை அங்கீகரிக்கவும்.",
     "delegations_revoke": "ரத்து செய்",
     "delegations_subtitle": "உங்கள் சார்பாக செயல்பட நீங்கள் அங்கீகரித்த நபர்கள் மற்றும் முகவர்கள்.",
-    "delegations_title": "பணி ஒப்படைப்புகள்"
+    "delegations_title": "பணி ஒப்படைப்புகள்",
+    "accord_concur": "ஒப்புக்கொள்",
+    "accord_entrenched": "நிலைபெற்றது",
+    "accord_family_empty": "இந்த நோடில் இன்னும் எந்த ஒப்பந்தக் குழுவும் நிறுவப்படவில்லை.",
+    "accord_family_title": "மனிதகுல ஒப்பந்தம்",
+    "accord_holder_attested": "FIPS / வன்பொருள் சான்றளிக்கப்பட்டது",
+    "accord_holders_desc": "செயல்படுத்தல்களில் ஒப்புதல் அளிக்கக்கூடிய ஒப்பந்தம் வைத்திருப்பவர்கள். ஒவ்வொருவரும் FIPS / வன்பொருள் சான்றளிக்கப்பட்டவர்கள்.",
+    "accord_holders_empty": "வைத்திருப்பவர்கள் யாரும் பதிவு செய்யப்படவில்லை.",
+    "accord_holders_title": "வைத்திருப்பவர்கள்",
+    "accord_invocations_empty": "நிலுவையில் உள்ள செயல்படுத்தல்கள் இல்லை.",
+    "accord_invocations_title": "செயல்படுத்தல்கள்",
+    "accord_kind_constitutional": "அரசியலமைப்பு சார்ந்தது",
+    "accord_kind_drill": "பயிற்சி",
+    "accord_kind_notify": "அறிவிப்பு",
+    "accord_quorum": "கோரம் {signed} / {threshold}",
+    "accord_subtitle": "மனிதகுல ஒப்பந்தம் — kill-switch-ஐ கூட்டாக வைத்திருக்கும் நிலைபெற்ற அரசியலமைப்பு பட்டியல். இந்த ஆப் எந்த விசையையும் வைத்திருப்பதில்லை; நோடு கையெழுத்திடுகிறது.",
+    "accord_title": "ஒப்பந்தம்"
   },
   "conscience": {
     "ponder_attempted": "நான் {action} செய்ய முயற்சித்தேன்",
@@ -2664,7 +2680,8 @@
       "moderation": "மட்டுப்படுத்தல்",
       "nodes": "கணுக்கள்",
       "safety": "பாதுகாப்பு",
-      "delegations": "பணி ஒப்படைப்புகள்"
+      "delegations": "பணி ஒப்படைப்புகள்",
+      "accord": "ஒப்பந்தம்"
     }
   },
   "setup_validation_select_provider": "ஒரு LLM வழங்குநரைத் தேர்ந்தெடுக்கவும்",

@@ -1930,7 +1930,23 @@
     "delegations_approve": "Approuver",
     "delegations_active_title": "Délégations actives",
     "delegations_empty": "Aucune délégation active. Autorisez-en une ci-dessus.",
-    "delegations_revoke": "Révoquer"
+    "delegations_revoke": "Révoquer",
+    "accord_title": "Accord",
+    "accord_subtitle": "Le Humanity Accord — le registre constitutionnel ancré qui détient conjointement le coupe-circuit. L’application ne détient aucune clé ; le nœud signe.",
+    "accord_family_title": "Humanity Accord",
+    "accord_family_empty": "Aucune famille d’accord établie sur ce nœud pour l’instant.",
+    "accord_entrenched": "Ancré",
+    "accord_holders_title": "Détenteurs",
+    "accord_holders_desc": "Les détenteurs de l’accord qui peuvent approuver les invocations. Chacun est attesté FIPS / matériellement.",
+    "accord_holders_empty": "Aucun détenteur enregistré.",
+    "accord_holder_attested": "Attesté FIPS / matériellement",
+    "accord_invocations_title": "Invocations",
+    "accord_invocations_empty": "Aucune invocation en attente.",
+    "accord_kind_constitutional": "CONSTITUTIONNEL",
+    "accord_kind_notify": "NOTIFIER",
+    "accord_kind_drill": "EXERCICE",
+    "accord_quorum": "Quorum {signed} / {threshold}",
+    "accord_concur": "Approuver"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Modération",
       "nodes": "Nœuds",
       "safety": "Sécurité",
-      "delegations": "Délégations"
+      "delegations": "Délégations",
+      "accord": "Accord"
     }
   },
   "setup_validation_select_provider": "Sélectionnez un fournisseur LLM",

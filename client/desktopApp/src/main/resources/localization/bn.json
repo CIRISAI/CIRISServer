@@ -2023,7 +2023,23 @@
     "delegations_approve": "অনুমোদন করুন",
     "delegations_active_title": "সক্রিয় প্রতিনিধিত্ব",
     "delegations_empty": "কোনো সক্রিয় প্রতিনিধিত্ব নেই। উপরে একটি অনুমোদন করুন।",
-    "delegations_revoke": "প্রত্যাহার করুন"
+    "delegations_revoke": "প্রত্যাহার করুন",
+    "accord_title": "অ্যাকর্ড",
+    "accord_subtitle": "দ্য হিউম্যানিটি অ্যাকর্ড — সুপ্রতিষ্ঠিত সাংবিধানিক তালিকা যা যৌথভাবে কিল-সুইচ ধারণ করে। অ্যাপটি কোনো কী রাখে না; নোড স্বাক্ষর করে।",
+    "accord_family_title": "হিউম্যানিটি অ্যাকর্ড",
+    "accord_family_empty": "এই নোডে এখনো কোনো অ্যাকর্ড পরিবার প্রতিষ্ঠিত হয়নি।",
+    "accord_entrenched": "সুপ্রতিষ্ঠিত",
+    "accord_holders_title": "ধারকগণ",
+    "accord_holders_desc": "যে অ্যাকর্ড ধারকগণ আহ্বানে সম্মত হতে পারেন। প্রত্যেকে FIPS / হার্ডওয়্যার-প্রত্যয়িত।",
+    "accord_holders_empty": "কোনো ধারক নিবন্ধিত নেই।",
+    "accord_holder_attested": "FIPS / হার্ডওয়্যার-প্রত্যয়িত",
+    "accord_invocations_title": "আহ্বানসমূহ",
+    "accord_invocations_empty": "কোনো অমীমাংসিত আহ্বান নেই।",
+    "accord_kind_constitutional": "সাংবিধানিক",
+    "accord_kind_notify": "বিজ্ঞপ্তি",
+    "accord_kind_drill": "মহড়া",
+    "accord_quorum": "কোরাম {signed} / {threshold}",
+    "accord_concur": "সম্মত হন"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",
@@ -2665,7 +2681,8 @@
       "moderation": "মডারেশন",
       "nodes": "নোড",
       "safety": "নিরাপত্তা",
-      "delegations": "প্রতিনিধিত্ব"
+      "delegations": "প্রতিনিধিত্ব",
+      "accord": "অ্যাকর্ড"
     }
   },
   "setup_validation_select_provider": "একটি LLM প্রদানকারী নির্বাচন করুন",

@@ -1930,7 +1930,23 @@
     "delegations_approve": "Подтвердить",
     "delegations_active_title": "Активные делегирования",
     "delegations_empty": "Нет активных делегирований. Авторизуйте одно выше.",
-    "delegations_revoke": "Отозвать"
+    "delegations_revoke": "Отозвать",
+    "accord_title": "Соглашение",
+    "accord_subtitle": "Соглашение человечества — закреплённый конституционный состав, который совместно владеет аварийным выключателем. Приложение не хранит ключей; узел подписывает.",
+    "accord_family_title": "Соглашение человечества",
+    "accord_family_empty": "На этом узле ещё не создано семейство соглашения.",
+    "accord_entrenched": "Закреплено",
+    "accord_holders_title": "Держатели",
+    "accord_holders_desc": "Держатели соглашения, которые могут согласовывать вызовы. Каждый подтверждён по FIPS / аппаратно.",
+    "accord_holders_empty": "Держатели не зарегистрированы.",
+    "accord_holder_attested": "Подтверждён по FIPS / аппаратно",
+    "accord_invocations_title": "Вызовы",
+    "accord_invocations_empty": "Нет ожидающих вызовов.",
+    "accord_kind_constitutional": "КОНСТИТУЦИОННЫЙ",
+    "accord_kind_notify": "УВЕДОМЛЕНИЕ",
+    "accord_kind_drill": "УЧЕНИЯ",
+    "accord_quorum": "Кворум {signed} / {threshold}",
+    "accord_concur": "Согласиться"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Модерация",
       "nodes": "Узлы",
       "safety": "Безопасность",
-      "delegations": "Делегирования"
+      "delegations": "Делегирования",
+      "accord": "Соглашение"
     }
   },
   "setup_validation_select_provider": "Выберите провайдера LLM",

@@ -1930,7 +1930,23 @@
     "delegations_approve": "Bestätigen",
     "delegations_active_title": "Aktive Delegationen",
     "delegations_empty": "Keine aktiven Delegationen. Autorisieren Sie oben eine.",
-    "delegations_revoke": "Widerrufen"
+    "delegations_revoke": "Widerrufen",
+    "accord_concur": "Zustimmen",
+    "accord_entrenched": "Verankert",
+    "accord_family_empty": "Auf diesem Knoten wurde noch keine Accord-Familie eingerichtet.",
+    "accord_family_title": "Humanity Accord",
+    "accord_holder_attested": "FIPS-/hardwareattestiert",
+    "accord_holders_desc": "Die Accord-Inhaber, die Aufrufen zustimmen dürfen. Jeder ist FIPS-/hardwareattestiert.",
+    "accord_holders_empty": "Keine Inhaber registriert.",
+    "accord_holders_title": "Inhaber",
+    "accord_invocations_empty": "Keine ausstehenden Aufrufe.",
+    "accord_invocations_title": "Aufrufe",
+    "accord_kind_constitutional": "VERFASSUNGSMÄSSIG",
+    "accord_kind_drill": "ÜBUNG",
+    "accord_kind_notify": "BENACHRICHTIGEN",
+    "accord_quorum": "Quorum {signed} / {threshold}",
+    "accord_subtitle": "Der Humanity Accord — die verankerte verfassungsmäßige Liste, die gemeinsam den Notausschalter hält. Die App hält keine Schlüssel; der Knoten signiert.",
+    "accord_title": "Accord"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "Moderation",
       "nodes": "Knoten",
       "safety": "Sicherheit",
-      "delegations": "Delegationen"
+      "delegations": "Delegationen",
+      "accord": "Accord"
     }
   },
   "setup_validation_select_provider": "LLM-Anbieter auswählen",

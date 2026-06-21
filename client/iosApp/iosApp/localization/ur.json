@@ -1930,7 +1930,23 @@
     "delegations_approve": "منظور کریں",
     "delegations_active_title": "فعال تفویضات",
     "delegations_empty": "کوئی فعال تفویض نہیں۔ اوپر سے کسی ایک کو اختیار دیں۔",
-    "delegations_revoke": "منسوخ کریں"
+    "delegations_revoke": "منسوخ کریں",
+    "accord_concur": "اتفاق کریں",
+    "accord_entrenched": "مستحکم",
+    "accord_family_empty": "اس نوڈ پر ابھی تک کوئی ایکارڈ فیملی قائم نہیں کی گئی۔",
+    "accord_family_title": "ہیومینٹی ایکارڈ",
+    "accord_holder_attested": "FIPS / ہارڈویئر سے تصدیق شدہ",
+    "accord_holders_desc": "ایکارڈ ہولڈرز جو انوکیشنز پر اتفاق کر سکتے ہیں۔ ہر ایک FIPS / ہارڈویئر سے تصدیق شدہ ہے۔",
+    "accord_holders_empty": "کوئی ہولڈر رجسٹرڈ نہیں۔",
+    "accord_holders_title": "ہولڈرز",
+    "accord_invocations_empty": "کوئی زیر التواء انوکیشن نہیں۔",
+    "accord_invocations_title": "انوکیشنز",
+    "accord_kind_constitutional": "آئینی",
+    "accord_kind_drill": "ڈرل",
+    "accord_kind_notify": "اطلاع",
+    "accord_quorum": "کورم {signed} / {threshold}",
+    "accord_subtitle": "ہیومینٹی ایکارڈ — مستحکم آئینی فہرست جو مشترکہ طور پر kill-switch رکھتی ہے۔ ایپ کوئی کلید نہیں رکھتی؛ نوڈ دستخط کرتا ہے۔",
+    "accord_title": "ایکارڈ"
   },
   "prompts": {
     "dma": {
@@ -2664,7 +2680,8 @@
       "moderation": "اعتدال پسندی",
       "nodes": "نوڈز",
       "safety": "حفاظت",
-      "delegations": "تفویضات"
+      "delegations": "تفویضات",
+      "accord": "ایکارڈ"
     }
   },
   "setup_validation_select_provider": "ایک LLM فراہم کنندہ منتخب کریں",
