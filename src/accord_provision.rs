@@ -41,6 +41,22 @@
 //! the cryptoki backend, CIRISVerify#62 closed). Without the feature the endpoint
 //! returns a clear `NotSupported` (501) and never links cryptoki — a plain
 //! `cargo build` is unaffected.
+//!
+//! ## Genesis cosign — `POST /v1/accord/family/cosign`
+//!
+//! The same file also hosts the genesis **cosign-with-the-YubiKey** step. After
+//! `POST /v1/accord/genesis/envelope` returns the canonical family envelope, each
+//! primary holder RE-INSERTS their YubiKey and cosigns the envelope on their own
+//! token: the endpoint re-opens the YubiKey Ed25519 + the USB-wrapped ML-DSA half
+//! (NO re-provision — the USB blob already exists), builds the same
+//! [`ciris_verify_core::self_at_login::HardwareRootedIdentity`], and calls
+//! [`ciris_verify_core::accord_genesis::co_sign_accord_family`]. The physical
+//! touch the YubiKey requires on the bound signature IS the holder's consent. The
+//! response carries the holder's [`ciris_verify_core::threshold::ThresholdSignature`]
+//! **and** their founder [`ciris_verify_core::threshold::ThresholdMember`] — the
+//! two inputs `POST /v1/accord/genesis/assemble` needs (`signatures` + `founders`),
+//! produced together from the one re-opened identity so the operator never hand-
+//! assembles a member set. Same `pkcs11` gating + loopback guard as provisioning.
 
 use std::sync::Arc;
 
@@ -103,6 +119,30 @@ struct ProvisionHolderRequest {
     attestation_chain_ders_base64: Option<Vec<String>>,
 }
 
+/// `POST /v1/accord/family/cosign` request.
+///
+/// `key_id` + `mldsa_usb_path` are validated on every build (the USB half is
+/// RE-OPENED, not provisioned); `envelope` is the verbatim family envelope JSON
+/// returned by `POST /v1/accord/genesis/envelope`. The `pkcs11` knobs drive the
+/// real-token path only (unread without the feature — see [`ProvisionPkcs11`]),
+/// hence the conditional `allow(dead_code)`.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct CosignFamilyRequest {
+    /// The holder's federation `key_id` — the SAME alias the wrapped ML-DSA half +
+    /// the holder record were minted under at `provision-holder` time.
+    key_id: String,
+    /// The holder's USB directory holding the AEAD-wrapped ML-DSA-65 seed (the one
+    /// chosen at provision time). RE-OPENED here — never re-provisioned.
+    mldsa_usb_path: String,
+    /// The verbatim family envelope JSON from `POST /v1/accord/genesis/envelope`.
+    /// Cosigned byte-for-byte (JCS) — never rebuilt here.
+    envelope: serde_json::Value,
+    /// PKCS#11 / PIV knobs for the holder's already-FIPS-approved YubiKey.
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+}
+
 #[derive(Clone)]
 struct ProvisionState {
     #[allow(dead_code)] // held for symmetry with the other setup routers + future use.
@@ -137,6 +177,38 @@ async fn provision_holder(State(_st): State<ProvisionState>, body: axum::body::B
     }
 
     provision_holder_impl(req).await
+}
+
+/// `POST /v1/accord/family/cosign` — RE-OPEN the holder's YubiKey + USB-wrapped
+/// ML-DSA half and cosign the genesis family envelope on their own token. Returns
+/// the holder's `{ signature, member }` for `POST /v1/accord/genesis/assemble`.
+///
+/// Behind the `pkcs11` feature this opens the real token (the touch-required tap
+/// IS the holder's consent); without it, it returns a clear `NotSupported`.
+async fn cosign_family(State(_st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CosignFamilyRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+
+    // Input validation (foolproof: refuse empty/non-object before touching hardware).
+    if req.key_id.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "key_id must not be empty");
+    }
+    if req.mldsa_usb_path.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "mldsa_usb_path must not be empty — insert your USB key and choose its folder",
+        );
+    }
+    if !req.envelope.is_object() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "envelope must be the family-envelope JSON object from /v1/accord/genesis/envelope",
+        );
+    }
+
+    cosign_family_impl(req).await
 }
 
 // ─── pkcs11 path: the real YubiKey-backed provisioning ────────────────────────
@@ -296,6 +368,130 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
         .into_response()
 }
 
+#[cfg(feature = "pkcs11")]
+async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
+    use std::path::PathBuf;
+
+    use ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer;
+    use ciris_keyring::PqcSigner;
+    use ciris_verify_core::accord_genesis::{co_sign_accord_family, founder_member};
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+
+    use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
+
+    let key_id = req.key_id.trim().to_string();
+    let usb_dir = PathBuf::from(req.mldsa_usb_path.trim());
+
+    // The USB directory must already hold this holder's wrapped ML-DSA blob.
+    if !usb_dir.is_dir() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "the ML-DSA USB path is not a directory: {} — insert the SAME USB key you \
+                 provisioned this holder with",
+                usb_dir.display()
+            ),
+        );
+    }
+
+    let piv_slot = req
+        .pkcs11
+        .piv_slot
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PIV_SLOT.to_string());
+
+    // 1. Re-open the holder's YubiKey Ed25519 (NO provisioning).
+    let opts = Pkcs11Options {
+        module_path: req
+            .pkcs11
+            .module_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
+        user_pin: req.pkcs11.user_pin.clone(),
+        piv_slot: piv_slot.clone(),
+        provision: false,
+        ..Pkcs11Options::default()
+    };
+    let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
+        Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
+                     inserted and the PIN correct?"
+                ),
+            )
+        }
+    };
+
+    // 2. Re-open the USB-wrapped ML-DSA-65 half (bound to THIS YubiKey + key_id).
+    let mldsa =
+        match UsbWrappedMlDsa65Signer::open(yubikey_ed.as_ref(), &key_id, usb_dir.clone()).await {
+            Ok(m) => m,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                    "couldn't re-open the USB-wrapped ML-DSA key for '{key_id}' at {}: {e} — is \
+                     this the SAME USB + YubiKey pair you provisioned this holder with?",
+                    usb_dir.display()
+                ),
+                )
+            }
+        };
+
+    // 3. Rebuild the hardware-rooted identity (YubiKey Ed25519 + USB-wrapped ML-DSA).
+    let identity = match HardwareRootedIdentity::new(
+        key_id.clone(),
+        yubikey_ed.clone(),
+        Arc::new(mldsa) as Arc<dyn PqcSigner>,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("build hardware-rooted identity: {e}"),
+            )
+        }
+    };
+
+    // 4. Cosign the genesis family envelope. A touch-required YubiKey BLOCKS on the
+    //    bound signature until tapped — that physical tap IS the holder's consent.
+    let signature = match co_sign_accord_family(&identity, &req.envelope).await {
+        Ok(s) => s,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cosign accord family envelope: {e}"),
+            )
+        }
+    };
+
+    // The founder ThresholdMember from the SAME identity — the assemble step needs
+    // both `signatures` and `founders`; producing them together is foolproof.
+    let member = match founder_member(&identity).await {
+        Ok(m) => m,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("derive founder member: {e}"),
+            )
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "key_id": key_id,
+            "signature": signature,
+            "member": member,
+        })),
+    )
+        .into_response()
+}
+
 /// Probe that `dir` is writable by creating + removing a temp file.
 #[cfg(feature = "pkcs11")]
 fn writable_probe(dir: &std::path::Path) -> std::io::Result<()> {
@@ -354,6 +550,16 @@ async fn provision_holder_impl(_req: ProvisionHolderRequest) -> Response {
     )
 }
 
+#[cfg(not(feature = "pkcs11"))]
+async fn cosign_family_impl(_req: CosignFamilyRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "accord-family genesis cosign needs a YubiKey (PKCS#11) — this build was compiled without \
+         the `pkcs11` feature. Rebuild ciris-server with `--features pkcs11` on a Linux host with \
+         the token attached.",
+    )
+}
+
 /// The accord-provision router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`).
 pub fn router(engine: Arc<Engine>) -> Router {
@@ -362,6 +568,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/provision-holder",
             axum::routing::post(provision_holder),
+        )
+        .route(
+            "/v1/accord/family/cosign",
+            axum::routing::post(cosign_family),
         )
         .with_state(state)
 }
@@ -440,6 +650,64 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn cosign_empty_key_id_is_rejected() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/family/cosign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"","mldsa_usb_path":"/tmp/usb","envelope":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn cosign_non_object_envelope_is_rejected() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/family/cosign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp","envelope":"nope"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(not(feature = "pkcs11"))]
+    #[tokio::test]
+    async fn cosign_without_pkcs11_returns_not_implemented() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/family/cosign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp","envelope":{"members":[]}}"#,
                     ))
                     .unwrap(),
             )

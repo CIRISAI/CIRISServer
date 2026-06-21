@@ -134,3 +134,48 @@ data class AccordProvisionResponse(
     @SerialName("custody_attestation")
     val custodyAttestation: kotlinx.serialization.json.JsonElement? = null,
 )
+
+// ─── Genesis ceremony (CIRISServer #41) ──────────────────────────────────────
+//
+// The guided HUMANITY_ACCORD genesis ceremony stands up a NEW mesh's 2-of-3
+// human kill-switch: 3 humans, each a PRIMARY seat + a cold SPARE. After all 6
+// keys are provisioned + registered, the 3 primaries co-sign a family envelope
+// and the node assembles the 2/3-founder-signed genesis (the cold-start bake
+// artifact). The app holds NO keys — every signature comes from a re-inserted
+// YubiKey via the loopback endpoints.
+
+/**
+ * ``POST /v1/accord/genesis/envelope`` response — the canonical, JCS-significant
+ * family envelope the primary holders co-sign byte-for-byte. Carried verbatim;
+ * the app never rebuilds it (it would break the signing bytes).
+ */
+@Serializable
+data class GenesisEnvelopeResponse(
+    val envelope: kotlinx.serialization.json.JsonElement,
+)
+
+/**
+ * ``POST /v1/accord/family/cosign`` response — one primary holder's genesis
+ * cosignature, produced on their re-inserted YubiKey by the loopback endpoint.
+ * Both [signature] (the ``ThresholdSignature``) and [member] (the founder
+ * ``ThresholdMember``) ride as opaque signed JSON; the app collects them and
+ * relays them verbatim to ``…/genesis/assemble`` (``signatures`` + ``founders``).
+ */
+@Serializable
+data class CosignFamilyResponse(
+    @SerialName("key_id")
+    val keyId: String,
+    val signature: kotlinx.serialization.json.JsonElement,
+    val member: kotlinx.serialization.json.JsonElement,
+)
+
+/**
+ * ``POST /v1/accord/genesis/assemble`` response — the assembled, 2/3-founder-
+ * signed genesis (the cold-start recognition root / bake artifact, CIRISVerify
+ * #107). [genesis] is the opaque signed CEG object the operator MUST SAVE.
+ */
+@Serializable
+data class GenesisAssembleResponse(
+    val genesis: kotlinx.serialization.json.JsonElement,
+    val message: String? = null,
+)

@@ -657,6 +657,9 @@ fun CIRISApp(
         ai.ciris.mobile.shared.viewmodels.ProvisionAccordHolderViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.ProvisionAccordHolderViewModel(apiClient)
     }
+    val accordCeremonyViewModel: ai.ciris.mobile.shared.viewmodels.AccordCeremonyViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.AccordCeremonyViewModel(apiClient)
+    }
     val safetyViewModel: ai.ciris.mobile.shared.viewmodels.SafetyViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.SafetyViewModel(apiClient)
     }
@@ -2777,6 +2780,20 @@ fun CIRISApp(
                 AccordScreen(
                     viewModel = accordViewModel,
                     onBack = { currentScreen = Screen.Interact },
+                    // Found-a-new-accord CTA — shown only when no family exists yet.
+                    onStartCeremony = { currentScreen = Screen.AccordCeremony },
+                )
+            }
+
+            Screen.AccordCeremony -> {
+                // Genesis ceremony (CIRISServer #41): the foolproof guided wizard
+                // that stands up a NEW mesh's 2-of-3 human kill-switch — 6 keys
+                // (3 primaries + 3 cold spares), cosign, assemble. The app holds no
+                // keys; the re-inserted YubiKey signs via the loopback endpoints.
+                PlatformLogger.d(TAG, "[Screen.AccordCeremony] Rendering accord genesis ceremony")
+                AccordCeremonyScreen(
+                    viewModel = accordCeremonyViewModel,
+                    onBack = { currentScreen = Screen.Accord },
                 )
             }
 
@@ -4127,6 +4144,8 @@ private sealed class Screen {
     object Accord : Screen()
     // Provision Accord Holder (mint a portable-2FA accord-holder identity).
     object ProvisionAccordHolder : Screen()
+    // Accord Genesis Ceremony (stand up a new mesh's 2-of-3 human kill-switch).
+    object AccordCeremony : Screen()
 
     // Holistic SAFETY surface (CIRISServer v0.4.6 /v1/safety/*) — moderation +
     // child-safety as first-class fabric primitives, built ahead of content.
@@ -4229,6 +4248,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.Delegations -> ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations
     Screen.Accord -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ProvisionAccordHolder -> ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder
+    Screen.AccordCeremony -> ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony
     Screen.Moderation -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
     Screen.ChildSafety -> ai.ciris.mobile.shared.ui.nav.NavSurface.ChildSafety
     Screen.Storage -> ai.ciris.mobile.shared.ui.nav.NavSurface.Storage
@@ -4281,6 +4301,7 @@ private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen
     ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations -> Screen.Delegations
     ai.ciris.mobile.shared.ui.nav.NavSurface.Accord -> Screen.Accord
     ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder -> Screen.ProvisionAccordHolder
+    ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony -> Screen.AccordCeremony
     // Safety parent routes to its first child (Moderation); the two leaves map 1:1.
     ai.ciris.mobile.shared.ui.nav.NavSurface.Safety -> Screen.Moderation
     ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation -> Screen.Moderation
