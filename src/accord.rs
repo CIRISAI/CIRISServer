@@ -33,17 +33,28 @@
 //!   cosignatures toward the 2-of-3 (advisory status; `verify-invocation` is
 //!   authoritative against `federation_keys`).
 //!
+//! ## Custody gate (v0.5.19 — the safe-mesh FLOOR pin)
+//!
+//! `POST /v1/accord/holder` accepts an optional `custody_attestation` (the
+//! holder's `portable_2fa` YubiKey PIV `9c → f9 → …intermediates… → Yubico
+//! Attestation Root 1` chain). When present it is verified via
+//! [`verify_accord_custody_attestation`] against the PINNED durable root
+//! ([`YUBICO_ATTESTATION_ROOT_1_DER`]) + the FIPS-certified + touch-always floor +
+//! the attested-key==holder bind — BEFORE the key is admitted. CIRISVerify#91 +
+//! #62 are both resolved + validated on a real YubiKey 5 FIPS (fw 5.7.4); the real
+//! `ciris_keyring::pkcs11` cryptoki backend is live (no longer stubbed).
+//!
 //! ## What is NOT here yet (and why the mesh still waits)
 //!
-//! The accord keys are held under verify v6.7.1's **portable high-secure key
-//! mode** (FIPS YubiKey + USB-held ML-DSA — CIRISVerify#91, resolved); the
-//! HOLDER-DEVICE provisioning tool (wiring `UsbWrappedMlDsa65Signer` +
-//! `produce_accord_custody_attestation`) + the KMP ceremony/concurrence UI are
-//! the remaining follow-ons, and the real YubiKey token open is blocked on
-//! CIRISVerify#62 (`get_token_signer` is stubbed). The canonical mesh stays on
-//! 0.5.X — 0.6 (+registry) bakes `CANONICAL_BOOTSTRAP_PEERS` and bootstraps the
-//! mesh, which MUST NOT happen before the kill-switch is enforceable AND the
-//! accord keys are under genuine 2-factor distributed-human custody.
+//! The remaining floor work is the **foolproof holder-provisioning UI** (drive
+//! [`crate::accord_custody::provision_portable_holder`] from a guided desktop flow
+//! — the holder selects the ML-DSA USB path on an already-FIPS-approved key) + the
+//! **operational genesis ceremony RUN** (mint the canonical holders on real
+//! YubiKeys, register them with their custody attestations, assemble the family).
+//! The canonical mesh stays on 0.5.X — 0.6 (+registry) bakes
+//! `CANONICAL_BOOTSTRAP_PEERS` and bootstraps the mesh, which MUST NOT happen
+//! before the kill-switch is enforceable AND the accord keys are under genuine
+//! 2-factor distributed-human custody (now gate-enforced).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -57,6 +68,7 @@ use serde::{Deserialize, Serialize};
 use ciris_persist::federation::types::{identity_type, KeyRecord, SignedKeyRecord};
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
+use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation;
 use ciris_verify_core::accord_genesis::{
     accord_invocation_status, assemble_accord_family_genesis, build_accord_family_envelope,
     build_accord_invocation_object, parse_accord_invocation, ACCORD_CONSENSUS_PROTOCOL,
@@ -72,6 +84,17 @@ use crate::auth::session::resolve_bearer;
 /// The §9.2.1 2-of-3 holder threshold (verify enforces this internally; surfaced
 /// here for the response + the cold-start roster sanity check).
 const ACCORD_THRESHOLD: usize = 2;
+
+/// The PINNED durable accord-custody trust anchor — **Yubico Attestation Root 1**
+/// (`developers.yubico.com/PKI/yubico-ca-1.pem`, CN="Yubico Attestation Root 1",
+/// DER). The safe-mesh floor pins THIS durable root, NOT the rotating "Yubico PIV
+/// Attestation B 1" intermediate; the f9 device cert + the two PIV intermediates
+/// ride in the holder's custody-attestation chain
+/// (`yubikey_attestation_chain_hex`), which `verify_accord_custody_attestation`
+/// walks (variable length) up to this anchor. Validated against a real YubiKey 5
+/// FIPS (fw 5.7.4) by the verify team. See the `accord-custody-gate-pinning` note.
+const YUBICO_ATTESTATION_ROOT_1_DER: &[u8] =
+    include_bytes!("accord_pki/yubico_attestation_root_1.der");
 
 #[derive(Clone)]
 struct AccordState {
@@ -152,6 +175,14 @@ async fn require_owner(st: &AccordState, headers: &HeaderMap) -> Result<(), Resp
 #[derive(Debug, Deserialize)]
 struct RegisterHolderRequest {
     key_record: SignedKeyRecord,
+    /// The holder's `portable_2fa` custody attestation (a YubiKey PIV `9c → f9 →
+    /// …intermediates… → Yubico Attestation Root 1` chain, produced at
+    /// provisioning). When present it is verified against the PINNED durable root
+    /// (the safe-mesh FIPS floor) BEFORE the key is admitted. Optional only so the
+    /// software test path can exercise the persist `attestation_evidence` gate
+    /// alone; the canonical accord holders ARE provisioned with it.
+    #[serde(default)]
+    custody_attestation: Option<SignedCegObject>,
 }
 
 async fn register_holder(
@@ -176,10 +207,50 @@ async fn register_holder(
         );
     }
     let key_id = req.key_record.record.key_id.clone();
+
+    // FIPS portable-2FA CUSTODY GATE (the safe-mesh floor): if a YubiKey PIV
+    // custody attestation is supplied, it MUST verify against the PINNED durable
+    // Yubico Attestation Root 1 + meet the FIPS-certified + touch-always floor +
+    // bind to THIS holder's Ed25519 — else the key is refused. The f9 + the two
+    // PIV intermediates ride in the attestation's chain; we pin only the root.
+    let custody = if let Some(custody) = &req.custody_attestation {
+        let holder_member = ThresholdMember {
+            member_id: req.key_record.record.key_id.clone(),
+            ed25519_public_key_base64: req.key_record.record.pubkey_ed25519_base64.clone(),
+            mldsa65_public_key_base64: req.key_record.record.pubkey_ml_dsa_65_base64.clone(),
+            role: None,
+        };
+        match verify_accord_custody_attestation(
+            custody,
+            &holder_member,
+            YUBICO_ATTESTATION_ROOT_1_DER,
+        ) {
+            Ok(v) => serde_json::json!({
+                "verified": true,
+                "hardware_class": v.hardware_class,
+                "custody_tier": v.custody_tier,
+                "fips_certified": v.fips_certified,
+                "touch_always": v.touch_always,
+                "firmware": v.firmware,
+            }),
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "accord custody attestation rejected (must be a FIPS YubiKey PIV chain to \
+                         Yubico Attestation Root 1): {e}"
+                    ),
+                )
+            }
+        }
+    } else {
+        serde_json::Value::Null
+    };
+
     match st.engine.register_federation_key(req.key_record).await {
         Ok(_) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "registered": true, "key_id": key_id })),
+            Json(serde_json::json!({ "registered": true, "key_id": key_id, "custody": custody })),
         )
             .into_response(),
         Err(e) => err(

@@ -579,3 +579,69 @@ async fn invocation_concurrence_advances_to_quorum() {
         "got {listed}"
     );
 }
+
+#[tokio::test]
+async fn accord_holder_with_bogus_custody_attestation_is_rejected() {
+    // The custody GATE (safe-mesh floor): a custody attestation that does NOT chain
+    // to the PINNED Yubico Attestation Root 1 (here a malformed / non-YubiKey one)
+    // is refused BEFORE the key is admitted — proving the gate pins the durable root
+    // and calls verify_accord_custody_attestation. (A real FIPS-YubiKey PIV chain is
+    // validated on hardware by verify; that success path runs at the ceremony.)
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holder = Holder::new("accord-holder-bogus-custody", 0xF1);
+    let bogus_custody = serde_json::json!({
+        "schema": "ciris.ceg.signed-object.v1",
+        "kind": "accord_holder_custody_attestation",
+        "key_id": "accord-holder-bogus-custody",
+        "created_at": "2026-06-20T00:00:00.000Z",
+        "body": {
+            "holder_key_id": "accord-holder-bogus-custody",
+            "custody_tier": "portable_2fa",
+            "yubikey_attestation_chain_hex": ["30820100"]
+        },
+        "signatures": serde_json::Value::Null
+    });
+
+    let resp = client
+        .post(format!("{base}/v1/accord/holder"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({
+            "key_record": holder.signed_key_record().await,
+            "custody_attestation": bogus_custody,
+        }))
+        .send()
+        .await
+        .expect("register w/ bogus custody");
+    assert_eq!(
+        resp.status(),
+        400,
+        "a custody attestation not chaining to Yubico Attestation Root 1 must be refused"
+    );
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("custody"),
+        "rejection must be the custody gate; got {body}"
+    );
+
+    // The key was NOT admitted (the custody gate runs before registration).
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster["holders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["key_id"] == "accord-holder-bogus-custody"),
+        "a custody-rejected holder must not be in the roster"
+    );
+}
