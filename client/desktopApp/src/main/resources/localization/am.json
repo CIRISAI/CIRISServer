@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "ማሳወቅ",
     "accord_quorum": "ምልአተ-ጉባኤ {signed} / {threshold}",
     "accord_subtitle": "የሰብአዊነት ስምምነት — የግድያ-ማብሪያውን በጋራ የሚይዘው የተደላደለ ሕገ-መንግሥታዊ ዝርዝር። መተግበሪያው ምንም ቁልፍ አይዝም፤ መስቀለኛው ይፈርማል።",
-    "accord_title": "ስምምነት"
+    "accord_title": "ስምምነት",
+    "provision_holder_title": "የአኮርድ ያዥ ያቅርቡ",
+    "provision_holder_subtitle": "ቀድሞውኑ በ FIPS የጸደቀ YubiKey በመጠቀም የተንቀሳቃሽ ባለ-ሁለት-ደረጃ HUMANITY_ACCORD ማንነትዎን ይፍጠሩ። መተግበሪያው ምንም ቁልፍ አይይዝም — ምስጢራዊ ሥራውን ኖድዎ ያከናውናል።",
+    "provision_holder_step1_title": "YubiKey ዎን ያረጋግጡ",
+    "provision_holder_step1_desc": "የ FIPS YubiKey ዎን ያስገቡ። ቀድሞውኑ በ FIPS የጸደቀ ሁነታ ላይ መሆን አለበት እና slot-9c ቁልፍ ተፈጥሮ መሆን አለበት (የ ykman ዝግጅት ከዚህ ውጭ ይከናወናል — ይህ ሂደት አያደርገውም)።",
+    "provision_holder_fips_ack": "YubiKey ዬ ገብቷል እና ቀድሞውኑ በ FIPS ጸድቋል (slot-9c ቁልፍ ተፈጥሯል)።",
+    "provision_holder_prep_note": "ገና አልተጠናቀቀም? በመጀመሪያ የ ykman FIPS ዝግጅትን በ YubiKey ዎ ላይ ያሂዱ፣ ከዚያም ይመለሱ።",
+    "provision_holder_key_id_label": "የያዥ ቁልፍ መታወቂያ",
+    "provision_holder_key_id_hint": "ለምሳሌ accord-holder-alice",
+    "provision_holder_step2_title": "የ ML-DSA USB አቃፊን ይምረጡ",
+    "provision_holder_step2_desc": "USB ቁልፍዎን ያስገቡ እና አቃፊውን ይምረጡ። የድህረ-ኳንተም ML-DSA ቁልፍ ተጠቅልሎ ወደዚያ ይጻፋል — በ YubiKey ዎ ብቻ ሊፈታ ይችላል (ንክኪ + PIN)።",
+    "provision_holder_usb_label": "የ ML-DSA USB አቃፊ መንገድ",
+    "provision_holder_usb_placeholder": "/media/you/USB ወይም /Volumes/USB",
+    "provision_holder_usb_guidance": "ወደተጫነው USB አቃፊ ሙሉ መንገዱን ያስገቡ። መኖር አለበት እና ሊጻፍ የሚችል መሆን አለበት።",
+    "provision_holder_pin_label": "YubiKey PIN (አማራጭ)",
+    "provision_holder_pin_note": "በቶከኑ እንዲጠየቁ ባዶ ይተዉት። በማንኛውም መንገድ YubiKey ን መንካት ያስፈልጋል።",
+    "provision_holder_submit": "ያቅርቡ",
+    "provision_holder_busy": "በማቅረብ ላይ…",
+    "provision_holder_touch_note": "የቁልፍ ጥቅልሉን ለማጽደቅ YubiKey ዎ ሲብለጨለጭ ይንኩት።",
+    "provision_holder_success_title": "ቀርቧል",
+    "provision_holder_success_next": "አሁን የኖድ ባለቤትዎ እንዲመዘግብዎት ይጠይቁ፡ የያዥ መዝገብዎን በ POST /v1/accord/holder ያስገባሉ።",
+    "provision_holder_again": "ሌላ ያቅርቡ"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "moderation": "ቁጥጥር",
       "child_safety": "የልጆች ደህንነት",
       "delegations": "ውክልናዎች",
-      "accord": "ስምምነት"
+      "accord": "ስምምነት",
+      "provision_accord_holder": "ያዥ ያቅርቡ"
     }
   },
   "setup_validation_select_provider": "የLLM አቅራቢ ይምረጡ",

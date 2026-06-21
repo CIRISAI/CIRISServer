@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "அறிவிப்பு",
     "accord_quorum": "கோரம் {signed} / {threshold}",
     "accord_subtitle": "மனிதகுல ஒப்பந்தம் — kill-switch-ஐ கூட்டாக வைத்திருக்கும் நிலைபெற்ற அரசியலமைப்பு பட்டியல். இந்த ஆப் எந்த விசையையும் வைத்திருப்பதில்லை; நோடு கையெழுத்திடுகிறது.",
-    "accord_title": "ஒப்பந்தம்"
+    "accord_title": "ஒப்பந்தம்",
+    "provision_holder_again": "மற்றொன்றை வழங்கு",
+    "provision_holder_busy": "வழங்குகிறது…",
+    "provision_holder_fips_ack": "என் YubiKey செருகப்பட்டுள்ளது மற்றும் ஏற்கனவே FIPS-அங்கீகரிக்கப்பட்டுள்ளது (slot-9c விசை உருவாக்கப்பட்டது).",
+    "provision_holder_key_id_hint": "எ.கா. accord-holder-alice",
+    "provision_holder_key_id_label": "வைப்பாளர் விசை ID",
+    "provision_holder_pin_label": "YubiKey PIN (விருப்பத்தேர்வு)",
+    "provision_holder_pin_note": "டோக்கனால் கேட்கப்பட வெறுமையாக விடுங்கள். எவ்வாறாயினும் YubiKey-ஐத் தொடுவது அவசியம்.",
+    "provision_holder_prep_note": "இன்னும் முடிக்கவில்லையா? முதலில் உங்கள் YubiKey-ல் ykman FIPS தயாரிப்பை இயக்கி, பிறகு திரும்பி வாருங்கள்.",
+    "provision_holder_step1_desc": "உங்கள் FIPS YubiKey-ஐ செருகுங்கள். அது ஏற்கனவே FIPS-அங்கீகரிக்கப்பட்ட பயன்முறையில் இருக்க வேண்டும், slot-9c விசை உருவாக்கப்பட்டிருக்க வேண்டும் (ykman தயாரிப்பு தனியாகச் செய்யப்படுகிறது — இந்தப் பாதை அதைச் செய்யாது).",
+    "provision_holder_step1_title": "உங்கள் YubiKey-ஐ உறுதிப்படுத்துங்கள்",
+    "provision_holder_step2_desc": "உங்கள் USB விசையைச் செருகி அதன் கோப்புறையைத் தேர்ந்தெடுங்கள். குவாண்டத்திற்குப் பிந்தைய ML-DSA விசை சுற்றப்பட்டு அங்கே எழுதப்படுகிறது — அதை உங்கள் YubiKey (தொடுதல் + PIN) மட்டுமே விரிக்க முடியும்.",
+    "provision_holder_step2_title": "ML-DSA USB கோப்புறையைத் தேர்ந்தெடுங்கள்",
+    "provision_holder_submit": "வழங்கு",
+    "provision_holder_subtitle": "ஏற்கனவே FIPS-அங்கீகரிக்கப்பட்ட உங்கள் YubiKey-ல் இருந்து உங்கள் கையடக்க இரு-காரணி HUMANITY_ACCORD அடையாளத்தை உருவாக்குங்கள். செயலி எந்த விசையையும் வைத்திருக்காது — குறியாக்கத்தை உங்கள் நோடு செய்கிறது.",
+    "provision_holder_success_next": "இப்போது உங்களைப் பதிவு செய்ய உங்கள் நோடு உரிமையாளரிடம் கேளுங்கள்: அவர்கள் உங்கள் வைப்பாளர் பதிவை POST /v1/accord/holder-ல் அனுமதிக்கிறார்கள்.",
+    "provision_holder_success_title": "வழங்கப்பட்டது",
+    "provision_holder_title": "ஒப்பந்த வைப்பாளரை வழங்கு",
+    "provision_holder_touch_note": "விசை சுற்றலை அங்கீகரிக்க, உங்கள் YubiKey சிமிட்டும்போது அதைத் தொடுங்கள்.",
+    "provision_holder_usb_guidance": "ஏற்றப்பட்ட USB கோப்புறையின் முழுப் பாதையை உள்ளிடுங்கள். அது இருக்க வேண்டும் மற்றும் எழுதக்கூடியதாக இருக்க வேண்டும்.",
+    "provision_holder_usb_label": "ML-DSA USB கோப்புறைப் பாதை",
+    "provision_holder_usb_placeholder": "/media/you/USB அல்லது /Volumes/USB"
   },
   "conscience": {
     "ponder_attempted": "நான் {action} செய்ய முயற்சித்தேன்",
@@ -2681,7 +2702,8 @@
       "nodes": "கணுக்கள்",
       "safety": "பாதுகாப்பு",
       "delegations": "பணி ஒப்படைப்புகள்",
-      "accord": "ஒப்பந்தம்"
+      "accord": "ஒப்பந்தம்",
+      "provision_accord_holder": "வைப்பாளரை வழங்கு"
     }
   },
   "setup_validation_select_provider": "ஒரு LLM வழங்குநரைத் தேர்ந்தெடுக்கவும்",

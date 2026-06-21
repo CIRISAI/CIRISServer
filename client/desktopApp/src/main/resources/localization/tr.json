@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "BİLDİRİM",
     "accord_kind_drill": "TATBİKAT",
     "accord_quorum": "Yeter sayı {signed} / {threshold}",
-    "accord_concur": "Mutabık ol"
+    "accord_concur": "Mutabık ol",
+    "provision_holder_title": "Accord Sahibi Sağla",
+    "provision_holder_subtitle": "Zaten FIPS onaylı YubiKey'inizden taşınabilir iki faktörlü HUMANITY_ACCORD kimliğinizi oluşturun. Uygulama hiçbir anahtar tutmaz — kriptografiyi düğümünüz yapar.",
+    "provision_holder_step1_title": "YubiKey'inizi onaylayın",
+    "provision_holder_step1_desc": "FIPS YubiKey'inizi takın. Cihaz, slot-9c anahtarı oluşturulmuş şekilde zaten FIPS onaylı modda olmalıdır (ykman hazırlığı ayrı yapılır — bu akış bunu yapmaz).",
+    "provision_holder_fips_ack": "YubiKey'im takılı ve zaten FIPS onaylı (slot-9c anahtarı oluşturuldu).",
+    "provision_holder_prep_note": "Henüz yapmadınız mı? Önce YubiKey'inizde ykman FIPS hazırlığını çalıştırın, sonra geri dönün.",
+    "provision_holder_key_id_label": "Sahip anahtar kimliği",
+    "provision_holder_key_id_hint": "örn. accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB klasörünü seçin",
+    "provision_holder_step2_desc": "USB anahtarınızı takın ve klasörünü seçin. Kuantum sonrası ML-DSA anahtarı sarmalanır ve oraya yazılır — yalnızca YubiKey'iniz ile (dokunma + PIN) açılabilir.",
+    "provision_holder_usb_label": "ML-DSA USB klasör yolu",
+    "provision_holder_usb_placeholder": "/media/you/USB veya /Volumes/USB",
+    "provision_holder_usb_guidance": "Bağlı USB klasörünün tam yolunu girin. Var olmalı ve yazılabilir olmalıdır.",
+    "provision_holder_pin_label": "YubiKey PIN (isteğe bağlı)",
+    "provision_holder_pin_note": "Belirteç tarafından sorulması için boş bırakın. Her durumda YubiKey'e dokunmanız gerekir.",
+    "provision_holder_submit": "Sağla",
+    "provision_holder_busy": "Sağlanıyor…",
+    "provision_holder_touch_note": "Anahtar sarmalamayı yetkilendirmek için yanıp söndüğünde YubiKey'inize dokunun.",
+    "provision_holder_success_title": "Sağlandı",
+    "provision_holder_success_next": "Şimdi düğüm sahibinizden sizi kaydetmesini isteyin: sahip kaydınızı POST /v1/accord/holder adresinde kabul ederler.",
+    "provision_holder_again": "Başka bir tane sağla"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Düğümler",
       "safety": "Güvenlik",
       "delegations": "Yetkilendirmeler",
-      "accord": "Mutabakat"
+      "accord": "Mutabakat",
+      "provision_accord_holder": "Sahip Sağla"
     }
   },
   "setup_validation_select_provider": "Bir LLM sağlayıcısı seçin",

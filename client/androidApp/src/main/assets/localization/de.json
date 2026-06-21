@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "BENACHRICHTIGEN",
     "accord_quorum": "Quorum {signed} / {threshold}",
     "accord_subtitle": "Der Humanity Accord — die verankerte verfassungsmäßige Liste, die gemeinsam den Notausschalter hält. Die App hält keine Schlüssel; der Knoten signiert.",
-    "accord_title": "Accord"
+    "accord_title": "Accord",
+    "provision_holder_title": "Accord-Inhaber bereitstellen",
+    "provision_holder_subtitle": "Erstellen Sie Ihre portable HUMANITY_ACCORD-Identität mit Zwei-Faktor-Authentifizierung aus Ihrem bereits FIPS-zugelassenen YubiKey. Die App speichert keine Schlüssel — die Kryptografie übernimmt Ihr Knoten.",
+    "provision_holder_step1_title": "Bestätigen Sie Ihren YubiKey",
+    "provision_holder_step1_desc": "Stecken Sie Ihren FIPS-YubiKey ein. Er muss sich bereits im FIPS-zugelassenen Modus befinden und einen Schlüssel in Slot 9c generiert haben (die ykman-Vorbereitung erfolgt separat — dieser Ablauf führt sie nicht durch).",
+    "provision_holder_fips_ack": "Mein YubiKey ist eingesteckt und bereits FIPS-zugelassen (Schlüssel in Slot 9c generiert).",
+    "provision_holder_prep_note": "Noch nicht erledigt? Führen Sie zuerst die ykman-FIPS-Vorbereitung auf Ihrem YubiKey durch und kommen Sie dann zurück.",
+    "provision_holder_key_id_label": "Inhaber-Schlüssel-ID",
+    "provision_holder_key_id_hint": "z. B. accord-holder-alice",
+    "provision_holder_step2_title": "Wählen Sie den ML-DSA-USB-Ordner",
+    "provision_holder_step2_desc": "Stecken Sie Ihren USB-Stick ein und wählen Sie dessen Ordner. Der Post-Quanten-ML-DSA-Schlüssel wird verpackt und dort gespeichert — er kann nur von Ihrem YubiKey entpackt werden (Berührung + PIN).",
+    "provision_holder_usb_label": "Pfad zum ML-DSA-USB-Ordner",
+    "provision_holder_usb_placeholder": "/media/you/USB oder /Volumes/USB",
+    "provision_holder_usb_guidance": "Geben Sie den vollständigen Pfad zum eingehängten USB-Ordner ein. Er muss vorhanden und beschreibbar sein.",
+    "provision_holder_pin_label": "YubiKey-PIN (optional)",
+    "provision_holder_pin_note": "Leer lassen, um vom Token zur Eingabe aufgefordert zu werden. Die Berührung des YubiKey ist in jedem Fall erforderlich.",
+    "provision_holder_submit": "Bereitstellen",
+    "provision_holder_busy": "Wird bereitgestellt…",
+    "provision_holder_touch_note": "Berühren Sie Ihren YubiKey, wenn er blinkt, um das Verpacken des Schlüssels zu autorisieren.",
+    "provision_holder_success_title": "Bereitgestellt",
+    "provision_holder_success_next": "Bitten Sie nun Ihren Knoten-Eigentümer, Sie zu registrieren: Er nimmt Ihren Inhaber-Datensatz unter POST /v1/accord/holder auf.",
+    "provision_holder_again": "Weiteren bereitstellen"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Knoten",
       "safety": "Sicherheit",
       "delegations": "Delegationen",
-      "accord": "Accord"
+      "accord": "Accord",
+      "provision_accord_holder": "Inhaber bereitstellen"
     }
   },
   "setup_validation_select_provider": "LLM-Anbieter auswählen",

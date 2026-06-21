@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "सूचित करें",
     "accord_quorum": "कोरम {signed} / {threshold}",
     "accord_subtitle": "The Humanity Accord — स्थापित संवैधानिक सूची जो संयुक्त रूप से किल-स्विच रखती है। ऐप कोई कुंजी नहीं रखता; नोड हस्ताक्षर करता है।",
-    "accord_title": "समझौता"
+    "accord_title": "समझौता",
+    "provision_holder_again": "एक और प्रावधान करें",
+    "provision_holder_busy": "प्रावधान किया जा रहा है…",
+    "provision_holder_fips_ack": "मेरी YubiKey डाली गई है और पहले से FIPS-स्वीकृत है (slot-9c कुंजी उत्पन्न)।",
+    "provision_holder_key_id_hint": "उदा. accord-holder-alice",
+    "provision_holder_key_id_label": "Holder कुंजी ID",
+    "provision_holder_pin_label": "YubiKey PIN (वैकल्पिक)",
+    "provision_holder_pin_note": "टोकन द्वारा संकेत पाने के लिए खाली छोड़ें। किसी भी स्थिति में YubiKey को स्पर्श करना आवश्यक है।",
+    "provision_holder_prep_note": "अभी तक नहीं किया? पहले अपनी YubiKey पर ykman FIPS तैयारी चलाएं, फिर वापस आएं।",
+    "provision_holder_step1_desc": "अपनी FIPS YubiKey डालें। यह पहले से FIPS-स्वीकृत मोड में होनी चाहिए और slot-9c कुंजी उत्पन्न होनी चाहिए (ykman तैयारी अलग से की जाती है — यह प्रवाह इसे नहीं करता)।",
+    "provision_holder_step1_title": "अपनी YubiKey की पुष्टि करें",
+    "provision_holder_step2_desc": "अपनी USB कुंजी डालें और उसका फ़ोल्डर चुनें। पोस्ट-क्वांटम ML-DSA कुंजी को रैप करके वहां लिखा जाता है — इसे केवल आपकी YubiKey (स्पर्श + PIN) से ही अनरैप किया जा सकता है।",
+    "provision_holder_step2_title": "ML-DSA USB फ़ोल्डर चुनें",
+    "provision_holder_submit": "प्रावधान करें",
+    "provision_holder_subtitle": "अपनी पहले से FIPS-स्वीकृत YubiKey से अपनी पोर्टेबल दो-कारक HUMANITY_ACCORD पहचान बनाएं। ऐप कोई कुंजी नहीं रखता — क्रिप्टो आपका नोड करता है।",
+    "provision_holder_success_next": "अब अपने नोड स्वामी से आपको पंजीकृत करने के लिए कहें: वे POST /v1/accord/holder पर आपका holder रिकॉर्ड स्वीकार करते हैं।",
+    "provision_holder_success_title": "प्रावधान किया गया",
+    "provision_holder_title": "Accord Holder प्रावधान करें",
+    "provision_holder_touch_note": "कुंजी रैप को अधिकृत करने के लिए जब आपकी YubiKey झपके तो उसे स्पर्श करें।",
+    "provision_holder_usb_guidance": "माउंट किए गए USB फ़ोल्डर का पूरा पथ दर्ज करें। यह मौजूद होना चाहिए और लिखने योग्य होना चाहिए।",
+    "provision_holder_usb_label": "ML-DSA USB फ़ोल्डर पथ",
+    "provision_holder_usb_placeholder": "/media/you/USB या /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "नोड्स",
       "safety": "सुरक्षा",
       "delegations": "प्रत्यायोजन",
-      "accord": "समझौता"
+      "accord": "समझौता",
+      "provision_accord_holder": "Holder प्रावधान करें"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता चुनें",

@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "SANARWA",
     "accord_quorum": "Adadin da ake buƙata {signed} / {threshold}",
     "accord_subtitle": "Yarjejeniyar Bil'adama — jerin tsarin mulki da aka tabbatar wanda ke riƙe da maɓallin kashewa tare. App ɗin ba ya riƙe maɓallai ba; node ɗin yana sa hannu.",
-    "accord_title": "Yarjejeniya"
+    "accord_title": "Yarjejeniya",
+    "provision_holder_title": "Tanada Mai Riƙe da Yarjejeniya",
+    "provision_holder_subtitle": "Ƙera shaidar HUMANITY_ACCORD ta abubuwa biyu da za a iya ɗauka daga YubiKey naka da aka riga aka amince da shi a FIPS. Manhajar ba ta riƙe maɓallai — node naka ne ke yin crypto.",
+    "provision_holder_step1_title": "Tabbatar da YubiKey naka",
+    "provision_holder_step1_desc": "Saka FIPS YubiKey naka. Dole ne ya riga ya kasance a yanayin da FIPS ya amince da shi tare da maɓallin slot-9c da aka ƙera (an gama shirye-shiryen ykman a waje — wannan tafarki ba ya yin sa).",
+    "provision_holder_fips_ack": "An saka YubiKey na kuma an riga an amince da shi a FIPS (an ƙera maɓallin slot-9c).",
+    "provision_holder_prep_note": "Ba a gama ba tukuna? Fara gudanar da shirye-shiryen FIPS na ykman a kan YubiKey naka, sannan ka dawo.",
+    "provision_holder_key_id_label": "ID na maɓallin mai riƙe",
+    "provision_holder_key_id_hint": "misali accord-holder-alice",
+    "provision_holder_step2_title": "Zaɓi babban fayil na USB na ML-DSA",
+    "provision_holder_step2_desc": "Saka maɓallin USB naka kuma ka zaɓi babban fayil ɗinsa. Ana naɗe maɓallin ML-DSA na bayan-quantum a rubuta shi a wurin — YubiKey naka kaɗai ne zai iya buɗe shi (taɓawa + PIN).",
+    "provision_holder_usb_label": "Hanyar babban fayil na USB na ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB ko /Volumes/USB",
+    "provision_holder_usb_guidance": "Shigar da cikakkiyar hanya zuwa babban fayil na USB da aka ɗora. Dole ne ya kasance kuma a iya rubutawa a cikinsa.",
+    "provision_holder_pin_label": "PIN na YubiKey (na zaɓi)",
+    "provision_holder_pin_note": "Bar shi babu komai don token ya tambaye ka. Taɓa YubiKey ya zama dole ko ta yaya.",
+    "provision_holder_submit": "Tanada",
+    "provision_holder_busy": "Ana Tanadawa…",
+    "provision_holder_touch_note": "Taɓa YubiKey naka lokacin da yake walƙiya don ba da izinin naɗe maɓalli.",
+    "provision_holder_success_title": "An Tanada",
+    "provision_holder_success_next": "Yanzu ka roƙi mai mallakar node naka ya yi maka rajista: suna shigar da bayanan mai riƙe naka a POST /v1/accord/holder.",
+    "provision_holder_again": "Tanada wani"
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",
@@ -2681,7 +2702,8 @@
       "nodes": "Kumburai",
       "safety": "Tsaro",
       "delegations": "Wakilci",
-      "accord": "Yarjejeniya"
+      "accord": "Yarjejeniya",
+      "provision_accord_holder": "Tanada Mai Riƙe"
     }
   },
   "setup_validation_select_provider": "Zaɓi mai bayar da LLM",

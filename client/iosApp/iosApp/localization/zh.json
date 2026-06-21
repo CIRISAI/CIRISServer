@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "通知",
     "accord_kind_drill": "演练",
     "accord_quorum": "法定人数 {signed} / {threshold}",
-    "accord_concur": "同意"
+    "accord_concur": "同意",
+    "provision_holder_title": "配置 Accord 持有者",
+    "provision_holder_subtitle": "从您已通过 FIPS 认证的 YubiKey 铸造可携带的双因子 HUMANITY_ACCORD 身份。应用不持有任何密钥——加密运算由您的节点完成。",
+    "provision_holder_step1_title": "确认您的 YubiKey",
+    "provision_holder_step1_desc": "插入您的 FIPS YubiKey。它必须已处于 FIPS 认证模式并已在 slot-9c 生成密钥（ykman 准备工作需在带外完成——本流程不会执行）。",
+    "provision_holder_fips_ack": "我的 YubiKey 已插入且已通过 FIPS 认证（已在 slot-9c 生成密钥）。",
+    "provision_holder_prep_note": "还没完成？请先在您的 YubiKey 上运行 ykman FIPS 准备工作，然后再回来。",
+    "provision_holder_key_id_label": "持有者密钥 ID",
+    "provision_holder_key_id_hint": "例如 accord-holder-alice",
+    "provision_holder_step2_title": "选择 ML-DSA USB 文件夹",
+    "provision_holder_step2_desc": "插入您的 USB 密钥并选择其文件夹。后量子 ML-DSA 密钥会被封装并写入该处——只能由您的 YubiKey（触摸 + PIN）解封。",
+    "provision_holder_usb_label": "ML-DSA USB 文件夹路径",
+    "provision_holder_usb_placeholder": "/media/you/USB 或 /Volumes/USB",
+    "provision_holder_usb_guidance": "输入已挂载 USB 文件夹的完整路径。该路径必须存在且可写。",
+    "provision_holder_pin_label": "YubiKey PIN（可选）",
+    "provision_holder_pin_note": "留空则由令牌提示输入。无论哪种方式都需要触摸 YubiKey。",
+    "provision_holder_submit": "配置",
+    "provision_holder_busy": "正在配置…",
+    "provision_holder_touch_note": "当 YubiKey 闪烁时触摸它，以授权密钥封装。",
+    "provision_holder_success_title": "已配置",
+    "provision_holder_success_next": "现在请您的节点所有者注册您：他们会在 POST /v1/accord/holder 接纳您的持有者记录。",
+    "provision_holder_again": "配置另一个"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "节点",
       "safety": "安全",
       "delegations": "委托",
-      "accord": "协约"
+      "accord": "协约",
+      "provision_accord_holder": "配置持有者"
     }
   },
   "setup_validation_select_provider": "请选择一个 LLM 提供商",

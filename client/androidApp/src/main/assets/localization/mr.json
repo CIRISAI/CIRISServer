@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "सूचना",
     "accord_quorum": "कोरम {signed} / {threshold}",
     "accord_subtitle": "The Humanity Accord — प्रस्थापित घटनात्मक यादी जी संयुक्तपणे kill-switch धारण करते. अॅप कोणत्याही की धारण करत नाही; नोड स्वाक्षरी करतो.",
-    "accord_title": "Accord"
+    "accord_title": "Accord",
+    "provision_holder_again": "आणखी एक तरतूद करा",
+    "provision_holder_busy": "तरतूद करत आहे…",
+    "provision_holder_fips_ack": "माझी YubiKey घातली आहे आणि आधीच FIPS-मंजूर आहे (slot-9c की तयार केली आहे).",
+    "provision_holder_key_id_hint": "उदा. accord-holder-alice",
+    "provision_holder_key_id_label": "होल्डर की ID",
+    "provision_holder_pin_label": "YubiKey PIN (पर्यायी)",
+    "provision_holder_pin_note": "टोकनकडून विचारणा होण्यासाठी रिकामे ठेवा. कोणत्याही प्रकारे YubiKey ला स्पर्श करणे आवश्यक आहे.",
+    "provision_holder_prep_note": "अजून केले नाही? आधी तुमच्या YubiKey वर ykman FIPS तयारी चालवा, मग परत या.",
+    "provision_holder_step1_desc": "तुमची FIPS YubiKey घाला. ती आधीच FIPS-मंजूर मोडमध्ये असली पाहिजे आणि slot-9c की तयार केलेली असली पाहिजे (ykman तयारी बाहेरून केली जाते — हा प्रवाह ती करत नाही).",
+    "provision_holder_step1_title": "तुमची YubiKey निश्चित करा",
+    "provision_holder_step2_desc": "तुमची USB की घाला आणि तिचे फोल्डर निवडा. पोस्ट-क्वांटम ML-DSA की रॅप करून तेथे लिहिली जाते — ती फक्त तुमच्या YubiKey ने (टच + PIN) अनरॅप केली जाऊ शकते.",
+    "provision_holder_step2_title": "ML-DSA USB फोल्डर निवडा",
+    "provision_holder_submit": "तरतूद करा",
+    "provision_holder_subtitle": "आधीच-FIPS-मंजूर असलेल्या तुमच्या YubiKey मधून तुमची पोर्टेबल टू-फॅक्टर HUMANITY_ACCORD ओळख तयार करा. अ‍ॅप कोणत्याही की ठेवत नाही — क्रिप्टो तुमचा नोड करतो.",
+    "provision_holder_success_next": "आता तुमच्या नोड मालकाला तुमची नोंदणी करण्यास सांगा: ते POST /v1/accord/holder वर तुमचा होल्डर रेकॉर्ड स्वीकारतात.",
+    "provision_holder_success_title": "तरतूद केली",
+    "provision_holder_title": "Accord होल्डर तरतूद करा",
+    "provision_holder_touch_note": "की रॅप अधिकृत करण्यासाठी तुमची YubiKey लुकलुकत असताना तिला स्पर्श करा.",
+    "provision_holder_usb_guidance": "माउंट केलेल्या USB फोल्डरचा पूर्ण पथ टाका. तो अस्तित्वात असला पाहिजे आणि लिहिण्यायोग्य असला पाहिजे.",
+    "provision_holder_usb_label": "ML-DSA USB फोल्डर पथ",
+    "provision_holder_usb_placeholder": "/media/you/USB किंवा /Volumes/USB"
   },
   "conscience": {
     "ponder_attempted": "मी {action} करण्याचा प्रयत्न केला",
@@ -2681,7 +2702,8 @@
       "nodes": "नोड्स",
       "safety": "सुरक्षा",
       "delegations": "प्रतिनिधीत्वे",
-      "accord": "Accord"
+      "accord": "Accord",
+      "provision_accord_holder": "होल्डर तरतूद करा"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता निवडा",

@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "СПОВІЩЕННЯ",
     "accord_kind_drill": "НАВЧАННЯ",
     "accord_quorum": "Кворум {signed} / {threshold}",
-    "accord_concur": "Погодити"
+    "accord_concur": "Погодити",
+    "provision_holder_again": "Надати ще одні",
+    "provision_holder_busy": "Надання облікових даних…",
+    "provision_holder_fips_ack": "Мій YubiKey вставлено та вже схвалено за FIPS (ключ у слоті 9c згенеровано).",
+    "provision_holder_key_id_hint": "напр., accord-holder-alice",
+    "provision_holder_key_id_label": "Ідентифікатор ключа власника",
+    "provision_holder_pin_label": "PIN YubiKey (необов'язково)",
+    "provision_holder_pin_note": "Залиште порожнім, щоб токен запитав його. Дотик до YubiKey потрібен у будь-якому разі.",
+    "provision_holder_prep_note": "Ще не зроблено? Спершу виконайте підготовку FIPS ykman на своєму YubiKey, а потім поверніться.",
+    "provision_holder_step1_desc": "Вставте свій FIPS YubiKey. Він уже має бути в схваленому за FIPS режимі зі згенерованим ключем у слоті 9c (підготовка ykman виконується окремо — цей процес її не виконує).",
+    "provision_holder_step1_title": "Підтвердьте свій YubiKey",
+    "provision_holder_step2_desc": "Вставте свій USB-ключ та виберіть його папку. Постквантовий ключ ML-DSA обгортається й записується туди — його можна розгорнути лише вашим YubiKey (дотик + PIN).",
+    "provision_holder_step2_title": "Виберіть USB-папку ML-DSA",
+    "provision_holder_submit": "Надати облікові дані",
+    "provision_holder_subtitle": "Створіть портативну дворівневу ідентичність HUMANITY_ACCORD з вашого вже схваленого за FIPS YubiKey. Застосунок не зберігає ключів — криптографію виконує ваш вузол.",
+    "provision_holder_success_next": "Тепер попросіть власника вашого вузла зареєструвати вас: він приймає ваш запис власника за POST /v1/accord/holder.",
+    "provision_holder_success_title": "Облікові дані надано",
+    "provision_holder_title": "Надати облікові дані власника Accord",
+    "provision_holder_touch_note": "Торкніться свого YubiKey, коли він блимне, щоб авторизувати обгортання ключа.",
+    "provision_holder_usb_guidance": "Введіть повний шлях до змонтованої USB-папки. Вона має існувати та бути доступною для запису.",
+    "provision_holder_usb_label": "Шлях до USB-папки ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB або /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Вузли",
       "safety": "Безпека",
       "delegations": "Делегування",
-      "accord": "Угода"
+      "accord": "Угода",
+      "provision_accord_holder": "Надати облікові дані власника"
     }
   },
   "setup_validation_select_provider": "Виберіть провайдера LLM",

@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "NOTIFICAR",
     "accord_kind_drill": "SIMULACRO",
     "accord_quorum": "Cuórum {signed} / {threshold}",
-    "accord_concur": "Coincidir"
+    "accord_concur": "Coincidir",
+    "provision_holder_title": "Aprovisionar Titular del Accord",
+    "provision_holder_subtitle": "Genera tu identidad portátil de dos factores HUMANITY_ACCORD a partir de tu YubiKey ya aprobada por FIPS. La aplicación no almacena claves: tu nodo realiza la criptografía.",
+    "provision_holder_step1_title": "Confirma tu YubiKey",
+    "provision_holder_step1_desc": "Inserta tu YubiKey FIPS. Debe estar ya en modo aprobado por FIPS con una clave generada en la ranura 9c (la preparación con ykman se realiza fuera de banda: este flujo no lo hace).",
+    "provision_holder_fips_ack": "Mi YubiKey está insertada y ya aprobada por FIPS (clave de la ranura 9c generada).",
+    "provision_holder_prep_note": "¿Aún no lo has hecho? Ejecuta primero la preparación FIPS con ykman en tu YubiKey y luego vuelve.",
+    "provision_holder_key_id_label": "ID de clave del titular",
+    "provision_holder_key_id_hint": "p. ej. accord-holder-alice",
+    "provision_holder_step2_title": "Elige la carpeta USB de ML-DSA",
+    "provision_holder_step2_desc": "Inserta tu memoria USB y elige su carpeta. La clave poscuántica ML-DSA se envuelve y se escribe allí: solo puede desenvolverse con tu YubiKey (toque + PIN).",
+    "provision_holder_usb_label": "Ruta de la carpeta USB de ML-DSA",
+    "provision_holder_usb_placeholder": "/media/tu/USB o /Volumes/USB",
+    "provision_holder_usb_guidance": "Introduce la ruta completa de la carpeta USB montada. Debe existir y tener permisos de escritura.",
+    "provision_holder_pin_label": "PIN de la YubiKey (opcional)",
+    "provision_holder_pin_note": "Déjalo en blanco para que el token te lo solicite. En cualquier caso, es necesario tocar la YubiKey.",
+    "provision_holder_submit": "Aprovisionar",
+    "provision_holder_busy": "Aprovisionando…",
+    "provision_holder_touch_note": "Toca tu YubiKey cuando parpadee para autorizar el envoltorio de la clave.",
+    "provision_holder_success_title": "Aprovisionado",
+    "provision_holder_success_next": "Ahora pide al propietario de tu nodo que te registre: admite tu registro de titular en POST /v1/accord/holder.",
+    "provision_holder_again": "Aprovisionar otro"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Nodos",
       "safety": "Seguridad",
       "delegations": "Delegaciones",
-      "accord": "Acuerdo"
+      "accord": "Acuerdo",
+      "provision_accord_holder": "Aprovisionar Titular"
     }
   },
   "setup_validation_select_provider": "Selecciona un proveedor de LLM",

@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "УВЕДОМЛЕНИЕ",
     "accord_kind_drill": "УЧЕНИЯ",
     "accord_quorum": "Кворум {signed} / {threshold}",
-    "accord_concur": "Согласиться"
+    "accord_concur": "Согласиться",
+    "provision_holder_title": "Подготовка держателя соглашения",
+    "provision_holder_subtitle": "Создайте свою переносимую двухфакторную идентичность HUMANITY_ACCORD на основе уже одобренного по FIPS YubiKey. Приложение не хранит ключей — криптографию выполняет ваш узел.",
+    "provision_holder_step1_title": "Подтвердите свой YubiKey",
+    "provision_holder_step1_desc": "Вставьте свой FIPS YubiKey. Он уже должен быть в одобренном по FIPS режиме со сгенерированным ключом в слоте 9c (подготовка ykman выполняется отдельно — этот процесс её не делает).",
+    "provision_holder_fips_ack": "Мой YubiKey вставлен и уже одобрен по FIPS (ключ в слоте 9c сгенерирован).",
+    "provision_holder_prep_note": "Ещё не сделано? Сначала выполните подготовку FIPS через ykman на своём YubiKey, затем вернитесь.",
+    "provision_holder_key_id_label": "Идентификатор ключа держателя",
+    "provision_holder_key_id_hint": "напр. accord-holder-alice",
+    "provision_holder_step2_title": "Выберите папку ML-DSA на USB",
+    "provision_holder_step2_desc": "Вставьте USB-накопитель и выберите его папку. Постквантовый ключ ML-DSA оборачивается и записывается туда — его можно развернуть только вашим YubiKey (касание + PIN).",
+    "provision_holder_usb_label": "Путь к папке ML-DSA на USB",
+    "provision_holder_usb_placeholder": "/media/you/USB или /Volumes/USB",
+    "provision_holder_usb_guidance": "Введите полный путь к смонтированной папке USB. Она должна существовать и быть доступной для записи.",
+    "provision_holder_pin_label": "PIN YubiKey (необязательно)",
+    "provision_holder_pin_note": "Оставьте пустым, чтобы запрос поступил от токена. Касание YubiKey требуется в любом случае.",
+    "provision_holder_submit": "Подготовить",
+    "provision_holder_busy": "Подготовка…",
+    "provision_holder_touch_note": "Коснитесь своего YubiKey, когда он замигает, чтобы авторизовать обёртывание ключа.",
+    "provision_holder_success_title": "Подготовлено",
+    "provision_holder_success_next": "Теперь попросите владельца узла зарегистрировать вас: он примет вашу запись держателя через POST /v1/accord/holder.",
+    "provision_holder_again": "Подготовить ещё одного"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Узлы",
       "safety": "Безопасность",
       "delegations": "Делегирования",
-      "accord": "Соглашение"
+      "accord": "Соглашение",
+      "provision_accord_holder": "Подготовить держателя"
     }
   },
   "setup_validation_select_provider": "Выберите провайдера LLM",
