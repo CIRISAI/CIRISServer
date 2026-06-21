@@ -1812,6 +1812,66 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Provision a portable accord holder** —
+     * `POST {nodeUrl}/v1/accord/provision-holder`. The loopback-only setup route
+     * behind the guided "Provision Accord Holder" flow (CIRISServer#41).
+     *
+     * The node opens the holder's ALREADY-FIPS-approved YubiKey (slot-9c Ed25519),
+     * AEAD-wraps a fresh ML-DSA-65 seed to [mldsaUsbPath] (unwrappable only by the
+     * YubiKey via touch + PIN), and mints the holder record + the portable_2fa
+     * custody attestation. The app does NO crypto — it only POSTs to the loopback
+     * endpoint; the substrate does everything.
+     *
+     * The ONE user choice is [mldsaUsbPath] (the USB directory). [userPin] is
+     * optional (the token may prompt out of band); [pivSlot] defaults to `9c`.
+     *
+     * Touching the physical YubiKey (PIN + touch) is the real authority; a
+     * touch-required token BLOCKS the call until tapped. On success the holder
+     * asks the node owner to register them (`POST /v1/accord/holder`).
+     */
+    suspend fun provisionAccordHolder(
+        keyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordProvisionResponse {
+        val method = "provisionAccordHolder"
+        logInfo(method, "POST $nodeUrl/v1/accord/provision-holder key_id=$keyId usb=$mldsaUsbPath")
+        val client = federationHttpClient()
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(keyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
+            val response = client.post("$nodeUrl/v1/accord/provision-holder") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("provision holder failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordProvisionResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO

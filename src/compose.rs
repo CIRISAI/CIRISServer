@@ -541,6 +541,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             exit_on_halt: true,
                         },
                     ))
+                    // ACCORD-HOLDER PROVISIONING (CIRISServer#41, the safe-mesh
+                    // floor): POST /v1/accord/provision-holder — the loopback-only
+                    // setup route behind the guided desktop "Provision Accord
+                    // Holder" flow. Drives accord_custody::provision_portable_holder
+                    // from the holder's already-FIPS-approved YubiKey + the chosen
+                    // ML-DSA USB path. LOOPBACK-only (a holder-device op run on the
+                    // node's own host; the OWNER gate is downstream at POST
+                    // /v1/accord/holder). pkcs11-feature-gated (NotSupported
+                    // without it). Mirrors the other setup routers' loopback guard.
+                    .merge(crate::accord_provision::router(Arc::clone(&engine)).layer(
+                        axum::middleware::from_fn(crate::auth::loopback::require_loopback),
+                    ))
                     // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
                     // POST /lens-api/api/v1/accord/events (legacy path, forwarded
                     // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events

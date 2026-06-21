@@ -36,6 +36,12 @@ pub mod accord_custody;
 /// HUMANITY_ACCORD operational halt (CIRISServer#41) — the disk-latched full halt
 /// + the startup gate that makes the 2-of-3 kill-switch enforceable (CC 4.2.3).
 pub mod accord_halt;
+/// `POST /v1/accord/provision-holder` — the loopback-only server endpoint behind
+/// the guided desktop "Provision Accord Holder" flow. Drives
+/// [`accord_custody::provision_portable_holder`] from the holder's already-FIPS-
+/// approved YubiKey + the chosen ML-DSA USB path. `pkcs11`-feature-gated for the
+/// real-token path (returns NotSupported without it).
+pub mod accord_provision;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
