@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "6.6.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
+version = "6.7.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "6.2.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.1#3dd9317ac20377e71d10136a86d4493e99b311e6"
+version = "6.2.2"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v6.2.2#17af7326504f266fc5b21ec36d07707463ac7c02"
 dependencies = [
  "async-trait",
  "axum",
@@ -895,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "6.6.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
+version = "6.7.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -960,8 +960,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "9.4.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.4.0#75a6bc4873d056b89bf72d3879258ba6c0634419"
+version = "9.4.1"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v9.4.1#5e10ff5507bed53c0b3428c4254ac0ec235cff07"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1040,8 +1040,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "6.6.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.6.1#929ccda8376b621754e177a97cefd3a01ef38b5d"
+version = "6.7.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v6.7.1#3deab6a83d3a7a30a471f29a2a4a58496df20c0c"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1081,6 +1081,7 @@ dependencies = [
  "webpki-roots 0.25.4",
  "webpki-roots 0.26.11",
  "windows-sys 0.52.0",
+ "x509-parser",
 ]
 
 [[package]]
@@ -7333,6 +7334,7 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry",
+ "ring",
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",
