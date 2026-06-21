@@ -451,7 +451,11 @@ pub async fn run_ceremony(report: &mut Report) {
     let owner = mint_owner_session(&engine).await;
     let base = serve(
         std::sync::Arc::clone(&engine),
-        AccordHalt { home: None, peers: Vec::new(), exit_on_halt: false },
+        AccordHalt {
+            home: None,
+            peers: Vec::new(),
+            exit_on_halt: false,
+        },
     )
     .await;
     let client = reqwest::Client::new();
@@ -469,7 +473,12 @@ pub async fn run_ceremony(report: &mut Report) {
     ];
     // Walk all 6 keys (A1, A2, B1, B2, C1, C2 order), registering each.
     let order = [
-        &primaries[0], &spares[0], &primaries[1], &spares[1], &primaries[2], &spares[2],
+        &primaries[0],
+        &spares[0],
+        &primaries[1],
+        &spares[1],
+        &primaries[2],
+        &spares[2],
     ];
     let mut all_ok = true;
     for (i, id) in order.iter().enumerate() {
@@ -481,7 +490,12 @@ pub async fn run_ceremony(report: &mut Report) {
         )
         .await;
         all_ok &= s == 200;
-        report.record(m, &format!("key {}/6 registered ({})", i + 1, id.key_id), s == 200, "");
+        report.record(
+            m,
+            &format!("key {}/6 registered ({})", i + 1, id.key_id),
+            s == 200,
+            "",
+        );
     }
     report.check(m, "all 6 keys registered", all_ok, "");
 
@@ -507,19 +521,51 @@ pub async fn run_ceremony(report: &mut Report) {
             "signatures": [primaries[0].family_cosign(&envelope).await, primaries[1].family_cosign(&envelope).await] }),
     )
     .await;
-    report.check(m, "assemble family genesis (2/3 founders)", s == 200, format!("status {s}"));
+    report.check(
+        m,
+        "assemble family genesis (2/3 founders)",
+        s == 200,
+        format!("status {s}"),
+    );
     // The signed genesis is the bake artifact (→ CIRISVerify#107).
-    report.check(m, "genesis object emitted (bake artifact for cold-start root)",
-        asm.get("genesis").is_some(), "");
+    report.check(
+        m,
+        "genesis object emitted (bake artifact for cold-start root)",
+        asm.get("genesis").is_some(),
+        "",
+    );
 
     // Roster = the 3 SEATS; all 6 registered; the spares are NOT seats.
     let roster: serde_json::Value = client
         .get(format!("{base}/v1/accord-holders"))
-        .send().await.unwrap().json().await.unwrap();
-    let seats: Vec<String> = roster["holders"].as_array().unwrap().iter()
-        .map(|h| h["key_id"].as_str().unwrap_or("").to_string()).collect();
-    report.check(m, "3 seats = the 3 primaries", roster["seat_count"] == 3 && seats.iter().all(|s| s.ends_with("-primary")), format!("{seats:?}"));
-    report.check(m, "6 registered (3 seats + 3 vaulted spares)", roster["registered_total"] == 6, format!("registered={}", roster["registered_total"]));
-    report.check(m, "spares registered but NOT seats",
-        !seats.iter().any(|s| s.ends_with("-spare")), format!("{seats:?}"));
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let seats: Vec<String> = roster["holders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["key_id"].as_str().unwrap_or("").to_string())
+        .collect();
+    report.check(
+        m,
+        "3 seats = the 3 primaries",
+        roster["seat_count"] == 3 && seats.iter().all(|s| s.ends_with("-primary")),
+        format!("{seats:?}"),
+    );
+    report.check(
+        m,
+        "6 registered (3 seats + 3 vaulted spares)",
+        roster["registered_total"] == 6,
+        format!("registered={}", roster["registered_total"]),
+    );
+    report.check(
+        m,
+        "spares registered but NOT seats",
+        !seats.iter().any(|s| s.ends_with("-spare")),
+        format!("{seats:?}"),
+    );
 }
