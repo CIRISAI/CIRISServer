@@ -617,8 +617,12 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response> {
     // Resolve the (key_id, pubkey) pin from the request: prefer the full NodeCode.
     let (claim_key_id, claim_pubkey) = if let Some(code) = req.node_code.as_deref() {
-        match crate::nodecode::decode(code) {
-            Ok(nc) => (nc.key_id, nc.pubkey_ed25519_base64),
+        // Route through verify's `fedcode` — the REFERENCE codec (CIRISServer#29) —
+        // so the auth-bootstrap NodeCode pin can never silently diverge from the
+        // wire spec. `fedcode::decode` round-trips legacy `CIRIS-V1-` codes; the
+        // nodecode↔fedcode cross-fidelity test pins them byte-for-byte.
+        match ciris_verify_core::fedcode::decode(code) {
+            Ok(fc) => (fc.key_id, fc.pubkey_ed25519_base64),
             Err(e) => {
                 return Some(err(
                     StatusCode::BAD_REQUEST,
