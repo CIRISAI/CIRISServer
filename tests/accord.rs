@@ -856,3 +856,45 @@ async fn message_without_registered_holder_signature_is_dropped() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[tokio::test]
+async fn open_invocation_without_registered_holder_signature_is_rejected() {
+    // DoS floor: an invocation opened with a NON-registered signer carries no
+    // authority and is NOT persisted (an unauthenticated caller cannot grow the
+    // pending table). Only holder-signed invocations are kept.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    // One real registered holder (so a roster exists), and an imposter who opens.
+    let real = Holder::new("accord-holder-a", 0xC1);
+    registered_holders(&base, &owner, std::slice::from_ref(&real)).await;
+    let imposter = Holder::new("accord-holder-imposter", 0xBB);
+
+    let inv = drill_invocation("dos-001");
+    let resp = client
+        .post(format!("{base}/v1/accord/invocation"))
+        .json(&serde_json::json!({
+            "invocation": inv,
+            "signature": imposter.cosign(&inv).await,
+        }))
+        .send()
+        .await
+        .expect("open invocation");
+    assert_eq!(resp.status(), 401, "unauthenticated opener ⇒ 401");
+
+    // It was not persisted — the pending list stays empty.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/accord/invocations"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        listed["invocations"].as_array().unwrap().is_empty(),
+        "an unauthenticated invocation must not be stored; got {listed}"
+    );
+}

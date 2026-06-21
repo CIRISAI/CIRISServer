@@ -529,9 +529,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         crate::accord::AccordHalt {
                             home: Some(cfg.home.clone()),
+                            // Replicate accord messages to known peers — EXCLUDING
+                            // self (an operator who lists this node in bootstrap_peers
+                            // must not make it gossip/halt-loop back to itself).
                             peers: cfg
                                 .bootstrap_peers
                                 .iter()
+                                .filter(|a| **a != cfg.listen_addr)
                                 .map(|a| format!("http://{a}"))
                                 .collect(),
                             exit_on_halt: true,

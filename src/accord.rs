@@ -104,6 +104,20 @@ use crate::auth::session::resolve_bearer;
 /// here for the response + the cold-start roster sanity check).
 const ACCORD_THRESHOLD: usize = 2;
 
+/// Backstop caps on the in-memory coordination tables (defense-in-depth: only
+/// holder-signed traffic reaches them now, but bound them anyway so a compromised
+/// holder — or a flood of distinct ids — cannot exhaust memory). `pending` is
+/// also pruned of expired invocations on every insert; `seen` is cleared when it
+/// overflows (re-gossip is idempotent — a duplicate halt just re-latches).
+const MAX_PENDING_INVOCATIONS: usize = 4096;
+const MAX_SEEN_INVOCATIONS: usize = 16_384;
+
+/// Per-peer replication request budget — a hung/stalling peer MUST NOT be able to
+/// block the local halt from latching. With the concurrent fan-out the whole
+/// round is bounded by this, not the sum across peers.
+const REPLICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const REPLICATION_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The PINNED durable accord-custody trust anchor — **Yubico Attestation Root 1**
 /// (`developers.yubico.com/PKI/yubico-ca-1.pem`, CN="Yubico Attestation Root 1",
 /// DER). The safe-mesh floor pins THIS durable root, NOT the rotating "Yubico PIV
@@ -187,6 +201,21 @@ async fn registered_holders(engine: &Engine) -> Result<Vec<ThresholdMember>, Res
 
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
+/// Evict expired (`valid_until` ≤ now, or unparseable) pending invocations — keeps
+/// the table bounded by the count of LIVE holder-driven invocations.
+fn prune_pending(
+    pending: &mut HashMap<(String, String), SignedCegObject>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    pending.retain(|_, obj| {
+        parse_accord_invocation(obj)
+            .ok()
+            .and_then(|p| chrono::DateTime::parse_from_rfc3339(&p.invocation.valid_until).ok())
+            .map(|vu| vu.with_timezone(&chrono::Utc) > now)
+            .unwrap_or(false)
+    });
 }
 
 /// Require a live OWNER session — the SAME apex gate `POST /v1/federation/peering`
@@ -652,14 +681,31 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.invocation.invocation_kind.as_str().to_string(),
         req.invocation.invocation_id.clone(),
     );
-    st.pending
-        .lock()
-        .expect("pending lock")
-        .insert(key, obj.clone());
-    // Replicate the new invocation to peers (concurrence-seeking gossip); honor the
-    // halt immediately if a single-holder open already met quorum (it cannot at 2/3,
-    // but the path is unconditional so concur below shares it).
-    let _ = replicate_and_maybe_halt(&st, &obj).await;
+    // Replicate the new invocation to peers (concurrence-seeking gossip) + honor a
+    // halt if it already meets 2/3. This ALSO tells us if the opener's signature is
+    // an authentic registered-holder one — we only persist authentic invocations
+    // (an unauthenticated opener cannot grow the pending table).
+    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    if !outcome.authentic {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "invocation carries no valid registered-holder signature — not opened",
+        );
+    }
+    {
+        let mut pending = st.pending.lock().expect("pending lock");
+        prune_pending(&mut pending, chrono::Utc::now());
+        if pending.len() >= MAX_PENDING_INVOCATIONS && !pending.contains_key(&key) {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many pending invocations — retry later",
+            );
+        }
+        pending.insert(key, obj.clone());
+    }
     invocation_response(&obj)
 }
 
@@ -702,13 +748,19 @@ async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Byte
         &signatures,
         &now,
     );
-    st.pending
-        .lock()
-        .expect("pending lock")
-        .insert(key, rebuilt.clone());
     // A concurring cosignature can be the one that reaches the 2-of-3: replicate to
     // peers and, for a CONSTITUTIONAL quorum, replicate-first → latch → halt.
-    let _ = replicate_and_maybe_halt(&st, &rebuilt).await;
+    let outcome = match replicate_and_maybe_halt(&st, &rebuilt).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    // The pending entry it concurs to is already authentic, so this holds; persist
+    // the advanced object (pruning expired entries to keep the table bounded).
+    if outcome.authentic {
+        let mut pending = st.pending.lock().expect("pending lock");
+        prune_pending(&mut pending, chrono::Utc::now());
+        pending.insert(key, rebuilt.clone());
+    }
     invocation_response(&rebuilt)
 }
 
@@ -787,17 +839,26 @@ struct AccordOutcome {
 /// can't reach a peer must still honor its own halt). Awaited on the halt path
 /// (replicate-BEFORE-halt); spawned for ordinary concurrence gossip.
 async fn replicate_to_peers(http: &reqwest::Client, peers: &[String], obj: &SignedCegObject) {
+    // CONCURRENT fan-out (the whole round is bounded by REPLICATION_TIMEOUT, not the
+    // sum across peers) so ONE stalling peer can never block the local halt path.
+    let mut set = tokio::task::JoinSet::new();
     for peer in peers {
-        let url = format!("{}/v1/accord/message", peer.trim_end_matches('/'));
-        match http.post(&url).json(obj).send().await {
-            Ok(r) => {
-                tracing::info!(peer = %peer, status = %r.status(), "replicated accord message")
+        let http = http.clone();
+        let peer = peer.clone();
+        let obj = obj.clone();
+        set.spawn(async move {
+            let url = format!("{}/v1/accord/message", peer.trim_end_matches('/'));
+            match http.post(&url).json(&obj).send().await {
+                Ok(r) => {
+                    tracing::info!(peer = %peer, status = %r.status(), "replicated accord message")
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %peer, error = %e, "accord replication to peer failed")
+                }
             }
-            Err(e) => {
-                tracing::warn!(peer = %peer, error = %e, "accord replication to peer failed")
-            }
-        }
+        });
     }
+    while set.join_next().await.is_some() {}
 }
 
 /// The single replicate + halt path (CC 4.2.1 / §9.2.1), shared by the inbound
@@ -854,12 +915,27 @@ async fn replicate_and_maybe_halt(
     let is_global_halt =
         status.invocation_kind == InvocationKind::Constitutional.as_str() && status.quorum_met;
     let key = (status.invocation_kind.clone(), status.invocation_id.clone());
-    let first_sight = st.seen.lock().expect("seen lock").insert(key);
+    let first_sight = {
+        let mut seen = st.seen.lock().expect("seen lock");
+        // Bounded backstop: clearing only costs a possible re-gossip, which is
+        // idempotent (a duplicate halt re-latches; a duplicate notify re-fans once).
+        if seen.len() >= MAX_SEEN_INVOCATIONS {
+            seen.clear();
+        }
+        seen.insert(key)
+    };
 
     if is_global_halt {
-        // Requirement: replicate to ALL known peers BEFORE initiating the halt
-        // (unconditional — even if already gossiped — so peers are reached first).
-        replicate_to_peers(&st.http, &st.halt.peers, obj).await;
+        // Requirement: replicate to known peers BEFORE initiating the halt (so the
+        // kill propagates before this node goes dark). AWAITED but bounded by
+        // REPLICATION_TIMEOUT — a hung peer can never delay the latch. Deduped on
+        // first sighting (A→B→A storms are stopped; the halt still reaches every
+        // peer because each node relays its OWN first sighting before going dark).
+        if first_sight {
+            replicate_to_peers(&st.http, &st.halt.peers, obj).await;
+        }
+        // The disk latch is the load-bearing, LOCAL, fast gate — write it (with a
+        // short retry) AFTER peers were reached but regardless of their outcome.
         if let Some(home) = &st.halt.home {
             let record = HaltRecord {
                 invocation_kind: status.invocation_kind.clone(),
@@ -868,15 +944,31 @@ async fn replicate_and_maybe_halt(
                 quorum_threshold: status.quorum_threshold,
                 latched_at: now.clone(),
             };
-            match latch_halt(home, &record) {
-                Ok(p) => tracing::error!(
+            let mut latched = None;
+            for attempt in 1..=3 {
+                match latch_halt(home, &record) {
+                    Ok(p) => {
+                        latched = Some(p);
+                        break;
+                    }
+                    Err(e) => tracing::error!(
+                        attempt,
+                        error = %e,
+                        "halt latch write failed — retrying"
+                    ),
+                }
+            }
+            match latched {
+                Some(p) => tracing::error!(
                     latch = %p.display(),
                     invocation_id = %status.invocation_id,
                     "HUMANITY_ACCORD HALT honored — node latched down (full halt, CC 4.2.1)"
                 ),
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "halt latch write FAILED — terminating anyway (fail-secure)"
+                None => tracing::error!(
+                    invocation_id = %status.invocation_id,
+                    "HALT LATCH WRITE FAILED after retries — terminating, but the latch is \
+                     NOT durable: the next startup will NOT be gated. An operator MUST create \
+                     the halt latch manually to keep this node down."
                 ),
             }
         }
@@ -891,7 +983,7 @@ async fn replicate_and_maybe_halt(
         }
     } else if first_sight {
         // Ordinary accord-holder-signed traffic (concurrence-seeking notify/drill/
-        // sub-quorum): gossip onward once, fire-and-forget.
+        // sub-quorum): gossip onward once, fire-and-forget (the holder isn't blocked).
         let http = st.http.clone();
         let peers = st.halt.peers.clone();
         let obj = obj.clone();
@@ -946,7 +1038,12 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
         dedup: Arc::new(Mutex::new(InvocationDedup::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
         seen: Arc::new(Mutex::new(HashSet::new())),
-        http: reqwest::Client::new(),
+        // A hung peer MUST NOT block the local halt — bound every replication request.
+        http: reqwest::Client::builder()
+            .timeout(REPLICATION_TIMEOUT)
+            .connect_timeout(REPLICATION_CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
         halt,
     };
     Router::new()
