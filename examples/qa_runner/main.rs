@@ -23,6 +23,7 @@ async fn main() {
     family::run(&mut report).await;
     accord::run(&mut report).await;
     accord::run_membership(&mut report).await;
+    accord::run_ceremony(&mut report).await;
 
     let ok = report.print_and_status();
     std::process::exit(i32::from(!ok));
