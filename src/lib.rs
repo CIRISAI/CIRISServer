@@ -82,6 +82,10 @@ pub mod config_api;
 /// touches the runtime — it writes CEG and nudges this loop. Public so the
 /// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
 pub mod config_reconcile;
+/// Generic CEWP **family operations** over persist's family CEG DX
+/// (`federation_families` + membership revocations) — create / add / live-roster /
+/// swap, NOT accord-aware. The HUMANITY_ACCORD kill-switch is one specialization.
+pub mod family;
 /// Owner-directed federation operations (the keystone for on-demand
 /// `consent:replication` peering): `GET /v1/federation/self-key-record` +
 /// `POST /v1/federation/peering`. Each node authors its OWN consent grant
