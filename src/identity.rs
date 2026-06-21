@@ -427,6 +427,32 @@ pub async fn hardware_user_local_signer(
     .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))
 }
 
+/// Open the holder's **already-provisioned** YubiKey PIV Ed25519 key as a
+/// [`HardwareSigner`] (no provisioning — the holder did the FIPS / `ykman` prep
+/// out of band; we only DETECT + USE the slot-9c key). Reuses the SAME PKCS#11
+/// machinery [`mint_user_identity`] uses ([`open_user_signer`] →
+/// [`get_user_identity_signer`]), so the accord-holder provisioning flow does
+/// not reinvent the token open.
+///
+/// `provision` is forced `false`: a missing key is a plain error (the prep was
+/// not done), never a silent generate — generating the accord-holder's classical
+/// half is the holder's deliberate out-of-band FIPS ceremony, not the node's.
+///
+/// Gated behind the `pkcs11` cargo feature: without it `ciris-keyring`'s
+/// `Pkcs11` backend honestly returns `NotSupported`, which surfaces here as a
+/// clear open error (the caller maps it to a NotSupported response).
+pub fn open_yubikey_ed25519_signer(opts: Pkcs11Options) -> Result<Box<dyn HardwareSigner>> {
+    let backend = UserIdentityBackend::Pkcs11(Pkcs11Options {
+        provision: false,
+        ..opts
+    });
+    // The PKCS#11 user-identity config keys the signer open. The accord-holder
+    // Ed25519 lives in the PIV slot directly (no seed_dir blob is read for the
+    // YubiKey backend), so a throwaway seed_dir is fine.
+    let cfg = user_identity_config(&backend, "accord-holder", std::env::temp_dir());
+    open_user_signer(&backend, &cfg)
+}
+
 /// Provision an Ed25519 key + self-signed cert in a YubiKey PIV slot via
 /// `ykman` (PIV slot policy + the slot cert are PIV-applet operations, NOT
 /// PKCS#11). `ykman` inherits the terminal, so it prompts for the PIN and the

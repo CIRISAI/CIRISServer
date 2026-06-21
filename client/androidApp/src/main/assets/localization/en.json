@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "NOTIFY",
     "accord_kind_drill": "DRILL",
     "accord_quorum": "Quorum {signed} / {threshold}",
-    "accord_concur": "Concur"
+    "accord_concur": "Concur",
+    "provision_holder_title": "Provision Accord Holder",
+    "provision_holder_subtitle": "Mint your portable two-factor HUMANITY_ACCORD identity from your already-FIPS-approved YubiKey. The app holds no keys — your node does the crypto.",
+    "provision_holder_step1_title": "Confirm your YubiKey",
+    "provision_holder_step1_desc": "Insert your FIPS YubiKey. It must already be in FIPS-approved mode with a slot-9c key generated (the ykman prep is done out of band — this flow does not do it).",
+    "provision_holder_fips_ack": "My YubiKey is inserted and already FIPS-approved (slot-9c key generated).",
+    "provision_holder_prep_note": "Not done yet? Run the ykman FIPS prep on your YubiKey first, then come back.",
+    "provision_holder_key_id_label": "Holder key ID",
+    "provision_holder_key_id_hint": "e.g. accord-holder-alice",
+    "provision_holder_step2_title": "Choose the ML-DSA USB folder",
+    "provision_holder_step2_desc": "Insert your USB key and choose its folder. The post-quantum ML-DSA key is wrapped and written there — it can only be unwrapped by your YubiKey (touch + PIN).",
+    "provision_holder_usb_label": "ML-DSA USB folder path",
+    "provision_holder_usb_placeholder": "/media/you/USB or /Volumes/USB",
+    "provision_holder_usb_guidance": "Enter the full path to the mounted USB folder. It must exist and be writable.",
+    "provision_holder_pin_label": "YubiKey PIN (optional)",
+    "provision_holder_pin_note": "Leave blank to be prompted by the token. Touching the YubiKey is required either way.",
+    "provision_holder_submit": "Provision",
+    "provision_holder_busy": "Provisioning…",
+    "provision_holder_touch_note": "Touch your YubiKey when it blinks to authorize the key wrap.",
+    "provision_holder_success_title": "Provisioned",
+    "provision_holder_success_next": "Now ask your node owner to register you: they admit your holder record at POST /v1/accord/holder.",
+    "provision_holder_again": "Provision another"
   },
   "conscience": {
     "ponder_attempted": "I attempted to {action}",
@@ -2682,7 +2703,8 @@
       "moderation": "Moderation",
       "child_safety": "Child Safety",
       "delegations": "Delegations",
-      "accord": "Accord"
+      "accord": "Accord",
+      "provision_accord_holder": "Provision Holder"
     }
   },
   "setup_validation_select_provider": "Select an LLM provider",

@@ -113,3 +113,24 @@ data class AccordConcurResponse(
     @SerialName("valid_signers")
     val validSigners: List<String> = emptyList(),
 )
+
+/**
+ * ``POST /v1/accord/provision-holder`` response — the two artifacts a portable
+ * accord holder mints on their device (CIRISServer#41, src/accord_provision.rs).
+ * The node did all the crypto from the holder's already-FIPS-approved YubiKey +
+ * the chosen ML-DSA USB path; the app holds NO keys. The holder then asks the
+ * node owner to register them (``POST /v1/accord/holder``).
+ *
+ * [holderRecord] + [custodyAttestation] are opaque signed JSON objects (the
+ * verify-core ``SignedKeyRecord`` + ``SignedCegObject``); the app never inspects
+ * their internals, so they ride as raw [kotlinx.serialization.json.JsonElement].
+ */
+@Serializable
+data class AccordProvisionResponse(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("holder_record")
+    val holderRecord: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("custody_attestation")
+    val custodyAttestation: kotlinx.serialization.json.JsonElement? = null,
+)

@@ -195,6 +195,20 @@ sealed class NavSurface(
     object Accord : NavSurface("accord", "Accord", CIRISIcons.shield,
         labelKey = "nav.surface.accord",)
 
+    /**
+     * Provision Accord Holder — the foolproof guided flow (CIRISServer #41, the
+     * safe-mesh custody floor). A would-be accord holder mints their portable-2FA
+     * HUMANITY_ACCORD identity from an already-FIPS-approved FIPS YubiKey + a
+     * chosen ML-DSA USB path, producing the holder record + custody attestation
+     * the node owner then registers. Drives the loopback-only
+     * `POST /v1/accord/provision-holder`; the app holds no keys (the node does the
+     * crypto). Reachable from the Accord screen + the Manage group. Live (no gate).
+     */
+    object ProvisionAccordHolder : NavSurface(
+        id = "provision-accord-holder", label = "Provision Holder", icon = CIRISIcons.keySecure,
+        labelKey = "nav.surface.provision_accord_holder",
+    )
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Safety group — the holistic SAFETY surface (CIRISServer v0.4.6
     // /v1/safety/*). Safety is built in FIRST, ahead of content: a Discord /
@@ -451,6 +465,7 @@ val MANAGE_GROUP = NavGroup(
         NavSurface.ManageConsent,   // consent:replication + user-data consent
         NavSurface.Delegations,     // device-auth grants — authorize an agent on-behalf
         NavSurface.Accord,          // HUMANITY_ACCORD — constitutional 2/3 kill-switch
+        NavSurface.ProvisionAccordHolder, // mint a portable-2FA accord-holder identity
         NavSurface.Users,
         NavSurface.Adapters,
         // The substrate operator-infra trio: Edge / Verify / Persist.
