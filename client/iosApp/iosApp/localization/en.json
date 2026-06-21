@@ -2022,7 +2022,23 @@
     "delegations_approve": "Approve",
     "delegations_active_title": "Active delegations",
     "delegations_empty": "No active delegations. Authorize one above.",
-    "delegations_revoke": "Revoke"
+    "delegations_revoke": "Revoke",
+    "accord_title": "Accord",
+    "accord_subtitle": "The Humanity Accord — the entrenched constitutional roster that jointly holds the kill-switch. The app holds no keys; the node signs.",
+    "accord_family_title": "Humanity Accord",
+    "accord_family_empty": "No accord family established on this node yet.",
+    "accord_entrenched": "Entrenched",
+    "accord_holders_title": "Holders",
+    "accord_holders_desc": "The accord holders who may concur on invocations. Each is FIPS / hardware-attested.",
+    "accord_holders_empty": "No holders registered.",
+    "accord_holder_attested": "FIPS / hardware-attested",
+    "accord_invocations_title": "Invocations",
+    "accord_invocations_empty": "No pending invocations.",
+    "accord_kind_constitutional": "CONSTITUTIONAL",
+    "accord_kind_notify": "NOTIFY",
+    "accord_kind_drill": "DRILL",
+    "accord_quorum": "Quorum {signed} / {threshold}",
+    "accord_concur": "Concur"
   },
   "conscience": {
     "ponder_attempted": "I attempted to {action}",
@@ -2665,7 +2681,8 @@
       "safety": "Safety",
       "moderation": "Moderation",
       "child_safety": "Child Safety",
-      "delegations": "Delegations"
+      "delegations": "Delegations",
+      "accord": "Accord"
     }
   },
   "setup_validation_select_provider": "Select an LLM provider",

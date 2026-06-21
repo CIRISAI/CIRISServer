@@ -1681,6 +1681,137 @@ class CIRISApiClient(
         }
     }
 
+    // ─── HUMANITY_ACCORD surface (/v1/accord*) — CIRISServer #41 (src/accord.rs) ─
+    //
+    // The constitutional safe-mesh floor: a hardware-attested holder roster that
+    // jointly holds a `quorum:2/3` kill-switch over invocations (CC 4.2.1). The app
+    // drives the LOCAL node only (owner session); it holds NO keys and performs NO
+    // crypto. `concur` just POSTs — the node's resolved local holder signer signs.
+
+    /** The accord family + consensus protocol — `GET {nodeUrl}/v1/accord/family`. */
+    suspend fun getAccordFamily(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordFamilyDto? {
+        val method = "getAccordFamily"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/family") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            // 404 / empty body = no accord family established yet.
+            if (response.status == HttpStatusCode.NotFound || raw.isBlank()) {
+                return null
+            }
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("get accord family failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordFamilyDto.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /** The accord holder registry — `GET {nodeUrl}/v1/accord-holders`. */
+    suspend fun getAccordHolders(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordHoldersResponse {
+        val method = "getAccordHolders"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord-holders") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("get accord holders failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordHoldersResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Pending accord invocations + quorum status — `GET {nodeUrl}/v1/accord/invocations`. */
+    suspend fun getAccordInvocations(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): List<ai.ciris.mobile.shared.models.federation.AccordInvocationDto> {
+        val method = "getAccordInvocations"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/invocations") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("get accord invocations failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordInvocationsResponse.serializer(),
+                raw,
+            ).invocations
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Concur on an invocation as the local holder —
+     * `POST {nodeUrl}/v1/accord/invocation/concur`. Owner-session-gated. The app
+     * sends NO crypto; the node signs with the resolved local holder signer.
+     */
+    suspend fun concurInvocation(
+        invocationKind: String,
+        invocationId: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
+        val method = "concurInvocation"
+        logInfo(method, "POST $nodeUrl/v1/accord/invocation/concur kind=$invocationKind id=$invocationId")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$nodeUrl/v1/accord/invocation/concur") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(
+                    "{\"invocation_kind\":\"${invocationKind.trim()}\"," +
+                        "\"invocation_id\":\"${invocationId.trim()}\"}",
+                )
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("concur failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordConcurResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO
