@@ -2,13 +2,15 @@
 //! (persist's family CEG DX): create → add member → live roster → remove → swap →
 //! threshold-roster. NOT accord-aware (a household family would use the same ops).
 
-use ciris_persist::federation::types::{Family, FamilyMember, FamilyMembershipRevocation};
+use ciris_persist::federation::cohort::{RevokeSpec, RosterMember};
+use ciris_persist::federation::types::{Family, FamilyMember};
 use ciris_server::family;
 
 use crate::common::{node, Report, SoftId};
 
 const FAMILY: &str = "qa-family";
 
+/// A `FamilyMember` for the genesis roster (`create_family` takes the persist type).
 fn member(key_id: &str, role: &str) -> FamilyMember {
     FamilyMember {
         key_id: key_id.to_string(),
@@ -17,16 +19,20 @@ fn member(key_id: &str, role: &str) -> FamilyMember {
     }
 }
 
-fn revocation(removed: &str) -> FamilyMembershipRevocation {
-    let now = chrono::Utc::now();
-    FamilyMembershipRevocation {
-        family_key_id: FAMILY.to_string(),
-        removed_identity_key_id: removed.to_string(),
-        removed_at: now,
-        effective_at: now,
+/// A `RosterMember` for the uniform cohort add/swap ops.
+fn roster_member(key_id: &str, role: &str) -> RosterMember {
+    RosterMember {
+        key_id: key_id.to_string(),
+        joined_at: chrono::Utc::now(),
+        role: Some(role.to_string()),
+    }
+}
+
+fn revoke_spec() -> RevokeSpec {
+    RevokeSpec {
+        effective_at: chrono::Utc::now(),
         reason: Some("qa-runner".into()),
         witness_set: Vec::new(),
-        persist_row_hash: String::new(),
     }
 }
 
@@ -92,7 +98,7 @@ pub async fn run(report: &mut Report) {
     }
 
     // add carol → 3 live members.
-    family::add_member(&engine, FAMILY, member("qa-carol", "member"))
+    family::add_member(&engine, FAMILY, roster_member("qa-carol", "member"))
         .await
         .expect("add");
     let r = live(&engine).await;
@@ -104,7 +110,7 @@ pub async fn run(report: &mut Report) {
     );
 
     // remove bob (revocation) → active read folds it out.
-    family::revoke_member(&engine, revocation("qa-bob"))
+    family::revoke_member(&engine, FAMILY, "qa-bob", revoke_spec())
         .await
         .expect("revoke");
     let r = live(&engine).await;
@@ -119,8 +125,9 @@ pub async fn run(report: &mut Report) {
     family::swap_member(
         &engine,
         FAMILY,
-        revocation("qa-alice"),
-        member("qa-dave", "member"),
+        "qa-alice",
+        roster_member("qa-dave", "member"),
+        revoke_spec(),
     )
     .await
     .expect("swap");
