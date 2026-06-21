@@ -246,6 +246,20 @@ impl Holder {
             "mldsa65_signature_base64": BASE64.encode(&pqc_sig),
         })
     }
+
+    /// Sign RAW bytes (bound hybrid) — for the membership-change payload
+    /// `jcs(change_envelope)`.
+    async fn sign_bytes(&self, bytes: &[u8]) -> serde_json::Value {
+        let ed_sig = self.ed.sign(bytes).to_bytes();
+        let mut bound = bytes.to_vec();
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign bytes");
+        serde_json::json!({
+            "member_id": self.key_id,
+            "ed25519_signature_base64": BASE64.encode(ed_sig),
+            "mldsa65_signature_base64": BASE64.encode(&pqc_sig),
+        })
+    }
 }
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
@@ -1017,4 +1031,99 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
         "the self-quorum attempt must not latch a halt"
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
+    // The supersede/recover op: the CURRENT 2/3 authorizes replacing one seat with a
+    // vaulted spare (same N). persist's quorum gate enforces ≥M prior cosignatures +
+    // anti-replay + one-seat IN THE SUBSTRATE; a sub-quorum change is refused.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&base, &owner, &holders).await;
+    // A vaulted spare (registered accord_holder, not a seat).
+    let spare = Holder::new("accord-holder-d", 0xC4);
+    registered_holders(&base, &owner, std::slice::from_ref(&spare)).await;
+
+    // Build the change envelope: replace A → D (roster {b,c,d}, still quorum:2/3).
+    let new_ids = vec![
+        holders[1].key_id.clone(),
+        holders[2].key_id.clone(),
+        spare.key_id.clone(),
+    ];
+    let env: serde_json::Value = client
+        .post(format!("{base}/v1/accord/family/change/envelope"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "new_member_key_ids": new_ids, "consensus_protocol": "quorum:2/3" }))
+        .send()
+        .await
+        .expect("change envelope")
+        .json()
+        .await
+        .unwrap();
+    let change_envelope = env["change_envelope"].clone();
+    let bytes = BASE64
+        .decode(env["signing_bytes_base64"].as_str().unwrap())
+        .expect("decode signing bytes");
+
+    // SUB-QUORUM: a single prior-roster signature is refused (409), live row intact.
+    let one = client
+        .post(format!("{base}/v1/accord/family/supersede"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "change_envelope": change_envelope, "signatures": [holders[1].sign_bytes(&bytes).await] }))
+        .send()
+        .await
+        .expect("1-sig supersede");
+    assert_eq!(one.status(), 409, "a sub-quorum supersede must be refused");
+
+    // QUORUM: B + C (2 of the prior {a,b,c}) cosign → the swap is applied.
+    let two = client
+        .post(format!("{base}/v1/accord/family/supersede"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({
+            "change_envelope": change_envelope,
+            "signatures": [holders[1].sign_bytes(&bytes).await, holders[2].sign_bytes(&bytes).await],
+        }))
+        .send()
+        .await
+        .expect("2-of-3 supersede");
+    assert_eq!(
+        two.status(),
+        200,
+        "2-of-3 authorizes the swap: {}",
+        two.text().await.unwrap_or_default()
+    );
+
+    // The kill-switch roster now reflects {b,c,d} — A is gone, D is a seat.
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(roster["seat_count"], 3, "got {roster}");
+    let seats: Vec<String> = roster["holders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["key_id"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        seats.contains(&"accord-holder-d".to_string()),
+        "spare D is now a seat: {seats:?}"
+    );
+    assert!(
+        !seats.contains(&"accord-holder-a".to_string()),
+        "A was replaced: {seats:?}"
+    );
 }

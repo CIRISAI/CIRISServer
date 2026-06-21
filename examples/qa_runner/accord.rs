@@ -244,3 +244,198 @@ pub async fn run(report: &mut Report) {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Membership-change lifecycle (supersede / reconstitute) over the 2/3-quorum gate.
+pub async fn run_membership(report: &mut Report) {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    println!("\n\x1b[1m▶ ACCORD — membership change (supersede / reconstitute, 2/3)\x1b[0m");
+    let m = "membership";
+    let engine = node().await;
+    let owner = mint_owner_session(&engine).await;
+    let base = serve(
+        std::sync::Arc::clone(&engine),
+        AccordHalt {
+            home: None,
+            peers: Vec::new(),
+            exit_on_halt: false,
+        },
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Genesis: a 3-seat family {a,b,c}, quorum:2/3 — plus vaulted spares d,e,f.
+    let h = [
+        SoftId::new("mc-a", 0xA1),
+        SoftId::new("mc-b", 0xA2),
+        SoftId::new("mc-c", 0xA3),
+    ];
+    let spares = [
+        SoftId::new("mc-d", 0xA4),
+        SoftId::new("mc-e", 0xA5),
+        SoftId::new("mc-f", 0xA6),
+    ];
+    for id in h.iter().chain(spares.iter()) {
+        jpost(
+            &client,
+            format!("{base}/v1/accord/holder"),
+            Some(&owner),
+            serde_json::json!({ "key_record": id.signed_key_record("accord_holder").await }),
+        )
+        .await;
+    }
+    let member_ids: Vec<String> = h.iter().map(|x| x.key_id.clone()).collect();
+    let (_s, env) = jpost(
+        &client,
+        format!("{base}/v1/accord/genesis/envelope"),
+        Some(&owner),
+        serde_json::json!({ "family_name": "HUMANITY_ACCORD", "member_key_ids": member_ids }),
+    )
+    .await;
+    let envelope = env["envelope"].clone();
+    let mut founders = Vec::new();
+    for x in &h {
+        founders.push(x.founder_member().await);
+    }
+    let (s, _) = jpost(
+        &client,
+        format!("{base}/v1/accord/genesis/assemble"),
+        Some(&owner),
+        serde_json::json!({ "envelope": envelope,
+            "founders": founders,
+            "signatures": [h[0].family_cosign(&envelope).await, h[1].family_cosign(&envelope).await] }),
+    )
+    .await;
+    report.check(m, "genesis 3-seat family (quorum:2/3)", s == 200, "");
+
+    // Helper: change-envelope → cosign by `signers` → supersede.
+    async fn change(
+        client: &reqwest::Client,
+        base: &str,
+        owner: &str,
+        new_ids: &[String],
+        cp: &str,
+        signers: &[&SoftId],
+    ) -> (u16, serde_json::Value) {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (_s, env) = jpost(
+            client,
+            format!("{base}/v1/accord/family/change/envelope"),
+            Some(owner),
+            serde_json::json!({ "new_member_key_ids": new_ids, "consensus_protocol": cp }),
+        )
+        .await;
+        let change_envelope = env["change_envelope"].clone();
+        let bytes = b64
+            .decode(env["signing_bytes_base64"].as_str().unwrap_or_default())
+            .unwrap_or_default();
+        let mut sigs = Vec::new();
+        for s in signers {
+            sigs.push(s.sign_bytes(&bytes).await);
+        }
+        jpost(
+            client,
+            format!("{base}/v1/accord/family/supersede"),
+            Some(owner),
+            serde_json::json!({ "change_envelope": change_envelope, "signatures": sigs }),
+        )
+        .await
+    }
+    let _ = b64; // (decode used inside `change`)
+
+    // SUPERSEDE: replace seat a → spare d (same N=3). Current roster {a,b,c} — b,c
+    // cosign (a is the one being replaced). Roster becomes {b,c,d}.
+    let new1 = vec![
+        h[1].key_id.clone(),
+        h[2].key_id.clone(),
+        spares[0].key_id.clone(),
+    ];
+    let (s1, r1) = change(&client, &base, &owner, &new1, "quorum:2/3", &[&h[1], &h[2]]).await;
+    report.check(
+        m,
+        "supersede replace a→d (2/3) ",
+        s1 == 200 && r1["superseded"] == true,
+        format!("{r1}"),
+    );
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let seats: Vec<String> = roster["holders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["key_id"].as_str().unwrap_or("").to_string())
+        .collect();
+    report.check(
+        m,
+        "roster now {b,c,d} (a replaced)",
+        roster["seat_count"] == 3
+            && seats.contains(&"mc-d".to_string())
+            && !seats.contains(&"mc-a".to_string()),
+        format!("{seats:?}"),
+    );
+
+    // RECONSTITUTE: expand {b,c,d} → {b,c,d,e,f}. Strict majority forces quorum:3/5.
+    // Current roster {b,c,d} — b,c cosign (2 of 3).
+    let new2 = vec![
+        h[1].key_id.clone(),
+        h[2].key_id.clone(),
+        spares[0].key_id.clone(),
+        spares[1].key_id.clone(),
+        spares[2].key_id.clone(),
+    ];
+    let (s2, r2) = change(&client, &base, &owner, &new2, "quorum:3/5", &[&h[1], &h[2]]).await;
+    report.check(
+        m,
+        "reconstitute expand 3→5 (→quorum:3/5)",
+        s2 == 200
+            && r2["superseded"] == true
+            && r2["consensus_protocol"] == "quorum:3/5"
+            && r2["member_count"] == 5,
+        format!("{r2}"),
+    );
+
+    // NEGATIVE: a 1-signature change is rejected by the substrate quorum gate (now
+    // quorum:3/5 needs ≥3) — live row untouched.
+    let new3 = vec![
+        h[1].key_id.clone(),
+        h[2].key_id.clone(),
+        spares[0].key_id.clone(),
+        spares[1].key_id.clone(),
+        h[0].key_id.clone(),
+    ];
+    let (s3, r3) = change(&client, &base, &owner, &new3, "quorum:3/5", &[&h[1]]).await;
+    report.check(
+        m,
+        "1-signature change REJECTED (quorum gate)",
+        s3 != 200 && r3["superseded"] != true,
+        format!("status {s3}"),
+    );
+
+    // HISTORY: the supersede chain is auditable.
+    let hist: serde_json::Value = client
+        .get(format!("{base}/v1/accord/family/history"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    report.check(
+        m,
+        "family/history records the supersede chain",
+        hist["versions"]
+            .as_array()
+            .map(|v| v.len() >= 2)
+            .unwrap_or(false),
+        format!(
+            "versions={}",
+            hist["versions"].as_array().map(|v| v.len()).unwrap_or(0)
+        ),
+    );
+}

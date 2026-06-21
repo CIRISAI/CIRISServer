@@ -275,6 +275,20 @@ impl SoftId {
         })
     }
 
+    /// Sign RAW bytes (bound hybrid: Ed25519 over `bytes`, ML-DSA over `bytes‖ed_sig`)
+    /// — for membership-change payloads (`jcs(change_envelope)`).
+    pub async fn sign_bytes(&self, bytes: &[u8]) -> serde_json::Value {
+        let ed_sig = self.ed.sign(bytes).to_bytes();
+        let mut bound = bytes.to_vec();
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign bytes");
+        serde_json::json!({
+            "member_id": self.key_id,
+            "ed25519_signature_base64": BASE64.encode(ed_sig),
+            "mldsa65_signature_base64": BASE64.encode(&pqc_sig),
+        })
+    }
+
     /// This identity as a founder `ThresholdMember` JSON.
     pub async fn founder_member(&self) -> serde_json::Value {
         serde_json::json!({

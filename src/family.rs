@@ -19,10 +19,8 @@
 //! the CALLER's concern (the family's `consensus_protocol`), not this module's —
 //! these are the mechanism, the policy lives in the specialization.
 
-use ciris_persist::federation::types::{
-    Family, FamilyMember, FamilyMembershipRevocation, KeyRecord, SignedFamily,
-    SignedFamilyMembershipRevocation,
-};
+use ciris_persist::federation::cohort::{Cohort, RevokeSpec, RosterMember};
+use ciris_persist::federation::types::{Family, SignedFamily};
 use ciris_persist::federation::Error as FedError;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::threshold::ThresholdMember;
@@ -67,15 +65,16 @@ pub async fn lookup(engine: &Engine, family_key_id: &str) -> Result<Option<Famil
 }
 
 /// Add one identity to a family roster (idempotent on `member.key_id` — an existing
-/// member is a no-op returning `Ok(false)`). The family must exist.
+/// member is a no-op returning `Ok(false)`). The family must exist. Substrate-native
+/// via the uniform cohort surface (CIRISPersist#249 G1).
 pub async fn add_member(
     engine: &Engine,
     family_key_id: &str,
-    member: FamilyMember,
+    member: RosterMember,
 ) -> Result<bool, FedError> {
     engine
         .federation_directory()
-        .add_family_member(family_key_id, member)
+        .add_member(Cohort::Family, family_key_id, member)
         .await
 }
 
@@ -84,39 +83,41 @@ pub async fn add_member(
 pub async fn active_members(
     engine: &Engine,
     family_key_id: &str,
-) -> Result<Vec<FamilyMember>, FedError> {
+) -> Result<Vec<RosterMember>, FedError> {
     engine
         .federation_directory()
-        .active_family_members(family_key_id)
+        .active_members(Cohort::Family, family_key_id)
         .await
 }
 
 /// Record a membership removal (append-only; the active reads filter against it).
 pub async fn revoke_member(
     engine: &Engine,
-    revocation: FamilyMembershipRevocation,
+    family_key_id: &str,
+    removed_key_id: &str,
+    spec: RevokeSpec,
 ) -> Result<(), FedError> {
     engine
         .federation_directory()
-        .put_family_membership_revocation(SignedFamilyMembershipRevocation {
-            family_membership_revocation: revocation,
-        })
+        .revoke_member(Cohort::Family, family_key_id, removed_key_id, spec)
         .await
 }
 
-/// **Swap one seat**: revoke `revocation.removed_identity_key_id`, then add
-/// `incoming`. The active roster stays the same size — the incoming key takes the
-/// leaving key's place. (The CALLER authorizes this per the family's
-/// `consensus_protocol`; e.g. the accord requires a 2/3 quorum.)
+/// **Swap one seat**: revoke `out_key_id`, add `incoming`. The active roster stays
+/// the same size — the incoming key takes the leaving key's place. (The CALLER
+/// authorizes this per the family's `consensus_protocol`; the accord routes a
+/// quorum-gated swap through `supersede_family_with_quorum` instead.)
 pub async fn swap_member(
     engine: &Engine,
     family_key_id: &str,
-    revocation: FamilyMembershipRevocation,
-    incoming: FamilyMember,
-) -> Result<(), FedError> {
-    revoke_member(engine, revocation).await?;
-    add_member(engine, family_key_id, incoming).await?;
-    Ok(())
+    out_key_id: &str,
+    incoming: RosterMember,
+    spec: RevokeSpec,
+) -> Result<bool, FedError> {
+    engine
+        .federation_directory()
+        .swap_member(Cohort::Family, family_key_id, out_key_id, incoming, spec)
+        .await
 }
 
 /// Resolve a family's LIVE roster to verify [`ThresholdMember`]s — each member's
@@ -130,7 +131,7 @@ pub async fn active_threshold_roster(
 ) -> Result<Vec<ThresholdMember>, RosterError> {
     let dir = engine.federation_directory();
     // A not-yet-created family is an EMPTY roster, not an error (persist's
-    // active_family_members errors InvalidArgument on an unknown family).
+    // active_member_keys errors InvalidArgument on an unknown family).
     if dir
         .lookup_family(family_key_id)
         .await
@@ -139,26 +140,22 @@ pub async fn active_threshold_roster(
     {
         return Ok(Vec::new());
     }
-    let members = dir
-        .active_family_members(family_key_id)
+    // Substrate-native (CIRISPersist#249 G1): persist resolves the LIVE roster →
+    // pinned hybrid KeyRecords in one call, with its own broken-roster guard
+    // (refuses to undercount a quorum). No hand-rolled per-member lookup.
+    let keys = dir
+        .active_member_keys(Cohort::Family, family_key_id)
         .await
         .map_err(RosterError::Store)?;
-    let mut roster = Vec::with_capacity(members.len());
-    for m in members {
-        let rec: KeyRecord = dir
-            .lookup_public_key(&m.key_id)
-            .await
-            .map_err(RosterError::Store)?
-            .ok_or_else(|| RosterError::UnregisteredMember(m.key_id.clone()))?;
-        roster.push(ThresholdMember {
+    Ok(keys
+        .into_iter()
+        .map(|rec| ThresholdMember {
             member_id: rec.key_id,
             ed25519_public_key_base64: rec.pubkey_ed25519_base64,
             mldsa65_public_key_base64: rec.pubkey_ml_dsa_65_base64,
-            // Role on the threshold member is only consulted by founder-quorum
-            // verifiers (genesis); invocation verification matches by member_id, so
-            // None is correct for the live kill-switch roster.
+            // Role is only consulted by founder-quorum verifiers (genesis);
+            // invocation verification matches by member_id, so None is correct.
             role: None,
-        });
-    }
-    Ok(roster)
+        })
+        .collect())
 }
