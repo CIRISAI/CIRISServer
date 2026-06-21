@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "ARIFA",
     "accord_kind_drill": "MAZOEZI",
     "accord_quorum": "Akidi {signed} / {threshold}",
-    "accord_concur": "Kubaliana"
+    "accord_concur": "Kubaliana",
+    "provision_holder_again": "Toa nyingine",
+    "provision_holder_busy": "Inatoa…",
+    "provision_holder_fips_ack": "YubiKey yangu imeingizwa na tayari imeidhinishwa na FIPS (ufunguo wa slot-9c umetengenezwa).",
+    "provision_holder_key_id_hint": "k.m. accord-holder-alice",
+    "provision_holder_key_id_label": "Kitambulisho cha ufunguo wa mshikaji",
+    "provision_holder_pin_label": "PIN ya YubiKey (si lazima)",
+    "provision_holder_pin_note": "Acha tupu ili uombwe na tokeni. Kugusa YubiKey kunahitajika kwa vyovyote vile.",
+    "provision_holder_prep_note": "Hujakamilisha bado? Endesha maandalizi ya FIPS ya ykman kwenye YubiKey yako kwanza, kisha urudi.",
+    "provision_holder_step1_desc": "Ingiza YubiKey yako ya FIPS. Lazima tayari iwe katika hali iliyoidhinishwa na FIPS ikiwa na ufunguo wa slot-9c uliotengenezwa (maandalizi ya ykman yanafanyika nje ya mtiririko huu — mtiririko huu haufanyi hivyo).",
+    "provision_holder_step1_title": "Thibitisha YubiKey yako",
+    "provision_holder_step2_desc": "Ingiza ufunguo wako wa USB na uchague folda yake. Ufunguo wa ML-DSA wa baada ya quantum umefungwa na kuandikwa hapo — unaweza kufunguliwa tu na YubiKey yako (kugusa + PIN).",
+    "provision_holder_step2_title": "Chagua folda ya USB ya ML-DSA",
+    "provision_holder_submit": "Toa",
+    "provision_holder_subtitle": "Tengeneza utambulisho wako wa HUMANITY_ACCORD wa vipengele viwili unaobebeka kutoka kwa YubiKey yako ambayo tayari imeidhinishwa na FIPS. Programu haishiki funguo yoyote — nodi yako ndiyo inayofanya usimbaji.",
+    "provision_holder_success_next": "Sasa mwombe mmiliki wa nodi yako akusajili: wanakubali rekodi yako ya mshikaji kwenye POST /v1/accord/holder.",
+    "provision_holder_success_title": "Imetolewa",
+    "provision_holder_title": "Toa Mshikaji wa Accord",
+    "provision_holder_touch_note": "Gusa YubiKey yako inapomulika ili kuidhinisha ufungaji wa ufunguo.",
+    "provision_holder_usb_guidance": "Ingiza njia kamili ya folda ya USB iliyowekwa. Lazima iwepo na iwe inayoweza kuandikwa.",
+    "provision_holder_usb_label": "Njia ya folda ya USB ya ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB au /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Nodi",
       "safety": "Usalama",
       "delegations": "Ukabidhi",
-      "accord": "Mkataba"
+      "accord": "Mkataba",
+      "provision_accord_holder": "Toa Mshikaji"
     }
   },
   "setup_validation_select_provider": "Chagua mtoa huduma wa LLM",

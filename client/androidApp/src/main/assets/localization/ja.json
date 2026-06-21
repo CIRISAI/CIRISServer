@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "通知",
     "accord_kind_drill": "訓練",
     "accord_quorum": "定足数 {signed} / {threshold}",
-    "accord_concur": "同意する"
+    "accord_concur": "同意する",
+    "provision_holder_title": "アコードホルダーのプロビジョニング",
+    "provision_holder_subtitle": "すでにFIPS承認済みのYubiKeyから、ポータブルな二要素のHUMANITY_ACCORDアイデンティティを発行します。アプリは鍵を保持しません — 暗号処理はあなたのノードが行います。",
+    "provision_holder_step1_title": "YubiKeyを確認",
+    "provision_holder_step1_desc": "FIPS対応のYubiKeyを挿入してください。すでにFIPS承認モードであり、スロット9cの鍵が生成されている必要があります（ykmanの準備は別途行われており、このフローでは実行しません）。",
+    "provision_holder_fips_ack": "YubiKeyを挿入済みで、すでにFIPS承認済みです（スロット9cの鍵を生成済み）。",
+    "provision_holder_prep_note": "まだ完了していませんか？まずYubiKeyでykmanのFIPS準備を実行してから、戻ってきてください。",
+    "provision_holder_key_id_label": "ホルダー鍵ID",
+    "provision_holder_key_id_hint": "例: accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USBフォルダを選択",
+    "provision_holder_step2_desc": "USBキーを挿入し、そのフォルダを選択してください。耐量子のML-DSA鍵はラップされてそこに書き込まれます — あなたのYubiKey（タッチ + PIN）でのみアンラップできます。",
+    "provision_holder_usb_label": "ML-DSA USBフォルダのパス",
+    "provision_holder_usb_placeholder": "/media/you/USB または /Volumes/USB",
+    "provision_holder_usb_guidance": "マウントされたUSBフォルダへのフルパスを入力してください。存在し、かつ書き込み可能である必要があります。",
+    "provision_holder_pin_label": "YubiKey PIN（任意）",
+    "provision_holder_pin_note": "空欄のままにすると、トークンからの入力を求められます。いずれの場合もYubiKeyのタッチが必要です。",
+    "provision_holder_submit": "プロビジョニング",
+    "provision_holder_busy": "プロビジョニング中…",
+    "provision_holder_touch_note": "鍵のラップを承認するには、YubiKeyが点滅したらタッチしてください。",
+    "provision_holder_success_title": "プロビジョニング完了",
+    "provision_holder_success_next": "次に、ノードの所有者に登録を依頼してください。所有者はPOST /v1/accord/holderであなたのホルダーレコードを承認します。",
+    "provision_holder_again": "別のホルダーをプロビジョニング"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "ノード",
       "safety": "安全性",
       "delegations": "委任",
-      "accord": "アコード"
+      "accord": "アコード",
+      "provision_accord_holder": "ホルダーをプロビジョニング"
     }
   },
   "setup_validation_select_provider": "LLMプロバイダーを選択してください",

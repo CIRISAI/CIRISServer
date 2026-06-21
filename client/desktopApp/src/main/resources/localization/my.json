@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "အသိပေးချက်",
     "accord_kind_drill": "ဇာတ်တိုက်လေ့ကျင့်မှု",
     "accord_quorum": "အသင်းဝင်ပြည့်မီမှု {signed} / {threshold}",
-    "accord_concur": "သဘောတူသည်"
+    "accord_concur": "သဘောတူသည်",
+    "provision_holder_title": "Accord Holder ကို စတင်ပြင်ဆင်ပါ",
+    "provision_holder_subtitle": "FIPS-အတည်ပြုပြီးသား YubiKey ကို အသုံးပြု၍ သယ်ဆောင်နိုင်သော two-factor HUMANITY_ACCORD ဝိသေသကို ဖန်တီးပါ။ အက်ပ်တွင် key များ မရှိပါ — သင့် node က crypto ကို လုပ်ဆောင်ပါသည်။",
+    "provision_holder_step1_title": "သင့် YubiKey ကို အတည်ပြုပါ",
+    "provision_holder_step1_desc": "သင့် FIPS YubiKey ကို ထည့်ပါ။ ၎င်းသည် FIPS-အတည်ပြု mode တွင် slot-9c key ဖန်တီးပြီးသား ဖြစ်ရပါမည် (ykman ပြင်ဆင်မှုကို ဤနေရာတွင် မလုပ်ဆောင်ပါ — ပြင်ပတွင် လုပ်ဆောင်ပြီးဖြစ်ရပါမည်)။",
+    "provision_holder_fips_ack": "ကျွန်ုပ်၏ YubiKey ကို ထည့်ထားပြီး FIPS-အတည်ပြုပြီး (slot-9c key ဖန်တီးပြီး) ဖြစ်ပါသည်။",
+    "provision_holder_prep_note": "မပြီးသေးဘူးလား? သင့် YubiKey ပေါ်တွင် ykman FIPS ပြင်ဆင်မှုကို ဦးစွာ လုပ်ဆောင်ပြီးမှ ပြန်လာပါ။",
+    "provision_holder_key_id_label": "Holder key ID",
+    "provision_holder_key_id_hint": "ဥပမာ accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB ဖိုလ်ဒါကို ရွေးချယ်ပါ",
+    "provision_holder_step2_desc": "သင့် USB key ကို ထည့်ပြီး ၎င်း၏ ဖိုလ်ဒါကို ရွေးချယ်ပါ။ post-quantum ML-DSA key ကို ထုပ်ပိုး၍ ထိုနေရာတွင် ရေးသားသည် — ၎င်းကို သင့် YubiKey (ထိရန် + PIN) ဖြင့်သာ ဖွင့်နိုင်သည်။",
+    "provision_holder_usb_label": "ML-DSA USB ဖိုလ်ဒါ လမ်းကြောင်း",
+    "provision_holder_usb_placeholder": "/media/you/USB or /Volumes/USB",
+    "provision_holder_usb_guidance": "တပ်ဆင်ထားသော USB ဖိုလ်ဒါ၏ လမ်းကြောင်း အပြည့်အစုံကို ထည့်ပါ။ ၎င်းသည် တည်ရှိပြီး ရေးသားနိုင်ရပါမည်။",
+    "provision_holder_pin_label": "YubiKey PIN (ရွေးချယ်နိုင်)",
+    "provision_holder_pin_note": "token မှ တောင်းခံစေရန် အလွတ်ထားပါ။ မည်သို့ဆိုစေ YubiKey ကို ထိရန် လိုအပ်ပါသည်။",
+    "provision_holder_submit": "စတင်ပြင်ဆင်ပါ",
+    "provision_holder_busy": "ပြင်ဆင်နေသည်…",
+    "provision_holder_touch_note": "key wrap ကို ခွင့်ပြုရန် YubiKey မှိတ်တုတ်မှိတ်တုတ် ဖြစ်သည့်အခါ ထိပါ။",
+    "provision_holder_success_title": "ပြင်ဆင်ပြီးပါပြီ",
+    "provision_holder_success_next": "ယခု သင့် node ပိုင်ရှင်အား သင့်ကို မှတ်ပုံတင်ပေးရန် တောင်းဆိုပါ — သူတို့သည် POST /v1/accord/holder တွင် သင့် holder မှတ်တမ်းကို လက်ခံပေးပါမည်။",
+    "provision_holder_again": "နောက်တစ်ခု ပြင်ဆင်ပါ"
   },
   "conscience": {
     "ponder_attempted": "ကျွန်ုပ် {action} ကို ကြိုးစားခဲ့သည်",
@@ -2681,7 +2702,8 @@
       "nodes": "Nodes",
       "safety": "ဘေးကင်းလုံခြုံမှု",
       "delegations": "လွှဲအပ်မှုများ",
-      "accord": "သဘောတူညီချက်"
+      "accord": "သဘောတူညီချက်",
+      "provision_accord_holder": "Holder ပြင်ဆင်ပါ"
     }
   },
   "setup_validation_select_provider": "LLM ဝန်ဆောင်မှုပေးသူကို ရွေးချယ်ပါ",

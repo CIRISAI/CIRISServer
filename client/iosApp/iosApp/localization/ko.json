@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "알림",
     "accord_kind_drill": "훈련",
     "accord_quorum": "정족수 {signed} / {threshold}",
-    "accord_concur": "동의"
+    "accord_concur": "동의",
+    "provision_holder_title": "어코드 홀더 프로비저닝",
+    "provision_holder_subtitle": "이미 FIPS 승인을 받은 YubiKey로 휴대용 2단계 HUMANITY_ACCORD 신원을 발급하세요. 앱은 키를 보관하지 않으며, 암호화는 노드가 수행합니다.",
+    "provision_holder_step1_title": "YubiKey 확인",
+    "provision_holder_step1_desc": "FIPS YubiKey를 삽입하세요. slot-9c 키가 생성된 상태로 이미 FIPS 승인 모드여야 합니다(ykman 준비는 별도로 수행되며, 이 흐름에서는 하지 않습니다).",
+    "provision_holder_fips_ack": "내 YubiKey가 삽입되어 있고 이미 FIPS 승인 상태입니다(slot-9c 키 생성 완료).",
+    "provision_holder_prep_note": "아직 완료하지 않았나요? 먼저 YubiKey에서 ykman FIPS 준비를 실행한 다음 돌아오세요.",
+    "provision_holder_key_id_label": "홀더 키 ID",
+    "provision_holder_key_id_hint": "예: accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB 폴더 선택",
+    "provision_holder_step2_desc": "USB 키를 삽입하고 해당 폴더를 선택하세요. 포스트 양자 ML-DSA 키가 래핑되어 그곳에 기록되며, YubiKey(터치 + PIN)로만 언래핑할 수 있습니다.",
+    "provision_holder_usb_label": "ML-DSA USB 폴더 경로",
+    "provision_holder_usb_placeholder": "/media/you/USB 또는 /Volumes/USB",
+    "provision_holder_usb_guidance": "마운트된 USB 폴더의 전체 경로를 입력하세요. 존재해야 하며 쓰기 가능해야 합니다.",
+    "provision_holder_pin_label": "YubiKey PIN(선택 사항)",
+    "provision_holder_pin_note": "비워 두면 토큰에서 입력을 요청합니다. 어느 경우든 YubiKey 터치는 필요합니다.",
+    "provision_holder_submit": "프로비저닝",
+    "provision_holder_busy": "프로비저닝 중…",
+    "provision_holder_touch_note": "키 래핑을 승인하려면 YubiKey가 깜박일 때 터치하세요.",
+    "provision_holder_success_title": "프로비저닝 완료",
+    "provision_holder_success_next": "이제 노드 소유자에게 등록을 요청하세요. 소유자가 POST /v1/accord/holder에서 홀더 레코드를 승인합니다.",
+    "provision_holder_again": "다른 홀더 프로비저닝"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "노드",
       "safety": "안전",
       "delegations": "위임",
-      "accord": "협약"
+      "accord": "협약",
+      "provision_accord_holder": "홀더 프로비저닝"
     }
   },
   "setup_validation_select_provider": "LLM 제공업체를 선택하세요",

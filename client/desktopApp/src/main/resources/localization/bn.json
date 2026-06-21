@@ -2039,7 +2039,28 @@
     "accord_kind_notify": "বিজ্ঞপ্তি",
     "accord_kind_drill": "মহড়া",
     "accord_quorum": "কোরাম {signed} / {threshold}",
-    "accord_concur": "সম্মত হন"
+    "accord_concur": "সম্মত হন",
+    "provision_holder_again": "আরেকটি প্রভিশন করুন",
+    "provision_holder_busy": "প্রভিশন করা হচ্ছে…",
+    "provision_holder_fips_ack": "আমার YubiKey প্রবেশ করানো হয়েছে এবং ইতিমধ্যে FIPS-অনুমোদিত (slot-9c কী জেনারেট করা)।",
+    "provision_holder_key_id_hint": "যেমন accord-holder-alice",
+    "provision_holder_key_id_label": "হোল্ডার কী ID",
+    "provision_holder_pin_label": "YubiKey PIN (ঐচ্ছিক)",
+    "provision_holder_pin_note": "টোকেন দ্বারা প্রম্পট হতে ফাঁকা রাখুন। উভয় ক্ষেত্রেই YubiKey স্পর্শ করা প্রয়োজন।",
+    "provision_holder_prep_note": "এখনও সম্পন্ন হয়নি? প্রথমে আপনার YubiKey-তে ykman FIPS প্রস্তুতি চালান, তারপর ফিরে আসুন।",
+    "provision_holder_step1_desc": "আপনার FIPS YubiKey প্রবেশ করান। এটি ইতিমধ্যে FIPS-অনুমোদিত মোডে থাকতে হবে এবং একটি slot-9c কী জেনারেট করা থাকতে হবে (ykman প্রস্তুতি ব্যান্ডের বাইরে করা হয় — এই ফ্লো তা করে না)।",
+    "provision_holder_step1_title": "আপনার YubiKey নিশ্চিত করুন",
+    "provision_holder_step2_desc": "আপনার USB কী প্রবেশ করান এবং এর ফোল্ডার বেছে নিন। পোস্ট-কোয়ান্টাম ML-DSA কী র‍্যাপ করে সেখানে লেখা হয় — এটি কেবল আপনার YubiKey দিয়েই আনর‍্যাপ করা যায় (স্পর্শ + PIN)।",
+    "provision_holder_step2_title": "ML-DSA USB ফোল্ডার বেছে নিন",
+    "provision_holder_submit": "প্রভিশন করুন",
+    "provision_holder_subtitle": "আপনার ইতিমধ্যে FIPS-অনুমোদিত YubiKey থেকে আপনার পোর্টেবল দুই-ফ্যাক্টর HUMANITY_ACCORD পরিচয় মিন্ট করুন। অ্যাপটি কোনো কী রাখে না — আপনার নোডই ক্রিপ্টো করে।",
+    "provision_holder_success_next": "এখন আপনার নোড মালিককে আপনাকে নিবন্ধন করতে বলুন: তারা POST /v1/accord/holder-এ আপনার হোল্ডার রেকর্ড ভর্তি করেন।",
+    "provision_holder_success_title": "প্রভিশন সম্পন্ন",
+    "provision_holder_title": "অ্যাকর্ড হোল্ডার প্রভিশন করুন",
+    "provision_holder_touch_note": "কী র‍্যাপ অনুমোদন করতে আপনার YubiKey জ্বলে উঠলে স্পর্শ করুন।",
+    "provision_holder_usb_guidance": "মাউন্ট করা USB ফোল্ডারের সম্পূর্ণ পাথ লিখুন। এটি অবশ্যই বিদ্যমান এবং লেখার-যোগ্য হতে হবে।",
+    "provision_holder_usb_label": "ML-DSA USB ফোল্ডার পাথ",
+    "provision_holder_usb_placeholder": "/media/you/USB বা /Volumes/USB"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",
@@ -2682,7 +2703,8 @@
       "nodes": "নোড",
       "safety": "নিরাপত্তা",
       "delegations": "প্রতিনিধিত্ব",
-      "accord": "অ্যাকর্ড"
+      "accord": "অ্যাকর্ড",
+      "provision_accord_holder": "হোল্ডার প্রভিশন করুন"
     }
   },
   "setup_validation_select_provider": "একটি LLM প্রদানকারী নির্বাচন করুন",

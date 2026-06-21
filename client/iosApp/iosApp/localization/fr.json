@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "NOTIFIER",
     "accord_kind_drill": "EXERCICE",
     "accord_quorum": "Quorum {signed} / {threshold}",
-    "accord_concur": "Approuver"
+    "accord_concur": "Approuver",
+    "provision_holder_again": "Provisionner un autre",
+    "provision_holder_busy": "Provisionnement…",
+    "provision_holder_fips_ack": "Ma YubiKey est insérée et déjà approuvée FIPS (clé de l'emplacement 9c générée).",
+    "provision_holder_key_id_hint": "ex. accord-holder-alice",
+    "provision_holder_key_id_label": "ID de clé du détenteur",
+    "provision_holder_pin_label": "PIN de la YubiKey (facultatif)",
+    "provision_holder_pin_note": "Laissez vide pour que le jeton vous le demande. Toucher la YubiKey est requis dans tous les cas.",
+    "provision_holder_prep_note": "Pas encore fait ? Exécutez d'abord la préparation FIPS ykman sur votre YubiKey, puis revenez.",
+    "provision_holder_step1_desc": "Insérez votre YubiKey FIPS. Elle doit déjà être en mode approuvé FIPS avec une clé générée dans l'emplacement 9c (la préparation ykman se fait hors bande — ce flux ne la réalise pas).",
+    "provision_holder_step1_title": "Confirmez votre YubiKey",
+    "provision_holder_step2_desc": "Insérez votre clé USB et choisissez son dossier. La clé post-quantique ML-DSA y est encapsulée et écrite — elle ne peut être déchiffrée que par votre YubiKey (contact + PIN).",
+    "provision_holder_step2_title": "Choisissez le dossier USB ML-DSA",
+    "provision_holder_submit": "Provisionner",
+    "provision_holder_subtitle": "Générez votre identité HUMANITY_ACCORD portable à deux facteurs à partir de votre YubiKey déjà approuvée FIPS. L'application ne détient aucune clé — votre nœud effectue la cryptographie.",
+    "provision_holder_success_next": "Demandez maintenant au propriétaire de votre nœud de vous enregistrer : il admet votre enregistrement de détenteur via POST /v1/accord/holder.",
+    "provision_holder_success_title": "Provisionné",
+    "provision_holder_title": "Provisionner le détenteur d'accord",
+    "provision_holder_touch_note": "Touchez votre YubiKey lorsqu'elle clignote pour autoriser l'encapsulation de la clé.",
+    "provision_holder_usb_guidance": "Saisissez le chemin complet vers le dossier USB monté. Il doit exister et être accessible en écriture.",
+    "provision_holder_usb_label": "Chemin du dossier USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB ou /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Nœuds",
       "safety": "Sécurité",
       "delegations": "Délégations",
-      "accord": "Accord"
+      "accord": "Accord",
+      "provision_accord_holder": "Provisionner le détenteur"
     }
   },
   "setup_validation_select_provider": "Sélectionnez un fournisseur LLM",

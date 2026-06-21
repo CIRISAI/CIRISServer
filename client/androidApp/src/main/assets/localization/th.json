@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "แจ้งเตือน",
     "accord_kind_drill": "ฝึกซ้อม",
     "accord_quorum": "องค์ประชุม {signed} / {threshold}",
-    "accord_concur": "เห็นชอบ"
+    "accord_concur": "เห็นชอบ",
+    "provision_holder_title": "จัดเตรียมผู้ถือ Accord",
+    "provision_holder_subtitle": "สร้างตัวตน HUMANITY_ACCORD แบบสองปัจจัยที่พกพาได้ของคุณจาก YubiKey ที่ผ่านการรับรอง FIPS อยู่แล้ว แอปไม่ได้เก็บคีย์ใด ๆ — โหนดของคุณเป็นผู้ทำการเข้ารหัส",
+    "provision_holder_step1_title": "ยืนยัน YubiKey ของคุณ",
+    "provision_holder_step1_desc": "เสียบ FIPS YubiKey ของคุณ มันต้องอยู่ในโหมดที่ผ่านการรับรอง FIPS อยู่แล้ว และมีคีย์ในช่อง slot-9c ที่สร้างไว้แล้ว (การเตรียม ykman ทำแยกต่างหาก — ขั้นตอนนี้ไม่ได้ทำให้)",
+    "provision_holder_fips_ack": "YubiKey ของฉันเสียบแล้วและผ่านการรับรอง FIPS เรียบร้อยแล้ว (สร้างคีย์ในช่อง slot-9c แล้ว)",
+    "provision_holder_prep_note": "ยังไม่ได้ทำใช่ไหม? รันการเตรียม ykman FIPS บน YubiKey ของคุณก่อน แล้วค่อยกลับมา",
+    "provision_holder_key_id_label": "รหัสคีย์ของผู้ถือ",
+    "provision_holder_key_id_hint": "เช่น accord-holder-alice",
+    "provision_holder_step2_title": "เลือกโฟลเดอร์ USB สำหรับ ML-DSA",
+    "provision_holder_step2_desc": "เสียบ USB ของคุณและเลือกโฟลเดอร์ คีย์แบบ post-quantum ML-DSA จะถูกห่อหุ้มและเขียนลงที่นั่น — สามารถแกะออกได้โดย YubiKey ของคุณเท่านั้น (แตะ + PIN)",
+    "provision_holder_usb_label": "เส้นทางโฟลเดอร์ USB ของ ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB หรือ /Volumes/USB",
+    "provision_holder_usb_guidance": "ป้อนเส้นทางแบบเต็มไปยังโฟลเดอร์ USB ที่เมานต์ไว้ มันต้องมีอยู่จริงและเขียนได้",
+    "provision_holder_pin_label": "PIN ของ YubiKey (ไม่บังคับ)",
+    "provision_holder_pin_note": "เว้นว่างไว้เพื่อให้โทเค็นถาม การแตะ YubiKey จำเป็นต้องทำในทั้งสองกรณี",
+    "provision_holder_submit": "จัดเตรียม",
+    "provision_holder_busy": "กำลังจัดเตรียม…",
+    "provision_holder_touch_note": "แตะ YubiKey ของคุณเมื่อมันกะพริบเพื่ออนุญาตการห่อหุ้มคีย์",
+    "provision_holder_success_title": "จัดเตรียมเรียบร้อยแล้ว",
+    "provision_holder_success_next": "ตอนนี้ขอให้เจ้าของโหนดของคุณลงทะเบียนคุณ: พวกเขาจะรับระเบียนผู้ถือของคุณที่ POST /v1/accord/holder",
+    "provision_holder_again": "จัดเตรียมอีกรายการ"
   },
   "conscience": {
     "ponder_attempted": "ฉันได้พยายามที่จะ {action}",
@@ -2681,7 +2702,8 @@
       "nodes": "โหนด",
       "safety": "ความปลอดภัย",
       "delegations": "การมอบอำนาจ",
-      "accord": "ข้อตกลง"
+      "accord": "ข้อตกลง",
+      "provision_accord_holder": "จัดเตรียมผู้ถือ"
     }
   },
   "setup_validation_select_provider": "เลือกผู้ให้บริการ LLM",

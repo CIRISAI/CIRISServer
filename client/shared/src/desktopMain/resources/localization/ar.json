@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "إشعار",
     "accord_quorum": "النصاب {signed} / {threshold}",
     "accord_subtitle": "ميثاق الإنسانية — القائمة الدستورية الراسخة التي تحمل مفتاح الإيقاف بشكل مشترك. التطبيق لا يحتفظ بأي مفاتيح؛ العقدة هي التي توقّع.",
-    "accord_title": "الميثاق"
+    "accord_title": "الميثاق",
+    "provision_holder_title": "تزويد حامل الميثاق",
+    "provision_holder_subtitle": "أنشئ هوية HUMANITY_ACCORD المحمولة ثنائية العامل من YubiKey المعتمد بالفعل وفق FIPS. التطبيق لا يحتفظ بأي مفاتيح — عقدتك هي من تنفذ عمليات التشفير.",
+    "provision_holder_step1_title": "تأكيد YubiKey الخاص بك",
+    "provision_holder_step1_desc": "أدخل YubiKey المعتمد وفق FIPS. يجب أن يكون بالفعل في وضع معتمد من FIPS مع توليد مفتاح في الفتحة slot-9c (إعداد ykman يتم خارج النطاق — هذا التدفق لا يقوم به).",
+    "provision_holder_fips_ack": "تم إدخال YubiKey الخاص بي وهو معتمد بالفعل وفق FIPS (تم توليد مفتاح الفتحة slot-9c).",
+    "provision_holder_prep_note": "لم تنته بعد؟ شغّل إعداد ykman FIPS على YubiKey أولاً، ثم عُد.",
+    "provision_holder_key_id_label": "معرّف مفتاح الحامل",
+    "provision_holder_key_id_hint": "مثال: accord-holder-alice",
+    "provision_holder_step2_title": "اختر مجلد USB الخاص بـ ML-DSA",
+    "provision_holder_step2_desc": "أدخل مفتاح USB واختر مجلده. يتم تغليف مفتاح ML-DSA ما بعد الكمي وكتابته هناك — ولا يمكن فك تغليفه إلا بواسطة YubiKey (لمس + PIN).",
+    "provision_holder_usb_label": "مسار مجلد USB الخاص بـ ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB أو /Volumes/USB",
+    "provision_holder_usb_guidance": "أدخل المسار الكامل لمجلد USB المثبّت. يجب أن يكون موجوداً وقابلاً للكتابة.",
+    "provision_holder_pin_label": "رمز PIN الخاص بـ YubiKey (اختياري)",
+    "provision_holder_pin_note": "اتركه فارغاً ليطلبه الرمز المميز. لمس YubiKey مطلوب في كلتا الحالتين.",
+    "provision_holder_submit": "تزويد",
+    "provision_holder_busy": "جارٍ التزويد…",
+    "provision_holder_touch_note": "المس YubiKey عندما يومض للتصريح بتغليف المفتاح.",
+    "provision_holder_success_title": "تم التزويد",
+    "provision_holder_success_next": "اطلب الآن من مالك عقدتك تسجيلك: يقوم بقبول سجل الحامل الخاص بك عبر POST /v1/accord/holder.",
+    "provision_holder_again": "تزويد حامل آخر"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "العُقد",
       "safety": "الأمان",
       "delegations": "التفويضات",
-      "accord": "الميثاق"
+      "accord": "الميثاق",
+      "provision_accord_holder": "تزويد حامل"
     }
   },
   "setup_validation_select_provider": "اختر مزوّد LLM",

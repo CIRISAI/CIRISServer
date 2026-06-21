@@ -1952,7 +1952,28 @@
     "accord_kind_notify": "اطلاع‌رسانی",
     "accord_quorum": "حد نصاب {signed} / {threshold}",
     "accord_subtitle": "پیمان بشریت — فهرست قانون اساسیِ تثبیت‌شده که به‌طور مشترک کلید توقف اضطراری را در اختیار دارد. برنامه هیچ کلیدی نگه نمی‌دارد؛ گره امضا می‌کند.",
-    "accord_title": "پیمان"
+    "accord_title": "پیمان",
+    "provision_holder_again": "تأمین مورد دیگر",
+    "provision_holder_busy": "در حال تأمین…",
+    "provision_holder_fips_ack": "YubiKey من وارد شده و از قبل تأییدشدهٔ FIPS است (کلید اسلات-9c تولید شده است).",
+    "provision_holder_key_id_hint": "مثلاً accord-holder-alice",
+    "provision_holder_key_id_label": "شناسهٔ کلید دارنده",
+    "provision_holder_pin_label": "PIN مربوط به YubiKey (اختیاری)",
+    "provision_holder_pin_note": "برای دریافت درخواست از توکن، خالی بگذارید. در هر صورت لمس YubiKey لازم است.",
+    "provision_holder_prep_note": "هنوز انجام نشده؟ ابتدا آماده‌سازی FIPS با ykman را روی YubiKey خود اجرا کنید، سپس بازگردید.",
+    "provision_holder_step1_desc": "YubiKey مجهز به FIPS خود را وارد کنید. باید از قبل در حالت تأییدشدهٔ FIPS باشد و کلید اسلات-9c آن تولید شده باشد (آماده‌سازی ykman جداگانه انجام می‌شود — این فرایند آن را انجام نمی‌دهد).",
+    "provision_holder_step1_title": "YubiKey خود را تأیید کنید",
+    "provision_holder_step2_desc": "کلید USB خود را وارد کرده و پوشهٔ آن را انتخاب کنید. کلید پساکوانتومی ML-DSA بسته‌بندی شده و در آنجا نوشته می‌شود — تنها با YubiKey شما (لمس + PIN) قابل بازگشایی است.",
+    "provision_holder_step2_title": "پوشهٔ USB مربوط به ML-DSA را انتخاب کنید",
+    "provision_holder_submit": "تأمین",
+    "provision_holder_subtitle": "هویت قابل‌حمل و دومرحله‌ای HUMANITY_ACCORD خود را از YubiKey از پیش تأییدشدهٔ FIPS خود ایجاد کنید. برنامه هیچ کلیدی نگه نمی‌دارد — رمزنگاری توسط نود شما انجام می‌شود.",
+    "provision_holder_success_next": "اکنون از مالک نود خود بخواهید شما را ثبت کند: آن‌ها رکورد دارندهٔ شما را در POST /v1/accord/holder می‌پذیرند.",
+    "provision_holder_success_title": "تأمین شد",
+    "provision_holder_title": "تأمین دارندهٔ پیمان",
+    "provision_holder_touch_note": "هنگامی که YubiKey چشمک می‌زند، آن را لمس کنید تا بسته‌بندی کلید را مجاز کنید.",
+    "provision_holder_usb_guidance": "مسیر کامل پوشهٔ USB متصل‌شده را وارد کنید. باید وجود داشته باشد و قابل نوشتن باشد.",
+    "provision_holder_usb_label": "مسیر پوشهٔ USB مربوط به ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB یا /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2687,7 +2708,8 @@
       "nodes": "گره‌ها",
       "safety": "ایمنی",
       "delegations": "واگذاری‌ها",
-      "accord": "پیمان"
+      "accord": "پیمان",
+      "provision_accord_holder": "تأمین دارنده"
     }
   },
   "setup_validation_select_provider": "یک ارائه‌دهنده LLM را انتخاب کنید",

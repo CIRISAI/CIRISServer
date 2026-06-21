@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "తెలియజేయి",
     "accord_kind_drill": "డ్రిల్",
     "accord_quorum": "కోరం {signed} / {threshold}",
-    "accord_concur": "అంగీకరించు"
+    "accord_concur": "అంగీకరించు",
+    "provision_holder_title": "అకార్డ్ హోల్డర్‌ను ప్రొవిజన్ చేయండి",
+    "provision_holder_subtitle": "ఇప్పటికే FIPS-ఆమోదిత మీ YubiKey నుండి మీ పోర్టబుల్ టూ-ఫ్యాక్టర్ HUMANITY_ACCORD గుర్తింపును మింట్ చేయండి. యాప్ ఎటువంటి కీలను ఉంచదు — క్రిప్టోను మీ నోడ్ చేస్తుంది.",
+    "provision_holder_step1_title": "మీ YubiKeyని నిర్ధారించండి",
+    "provision_holder_step1_desc": "మీ FIPS YubiKeyని చొప్పించండి. ఇది ఇప్పటికే FIPS-ఆమోదిత మోడ్‌లో ఉండి, slot-9c కీ జనరేట్ అయి ఉండాలి (ykman ప్రిపరేషన్ ఔట్ ఆఫ్ బ్యాండ్‌గా పూర్తి చేయబడుతుంది — ఈ ఫ్లో దాన్ని చేయదు).",
+    "provision_holder_fips_ack": "నా YubiKey చొప్పించబడింది మరియు ఇప్పటికే FIPS-ఆమోదితమైనది (slot-9c కీ జనరేట్ చేయబడింది).",
+    "provision_holder_prep_note": "ఇంకా పూర్తి కాలేదా? ముందుగా మీ YubiKeyపై ykman FIPS ప్రిపరేషన్ అమలు చేసి, ఆపై తిరిగి రండి.",
+    "provision_holder_key_id_label": "హోల్డర్ కీ ID",
+    "provision_holder_key_id_hint": "ఉదా. accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB ఫోల్డర్‌ను ఎంచుకోండి",
+    "provision_holder_step2_desc": "మీ USB కీని చొప్పించి దాని ఫోల్డర్‌ను ఎంచుకోండి. పోస్ట్-క్వాంటం ML-DSA కీ ర్యాప్ చేయబడి అక్కడ వ్రాయబడుతుంది — దాన్ని మీ YubiKey ద్వారా మాత్రమే అన్‌ర్యాప్ చేయవచ్చు (టచ్ + PIN).",
+    "provision_holder_usb_label": "ML-DSA USB ఫోల్డర్ పాత్",
+    "provision_holder_usb_placeholder": "/media/you/USB లేదా /Volumes/USB",
+    "provision_holder_usb_guidance": "మౌంట్ చేయబడిన USB ఫోల్డర్‌కు పూర్తి పాత్‌ను నమోదు చేయండి. ఇది తప్పనిసరిగా ఉండాలి మరియు రైటబుల్‌గా ఉండాలి.",
+    "provision_holder_pin_label": "YubiKey PIN (ఐచ్ఛికం)",
+    "provision_holder_pin_note": "టోకెన్ ద్వారా ప్రాంప్ట్ చేయబడటానికి ఖాళీగా ఉంచండి. ఏ విధంగానైనా YubiKeyని టచ్ చేయడం అవసరం.",
+    "provision_holder_submit": "ప్రొవిజన్ చేయండి",
+    "provision_holder_busy": "ప్రొవిజన్ చేస్తోంది…",
+    "provision_holder_touch_note": "కీ ర్యాప్‌ను అధికారం ఇవ్వడానికి మీ YubiKey మెరిసినప్పుడు దాన్ని టచ్ చేయండి.",
+    "provision_holder_success_title": "ప్రొవిజన్ చేయబడింది",
+    "provision_holder_success_next": "ఇప్పుడు మిమ్మల్ని నమోదు చేయమని మీ నోడ్ యజమానిని అడగండి: వారు POST /v1/accord/holder వద్ద మీ హోల్డర్ రికార్డ్‌ను అడ్మిట్ చేస్తారు.",
+    "provision_holder_again": "మరొకటి ప్రొవిజన్ చేయండి"
   },
   "conscience": {
     "ponder_attempted": "నేను {action} చేయడానికి ప్రయత్నించాను",
@@ -2681,7 +2702,8 @@
       "nodes": "నోడ్‌లు",
       "safety": "భద్రత",
       "delegations": "ప్రతినిధ్యాలు",
-      "accord": "ఒడంబడిక"
+      "accord": "ఒడంబడిక",
+      "provision_accord_holder": "హోల్డర్‌ను ప్రొవిజన్ చేయండి"
     }
   },
   "setup_validation_select_provider": "ఒక LLM ప్రొవైడర్‌ను ఎంచుకోండి",

@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "ਸੂਚਿਤ ਕਰੋ",
     "accord_kind_drill": "ਅਭਿਆਸ",
     "accord_quorum": "ਕੋਰਮ {signed} / {threshold}",
-    "accord_concur": "ਸਹਿਮਤ"
+    "accord_concur": "ਸਹਿਮਤ",
+    "provision_holder_title": "ਅਕਾਰਡ ਹੋਲਡਰ ਪ੍ਰੋਵਿਜ਼ਨ ਕਰੋ",
+    "provision_holder_subtitle": "ਆਪਣੀ ਪਹਿਲਾਂ ਤੋਂ FIPS-ਪ੍ਰਵਾਨਿਤ YubiKey ਤੋਂ ਆਪਣੀ ਪੋਰਟੇਬਲ ਦੋ-ਫੈਕਟਰ HUMANITY_ACCORD ਪਛਾਣ ਮਿੰਟ ਕਰੋ। ਐਪ ਕੋਈ ਕੁੰਜੀ ਨਹੀਂ ਰੱਖਦੀ — ਕ੍ਰਿਪਟੋ ਤੁਹਾਡਾ ਨੋਡ ਕਰਦਾ ਹੈ।",
+    "provision_holder_step1_title": "ਆਪਣੀ YubiKey ਦੀ ਪੁਸ਼ਟੀ ਕਰੋ",
+    "provision_holder_step1_desc": "ਆਪਣੀ FIPS YubiKey ਪਾਓ। ਇਹ ਪਹਿਲਾਂ ਤੋਂ FIPS-ਪ੍ਰਵਾਨਿਤ ਮੋਡ ਵਿੱਚ ਹੋਣੀ ਚਾਹੀਦੀ ਹੈ ਜਿਸ ਵਿੱਚ ਸਲੌਟ-9c ਕੁੰਜੀ ਜਨਰੇਟ ਹੋਈ ਹੋਵੇ (ykman ਤਿਆਰੀ ਬੈਂਡ ਤੋਂ ਬਾਹਰ ਕੀਤੀ ਜਾਂਦੀ ਹੈ — ਇਹ ਫਲੋ ਇਹ ਨਹੀਂ ਕਰਦਾ)।",
+    "provision_holder_fips_ack": "ਮੇਰੀ YubiKey ਪਾਈ ਗਈ ਹੈ ਅਤੇ ਪਹਿਲਾਂ ਤੋਂ FIPS-ਪ੍ਰਵਾਨਿਤ ਹੈ (ਸਲੌਟ-9c ਕੁੰਜੀ ਜਨਰੇਟ ਹੋਈ)।",
+    "provision_holder_prep_note": "ਅਜੇ ਨਹੀਂ ਕੀਤਾ? ਪਹਿਲਾਂ ਆਪਣੀ YubiKey 'ਤੇ ykman FIPS ਤਿਆਰੀ ਚਲਾਓ, ਫਿਰ ਵਾਪਸ ਆਓ।",
+    "provision_holder_key_id_label": "ਹੋਲਡਰ ਕੁੰਜੀ ID",
+    "provision_holder_key_id_hint": "ਜਿਵੇਂ accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB ਫੋਲਡਰ ਚੁਣੋ",
+    "provision_holder_step2_desc": "ਆਪਣੀ USB ਕੁੰਜੀ ਪਾਓ ਅਤੇ ਉਸ ਦਾ ਫੋਲਡਰ ਚੁਣੋ। ਪੋਸਟ-ਕੁਆਂਟਮ ML-DSA ਕੁੰਜੀ ਨੂੰ ਲਪੇਟ ਕੇ ਉੱਥੇ ਲਿਖਿਆ ਜਾਂਦਾ ਹੈ — ਇਸ ਨੂੰ ਸਿਰਫ਼ ਤੁਹਾਡੀ YubiKey ਖੋਲ੍ਹ ਸਕਦੀ ਹੈ (ਸਪਰਸ਼ + PIN)।",
+    "provision_holder_usb_label": "ML-DSA USB ਫੋਲਡਰ ਪਾਥ",
+    "provision_holder_usb_placeholder": "/media/you/USB ਜਾਂ /Volumes/USB",
+    "provision_holder_usb_guidance": "ਮਾਊਂਟ ਕੀਤੇ USB ਫੋਲਡਰ ਦਾ ਪੂਰਾ ਪਾਥ ਦਾਖਲ ਕਰੋ। ਇਹ ਮੌਜੂਦ ਅਤੇ ਲਿਖਣਯੋਗ ਹੋਣਾ ਚਾਹੀਦਾ ਹੈ।",
+    "provision_holder_pin_label": "YubiKey PIN (ਵਿਕਲਪਿਕ)",
+    "provision_holder_pin_note": "ਟੋਕਨ ਦੁਆਰਾ ਪੁੱਛੇ ਜਾਣ ਲਈ ਖਾਲੀ ਛੱਡੋ। ਕਿਸੇ ਵੀ ਹਾਲਤ ਵਿੱਚ YubiKey ਨੂੰ ਛੂਹਣਾ ਜ਼ਰੂਰੀ ਹੈ।",
+    "provision_holder_submit": "ਪ੍ਰੋਵਿਜ਼ਨ ਕਰੋ",
+    "provision_holder_busy": "ਪ੍ਰੋਵਿਜ਼ਨ ਹੋ ਰਿਹਾ ਹੈ…",
+    "provision_holder_touch_note": "ਕੁੰਜੀ ਲਪੇਟਣ ਨੂੰ ਅਧਿਕਾਰ ਦੇਣ ਲਈ ਜਦੋਂ ਤੁਹਾਡੀ YubiKey ਝਪਕੇ ਤਾਂ ਉਸ ਨੂੰ ਛੂਹੋ।",
+    "provision_holder_success_title": "ਪ੍ਰੋਵਿਜ਼ਨ ਹੋ ਗਿਆ",
+    "provision_holder_success_next": "ਹੁਣ ਆਪਣੇ ਨੋਡ ਮਾਲਕ ਨੂੰ ਤੁਹਾਨੂੰ ਰਜਿਸਟਰ ਕਰਨ ਲਈ ਕਹੋ: ਉਹ ਤੁਹਾਡਾ ਹੋਲਡਰ ਰਿਕਾਰਡ POST /v1/accord/holder 'ਤੇ ਦਾਖਲ ਕਰਦੇ ਹਨ।",
+    "provision_holder_again": "ਇੱਕ ਹੋਰ ਪ੍ਰੋਵਿਜ਼ਨ ਕਰੋ"
   },
   "conscience": {
     "ponder_attempted": "ਮੈਂ {action} ਕਰਨ ਦੀ ਕੋਸ਼ਿਸ਼ ਕੀਤੀ",
@@ -2681,7 +2702,8 @@
       "nodes": "ਨੋਡਾਂ",
       "safety": "ਸੁਰੱਖਿਆ",
       "delegations": "ਸੌਂਪਣੀਆਂ",
-      "accord": "ਅਕੋਰਡ"
+      "accord": "ਅਕੋਰਡ",
+      "provision_accord_holder": "ਹੋਲਡਰ ਪ੍ਰੋਵਿਜ਼ਨ ਕਰੋ"
     }
   },
   "setup_validation_select_provider": "ਇੱਕ LLM ਪ੍ਰਦਾਤਾ ਚੁਣੋ",

@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "NOTIFICA",
     "accord_quorum": "Quorum {signed} / {threshold}",
     "accord_subtitle": "L'Accordo dell'Umanità — il registro costituzionale consolidato che detiene congiuntamente l'interruttore di emergenza. L'app non detiene chiavi; il nodo firma.",
-    "accord_title": "Accordo"
+    "accord_title": "Accordo",
+    "provision_holder_title": "Provisiona il titolare dell'accordo",
+    "provision_holder_subtitle": "Genera la tua identità HUMANITY_ACCORD portatile a due fattori dalla tua YubiKey già approvata FIPS. L'app non conserva alcuna chiave: la crittografia la esegue il tuo nodo.",
+    "provision_holder_step1_title": "Conferma la tua YubiKey",
+    "provision_holder_step1_desc": "Inserisci la tua YubiKey FIPS. Deve già essere in modalità approvata FIPS con una chiave generata nello slot 9c (la preparazione con ykman viene eseguita separatamente: questa procedura non la esegue).",
+    "provision_holder_fips_ack": "La mia YubiKey è inserita e già approvata FIPS (chiave dello slot 9c generata).",
+    "provision_holder_prep_note": "Non l'hai ancora fatto? Esegui prima la preparazione FIPS con ykman sulla tua YubiKey, poi torna qui.",
+    "provision_holder_key_id_label": "ID chiave titolare",
+    "provision_holder_key_id_hint": "es. accord-holder-alice",
+    "provision_holder_step2_title": "Scegli la cartella USB ML-DSA",
+    "provision_holder_step2_desc": "Inserisci la tua chiave USB e scegli la sua cartella. La chiave post-quantistica ML-DSA viene incapsulata e scritta lì: può essere decapsulata solo dalla tua YubiKey (tocco + PIN).",
+    "provision_holder_usb_label": "Percorso della cartella USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB o /Volumes/USB",
+    "provision_holder_usb_guidance": "Inserisci il percorso completo della cartella USB montata. Deve esistere ed essere scrivibile.",
+    "provision_holder_pin_label": "PIN YubiKey (opzionale)",
+    "provision_holder_pin_note": "Lascia vuoto per ricevere la richiesta dal token. È comunque necessario toccare la YubiKey.",
+    "provision_holder_submit": "Provisiona",
+    "provision_holder_busy": "Provisioning in corso…",
+    "provision_holder_touch_note": "Tocca la tua YubiKey quando lampeggia per autorizzare l'incapsulamento della chiave.",
+    "provision_holder_success_title": "Provisionato",
+    "provision_holder_success_next": "Ora chiedi al proprietario del nodo di registrarti: ammette il tuo record di titolare con POST /v1/accord/holder.",
+    "provision_holder_again": "Provisiona un altro"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Nodi",
       "safety": "Sicurezza",
       "delegations": "Deleghe",
-      "accord": "Accordo"
+      "accord": "Accordo",
+      "provision_accord_holder": "Provisiona titolare"
     }
   },
   "setup_validation_select_provider": "Seleziona un provider LLM",

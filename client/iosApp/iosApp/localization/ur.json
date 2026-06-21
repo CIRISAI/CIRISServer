@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "اطلاع",
     "accord_quorum": "کورم {signed} / {threshold}",
     "accord_subtitle": "ہیومینٹی ایکارڈ — مستحکم آئینی فہرست جو مشترکہ طور پر kill-switch رکھتی ہے۔ ایپ کوئی کلید نہیں رکھتی؛ نوڈ دستخط کرتا ہے۔",
-    "accord_title": "ایکارڈ"
+    "accord_title": "ایکارڈ",
+    "provision_holder_title": "اکارڈ ہولڈر فراہم کریں",
+    "provision_holder_subtitle": "اپنی پہلے سے FIPS منظور شدہ YubiKey سے اپنی پورٹیبل ٹو فیکٹر HUMANITY_ACCORD شناخت بنائیں۔ ایپ کوئی کلید نہیں رکھتی — کرپٹو آپ کا نوڈ کرتا ہے۔",
+    "provision_holder_step1_title": "اپنی YubiKey کی تصدیق کریں",
+    "provision_holder_step1_desc": "اپنی FIPS YubiKey داخل کریں۔ یہ پہلے سے FIPS منظور شدہ موڈ میں ہونی چاہیے جس میں slot-9c کلید تیار کی گئی ہو (ykman کی تیاری اس فلو سے باہر کی جاتی ہے — یہ فلو وہ نہیں کرتا)۔",
+    "provision_holder_fips_ack": "میری YubiKey داخل ہے اور پہلے سے FIPS منظور شدہ ہے (slot-9c کلید تیار کی گئی ہے)۔",
+    "provision_holder_prep_note": "ابھی تک نہیں کیا؟ پہلے اپنی YubiKey پر ykman FIPS کی تیاری چلائیں، پھر واپس آئیں۔",
+    "provision_holder_key_id_label": "ہولڈر کلید ID",
+    "provision_holder_key_id_hint": "مثلاً accord-holder-alice",
+    "provision_holder_step2_title": "ML-DSA USB فولڈر منتخب کریں",
+    "provision_holder_step2_desc": "اپنی USB کلید داخل کریں اور اس کا فولڈر منتخب کریں۔ پوسٹ کوانٹم ML-DSA کلید لپیٹ کر وہاں لکھی جاتی ہے — اسے صرف آپ کی YubiKey (ٹچ + PIN) سے کھولا جا سکتا ہے۔",
+    "provision_holder_usb_label": "ML-DSA USB فولڈر کا راستہ",
+    "provision_holder_usb_placeholder": "/media/you/USB یا /Volumes/USB",
+    "provision_holder_usb_guidance": "ماؤنٹ شدہ USB فولڈر کا مکمل راستہ درج کریں۔ یہ موجود ہونا چاہیے اور قابلِ تحریر ہونا چاہیے۔",
+    "provision_holder_pin_label": "YubiKey PIN (اختیاری)",
+    "provision_holder_pin_note": "ٹوکن سے درخواست کیے جانے کے لیے خالی چھوڑ دیں۔ بہر صورت YubiKey کو ٹچ کرنا ضروری ہے۔",
+    "provision_holder_submit": "فراہم کریں",
+    "provision_holder_busy": "فراہم کیا جا رہا ہے…",
+    "provision_holder_touch_note": "کلید لپیٹنے کی اجازت دینے کے لیے جب آپ کی YubiKey چمکے تو اسے ٹچ کریں۔",
+    "provision_holder_success_title": "فراہم کر دیا گیا",
+    "provision_holder_success_next": "اب اپنے نوڈ مالک سے کہیں کہ وہ آپ کو رجسٹر کریں: وہ آپ کا ہولڈر ریکارڈ POST /v1/accord/holder پر داخل کرتے ہیں۔",
+    "provision_holder_again": "ایک اور فراہم کریں"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "نوڈز",
       "safety": "حفاظت",
       "delegations": "تفویضات",
-      "accord": "ایکارڈ"
+      "accord": "ایکارڈ",
+      "provision_accord_holder": "ہولڈر فراہم کریں"
     }
   },
   "setup_validation_select_provider": "ایک LLM فراہم کنندہ منتخب کریں",

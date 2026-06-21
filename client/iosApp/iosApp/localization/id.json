@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "NOTIFIKASI",
     "accord_quorum": "Kuorum {signed} / {threshold}",
     "accord_subtitle": "The Humanity Accord — daftar konstitusional yang mengakar yang secara bersama memegang kill-switch. Aplikasi tidak menyimpan kunci; node yang menandatangani.",
-    "accord_title": "Akord"
+    "accord_title": "Akord",
+    "provision_holder_title": "Sediakan Pemegang Accord",
+    "provision_holder_subtitle": "Buat identitas HUMANITY_ACCORD dua-faktor portabel Anda dari YubiKey yang sudah disetujui FIPS. Aplikasi tidak menyimpan kunci apa pun — node Anda yang melakukan kriptografinya.",
+    "provision_holder_step1_title": "Konfirmasi YubiKey Anda",
+    "provision_holder_step1_desc": "Masukkan YubiKey FIPS Anda. Perangkat harus sudah dalam mode yang disetujui FIPS dengan kunci slot-9c yang telah dibuat (persiapan ykman dilakukan secara terpisah — alur ini tidak melakukannya).",
+    "provision_holder_fips_ack": "YubiKey saya sudah dimasukkan dan telah disetujui FIPS (kunci slot-9c telah dibuat).",
+    "provision_holder_prep_note": "Belum selesai? Jalankan persiapan FIPS ykman pada YubiKey Anda terlebih dahulu, lalu kembali.",
+    "provision_holder_key_id_label": "ID kunci pemegang",
+    "provision_holder_key_id_hint": "mis. accord-holder-alice",
+    "provision_holder_step2_title": "Pilih folder USB ML-DSA",
+    "provision_holder_step2_desc": "Masukkan kunci USB Anda dan pilih foldernya. Kunci pasca-kuantum ML-DSA dibungkus dan ditulis di sana — hanya dapat dibuka oleh YubiKey Anda (sentuh + PIN).",
+    "provision_holder_usb_label": "Jalur folder USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB atau /Volumes/USB",
+    "provision_holder_usb_guidance": "Masukkan jalur lengkap ke folder USB yang terpasang. Folder harus ada dan dapat ditulisi.",
+    "provision_holder_pin_label": "PIN YubiKey (opsional)",
+    "provision_holder_pin_note": "Biarkan kosong agar diminta oleh token. Menyentuh YubiKey tetap diperlukan dalam kedua kasus.",
+    "provision_holder_submit": "Sediakan",
+    "provision_holder_busy": "Menyediakan…",
+    "provision_holder_touch_note": "Sentuh YubiKey Anda saat berkedip untuk mengizinkan pembungkusan kunci.",
+    "provision_holder_success_title": "Tersedia",
+    "provision_holder_success_next": "Sekarang minta pemilik node Anda untuk mendaftarkan Anda: mereka menerima catatan pemegang Anda di POST /v1/accord/holder.",
+    "provision_holder_again": "Sediakan yang lain"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",
@@ -2681,7 +2702,8 @@
       "nodes": "Node",
       "safety": "Keamanan",
       "delegations": "Pendelegasian",
-      "accord": "Akord"
+      "accord": "Akord",
+      "provision_accord_holder": "Sediakan Pemegang"
     }
   },
   "setup_validation_select_provider": "Pilih penyedia LLM",

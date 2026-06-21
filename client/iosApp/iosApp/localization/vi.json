@@ -2272,7 +2272,28 @@
     "accord_kind_notify": "THÔNG BÁO",
     "accord_kind_drill": "DIỄN TẬP",
     "accord_quorum": "Số phiếu {signed} / {threshold}",
-    "accord_concur": "Đồng thuận"
+    "accord_concur": "Đồng thuận",
+    "provision_holder_title": "Cấp phát Accord Holder",
+    "provision_holder_subtitle": "Tạo danh tính HUMANITY_ACCORD hai yếu tố di động của bạn từ YubiKey đã được phê duyệt FIPS. Ứng dụng không giữ khóa nào — node của bạn thực hiện mã hóa.",
+    "provision_holder_step1_title": "Xác nhận YubiKey của bạn",
+    "provision_holder_step1_desc": "Cắm YubiKey FIPS của bạn. Nó phải đã ở chế độ được phê duyệt FIPS với khóa slot-9c đã được tạo (việc chuẩn bị ykman được thực hiện ngoài luồng — quy trình này không làm điều đó).",
+    "provision_holder_fips_ack": "YubiKey của tôi đã được cắm và đã được phê duyệt FIPS (khóa slot-9c đã được tạo).",
+    "provision_holder_prep_note": "Chưa thực hiện? Hãy chạy chuẩn bị FIPS ykman trên YubiKey của bạn trước, rồi quay lại.",
+    "provision_holder_key_id_label": "ID khóa holder",
+    "provision_holder_key_id_hint": "ví dụ: accord-holder-alice",
+    "provision_holder_step2_title": "Chọn thư mục USB ML-DSA",
+    "provision_holder_step2_desc": "Cắm khóa USB của bạn và chọn thư mục của nó. Khóa hậu lượng tử ML-DSA được bọc và ghi vào đó — nó chỉ có thể được gỡ bọc bằng YubiKey của bạn (chạm + PIN).",
+    "provision_holder_usb_label": "Đường dẫn thư mục USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB hoặc /Volumes/USB",
+    "provision_holder_usb_guidance": "Nhập đường dẫn đầy đủ tới thư mục USB đã gắn kết. Nó phải tồn tại và có thể ghi được.",
+    "provision_holder_pin_label": "PIN của YubiKey (tùy chọn)",
+    "provision_holder_pin_note": "Để trống để token nhắc bạn. Dù thế nào vẫn cần chạm vào YubiKey.",
+    "provision_holder_submit": "Cấp phát",
+    "provision_holder_busy": "Đang cấp phát…",
+    "provision_holder_touch_note": "Chạm vào YubiKey khi nó nhấp nháy để cho phép việc bọc khóa.",
+    "provision_holder_success_title": "Đã cấp phát",
+    "provision_holder_success_next": "Bây giờ hãy yêu cầu chủ node của bạn đăng ký bạn: họ chấp nhận bản ghi holder của bạn tại POST /v1/accord/holder.",
+    "provision_holder_again": "Cấp phát thêm cái khác"
   },
   "network": {
     "title": "Mạng",
@@ -2681,7 +2702,8 @@
       "nodes": "Các node",
       "safety": "An toàn",
       "delegations": "Ủy quyền",
-      "accord": "Accord"
+      "accord": "Accord",
+      "provision_accord_holder": "Cấp phát Holder"
     }
   },
   "setup_validation_select_provider": "Chọn nhà cung cấp LLM",

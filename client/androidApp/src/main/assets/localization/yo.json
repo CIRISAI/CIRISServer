@@ -2038,7 +2038,28 @@
     "accord_kind_notify": "FÌFÍTỌ́NI",
     "accord_quorum": "Iye tó tó {signed} / {threshold}",
     "accord_subtitle": "Àdéhùn Ẹ̀dá Ènìyàn — àkójọ ìpìlẹ̀ òfin tí ó dúró ṣinṣin tí wọ́n jọ ní agbára ìparí. Áàpù náà kò ní àwọn kọ́kọ́rọ́ kankan; ojú-ọ̀nà náà ni ó fọwọ́sí.",
-    "accord_title": "Àdéhùn"
+    "accord_title": "Àdéhùn",
+    "provision_holder_again": "Pèsè òmíràn",
+    "provision_holder_busy": "Ń pèsè…",
+    "provision_holder_fips_ack": "A ti fi YubiKey mi sí inú, ó sì ti gba ìfọwọ́sí FIPS (a ti dá bọtìnì slot-9c).",
+    "provision_holder_key_id_hint": "f.a. accord-holder-alice",
+    "provision_holder_key_id_label": "ID bọtìnì olùdìmú",
+    "provision_holder_pin_label": "PIN YubiKey (yíyàn)",
+    "provision_holder_pin_note": "Fi sílẹ̀ ní òfo kí tókìnì náà béèrè rẹ̀. Fífọwọ́kàn YubiKey jẹ́ dandan lọ́nàkọnà.",
+    "provision_holder_prep_note": "O kò tíì ṣe é? Kọ́kọ́ ṣe ìmúrasílẹ̀ FIPS ykman lórí YubiKey rẹ, lẹ́yìn náà padà wá.",
+    "provision_holder_step1_desc": "Fi YubiKey FIPS rẹ sí inú. Ó gbọ́dọ̀ ti wà nínú ipò tí FIPS fọwọ́sí pẹ̀lú bọtìnì slot-9c tí a ti dá (ìmúrasílẹ̀ ykman ni a ń ṣe ní ìta — ìṣàn yìí kò ṣe é).",
+    "provision_holder_step1_title": "Jẹ́rìí YubiKey rẹ",
+    "provision_holder_step2_desc": "Fi bọtìnì USB rẹ sí inú kí o sì yan fódà rẹ̀. A ó dì bọtìnì ML-DSA post-quantum kí a sì kọ ọ́ síbẹ̀ — YubiKey rẹ nìkan ni ó lè túká rẹ̀ (fọwọ́kàn + PIN).",
+    "provision_holder_step2_title": "Yan fódà USB ML-DSA",
+    "provision_holder_submit": "Pèsè",
+    "provision_holder_subtitle": "Da ìdánimọ̀ HUMANITY_ACCORD onífekíkàn-méjì tí ó ṣeé gbé jáde láti inú YubiKey rẹ tí a ti fọwọ́sí pẹ̀lú FIPS. Áàpù náà kò ní bọtìnì-ìṣínà kankan — nóòdù rẹ ni ó ń ṣe cryptography.",
+    "provision_holder_success_next": "Báyìí, béèrè lọ́wọ́ olówó nóòdù rẹ kí ó forúkọ rẹ sílẹ̀: wọ́n gba àkọsílẹ̀ olùdìmú rẹ ní POST /v1/accord/holder.",
+    "provision_holder_success_title": "A ti pèsè",
+    "provision_holder_title": "Pèsè Olùdìmú Àdéhùn",
+    "provision_holder_touch_note": "Fọwọ́kàn YubiKey rẹ nígbà tí ó bá ń ṣe ìmọ́lẹ̀ láti fún ní àṣẹ fún dídì bọtìnì.",
+    "provision_holder_usb_guidance": "Tẹ ọ̀nà kíkún sí fódà USB tí a gbé sókè. Ó gbọ́dọ̀ wà kí ó sì ṣeé kọ sí.",
+    "provision_holder_usb_label": "Ọ̀nà fódà USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/you/USB tàbí /Volumes/USB"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -2681,7 +2702,8 @@
       "nodes": "Àwọn Ọkàn-ìpadé",
       "safety": "Ààbò",
       "delegations": "Awọn Aṣẹ-fifúnni",
-      "accord": "Àdéhùn"
+      "accord": "Àdéhùn",
+      "provision_accord_holder": "Pèsè Olùdìmú"
     }
   },
   "setup_validation_select_provider": "Yan olùpèsè LLM",

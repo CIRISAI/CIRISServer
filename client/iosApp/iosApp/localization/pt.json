@@ -1946,7 +1946,28 @@
     "accord_kind_notify": "NOTIFICAR",
     "accord_kind_drill": "SIMULAÇÃO",
     "accord_quorum": "Quórum {signed} / {threshold}",
-    "accord_concur": "Concordar"
+    "accord_concur": "Concordar",
+    "provision_holder_again": "Provisionar outro",
+    "provision_holder_busy": "A provisionar…",
+    "provision_holder_fips_ack": "A minha YubiKey está inserida e já aprovada FIPS (chave do slot 9c gerada).",
+    "provision_holder_key_id_hint": "ex.: accord-holder-alice",
+    "provision_holder_key_id_label": "ID da chave do detentor",
+    "provision_holder_pin_label": "PIN da YubiKey (opcional)",
+    "provision_holder_pin_note": "Deixe em branco para que o token o solicite. Tocar na YubiKey é sempre necessário.",
+    "provision_holder_prep_note": "Ainda não o fez? Execute primeiro a preparação FIPS ykman na sua YubiKey e depois volte.",
+    "provision_holder_step1_desc": "Insira a sua YubiKey FIPS. Já deve estar em modo aprovado FIPS com uma chave gerada no slot 9c (a preparação ykman é feita fora deste fluxo — este fluxo não a executa).",
+    "provision_holder_step1_title": "Confirme a sua YubiKey",
+    "provision_holder_step2_desc": "Insira a sua chave USB e escolha a sua pasta. A chave pós-quântica ML-DSA é encapsulada e escrita aí — só pode ser desencapsulada pela sua YubiKey (toque + PIN).",
+    "provision_holder_step2_title": "Escolha a pasta USB ML-DSA",
+    "provision_holder_submit": "Provisionar",
+    "provision_holder_subtitle": "Crie a sua identidade portátil de dois fatores HUMANITY_ACCORD a partir da sua YubiKey já aprovada FIPS. A aplicação não guarda chaves — é o seu nó que faz a criptografia.",
+    "provision_holder_success_next": "Agora peça ao proprietário do seu nó para o registar: ele admite o seu registo de detentor em POST /v1/accord/holder.",
+    "provision_holder_success_title": "Provisionado",
+    "provision_holder_title": "Provisionar Detentor do Accord",
+    "provision_holder_touch_note": "Toque na sua YubiKey quando piscar para autorizar o encapsulamento da chave.",
+    "provision_holder_usb_guidance": "Introduza o caminho completo para a pasta USB montada. Deve existir e ser gravável.",
+    "provision_holder_usb_label": "Caminho da pasta USB ML-DSA",
+    "provision_holder_usb_placeholder": "/media/voce/USB ou /Volumes/USB"
   },
   "prompts": {
     "dma": {
@@ -2681,7 +2702,8 @@
       "nodes": "Nós",
       "safety": "Segurança",
       "delegations": "Delegações",
-      "accord": "Acordo"
+      "accord": "Acordo",
+      "provision_accord_holder": "Provisionar Detentor"
     }
   },
   "setup_validation_select_provider": "Selecione um provedor de LLM",
