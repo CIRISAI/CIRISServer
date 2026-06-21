@@ -43,6 +43,21 @@
 //! the attested-key==holder bind — BEFORE the key is admitted. CIRISVerify#91 +
 //! #62 are both resolved + validated on a real YubiKey 5 FIPS (fw 5.7.4); the real
 //! `ciris_keyring::pkcs11` cryptoki backend is live (no longer stubbed).
+//! ## Operational halt — the ENFORCEABLE kill-switch (CC 4.2.1 / 4.2.3 / §9.2.1)
+//!
+//! `POST /v1/accord/message` is the inbound accord-message sink (a peer or a
+//! holder app delivers a signed invocation object here). The node:
+//!
+//!   1. replicates any authentic accord-holder-signed message onward to all known
+//!      peers (concurrence-seeking gossip; loop-stopped by a seen-set);
+//!   2. for a verified 2-of-3 `CONSTITUTIONAL` quorum — the global halt —
+//!      replicates to all peers FIRST, then latches the disk halt
+//!      ([`crate::accord_halt`]) and terminates (fail-secure, full halt). The
+//!      latch gates every future startup until it is manually removed ("not a
+//!      recoverable pause"). `create`/`concur` share this path, so a concurring
+//!      cosignature that reaches 2-of-3 halts too.
+//!   3. `notify` / `drill` messages flow through the SAME replicate-and-surface
+//!      path but NEVER halt (a drill is the EAS-style test of the delivery path).
 //!
 //! ## What is NOT here yet (and why the mesh still waits)
 //!
@@ -56,7 +71,8 @@
 //! before the kill-switch is enforceable AND the accord keys are under genuine
 //! 2-factor distributed-human custody (now gate-enforced).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -75,15 +91,32 @@ use ciris_verify_core::accord_genesis::{
     ACCORD_FAMILY_GENESIS_KIND, ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
-use ciris_verify_core::humanity_accord::{verify_invocation, Invocation, InvocationDedup};
+use ciris_verify_core::humanity_accord::{
+    verify_invocation, Invocation, InvocationDedup, InvocationKind,
+};
 use ciris_verify_core::threshold::{ThresholdMember, ThresholdSignature};
 
+use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::resolve_bearer;
 
 /// The §9.2.1 2-of-3 holder threshold (verify enforces this internally; surfaced
 /// here for the response + the cold-start roster sanity check).
 const ACCORD_THRESHOLD: usize = 2;
+
+/// Backstop caps on the in-memory coordination tables (defense-in-depth: only
+/// holder-signed traffic reaches them now, but bound them anyway so a compromised
+/// holder — or a flood of distinct ids — cannot exhaust memory). `pending` is
+/// also pruned of expired invocations on every insert; `seen` is cleared when it
+/// overflows (re-gossip is idempotent — a duplicate halt just re-latches).
+const MAX_PENDING_INVOCATIONS: usize = 4096;
+const MAX_SEEN_INVOCATIONS: usize = 16_384;
+
+/// Per-peer replication request budget — a hung/stalling peer MUST NOT be able to
+/// block the local halt from latching. With the concurrent fan-out the whole
+/// round is bounded by this, not the sum across peers.
+const REPLICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const REPLICATION_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The PINNED durable accord-custody trust anchor — **Yubico Attestation Root 1**
 /// (`developers.yubico.com/PKI/yubico-ca-1.pem`, CN="Yubico Attestation Root 1",
@@ -95,6 +128,36 @@ const ACCORD_THRESHOLD: usize = 2;
 /// FIPS (fw 5.7.4) by the verify team. See the `accord-custody-gate-pinning` note.
 const YUBICO_ATTESTATION_ROOT_1_DER: &[u8] =
     include_bytes!("accord_pki/yubico_attestation_root_1.der");
+/// The node-boot wiring the operational halt needs: WHERE to latch the disk halt,
+/// WHO the known peers are to replicate to, and (in prod) that a verified halt
+/// terminates the process. Built from [`crate::config::ServerConfig`] in
+/// `compose.rs`; [`AccordHalt::disabled`] is the inert default used by unit tests
+/// that don't exercise the halt path.
+#[derive(Clone)]
+pub struct AccordHalt {
+    /// The node `home` the [`crate::accord_halt::HALT_LATCH_FILE`] is written
+    /// under. `None` disables the disk latch (test / no-home contexts).
+    pub home: Option<PathBuf>,
+    /// Known-peer base URLs (e.g. `http://10.0.0.2:4243`) the node replicates
+    /// authentic accord messages to — and, for a global halt, replicates to FIRST
+    /// (before latching). From `bootstrap_peers`; may be empty (0.5 canonical mesh).
+    pub peers: Vec<String>,
+    /// Whether a verified 2-of-3 `CONSTITUTIONAL` halt terminates the process after
+    /// latching (`true` in prod; `false` in tests so the runner survives).
+    pub exit_on_halt: bool,
+}
+
+impl AccordHalt {
+    /// The inert default — no disk latch, no peers, no process exit.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            home: None,
+            peers: Vec::new(),
+            exit_on_halt: false,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct AccordState {
@@ -108,6 +171,13 @@ struct AccordState {
     /// restart drops in-flight invocations); the durable artifact is the assembled
     /// invocation's holder cosignatures, re-verifiable against `federation_keys`.
     pending: Arc<Mutex<HashMap<(String, String), SignedCegObject>>>,
+    /// `(invocation_kind, invocation_id)` already gossiped — the loop-stop so a
+    /// replicated message isn't re-fanned-out endlessly across the mesh.
+    seen: Arc<Mutex<HashSet<(String, String)>>>,
+    /// HTTP client for the peer replication fan-out.
+    http: reqwest::Client,
+    /// Disk-latch + peer + process-exit wiring for the operational halt.
+    halt: AccordHalt,
 }
 
 /// Build the registered accord-holder set as `threshold::ThresholdMember`s (the
@@ -131,6 +201,21 @@ async fn registered_holders(engine: &Engine) -> Result<Vec<ThresholdMember>, Res
 
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
+/// Evict expired (`valid_until` ≤ now, or unparseable) pending invocations — keeps
+/// the table bounded by the count of LIVE holder-driven invocations.
+fn prune_pending(
+    pending: &mut HashMap<(String, String), SignedCegObject>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    pending.retain(|_, obj| {
+        parse_accord_invocation(obj)
+            .ok()
+            .and_then(|p| chrono::DateTime::parse_from_rfc3339(&p.invocation.valid_until).ok())
+            .map(|vu| vu.with_timezone(&chrono::Utc) > now)
+            .unwrap_or(false)
+    });
 }
 
 /// Require a live OWNER session — the SAME apex gate `POST /v1/federation/peering`
@@ -596,10 +681,31 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.invocation.invocation_kind.as_str().to_string(),
         req.invocation.invocation_id.clone(),
     );
-    st.pending
-        .lock()
-        .expect("pending lock")
-        .insert(key, obj.clone());
+    // Replicate the new invocation to peers (concurrence-seeking gossip) + honor a
+    // halt if it already meets 2/3. This ALSO tells us if the opener's signature is
+    // an authentic registered-holder one — we only persist authentic invocations
+    // (an unauthenticated opener cannot grow the pending table).
+    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    if !outcome.authentic {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "invocation carries no valid registered-holder signature — not opened",
+        );
+    }
+    {
+        let mut pending = st.pending.lock().expect("pending lock");
+        prune_pending(&mut pending, chrono::Utc::now());
+        if pending.len() >= MAX_PENDING_INVOCATIONS && !pending.contains_key(&key) {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many pending invocations — retry later",
+            );
+        }
+        pending.insert(key, obj.clone());
+    }
     invocation_response(&obj)
 }
 
@@ -642,10 +748,19 @@ async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Byte
         &signatures,
         &now,
     );
-    st.pending
-        .lock()
-        .expect("pending lock")
-        .insert(key, rebuilt.clone());
+    // A concurring cosignature can be the one that reaches the 2-of-3: replicate to
+    // peers and, for a CONSTITUTIONAL quorum, replicate-first → latch → halt.
+    let outcome = match replicate_and_maybe_halt(&st, &rebuilt).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    // The pending entry it concurs to is already authentic, so this holds; persist
+    // the advanced object (pruning expired entries to keep the table bounded).
+    if outcome.authentic {
+        let mut pending = st.pending.lock().expect("pending lock");
+        prune_pending(&mut pending, chrono::Utc::now());
+        pending.insert(key, rebuilt.clone());
+    }
     invocation_response(&rebuilt)
 }
 
@@ -702,12 +817,234 @@ fn invocation_response(obj: &SignedCegObject) -> Response {
         .into_response()
 }
 
-/// The accord router — merge onto the read-API listener.
+// ─── Accord message handling (replicate → maybe-halt) — CC 4.2.1 / §9.2.1 ─────
+
+/// The result of folding an accord object through the replicate/halt path.
+struct AccordOutcome {
+    /// At least one cosignature is from a REGISTERED holder (so the message is an
+    /// authentic accord message and was replicated). A node only relays/acts on
+    /// holder-signed traffic — anything else is dropped.
+    authentic: bool,
+    invocation_kind: String,
+    invocation_id: String,
+    quorum_met: bool,
+    valid_signers: Vec<String>,
+    /// A 2-of-3 `CONSTITUTIONAL` halt was honored (latched; process termination
+    /// scheduled in prod).
+    halted: bool,
+}
+
+/// Replicate an authentic accord object to every known peer's `/v1/accord/message`.
+/// Best-effort + bounded; per-peer failures are logged, never fatal (a node that
+/// can't reach a peer must still honor its own halt). Awaited on the halt path
+/// (replicate-BEFORE-halt); spawned for ordinary concurrence gossip.
+async fn replicate_to_peers(http: &reqwest::Client, peers: &[String], obj: &SignedCegObject) {
+    // CONCURRENT fan-out (the whole round is bounded by REPLICATION_TIMEOUT, not the
+    // sum across peers) so ONE stalling peer can never block the local halt path.
+    let mut set = tokio::task::JoinSet::new();
+    for peer in peers {
+        let http = http.clone();
+        let peer = peer.clone();
+        let obj = obj.clone();
+        set.spawn(async move {
+            let url = format!("{}/v1/accord/message", peer.trim_end_matches('/'));
+            match http.post(&url).json(&obj).send().await {
+                Ok(r) => {
+                    tracing::info!(peer = %peer, status = %r.status(), "replicated accord message")
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %peer, error = %e, "accord replication to peer failed")
+                }
+            }
+        });
+    }
+    while set.join_next().await.is_some() {}
+}
+
+/// The single replicate + halt path (CC 4.2.1 / §9.2.1), shared by the inbound
+/// `/v1/accord/message` ingest and the local `create`/`concur` producers:
+///
+///   1. Re-bind the object's signatures to THIS node's registered holder roster
+///      (the authority on WHO can halt — never the object's embedded roster) and
+///      compute the concurrence status.
+///   2. If authentic (≥1 valid holder cosignature): **replicate to peers** — the
+///      requirement that any accord-holder-signed message is gossiped onward.
+///   3. If a 2-of-3 `CONSTITUTIONAL` quorum is met: this is a GLOBAL HALT — replicate
+///      to all known peers FIRST (so the kill propagates before this node goes
+///      dark), then latch the disk halt + (in prod) terminate. `notify`/`drill`/
+///      sub-quorum messages are surfaced, never halt (a drill exercises exactly
+///      this delivery path without the kill — EAS-style).
+async fn replicate_and_maybe_halt(
+    st: &AccordState,
+    obj: &SignedCegObject,
+) -> Result<AccordOutcome, Response> {
+    let roster = registered_holders(&st.engine).await?;
+    let parsed_in = parse_accord_invocation(obj).map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            &format!("parse accord object: {e}"),
+        )
+    })?;
+    // Re-bind to MY roster so authenticity + quorum are judged against the registered
+    // holders, not whatever roster the producer embedded.
+    let now = chrono::Utc::now().to_rfc3339();
+    let rebound = build_accord_invocation_object(
+        &parsed_in.family_key_id,
+        &roster,
+        &parsed_in.invocation,
+        &parsed_in.signatures,
+        &now,
+    );
+    let parsed = parse_accord_invocation(&rebound)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("re-bind: {e}")))?;
+    let status = accord_invocation_status(&parsed)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("status: {e}")))?;
+
+    let mut outcome = AccordOutcome {
+        authentic: !status.valid_signers.is_empty(),
+        invocation_kind: status.invocation_kind.clone(),
+        invocation_id: status.invocation_id.clone(),
+        quorum_met: status.quorum_met,
+        valid_signers: status.valid_signers.clone(),
+        halted: false,
+    };
+    if !outcome.authentic {
+        return Ok(outcome);
+    }
+
+    let is_global_halt =
+        status.invocation_kind == InvocationKind::Constitutional.as_str() && status.quorum_met;
+    let key = (status.invocation_kind.clone(), status.invocation_id.clone());
+    let first_sight = {
+        let mut seen = st.seen.lock().expect("seen lock");
+        // Bounded backstop: clearing only costs a possible re-gossip, which is
+        // idempotent (a duplicate halt re-latches; a duplicate notify re-fans once).
+        if seen.len() >= MAX_SEEN_INVOCATIONS {
+            seen.clear();
+        }
+        seen.insert(key)
+    };
+
+    if is_global_halt {
+        // Requirement: replicate to known peers BEFORE initiating the halt (so the
+        // kill propagates before this node goes dark). AWAITED but bounded by
+        // REPLICATION_TIMEOUT — a hung peer can never delay the latch. Deduped on
+        // first sighting (A→B→A storms are stopped; the halt still reaches every
+        // peer because each node relays its OWN first sighting before going dark).
+        if first_sight {
+            replicate_to_peers(&st.http, &st.halt.peers, obj).await;
+        }
+        // The disk latch is the load-bearing, LOCAL, fast gate — write it (with a
+        // short retry) AFTER peers were reached but regardless of their outcome.
+        if let Some(home) = &st.halt.home {
+            let record = HaltRecord {
+                invocation_kind: status.invocation_kind.clone(),
+                invocation_id: status.invocation_id.clone(),
+                valid_signers: status.valid_signers.clone(),
+                quorum_threshold: status.quorum_threshold,
+                latched_at: now.clone(),
+            };
+            let mut latched = None;
+            for attempt in 1..=3 {
+                match latch_halt(home, &record) {
+                    Ok(p) => {
+                        latched = Some(p);
+                        break;
+                    }
+                    Err(e) => tracing::error!(
+                        attempt,
+                        error = %e,
+                        "halt latch write failed — retrying"
+                    ),
+                }
+            }
+            match latched {
+                Some(p) => tracing::error!(
+                    latch = %p.display(),
+                    invocation_id = %status.invocation_id,
+                    "HUMANITY_ACCORD HALT honored — node latched down (full halt, CC 4.2.1)"
+                ),
+                None => tracing::error!(
+                    invocation_id = %status.invocation_id,
+                    "HALT LATCH WRITE FAILED after retries — terminating, but the latch is \
+                     NOT durable: the next startup will NOT be gated. An operator MUST create \
+                     the halt latch manually to keep this node down."
+                ),
+            }
+        }
+        outcome.halted = true;
+        // Full halt, fail-secure: terminate after a short grace so the HTTP
+        // response flushes. The disk latch blocks the next startup regardless.
+        if st.halt.exit_on_halt {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                std::process::exit(HALT_EXIT_CODE);
+            });
+        }
+    } else if first_sight {
+        // Ordinary accord-holder-signed traffic (concurrence-seeking notify/drill/
+        // sub-quorum): gossip onward once, fire-and-forget (the holder isn't blocked).
+        let http = st.http.clone();
+        let peers = st.halt.peers.clone();
+        let obj = obj.clone();
+        tokio::spawn(async move { replicate_to_peers(&http, &peers, &obj).await });
+    }
+    Ok(outcome)
+}
+
+/// `POST /v1/accord/message` — the inbound accord-message sink a peer (or a holder
+/// app) delivers a signed invocation object to. Authentic holder-signed messages
+/// are replicated onward; a 2-of-3 `CONSTITUTIONAL` triggers the global halt
+/// (replicate-first → latch → terminate). Unauthenticated: the holder cosignatures
+/// ARE the authority (a message with no valid holder signature is dropped).
+async fn ingest_message(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let obj: SignedCegObject = match serde_json::from_slice(&body) {
+        Ok(o) => o,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad accord object: {e}")),
+    };
+    match replicate_and_maybe_halt(&st, &obj).await {
+        Ok(o) if !o.authentic => err(
+            StatusCode::UNAUTHORIZED,
+            "accord message carries no valid registered-holder signature — dropped",
+        ),
+        Ok(o) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "accepted": true,
+                "invocation_kind": o.invocation_kind,
+                "invocation_id": o.invocation_id,
+                "quorum_met": o.quorum_met,
+                "valid_signers": o.valid_signers,
+                "halted": o.halted,
+            })),
+        )
+            .into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// The accord router — merge onto the read-API listener. [`router`] uses the inert
+/// [`AccordHalt::disabled`] (no disk latch / peers / exit); `compose.rs` wires the
+/// live halt config via [`router_with_halt`].
 pub fn router(engine: Arc<Engine>) -> Router {
+    router_with_halt(engine, AccordHalt::disabled())
+}
+
+/// The accord router with an explicit [`AccordHalt`] (the prod entry — disk latch
+/// under `home`, replication to `peers`, process-exit on a verified halt).
+pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
     let state = AccordState {
         engine,
         dedup: Arc::new(Mutex::new(InvocationDedup::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        seen: Arc::new(Mutex::new(HashSet::new())),
+        // A hung peer MUST NOT block the local halt — bound every replication request.
+        http: reqwest::Client::builder()
+            .timeout(REPLICATION_TIMEOUT)
+            .connect_timeout(REPLICATION_CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
+        halt,
     };
     Router::new()
         .route("/v1/accord/holder", axum::routing::post(register_holder))
@@ -716,6 +1053,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
             "/v1/accord/verify-invocation",
             axum::routing::post(verify_invocation_handler),
         )
+        .route("/v1/accord/message", axum::routing::post(ingest_message))
         // genesis ceremony
         .route(
             "/v1/accord/genesis/envelope",

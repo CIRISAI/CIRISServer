@@ -23,7 +23,9 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use ciris_verify_core::humanity_accord::{Invocation, InvocationKind};
 
-use ciris_verify_core::accord_genesis::accord_family_signing_bytes;
+use ciris_verify_core::accord_genesis::{
+    accord_family_signing_bytes, build_accord_invocation_object,
+};
 use ciris_verify_core::threshold::{Role, ThresholdMember, ThresholdSignature};
 
 use ciris_server::accord;
@@ -247,7 +249,12 @@ impl Holder {
 }
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let app = accord::router(engine);
+    serve_app(accord::router(engine)).await
+}
+
+/// Serve an explicit router (used by the operational-halt tests, which need a
+/// `router_with_halt` carrying a temp `home` + `exit_on_halt: false`).
+async fn serve_app(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -256,6 +263,56 @@ async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
         let _ = axum::serve(listener, app).await;
     });
     (format!("http://{addr}"), handle)
+}
+
+/// A typed invocation cosignature (the `/v1/accord/message` object embeds
+/// `ThresholdSignature`s, not the loose JSON `cosign` produces).
+async fn cosign_typed(h: &Holder, inv: &Invocation) -> ThresholdSignature {
+    serde_json::from_value(h.cosign(inv).await).expect("cosign → ThresholdSignature")
+}
+
+/// Build a signed accord invocation object (what a peer/holder app delivers to
+/// `/v1/accord/message`) from a roster + cosignatures.
+fn invocation_object(
+    roster: &[ThresholdMember],
+    inv: &Invocation,
+    sigs: &[ThresholdSignature],
+) -> serde_json::Value {
+    let obj = build_accord_invocation_object(
+        "humanity-accord",
+        roster,
+        inv,
+        sigs,
+        "2026-06-20T00:00:00.000Z",
+    );
+    serde_json::to_value(obj).expect("invocation object → json")
+}
+
+/// A CONSTITUTIONAL halt invocation (the real kill — the 2-of-3 EmergencyShutdown).
+fn constitutional_invocation(id: &str) -> Invocation {
+    Invocation {
+        invocation_kind: InvocationKind::Constitutional,
+        invocation_id: id.to_string(),
+        nonce: BASE64.encode([9u8; 32]),
+        asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
+        valid_until: "2030-01-01T00:00:00.000Z".to_string(),
+        payload_sha256: hex::encode(Sha256::digest(b"halt-payload")),
+    }
+}
+
+/// Register N holders with the node (owner-gated) + return them.
+async fn registered_holders(base: &str, owner: &str, holders: &[Holder]) {
+    let client = reqwest::Client::new();
+    for h in holders {
+        let resp = client
+            .post(format!("{base}/v1/accord/holder"))
+            .bearer_auth(owner)
+            .json(&serde_json::json!({ "key_record": h.signed_key_record().await }))
+            .send()
+            .await
+            .expect("register holder");
+        assert_eq!(resp.status(), 200, "register {}", h.key_id);
+    }
 }
 
 /// A drill invocation (never CONSTITUTIONAL in a test) over a fixed payload.
@@ -643,5 +700,201 @@ async fn accord_holder_with_bogus_custody_attestation_is_rejected() {
             .iter()
             .any(|h| h["key_id"] == "accord-holder-bogus-custody"),
         "a custody-rejected holder must not be in the roster"
+    );
+}
+
+// ─── Operational halt (CC 4.2.1 / 4.2.3 / §9.2.1) — the enforceable kill-switch ─
+
+/// Build a router that latches its halt under a unique temp `home` (no peers, no
+/// process exit) + return `(base_url, home, handle)`.
+async fn serve_haltable(
+    engine: Arc<Engine>,
+    tag: &str,
+) -> (String, std::path::PathBuf, tokio::task::JoinHandle<()>) {
+    let home = std::env::temp_dir().join(format!("accord-halt-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("temp home");
+    let _ = std::fs::remove_file(home.join("HUMANITY_ACCORD_HALT"));
+    let app = accord::router_with_halt(
+        engine,
+        accord::AccordHalt {
+            home: Some(home.clone()),
+            peers: Vec::new(),
+            exit_on_halt: false, // never kill the test runner
+        },
+    );
+    let (base, handle) = serve_app(app).await;
+    (base, home, handle)
+}
+
+#[tokio::test]
+async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
+    // The operational kill-switch: a 2-of-3 CONSTITUTIONAL accord message latches
+    // the disk halt + the latch then gates startup (not a recoverable pause).
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "halt").await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+    ];
+    registered_holders(&base, &owner, &holders).await;
+
+    let inv = constitutional_invocation("halt-001");
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let sigs = vec![
+        cosign_typed(&holders[0], &inv).await,
+        cosign_typed(&holders[1], &inv).await,
+    ];
+    let obj = invocation_object(&roster, &inv, &sigs);
+
+    let resp = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver halt message");
+    assert_eq!(resp.status(), 200, "authentic halt message accepted");
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["quorum_met"], true, "2-of-3 met; got {body}");
+    assert_eq!(
+        body["halted"], true,
+        "CONSTITUTIONAL 2-of-3 ⇒ halted; got {body}"
+    );
+
+    // The disk latch was written + now gates a fresh startup.
+    let latch = home.join("HUMANITY_ACCORD_HALT");
+    assert!(
+        latch.exists(),
+        "halt latch must be written to {}",
+        latch.display()
+    );
+    assert!(
+        ciris_server::accord_halt::check_halt_gate(&home).is_err(),
+        "a present halt latch must refuse startup"
+    );
+    // Manual removal clears the gate (the only way back — CC 4.2.3).
+    std::fs::remove_file(&latch).unwrap();
+    assert!(ciris_server::accord_halt::check_halt_gate(&home).is_ok());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn drill_2of3_message_is_surfaced_but_does_not_halt() {
+    // EAS-style: a drill (or notify) exercises the SAME delivery path — replicate +
+    // surface — but NEVER halts, even at a full 2-of-3.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "drill").await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+    ];
+    registered_holders(&base, &owner, &holders).await;
+
+    let inv = drill_invocation("drill-eas-001");
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let sigs = vec![
+        cosign_typed(&holders[0], &inv).await,
+        cosign_typed(&holders[1], &inv).await,
+    ];
+    let obj = invocation_object(&roster, &inv, &sigs);
+
+    let body = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver drill")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(body["quorum_met"], true, "drill quorum met; got {body}");
+    assert_eq!(body["halted"], false, "a DRILL must NOT halt; got {body}");
+    assert!(
+        !home.join("HUMANITY_ACCORD_HALT").exists(),
+        "a drill must not write a halt latch"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn message_without_registered_holder_signature_is_dropped() {
+    // Authenticity floor: a message whose cosignatures are NOT from registered
+    // holders carries no authority — dropped (401), never replicated, never halts.
+    let engine = node().await;
+    let _owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "unauth").await;
+    let client = reqwest::Client::new();
+
+    // A would-be holder that was NEVER registered with the node.
+    let imposter = Holder::new("accord-holder-imposter", 0xBB);
+    let inv = constitutional_invocation("halt-imposter");
+    let roster = vec![imposter.threshold_member(None).await];
+    let sigs = vec![cosign_typed(&imposter, &inv).await];
+    let obj = invocation_object(&roster, &inv, &sigs);
+
+    let resp = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver imposter message");
+    assert_eq!(resp.status(), 401, "unregistered-holder message ⇒ 401");
+    assert!(
+        !home.join("HUMANITY_ACCORD_HALT").exists(),
+        "an unauthentic message must never latch a halt"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn open_invocation_without_registered_holder_signature_is_rejected() {
+    // DoS floor: an invocation opened with a NON-registered signer carries no
+    // authority and is NOT persisted (an unauthenticated caller cannot grow the
+    // pending table). Only holder-signed invocations are kept.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    // One real registered holder (so a roster exists), and an imposter who opens.
+    let real = Holder::new("accord-holder-a", 0xC1);
+    registered_holders(&base, &owner, std::slice::from_ref(&real)).await;
+    let imposter = Holder::new("accord-holder-imposter", 0xBB);
+
+    let inv = drill_invocation("dos-001");
+    let resp = client
+        .post(format!("{base}/v1/accord/invocation"))
+        .json(&serde_json::json!({
+            "invocation": inv,
+            "signature": imposter.cosign(&inv).await,
+        }))
+        .send()
+        .await
+        .expect("open invocation");
+    assert_eq!(resp.status(), 401, "unauthenticated opener ⇒ 401");
+
+    // It was not persisted — the pending list stays empty.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/accord/invocations"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        listed["invocations"].as_array().unwrap().is_empty(),
+        "an unauthenticated invocation must not be stored; got {listed}"
     );
 }

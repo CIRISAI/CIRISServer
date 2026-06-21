@@ -54,6 +54,12 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
+    // ── HUMANITY_ACCORD STARTUP GATE (CC 4.2.3) ───────────────────────────────
+    // Before anything else: refuse to boot if a 2-of-3 CONSTITUTIONAL halt latch
+    // exists. "Not a recoverable pause" — only a manual removal of the latch (the
+    // human act a valid accord:lifecycle:active re-activation authorizes) clears it.
+    crate::accord_halt::check_halt_gate(&cfg.home)?;
+
     let caps = Capabilities::detect(&cfg);
     tracing::info!(
         disk_free_gib = caps.disk_free_gib(),
@@ -513,8 +519,28 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // HUMANITY_ACCORD surface (CIRISServer#41): accord-holder
                     // registry (owner-gated register + cold-start GET
                     // /v1/accord-holders) + the server-canonical 2-of-3 invocation
-                    // kill-switch (CC 4.2.1 / §9.2.1). The safe-mesh floor.
-                    .merge(crate::accord::router(Arc::clone(&engine)))
+                    // kill-switch (CC 4.2.1 / §9.2.1) + the OPERATIONAL halt — POST
+                    // /v1/accord/message replicates an authentic accord message to
+                    // all known peers and, for a 2-of-3 CONSTITUTIONAL, replicates
+                    // FIRST then latches the disk halt (HUMANITY_ACCORD_HALT under
+                    // home, gating all future startups) and terminates. The
+                    // safe-mesh floor.
+                    .merge(crate::accord::router_with_halt(
+                        Arc::clone(&engine),
+                        crate::accord::AccordHalt {
+                            home: Some(cfg.home.clone()),
+                            // Replicate accord messages to known peers — EXCLUDING
+                            // self (an operator who lists this node in bootstrap_peers
+                            // must not make it gossip/halt-loop back to itself).
+                            peers: cfg
+                                .bootstrap_peers
+                                .iter()
+                                .filter(|a| **a != cfg.listen_addr)
+                                .map(|a| format!("http://{a}"))
+                                .collect(),
+                            exit_on_halt: true,
+                        },
+                    ))
                     // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
                     // POST /lens-api/api/v1/accord/events (legacy path, forwarded
                     // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events
