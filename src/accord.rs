@@ -96,7 +96,10 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use ciris_persist::federation::types::{identity_type, Family, FamilyMember, SignedKeyRecord};
+use ciris_persist::federation::cohort::Cohort;
+use ciris_persist::federation::types::{
+    identity_type, Family, FamilyMember, SignedFamily, SignedKeyRecord,
+};
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation;
@@ -1169,6 +1172,209 @@ async fn ingest_message(State(st): State<AccordState>, body: axum::body::Bytes) 
     }
 }
 
+// ─── Family membership change: supersede / reconstitute (CC 4.2 §9 / runbook §10) ─
+//
+// The recovery + governance write path, authorized by the CURRENT 2/3 roster. ONE
+// primitive covers replace-a-seat (same N), recover-from-spare, expand/shrink N, and
+// the threshold change those force (3→5 ⇒ quorum:2/3→3/5). The flow mirrors genesis
+// (envelope → quorum-signed → apply), but the authority is the CURRENT roster, and
+// persist (CIRISPersist#249 G3/G3.5, composing verify v6.9.0 `verify_membership_change`)
+// enforces ≥M valid prior-roster hybrid cosignatures + the `supersedes` anti-replay
+// binding + one-seat key-distinctness IN THE SUBSTRATE before applying as a new version.
+
+#[derive(Debug, Deserialize)]
+struct ChangeEnvelopeRequest {
+    /// The NEW full roster (registered `accord_holder` `key_id`s). Same N with one
+    /// swapped = replace/recover; different N = expand/shrink.
+    new_member_key_ids: Vec<String>,
+    /// The NEW consensus protocol (e.g. `"quorum:3/5"`). `None` ⇒ persist derives the
+    /// strict-majority default for the new N. (Expanding past the `2M>N` boundary
+    /// REQUIRES a threshold change — 3→5 forces `quorum:3/5`.)
+    #[serde(default)]
+    consensus_protocol: Option<String>,
+}
+
+/// `POST /v1/accord/family/change/envelope` (owner-gated) — build the canonical
+/// membership-change payload the CURRENT roster cosigns. Returns the change envelope
+/// plus the exact JCS bytes to sign (base64); each current holder signs those bytes on
+/// their own device (Ed25519 + ML-DSA-65 bound), and the cosignatures go to
+/// `/v1/accord/family/supersede`.
+async fn family_change_envelope(
+    State(st): State<AccordState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: ChangeEnvelopeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let change = match st
+        .engine
+        .federation_directory()
+        .build_membership_change_envelope(
+            Cohort::Family,
+            HUMANITY_ACCORD_FAMILY_KEY_ID,
+            &req.new_member_key_ids,
+            true,
+            req.consensus_protocol.as_deref(),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::CONFLICT, &format!("build change envelope: {e}")),
+    };
+    let signing_bytes = match ciris_verify_core::jcs::canonicalize(&change) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("canonicalize change: {e}"),
+            )
+        }
+    };
+    use base64::Engine as _;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "change_envelope": change,
+            "signing_bytes_base64": base64::engine::general_purpose::STANDARD.encode(&signing_bytes),
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct SupersedeRequest {
+    /// The exact change envelope from `…/change/envelope` (re-canonicalized; never rebuilt).
+    change_envelope: serde_json::Value,
+    /// The CURRENT roster's cosignatures over `jcs(change_envelope)` (≥ M of N).
+    signatures: Vec<ThresholdSignature>,
+}
+
+/// Build a [`SignedFamily`] from the verified change envelope (the roster + protocol
+/// the quorum authorized — persist's "verify-A-store-B" guard rejects any mismatch).
+#[allow(clippy::result_large_err)] // mirrors the rest of the module's Result<_, Response> handlers
+fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, Response> {
+    let consensus_protocol = env
+        .get("consensus_protocol")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "change envelope missing consensus_protocol",
+            )
+        })?
+        .to_string();
+    let members = env
+        .get("members")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "change envelope missing members[]"))?;
+    let now = chrono::Utc::now();
+    let members: Vec<FamilyMember> = members
+        .iter()
+        .filter_map(|m| {
+            Some(FamilyMember {
+                key_id: m.get("key_id")?.as_str()?.to_owned(),
+                joined_at: now,
+                role: m.get("role").and_then(|v| v.as_str()).map(str::to_owned),
+            })
+        })
+        .collect();
+    Ok(SignedFamily {
+        family: Family {
+            family_key_id: env
+                .get("family_key_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(HUMANITY_ACCORD_FAMILY_KEY_ID)
+                .to_string(),
+            family_name: env
+                .get("family_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("HUMANITY_ACCORD")
+                .to_string(),
+            members,
+            founded_at: now,
+            consensus_protocol,
+            consensus_protocol_entrenched: env
+                .get("consensus_protocol_entrenched")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            persist_row_hash: String::new(),
+        },
+    })
+}
+
+/// `POST /v1/accord/family/supersede` (owner-gated submission; **2/3-authorized** by
+/// the prior roster's cosignatures) — apply a membership change. persist re-verifies
+/// ≥M prior-roster hybrid cosignatures over the change payload, the `supersedes`
+/// anti-replay binding, and one-seat key-distinctness, then re-baselines the family
+/// as a NEW version. Covers replace / recover / expand / shrink (+ threshold) — the
+/// whole `supersede`/`reconstitute` surface. The kill-switch roster ([`accord_roster`])
+/// reflects the new seats immediately.
+async fn family_supersede(
+    State(st): State<AccordState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: SupersedeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let new = match signed_family_from_envelope(&req.change_envelope) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    let new_count = new.family.members.len();
+    let new_protocol = new.family.consensus_protocol.clone();
+    match st
+        .engine
+        .federation_directory()
+        .supersede_family_with_quorum(new, req.change_envelope, req.signatures)
+        .await
+    {
+        Ok(valid) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "superseded": true,
+                "valid_signatures": valid,
+                "consensus_protocol": new_protocol,
+                "member_count": new_count,
+            })),
+        )
+            .into_response(),
+        // Fail-closed: insufficient quorum / anti-replay / one-seat violation ⇒ 409,
+        // and persist leaves the live family row untouched.
+        Err(e) => err(
+            StatusCode::CONFLICT,
+            &format!("supersede rejected (quorum / anti-replay / one-seat): {e}"),
+        ),
+    }
+}
+
+/// `GET /v1/accord/family/history` — the family's supersede chain (audit: who
+/// superseded whom, each version's roster + consensus_protocol).
+async fn family_history(State(st): State<AccordState>) -> Response {
+    match st
+        .engine
+        .federation_directory()
+        .group_history(Cohort::Family, HUMANITY_ACCORD_FAMILY_KEY_ID)
+        .await
+    {
+        Ok(versions) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "versions": versions })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    }
+}
+
 /// The accord router — merge onto the read-API listener. [`router`] uses the inert
 /// [`AccordHalt::disabled`] (no disk latch / peers / exit); `compose.rs` wires the
 /// live halt config via [`router_with_halt`].
@@ -1210,6 +1416,19 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             axum::routing::post(genesis_assemble),
         )
         .route("/v1/accord/family", axum::routing::get(get_family))
+        // family membership change — supersede / reconstitute (2/3-authorized)
+        .route(
+            "/v1/accord/family/change/envelope",
+            axum::routing::post(family_change_envelope),
+        )
+        .route(
+            "/v1/accord/family/supersede",
+            axum::routing::post(family_supersede),
+        )
+        .route(
+            "/v1/accord/family/history",
+            axum::routing::get(family_history),
+        )
         // invocation concurrence
         .route(
             "/v1/accord/invocation",

@@ -19,8 +19,9 @@
 //! the CALLER's concern (the family's `consensus_protocol`), not this module's —
 //! these are the mechanism, the policy lives in the specialization.
 
+use ciris_persist::federation::cohort::Cohort;
 use ciris_persist::federation::types::{
-    Family, FamilyMember, FamilyMembershipRevocation, KeyRecord, SignedFamily,
+    Family, FamilyMember, FamilyMembershipRevocation, SignedFamily,
     SignedFamilyMembershipRevocation,
 };
 use ciris_persist::federation::Error as FedError;
@@ -130,7 +131,7 @@ pub async fn active_threshold_roster(
 ) -> Result<Vec<ThresholdMember>, RosterError> {
     let dir = engine.federation_directory();
     // A not-yet-created family is an EMPTY roster, not an error (persist's
-    // active_family_members errors InvalidArgument on an unknown family).
+    // active_member_keys errors InvalidArgument on an unknown family).
     if dir
         .lookup_family(family_key_id)
         .await
@@ -139,26 +140,22 @@ pub async fn active_threshold_roster(
     {
         return Ok(Vec::new());
     }
-    let members = dir
-        .active_family_members(family_key_id)
+    // Substrate-native (CIRISPersist#249 G1): persist resolves the LIVE roster →
+    // pinned hybrid KeyRecords in one call, with its own broken-roster guard
+    // (refuses to undercount a quorum). No hand-rolled per-member lookup.
+    let keys = dir
+        .active_member_keys(Cohort::Family, family_key_id)
         .await
         .map_err(RosterError::Store)?;
-    let mut roster = Vec::with_capacity(members.len());
-    for m in members {
-        let rec: KeyRecord = dir
-            .lookup_public_key(&m.key_id)
-            .await
-            .map_err(RosterError::Store)?
-            .ok_or_else(|| RosterError::UnregisteredMember(m.key_id.clone()))?;
-        roster.push(ThresholdMember {
+    Ok(keys
+        .into_iter()
+        .map(|rec| ThresholdMember {
             member_id: rec.key_id,
             ed25519_public_key_base64: rec.pubkey_ed25519_base64,
             mldsa65_public_key_base64: rec.pubkey_ml_dsa_65_base64,
-            // Role on the threshold member is only consulted by founder-quorum
-            // verifiers (genesis); invocation verification matches by member_id, so
-            // None is correct for the live kill-switch roster.
+            // Role is only consulted by founder-quorum verifiers (genesis);
+            // invocation verification matches by member_id, so None is correct.
             role: None,
-        });
-    }
-    Ok(roster)
+        })
+        .collect())
 }
