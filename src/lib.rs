@@ -28,6 +28,11 @@
 /// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
 /// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
 pub mod accord;
+/// HUMANITY_ACCORD holder-device **portable high-secure** provisioning
+/// (CIRISServer#41) — the caller-run library tool that mints a holder's
+/// self-signed `accord_holder` record + its `portable_2fa` custody attestation
+/// (FIPS YubiKey Ed25519 + USB-wrapped ML-DSA-65; both-keys + PIN + touch).
+pub mod accord_custody;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
