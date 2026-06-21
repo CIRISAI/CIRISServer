@@ -19,15 +19,30 @@
 //!      holder set + an [`InvocationDedup`] anti-replay window. The verify CLI's
 //!      local quorum is advisory; THIS is canonical (against `federation_keys`).
 //!
+//! ## The accord IS a persist family (generic family ops + accord specialization)
+//!
+//! The HUMANITY_ACCORD kill-switch roster is the LIVE membership of a first-class
+//! persist *family* (`federation_families`, `consensus_protocol: quorum:2/3`,
+//! entrenched), read through the GENERIC [`crate::family`] layer
+//! (`active_family_members`). The accord is the specialization on top — it adds the
+//! founder-signed genesis, the custody gate, the 2/3 invocation verify, and the
+//! disk halt. The **authoritative kill-switch roster is [`accord_roster`] =
+//! `family::active_threshold_roster("humanity-accord")`** — the family SEATS, NOT
+//! "every `accord_holder` row": a vaulted cold-spare is a registered identity but
+//! NOT a member, so it can never be a seat (closing the one-human-two-keys
+//! self-quorum hole). A spare is swapped into a seat only via a family member
+//! SWAP (revoke primary + add spare — [`crate::family::swap_member`]), preserving
+//! exactly N distinct-human seats.
+//!
 //! ## Genesis ceremony + invocation concurrence (v0.5.17, verify v6.7.1)
 //!
-//! - `POST /v1/accord/genesis/envelope` → `assemble` (`accord_genesis`,
-//!   2-of-3 distinct-founder quorum, fail-closed) → the verified
-//!   `accord_family_genesis` is durably recorded as a node-authored CEG
-//!   attestation (the accord family is FOUNDER-signed — it has no family keypair,
-//!   so it is NOT stored in `federation_families`, whose `family_key_id` FKs to
-//!   `federation_keys`; the signed genesis object IS the record). `GET
-//!   /v1/accord/family` projects the entrenched `quorum:2/3` family from it.
+//! - `POST /v1/accord/genesis/envelope` → `assemble` (`accord_genesis`, 2-of-3
+//!   distinct-founder quorum, fail-closed) → on success the node (1) records the
+//!   2/3-founder-signed genesis as a node-authored `accord_family_genesis` CEG
+//!   attestation (the signed AUTHORIZATION proof) AND (2) entrenches the family in
+//!   `federation_families` via the generic layer — registering a CEREMONIAL anchor
+//!   key for the FK (private half discarded; the family never signs) + `put_family`.
+//!   `GET /v1/accord/family` projects the entrenched family + its live roster.
 //! - `POST /v1/accord/invocation` (open) / `…/concur` (advance) + `GET
 //!   /v1/accord/invocations` — the multi-party path that accumulates holder
 //!   cosignatures toward the 2-of-3 (advisory status; `verify-invocation` is
@@ -81,7 +96,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use ciris_persist::federation::types::{identity_type, KeyRecord, SignedKeyRecord};
+use ciris_persist::federation::types::{identity_type, Family, FamilyMember, SignedKeyRecord};
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation;
@@ -91,9 +106,11 @@ use ciris_verify_core::accord_genesis::{
     ACCORD_FAMILY_GENESIS_KIND, ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
+use ciris_verify_core::federation_self_record::produce_self_key_record;
 use ciris_verify_core::humanity_accord::{
     verify_invocation, Invocation, InvocationDedup, InvocationKind,
 };
+use ciris_verify_core::self_at_login::HybridSigningIdentity;
 use ciris_verify_core::threshold::{ThresholdMember, ThresholdSignature};
 
 use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
@@ -180,27 +197,36 @@ struct AccordState {
     halt: AccordHalt,
 }
 
-/// Build the registered accord-holder set as `threshold::ThresholdMember`s (the
-/// roster the genesis/invocation producers + `verify_invocation` resolve against).
-async fn registered_holders(engine: &Engine) -> Result<Vec<ThresholdMember>, Response> {
-    let rows: Vec<KeyRecord> = engine
-        .federation_directory()
-        .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
-        .await
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
-    Ok(rows
-        .into_iter()
-        .map(|r| ThresholdMember {
-            member_id: r.key_id,
-            ed25519_public_key_base64: r.pubkey_ed25519_base64,
-            mldsa65_public_key_base64: r.pubkey_ml_dsa_65_base64,
-            role: None,
-        })
-        .collect())
-}
-
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
+/// The **AUTHORITATIVE kill-switch roster** (CC 4.2.1 / §9.2.1) — the LIVE members
+/// of the HUMANITY_ACCORD *family* (the 3 primary SEATS), resolved to their pinned
+/// pubkeys via the generic family layer ([`crate::family::active_threshold_roster`]).
+///
+/// This is deliberately NOT "every `accord_holder` row". A vaulted COLD-SPARE is a
+/// registered + steward-attested `accord_holder` identity (so a recovery swap is
+/// fast), but it is **not a family member**, so it is **not a live seat** — counting
+/// it would let one human's two distinct keys self-satisfy the 2-of-3 (the family
+/// roster is the only thing that pins one-seat-per-human; verify's distinct-key gate
+/// only stops the *same* key in two seats). A spare becomes a counted seat ONLY via
+/// a family member SWAP that simultaneously revokes the primary it replaces — never
+/// as an added 4th seat. Errs `409` until the family is entrenched.
+async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response> {
+    match crate::family::active_threshold_roster(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(roster) if roster.is_empty() => Err(err(
+            StatusCode::CONFLICT,
+            "no HUMANITY_ACCORD family entrenched — the kill-switch roster is undefined",
+        )),
+        Ok(roster) => Ok(roster),
+        Err(crate::family::RosterError::Store(e)) => {
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))
+        }
+        Err(e @ crate::family::RosterError::UnregisteredMember(_)) => {
+            Err(err(StatusCode::CONFLICT, &e.to_string()))
+        }
+    }
 }
 
 /// Evict expired (`valid_until` ≤ now, or unparseable) pending invocations — keeps
@@ -354,33 +380,63 @@ struct HolderSummary {
     pubkey_ml_dsa_65_base64: Option<String>,
 }
 
-/// `GET /v1/accord-holders` — the cold-start recognition roster (runbook §10.2):
-/// every `accord_holder` `federation_keys` row, so a fresh consumer can pin the
-/// holder pubkeys and verify a 2-of-3 invocation with NO trust-on-first-use.
+/// `GET /v1/accord-holders` — the cold-start recognition roster (runbook §10.2).
+///
+/// `holders` is the **AUTHORITATIVE kill-switch roster** — the LIVE seats of the
+/// HUMANITY_ACCORD family (the 3 primaries), what a fresh consumer pins to verify a
+/// 2-of-3 invocation with NO trust-on-first-use. `registered` additionally lists
+/// every `accord_holder` identity on file (including vaulted COLD-SPARES, which are
+/// registered but are NOT seats) so an operator can see custody at a glance.
 async fn list_holders(State(st): State<AccordState>) -> Response {
-    let rows = match st
+    // All registered accord_holder identities (incl vaulted spares — informational).
+    let registered: Vec<HolderSummary> = match st
         .engine
         .federation_directory()
         .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
         .await
     {
-        Ok(rows) => rows,
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| HolderSummary {
+                key_id: r.key_id,
+                pubkey_ed25519_base64: r.pubkey_ed25519_base64,
+                pubkey_ml_dsa_65_base64: r.pubkey_ml_dsa_65_base64,
+            })
+            .collect(),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
-    let holders: Vec<HolderSummary> = rows
-        .into_iter()
-        .map(|r| HolderSummary {
-            key_id: r.key_id,
-            pubkey_ed25519_base64: r.pubkey_ed25519_base64,
-            pubkey_ml_dsa_65_base64: r.pubkey_ml_dsa_65_base64,
-        })
-        .collect();
+    // The authoritative seats = the live family roster (empty/none until genesis).
+    let (family_established, seats): (bool, Vec<HolderSummary>) =
+        match crate::family::active_threshold_roster(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID)
+            .await
+        {
+            Ok(roster) if !roster.is_empty() => (
+                true,
+                roster
+                    .into_iter()
+                    .map(|m| HolderSummary {
+                        key_id: m.member_id,
+                        pubkey_ed25519_base64: m.ed25519_public_key_base64,
+                        pubkey_ml_dsa_65_base64: m.mldsa65_public_key_base64,
+                    })
+                    .collect(),
+            ),
+            Ok(_) => (false, Vec::new()),
+            Err(crate::family::RosterError::Store(e)) => {
+                return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}"))
+            }
+            // A seated member missing its key ⇒ roster incomplete; surface as not-established.
+            Err(crate::family::RosterError::UnregisteredMember(_)) => (false, Vec::new()),
+        };
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "threshold": ACCORD_THRESHOLD,
-            "holder_count": holders.len(),
-            "holders": holders,
+            "family_established": family_established,
+            "seat_count": seats.len(),
+            "holders": seats,
+            "registered_total": registered.len(),
+            "registered": registered,
         })),
     )
         .into_response()
@@ -415,32 +471,15 @@ async fn verify_invocation_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
 
-    // The holder set the threshold verifies against = the registered accord_holder
-    // rows (NOT caller-supplied — the registry is the authority on WHO can halt).
-    let rows = match st
-        .engine
-        .federation_directory()
-        .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    // The holder set the threshold verifies against = the entrenched FAMILY SEATS
+    // (the 3 primaries), NOT every accord_holder row. A vaulted spare is a
+    // registered identity but NOT a counted seat — see [`family_roster`]. The
+    // registry/family is the authority on WHO can halt; the caller-supplied roster
+    // (if any) is ignored.
+    let holders = match accord_roster(&st.engine).await {
+        Ok(h) => h,
+        Err(resp) => return resp,
     };
-    if rows.len() < ACCORD_THRESHOLD {
-        return err(
-            StatusCode::CONFLICT,
-            "fewer registered accord holders than the 2-of-3 threshold — accord not established",
-        );
-    }
-    let holders: Vec<ThresholdMember> = rows
-        .into_iter()
-        .map(|r| ThresholdMember {
-            member_id: r.key_id,
-            ed25519_public_key_base64: r.pubkey_ed25519_base64,
-            mldsa65_public_key_base64: r.pubkey_ml_dsa_65_base64,
-            role: None,
-        })
-        .collect();
 
     // Anti-replay FIRST (fail-closed on a duplicate id within its window).
     {
@@ -484,6 +523,84 @@ async fn verify_invocation_handler(
 }
 
 // ─── Genesis ceremony (CC 4.2 / §9 — build envelope → assemble 2/3 → entrench) ─
+
+/// Ensure the HUMANITY_ACCORD family's **ceremonial anchor key** exists in
+/// `federation_keys` (the FK `federation_families` requires). Idempotent: a no-op
+/// if already registered. Mints a fresh hybrid keypair, self-signs the `family`
+/// registration record, registers it, and **discards the private half** — the
+/// family key never signs anything (founders sign genesis; holders sign
+/// invocations), it is purely the §5.6.8.9 family identity anchor.
+async fn ensure_accord_family_anchor(
+    engine: &Engine,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Result<(), Response> {
+    let exists = engine
+        .federation_directory()
+        .lookup_public_key(HUMANITY_ACCORD_FAMILY_KEY_ID)
+        .await
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
+    if exists.is_some() {
+        return Ok(());
+    }
+    // Mint on a dedicated LARGE-STACK thread: ML-DSA-65 keygen + sign hold big
+    // buffers across `.await`s that overflow a default (~2 MiB) async worker stack —
+    // this would crash the genesis handler in prod, not just tests. The private half
+    // never leaves this thread; only the self-signed PUBLIC record is returned (as
+    // JSON), and the keypair is dropped when the thread ends — the ceremonial anchor
+    // has no retained signer anywhere.
+    let now_s = now.to_rfc3339();
+    let minted: serde_json::Value = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .name("accord-family-anchor-mint".into())
+        .spawn(move || -> Result<serde_json::Value, String> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async move {
+                let anchor = HybridSigningIdentity::generate(HUMANITY_ACCORD_FAMILY_KEY_ID)
+                    .map_err(|e| e.to_string())?;
+                let v_rec = produce_self_key_record(&anchor, "family", &now_s)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(&v_rec).map_err(|e| e.to_string())
+            })
+        })
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("spawn anchor mint: {e}"),
+            )
+        })?
+        .join()
+        .map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "anchor mint thread panicked",
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("mint family anchor: {e}"),
+            )
+        })?;
+
+    // verify's SignedKeyRecord → persist's (structurally identical JSON; the wire
+    // shape the holder-registration path round-trips too).
+    let p_rec: SignedKeyRecord = serde_json::from_value(minted).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("anchor record conversion: {e}"),
+        )
+    })?;
+    engine.register_federation_key(p_rec).await.map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            &format!("register family anchor: {e}"),
+        )
+    })?;
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 struct GenesisEnvelopeRequest {
@@ -569,14 +686,29 @@ async fn genesis_assemble(
     // (We do NOT use the federation_families table: its family_key_id FKs to
     // federation_keys, but the accord family is FOUNDER-signed — it has no family
     // keypair to register. The signed genesis object IS the durable record.)
-    let member_ids: Vec<String> = req.envelope["members"]
+    // The full member set (with founder roles) from the verified envelope.
+    let members: Vec<FamilyMember> = req.envelope["members"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter_map(|m| m.get("key_id").and_then(|v| v.as_str()).map(str::to_owned))
+                .filter_map(|m| {
+                    let key_id = m.get("key_id")?.as_str()?.to_owned();
+                    let role = m.get("role").and_then(|v| v.as_str()).map(str::to_owned);
+                    Some(FamilyMember {
+                        key_id,
+                        joined_at: now,
+                        role,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
+    let member_ids: Vec<String> = members.iter().map(|m| m.key_id.clone()).collect();
+
+    // (1) Durably record the 2/3-FOUNDER-SIGNED genesis as a node-authored CEG
+    // attestation — the signed AUTHORIZATION proof (the founder signatures) that the
+    // family table itself does not carry. Audit + cold-start legitimacy of the
+    // 2/3-founding.
     let mut input =
         EmitAttestationInput::with_envelope(ACCORD_FAMILY_GENESIS_KIND, genesis.body.clone());
     input.subject_key_ids = member_ids.clone();
@@ -586,10 +718,39 @@ async fn genesis_assemble(
             &format!("record accord family genesis: {e}"),
         );
     }
+
+    // (2) Entrench the HUMANITY_ACCORD family as a FIRST-CLASS persist family (via
+    // the generic family layer): register its CEREMONIAL anchor key (private half
+    // discarded — it never signs; founders signed genesis, holders sign invocations)
+    // so the `federation_families` FK holds, then `put_family` with the founders as
+    // members + entrenched `quorum:2/3`. From here the kill-switch roster IS
+    // `active_family_members` (see [`accord_roster`]) — generic + swap-capable.
+    if let Err(resp) = ensure_accord_family_anchor(&st.engine, &now).await {
+        return resp;
+    }
+    let family_name = req.envelope["family_name"]
+        .as_str()
+        .unwrap_or("HUMANITY_ACCORD")
+        .to_string();
+    let family = Family {
+        family_key_id: HUMANITY_ACCORD_FAMILY_KEY_ID.to_string(),
+        family_name,
+        members,
+        founded_at: now,
+        consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
+        consensus_protocol_entrenched: true,
+        persist_row_hash: String::new(),
+    };
+    if let Err(e) = crate::family::create_family(&st.engine, family).await {
+        return err(
+            StatusCode::CONFLICT,
+            &format!("entrench accord family: {e}"),
+        );
+    }
     tracing::info!(
         family = %HUMANITY_ACCORD_FAMILY_KEY_ID,
         holders = member_ids.len(),
-        "assembled + recorded the HUMANITY_ACCORD family genesis (quorum:2/3, entrenched)"
+        "assembled + entrenched the HUMANITY_ACCORD family (quorum:2/3) — genesis recorded + family put"
     );
     (
         StatusCode::OK,
@@ -603,46 +764,31 @@ async fn genesis_assemble(
         .into_response()
 }
 
-/// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family (cold-start
-/// read), projected from the latest `accord_family_genesis` CEG record. 404 until
-/// genesis is assembled.
+/// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family, read from the
+/// persist `federation_families` row via the generic family layer
+/// ([`crate::family::lookup`]) + its LIVE roster ([`crate::family::active_members`],
+/// revocation-folded). 404 until genesis is assembled.
 async fn get_family(State(st): State<AccordState>) -> Response {
-    let node_id = match st.engine.local_derived_key_id().await {
-        Ok(id) => id,
-        Err(e) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("derive node id: {e}"),
-            )
-        }
-    };
-    let rows = match st
-        .engine
-        .federation_directory()
-        .list_attestations_by(&node_id)
-        .await
-    {
-        Ok(r) => r,
+    let family = match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(Some(f)) => f,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet"),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
-    // The latest genesis record (by asserted_at); its envelope is the genesis body
-    // `{ family, founder_signatures }` — the `family` is the §9 entrenched envelope.
-    let latest = rows
-        .into_iter()
-        .filter(|a| a.attestation_type == ACCORD_FAMILY_GENESIS_KIND)
-        .max_by_key(|a| a.asserted_at);
-    let Some(att) = latest else {
-        return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet");
+    // The live seats (admitted MINUS revoked) — what a swap reflects immediately.
+    let live = match crate::family::active_members(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await
+    {
+        Ok(m) => m,
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
-    let family = &att.attestation_envelope["family"];
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "family_key_id": family.get("family_key_id").cloned().unwrap_or(serde_json::json!(HUMANITY_ACCORD_FAMILY_KEY_ID)),
-            "family_name": family.get("family_name").cloned().unwrap_or(serde_json::Value::Null),
-            "consensus_protocol": family.get("consensus_protocol").cloned().unwrap_or(serde_json::json!(ACCORD_CONSENSUS_PROTOCOL)),
-            "entrenched": family.get("consensus_protocol_entrenched").cloned().unwrap_or(serde_json::json!(true)),
-            "members": family.get("members").cloned().unwrap_or(serde_json::json!([])),
+            "family_key_id": family.family_key_id,
+            "family_name": family.family_name,
+            "consensus_protocol": family.consensus_protocol,
+            "entrenched": family.consensus_protocol_entrenched,
+            "founded_at": family.founded_at,
+            "members": live,
         })),
     )
         .into_response()
@@ -665,7 +811,7 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
-    let roster = match registered_holders(&st.engine).await {
+    let roster = match accord_roster(&st.engine).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -878,7 +1024,7 @@ async fn replicate_and_maybe_halt(
     st: &AccordState,
     obj: &SignedCegObject,
 ) -> Result<AccordOutcome, Response> {
-    let roster = registered_holders(&st.engine).await?;
+    let roster = accord_roster(&st.engine).await?;
     let parsed_in = parse_accord_invocation(obj).map_err(|e| {
         err(
             StatusCode::BAD_REQUEST,
