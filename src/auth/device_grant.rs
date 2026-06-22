@@ -132,7 +132,17 @@ struct DeviceGrantState {
 async fn resolve_owner_signer(
     st: &DeviceGrantState,
 ) -> Result<Arc<ciris_persist::prelude::LocalSigner>, Response> {
-    match crate::compose::resolve_user_signer(&st.owner_key_id, st.seed_dir.clone()).await {
+    // OwnerSession: the device approve/revoke handlers gate on `require_owner`
+    // (SystemAdmin + FullAccess) before reaching here, so the fed-ID is wielded only
+    // under a live owner session.
+    match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &st.owner_key_id,
+        st.seed_dir.clone(),
+    )
+    .await
+    {
         Ok(Some(signer)) => Ok(signer),
         Ok(None) => Err(err(
             StatusCode::CONFLICT,

@@ -334,7 +334,8 @@ async fn claim_remote_handler(
     // node. The route is loopback-only via the setup-route guard. (`require_owner`'s
     // result is gate-only — not consumed below — so the bypass is safe.) Mirrors
     // the agent's require_setup_mode.
-    if !crate::auth::bootstrap::is_first_run(&st.engine).await {
+    let first_run = crate::auth::bootstrap::is_first_run(&st.engine).await;
+    if !first_run {
         if let Err(resp) = require_owner(&st, &headers).await {
             return resp;
         }
@@ -350,8 +351,17 @@ async fn claim_remote_handler(
 
     // Resolve the responsible-user signer NOW (not at boot): the fed-ID minted
     // earlier in this same first-run wizard is on disk by the time the automated
-    // self-claim runs. Absent ⇒ the user hasn't created their fed-ID yet.
+    // self-claim runs. Absent ⇒ the user hasn't created their fed-ID yet. The fed-ID
+    // is bound to the login: first-run = bootstrap (creates the owner); otherwise the
+    // require_owner gate above already proved a live owner session.
+    let auth = if first_run {
+        crate::compose::FedIdUse::FirstRunBootstrap
+    } else {
+        crate::compose::FedIdUse::OwnerSession
+    };
     let user_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        auth,
         &st.user_key_id,
         st.user_seed_dir.clone(),
     )
@@ -427,6 +437,8 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
     }
     // Resolve the fed-ID signer the client just minted (POST /v1/self/identity).
     let user_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
         &st.user_key_id,
         st.user_seed_dir.clone(),
     )
@@ -540,26 +552,27 @@ async fn set_age_self(
     // CEG-native, hybrid-signed federation attestation (NOT the unsigned
     // local-upsert+promote path, broken by CIRISPersist#247). The node holds the
     // owner's fed-ID signer (resolved at request time, same as the self-claim).
-    let signer = match crate::compose::resolve_user_signer(
-        &st.user_key_id,
-        st.user_seed_dir.clone(),
-    )
-    .await
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return err(
+    let signer =
+        match crate::compose::resolve_user_signer(
+            &st.engine,
+            crate::compose::FedIdUse::OwnerSession,
+            &st.user_key_id,
+            st.user_seed_dir.clone(),
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => return err(
                 StatusCode::CONFLICT,
                 "node has no federation ID yet — create one + claim ownership before setting age",
-            )
-        }
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("resolve user signer: {e}"),
-            )
-        }
-    };
+            ),
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("resolve user signer: {e}"),
+                )
+            }
+        };
     let subject = signer.key_id().to_string();
     match crate::safety::age::emit_age_assurance_signed(
         &st.engine,

@@ -759,16 +759,45 @@ fn identity_router(identity_json: String) -> axum::Router {
 /// node's steward signer (the owner-binding asserts an accountable *human* is
 /// responsible).
 ///
-/// Resolve the responsible-user signer from its on-disk seed, if present. Pulled
-/// out of [`user_identity_signer`] so `claim-remote` can resolve it **at request
-/// time** rather than only at boot — the fed-ID is minted DURING the first-run
-/// wizard (after boot), so a boot-time resolution would miss it and leave the
-/// self-claim's signer absent. Returns `None` (not an error) when no user seed
-/// exists yet.
+/// Authorization to wield the owner's fed-ID — the most powerful key on the node (it
+/// signs owner-bindings + delegations + age, and re-roots ownership). [`resolve_user_signer`]
+/// is the ENFORCED choke point: it releases the signer ONLY for one of these, so the
+/// fed-ID is "bound to the login" — no live owner session (or first-run bootstrap), no
+/// fed-ID. A future caller can't reach the signer without declaring its authority.
+pub(crate) enum FedIdUse {
+    /// A VERIFIED owner session — the caller already passed `require_owner`
+    /// (SystemAdmin + FullAccess via `resolve_bearer`). The post-claim path.
+    OwnerSession,
+    /// First-run BOOTSTRAP: no owner exists yet, so the fed-ID is minted + used to
+    /// CREATE the owner. `resolve_user_signer` RE-VERIFIES `is_first_run` for this
+    /// arm, so it can never wield the fed-ID once the node is owned.
+    FirstRunBootstrap,
+}
+
+/// Resolve the responsible-user (owner) fed-ID signer from its on-disk seed, **only
+/// when authorized** ([`FedIdUse`]). Pulled out of [`user_identity_signer`] so
+/// `claim-remote` can resolve it **at request time** (the fed-ID is minted DURING the
+/// first-run wizard, after boot). Returns `None` (not an error) when no user seed
+/// exists yet; `Err` when the use is unauthorized (bootstrap on an owned node).
 pub(crate) async fn resolve_user_signer(
+    engine: &Engine,
+    auth: FedIdUse,
     user_key_id: &str,
     seed_dir: std::path::PathBuf,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
+    // CHOKE POINT — the fed-ID is bound to the login: release it only to a verified
+    // owner session, or during the first-run bootstrap window (which CREATES the
+    // owner). The bootstrap arm is re-checked here, so it can never wield the fed-ID
+    // on an already-owned node (defense-in-depth — even if a caller forgot its gate).
+    if matches!(auth, FedIdUse::FirstRunBootstrap)
+        && !crate::auth::bootstrap::is_first_run(engine).await
+    {
+        anyhow::bail!(
+            "fed-ID use refused — this node is already owned, so the responsible-user \
+             identity may be wielded only under a live owner session (login)"
+        );
+    }
+
     // Determine WHICH custody backend minted the identity, so we re-open it the
     // SAME way (software seed / TPM-sealed / YubiKey). The mint records a marker
     // (`<seed_dir>/<alias>.backend`); fall back to the software seed file for

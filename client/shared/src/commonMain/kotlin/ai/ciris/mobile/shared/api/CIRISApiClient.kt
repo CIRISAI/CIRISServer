@@ -1888,6 +1888,36 @@ class CIRISApiClient(
     }
 
     /**
+     * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
+     * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
+     * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the
+     * ceremony UI can show "YUBI DETECTED — FIPS COMPLIANT — 9C PROVISIONED — READY".
+     * Never throws on a missing token — returns `detected=false` with a hint.
+     */
+    suspend fun getYubiKeyStatus(
+        nodeUrl: String = LOCAL_NODE_URL,
+    ): ai.ciris.mobile.shared.models.federation.YubiKeyStatus {
+        val method = "getYubiKeyStatus"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/yubikey-status")
+            val raw = response.bodyAsText()
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.YubiKeyStatus.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.federation.YubiKeyStatus(
+                detected = false,
+                hint = "couldn't reach the node's YubiKey probe: ${e.message}",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **Register an accord holder** — `POST {nodeUrl}/v1/accord/holder`
      * (owner-session-gated). Admits a holder's self-signed `accord_holder`
      * [holderRecord] (+ the optional `portable_2fa` [custodyAttestation] from

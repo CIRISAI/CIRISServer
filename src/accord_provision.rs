@@ -282,29 +282,43 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
         pin_supplied = opts.user_pin.is_some(),
         "accord provision-holder: opening the holder's YubiKey Ed25519 (slot {piv_slot})"
     );
+
+    // AUTO-FIX the "key present, no certificate" case BEFORE opening: ykcs11 only
+    // exposes a PIV key when its slot has a cert, so the node generates a self-signed
+    // cert in the slot itself (using the PIN) — no manual `ykman` step for the holder.
+    match ensure_slot_cert(
+        &piv_slot,
+        req.pkcs11.user_pin.as_deref(),
+        &format!("CN=ciris-accord-{}", req.key_id),
+    ) {
+        Ok(true) => tracing::info!(
+            key_id = %req.key_id, slot = %piv_slot,
+            "accord provision-holder: auto-generated the slot certificate (ykcs11 enumeration fix)"
+        ),
+        Ok(false) => {} // a cert already existed
+        Err(e) => tracing::warn!(
+            key_id = %req.key_id, slot = %piv_slot, error = %e,
+            "accord provision-holder: could not auto-generate the slot certificate — the open may fail"
+        ),
+    }
+
     let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
         Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
         Err(e) => {
-            // Log server-side too (the failure was previously visible ONLY in the
-            // client). The most common cause when the key IS present: ykcs11 only
-            // exposes a PIV private key when the slot also holds a CERTIFICATE — a
-            // key-without-cert slot enumerates nothing ("Key not found").
             tracing::warn!(
                 key_id = %req.key_id,
                 slot = %piv_slot,
                 error = %e,
-                "accord provision-holder: could NOT open the YubiKey slot key — if the key IS \
-                 present (ykman piv info), the slot likely has no CERTIFICATE (ykcs11 enumerates \
-                 keys by cert) and/or no CHUID; generate a self-signed cert in the slot"
+                "accord provision-holder: could NOT open the YubiKey slot key (even after the \
+                 cert auto-fix) — check the YubiKey is inserted, FIPS-approved, and the PIN correct"
             );
             return err(
                 StatusCode::BAD_REQUEST,
                 &format!(
-                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — if `ykman piv info` \
-                     shows the key, the slot is likely missing a CERTIFICATE (ykcs11 only exposes \
-                     a PIV key when its slot has a cert): generate a self-signed cert in slot \
-                     {piv_slot}. Otherwise check the YubiKey is inserted, FIPS-approved, and the \
-                     PIN is correct."
+                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — check the YubiKey is \
+                     inserted + FIPS-approved, the PIN is correct, and slot {piv_slot} holds an \
+                     Ed25519 key (the node tried to auto-generate the slot certificate; if that \
+                     also failed the PIN may be missing or wrong)."
                 ),
             );
         }
@@ -569,6 +583,79 @@ fn run_ykman_capture(args: &[&str]) -> anyhow::Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// **Auto-provision the slot certificate.** ykcs11 only exposes a PIV private key
+/// when its slot ALSO holds a certificate — a key-without-cert slot enumerates
+/// nothing ("Key not found"). Rather than make the holder run `ykman` by hand, the
+/// node fixes it: if the slot has no cert, export the slot's public key and write a
+/// self-signed cert into the slot (signed by the slot key itself — may require a
+/// touch). The PIN is required (the management key is PIN-protected). Returns
+/// `Ok(true)` if a cert was generated, `Ok(false)` if one already existed.
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+fn ensure_slot_cert(slot: &str, pin: Option<&str>, subject: &str) -> anyhow::Result<bool> {
+    use std::io::Write;
+
+    // Already has a certificate? (export succeeds + non-empty)
+    let has_cert = std::process::Command::new("ykman")
+        .args(["piv", "certificates", "export", "-F", "PEM", slot, "-"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false);
+    if has_cert {
+        return Ok(false);
+    }
+
+    // Writing a cert needs the PIN (the PIN-protected management key).
+    let pin = pin.ok_or_else(|| {
+        anyhow::anyhow!(
+            "slot {slot} has a key but no certificate, and no PIN was supplied to generate one"
+        )
+    })?;
+
+    // Export the slot's PUBLIC key (PEM) — the cert is self-signed over it.
+    let pub_pem = run_ykman_capture(&["piv", "keys", "export", slot, "-"])
+        .map_err(|e| anyhow::anyhow!("export slot {slot} public key: {e}"))?;
+
+    // `ykman piv certificates generate [OPTS] SLOT PUBLIC_KEY` — `-` reads the
+    // pubkey from stdin; `--pin` unlocks the protected management key.
+    let mut child = std::process::Command::new("ykman")
+        .args([
+            "piv",
+            "certificates",
+            "generate",
+            "--pin",
+            pin,
+            "--subject",
+            subject,
+            slot,
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("run `ykman certificates generate`: {e}"))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("ykman generate: no stdin handle"))?;
+        stdin
+            .write_all(&pub_pem)
+            .map_err(|e| anyhow::anyhow!("write pubkey to ykman: {e}"))?;
+    } // stdin dropped → pipe closed so ykman proceeds
+    let out = child
+        .wait_with_output()
+        .map_err(|e| anyhow::anyhow!("wait for ykman generate: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ykman piv certificates generate {slot}` failed (exit {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(true)
+}
+
 // ─── no-pkcs11 path: honest NotSupported ──────────────────────────────────────
 
 #[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
@@ -591,6 +678,115 @@ async fn cosign_family_impl(_req: CosignFamilyRequest) -> Response {
     )
 }
 
+// ─── GET /v1/accord/yubikey-status — the "is this token ready?" probe ──────────
+
+/// `GET /v1/accord/yubikey-status` — report the inserted YubiKey's readiness for
+/// accord provisioning so the ceremony UI can show a clear banner ("YUBI DETECTED —
+/// FIPS COMPLIANT — 9C PROVISIONED — READY") + the PIN/PUK tries remaining. Shells
+/// `ykman piv info` (read-only; no cryptoki, so it works on any build); a missing
+/// token / `ykman` returns `{detected:false,…}` with a hint rather than an error.
+/// Loopback-only (same guard as the other accord-setup routes).
+async fn yubikey_status(State(_st): State<ProvisionState>) -> Response {
+    (StatusCode::OK, Json(probe_yubikey_status())).into_response()
+}
+
+/// Run `ykman piv info` and parse it into the readiness fields the UI shows. Never
+/// errors out — a missing token / `ykman` is reported as `detected:false`.
+fn probe_yubikey_status() -> serde_json::Value {
+    use serde_json::json;
+    let out = match std::process::Command::new("ykman")
+        .args(["piv", "info"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return json!({
+                "detected": false,
+                "ready": false,
+                "hint": format!("could not run `ykman` (is yubikey-manager installed?): {e}"),
+            })
+        }
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return json!({
+            "detected": false,
+            "ready": false,
+            "hint": format!("no YubiKey PIV detected: {}", stderr.trim()),
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let line_after = |label: &str| -> Option<String> {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(label))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let fips = line_after("FIPS approved:")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let pin_tries = line_after("PIN tries remaining:");
+    let puk_tries = line_after("PUK tries remaining:");
+    let piv_version = line_after("PIV version:");
+
+    // The Slot 9C block: a "Private key type" line ⇒ key present; any cert line
+    // (Subject/Issuer/Fingerprint/Not before/Not after) ⇒ certificate present. The
+    // certificate is what ykcs11 needs to ENUMERATE the key.
+    let mut in_9c = false;
+    let mut key_type: Option<String> = None;
+    let mut has_cert = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("Slot 9C") || t.starts_with("Slot 9c") {
+            in_9c = true;
+            continue;
+        }
+        // Indented lines belong to the current slot; a non-indented line ends it.
+        if in_9c && !line.starts_with(' ') && !line.starts_with('\t') && !t.is_empty() {
+            in_9c = false;
+        }
+        if in_9c {
+            if let Some((_, v)) = t.split_once("Private key type:") {
+                key_type = Some(v.trim().to_string());
+            }
+            if t.starts_with("Subject")
+                || t.starts_with("Issuer")
+                || t.starts_with("Fingerprint")
+                || t.starts_with("Not before")
+                || t.starts_with("Not after")
+            {
+                has_cert = true;
+            }
+        }
+    }
+    let key_present = key_type.is_some();
+    let ready = fips && key_present && has_cert;
+
+    json!({
+        "detected": true,
+        "piv_version": piv_version,
+        "fips_approved": fips,
+        "pin_tries_remaining": pin_tries,
+        "puk_tries_remaining": puk_tries,
+        "slot_9c_key": key_present,
+        "slot_9c_key_type": key_type,
+        "slot_9c_cert": has_cert,
+        "ready": ready,
+        // The slot needs a CERTIFICATE for ykcs11 to enumerate the key — surface the
+        // exact next step when the key is there but the cert isn't.
+        "hint": if key_present && !has_cert {
+            Some("slot 9C has a key but NO certificate — ykcs11 can't see it; generate a self-signed cert in 9C")
+        } else if !key_present {
+            Some("slot 9C has no key — provision an Ed25519 key in slot 9C")
+        } else if !fips {
+            Some("YubiKey is not FIPS-approved")
+        } else {
+            None
+        },
+    })
+}
+
 /// The accord-provision router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`).
 pub fn router(engine: Arc<Engine>) -> Router {
@@ -603,6 +799,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/family/cosign",
             axum::routing::post(cosign_family),
+        )
+        .route(
+            "/v1/accord/yubikey-status",
+            axum::routing::get(yubikey_status),
         )
         .with_state(state)
 }

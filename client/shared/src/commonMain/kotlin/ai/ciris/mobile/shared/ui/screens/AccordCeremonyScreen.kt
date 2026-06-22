@@ -27,10 +27,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import ai.ciris.mobile.shared.models.federation.YubiKeyStatus
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -184,10 +188,14 @@ private fun ProvisionPhase(viewModel: AccordCeremonyViewModel, busy: Boolean, er
     val keyId by viewModel.keyId.collectAsState()
     val usbPath by viewModel.usbPath.collectAsState()
     val userPin by viewModel.userPin.collectAsState()
+    val yubiKeyStatus by viewModel.yubiKeyStatus.collectAsState()
+    LaunchedEffect(Unit) { viewModel.refreshYubiKeyStatus() }
 
     val slot = AccordCeremonyViewModel.KEY_SLOTS[slotIndex]
     val tierLabelKey = if (slot.primary) "mobile.accord_ceremony_tier_seat" else "mobile.accord_ceremony_tier_vault"
 
+    Spacer(Modifier.height(8.dp))
+    YubiKeyStatusBanner(yubiKeyStatus) { viewModel.refreshYubiKeyStatus() }
     Spacer(Modifier.height(8.dp))
     Text(
         localizedString("mobile.accord_ceremony_progress")
@@ -272,6 +280,7 @@ private fun ProvisionPhase(viewModel: AccordCeremonyViewModel, busy: Boolean, er
         onValueChange = { viewModel.setUserPin(it) },
         singleLine = true,
         enabled = !busy,
+        visualTransformation = PasswordVisualTransformation(),
         label = { Text(localizedString("mobile.accord_ceremony_pin_label")) },
         modifier = Modifier.fillMaxWidth().testable("input_ceremony_pin"),
     )
@@ -301,12 +310,8 @@ private fun ProvisionPhase(viewModel: AccordCeremonyViewModel, busy: Boolean, er
         }
     }
     if (busy) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            localizedString("mobile.accord_ceremony_touch_note"),
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Spacer(Modifier.height(12.dp))
+        TouchYubiKeyPrompt()
     }
 }
 
@@ -371,6 +376,7 @@ private fun CosignPhase(viewModel: AccordCeremonyViewModel, busy: Boolean, error
             onValueChange = { viewModel.setCosignUserPin(it) },
             singleLine = true,
             enabled = !busy,
+            visualTransformation = PasswordVisualTransformation(),
             label = { Text(localizedString("mobile.accord_ceremony_pin_label")) },
             modifier = Modifier.fillMaxWidth().testable("input_ceremony_cosign_pin"),
         )
@@ -391,12 +397,8 @@ private fun CosignPhase(viewModel: AccordCeremonyViewModel, busy: Boolean, error
             }
         }
         if (busy) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                localizedString("mobile.accord_ceremony_touch_note"),
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Spacer(Modifier.height(12.dp))
+            TouchYubiKeyPrompt()
         }
     }
 
@@ -536,3 +538,99 @@ private fun SlotRow(label: String, holderName: String, primary: Boolean, done: B
     }
 }
 
+
+// ── YubiKey readiness banner + the "touch now" prompt (0.5.33) ────────────────
+
+/**
+ * "YUBI DETECTED — FIPS COMPLIANT — 9C PROVISIONED — READY TO PROCEED" — the at-a-
+ * glance YubiKey readiness banner (green when ready, error-tinted when something is
+ * missing) + PIN/PUK tries remaining + a Re-check button. Driven by
+ * [AccordCeremonyViewModel.yubiKeyStatus] (GET /v1/accord/yubikey-status).
+ */
+@Composable
+private fun YubiKeyStatusBanner(status: YubiKeyStatus?, onRefresh: () -> Unit) {
+    val detected = status?.detected == true
+    val ready = status?.ready == true
+    val bg = when {
+        ready -> MaterialTheme.colorScheme.primaryContainer
+        detected -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    Surface(shape = RoundedCornerShape(10.dp), color = bg, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (ready) CIRISIcons.shield else CIRISIcons.keySecure,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = when {
+                        status == null -> "CHECKING YUBIKEY…"
+                        !detected -> "NO YUBIKEY DETECTED"
+                        else -> buildString {
+                            append("YUBI DETECTED")
+                            append(if (status.fipsApproved) " — FIPS COMPLIANT" else " — NOT FIPS")
+                            append(
+                                when {
+                                    status.slot9cKey && status.slot9cCert -> " — 9C PROVISIONED"
+                                    status.slot9cKey -> " — 9C KEY (no cert)"
+                                    else -> " — 9C EMPTY"
+                                }
+                            )
+                            if (ready) append(" — READY TO PROCEED")
+                        }
+                    },
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRefresh) { Text("Re-check") }
+            }
+            status?.takeIf { it.detected }?.let { s ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "PIN tries: ${s.pinTriesRemaining ?: "?"}    PUK tries: ${s.pukTriesRemaining ?: "?"}    " +
+                        "key: ${s.slot9cKeyType ?: "—"}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            status?.hint?.takeIf { !ready }?.let {
+                Spacer(Modifier.height(2.dp))
+                Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+/** The prominent "touch your YubiKey now" prompt shown while a provision/cosign is
+ *  in-flight (the token blocks on a physical touch to authorize the signature). */
+@Composable
+private fun TouchYubiKeyPrompt() {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(12.dp)) {
+            Icon(CIRISIcons.keySecure, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    "👆 Touch your YubiKey now",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                Text(
+                    "The token is waiting for your physical touch to authorize this operation.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+        }
+    }
+}
