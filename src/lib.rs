@@ -107,6 +107,10 @@ pub mod federation_nodecode;
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
+/// Server health — the fabric node's own liveness endpoint (`/health`,
+/// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
+/// `/v1/system/health` with optional cognitive health.
+pub mod health;
 /// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
 /// (the publisher + converger that advertise this node's held fountain
 /// content and act on peers' holding claims) into the shared Edge. The

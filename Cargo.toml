@@ -34,7 +34,13 @@ name = "ciris-server"
 path = "src/main.rs"
 
 [features]
-default = []
+# pkcs11 (the YubiKey / PKCS#11-PIV custody backend) ships in DEFAULT so the
+# published wheel + the `ciris-server` binary carry the hardware fed-ID + accord
+# custody path out of the box (no special build). `python`/`extension-module` are
+# deliberately NOT default — the binary must never link libpython; maturin turns
+# them on for the wheel (pyproject [tool.maturin]). TPM/postgres hardware backends
+# are auto-on per-target on Linux (see the [target.*] tables below).
+default = ["pkcs11"]
 # `python` pulls the PyO3 bindings (for the wheel). The binary builds WITHOUT it,
 # so a plain `cargo build` never links libpython.
 # ONE-WHEEL RE-EXPORT (CIRISServer#4): `python` ALSO turns on the substrate
@@ -71,7 +77,14 @@ extension-module = [
 # operator — there is no token in CI, so it is gated + flagged, not unit-tested.
 # Like the per-target `tpm` posture, it is NOT in `default`; build it explicitly
 # (`--features pkcs11`) on a Linux box with a token attached.
-pkcs11 = ["ciris-keyring/pkcs11"]
+# `pkcs11` is a DEFAULT marker (the YubiKey custody path). It does NOT pull
+# `ciris-keyring/pkcs11` directly, because keyring's `cryptoki` dep exists ONLY on
+# linux/windows — pulling it globally would break the macos/android/ios wheels. So
+# the keyring backend is enabled per-target below (linux + windows), and the
+# ciris-server pkcs11 source (src/accord_provision.rs) is gated on
+# `all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))` — the
+# real impl compiles where cryptoki is present; elsewhere the 501 stub stands.
+pkcs11 = []
 # NOTE: hardware key custody (TPM/SE/StrongBox) is wired per-TARGET below, not as
 # a cargo feature — TPM (tss-esapi) is Linux-only, so a top-level `tpm` feature
 # made `--all-features` drag tss-esapi onto Windows/macOS (where it can't build).
@@ -181,7 +194,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v9.10.0", features = ["postgres", "cirislens_wa_cert", "cirislens_service_token_revocation"] }
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v6.11.0", version = "6", features = ["tpm"] }
+# keyring `tpm` (TPM-at-rest) + `pkcs11` (YubiKey/PIV — cryptoki is linux/windows-only
+# in keyring, so it is enabled HERE, not in the global `default`).
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v6.11.0", version = "6", features = ["tpm", "pkcs11"] }
+
+# Windows: the keyring `pkcs11` (YubiKey/PIV) backend — cryptoki builds on windows too.
+[target.'cfg(target_os = "windows")'.dependencies]
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v6.11.0", version = "6", features = ["pkcs11"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
 # Keystore/StrongBox); sqlite bundles, no postgres/tpm. Mirrors persist/edge.

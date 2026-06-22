@@ -75,7 +75,10 @@ use ciris_persist::prelude::Engine;
 /// request still parses (so the endpoint can return a clear NotSupported), but
 /// the values go unread — hence the conditional `allow(dead_code)`.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
+    allow(dead_code)
+)]
 struct ProvisionPkcs11 {
     /// The PIV user PIN. When omitted the token may prompt out of band (or the
     /// open fails with a plain-language "PIN required" error the UI surfaces).
@@ -95,7 +98,10 @@ struct ProvisionPkcs11 {
 /// drive the `pkcs11` path only (unread without the feature — see
 /// [`ProvisionPkcs11`]), hence the conditional `allow(dead_code)`.
 #[derive(Debug, Deserialize)]
-#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
+    allow(dead_code)
+)]
 struct ProvisionHolderRequest {
     /// The federation `key_id` (the keystore/seal alias the wrapped ML-DSA half +
     /// the holder record are minted under).
@@ -127,7 +133,10 @@ struct ProvisionHolderRequest {
 /// real-token path only (unread without the feature — see [`ProvisionPkcs11`]),
 /// hence the conditional `allow(dead_code)`.
 #[derive(Debug, Deserialize)]
-#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
+    allow(dead_code)
+)]
 struct CosignFamilyRequest {
     /// The holder's federation `key_id` — the SAME alias the wrapped ML-DSA half +
     /// the holder record were minted under at `provision-holder` time.
@@ -213,7 +222,7 @@ async fn cosign_family(State(_st): State<ProvisionState>, body: axum::body::Byte
 
 // ─── pkcs11 path: the real YubiKey-backed provisioning ────────────────────────
 
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
     use std::path::PathBuf;
 
@@ -368,7 +377,7 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
         .into_response()
 }
 
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
     use std::path::PathBuf;
 
@@ -493,7 +502,7 @@ async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
 }
 
 /// Probe that `dir` is writable by creating + removing a temp file.
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 fn writable_probe(dir: &std::path::Path) -> std::io::Result<()> {
     let probe = dir.join(format!(".ciris-accord-write-probe-{}", std::process::id()));
     std::fs::write(&probe, b"ciris")?;
@@ -502,21 +511,21 @@ fn writable_probe(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// `ykman piv keys attest <slot>` → the slot's PIV attestation cert (DER).
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 fn ykman_attest_9c(slot: &str) -> anyhow::Result<Vec<u8>> {
     // `-F DER` emits DER to stdout (the `-` output target).
     run_ykman_capture(&["piv", "keys", "attest", "-F", "DER", slot, "-"])
 }
 
 /// `ykman piv certificates export f9` → the f9 device attestation cert (DER).
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 fn ykman_export_f9() -> anyhow::Result<Vec<u8>> {
     run_ykman_capture(&["piv", "certificates", "export", "-F", "DER", "f9", "-"])
 }
 
 /// Run `ykman <args>` capturing stdout as bytes (DER). `ykman` reads the token
 /// directly; a missing binary or a non-zero exit is a plain error.
-#[cfg(feature = "pkcs11")]
+#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
 fn run_ykman_capture(args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let out = std::process::Command::new("ykman")
         .args(args)
@@ -540,7 +549,7 @@ fn run_ykman_capture(args: &[&str]) -> anyhow::Result<Vec<u8>> {
 
 // ─── no-pkcs11 path: honest NotSupported ──────────────────────────────────────
 
-#[cfg(not(feature = "pkcs11"))]
+#[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
 async fn provision_holder_impl(_req: ProvisionHolderRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
@@ -550,7 +559,7 @@ async fn provision_holder_impl(_req: ProvisionHolderRequest) -> Response {
     )
 }
 
-#[cfg(not(feature = "pkcs11"))]
+#[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
 async fn cosign_family_impl(_req: CosignFamilyRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
@@ -638,7 +647,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(feature = "pkcs11"))]
+    #[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
     #[tokio::test]
     async fn without_pkcs11_returns_not_implemented() {
         let app = router_with_engine().await;
@@ -696,7 +705,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(feature = "pkcs11"))]
+    #[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
     #[tokio::test]
     async fn cosign_without_pkcs11_returns_not_implemented() {
         let app = router_with_engine().await;

@@ -384,6 +384,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 let adapter = Arc::clone(&adapter);
                 let adapter_ctx = adapter_ctx.clone();
                 let r = identity_router(identity_json)
+                    // Server health — the node's OWN liveness (/health, /v1/health,
+                    // /v1/system/health). Mandatory base; the agent enriches the
+                    // /v1/system/health endpoint with optional cognitive health.
+                    .merge(crate::health::router())
                     // login ceremony (self-at-login → user-managed consent). The
                     // admin-eligibility allowlist is the boot-resolved config:*
                     // auth.admin_key_ids (Server 0.5 — replaces CIRIS_ADMIN_KEY_IDS).
