@@ -1,10 +1,12 @@
 # FSD — The Safe Mesh (what it means, and why v0.5.30 is the floor)
 
-> **Status:** CLAIM REFUTED by red-team review (2026-06-21) — v0.5.30 is **close but
-> NOT yet the complete safe-mesh floor**. §3/§5 below are the original claim; **§8
-> records the review outcome and the blockers that must be fixed before the genesis
-> ceremony.** Of the I1–I8 invariants, the review found I6/I7/I8 hold but **I1, I2, I3,
-> I5 have real gaps** (two critical). Read §8 first.
+> **Status:** REMEDIATED (2026-06-21). A red-team review (§8) refuted the original
+> v0.5.30 claim; the blockers were then fixed and re-verified (§9). **B1, B3, B4, N1,
+> N2 are CLOSED; B2 is mitigated and its full closure is gated on G2 (the verify
+> genesis bake) + latch hardening.** Net: the code floor is essentially complete; the
+> remaining path to the ceremony is G1→G2→G3 (§6) with the B2 latch/continuity
+> hardening landed alongside G2. §3/§5 are the original claim; **read §8 (findings)
+> then §9 (remediation).**
 >
 > This FSD defines "safe mesh", states the invariants that make a mesh safe, maps each
 > to the code that was *intended* to satisfy it, and is explicit about what is NOT yet
@@ -259,3 +261,48 @@ now would mint a kill-switch that (B1) admits non-hardware holders, (B2) a root
 operator can both `rm`-clear and forge a reactivation for, and (B3) may fail to spread
 when triggered.** B1+B2+B3+B4 must be fixed (and G2 — the verify genesis bake — is a
 hard dependency of B2's real fix) before the genesis ceremony and the 0.6 canonical cut.
+
+## 9. Remediation (2026-06-21) — the §8 blockers, fixed + re-verified
+
+The blockers were fixed and re-checked by a second adversarial pass. Status:
+
+- **B1 (custody bypass) — CLOSED.** `custody_attestation` is now MANDATORY at
+  `POST /v1/accord/holder` (a missing attestation is refused), so no software-only key
+  is admitted there. The re-review then found a *side-door* (the generic
+  `/v1/federation/peering` route admitted a caller-typed `accord_holder` with no custody
+  check), now closed at two points: `peer::register_peer_key` REFUSES
+  `identity_type==accord_holder`, and `genesis_assemble` requires **every entrenched
+  seat to be a registered `accord_holder`** (⟹ custody-verified). So "seat ⟹
+  accord_holder ⟹ FIPS custody" holds regardless of how any other key reached
+  `federation_keys`. Tests: `holder_without_custody_attestation_is_rejected`,
+  `genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder`.
+- **B3 (halt not propagated) — CLOSED.** The gossip loop-stop key now carries
+  `is_global_halt`, so a sub-quorum first sighting no longer suppresses the
+  quorum-completing halt's replication; replicate is still awaited before latch+exit.
+- **B4 (halt resurrects) — CLOSED.** The clean `exit(42)` is now gated on a durable
+  latch; on latch-write failure the node `abort()`s (after replicating to peers) rather
+  than exiting "as halted", so it cannot restart un-gated.
+- **N1 (hard-coded threshold) — CLOSED.** The halt paths derive M from the family's
+  ENTRENCHED `consensus_protocol` (the same M reactivate honors), falling back to
+  strict-majority only at cold-start — a grown 3/5 needs 3 to halt.
+- **N2 (distinct-key at verifier) — CLOSED.** `assert_distinct_roster` re-asserts
+  one-key-one-seat at the verification point.
+- **B2 (operator-forgeable reactivation) — MITIGATED; full closure gated on G2.** The
+  ORIGINAL-genesis continuity check is now anchored to the PINNED
+  `humanity_accord_genesis()` (compiled into verify, not operator-writable) **when it is
+  baked**, and `check_halt_gate` no longer advertises the `rm` break-glass. **Residual
+  (tracked):** (a) until **G2** bakes the genesis, the original-set falls back to the
+  local-DB version-1 snapshot (now warned, honest); (b) the *current-roster* quorum
+  (reactivate step 1) and the disk latch remain local/operator-writable — full closure
+  needs the genesis bake **plus** a pinned/quorum-bound current-roster source and a
+  tamper-evident latch. These ride with **G2** (already the sequenced gate before 0.6),
+  so B2 is not an *additional* blocker beyond G2 — but G2 must now also land the latch +
+  current-roster hardening, not just the JSON paste.
+
+### Revised bottom line
+With B1/B3/B4/N1/N2 closed, the enforceable, hardware-custodied, mesh-propagating,
+correctly-thresholded kill-switch is in place for the genesis `quorum:2/3` trio. The
+one remaining floor item is **B2's continuity/latch hardening, which is folded into G2**
+(the verify genesis bake). Sequencing to the ceremony is unchanged — G1 → G2 (now also
+carrying B2's latch + current-roster pin) → G3 — and minting the two trios is gated on
+G2, not on any further G1-time code.
