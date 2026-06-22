@@ -106,16 +106,16 @@ use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attesta
 use ciris_verify_core::accord_genesis::{
     accord_invocation_status, accord_roster_from_family, assemble_accord_family_genesis,
     build_accord_family_envelope, build_accord_invocation_object, humanity_accord_genesis,
-    parse_accord_invocation, ACCORD_CONSENSUS_PROTOCOL, ACCORD_FAMILY_GENESIS_KIND,
-    ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
+    parse_accord_invocation, strict_majority, ACCORD_CONSENSUS_PROTOCOL,
+    ACCORD_FAMILY_GENESIS_KIND, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
 use ciris_verify_core::federation_self_record::produce_self_key_record;
-use ciris_verify_core::humanity_accord::{
-    verify_invocation, Invocation, InvocationDedup, InvocationKind,
-};
+use ciris_verify_core::humanity_accord::{Invocation, InvocationDedup, InvocationKind};
 use ciris_verify_core::self_at_login::HybridSigningIdentity;
-use ciris_verify_core::threshold::{ThresholdMember, ThresholdSignature};
+use ciris_verify_core::threshold::{
+    verify_threshold_signatures, ThresholdMember, ThresholdSignature,
+};
 
 use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
 use crate::auth::roles::{Permission, UserRole};
@@ -192,9 +192,13 @@ struct AccordState {
     /// restart drops in-flight invocations); the durable artifact is the assembled
     /// invocation's holder cosignatures, re-verifiable against `federation_keys`.
     pending: Arc<Mutex<HashMap<(String, String), SignedCegObject>>>,
-    /// `(invocation_kind, invocation_id)` already gossiped — the loop-stop so a
-    /// replicated message isn't re-fanned-out endlessly across the mesh.
-    seen: Arc<Mutex<HashSet<(String, String)>>>,
+    /// `(invocation_kind, invocation_id, is_global_halt)` already gossiped — the
+    /// loop-stop so a replicated message isn't re-fanned-out endlessly. The
+    /// `is_global_halt` discriminator (B3 fix) keeps the SUB-quorum sighting of an
+    /// invocation from suppressing the later QUORUM-meeting halt's propagation: a
+    /// sub-quorum gossip (`false`) and the quorum-completing halt (`true`) are
+    /// tracked independently, so the halt always relays even after sub-quorum churn.
+    seen: Arc<Mutex<HashSet<(String, String, bool)>>>,
     /// HTTP client for the peer replication fan-out.
     http: reqwest::Client,
     /// Disk-latch + peer + process-exit wiring for the operational halt.
@@ -297,6 +301,41 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
     }
 }
 
+/// The live kill-switch quorum **M** = strict majority of the seated roster. This is
+/// the SAME M [`crate::accord_reactivate`] derives from the family's entrenched
+/// `consensus_protocol` (which IS set to strict-majority at genesis/supersede), so a
+/// grown `quorum:3/5` family needs **3** to halt — NEVER a hard-coded 2. (Fixes the
+/// N1 review finding: the halt paths previously used the literal `2`.)
+fn kill_switch_quorum_m(roster: &[ThresholdMember]) -> usize {
+    strict_majority(roster.len())
+}
+
+/// Defense-in-depth distinct-key gate on the kill-switch roster (N2): the family
+/// seats are distinct by construction (genesis/supersede enforce one-seat in the
+/// substrate), but the verifier must never count one human's key as two seats. Re-
+/// assert it here so the property holds at the verification point, not only upstream.
+fn assert_distinct_roster(roster: &[ThresholdMember]) -> Result<(), String> {
+    let mut ed = HashSet::new();
+    let mut pq = HashSet::new();
+    for m in roster {
+        if !ed.insert(m.ed25519_public_key_base64.as_str()) {
+            return Err(format!(
+                "kill-switch roster has a DUPLICATE Ed25519 key (member {}) — one key cannot hold two seats",
+                m.member_id
+            ));
+        }
+        if let Some(p) = &m.mldsa65_public_key_base64 {
+            if !pq.insert(p.as_str()) {
+                return Err(format!(
+                    "kill-switch roster has a DUPLICATE ML-DSA-65 key (member {})",
+                    m.member_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Evict expired (`valid_until` ≤ now, or unparseable) pending invocations — keeps
 /// the table bounded by the count of LIVE holder-driven invocations.
 fn prune_pending(
@@ -387,43 +426,51 @@ async fn register_holder(
     }
     let key_id = req.key_record.record.key_id.clone();
 
-    // FIPS portable-2FA CUSTODY GATE (the safe-mesh floor): if a YubiKey PIV
-    // custody attestation is supplied, it MUST verify against the PINNED durable
-    // Yubico Attestation Root 1 + meet the FIPS-certified + touch-always floor +
-    // bind to THIS holder's Ed25519 — else the key is refused. The f9 + the two
-    // PIV intermediates ride in the attestation's chain; we pin only the root.
-    let custody = if let Some(custody) = &req.custody_attestation {
-        let holder_member = ThresholdMember {
-            member_id: req.key_record.record.key_id.clone(),
-            ed25519_public_key_base64: req.key_record.record.pubkey_ed25519_base64.clone(),
-            mldsa65_public_key_base64: req.key_record.record.pubkey_ml_dsa_65_base64.clone(),
-            role: None,
-        };
-        match verify_accord_custody_attestation(
-            custody,
-            &holder_member,
-            YUBICO_ATTESTATION_ROOT_1_DER,
-        ) {
-            Ok(v) => serde_json::json!({
-                "verified": true,
-                "hardware_class": v.hardware_class,
-                "custody_tier": v.custody_tier,
-                "fips_certified": v.fips_certified,
-                "touch_always": v.touch_always,
-                "firmware": v.firmware,
-            }),
-            Err(e) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    &format!(
-                        "accord custody attestation rejected (must be a FIPS YubiKey PIV chain to \
-                         Yubico Attestation Root 1): {e}"
-                    ),
-                )
-            }
+    // FIPS portable-2FA CUSTODY GATE (the safe-mesh floor — B1 fix: MANDATORY).
+    // An accord holder wields the 2-of-3 kill-switch, so it is admitted ONLY with a
+    // YubiKey PIV custody attestation that verifies against the PINNED durable Yubico
+    // Attestation Root 1 + meets the FIPS-certified + touch-always floor + binds to
+    // THIS holder's Ed25519. A software-only or non-FIPS key CANNOT hold the
+    // kill-switch. (Previously the attestation was optional, so the persist
+    // attestation_evidence gate — which accepts any non-Software hardware — was the
+    // only thing standing; that hole is closed here.) The f9 + the two PIV
+    // intermediates ride in the attestation's chain; we pin only the root.
+    let Some(custody) = &req.custody_attestation else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "an accord_holder MUST present a portable_2fa custody_attestation (a FIPS YubiKey PIV \
+             chain to Yubico Attestation Root 1) — a software-only or unattested key cannot hold \
+             the HUMANITY_ACCORD kill-switch",
+        );
+    };
+    let holder_member = ThresholdMember {
+        member_id: req.key_record.record.key_id.clone(),
+        ed25519_public_key_base64: req.key_record.record.pubkey_ed25519_base64.clone(),
+        mldsa65_public_key_base64: req.key_record.record.pubkey_ml_dsa_65_base64.clone(),
+        role: None,
+    };
+    let custody = match verify_accord_custody_attestation(
+        custody,
+        &holder_member,
+        YUBICO_ATTESTATION_ROOT_1_DER,
+    ) {
+        Ok(v) => serde_json::json!({
+            "verified": true,
+            "hardware_class": v.hardware_class,
+            "custody_tier": v.custody_tier,
+            "fips_certified": v.fips_certified,
+            "touch_always": v.touch_always,
+            "firmware": v.firmware,
+        }),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "accord custody attestation rejected (must be a FIPS YubiKey PIV chain to \
+                     Yubico Attestation Root 1): {e}"
+                ),
+            )
         }
-    } else {
-        serde_json::Value::Null
     };
 
     match st.engine.register_federation_key(req.key_record).await {
@@ -567,7 +614,16 @@ async fn verify_invocation_handler(
         }
     }
 
-    match verify_invocation(&req.invocation, &holders, &req.signatures) {
+    // N2: re-assert one-key-one-seat on the roster at the verification point.
+    if let Err(e) = assert_distinct_roster(&holders) {
+        return err(StatusCode::CONFLICT, &e);
+    }
+    // N1: the threshold is the family's LIVE strict-majority M (a grown 3/5 needs 3),
+    // not a hard-coded 2. Verify the hybrid cosignatures over §9.2.1 canonical bytes
+    // against the seated roster at M (the same primitive reactivate uses).
+    let m = kill_switch_quorum_m(&holders);
+    let canonical = req.invocation.canonical_bytes();
+    match verify_threshold_signatures(&canonical, &holders, &req.signatures, m) {
         Ok(valid) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -575,7 +631,8 @@ async fn verify_invocation_handler(
                 "kind": req.invocation.invocation_kind.as_str(),
                 "invocation_id": req.invocation.invocation_id,
                 "valid_signatures": valid,
-                "threshold": ACCORD_THRESHOLD,
+                "threshold": m,
+                "roster_size": holders.len(),
             })),
         )
             .into_response(),
@@ -585,7 +642,8 @@ async fn verify_invocation_handler(
                 "verified": false,
                 "reason": "quorum_not_met",
                 "detail": e.to_string(),
-                "threshold": ACCORD_THRESHOLD,
+                "threshold": m,
+                "roster_size": holders.len(),
             })),
         )
             .into_response(),
@@ -1019,7 +1077,7 @@ fn invocation_response(obj: &SignedCegObject) -> Response {
         .and_then(|p| accord_invocation_status(&p).ok());
     let (quorum_met, valid_signers, threshold) = match &status {
         Some(s) => (s.quorum_met, s.valid_signers.clone(), s.quorum_threshold),
-        None => (false, Vec::new(), ACCORD_QUORUM_THRESHOLD),
+        None => (false, Vec::new(), ACCORD_THRESHOLD),
     };
     (
         StatusCode::OK,
@@ -1116,11 +1174,18 @@ async fn replicate_and_maybe_halt(
     let status = accord_invocation_status(&parsed)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("status: {e}")))?;
 
+    // N1: judge quorum at the family's LIVE strict-majority M (a grown 3/5 needs 3),
+    // NOT the hard-coded 2 in accord_invocation_status. valid_signers is the set of
+    // distinct, validly-hybrid-signed seats; the roster is the seated family.
+    let _ = assert_distinct_roster(&roster); // defense-in-depth; roster is seat-distinct
+    let m = kill_switch_quorum_m(&roster);
+    let quorum_met = status.valid_signers.len() >= m;
+
     let mut outcome = AccordOutcome {
         authentic: !status.valid_signers.is_empty(),
         invocation_kind: status.invocation_kind.clone(),
         invocation_id: status.invocation_id.clone(),
-        quorum_met: status.quorum_met,
+        quorum_met,
         valid_signers: status.valid_signers.clone(),
         halted: false,
     };
@@ -1129,8 +1194,16 @@ async fn replicate_and_maybe_halt(
     }
 
     let is_global_halt =
-        status.invocation_kind == InvocationKind::Constitutional.as_str() && status.quorum_met;
-    let key = (status.invocation_kind.clone(), status.invocation_id.clone());
+        status.invocation_kind == InvocationKind::Constitutional.as_str() && quorum_met;
+    // B3: the loop-stop key includes `is_global_halt`, so a SUB-quorum sighting of
+    // this invocation (gossiped earlier with <M sigs) does NOT suppress the later
+    // QUORUM-meeting halt — the halt relays on its own first quorum-sighting even if
+    // the sub-quorum object was already seen.
+    let key = (
+        status.invocation_kind.clone(),
+        status.invocation_id.clone(),
+        is_global_halt,
+    );
     let first_sight = {
         let mut seen = st.seen.lock().expect("seen lock");
         // Bounded backstop: clearing only costs a possible re-gossip, which is
@@ -1145,33 +1218,40 @@ async fn replicate_and_maybe_halt(
         // Requirement: replicate to known peers BEFORE initiating the halt (so the
         // kill propagates before this node goes dark). AWAITED but bounded by
         // REPLICATION_TIMEOUT — a hung peer can never delay the latch. Deduped on
-        // first sighting (A→B→A storms are stopped; the halt still reaches every
-        // peer because each node relays its OWN first sighting before going dark).
+        // first QUORUM-sighting (A→B→A storms stopped; the halt still reaches every
+        // peer because each node relays its OWN first quorum-sighting before going dark).
         if first_sight {
             replicate_to_peers(&st.http, &st.halt.peers, obj).await;
         }
-        // The disk latch is the load-bearing, LOCAL, fast gate — write it (with a
-        // short retry) AFTER peers were reached but regardless of their outcome.
+        // The disk latch is the load-bearing, LOCAL, fast gate. B4: a halt must NEVER
+        // resurrect — so the clean exit is GATED on a durable latch. We retry with
+        // backoff; if the latch can NOT be written, we do NOT take the exit(42) path
+        // (which would let the next startup boot un-gated). Instead we abort() loudly
+        // AFTER replicating to peers — a crash an auto-restarter must NOT silently
+        // bring back, and the peers already hold the halt.
         if let Some(home) = &st.halt.home {
             let record = HaltRecord {
                 invocation_kind: status.invocation_kind.clone(),
                 invocation_id: status.invocation_id.clone(),
                 valid_signers: status.valid_signers.clone(),
-                quorum_threshold: status.quorum_threshold,
+                quorum_threshold: m,
                 latched_at: now.clone(),
             };
             let mut latched = None;
-            for attempt in 1..=3 {
+            for attempt in 1..=8u32 {
                 match latch_halt(home, &record) {
                     Ok(p) => {
                         latched = Some(p);
                         break;
                     }
-                    Err(e) => tracing::error!(
-                        attempt,
-                        error = %e,
-                        "halt latch write failed — retrying"
-                    ),
+                    Err(e) => {
+                        tracing::error!(attempt, error = %e, "halt latch write failed — retrying");
+                        // Backoff (capped) so a transient disk fault can clear.
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            (50u64 << attempt.min(6)).min(2000),
+                        ))
+                        .await;
+                    }
                 }
             }
             match latched {
@@ -1180,17 +1260,37 @@ async fn replicate_and_maybe_halt(
                     invocation_id = %status.invocation_id,
                     "HUMANITY_ACCORD HALT honored — node latched down (full halt, CC 4.2.1)"
                 ),
-                None => tracing::error!(
-                    invocation_id = %status.invocation_id,
-                    "HALT LATCH WRITE FAILED after retries — terminating, but the latch is \
-                     NOT durable: the next startup will NOT be gated. An operator MUST create \
-                     the halt latch manually to keep this node down."
-                ),
+                None => {
+                    // B4 fail-secure: the latch is the ONLY thing that gates the next
+                    // boot. Without it we must NOT exit into a restartable, un-gated
+                    // serving state. Abort hard (the halt is already replicated to
+                    // peers) — a node that cannot latch its own halt must be treated
+                    // as compromised and NOT auto-restarted without a manual latch.
+                    if st.halt.exit_on_halt {
+                        tracing::error!(
+                            invocation_id = %status.invocation_id,
+                            "HALT LATCH WRITE FAILED after retries — ABORTING (NOT a clean halt \
+                             exit). The latch is NOT durable: do NOT auto-restart this node; an \
+                             operator MUST create the halt latch before it may run again."
+                        );
+                        // Flush the response, then abort (distinct from the clean exit 42).
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        std::process::abort();
+                    } else {
+                        tracing::error!(
+                            invocation_id = %status.invocation_id,
+                            "HALT LATCH WRITE FAILED after retries and the latch is NOT durable \
+                             (exit_on_halt off) — an operator MUST create the halt latch."
+                        );
+                    }
+                }
             }
         }
         outcome.halted = true;
         // Full halt, fail-secure: terminate after a short grace so the HTTP
-        // response flushes. The disk latch blocks the next startup regardless.
+        // response flushes. The disk latch blocks the next startup. (Only reached
+        // when the latch is durable OR no home is configured — the no-durable-latch
+        // case aborted above.)
         if st.halt.exit_on_halt {
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;

@@ -315,6 +315,20 @@ impl SoftId {
     }
 }
 
+/// Seat an accord holder DIRECTLY via the engine admission gate (the kill-switch
+/// LOGIC path). The HTTP `POST /v1/accord/holder` now MANDATES a FIPS YubiKey custody
+/// attestation a software run cannot produce (the B1 safe-mesh-floor fix); the QA
+/// scenarios prove the roster / quorum / halt / governance logic, which is
+/// independent of HOW a holder reached persist, so they seat holders here with the
+/// same hardware `attestation_evidence` the persist gate requires. (The HTTP custody
+/// gate is exercised by `tests/accord.rs`'s rejection tests.)
+pub async fn seat_holder(engine: &Engine, h: &SoftId) -> bool {
+    engine
+        .register_federation_key(h.signed_key_record(identity_type::ACCORD_HOLDER).await)
+        .await
+        .is_ok()
+}
+
 /// Build an `Invocation` JSON (the §9.2.1 shape the server deserializes).
 pub fn invocation(kind: &str, id: &str, payload: &[u8]) -> serde_json::Value {
     serde_json::json!({

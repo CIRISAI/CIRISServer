@@ -314,26 +314,28 @@ fn constitutional_invocation(id: &str) -> Invocation {
     }
 }
 
-/// Register N holders with the node (owner-gated) + return them.
-async fn registered_holders(base: &str, owner: &str, holders: &[Holder]) {
-    let client = reqwest::Client::new();
+/// Seat N holders DIRECTLY into the engine (via the persist admission gate), used by
+/// the kill-switch LOGIC tests. The HTTP `POST /v1/accord/holder` endpoint now
+/// MANDATES a FIPS YubiKey custody attestation (B1 fix) that a software test cannot
+/// produce — that endpoint's custody gate is exercised by the dedicated rejection
+/// tests (`holder_without_custody_attestation_is_rejected`,
+/// `accord_holder_with_bogus_custody_attestation_is_rejected`). The roster/quorum/
+/// halt logic is independent of HOW a holder reached persist, so the logic tests seat
+/// holders here (with the same hardware `attestation_evidence` the persist gate wants).
+async fn registered_holders(engine: &Engine, holders: &[Holder]) {
     for h in holders {
-        let resp = client
-            .post(format!("{base}/v1/accord/holder"))
-            .bearer_auth(owner)
-            .json(&serde_json::json!({ "key_record": h.signed_key_record().await }))
-            .send()
+        engine
+            .register_federation_key(h.signed_key_record().await)
             .await
-            .expect("register holder");
-        assert_eq!(resp.status(), 200, "register {}", h.key_id);
+            .unwrap_or_else(|e| panic!("seat holder {}: {e}", h.key_id));
     }
 }
 
 /// Register `holders` AND assemble the HUMANITY_ACCORD family over them (the genesis
 /// ceremony) so the kill-switch roster (`active_family_members`) is entrenched. The
 /// first two holders co-sign the 2/3 founder quorum.
-async fn establish_family(base: &str, owner: &str, holders: &[Holder]) {
-    registered_holders(base, owner, holders).await;
+async fn establish_family(engine: &Engine, base: &str, owner: &str, holders: &[Holder]) {
+    registered_holders(engine, holders).await;
     let client = reqwest::Client::new();
     let member_ids: Vec<String> = holders.iter().map(|h| h.key_id.clone()).collect();
     let env: serde_json::Value = client
@@ -398,7 +400,7 @@ async fn register_holders_list_roster_and_verify_2_of_3_invocation() {
     ];
 
     // ── 1. Owner registers the 3 holders + assembles the family (the roster) ──
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
 
     // ── 2. Cold-start recognition roster = the 3 entrenched family SEATS ──────
     let roster: serde_json::Value = client
@@ -545,16 +547,9 @@ async fn genesis_ceremony_assembles_and_entrenches_the_family() {
         Holder::new("accord-gen-b", 0xA2),
         Holder::new("accord-gen-c", 0xA3),
     ];
-    for h in &holders {
-        let r = client
-            .post(format!("{base}/v1/accord/holder"))
-            .bearer_auth(&owner)
-            .json(&serde_json::json!({ "key_record": h.signed_key_record().await }))
-            .send()
-            .await
-            .expect("register holder");
-        assert_eq!(r.status(), 200);
-    }
+    // Seat holders directly (the HTTP /v1/accord/holder custody gate now MANDATES a
+    // FIPS attestation a software test can't produce — covered by the rejection tests).
+    registered_holders(&engine, &holders).await;
     let member_key_ids: Vec<String> = holders.iter().map(|h| h.key_id.clone()).collect();
 
     // 1. Build the canonical family envelope.
@@ -625,7 +620,7 @@ async fn invocation_concurrence_advances_to_quorum() {
         Holder::new("accord-inv-b", 0xB2),
         Holder::new("accord-inv-c", 0xB3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
 
     let inv = drill_invocation("concur-001");
 
@@ -745,6 +740,58 @@ async fn accord_holder_with_bogus_custody_attestation_is_rejected() {
     );
 }
 
+#[tokio::test]
+async fn holder_without_custody_attestation_is_rejected() {
+    // B1 (safe-mesh floor): the custody attestation is MANDATORY for an accord_holder.
+    // A registration with NO custody_attestation — which previously slipped through on
+    // the persist attestation_evidence gate alone (any non-Software hardware) — must
+    // now be refused. A software-only / unattested key cannot hold the kill-switch.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holder = Holder::new("accord-holder-no-custody", 0xE7);
+    let resp = client
+        .post(format!("{base}/v1/accord/holder"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_record": holder.signed_key_record().await }))
+        .send()
+        .await
+        .expect("register w/o custody");
+    assert_eq!(
+        resp.status(),
+        400,
+        "an accord_holder with no custody_attestation must be refused"
+    );
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("custody_attestation"),
+        "rejection must name the missing custody_attestation; got {body}"
+    );
+
+    // The key was NOT admitted.
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster["registered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["key_id"] == "accord-holder-no-custody"),
+        "an unattested holder must not be registered"
+    );
+}
+
 // ─── Operational halt (CC 4.2.1 / 4.2.3 / §9.2.1) — the enforceable kill-switch ─
 
 /// Build a router that latches its halt under a unique temp `home` (no peers, no
@@ -782,7 +829,7 @@ async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
 
     let inv = constitutional_invocation("halt-001");
     let roster = vec![
@@ -840,7 +887,7 @@ async fn drill_2of3_message_is_surfaced_but_does_not_halt() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
 
     let inv = drill_invocation("drill-eas-001");
     let roster = vec![
@@ -886,7 +933,7 @@ async fn message_without_registered_holder_signature_is_dropped() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
 
     // … but the signer is NOT a seat (never registered) — no authority.
     let imposter = Holder::new("accord-holder-imposter", 0xBB);
@@ -925,7 +972,7 @@ async fn open_invocation_without_registered_holder_signature_is_rejected() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
     let imposter = Holder::new("accord-holder-imposter", 0xBB);
 
     let inv = drill_invocation("dos-001");
@@ -972,10 +1019,10 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
     // … plus A's cold SPARE: a registered accord_holder identity that is NOT a seat.
     let a_spare = Holder::new("accord-holder-a-spare", 0xC9);
-    registered_holders(&base, &owner, std::slice::from_ref(&a_spare)).await;
+    registered_holders(&engine, std::slice::from_ref(&a_spare)).await;
 
     // It IS registered (visible under `registered`) but is NOT one of the 3 seats.
     let roster: serde_json::Value = client
@@ -1048,10 +1095,10 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         Holder::new("accord-holder-b", 0xC2),
         Holder::new("accord-holder-c", 0xC3),
     ];
-    establish_family(&base, &owner, &holders).await;
+    establish_family(&engine, &base, &owner, &holders).await;
     // A vaulted spare (registered accord_holder, not a seat).
     let spare = Holder::new("accord-holder-d", 0xC4);
-    registered_holders(&base, &owner, std::slice::from_ref(&spare)).await;
+    registered_holders(&engine, std::slice::from_ref(&spare)).await;
 
     // Build the change envelope: replace A → D (roster {b,c,d}, still quorum:2/3).
     let new_ids = vec![
