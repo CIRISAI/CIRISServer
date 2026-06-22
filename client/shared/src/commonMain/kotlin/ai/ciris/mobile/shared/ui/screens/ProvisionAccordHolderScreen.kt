@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -266,6 +267,7 @@ fun ProvisionAccordHolderScreen(
                 onValueChange = { viewModel.setUserPin(it) },
                 singleLine = true,
                 enabled = !busy,
+                visualTransformation = PasswordVisualTransformation(),
                 label = { Text(localizedString("mobile.provision_holder_pin_label")) },
                 modifier = Modifier.fillMaxWidth().testable("input_provision_holder_pin"),
             )

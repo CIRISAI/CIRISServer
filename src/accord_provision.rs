@@ -591,6 +591,115 @@ async fn cosign_family_impl(_req: CosignFamilyRequest) -> Response {
     )
 }
 
+// ─── GET /v1/accord/yubikey-status — the "is this token ready?" probe ──────────
+
+/// `GET /v1/accord/yubikey-status` — report the inserted YubiKey's readiness for
+/// accord provisioning so the ceremony UI can show a clear banner ("YUBI DETECTED —
+/// FIPS COMPLIANT — 9C PROVISIONED — READY") + the PIN/PUK tries remaining. Shells
+/// `ykman piv info` (read-only; no cryptoki, so it works on any build); a missing
+/// token / `ykman` returns `{detected:false,…}` with a hint rather than an error.
+/// Loopback-only (same guard as the other accord-setup routes).
+async fn yubikey_status(State(_st): State<ProvisionState>) -> Response {
+    (StatusCode::OK, Json(probe_yubikey_status())).into_response()
+}
+
+/// Run `ykman piv info` and parse it into the readiness fields the UI shows. Never
+/// errors out — a missing token / `ykman` is reported as `detected:false`.
+fn probe_yubikey_status() -> serde_json::Value {
+    use serde_json::json;
+    let out = match std::process::Command::new("ykman")
+        .args(["piv", "info"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return json!({
+                "detected": false,
+                "ready": false,
+                "hint": format!("could not run `ykman` (is yubikey-manager installed?): {e}"),
+            })
+        }
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return json!({
+            "detected": false,
+            "ready": false,
+            "hint": format!("no YubiKey PIV detected: {}", stderr.trim()),
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let line_after = |label: &str| -> Option<String> {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(label))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let fips = line_after("FIPS approved:")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let pin_tries = line_after("PIN tries remaining:");
+    let puk_tries = line_after("PUK tries remaining:");
+    let piv_version = line_after("PIV version:");
+
+    // The Slot 9C block: a "Private key type" line ⇒ key present; any cert line
+    // (Subject/Issuer/Fingerprint/Not before/Not after) ⇒ certificate present. The
+    // certificate is what ykcs11 needs to ENUMERATE the key.
+    let mut in_9c = false;
+    let mut key_type: Option<String> = None;
+    let mut has_cert = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("Slot 9C") || t.starts_with("Slot 9c") {
+            in_9c = true;
+            continue;
+        }
+        // Indented lines belong to the current slot; a non-indented line ends it.
+        if in_9c && !line.starts_with(' ') && !line.starts_with('\t') && !t.is_empty() {
+            in_9c = false;
+        }
+        if in_9c {
+            if let Some((_, v)) = t.split_once("Private key type:") {
+                key_type = Some(v.trim().to_string());
+            }
+            if t.starts_with("Subject")
+                || t.starts_with("Issuer")
+                || t.starts_with("Fingerprint")
+                || t.starts_with("Not before")
+                || t.starts_with("Not after")
+            {
+                has_cert = true;
+            }
+        }
+    }
+    let key_present = key_type.is_some();
+    let ready = fips && key_present && has_cert;
+
+    json!({
+        "detected": true,
+        "piv_version": piv_version,
+        "fips_approved": fips,
+        "pin_tries_remaining": pin_tries,
+        "puk_tries_remaining": puk_tries,
+        "slot_9c_key": key_present,
+        "slot_9c_key_type": key_type,
+        "slot_9c_cert": has_cert,
+        "ready": ready,
+        // The slot needs a CERTIFICATE for ykcs11 to enumerate the key — surface the
+        // exact next step when the key is there but the cert isn't.
+        "hint": if key_present && !has_cert {
+            Some("slot 9C has a key but NO certificate — ykcs11 can't see it; generate a self-signed cert in 9C")
+        } else if !key_present {
+            Some("slot 9C has no key — provision an Ed25519 key in slot 9C")
+        } else if !fips {
+            Some("YubiKey is not FIPS-approved")
+        } else {
+            None
+        },
+    })
+}
+
 /// The accord-provision router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`).
 pub fn router(engine: Arc<Engine>) -> Router {
@@ -603,6 +712,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/family/cosign",
             axum::routing::post(cosign_family),
+        )
+        .route(
+            "/v1/accord/yubikey-status",
+            axum::routing::get(yubikey_status),
         )
         .with_state(state)
 }

@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.models.federation.YubiKeyStatus
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -140,6 +141,18 @@ class AccordCeremonyViewModel(
 
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    /** The inserted YubiKey's readiness (detected / FIPS / 9C key+cert / PIN tries),
+     *  driving the "YUBI DETECTED — FIPS COMPLIANT — 9C PROVISIONED — READY" banner. */
+    private val _yubiKeyStatus = MutableStateFlow<YubiKeyStatus?>(null)
+    val yubiKeyStatus: StateFlow<YubiKeyStatus?> = _yubiKeyStatus.asStateFlow()
+
+    /** Re-probe the inserted YubiKey (called on entering PROVISION + on demand). */
+    fun refreshYubiKeyStatus() {
+        viewModelScope.launch {
+            _yubiKeyStatus.value = apiClient.getYubiKeyStatus(CIRISApiClient.LOCAL_NODE_URL)
+        }
+    }
 
     /** The PRIMARY provisioned keys, in ceremony order (the genesis member set). */
     fun primaries(): List<ProvisionedKey> = _provisioned.value.filter { it.slot.primary }

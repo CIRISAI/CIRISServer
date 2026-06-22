@@ -179,3 +179,24 @@ data class GenesisAssembleResponse(
     val genesis: kotlinx.serialization.json.JsonElement,
     val message: String? = null,
 )
+
+/**
+ * ``GET /v1/accord/yubikey-status`` — the inserted YubiKey's readiness for accord
+ * provisioning, so the ceremony UI can show a clear banner + the PIN/PUK tries.
+ * `detected=false` (token/`ykman` absent) carries a [hint] instead of the rest.
+ * `ready` == detected && fips_approved && slot 9C has BOTH a key and a certificate
+ * (the cert is what ykcs11 needs to enumerate the key).
+ */
+@Serializable
+data class YubiKeyStatus(
+    val detected: Boolean = false,
+    val ready: Boolean = false,
+    @SerialName("piv_version") val pivVersion: String? = null,
+    @SerialName("fips_approved") val fipsApproved: Boolean = false,
+    @SerialName("pin_tries_remaining") val pinTriesRemaining: String? = null,
+    @SerialName("puk_tries_remaining") val pukTriesRemaining: String? = null,
+    @SerialName("slot_9c_key") val slot9cKey: Boolean = false,
+    @SerialName("slot_9c_key_type") val slot9cKeyType: String? = null,
+    @SerialName("slot_9c_cert") val slot9cCert: Boolean = false,
+    val hint: String? = null,
+)
