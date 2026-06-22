@@ -104,9 +104,10 @@ use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation;
 use ciris_verify_core::accord_genesis::{
-    accord_invocation_status, assemble_accord_family_genesis, build_accord_family_envelope,
-    build_accord_invocation_object, parse_accord_invocation, ACCORD_CONSENSUS_PROTOCOL,
-    ACCORD_FAMILY_GENESIS_KIND, ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
+    accord_invocation_status, accord_roster_from_family, assemble_accord_family_genesis,
+    build_accord_family_envelope, build_accord_invocation_object, humanity_accord_genesis,
+    parse_accord_invocation, ACCORD_CONSENSUS_PROTOCOL, ACCORD_FAMILY_GENESIS_KIND,
+    ACCORD_QUORUM_THRESHOLD, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
 use ciris_verify_core::federation_self_record::produce_self_key_record;
@@ -216,18 +217,82 @@ fn err(code: StatusCode, error: &str) -> Response {
 /// only stops the *same* key in two seats). A spare becomes a counted seat ONLY via
 /// a family member SWAP that simultaneously revokes the primary it replaces — never
 /// as an added 4th seat. Errs `409` until the family is entrenched.
-async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response> {
+/// The outcome of resolving the kill-switch roster — distinguished so callers
+/// (the strict [`accord_roster`] vs the informational [`list_holders`]) can each
+/// choose how to render "no usable roster yet".
+enum RosterResolution {
+    /// A usable kill-switch roster (from the entrenched persist family OR, at
+    /// cold-start, the baked genesis recognition root).
+    Resolved(Vec<ThresholdMember>),
+    /// No persist family AND no baked genesis — the kill-switch roster is undefined.
+    Undefined,
+    /// A family/genesis is present but its roster cannot be fully resolved to pinned
+    /// holder keys yet (a seat's `accord_holder` record hasn't replicated in, or a
+    /// malformed bake) — fail-closed: NOT a usable roster.
+    Incomplete(String),
+    /// A persist store fault.
+    Store(String),
+}
+
+/// Resolve the authoritative kill-switch roster, with **cold-start fallback to the
+/// BAKED genesis recognition root** (CIRISVerify#107). Order:
+///   1. the entrenched persist FAMILY (the live SEATS) — authoritative when present;
+///   2. else the **baked** `humanity_accord_genesis()` resolved against the node's
+///      PINNED `accord_holder` keys via [`accord_roster_from_family`] — the no-TOFU
+///      recognition path a node that was NOT at the ceremony uses (NEVER fetched
+///      from a peer). Inert until verify bakes the genesis (`None` today).
+async fn resolve_kill_switch_roster(engine: &Engine) -> RosterResolution {
+    // (1) An entrenched persist family is authoritative.
     match crate::family::active_threshold_roster(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
-        Ok(roster) if roster.is_empty() => Err(err(
-            StatusCode::CONFLICT,
-            "no HUMANITY_ACCORD family entrenched — the kill-switch roster is undefined",
-        )),
-        Ok(roster) => Ok(roster),
-        Err(crate::family::RosterError::Store(e)) => {
-            Err(err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))
-        }
+        Ok(roster) if !roster.is_empty() => return RosterResolution::Resolved(roster),
+        Ok(_) => {} // empty → try the baked recognition root below
+        Err(crate::family::RosterError::Store(e)) => return RosterResolution::Store(e.to_string()),
         Err(e @ crate::family::RosterError::UnregisteredMember(_)) => {
-            Err(err(StatusCode::CONFLICT, &e.to_string()))
+            return RosterResolution::Incomplete(e.to_string())
+        }
+    }
+
+    // (2) Cold-start, no-TOFU recognition: resolve the roster from the BAKED genesis
+    // against the node's PINNED accord_holder keys. verify's resolver picks exactly
+    // the genesis members out of the directory and fail-closes on any missing.
+    let Some(genesis) = humanity_accord_genesis() else {
+        return RosterResolution::Undefined;
+    };
+    let directory: Vec<ThresholdMember> = match engine
+        .federation_directory()
+        .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| ThresholdMember {
+                member_id: r.key_id,
+                ed25519_public_key_base64: r.pubkey_ed25519_base64,
+                mldsa65_public_key_base64: r.pubkey_ml_dsa_65_base64,
+                role: None,
+            })
+            .collect(),
+        Err(e) => return RosterResolution::Store(e.to_string()),
+    };
+    match accord_roster_from_family(genesis, &directory) {
+        Ok(roster) => RosterResolution::Resolved(roster),
+        Err(e) => RosterResolution::Incomplete(format!(
+            "baked HUMANITY_ACCORD genesis present but its roster is not yet \
+             resolvable from pinned holder keys: {e}"
+        )),
+    }
+}
+
+async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response> {
+    match resolve_kill_switch_roster(engine).await {
+        RosterResolution::Resolved(roster) => Ok(roster),
+        RosterResolution::Undefined => Err(err(
+            StatusCode::CONFLICT,
+            "no HUMANITY_ACCORD family entrenched and no baked genesis — the kill-switch roster is undefined",
+        )),
+        RosterResolution::Incomplete(detail) => Err(err(StatusCode::CONFLICT, &detail)),
+        RosterResolution::Store(e) => {
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))
         }
     }
 }
@@ -408,12 +473,13 @@ async fn list_holders(State(st): State<AccordState>) -> Response {
             .collect(),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
-    // The authoritative seats = the live family roster (empty/none until genesis).
+    // The authoritative seats = the live family roster, with the same cold-start
+    // fallback to the BAKED genesis recognition root the kill-switch itself uses
+    // ([`resolve_kill_switch_roster`]) — so a node that was NOT at the ceremony lists
+    // the seats it recognizes with no trust-on-first-use.
     let (family_established, seats): (bool, Vec<HolderSummary>) =
-        match crate::family::active_threshold_roster(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID)
-            .await
-        {
-            Ok(roster) if !roster.is_empty() => (
+        match resolve_kill_switch_roster(&st.engine).await {
+            RosterResolution::Resolved(roster) => (
                 true,
                 roster
                     .into_iter()
@@ -424,12 +490,13 @@ async fn list_holders(State(st): State<AccordState>) -> Response {
                     })
                     .collect(),
             ),
-            Ok(_) => (false, Vec::new()),
-            Err(crate::family::RosterError::Store(e)) => {
+            RosterResolution::Undefined => (false, Vec::new()),
+            // A genesis is present but a seat's key hasn't replicated in yet ⇒ surface
+            // as not-established (informational endpoint, fail-closed).
+            RosterResolution::Incomplete(_) => (false, Vec::new()),
+            RosterResolution::Store(e) => {
                 return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}"))
             }
-            // A seated member missing its key ⇒ roster incomplete; surface as not-established.
-            Err(crate::family::RosterError::UnregisteredMember(_)) => (false, Vec::new()),
         };
     (
         StatusCode::OK,
