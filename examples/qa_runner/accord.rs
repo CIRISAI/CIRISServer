@@ -6,7 +6,7 @@
 use ciris_server::accord::AccordHalt;
 use ciris_server::accord_halt::{check_halt_gate, halt_latch_path};
 
-use crate::common::{invocation, mint_owner_session, node, serve, Report, SoftId};
+use crate::common::{invocation, mint_owner_session, node, seat_holder, serve, Report, SoftId};
 
 async fn jpost(
     client: &reqwest::Client,
@@ -53,17 +53,11 @@ pub async fn run(report: &mut Report) {
         SoftId::new("qa-holder-c", 0xC3),
     ];
 
-    // 1. Register the 3 holders (hardware-attested accord_holder records).
+    // 1. Seat the 3 holders (hardware-attested accord_holder records). Seated via the
+    //    engine — the HTTP custody gate (now mandatory) needs a real FIPS YubiKey.
     let mut reg_ok = true;
     for h in &holders {
-        let (s, _) = jpost(
-            &client,
-            format!("{base}/v1/accord/holder"),
-            Some(&owner),
-            serde_json::json!({ "key_record": h.signed_key_record("accord_holder").await }),
-        )
-        .await;
-        reg_ok &= s == 200;
+        reg_ok &= seat_holder(&engine, h).await;
     }
     report.check(m, "register 3 holders", reg_ok, "");
 
@@ -101,14 +95,8 @@ pub async fn run(report: &mut Report) {
 
     // 3. Register a cold SPARE (a registered accord_holder that is NOT a seat).
     let spare = SoftId::new("qa-holder-a-spare", 0xC9);
-    let (s, _) = jpost(
-        &client,
-        format!("{base}/v1/accord/holder"),
-        Some(&owner),
-        serde_json::json!({ "key_record": spare.signed_key_record("accord_holder").await }),
-    )
-    .await;
-    report.record(m, "register cold spare", s == 200, "");
+    let seated = seat_holder(&engine, &spare).await;
+    report.record(m, "register cold spare", seated, "");
 
     // 4. Roster = the 3 SEATS; the spare is registered but not seated.
     let roster: serde_json::Value = client
@@ -276,13 +264,7 @@ pub async fn run_membership(report: &mut Report) {
         SoftId::new("mc-f", 0xA6),
     ];
     for id in h.iter().chain(spares.iter()) {
-        jpost(
-            &client,
-            format!("{base}/v1/accord/holder"),
-            Some(&owner),
-            serde_json::json!({ "key_record": id.signed_key_record("accord_holder").await }),
-        )
-        .await;
+        seat_holder(&engine, id).await;
     }
     let member_ids: Vec<String> = h.iter().map(|x| x.key_id.clone()).collect();
     let (_s, env) = jpost(
@@ -482,18 +464,12 @@ pub async fn run_ceremony(report: &mut Report) {
     ];
     let mut all_ok = true;
     for (i, id) in order.iter().enumerate() {
-        let (s, _) = jpost(
-            &client,
-            format!("{base}/v1/accord/holder"),
-            Some(&owner),
-            serde_json::json!({ "key_record": id.signed_key_record("accord_holder").await }),
-        )
-        .await;
-        all_ok &= s == 200;
+        let seated = seat_holder(&engine, id).await;
+        all_ok &= seated;
         report.record(
             m,
             &format!("key {}/6 registered ({})", i + 1, id.key_id),
-            s == 200,
+            seated,
             "",
         );
     }

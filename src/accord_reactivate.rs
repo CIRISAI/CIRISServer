@@ -16,7 +16,10 @@ use anyhow::{bail, Context, Result};
 use ciris_keyring::{HardwareSigner, PqcSigner};
 use ciris_persist::federation::cohort::Cohort;
 use ciris_persist::prelude::Engine;
-use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
+use ciris_verify_core::accord_genesis::{
+    accord_roster_from_family, humanity_accord_genesis, HUMANITY_ACCORD_FAMILY_KEY_ID,
+    IDENTITY_TYPE_ACCORD_HOLDER,
+};
 use ciris_verify_core::humanity_accord::{Invocation, InvocationKind};
 use ciris_verify_core::threshold::{
     verify_threshold_signatures, QuorumPolicy, ThresholdMember, ThresholdSignature,
@@ -103,43 +106,76 @@ pub async fn reactivate_accord(cfg: &ServerConfig, proof: ReactivationProof) -> 
         })?;
 
     // (2) Original-mesh continuity (the reactivation FLOOR): the proof MUST also carry
-    // ≥1 cosignature from an ORIGINAL (genesis, version-1) seat. A halted node is
-    // brought back only with a FOUNDING human's authorization — so a fully rotated (or
-    // captured) roster cannot resurrect a node the original humanity halted. (If every
-    // founder's key is gone, reactivation requires re-establishing the family — by
-    // design: the gravest undo demands continuity with who established the accord.)
+    // ≥1 cosignature from an ORIGINAL (genesis) seat. A halted node is brought back only
+    // with a FOUNDING human's authorization — so a fully rotated (or captured) roster
+    // cannot resurrect a node the original humanity halted. (If every founder's key is
+    // gone, reactivation requires re-establishing the family — by design: the gravest
+    // undo demands continuity with who established the accord.)
+    //
+    // B2 review fix — the original set is anchored to the PINNED baked genesis
+    // (`humanity_accord_genesis()`, compiled into the verify binary, NOT operator-
+    // writable) when available. Only when it is not yet baked (CIRISVerify#107 / G2
+    // pending) do we fall back to the LOCAL persist version-1 snapshot — which an
+    // operator with DB write could forge — and we say so loudly.
     let dir = engine.federation_directory();
-    let genesis_member_ids: Vec<String> = match dir
-        .group_at(Cohort::Family, HUMANITY_ACCORD_FAMILY_KEY_ID, 1)
-        .await
-        .map_err(|e| anyhow::anyhow!("read genesis (version 1) family: {e}"))?
-    {
-        Some(v) => v.snapshot["members"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| m.get("key_id")?.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        // No version-1 record (never superseded) ⇒ the current family IS the original.
-        None => family.members.iter().map(|m| m.key_id.clone()).collect(),
-    };
-    let mut original_roster: Vec<ThresholdMember> = Vec::new();
-    for key_id in &genesis_member_ids {
-        if let Some(rec) = dir
-            .lookup_public_key(key_id)
+    let original_roster: Vec<ThresholdMember> = if let Some(genesis) = humanity_accord_genesis() {
+        // Pinned source of truth: resolve the baked genesis members against the node's
+        // registered accord_holder keys (verify's resolver fail-closes on any missing).
+        let directory: Vec<ThresholdMember> = dir
+            .list_keys_by_identity_type(IDENTITY_TYPE_ACCORD_HOLDER)
             .await
-            .map_err(|e| anyhow::anyhow!("resolve genesis seat {key_id}: {e}"))?
-        {
-            original_roster.push(ThresholdMember {
-                member_id: rec.key_id,
-                ed25519_public_key_base64: rec.pubkey_ed25519_base64,
-                mldsa65_public_key_base64: rec.pubkey_ml_dsa_65_base64,
+            .map_err(|e| anyhow::anyhow!("list accord_holder keys for genesis resolve: {e}"))?
+            .into_iter()
+            .map(|r| ThresholdMember {
+                member_id: r.key_id,
+                ed25519_public_key_base64: r.pubkey_ed25519_base64,
+                mldsa65_public_key_base64: r.pubkey_ml_dsa_65_base64,
                 role: None,
-            });
+            })
+            .collect();
+        accord_roster_from_family(genesis, &directory).map_err(|e| {
+            anyhow::anyhow!("resolve the BAKED (pinned) genesis original roster: {e}")
+        })?
+    } else {
+        tracing::warn!(
+            "HUMANITY_ACCORD genesis is NOT yet baked into verify (CIRISVerify#107 / G2) — the \
+             original-mesh continuity check is falling back to the LOCAL persist version-1 \
+             snapshot, which an operator with DB write could forge. Bake the genesis to pin this \
+             floor against a captured host."
+        );
+        let genesis_member_ids: Vec<String> = match dir
+            .group_at(Cohort::Family, HUMANITY_ACCORD_FAMILY_KEY_ID, 1)
+            .await
+            .map_err(|e| anyhow::anyhow!("read genesis (version 1) family: {e}"))?
+        {
+            Some(v) => v.snapshot["members"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m.get("key_id")?.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // No version-1 record (never superseded) ⇒ the current family IS the original.
+            None => family.members.iter().map(|m| m.key_id.clone()).collect(),
+        };
+        let mut roster = Vec::new();
+        for key_id in &genesis_member_ids {
+            if let Some(rec) = dir
+                .lookup_public_key(key_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve genesis seat {key_id}: {e}"))?
+            {
+                roster.push(ThresholdMember {
+                    member_id: rec.key_id,
+                    ed25519_public_key_base64: rec.pubkey_ed25519_base64,
+                    mldsa65_public_key_base64: rec.pubkey_ml_dsa_65_base64,
+                    role: None,
+                });
+            }
         }
-    }
+        roster
+    };
     verify_threshold_signatures(&canonical, &original_roster, &proof.signatures, 1).map_err(
         |_| {
             anyhow::anyhow!(

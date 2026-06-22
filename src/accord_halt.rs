@@ -67,11 +67,12 @@ pub fn check_halt_gate(home: &Path) -> anyhow::Result<()> {
          accord (accord:lifecycle:active). No operator, steward, or Wise Authority \
          restart can override it.\n\n\
          Halt latch: {path}\n{detail}\n\n\
-         The constitutional way back is a verified 2-of-3 accord:lifecycle:active that \
+         The ONLY conformant way back is a verified 2-of-3 accord:lifecycle:active that \
          includes >=1 of the ORIGINAL (genesis) holders:\n    \
          ciris-server accord reactivate --home <home> --proof <proof.json>\n\n\
-         (Break-glass only, NON-conformant — an operator override the accord does not \
-         authorize: rm {path})\n",
+         Manually deleting the latch is a NON-conformant operator override the accord does \
+         not authorize and is not a supported recovery path; the kill-switch holders, not the \
+         operator, bring a node back.\n",
         path = path.display(),
     );
 }

@@ -26,7 +26,7 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use ciris_persist::federation::types::{attestation_type, cohort_scope};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, identity_type};
 use ciris_persist::federation::{EmitAttestationInput, Error as FederationError};
 use ciris_persist::prelude::Engine;
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -117,6 +117,17 @@ pub fn default_attestation_prefixes() -> Vec<String> {
 /// must not fail boot over a directory race, and B's stable published identity
 /// should never legitimately conflict.
 pub async fn register_peer_key(engine: &Engine, peer: &PeerB) -> Result<()> {
+    // Safe-mesh floor (B1): an `accord_holder` identity — a kill-switch SEAT — may be
+    // admitted ONLY through the custody-gated `POST /v1/accord/holder` (which mandates
+    // a verified FIPS YubiKey custody attestation). This generic peer-key route does
+    // NOT verify custody, so it must REFUSE accord_holder records — otherwise an owner
+    // could seat a non-FIPS kill-switch holder via the side door.
+    if peer.key_record.record.identity_type == identity_type::ACCORD_HOLDER {
+        return Err(anyhow::anyhow!(
+            "refusing to register an accord_holder key via the peering route — accord holders \
+             must be admitted through the custody-gated POST /v1/accord/holder"
+        ));
+    }
     match engine
         .register_federation_key(peer.key_record.clone())
         .await
