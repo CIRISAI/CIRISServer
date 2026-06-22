@@ -219,6 +219,7 @@ async fn serve_with_pin(
         node_key_id.to_string(),
         node_pubkey_b64(),
         claim_pin,
+        None,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -491,6 +491,9 @@ struct SetupState {
     /// the first successful claim (consume-once; no replay). Held behind a `Mutex`
     /// so the claim handler can take it. NEVER reachable via any HTTP route.
     claim_pin: Arc<Mutex<Option<String>>>,
+    /// The durable claim-PIN file (`<home>/claim_pin`), if one was written. Deleted
+    /// on the first successful claim so the one-time secret does not linger on disk.
+    claim_pin_file: Option<std::path::PathBuf>,
 }
 
 /// The 1-phase first-run ROOT-claim request body — the NodeCode identity-pin
@@ -910,9 +913,22 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     };
     match store::upsert(&st.engine, cert).await {
         Ok(()) => {
-            // Consume the one-time PIN (no replay; route is also 409-closed now).
+            // Consume the one-time PIN (no replay; route is also 409-closed now):
+            // clear it from memory AND delete its durable file so the secret does not
+            // linger on disk after the node is claimed.
             if let Ok(mut guard) = st.claim_pin.lock() {
                 *guard = None;
+            }
+            if let Some(pin_file) = &st.claim_pin_file {
+                match std::fs::remove_file(pin_file) {
+                    Ok(()) => {
+                        tracing::info!(pin_file = %pin_file.display(), "claim PIN file deleted on successful claim (one-time secret consumed)")
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::warn!(pin_file = %pin_file.display(), error = %e, "could not delete claim PIN file after claim — remove it manually")
+                    }
+                }
             }
             tracing::info!(
                 identity = %identity_key_id,
@@ -1036,6 +1052,7 @@ pub fn router(
     node_key_id: String,
     node_pubkey_ed25519_base64: String,
     claim_pin: Option<String>,
+    claim_pin_file: Option<std::path::PathBuf>,
 ) -> Router {
     Router::new()
         .route("/v1/setup/root", axum::routing::post(setup_root))
@@ -1047,6 +1064,7 @@ pub fn router(
             node_key_id,
             node_pubkey_ed25519_base64,
             claim_pin: Arc::new(Mutex::new(claim_pin)),
+            claim_pin_file,
         })
 }
 

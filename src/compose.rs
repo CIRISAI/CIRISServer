@@ -412,6 +412,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             node_code.key_id.clone(),
                             node_code.pubkey_ed25519_base64.clone(),
                             claim_pin.clone(),
+                            // The durable PIN file to delete on a successful claim
+                            // (the same conventional path announce_ownership_unclaimed
+                            // writes). Only meaningful when a PIN was minted.
+                            claim_pin.as_ref().map(|_| cfg.claim_pin_file()),
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,
