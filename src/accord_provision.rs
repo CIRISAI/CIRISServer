@@ -274,17 +274,39 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
         provision: false,
         ..Pkcs11Options::default()
     };
+    tracing::info!(
+        key_id = %req.key_id,
+        piv_slot = %piv_slot,
+        module = %opts.module_path.display(),
+        usb_path = %usb_dir.display(),
+        pin_supplied = opts.user_pin.is_some(),
+        "accord provision-holder: opening the holder's YubiKey Ed25519 (slot {piv_slot})"
+    );
     let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
         Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
         Err(e) => {
+            // Log server-side too (the failure was previously visible ONLY in the
+            // client). The most common cause when the key IS present: ykcs11 only
+            // exposes a PIV private key when the slot also holds a CERTIFICATE — a
+            // key-without-cert slot enumerates nothing ("Key not found").
+            tracing::warn!(
+                key_id = %req.key_id,
+                slot = %piv_slot,
+                error = %e,
+                "accord provision-holder: could NOT open the YubiKey slot key — if the key IS \
+                 present (ykman piv info), the slot likely has no CERTIFICATE (ykcs11 enumerates \
+                 keys by cert) and/or no CHUID; generate a self-signed cert in the slot"
+            );
             return err(
                 StatusCode::BAD_REQUEST,
                 &format!(
-                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
-                     inserted, FIPS-approved, and the PIN correct? (run the ykman prep first if \
-                     you haven't)"
+                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — if `ykman piv info` \
+                     shows the key, the slot is likely missing a CERTIFICATE (ykcs11 only exposes \
+                     a PIV key when its slot has a cert): generate a self-signed cert in slot \
+                     {piv_slot}. Otherwise check the YubiKey is inserted, FIPS-approved, and the \
+                     PIN is correct."
                 ),
-            )
+            );
         }
     };
 
