@@ -738,9 +738,17 @@ class SetupViewModel(
                 // node does all crypto (keygen, sealing, genesis-object signing) in
                 // its substrate; the app only POSTs over plain localhost HTTP and
                 // surfaces the public result. NO keys/crypto in Kotlin.
+                // "Secure with 2FA" means a HARDWARE-custodied (YubiKey / PKCS#11)
+                // identity — so route the mint to the pkcs11 backend (opens the token,
+                // touch+PIN). An explicit backend choice wins; otherwise 2FA ⇒ pkcs11,
+                // and only with 2FA OFF do we fall back to the server's default
+                // (platform-sealed / software). Without this the mint sent no backend
+                // and the node silently minted a software/TPM-sealed key — no YubiKey.
+                val mintBackend = fed.backend
+                    ?: if (_state.value.secureWith2FA) "pkcs11" else null
                 val minted = client.mintUserIdentity(
                     label = fed.label.trim().ifBlank { null },
-                    backend = fed.backend,
+                    backend = mintBackend,
                     localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
                 )
                 _state.value = _state.value.copy(

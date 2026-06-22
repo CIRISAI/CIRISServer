@@ -946,10 +946,19 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
 /// `is_first_run` here: ciris-server's only setup-needed state is "no ROOT yet"
 /// (the agent's extra `config_exists && !has_admin` recovery case maps onto the
 /// same ROOT-absence signal on the fabric).
+/// The `{data:{…}}`-enveloped setup status the shared client reads (it is generated
+/// from the agent OpenAPI, which wraps every payload in `data`). `config_exists`
+/// mirrors the agent field; on the fabric it means "already claimed" (`!is_first_run`).
 #[derive(Debug, Serialize)]
-struct SetupStatusResponse {
+struct SetupStatusData {
     is_first_run: bool,
     setup_required: bool,
+    config_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SetupStatusResponse {
+    data: SetupStatusData,
 }
 
 /// `GET /v1/setup/owned-nodes` — the CEG-native node list: the nodes owned by
@@ -994,8 +1003,11 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
     (
         StatusCode::OK,
         Json(SetupStatusResponse {
-            is_first_run: first_run,
-            setup_required: first_run,
+            data: SetupStatusData {
+                is_first_run: first_run,
+                setup_required: first_run,
+                config_exists: !first_run,
+            },
         }),
     )
         .into_response()
