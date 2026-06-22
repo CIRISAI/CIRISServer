@@ -1,10 +1,15 @@
 # FSD — The Safe Mesh (what it means, and why v0.5.30 is the floor)
 
-> **Status:** proposed — the claim that ciris-server **v0.5.30** completes the
-> *safe-mesh floor*, the precondition the project has held `0.5.X` for. This FSD
-> defines "safe mesh", states the invariants that make a mesh safe, maps each to the
-> code that satisfies it, and is explicit about **what is NOT yet done** (the
-> operational ceremony + the verify genesis bake) before 0.6 mints the canonical mesh.
+> **Status:** CLAIM REFUTED by red-team review (2026-06-21) — v0.5.30 is **close but
+> NOT yet the complete safe-mesh floor**. §3/§5 below are the original claim; **§8
+> records the review outcome and the blockers that must be fixed before the genesis
+> ceremony.** Of the I1–I8 invariants, the review found I6/I7/I8 hold but **I1, I2, I3,
+> I5 have real gaps** (two critical). Read §8 first.
+>
+> This FSD defines "safe mesh", states the invariants that make a mesh safe, maps each
+> to the code that was *intended* to satisfy it, and is explicit about what is NOT yet
+> done (the operational ceremony + the verify genesis bake) before 0.6 mints the
+> canonical mesh.
 >
 > Audience: the maintainers deciding whether to run the genesis ceremony and cut 0.6.
 > This document is written to be **challenged** — every invariant cites the module
@@ -170,3 +175,87 @@ state "safe mesh" forbids.
 
 If the answers hold, v0.5.30 is the safe-mesh floor and G1–G3 may proceed in order. If
 any fail, that gap is a blocker before the ceremony.
+
+## 8. Red-team review outcome (2026-06-21) — this REVISES §5
+
+A four-agent adversarial review (one per invariant cluster, each tasked to *refute*)
+read the merged v0.5.30 code + the pinned substrate (verify v6.11.0, persist v9.10.0).
+Result: **the code floor is NOT complete.** I6 (no-TOFU recognition), I7 (PQC-hybrid +
+distinct-key), and I8 (governance/membership change) hold as implemented. The
+following gaps were found and verified against source.
+
+### Ceremony BLOCKERS (must fix before minting the trios)
+
+- **B1 — CRITICAL (I5): the FIPS custody floor is bypassable.** `register_holder`'s
+  `custody_attestation` is `#[serde(default)] Option` (`src/accord.rs:~363`); when
+  absent the code admits the holder anyway (`else => Null`, `src/accord.rs:~425`). The
+  always-on substrate gate (`register_federation_key` → persist `HardwareAttestationPolicy`)
+  only refuses `SoftwareOnly` and accepts *any* other hardware type (Android StrongBox,
+  TPM, …) from a caller-asserted, chain-unverified `attestation_evidence` field that is
+  *disjoint* from the YubiKey `custody_attestation`. So an owner session can seat a
+  kill-switch holder with a fabricated non-FIPS claim and **no YubiKey/FIPS/touch** —
+  which is exactly what `tests/accord.rs` + `examples/qa_runner` do. The rigorous
+  Yubico-root chain verification *exists* and is sound, but is **not on the mandatory
+  path.** Fix: make `custody_attestation` REQUIRED for `identity_type==accord_holder`,
+  couple the verified `CustodyVerdict` to the persisted `attestation_evidence`, and/or
+  install a strict YubiKey-FIPS `HardwareAttestationPolicy`.
+
+- **B2 — CRITICAL (I2): reactivation/halt-clear continuity is rooted in operator-
+  writable local state, not a pin.** `reactivate_accord` reads BOTH the current roster
+  and the "ORIGINAL genesis (version-1)" set from `engine.federation_directory()` — the
+  local persist DB (`src/accord_reactivate.rs:74, 112-142`) — and never consults the
+  pinned `humanity_accord_genesis()`. A root operator can rewrite `federation_families`
+  / forge a version-1 group row with their own keys and self-author a "valid" 2/3
+  `lifecycle:active`. Compounded by the `rm <latch>` break-glass that `check_halt_gate`
+  itself advertises (`src/accord_halt.rs:73-74`): the latch is a plain file clearable by
+  any process as the node user, with no quorum. So I2 ("no operator action brings it
+  back without a 2/3 proof") is false against a captured host — the exact threat in §4.
+  Fix: anchor the original-genesis continuity check to the *pinned* baked genesis (needs
+  G2), make the latch tamper-evident / quorum-bound, and close/neuter the bare-`rm` path.
+
+- **B3 — HIGH (I3): the quorum-completing halt is not propagated mesh-wide.** The gossip
+  loop-stop `seen` set is keyed on `(invocation_kind, invocation_id)` only and is
+  inserted on the FIRST (sub-quorum) sighting (`src/accord.rs:~1133-1152`). A
+  CONSTITUTIONAL invocation normally arrives sub-quorum first; when the signature that
+  COMPLETES the 2/3 arrives later, `first_sight==false` so `replicate_to_peers` is
+  skipped — the node latches + exits **without** propagating the now-quorum halt, and
+  the earlier gossiped object carried <2 sigs so no peer can halt from it. Fix: make the
+  loop-stop quorum-aware (track quorum-met sightings separately; always replicate a
+  global halt that newly reaches quorum).
+
+- **B4 — HIGH (I1): a halt can resurrect if the latch write fails.** In
+  `replicate_and_maybe_halt`, if all latch-write attempts fail the node logs + still
+  `exit(42)` (`src/accord.rs:~1177-1198`); next boot finds no latch and starts normally.
+  A full/read-only disk silently un-halts a killed node. Fix: a failed latch write must
+  not exit "as halted" — stay down / retry / fail louder.
+
+### Not an initial-ceremony blocker, but MUST fix before the family grows
+
+- **N1 — HIGH (I4, latent): the live halt threshold is hard-coded to `2`.**
+  `verify_invocation` (literal `2`) and `accord_invocation_status`
+  (`ACCORD_QUORUM_THRESHOLD=2`) never read the family's `consensus_protocol`, unlike
+  `reactivate` which derives M correctly. Correct for the genesis `quorum:2/3` trio, but
+  after an I8 growth to 3/5 a **2-of-5 minority** could trigger the irreversible global
+  kill (and reactivation would need 3 — an asymmetry). Fix: derive M from
+  `consensus_protocol` on the halt paths too.
+
+- **N2 — MEDIUM (I7 boundary): `verify-invocation` applies no distinct-pubkey re-check**
+  (only `member_id`-string dedup); the same key under two `member_id`s would be counted
+  twice there. Contained today because the roster is built by genesis/supersede which
+  enforce distinct pubkeys in the substrate, and no raw add-member route is exposed —
+  but the property should be re-asserted at the verifier, not relied on upstream.
+
+### Verified SOUND (no flaw found)
+I6 no-TOFU recognition (fails safe; cold-start with no baked genesis recognizes NO
+roster rather than a fetched one); I7 PQC-hybrid required on every authority path +
+zero/over-threshold rejected; I8 supersede (substrate-enforced strict-majority +
+one-seat + anti-replay + entrenchment-preserving); startup-gate fail-secure on latch
+presence; wrong-kind reactivate proof rejected before engine open; spare-vs-seat
+self-quorum closed (roster = live family seats only).
+
+### Revised bottom line
+v0.5.30 is the right architecture and most of it is sound, but **running the ceremony
+now would mint a kill-switch that (B1) admits non-hardware holders, (B2) a root
+operator can both `rm`-clear and forge a reactivation for, and (B3) may fail to spread
+when triggered.** B1+B2+B3+B4 must be fixed (and G2 — the verify genesis bake — is a
+hard dependency of B2's real fix) before the genesis ceremony and the 0.6 canonical cut.
