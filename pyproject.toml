@@ -40,3 +40,13 @@ ciris-server = "ciris_server:main"
 features = ["extension-module"]
 module-name = "ciris_server"
 # Pure-Rust extension (no Python wrapper source); abi3 forward-compat wheel.
+# Keep the Python sdist under PyPI's 100 MB/file limit: drop the vendored
+# KMP/Compose client (~234 MB) + the other non-Rust-build trees from the sdist.
+# None are needed to build the abi3 extension — the wheel carries the compiled
+# artifact, the sdist carries buildable Rust source. (Wheels never bundled these.)
+exclude = [
+    { path = "client/**/*", format = "sdist" },
+    { path = "qa/**/*", format = "sdist" },
+    { path = "app/**/*", format = "sdist" },
+    { path = "FSD/**/*", format = "sdist" },
+]
