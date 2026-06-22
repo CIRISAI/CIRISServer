@@ -42,6 +42,10 @@ pub mod accord_halt;
 /// approved YubiKey + the chosen ML-DSA USB path. `pkcs11`-feature-gated for the
 /// real-token path (returns NotSupported without it).
 pub mod accord_provision;
+/// HUMANITY_ACCORD reactivation (CIRISServer#41, CC 4.2.1 §69) — the offline
+/// `accord reactivate` op: a verified 2/3 `accord:lifecycle:active` clears the halt
+/// latch (the quorum brings the node back, never an operator restart).
+pub mod accord_reactivate;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become

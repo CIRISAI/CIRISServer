@@ -57,6 +57,18 @@ async fn main() -> Result<()> {
                 other
             )),
         },
+        // `ciris-server accord reactivate --home <path> [--key-id <name>] --proof <file>`
+        // — the constitutional way back from a HUMANITY_ACCORD halt (CC 4.2.1 §69): a
+        // verified 2/3 `accord:lifecycle:active` proof clears the disk latch so the
+        // node may boot. NOT an operator restart — the quorum brings it back.
+        Some("accord") => match args.next().as_deref() {
+            Some("reactivate") => run_accord_reactivate(args).await,
+            other => Err(anyhow::anyhow!(
+                "usage: ciris-server accord reactivate --home <path> [--key-id <name>] \
+                 --proof <file.json> (got {:?})",
+                other
+            )),
+        },
         // `ciris-server identity create ...` consumed the first arg already; the
         // default arm boots the fabric node. The default-serve path takes the ONLY
         // two bootstrap inputs (Server 0.5 zero-env): `--home <path>` (the data
@@ -73,6 +85,36 @@ async fn main() -> Result<()> {
         }
     }
 }
+
+/// Parse `accord reactivate` flags + clear the halt latch on a verified 2/3 proof.
+async fn run_accord_reactivate(mut args: impl Iterator<Item = String>) -> Result<()> {
+    use ciris_server::config::{ServerConfig, DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
+
+    let mut home: Option<String> = None;
+    let mut key_id = DEFAULT_KEY_ID.to_string();
+    let mut proof_path: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--proof" => proof_path = Some(args.next().context("--proof needs a file")?),
+            other => return Err(anyhow::anyhow!("unknown accord-reactivate arg: {other}")),
+        }
+    }
+    let home = home.unwrap_or_else(|| DEFAULT_CIRIS_HOME.to_string());
+    let proof_path = proof_path
+        .ok_or_else(|| anyhow::anyhow!("accord reactivate requires --proof <file.json>"))?;
+
+    let cfg = ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let proof_bytes = std::fs::read(&proof_path)
+        .with_context(|| format!("read reactivation proof {proof_path}"))?;
+    let proof: ciris_server::accord_reactivate::ReactivationProof =
+        serde_json::from_slice(&proof_bytes).context("parse reactivation proof JSON")?;
+
+    ciris_server::accord_reactivate::reactivate_accord(&cfg, proof).await
+}
+
+use anyhow::Context as _;
 
 /// Parse the `identity create` flags and mint the USER federation identity.
 async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<()> {
