@@ -384,6 +384,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 let adapter = Arc::clone(&adapter);
                 let adapter_ctx = adapter_ctx.clone();
                 let r = identity_router(identity_json)
+                    // Server health — the node's OWN liveness (/health, /v1/health,
+                    // /v1/system/health). Mandatory base; the agent enriches the
+                    // /v1/system/health endpoint with optional cognitive health.
+                    .merge(crate::health::router())
                     // login ceremony (self-at-login → user-managed consent). The
                     // admin-eligibility allowlist is the boot-resolved config:*
                     // auth.admin_key_ids (Server 0.5 — replaces CIRIS_ADMIN_KEY_IDS).
@@ -408,6 +412,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             node_code.key_id.clone(),
                             node_code.pubkey_ed25519_base64.clone(),
                             claim_pin.clone(),
+                            // The durable PIN file to delete on a successful claim
+                            // (the same conventional path announce_ownership_unclaimed
+                            // writes). Only meaningful when a PIN was minted.
+                            claim_pin.as_ref().map(|_| cfg.claim_pin_file()),
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,

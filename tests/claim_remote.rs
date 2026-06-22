@@ -147,6 +147,7 @@ async fn serve_target(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<(
         T_NODE_KEY_ID.to_string(),
         t_node_pubkey_b64(),
         Some(TEST_CLAIM_PIN.to_string()),
+        None,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

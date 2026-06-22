@@ -1265,7 +1265,22 @@ class CIRISApiClient(
             if (!response.status.isSuccess()) {
                 throw RuntimeException("self-key-record fetch failed: ${response.status} for $nodeUrl")
             }
-            decodeFederationEnvelope(response.bodyAsText(), SignedKeyRecord.serializer())
+            // ciris-server returns the CANONICAL persist SignedKeyRecord, which nests
+            // the fields under `record` ({"record":{"key_id":…,"pubkey_ed25519_base64":…}}).
+            // The flat client model expects `key_id` at the top, so map the nested
+            // shape here (tolerating a flat body too). We only need the identity fields.
+            val text = response.bodyAsText()
+            val root = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                .parseToJsonElement(text).jsonObject
+            val rec = root["record"]?.jsonObject ?: root
+            val keyId = rec["key_id"]?.jsonPrimitive?.contentOrNull
+                ?: throw RuntimeException("self-key-record missing key_id")
+            SignedKeyRecord(
+                keyId = keyId,
+                publicKey = rec["pubkey_ed25519_base64"]?.jsonPrimitive?.contentOrNull,
+                signature = rec["scrub_signature_classical"]?.jsonPrimitive?.contentOrNull,
+                algorithm = rec["algorithm"]?.jsonPrimitive?.contentOrNull,
+            )
         } catch (e: Exception) {
             logException(method, e, "nodeUrl=$nodeUrl")
             throw e

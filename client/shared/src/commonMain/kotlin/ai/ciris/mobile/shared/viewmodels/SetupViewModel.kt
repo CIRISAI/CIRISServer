@@ -589,18 +589,20 @@ class SetupViewModel(
             )
             return
         }
+        // The USER fed-ID is DISTINCT from the node's own steward key. We deliberately
+        // do NOT read the node's self-key-record here — that is the NODE identity
+        // (always present, e.g. the TPM-sealed steward key), NOT the user's fed-ID.
+        // Treating it as "you already have a fed-ID" is the bug that skipped minting a
+        // real user identity. Per req A the wizard ALWAYS creates the user fed-ID via
+        // the backend ladder (pkcs11-if-2FA → HW-if-available → SW; verify resolves
+        // the custody). Probe only marks the node reachable; it does NOT assert an
+        // existing user identity (`identityKeyId` stays null until a real mint/associate).
         viewModelScope.launch {
-            val (present, keyId) = try {
-                val record = client.getSelfKeyRecord(CIRISApiClient.LOCAL_NODE_URL)
-                true to record.keyId
-            } catch (e: Exception) {
-                PlatformLogger.w(TAG, "probeFederationIdentity: local node has no identity yet: ${e.message}")
-                false to null
-            }
+            val up = client.isLocalNodeUp(CIRISApiClient.LOCAL_NODE_URL)
             _state.value = _state.value.copy(
                 federationIdentity = _state.value.federationIdentity.copy(
-                    hardwareAvailable = present,
-                    identityKeyId = keyId,
+                    hardwareAvailable = up,
+                    identityKeyId = null,
                     probed = true,
                 )
             )
@@ -738,9 +740,17 @@ class SetupViewModel(
                 // node does all crypto (keygen, sealing, genesis-object signing) in
                 // its substrate; the app only POSTs over plain localhost HTTP and
                 // surfaces the public result. NO keys/crypto in Kotlin.
+                // "Secure with 2FA" means a HARDWARE-custodied (YubiKey / PKCS#11)
+                // identity — so route the mint to the pkcs11 backend (opens the token,
+                // touch+PIN). An explicit backend choice wins; otherwise 2FA ⇒ pkcs11,
+                // and only with 2FA OFF do we fall back to the server's default
+                // (platform-sealed / software). Without this the mint sent no backend
+                // and the node silently minted a software/TPM-sealed key — no YubiKey.
+                val mintBackend = fed.backend
+                    ?: if (_state.value.secureWith2FA) "pkcs11" else null
                 val minted = client.mintUserIdentity(
                     label = fed.label.trim().ifBlank { null },
-                    backend = fed.backend,
+                    backend = mintBackend,
                     localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
                 )
                 _state.value = _state.value.copy(

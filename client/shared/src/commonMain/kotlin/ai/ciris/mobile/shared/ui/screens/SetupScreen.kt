@@ -2355,9 +2355,11 @@ private fun FederationIdentityStep(
                 }
 
                 when {
-                    // Minted just now (or local node already holds one) → show the
-                    // resulting fedcode + key_id + hardware tier.
-                    fed.minted || fed.admitted || (fed.probed && fed.hardwareAvailable) -> {
+                    // Show the result ONLY after a real USER fed-ID was minted or
+                    // associated THIS session. (Do NOT treat "node reachable + HW
+                    // available" as "you already have a fed-ID" — that conflated the
+                    // node's steward key with the user's identity and skipped the mint.)
+                    fed.minted || fed.admitted -> {
                         Text(
                             text = if (fed.minted) {
                                 localizedString("mobile.federation_create_minted")

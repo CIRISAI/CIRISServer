@@ -113,11 +113,42 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
             if (health.getOrNull() == true) {
                 println("[PythonRuntime.desktop] Server is healthy!")
                 _serverStarted = true
+                // The one-time CLAIM PIN is console-only (never over HTTP). We capture
+                // it from the node's stdout banner WHEN WE LAUNCH the node — but if the
+                // node was already running (we didn't own its stdout), fall back to its
+                // durable `<home>/claim_pin` file (0600). Local-FS access to the node's
+                // home IS first-run operator-level access, so this is a legitimate
+                // capture of the same secret — NOT a weakening (setup/root still
+                // verifies the PIN). Only fills if the stdout capture missed it.
+                readClaimPinFromFileIfMissing()
                 return@runCatching _serverUrl
             }
             delay(1000)
         }
         throw RuntimeException("Cannot connect to CIRIS server at $_serverUrl. Please ensure the server is running.")
+    }
+
+    /**
+     * Fallback CLAIM-PIN capture: read the local node's durable `<home>/claim_pin`
+     * file when the stdout banner capture missed it (e.g. the node was already
+     * running, so we never owned its stdout). Console-only-over-HTTP is preserved —
+     * this is a same-machine file read (first-run op-level access). No-op if the PIN
+     * is already captured or the file is absent/empty.
+     */
+    private fun readClaimPinFromFileIfMissing() {
+        if (_localClaimPin.value != null) return
+        runCatching {
+            val pinFile = java.io.File(nodeHomeDir(), "claim_pin")
+            if (pinFile.canRead()) {
+                val pin = pinFile.readText().trim()
+                if (pin.isNotEmpty()) {
+                    _localClaimPin.value = pin
+                    println("[PythonRuntime.desktop] Captured CLAIM PIN from ${pinFile.path} (file fallback).")
+                }
+            }
+        }.onFailure {
+            println("[PythonRuntime.desktop] claim_pin file fallback failed: ${it.message}")
+        }
     }
 
     /**
