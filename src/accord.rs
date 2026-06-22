@@ -114,7 +114,7 @@ use ciris_verify_core::federation_self_record::produce_self_key_record;
 use ciris_verify_core::humanity_accord::{Invocation, InvocationDedup, InvocationKind};
 use ciris_verify_core::self_at_login::HybridSigningIdentity;
 use ciris_verify_core::threshold::{
-    verify_threshold_signatures, ThresholdMember, ThresholdSignature,
+    verify_threshold_signatures, QuorumPolicy, ThresholdMember, ThresholdSignature,
 };
 
 use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
@@ -301,12 +301,24 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
     }
 }
 
-/// The live kill-switch quorum **M** = strict majority of the seated roster. This is
-/// the SAME M [`crate::accord_reactivate`] derives from the family's entrenched
-/// `consensus_protocol` (which IS set to strict-majority at genesis/supersede), so a
-/// grown `quorum:3/5` family needs **3** to halt — NEVER a hard-coded 2. (Fixes the
-/// N1 review finding: the halt paths previously used the literal `2`.)
-fn kill_switch_quorum_m(roster: &[ThresholdMember]) -> usize {
+/// The live kill-switch quorum **M**. Anchored to the family's ENTRENCHED
+/// `consensus_protocol` (`quorum:M/N`) — the M the founders voted to entrench and the
+/// SAME one [`crate::accord_reactivate`] honors — so the irreversible-kill bar can
+/// never silently drop below the entrenched quorum (e.g. via an unpaired revocation
+/// shrinking the live roster). Falls back to strict-majority of the roster only when
+/// no family is entrenched (cold-start / baked-genesis recognition). NEVER a
+/// hard-coded 2 (N1 review finding: the halt paths previously used the literal `2`).
+async fn kill_switch_quorum_m(engine: &Engine, roster: &[ThresholdMember]) -> usize {
+    if let Ok(Some(family)) = crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        if let Some(m) = family
+            .consensus_protocol
+            .strip_prefix("quorum:")
+            .and_then(QuorumPolicy::parse)
+            .map(|p| p.m)
+        {
+            return m;
+        }
+    }
     strict_majority(roster.len())
 }
 
@@ -621,7 +633,7 @@ async fn verify_invocation_handler(
     // N1: the threshold is the family's LIVE strict-majority M (a grown 3/5 needs 3),
     // not a hard-coded 2. Verify the hybrid cosignatures over §9.2.1 canonical bytes
     // against the seated roster at M (the same primitive reactivate uses).
-    let m = kill_switch_quorum_m(&holders);
+    let m = kill_switch_quorum_m(&st.engine, &holders).await;
     let canonical = req.invocation.canonical_bytes();
     match verify_threshold_signatures(&canonical, &holders, &req.signatures, m) {
         Ok(valid) => (
@@ -832,6 +844,35 @@ async fn genesis_assemble(
         })
         .unwrap_or_default();
     let member_ids: Vec<String> = members.iter().map(|m| m.key_id.clone()).collect();
+
+    // Safe-mesh floor (B1): every entrenched SEAT MUST be a registered `accord_holder`
+    // — which (since the holder-admission gate now mandates a verified FIPS YubiKey
+    // custody attestation) means every seat is custody-verified. This is the chokepoint
+    // that makes "seat ⟹ accord_holder ⟹ FIPS custody" hold regardless of how any
+    // OTHER key reached `federation_keys` (e.g. the non-custody peering route): a key
+    // that is not a custody-admitted accord_holder can never be seated.
+    let accord_holder_ids: std::collections::HashSet<String> = match st
+        .engine
+        .federation_directory()
+        .list_keys_by_identity_type(identity_type::ACCORD_HOLDER)
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(|r| r.key_id).collect(),
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    };
+    if let Some(missing) = member_ids
+        .iter()
+        .find(|id| !accord_holder_ids.contains(*id))
+    {
+        return err(
+            StatusCode::CONFLICT,
+            &format!(
+                "cannot entrench {missing} as a HUMANITY_ACCORD seat — it is not a registered, \
+                 custody-verified accord_holder (every seat must be admitted via the FIPS \
+                 custody-gated POST /v1/accord/holder)"
+            ),
+        );
+    }
 
     // (1) Durably record the 2/3-FOUNDER-SIGNED genesis as a node-authored CEG
     // attestation — the signed AUTHORIZATION proof (the founder signatures) that the
@@ -1178,7 +1219,7 @@ async fn replicate_and_maybe_halt(
     // NOT the hard-coded 2 in accord_invocation_status. valid_signers is the set of
     // distinct, validly-hybrid-signed seats; the roster is the seated family.
     let _ = assert_distinct_roster(&roster); // defense-in-depth; roster is seat-distinct
-    let m = kill_switch_quorum_m(&roster);
+    let m = kill_switch_quorum_m(&st.engine, &roster).await;
     let quorum_met = status.valid_signers.len() >= m;
 
     let mut outcome = AccordOutcome {

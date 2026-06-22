@@ -792,6 +792,84 @@ async fn holder_without_custody_attestation_is_rejected() {
     );
 }
 
+#[tokio::test]
+async fn genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder() {
+    // B1 chokepoint: a family SEAT must be a registered accord_holder (⟹ FIPS custody).
+    // Even with a valid 2/3 founder quorum, entrenching a member that never passed the
+    // custody-gated holder admission is refused — so a non-FIPS key registered via some
+    // OTHER route (e.g. peering) can never be seated into the kill-switch.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let a = Holder::new("seat-a", 0x51);
+    let b = Holder::new("seat-b", 0x52);
+    let outsider = Holder::new("outsider-not-a-holder", 0x53);
+    // Seat only a + b as custody-verified accord_holders; `outsider` is NEVER admitted
+    // as an accord_holder (it never passed the custody gate).
+    registered_holders(&engine, std::slice::from_ref(&a)).await;
+    registered_holders(&engine, std::slice::from_ref(&b)).await;
+
+    let member_key_ids = vec![a.key_id.clone(), b.key_id.clone(), outsider.key_id.clone()];
+    let env: serde_json::Value = client
+        .post(format!("{base}/v1/accord/genesis/envelope"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "family_name": "HUMANITY_ACCORD", "member_key_ids": member_key_ids }))
+        .send()
+        .await
+        .expect("envelope")
+        .json()
+        .await
+        .unwrap();
+    let envelope = env["envelope"].clone();
+    let founders = vec![
+        a.threshold_member(Some(Role::Founder)).await,
+        b.threshold_member(Some(Role::Founder)).await,
+        outsider.threshold_member(Some(Role::Founder)).await,
+    ];
+    // A valid 2/3 founder quorum (a + b) — so assembly itself succeeds; the member-type
+    // gate is what must reject the entrenchment.
+    let signatures = vec![
+        a.family_cosign(&envelope).await,
+        b.family_cosign(&envelope).await,
+    ];
+    let resp = client
+        .post(format!("{base}/v1/accord/genesis/assemble"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "envelope": envelope, "founders": founders, "signatures": signatures }))
+        .send()
+        .await
+        .expect("assemble");
+    assert_eq!(
+        resp.status(),
+        409,
+        "entrenching a non-accord_holder seat must be refused"
+    );
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("outsider-not-a-holder"),
+        "rejection must name the non-holder member; got {body}"
+    );
+
+    // No family was entrenched.
+    let roster: serde_json::Value = client
+        .get(format!("{base}/v1/accord-holders"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        roster["family_established"], false,
+        "a rejected genesis must not entrench a family"
+    );
+}
+
 // ─── Operational halt (CC 4.2.1 / 4.2.3 / §9.2.1) — the enforceable kill-switch ─
 
 /// Build a router that latches its halt under a unique temp `home` (no peers, no
