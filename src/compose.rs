@@ -296,6 +296,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // node's lifetime AND shared with the CEG-driven reconcile loop below.
     let replication = setup_peer_replication(&engine, &edge, &cfg).await?;
 
+    // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
+    // The publisher advertises the fountain content THIS node holds as signed
+    // FountainHoldingClaim envelopes to the consent cohort; the converger acts
+    // on PEERS' claims (tier-evict / hard-delete locally-held symbols once a
+    // content unit is sufficiently replicated). Like the ReplicationRuntime it
+    // reuses the SAME Reticulum transport and MUST install BEFORE edge.run()
+    // consumes the Edge (install routes verified inbound claims into the
+    // converger, CIRISEdge#184). Gated on `caps.lens_store`: the holonomic tier
+    // only makes sense when the node carries the corpus — a relay-only node
+    // holds no fountain content and has nothing to publish or converge. The
+    // handle is bound for the node's lifetime so the publisher/converger tasks
+    // are not dropped.
+    let _swarm = if caps.lens_store {
+        crate::holonomic::install_swarm_runtime(&engine, &edge, &cfg).await
+    } else {
+        None
+    };
+
     // ── CEG-driven reconcile nudge ────────────────────────────────────────────
     // The peering API (POST /v1/federation/peering) NEVER touches the runtime — it
     // writes a consent:replication CEG object and fires this Notify so the

@@ -42,6 +42,10 @@ pub mod accord_halt;
 /// approved YubiKey + the chosen ML-DSA USB path. `pkcs11`-feature-gated for the
 /// real-token path (returns NotSupported without it).
 pub mod accord_provision;
+/// HUMANITY_ACCORD reactivation (CIRISServer#41, CC 4.2.1 §69) — the offline
+/// `accord reactivate` op: a verified 2/3 `accord:lifecycle:active` clears the halt
+/// latch (the quorum brings the node back, never an operator restart).
+pub mod accord_reactivate;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
@@ -103,6 +107,12 @@ pub mod federation_nodecode;
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
+/// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
+/// (the publisher + converger that advertise this node's held fountain
+/// content and act on peers' holding claims) into the shared Edge. The
+/// persist-backed trait adapters + the `install_swarm_runtime` entry point
+/// that mirrors the replication wiring shape (build before `edge.run()`).
+pub mod holonomic;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
 /// identity via ciris-server (the founder's goal, CIRISServer#21 /
 /// CIRISVerify#80). `mint_user_identity` opens the user's Ed25519 signing half
