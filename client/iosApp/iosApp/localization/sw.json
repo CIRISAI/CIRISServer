@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "Gusa YubiKey inapomulika ili kuidhinisha.",
     "accord_ceremony_usb_label": "Njia ya folda ya USB ya ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB au /Volumes/USB",
-    "accord_ceremony_vault_desc": "Kibadala cha hifadhi — kimesajiliwa kwa ulinzi, lakini HAKIJAWEKWA kwenye kiti (kinawekwa hifadhini)."
+    "accord_ceremony_vault_desc": "Kibadala cha hifadhi — kimesajiliwa kwa ulinzi, lakini HAKIJAWEKWA kwenye kiti (kinawekwa hifadhini).",
+    "provision_holder_usb_browse": "Vinjari…"
   },
   "prompts": {
     "dma": {

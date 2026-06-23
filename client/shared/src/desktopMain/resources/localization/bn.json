@@ -2095,7 +2095,8 @@
     "accord_ceremony_done_title": "জেনেসিস একত্রিত হয়েছে",
     "accord_ceremony_save_genesis": "এই জেনেসিস সংরক্ষণ করুন — এটি কোল্ড-স্টার্ট স্বীকৃতির জন্য বেক আর্টিফ্যাক্ট।",
     "accord_ceremony_genesis_label": "জেনেসিস (বেক আর্টিফ্যাক্ট)",
-    "accord_ceremony_save_note": "উপরের JSON কপি করুন এবং ডিভাইসের বাইরে নিরাপদে সংরক্ষণ করুন। এটি এই মেশের কোল্ড-স্টার্ট স্বীকৃতি মূল।"
+    "accord_ceremony_save_note": "উপরের JSON কপি করুন এবং ডিভাইসের বাইরে নিরাপদে সংরক্ষণ করুন। এটি এই মেশের কোল্ড-স্টার্ট স্বীকৃতি মূল।",
+    "provision_holder_usb_browse": "ব্রাউজ করুন…"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",

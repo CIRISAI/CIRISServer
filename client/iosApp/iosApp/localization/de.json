@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "Berühren Sie den YubiKey, wenn er blinkt, um zu autorisieren.",
     "accord_ceremony_usb_label": "Pfad zum ML-DSA-USB-Ordner",
     "accord_ceremony_usb_placeholder": "/media/you/USB oder /Volumes/USB",
-    "accord_ceremony_vault_desc": "Cold-Reserve — für die Verwahrung registriert, aber NICHT besetzt (im Tresor aufbewahrt)."
+    "accord_ceremony_vault_desc": "Cold-Reserve — für die Verwahrung registriert, aber NICHT besetzt (im Tresor aufbewahrt).",
+    "provision_holder_usb_browse": "Durchsuchen…"
   },
   "prompts": {
     "dma": {

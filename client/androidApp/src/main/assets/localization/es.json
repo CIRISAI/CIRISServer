@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "Toca la YubiKey cuando parpadee para autorizar.",
     "accord_ceremony_usb_label": "Ruta de la carpeta USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB o /Volumes/USB",
-    "accord_ceremony_vault_desc": "Copia de seguridad en frío — registrada para custodia, pero NO asentada (guardada en la bóveda)."
+    "accord_ceremony_vault_desc": "Copia de seguridad en frío — registrada para custodia, pero NO asentada (guardada en la bóveda).",
+    "provision_holder_usb_browse": "Examinar…"
   },
   "prompts": {
     "dma": {

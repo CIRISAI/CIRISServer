@@ -2094,7 +2094,8 @@
     "accord_ceremony_done_title": "जेनेसिस एकत्र केले",
     "accord_ceremony_save_genesis": "हे जेनेसिस सेव्ह करा — हे कोल्ड-स्टार्ट ओळखीसाठीचे बेक आर्टिफॅक्ट आहे.",
     "accord_ceremony_genesis_label": "जेनेसिस (बेक आर्टिफॅक्ट)",
-    "accord_ceremony_save_note": "वरील JSON कॉपी करा आणि ते डिव्हाइसच्या बाहेर सुरक्षितपणे साठवा. हे या मेशसाठी कोल्ड-स्टार्ट ओळखीचे मूळ आहे."
+    "accord_ceremony_save_note": "वरील JSON कॉपी करा आणि ते डिव्हाइसच्या बाहेर सुरक्षितपणे साठवा. हे या मेशसाठी कोल्ड-स्टार्ट ओळखीचे मूळ आहे.",
+    "provision_holder_usb_browse": "ब्राउझ करा…"
   },
   "conscience": {
     "ponder_attempted": "मी {action} करण्याचा प्रयत्न केला",

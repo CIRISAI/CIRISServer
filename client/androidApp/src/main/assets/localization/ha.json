@@ -2094,7 +2094,8 @@
     "accord_ceremony_touch_note": "Taba YubiKey lokacin da yake kyaftawa don bayar da izini.",
     "accord_ceremony_usb_label": "Hanyar babban fayil na USB na ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB ko /Volumes/USB",
-    "accord_ceremony_vault_desc": "Na ajiya mai sanyi — an yi rajista don kulawa, amma BA a zaunar ba (an ajiye a ma'aji)."
+    "accord_ceremony_vault_desc": "Na ajiya mai sanyi — an yi rajista don kulawa, amma BA a zaunar ba (an ajiye a ma'aji).",
+    "provision_holder_usb_browse": "Bincika…"
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",

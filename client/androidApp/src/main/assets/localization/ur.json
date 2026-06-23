@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "جینیسس جمع ہو گیا",
     "accord_ceremony_save_genesis": "یہ جینیسس محفوظ کریں — یہ کولڈ-اسٹارٹ شناخت کے لیے بیک آرٹفیکٹ ہے۔",
     "accord_ceremony_genesis_label": "جینیسس (بیک آرٹفیکٹ)",
-    "accord_ceremony_save_note": "اوپر دیا گیا JSON کاپی کریں اور اسے ڈیوائس سے باہر محفوظ طریقے سے ذخیرہ کریں۔ یہ اس میش کے لیے کولڈ-اسٹارٹ شناخت کی جڑ ہے۔"
+    "accord_ceremony_save_note": "اوپر دیا گیا JSON کاپی کریں اور اسے ڈیوائس سے باہر محفوظ طریقے سے ذخیرہ کریں۔ یہ اس میش کے لیے کولڈ-اسٹارٹ شناخت کی جڑ ہے۔",
+    "provision_holder_usb_browse": "براؤز کریں…"
   },
   "prompts": {
     "dma": {

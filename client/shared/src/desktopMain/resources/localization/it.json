@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "Tocca la YubiKey quando lampeggia per autorizzare.",
     "accord_ceremony_usb_label": "Percorso della cartella USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/tu/USB o /Volumes/USB",
-    "accord_ceremony_vault_desc": "Copia di riserva a freddo — registrata per la custodia, ma NON assegnata a un posto (conservata nel caveau)."
+    "accord_ceremony_vault_desc": "Copia di riserva a freddo — registrata per la custodia, ma NON assegnata a un posto (conservata nel caveau).",
+    "provision_holder_usb_browse": "Sfoglia…"
   },
   "prompts": {
     "dma": {

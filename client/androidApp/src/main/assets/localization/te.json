@@ -2094,7 +2094,8 @@
     "accord_ceremony_touch_note": "అధికారం ఇవ్వడానికి YubiKey మెరిసినప్పుడు దాన్ని తాకండి.",
     "accord_ceremony_usb_label": "ML-DSA USB ఫోల్డర్ మార్గం",
     "accord_ceremony_usb_placeholder": "/media/you/USB లేదా /Volumes/USB",
-    "accord_ceremony_vault_desc": "కోల్డ్ స్పేర్ — కస్టడీ కోసం నమోదు చేయబడింది, కానీ సీటు కేటాయించబడలేదు (వాల్ట్‌లో ఉంచబడింది)."
+    "accord_ceremony_vault_desc": "కోల్డ్ స్పేర్ — కస్టడీ కోసం నమోదు చేయబడింది, కానీ సీటు కేటాయించబడలేదు (వాల్ట్‌లో ఉంచబడింది).",
+    "provision_holder_usb_browse": "బ్రౌజ్ చేయండి…"
   },
   "conscience": {
     "ponder_attempted": "నేను {action} చేయడానికి ప్రయత్నించాను",

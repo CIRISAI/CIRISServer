@@ -2052,6 +2052,7 @@
     "provision_holder_usb_label": "ML-DSA USB folder path",
     "provision_holder_usb_placeholder": "/media/you/USB or /Volumes/USB",
     "provision_holder_usb_guidance": "Enter the full path to the mounted USB folder. It must exist and be writable.",
+    "provision_holder_usb_browse": "Browse…",
     "provision_holder_pin_label": "YubiKey PIN (optional)",
     "provision_holder_pin_note": "Leave blank to be prompted by the token. Touching the YubiKey is required either way.",
     "provision_holder_submit": "Provision",
@@ -2746,6 +2747,5 @@
   "setup_validation_select_provider": "Select an LLM provider",
   "network_ops": {
     "open_federation_hub": "Open federation hub →"
-  },
-  "provision_holder_usb_browse": "Browse…"
+  }
 }

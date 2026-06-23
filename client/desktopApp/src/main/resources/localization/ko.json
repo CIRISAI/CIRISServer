@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "제네시스 조립 완료",
     "accord_ceremony_save_genesis": "이 제네시스를 저장하세요 — 콜드 스타트 인식을 위한 베이크 아티팩트입니다.",
     "accord_ceremony_genesis_label": "제네시스 (베이크 아티팩트)",
-    "accord_ceremony_save_note": "위의 JSON을 복사하여 기기 외부에 안전하게 보관하세요. 이는 이 메시의 콜드 스타트 인식 루트입니다."
+    "accord_ceremony_save_note": "위의 JSON을 복사하여 기기 외부에 안전하게 보관하세요. 이는 이 메시의 콜드 스타트 인식 루트입니다.",
+    "provision_holder_usb_browse": "찾아보기…"
   },
   "prompts": {
     "dma": {

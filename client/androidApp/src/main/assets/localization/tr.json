@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "Doğuş birleştirildi",
     "accord_ceremony_save_genesis": "Bu doğuşu kaydedin — soğuk başlangıç tanıması için pişirme yapıtıdır.",
     "accord_ceremony_genesis_label": "Doğuş (pişirme yapıtı)",
-    "accord_ceremony_save_note": "Yukarıdaki JSON'u kopyalayın ve cihaz dışında güvenli bir yerde saklayın. Bu ağ için soğuk başlangıç tanıma köküdür."
+    "accord_ceremony_save_note": "Yukarıdaki JSON'u kopyalayın ve cihaz dışında güvenli bir yerde saklayın. Bu ağ için soğuk başlangıç tanıma köküdür.",
+    "provision_holder_usb_browse": "Gözat…"
   },
   "prompts": {
     "dma": {

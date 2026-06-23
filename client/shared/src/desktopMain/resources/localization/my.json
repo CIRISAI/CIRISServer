@@ -2094,7 +2094,8 @@
     "accord_ceremony_touch_note": "ခွင့်ပြုရန် YubiKey မှိတ်တုတ်မှိတ်တုတ် ဖြစ်နေချိန်တွင် ၎င်းကို ထိပါ။",
     "accord_ceremony_usb_label": "ML-DSA USB ဖိုလ်ဒါ လမ်းကြောင်း",
     "accord_ceremony_usb_placeholder": "/media/you/USB သို့မဟုတ် /Volumes/USB",
-    "accord_ceremony_vault_desc": "အအေးခံ အရံ — ထိန်းသိမ်းမှုအတွက် မှတ်ပုံတင်ထားသော်လည်း ထိုင်ခုံ မချထားပါ (သိုလှောင်ခန်းတွင် သိမ်းထားသည်)။"
+    "accord_ceremony_vault_desc": "အအေးခံ အရံ — ထိန်းသိမ်းမှုအတွက် မှတ်ပုံတင်ထားသော်လည်း ထိုင်ခုံ မချထားပါ (သိုလှောင်ခန်းတွင် သိမ်းထားသည်)။",
+    "provision_holder_usb_browse": "ရှာဖွေရန်…"
   },
   "conscience": {
     "ponder_attempted": "ကျွန်ုပ် {action} ကို ကြိုးစားခဲ့သည်",

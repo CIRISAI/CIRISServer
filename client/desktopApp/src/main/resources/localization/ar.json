@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "تم تجميع النشأة",
     "accord_ceremony_save_genesis": "احفظ هذه النشأة — فهي ناتج الترسيخ للتعرّف عند البدء البارد.",
     "accord_ceremony_genesis_label": "النشأة (ناتج الترسيخ)",
-    "accord_ceremony_save_note": "انسخ ملف JSON أعلاه وخزّنه بأمان خارج الجهاز. فهو جذر التعرّف للبدء البارد لهذه الشبكة."
+    "accord_ceremony_save_note": "انسخ ملف JSON أعلاه وخزّنه بأمان خارج الجهاز. فهو جذر التعرّف للبدء البارد لهذه الشبكة.",
+    "provision_holder_usb_browse": "تصفح…"
   },
   "prompts": {
     "dma": {

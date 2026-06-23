@@ -2094,7 +2094,8 @@
     "accord_ceremony_done_title": "Ìpilẹ̀ṣẹ̀ ti kó jọ",
     "accord_ceremony_save_genesis": "Fi ìpilẹ̀ṣẹ̀ yìí pamọ́ — ó jẹ́ ohun èlò bake fún ìdánimọ̀ ìbẹ̀rẹ̀-tútù.",
     "accord_ceremony_genesis_label": "Ìpilẹ̀ṣẹ̀ (ohun èlò bake)",
-    "accord_ceremony_save_note": "Ṣe àdàkọ JSON tó wà lókè kí o sì fi pamọ́ dáadáa kúrò lórí ẹrọ. Ó jẹ́ gbòǹgbò ìdánimọ̀ ìbẹ̀rẹ̀-tútù fún mesh yìí."
+    "accord_ceremony_save_note": "Ṣe àdàkọ JSON tó wà lókè kí o sì fi pamọ́ dáadáa kúrò lórí ẹrọ. Ó jẹ́ gbòǹgbò ìdánimọ̀ ìbẹ̀rẹ̀-tútù fún mesh yìí.",
+    "provision_holder_usb_browse": "Wáròyìn…"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",

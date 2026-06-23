@@ -2328,7 +2328,8 @@
     "accord_ceremony_touch_note": "Chạm vào YubiKey khi nó nhấp nháy để cấp quyền.",
     "accord_ceremony_usb_label": "Đường dẫn thư mục USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB hoặc /Volumes/USB",
-    "accord_ceremony_vault_desc": "Bản dự phòng nguội — được đăng ký để lưu giữ, nhưng KHÔNG được xếp ghế (giữ trong kho lưu trữ)."
+    "accord_ceremony_vault_desc": "Bản dự phòng nguội — được đăng ký để lưu giữ, nhưng KHÔNG được xếp ghế (giữ trong kho lưu trữ).",
+    "provision_holder_usb_browse": "Duyệt…"
   },
   "network": {
     "title": "Mạng",

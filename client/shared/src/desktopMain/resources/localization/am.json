@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "ለማጽደቅ YubiKey ሲብለጨለጭ ይንኩት።",
     "accord_ceremony_usb_label": "የ ML-DSA USB አቃፊ መንገድ",
     "accord_ceremony_usb_placeholder": "/media/you/USB ወይም /Volumes/USB",
-    "accord_ceremony_vault_desc": "ቀዝቃዛ መለዋወጫ — ለጥበቃ ተመዝግቧል፣ ነገር ግን አልተቀመጠም (በቮልት ውስጥ ይቀመጣል)።"
+    "accord_ceremony_vault_desc": "ቀዝቃዛ መለዋወጫ — ለጥበቃ ተመዝግቧል፣ ነገር ግን አልተቀመጠም (በቮልት ውስጥ ይቀመጣል)።",
+    "provision_holder_usb_browse": "ያስሱ…"
   },
   "prompts": {
     "dma": {

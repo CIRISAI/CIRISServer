@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "Genèse assemblée",
     "accord_ceremony_save_genesis": "Enregistrez cette genèse — c'est l'artefact de cuisson pour la reconnaissance au démarrage à froid.",
     "accord_ceremony_genesis_label": "Genèse (artefact de cuisson)",
-    "accord_ceremony_save_note": "Copiez le JSON ci-dessus et stockez-le en lieu sûr hors de l'appareil. C'est la racine de reconnaissance au démarrage à froid pour ce maillage."
+    "accord_ceremony_save_note": "Copiez le JSON ci-dessus et stockez-le en lieu sûr hors de l'appareil. C'est la racine de reconnaissance au démarrage à froid pour ce maillage.",
+    "provision_holder_usb_browse": "Parcourir…"
   },
   "prompts": {
     "dma": {

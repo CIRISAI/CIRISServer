@@ -2094,7 +2094,8 @@
     "accord_ceremony_touch_note": "ਅਧਿਕਾਰ ਦੇਣ ਲਈ YubiKey ਨੂੰ ਛੂਹੋ ਜਦੋਂ ਇਹ ਝਪਕੇ।",
     "accord_ceremony_usb_label": "ML-DSA USB ਫੋਲਡਰ ਪਾਥ",
     "accord_ceremony_usb_placeholder": "/media/you/USB ਜਾਂ /Volumes/USB",
-    "accord_ceremony_vault_desc": "ਕੋਲਡ ਸਪੇਅਰ — ਕਸਟਡੀ ਲਈ ਰਜਿਸਟਰ ਕੀਤਾ, ਪਰ ਸੀਟ ਨਹੀਂ ਦਿੱਤੀ (ਵਾਲਟ ਵਿੱਚ ਰੱਖਿਆ)।"
+    "accord_ceremony_vault_desc": "ਕੋਲਡ ਸਪੇਅਰ — ਕਸਟਡੀ ਲਈ ਰਜਿਸਟਰ ਕੀਤਾ, ਪਰ ਸੀਟ ਨਹੀਂ ਦਿੱਤੀ (ਵਾਲਟ ਵਿੱਚ ਰੱਖਿਆ)।",
+    "provision_holder_usb_browse": "ਬ੍ਰਾਊਜ਼ ਕਰੋ…"
   },
   "conscience": {
     "ponder_attempted": "ਮੈਂ {action} ਕਰਨ ਦੀ ਕੋਸ਼ਿਸ਼ ਕੀਤੀ",

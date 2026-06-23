@@ -2002,7 +2002,8 @@
     "accord_ceremony_done_title": "創設が組み立てられました",
     "accord_ceremony_save_genesis": "この創設を保存してください — コールドスタート認識のためのベイク成果物です。",
     "accord_ceremony_genesis_label": "創設（ベイク成果物）",
-    "accord_ceremony_save_note": "上記の JSON をコピーし、デバイス外に安全に保管してください。これはこのメッシュのコールドスタート認識ルートです。"
+    "accord_ceremony_save_note": "上記の JSON をコピーし、デバイス外に安全に保管してください。これはこのメッシュのコールドスタート認識ルートです。",
+    "provision_holder_usb_browse": "参照…"
   },
   "prompts": {
     "dma": {

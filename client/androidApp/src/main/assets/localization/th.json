@@ -2094,7 +2094,8 @@
     "accord_ceremony_done_title": "ประกอบปฐมกำเนิดแล้ว",
     "accord_ceremony_save_genesis": "บันทึกปฐมกำเนิดนี้ — เป็นอาร์ติแฟกต์สำหรับการจดจำตอนเริ่มต้นแบบเย็น",
     "accord_ceremony_genesis_label": "ปฐมกำเนิด (อาร์ติแฟกต์ที่อบไว้)",
-    "accord_ceremony_save_note": "คัดลอก JSON ด้านบนและจัดเก็บไว้อย่างปลอดภัยนอกอุปกรณ์ มันคือรากของการจดจำตอนเริ่มต้นแบบเย็นสำหรับเมชนี้"
+    "accord_ceremony_save_note": "คัดลอก JSON ด้านบนและจัดเก็บไว้อย่างปลอดภัยนอกอุปกรณ์ มันคือรากของการจดจำตอนเริ่มต้นแบบเย็นสำหรับเมชนี้",
+    "provision_holder_usb_browse": "เรียกดู…"
   },
   "conscience": {
     "ponder_attempted": "ฉันได้พยายามที่จะ {action}",

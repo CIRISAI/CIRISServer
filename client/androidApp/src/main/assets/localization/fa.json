@@ -2008,7 +2008,8 @@
     "accord_ceremony_touch_note": "هنگامی که YubiKey چشمک می‌زند آن را لمس کنید تا مجوز صادر شود.",
     "accord_ceremony_usb_label": "مسیر پوشه‌ی USB مربوط به ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB یا /Volumes/USB",
-    "accord_ceremony_vault_desc": "ذخیره‌ی سرد — برای نگهداری ثبت شده، اما صندلی نگرفته (در گاوصندوق نگهداری می‌شود)."
+    "accord_ceremony_vault_desc": "ذخیره‌ی سرد — برای نگهداری ثبت شده، اما صندلی نگرفته (در گاوصندوق نگهداری می‌شود).",
+    "provision_holder_usb_browse": "مرور…"
   },
   "prompts": {
     "dma": {

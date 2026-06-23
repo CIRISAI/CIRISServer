@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "YubiKey 闪烁时触碰它以授权。",
     "accord_ceremony_usb_label": "ML-DSA USB 文件夹路径",
     "accord_ceremony_usb_placeholder": "/media/you/USB 或 /Volumes/USB",
-    "accord_ceremony_vault_desc": "冷备份——已注册以供保管，但未占用席位（存放于保险库中）。"
+    "accord_ceremony_vault_desc": "冷备份——已注册以供保管，但未占用席位（存放于保险库中）。",
+    "provision_holder_usb_browse": "浏览…"
   },
   "prompts": {
     "dma": {

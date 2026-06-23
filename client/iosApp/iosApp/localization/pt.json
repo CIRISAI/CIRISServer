@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "Toque no YubiKey quando ele piscar para autorizar.",
     "accord_ceremony_usb_label": "Caminho da pasta USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB ou /Volumes/USB",
-    "accord_ceremony_vault_desc": "Reserva fria — registrada para custódia, mas SEM assento (mantida no cofre)."
+    "accord_ceremony_vault_desc": "Reserva fria — registrada para custódia, mas SEM assento (mantida no cofre).",
+    "provision_holder_usb_browse": "Procurar…"
   },
   "prompts": {
     "dma": {

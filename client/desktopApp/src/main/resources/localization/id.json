@@ -2094,7 +2094,8 @@
     "accord_ceremony_done_title": "Genesis dirakit",
     "accord_ceremony_save_genesis": "Simpan genesis ini — ini adalah artefak bake untuk pengenalan cold-start.",
     "accord_ceremony_genesis_label": "Genesis (artefak bake)",
-    "accord_ceremony_save_note": "Salin JSON di atas dan simpan dengan aman di luar perangkat. Ini adalah akar pengenalan cold-start untuk mesh ini."
+    "accord_ceremony_save_note": "Salin JSON di atas dan simpan dengan aman di luar perangkat. Ini adalah akar pengenalan cold-start untuk mesh ini.",
+    "provision_holder_usb_browse": "Jelajahi…"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",

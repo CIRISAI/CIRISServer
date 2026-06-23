@@ -2002,7 +2002,8 @@
     "accord_ceremony_touch_note": "अधिकृत करने के लिए YubiKey के झपकने पर उसे स्पर्श करें।",
     "accord_ceremony_usb_label": "ML-DSA USB फ़ोल्डर पथ",
     "accord_ceremony_usb_placeholder": "/media/you/USB या /Volumes/USB",
-    "accord_ceremony_vault_desc": "कोल्ड स्पेयर — कस्टडी के लिए पंजीकृत, पर सीट नहीं दी गई (वॉल्ट में रखी गई)।"
+    "accord_ceremony_vault_desc": "कोल्ड स्पेयर — कस्टडी के लिए पंजीकृत, पर सीट नहीं दी गई (वॉल्ट में रखी गई)।",
+    "provision_holder_usb_browse": "ब्राउज़ करें…"
   },
   "prompts": {
     "dma": {
