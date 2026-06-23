@@ -21,9 +21,12 @@
 use std::path::PathBuf;
 
 // ── Target substrate floor (Stage 1) ─────────────────────────────────────────
+// 0.5.36: edge v6.4.0→v7.0.0 (CIRISEdge#191 — N1 explicit-hash on the IP transport,
+// so the node code determines the routable RNS destination) + persist v9.11.0→v10.0.0
+// (FederationDirectory carries fountain evict directly). verify stays v7.2.0.
 pub const TARGET_VERIFY: &str = "v7.2.0";
-pub const TARGET_PERSIST: &str = "v9.11.0";
-pub const TARGET_EDGE: &str = "v6.4.0";
+pub const TARGET_PERSIST: &str = "v10.0.0";
+pub const TARGET_EDGE: &str = "v7.0.0";
 /// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
 pub const TARGET_PERSIST_V10: &str = "v10";
 

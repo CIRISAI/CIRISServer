@@ -14,7 +14,7 @@
 
 use crate::support::{blocked, http_get, node_url};
 
-const MIN_VERSION: (u32, u32, u32) = (0, 5, 35);
+const MIN_VERSION: (u32, u32, u32) = (0, 5, 36);
 
 fn parse_semver(v: &str) -> Option<(u32, u32, u32)> {
     let core = v.trim().trim_start_matches('v');

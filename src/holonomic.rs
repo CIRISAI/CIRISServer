@@ -32,12 +32,10 @@
 use std::sync::Arc;
 
 use ciris_edge::swarm::persist_fountain_evict::{
-    FountainEvictError, FountainEvictHardDelete, FountainHoldingsSource, FountainTierEvict,
-    HeldFountainContent,
+    FountainEvictError, FountainHoldingsSource, HeldFountainContent,
 };
 use ciris_edge::swarm::{FountainSwarmRuntime, SwarmRuntimeConfig};
 use ciris_edge::Edge;
-use ciris_persist::fountain::FountainTier;
 use ciris_persist::prelude::Engine;
 
 use crate::config::ServerConfig;
@@ -57,37 +55,6 @@ fn map_held(meta: &ciris_persist::fountain::FountainHeldMeta) -> HeldFountainCon
         corpus_kind: meta.corpus_kind.clone(),
         // count-as-contiguous-ids — persist exposes no per-symbol ids.
         symbol_ids: (0..meta.held_symbols).collect(),
-    }
-}
-
-/// Parse the edge `FountainTierEvict` string tier label onto persist's
-/// [`FountainTier`] enum.
-///
-/// Edge's converger emits `"t1"` for the gentlest row-freeing eviction
-/// (its comment: "DiskPressure::Warn-equivalent — the gentlest step
-/// that actually frees symbol rows"). Persist has no `T1`; its
-/// `Warn`-equivalent is [`FountainTier::T2`] (keep `n_source`, drop
-/// repair), so `"t1"` maps to `T2`. Unknown labels default to `T2` —
-/// the gentlest tier that still frees rows — and are logged; defaulting
-/// conservative (least destructive that honors the eject intent) avoids
-/// an over-eager hard drop on a label this node doesn't recognize.
-fn parse_tier(tier: &str) -> FountainTier {
-    match tier {
-        "full" => FountainTier::Full,
-        // "t1" (edge's Warn-equivalent gentlest evict) and "t2" both
-        // map to persist T2: keep n_source, drop repair symbols.
-        "t1" | "t2" => FountainTier::T2,
-        "t3" => FountainTier::T3,
-        "t4" => FountainTier::T4,
-        "t5" => FountainTier::T5,
-        other => {
-            tracing::warn!(
-                tier = %other,
-                "swarm tier-evict: unrecognized tier label — defaulting to T2 (gentlest \
-                 row-freeing tier)"
-            );
-            FountainTier::T2
-        }
     }
 }
 
@@ -113,74 +80,12 @@ impl FountainHoldingsSource for EngineHoldingsSource {
     }
 }
 
-/// Persist-backed [`FountainTierEvict`]: tier-eviction sibling of the
-/// hard-delete path. Async, matching persist's async eviction API.
-struct EngineTierEvict {
-    engine: Arc<Engine>,
-}
-
-#[async_trait::async_trait]
-impl FountainTierEvict for EngineTierEvict {
-    async fn evict_fountain_content_to_tier(
-        &self,
-        content_id: &str,
-        corpus_kind: &str,
-        tier: &str,
-    ) -> Result<(), FountainEvictError> {
-        let tier = parse_tier(tier);
-        self.engine
-            .evict_fountain_content_to_tier(content_id, corpus_kind, tier)
-            .await
-            .map(|_evicted| ())
-            .map_err(|e| FountainEvictError::HardDeleteFailed(e.to_string()))
-    }
-}
-
-/// Persist-backed [`FountainEvictHardDelete`]: the §8.1.11.3 N5
-/// terminal hard-delete primitive.
-///
-/// **WRINKLE 2**: the edge trait method is **sync** but persist's
-/// `evict_fountain_content_hard_delete` is **async**. We bridge with a
-/// captured [`tokio::runtime::Handle`] + `block_in_place` +
-/// `handle.block_on(..)`. This is the safe option here: the converger
-/// invokes this method from inside an `async fn` running on a tokio
-/// *worker thread* of the server's multi-thread runtime (see
-/// `FountainSwarmRuntime`'s converger task — the hard-delete call sits
-/// directly in the async dispatch body). `block_in_place` is exactly
-/// for that case: it tells the runtime this worker is about to block so
-/// the scheduler can compensate, then `block_on` drives the persist
-/// future to completion. (`block_in_place` requires the multi-thread
-/// runtime, which the server always uses.)
-struct EngineHardDelete {
-    engine: Arc<Engine>,
-    handle: tokio::runtime::Handle,
-}
-
-impl FountainEvictHardDelete for EngineHardDelete {
-    fn evict_fountain_content_hard_delete(
-        &self,
-        content_id: &str,
-        corpus_kind: &str,
-    ) -> Result<(), FountainEvictError> {
-        let engine = Arc::clone(&self.engine);
-        let content_id = content_id.to_string();
-        let corpus_kind = corpus_kind.to_string();
-        let handle = self.handle.clone();
-        // Bridge sync→async: block_in_place + block_on. Safe because the
-        // converger calls this from a multi-thread-runtime worker thread
-        // (an async dispatch body), never from inside a single-thread
-        // runtime or a nested block_on.
-        tokio::task::block_in_place(move || {
-            handle.block_on(async move {
-                engine
-                    .evict_fountain_content_hard_delete(&content_id, &corpus_kind)
-                    .await
-                    .map(|_dropped| ())
-                    .map_err(|e| FountainEvictError::HardDeleteFailed(e.to_string()))
-            })
-        })
-    }
-}
+// NB (edge v7.0.0 / persist v10): the `FountainTierEvict` + `FountainEvictHardDelete`
+// adapter traits were dropped — `FederationDirectory` now carries
+// `evict_fountain_content_to_tier` + `evict_fountain_content_hard_delete` directly,
+// so the runtime takes the engine's `Arc<dyn FederationDirectory>` (same shape as
+// `ReplicationRuntime`) and these two persist-backed shims are no longer needed.
+// `FountainHoldingsSource` (the publisher's holdings view) is still adapter-supplied.
 
 /// Wire the holonomic-tier [`FountainSwarmRuntime`] into the shared
 /// `Edge`, mirroring `setup_peer_replication`.
@@ -212,14 +117,9 @@ pub async fn install_swarm_runtime(
         engine: Arc::clone(engine),
         publisher_key_id: cfg.key_id.clone(),
     });
-    let tier_evict: Arc<dyn FountainTierEvict> = Arc::new(EngineTierEvict {
-        engine: Arc::clone(engine),
-    });
-    let hard_delete: Arc<dyn FountainEvictHardDelete + Send + Sync> = Arc::new(EngineHardDelete {
-        engine: Arc::clone(engine),
-        // Captured at construction; the converger runs on this runtime.
-        handle: tokio::runtime::Handle::current(),
-    });
+    // edge v7.0.0: tier-evict + hard-delete are now methods on the persist
+    // FederationDirectory the runtime holds — no per-trait shims.
+    let directory = engine.federation_directory();
 
     // Cohort = the node's current replication/consent peers (the same
     // source the ReplicationRuntime converges to). A static snapshot
@@ -249,8 +149,7 @@ pub async fn install_swarm_runtime(
     let runtime = FountainSwarmRuntime::start(
         SwarmRuntimeConfig::default(),
         holdings,
-        tier_evict,
-        hard_delete,
+        directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
         cohort,
         cfg.key_id.clone(),
@@ -323,16 +222,7 @@ mod tests {
         assert!(mapped.is_empty());
     }
 
-    #[test]
-    fn parse_tier_maps_all_labels() {
-        assert_eq!(parse_tier("full"), FountainTier::Full);
-        // edge's "t1" gentlest-evict label → persist T2.
-        assert_eq!(parse_tier("t1"), FountainTier::T2);
-        assert_eq!(parse_tier("t2"), FountainTier::T2);
-        assert_eq!(parse_tier("t3"), FountainTier::T3);
-        assert_eq!(parse_tier("t4"), FountainTier::T4);
-        assert_eq!(parse_tier("t5"), FountainTier::T5);
-        // unknown → conservative gentlest row-freeing tier.
-        assert_eq!(parse_tier("nonsense"), FountainTier::T2);
-    }
+    // (edge v7.0.0) `parse_tier_maps_all_labels` retired — the string-tier→
+    // FountainTier mapping moved into persist's FederationDirectory, which the
+    // runtime now calls directly; the server no longer owns that translation.
 }
