@@ -135,6 +135,12 @@ kotlin {
                 implementation("androidx.security:security-crypto:1.1.0-alpha06")
                 implementation("androidx.activity:activity-compose:1.9.3")
 
+                // On-device YubiKey PIV over NFC (YubiKey-backed fed-ID). Ed25519
+                // slot-9c signing needs firmware 5.7+ and yubikit >= 2.6.
+                implementation("com.yubico.yubikit:android:3.1.0")
+                implementation("com.yubico.yubikit:piv:3.1.0")
+                implementation("com.yubico.yubikit:core:3.1.0")
+
                 // Google Play Services
                 implementation("com.google.android.gms:play-services-auth:20.7.0")
                 implementation("com.android.billingclient:billing-ktx:7.1.1")

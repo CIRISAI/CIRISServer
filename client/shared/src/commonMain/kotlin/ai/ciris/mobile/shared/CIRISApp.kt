@@ -63,6 +63,7 @@ import ai.ciris.mobile.shared.viewmodels.DataManagementViewModel
 import ai.ciris.mobile.shared.viewmodels.LLMSettingsViewModel
 import ai.ciris.mobile.shared.viewmodels.SkillImportViewModel
 import ai.ciris.mobile.shared.viewmodels.SkillStudioViewModel
+import ai.ciris.mobile.shared.viewmodels.ContactsViewModel
 import ai.ciris.mobile.shared.ui.screens.graph.GraphMemoryScreen
 import ai.ciris.mobile.shared.ui.screens.SkillStudioScreen
 import ai.ciris.mobile.shared.ui.theme.BrightnessPreference
@@ -396,8 +397,26 @@ fun CIRISApp(
         previousLanguage = currentLanguage
     }
 
+    // ─── The ONE node-vs-agent gate ──────────────────────────────────────────
+    // Universal client: the same app runs against either a bare ciris-server
+    // NODE (no brain) or a full CIRIS AGENT. clientMode is the single source of
+    // truth — derived ONCE from the /v1/health capability probe (AGENT iff the
+    // server reports a cognitive_state / a non-empty agent service map; else
+    // NODE) and read everywhere that must branch (the 22 cognitive service
+    // lights, "agent" wording, the WORK-state wait). null = not probed yet.
+    // nodeVersion drives the non-blocking version-mismatch banner.
+    var clientMode by remember { mutableStateOf<ai.ciris.mobile.shared.models.ClientMode?>(null) }
+    var nodeVersion by remember { mutableStateOf<String?>(null) }
+    val isAgentMode = clientMode?.isAgent ?: true  // default to agent wording until probed
+
     // Navigation state
     var currentScreen by remember { mutableStateOf<Screen>(Screen.Startup) }
+
+    // Picker flow: when the user taps "Choose from Contacts" in Delegations,
+    // we navigate to Contacts in picker mode and stash the result here so the
+    // Delegations screen can consume it when the user presses back.
+    var contactsPickerSourceScreen by remember { mutableStateOf<Screen?>(null) }
+    var pickedDelegationKeyId by remember { mutableStateOf<String?>(null) }
 
     // Track screen changes for test automation
     LaunchedEffect(currentScreen) {
@@ -433,6 +452,13 @@ fun CIRISApp(
             is Screen.NetworkContent -> Screen.LayerGlobalCommons
             // Peer detail (parameterised) goes back to the peer list, not the hub
             is Screen.NetworkPeerDetail -> Screen.NetworkPeers
+
+            // Contacts goes back to the picker source (Delegations) or Interact
+            is Screen.Contacts -> {
+                val src = contactsPickerSourceScreen
+                contactsPickerSourceScreen = null
+                src ?: Screen.Interact
+            }
 
             // All other screens go back to Interact (main screen)
             else -> Screen.Interact
@@ -650,6 +676,9 @@ fun CIRISApp(
     val delegationsViewModel: ai.ciris.mobile.shared.viewmodels.DelegationsViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.DelegationsViewModel(apiClient)
     }
+    val contactsViewModel: ContactsViewModel = viewModel {
+        ContactsViewModel(apiClient)
+    }
     val accordViewModel: ai.ciris.mobile.shared.viewmodels.AccordViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.AccordViewModel(apiClient)
     }
@@ -731,6 +760,32 @@ fun CIRISApp(
             checkingFirstRun = true
             platformLog(TAG, "[INFO] Startup READY, checking first-run status...")
 
+            // ─── Derive the ONE node-vs-agent gate (server now reachable) ────
+            // Probe /v1/health ONCE: AGENT iff the server reports a
+            // cognitive_state / a non-empty agent service map; else a bare NODE.
+            // Drives the 22-light gating, "agent" wording, and the WORK-state
+            // wait below. nodeVersion feeds the version-mismatch banner.
+            try {
+                val nodeHealth = apiClient.getNodeHealth()
+                nodeVersion = nodeHealth.version
+                val mode = ai.ciris.mobile.shared.models.clientModeFrom(
+                    nodeHealth.cognitiveState, nodeHealth.serviceCount
+                )
+                clientMode = mode
+                // Node mode has no 22 cognitive service lights — drive the count
+                // from the gate rather than the hardcoded agent default.
+                startupViewModel.setClientMode(mode)
+                platformLog(
+                    TAG,
+                    "[INFO][gate] clientMode=$mode (role=${nodeHealth.role}, " +
+                        "cognitive_state=${nodeHealth.cognitiveState}, services=${nodeHealth.serviceCount}, " +
+                        "version=${nodeHealth.version})",
+                )
+            } catch (e: Exception) {
+                // Probe failed — leave the gate unset (defaults to agent wording).
+                platformLog(TAG, "[WARN][gate] clientMode probe failed: ${e.message?.take(80)}")
+            }
+
             // If we just completed setup, wait for agent WORK state before navigating to Interact
             // The token was literally just created during setup, so it's definitely valid
             if (justCompletedSetup) {
@@ -742,7 +797,10 @@ fun CIRISApp(
 
                 // Check for degraded mode first - skip WORK state wait if no LLM
                 // NOTE: Don't call setPhase() here - it would cancel this LaunchedEffect!
-                startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_waiting_agent"))
+                startupViewModel.setStatus(
+                    if (isAgentMode) LocalizationHelper.getString("mobile.status_waiting_agent")
+                    else "Connecting to node..."
+                )
 
                 var agentReady = false
                 var inDegradedMode = false
@@ -750,17 +808,28 @@ fun CIRISApp(
                 val maxPollAttempts = 150 // 30 seconds
                 var lastState = "UNKNOWN"
 
-                // Quick check for degraded mode via health endpoint
-                try {
-                    val health = apiClient.getSystemHealth()
-                    if (health.degradedMode) {
-                        PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
-                        startupViewModel.setStatus("Running in limited mode (no LLM)")
-                        inDegradedMode = true
-                        agentReady = true  // Skip waiting for WORK state
+                if (!isAgentMode) {
+                    // NODE mode: a bare node has no cognitive brain / WORK state.
+                    // The server is already healthy (we just probed /v1/health),
+                    // so there is nothing to wait for — proceed straight through.
+                    PlatformLogger.i(TAG, " NODE mode — skipping agent WORK-state wait")
+                    startupViewModel.setStatus("Node ready")
+                    agentReady = true
+                }
+
+                // Quick check for degraded mode via health endpoint (agent only)
+                if (isAgentMode) {
+                    try {
+                        val health = apiClient.getSystemHealth()
+                        if (health.degradedMode) {
+                            PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
+                            startupViewModel.setStatus("Running in limited mode (no LLM)")
+                            inDegradedMode = true
+                            agentReady = true  // Skip waiting for WORK state
+                        }
+                    } catch (e: Exception) {
+                        PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                     }
-                } catch (e: Exception) {
-                    PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                 }
 
                 // Only wait for WORK state if not in degraded mode
@@ -796,7 +865,7 @@ fun CIRISApp(
                     PlatformLogger.w(TAG, " Agent did not reach WORK state within timeout, proceeding anyway")
                     startupViewModel.setStatus("Agent ready (timeout)")
                 } else {
-                    startupViewModel.setStatus("Agent ready!")
+                    startupViewModel.setStatus(if (isAgentMode) "Agent ready!" else "Node ready!")
                 }
                 kotlinx.coroutines.delay(500)
 
@@ -960,7 +1029,10 @@ fun CIRISApp(
                                 // The status message is sufficient for user feedback
                                 // Keep timer running during backend polling
                                 startupViewModel.setKeepTimerAlive(true)
-                                startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_waiting_agent"))
+                                startupViewModel.setStatus(
+                                    if (isAgentMode) LocalizationHelper.getString("mobile.status_waiting_agent")
+                                    else "Connecting to node..."
+                                )
 
                                 // Poll for WORK state with timeout
                                 var agentReady = false
@@ -969,17 +1041,26 @@ fun CIRISApp(
                                 val maxPollAttempts = 150 // 30 seconds (150 * 200ms)
                                 var lastState = "UNKNOWN"
 
-                                // Quick check for degraded mode via health endpoint
-                                try {
-                                    val health = apiClient.getSystemHealth()
-                                    if (health.degradedMode) {
-                                        PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
-                                        startupViewModel.setStatus("Running in limited mode (no LLM)")
-                                        inDegradedMode = true
-                                        agentReady = true  // Skip waiting for WORK state
+                                if (!isAgentMode) {
+                                    // NODE mode: no cognitive brain / WORK state to wait for.
+                                    PlatformLogger.i(TAG, " NODE mode — skipping agent WORK-state wait")
+                                    startupViewModel.setStatus("Node ready")
+                                    agentReady = true
+                                }
+
+                                // Quick check for degraded mode via health endpoint (agent only)
+                                if (isAgentMode) {
+                                    try {
+                                        val health = apiClient.getSystemHealth()
+                                        if (health.degradedMode) {
+                                            PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
+                                            startupViewModel.setStatus("Running in limited mode (no LLM)")
+                                            inDegradedMode = true
+                                            agentReady = true  // Skip waiting for WORK state
+                                        }
+                                    } catch (e: Exception) {
+                                        PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                     }
-                                } catch (e: Exception) {
-                                    PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                 }
 
                                 // Only wait for WORK state if not in degraded mode
@@ -1014,7 +1095,7 @@ fun CIRISApp(
                                     PlatformLogger.w(TAG, " Agent did not reach WORK state within timeout, proceeding anyway")
                                     startupViewModel.setStatus("Agent ready (timeout)")
                                 } else {
-                                    startupViewModel.setStatus("Agent ready!")
+                                    startupViewModel.setStatus(if (isAgentMode) "Agent ready!" else "Node ready!")
                                 }
 
                                 // Brief pause to show ready state
@@ -1187,6 +1268,7 @@ fun CIRISApp(
                         }
                 }
 
+                Box(modifier = Modifier.fillMaxSize()) {
                 LoginScreen(
                     onGoogleSignIn = {
                         platformLog(TAG, "[INFO][onGoogleSignIn] Button click handler invoked, googleSignInCallback=${if (googleSignInCallback != null) "PRESENT" else "NULL"}")
@@ -1260,22 +1342,30 @@ fun CIRISApp(
                                                     tokenManager.handleNewToken(result.idToken, result.provider)
 
                                                     // Check for degraded mode first - skip WORK state wait if no LLM
-                                                    loginStatusMessage = "Waiting for agent..."
+                                                    loginStatusMessage =
+                                                        if (isAgentMode) "Waiting for agent..." else "Connecting to node..."
                                                     var agentReady = false
                                                     var inDegradedMode = false
                                                     var pollAttempts = 0
 
-                                                    // Quick check for degraded mode via health endpoint
-                                                    try {
-                                                        val health = apiClient.getSystemHealth()
-                                                        if (health.degradedMode) {
-                                                            PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
-                                                            loginStatusMessage = "Running in limited mode (no LLM)"
-                                                            inDegradedMode = true
-                                                            agentReady = true  // Skip waiting for WORK state
+                                                    if (!isAgentMode) {
+                                                        // NODE mode: no cognitive brain / WORK state to wait for.
+                                                        agentReady = true
+                                                    }
+
+                                                    // Quick check for degraded mode via health endpoint (agent only)
+                                                    if (isAgentMode) {
+                                                        try {
+                                                            val health = apiClient.getSystemHealth()
+                                                            if (health.degradedMode) {
+                                                                PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
+                                                                loginStatusMessage = "Running in limited mode (no LLM)"
+                                                                inDegradedMode = true
+                                                                agentReady = true  // Skip waiting for WORK state
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                                         }
-                                                    } catch (e: Exception) {
-                                                        PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                                     }
 
                                                     // Only wait for WORK state if not in degraded mode
@@ -1422,23 +1512,31 @@ fun CIRISApp(
                                     .onFailure { e -> PlatformLogger.w(TAG, " Failed to save token: ${e.message}") }
 
                                 // Check for degraded mode first - skip WORK state wait if no LLM
-                                PlatformLogger.i(TAG, " Local login successful, waiting for agent...")
-                                loginStatusMessage = "Waiting for agent..."
+                                PlatformLogger.i(TAG, " Local login successful, waiting for ${if (isAgentMode) "agent" else "node"}...")
+                                loginStatusMessage =
+                                    if (isAgentMode) "Waiting for agent..." else "Connecting to node..."
                                 var agentReady = false
                                 var inDegradedMode = false
                                 var pollAttempts = 0
 
-                                // Quick check for degraded mode via health endpoint
-                                try {
-                                    val health = apiClient.getSystemHealth()
-                                    if (health.degradedMode) {
-                                        PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
-                                        loginStatusMessage = "Running in limited mode (no LLM)"
-                                        inDegradedMode = true
-                                        agentReady = true  // Skip waiting for WORK state
+                                if (!isAgentMode) {
+                                    // NODE mode: no cognitive brain / WORK state to wait for.
+                                    agentReady = true
+                                }
+
+                                // Quick check for degraded mode via health endpoint (agent only)
+                                if (isAgentMode) {
+                                    try {
+                                        val health = apiClient.getSystemHealth()
+                                        if (health.degradedMode) {
+                                            PlatformLogger.i(TAG, " Degraded mode detected - no working LLM provider")
+                                            loginStatusMessage = "Running in limited mode (no LLM)"
+                                            inDegradedMode = true
+                                            agentReady = true  // Skip waiting for WORK state
+                                        }
+                                    } catch (e: Exception) {
+                                        PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                     }
-                                } catch (e: Exception) {
-                                    PlatformLogger.d(TAG, " Could not check degraded mode: ${e.message?.take(30)}")
                                 }
 
                                 // Only wait for WORK state if not in degraded mode
@@ -1539,35 +1637,25 @@ fun CIRISApp(
                     observerBlocked = observerBlocked,
                     showLocalLoginForm = (googleSignInCallback == null && isFirstRun == false),
                     isFirstRun = isFirstRun ?: true,
-                    // Federation-ID-first entry (CIRISAgent#887).
-                    federationIdentityKeyId = federationIdentityKeyId,
-                    federationProbed = federationProbed,
-                    onFederationSignIn = {
-                        // A long-lived hybrid identity is already persisted on this
-                        // device — the founder is signed in with it. Load it as the
-                        // active federation identity and proceed to the main app.
-                        platformLog(
-                            TAG,
-                            "[INFO][onFederationSignIn] Signing in with existing federation identity key_id=$federationIdentityKeyId",
-                        )
-                        loginErrorMessage = null
-                        currentScreen = HOME_SCREEN
-                    },
-                    onCreateFederationIdentity = {
-                        // No identity yet — run the FEDERATION_IDENTITY_SETUP wizard,
-                        // which DRIVES the local node to provision/report the owner's
-                        // federation identity (the node owns the keys, not the app).
-                        platformLog(TAG, "[INFO][onCreateFederationIdentity] No identity — entering setup wizard to mint one")
-                        loginErrorMessage = null
-                        setupViewModel.setGoogleAuthState(
-                            isAuth = false,
-                            idToken = null,
-                            email = null,
-                            userId = null,
-                        )
-                        currentScreen = Screen.Setup
-                    },
+                    // NOTE: no fedID sign-in option here by design — the fedID is the
+                    // founder's identity, minted in the first-run wizard and accessed
+                    // ONLY via the associated user-account session (log in below). It
+                    // is never a credential-less login. First-run users are auto-routed
+                    // to the setup wizard upstream (isFirstRun handling).
                 )
+
+                    // Non-blocking node-vs-client VERSION-MISMATCH banner. The node
+                    // reports its version in /v1/health; when it differs materially
+                    // from the app's build (CLIENT_VERSION) we warn but never block —
+                    // overlaid at the top so it never disturbs the login layout.
+                    if (ai.ciris.mobile.shared.models.isVersionMismatch(nodeVersion)) {
+                        VersionMismatchBanner(
+                            nodeVersion = nodeVersion ?: "",
+                            clientVersion = ai.ciris.mobile.shared.models.CLIENT_VERSION,
+                            modifier = Modifier.align(Alignment.TopCenter)
+                        )
+                    }
+                }
             }
 
             Screen.Setup -> {
@@ -2762,6 +2850,27 @@ fun CIRISApp(
                 )
             }
 
+            Screen.Contacts -> {
+                // Contacts / Identities (Manage group): browse known federation
+                // peer store. Also reached from Delegations picker flow
+                // (contactsPickerSourceScreen != null = picker mode).
+                PlatformLogger.d(TAG, "[Screen.Contacts] Rendering contacts screen (picker=${contactsPickerSourceScreen != null})")
+                ContactsScreen(
+                    viewModel = contactsViewModel,
+                    onBack = {
+                        val src = contactsPickerSourceScreen
+                        contactsPickerSourceScreen = null
+                        currentScreen = src ?: Screen.Interact
+                    },
+                    onPeerPicked = if (contactsPickerSourceScreen != null) { peer ->
+                        pickedDelegationKeyId = peer.keyId
+                        val src = contactsPickerSourceScreen
+                        contactsPickerSourceScreen = null
+                        currentScreen = src ?: Screen.Delegations
+                    } else null,
+                )
+            }
+
             Screen.Delegations -> {
                 // Delegations card (Manage group): who the owner has authorized to
                 // act on-behalf (active device-auth grants) + approve-new / revoke.
@@ -2769,6 +2878,13 @@ fun CIRISApp(
                 DelegationsScreen(
                     viewModel = delegationsViewModel,
                     onBack = { currentScreen = Screen.Interact },
+                    onOpenContacts = {
+                        contactsPickerSourceScreen = Screen.Delegations
+                        contactsViewModel.selectPeer(null) // clear any prior selection
+                        currentScreen = Screen.Contacts
+                    },
+                    pickedIdentityKeyId = pickedDelegationKeyId,
+                    onPickedIdentityConsumed = { pickedDelegationKeyId = null },
                 )
             }
 
@@ -4138,6 +4254,9 @@ private sealed class Screen {
     object ManageNodes : Screen()
     // Consent management (consent:replication peering + user-data consent).
     object ManageConsent : Screen()
+    // Contacts / Identities — browse the local node's known federation peer store;
+    // also used as a picker when delegating to an existing fed-ID.
+    object Contacts : Screen()
     // Delegations (device-auth grants — authorize an agent to act on-behalf).
     object Delegations : Screen()
     // Accord (HUMANITY_ACCORD — constitutional 2/3 kill-switch + holder roster).
@@ -4245,6 +4364,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.NetworkOps -> ai.ciris.mobile.shared.ui.nav.NavSurface.NetworkOps
     Screen.ManageNodes -> ai.ciris.mobile.shared.ui.nav.NavSurface.Nodes
     Screen.ManageConsent -> ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent
+    Screen.Contacts -> ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts
     Screen.Delegations -> ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations
     Screen.Accord -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ProvisionAccordHolder -> ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder
@@ -4298,6 +4418,7 @@ private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen
     ai.ciris.mobile.shared.ui.nav.NavSurface.NetworkOps -> Screen.NetworkOps
     ai.ciris.mobile.shared.ui.nav.NavSurface.Nodes -> Screen.ManageNodes
     ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent -> Screen.ManageConsent
+    ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts -> Screen.Contacts
     ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations -> Screen.Delegations
     ai.ciris.mobile.shared.ui.nav.NavSurface.Accord -> Screen.Accord
     ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder -> Screen.ProvisionAccordHolder
@@ -4450,6 +4571,47 @@ private fun ThemeColorChip(
                 text = theme.displayName,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * Non-blocking node-vs-client VERSION-MISMATCH banner. The connected node reports
+ * its version in /v1/health; when it differs materially from the app's build
+ * ([ai.ciris.mobile.shared.models.CLIENT_VERSION]) we surface an "update
+ * recommended" hint. Purely informational — it never blocks usage.
+ */
+@Composable
+private fun VersionMismatchBanner(
+    nodeVersion: String,
+    clientVersion: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(8.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = RoundedCornerShape(8.dp),
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Info,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = "Node is v$nodeVersion — app built for v$clientVersion. Update recommended.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
             )
         }
     }

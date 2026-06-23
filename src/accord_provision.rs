@@ -75,10 +75,7 @@ use ciris_persist::prelude::Engine;
 /// request still parses (so the endpoint can return a clear NotSupported), but
 /// the values go unread — hence the conditional `allow(dead_code)`.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(
-    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
 struct ProvisionPkcs11 {
     /// The PIV user PIN. When omitted the token may prompt out of band (or the
     /// open fails with a plain-language "PIN required" error the UI surfaces).
@@ -98,10 +95,7 @@ struct ProvisionPkcs11 {
 /// drive the `pkcs11` path only (unread without the feature — see
 /// [`ProvisionPkcs11`]), hence the conditional `allow(dead_code)`.
 #[derive(Debug, Deserialize)]
-#[cfg_attr(
-    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
 struct ProvisionHolderRequest {
     /// The federation `key_id` (the keystore/seal alias the wrapped ML-DSA half +
     /// the holder record are minted under).
@@ -133,10 +127,7 @@ struct ProvisionHolderRequest {
 /// real-token path only (unread without the feature — see [`ProvisionPkcs11`]),
 /// hence the conditional `allow(dead_code)`.
 #[derive(Debug, Deserialize)]
-#[cfg_attr(
-    not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
 struct CosignFamilyRequest {
     /// The holder's federation `key_id` — the SAME alias the wrapped ML-DSA half +
     /// the holder record were minted under at `provision-holder` time.
@@ -222,7 +213,7 @@ async fn cosign_family(State(_st): State<ProvisionState>, body: axum::body::Byte
 
 // ─── pkcs11 path: the real YubiKey-backed provisioning ────────────────────────
 
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
     use std::path::PathBuf;
 
@@ -312,15 +303,31 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
                 "accord provision-holder: could NOT open the YubiKey slot key (even after the \
                  cert auto-fix) — check the YubiKey is inserted, FIPS-approved, and the PIN correct"
             );
-            return err(
-                StatusCode::BAD_REQUEST,
-                &format!(
+            // Diagnose the most common silent failure: the slot is perfect, but the
+            // HOST's ykcs11 is too old to expose an Ed25519 PIV key. "Key not found"
+            // while pkcs11 enumerates NO private-key object is the fingerprint.
+            let es = e.to_string();
+            let key_not_found = es.contains("Key not found") || es.contains("Private key");
+            let host_pkcs11_too_old =
+                key_not_found && probe_pkcs11_surfaces_slot9c() == Some(false);
+            let msg = if host_pkcs11_too_old {
+                format!(
+                    "your YubiKey slot-{piv_slot} is fine, but this HOST's PKCS#11 module \
+                     (ykcs11/yubico-piv-tool) is TOO OLD to use an Ed25519 PIV key — it can't \
+                     expose the private key to the signer (root cause: {e}). UPGRADE \
+                     yubico-piv-tool to ≥ 2.5.0 (Ubuntu 24.04 ships 2.2.0): \
+                     `sudo add-apt-repository ppa:yubico/stable && sudo apt update && sudo apt \
+                     install ykcs11`, then retry. No change to the YubiKey is needed."
+                )
+            } else {
+                format!(
                     "couldn't open your YubiKey's slot-{piv_slot} key: {e} — check the YubiKey is \
                      inserted + FIPS-approved, the PIN is correct, and slot {piv_slot} holds an \
                      Ed25519 key (the node tried to auto-generate the slot certificate; if that \
                      also failed the PIN may be missing or wrong)."
-                ),
-            );
+                )
+            };
+            return err(StatusCode::BAD_REQUEST, &msg);
         }
     };
 
@@ -365,7 +372,13 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
             out
         }
         None => match ykman_export_f9() {
-            Ok(d) => vec![d],
+            // ykman only yields the on-device f9 cert; the YubiKey does NOT hold the
+            // Yubico CA intermediates above it. Path-build [f9, …intermediates…] up
+            // to the pinned root from the bundled Yubico PKI so the custody
+            // attestation validates (CIRISVerify expects the FULL chain to the root;
+            // fw-5.7 FIPS devices have an extra level: f9 → PIV-Att-B1 → Att-Int-B1
+            // → Root). See `complete_attestation_chain`.
+            Ok(f9) => complete_attestation_chain(f9),
             Err(e) => {
                 return err(
                     StatusCode::BAD_REQUEST,
@@ -380,12 +393,19 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
     let chain_refs: Vec<&[u8]> = chain.iter().map(|v| v.as_slice()).collect();
 
     // 3. Drive the custody provisioning (USB wrap + identity + the two artifacts).
-    //    A touch-required YubiKey BLOCKS on the wrap-key signature until tapped.
+    //    A touch-required YubiKey (slot 9c policy ALWAYS) BLOCKS on EACH Ed25519
+    //    sign until tapped — THREE in all: the USB ML-DSA wrap-challenge, the holder
+    //    record, and the custody attestation. The holder must touch for every blink.
+    tracing::info!(
+        key_id = %req.key_id.trim(),
+        "accord provision-holder: YubiKey opened + attestation read; now signing — \
+         TOUCH the YubiKey for EACH blink (3 signs: ML-DSA wrap, holder record, custody attestation)"
+    );
     let now = chrono::Utc::now().to_rfc3339();
     let provisioned = match crate::accord_custody::provision_portable_holder(
         yubikey_ed,
         req.key_id.trim(),
-        usb_dir,
+        usb_dir.clone(),
         &attestation_9c_der,
         &chain_refs,
         &now,
@@ -394,26 +414,59 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
     {
         Ok(p) => p,
         Err(e) => {
+            tracing::warn!(key_id = %req.key_id.trim(), error = %e, "accord provision-holder: custody provisioning FAILED");
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("provision portable holder: {e}"),
-            )
+            );
         }
     };
+    tracing::info!(
+        key_id = %req.key_id.trim(),
+        "accord provision-holder: all 3 signs complete — holder record + custody attestation produced"
+    );
+
+    let key_id = req.key_id.trim().to_string();
+
+    // OUTBOX — write the finished artifacts to the SAME shared CEG outbox that
+    // verify's `create_federation_identity` already uses (`ceg_outbox()` =
+    // `$CIRIS_HOME/ceg/outbox`, else `~/ciris/ceg/outbox`). The custody attestation
+    // IS a `SignedCegObject` → `write_to_outbox` (the same exact case as verify);
+    // the holder record (a `SignedKeyRecord`) rides alongside as a bundle. Every
+    // holder's finished objects land in ONE place for verify to wrap into the
+    // persist `attestation_evidence` (PlatformAttestation) + register — so the
+    // touch-gated work is NEVER wasted even before that admission path is wired.
+    match provisioned.custody_attestation.write_to_outbox(&key_id) {
+        Ok(p) => tracing::info!(key_id = %key_id, path = %p.display(),
+            "accord provision-holder: custody attestation written to the CEG outbox"),
+        Err(e) => tracing::warn!(key_id = %key_id, error = %e,
+            "accord provision-holder: could NOT write the custody attestation to the CEG outbox"),
+    }
+
+    let body = serde_json::json!({
+        "key_id": key_id,
+        "holder_record": provisioned.holder_record,
+        "custody_attestation": provisioned.custody_attestation,
+    });
+
+    let holder_dir = ciris_verify_core::ceg_outbox::ceg_outbox().join("accord_holder");
+    let holder_path = holder_dir.join(format!("{key_id}.json"));
+    match std::fs::create_dir_all(&holder_dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| serde_json::to_vec_pretty(&body).map_err(|e| e.to_string()))
+        .and_then(|b| std::fs::write(&holder_path, b).map_err(|e| e.to_string()))
+    {
+        Ok(()) => tracing::info!(key_id = %key_id, path = %holder_path.display(),
+            "accord provision-holder: holder bundle saved to the CEG outbox (pass to verify to wrap + register)"),
+        Err(e) => tracing::warn!(key_id = %key_id, error = %e,
+            "accord provision-holder: could NOT write the holder bundle to the outbox"),
+    }
 
     // 4. Return the two artifacts the holder POSTs to /v1/accord/holder.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "key_id": req.key_id.trim(),
-            "holder_record": provisioned.holder_record,
-            "custody_attestation": provisioned.custody_attestation,
-        })),
-    )
-        .into_response()
+    (StatusCode::OK, Json(body)).into_response()
 }
 
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
     use std::path::PathBuf;
 
@@ -538,7 +591,7 @@ async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
 }
 
 /// Probe that `dir` is writable by creating + removing a temp file.
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 fn writable_probe(dir: &std::path::Path) -> std::io::Result<()> {
     let probe = dir.join(format!(".ciris-accord-write-probe-{}", std::process::id()));
     std::fs::write(&probe, b"ciris")?;
@@ -547,21 +600,133 @@ fn writable_probe(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// `ykman piv keys attest <slot>` → the slot's PIV attestation cert (DER).
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 fn ykman_attest_9c(slot: &str) -> anyhow::Result<Vec<u8>> {
     // `-F DER` emits DER to stdout (the `-` output target).
     run_ykman_capture(&["piv", "keys", "attest", "-F", "DER", slot, "-"])
 }
 
 /// `ykman piv certificates export f9` → the f9 device attestation cert (DER).
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 fn ykman_export_f9() -> anyhow::Result<Vec<u8>> {
     run_ykman_capture(&["piv", "certificates", "export", "-F", "DER", "f9", "-"])
 }
 
+/// Yubico's published attestation-CA intermediate bundle
+/// (`developers.yubico.com/PKI/yubico-intermediate.pem`). The YubiKey holds only
+/// the 9c + f9 certs; the intermediates above f9 (which ROTATE, e.g. `Yubico PIV
+/// Attestation B 1` → `Yubico Attestation Intermediate B 1`) are published here.
+/// CIRISVerify pins the durable ROOT and expects the caller to carry the
+/// intermediates, so we path-build them in.
+#[cfg(feature = "pkcs11")]
+const YUBICO_INTERMEDIATE_BUNDLE: &str = include_str!("yubico_attestation_ca.pem");
+
+/// The pinned Yubico attestation root CN — the chain stops one short of it (verify
+/// supplies the root out of band).
+#[cfg(feature = "pkcs11")]
+const YUBICO_ROOT_CN: &str = "Yubico Attestation Root 1";
+
+/// Extract `(issuer_cn, subject_cn)` from a DER cert by scanning for the commonName
+/// OID `2.5.4.3` (`06 03 55 04 03`) followed by a DirectoryString. In a
+/// TBSCertificate the issuer RDNs precede the subject RDNs, so the 1st CN is the
+/// issuer's and the 2nd the subject's. Sufficient for the simple Yubico CA certs.
+#[cfg(feature = "pkcs11")]
+fn cert_cns(der: &[u8]) -> Option<(String, String)> {
+    const OID_CN: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
+    let mut cns: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i + 7 <= der.len() {
+        if der[i..i + 5] == OID_CN {
+            let tag = der[i + 5];
+            let len = der[i + 6] as usize;
+            // CNs are short DirectoryStrings (UTF8String/PrintableString/IA5String),
+            // short-form length (< 128).
+            if (tag == 0x0c || tag == 0x13 || tag == 0x16) && len < 0x80 {
+                let start = i + 7;
+                if start + len <= der.len() {
+                    if let Ok(s) = std::str::from_utf8(&der[start..start + len]) {
+                        cns.push(s.to_string());
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    match cns.len() {
+        0 => None,
+        1 => Some((cns[0].clone(), cns[0].clone())),
+        _ => Some((cns[0].clone(), cns[1].clone())),
+    }
+}
+
+/// Parse the bundled Yubico intermediates into `(subject_cn, der)` pairs.
+#[cfg(feature = "pkcs11")]
+fn yubico_intermediates() -> Vec<(String, Vec<u8>)> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut out = Vec::new();
+    for block in YUBICO_INTERMEDIATE_BUNDLE
+        .split("-----BEGIN CERTIFICATE-----")
+        .skip(1)
+    {
+        let body = block
+            .split("-----END CERTIFICATE-----")
+            .next()
+            .unwrap_or("");
+        let b64s: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        if let Ok(der) = b64.decode(b64s) {
+            if let Some((_, subject)) = cert_cns(&der) {
+                out.push((subject, der));
+            }
+        }
+    }
+    out
+}
+
+/// Build `[f9, …intermediates…]` (leaf-first, EXCLUDING the pinned root) by walking
+/// each cert's issuer CN to the next bundled intermediate, until the issuer is the
+/// pinned root. Best-effort: if an intermediate is missing it returns what it has +
+/// logs (verify will then reject, with a clear chain error).
+#[cfg(feature = "pkcs11")]
+fn complete_attestation_chain(f9_der: Vec<u8>) -> Vec<Vec<u8>> {
+    let bundle = yubico_intermediates();
+    let mut chain = vec![f9_der.clone()];
+    let mut cur = f9_der;
+    for _ in 0..8 {
+        let issuer = match cert_cns(&cur) {
+            Some((iss, _)) => iss,
+            None => break,
+        };
+        if issuer == YUBICO_ROOT_CN {
+            tracing::info!(
+                links = chain.len(),
+                "accord provision-holder: attestation chain path-built to the pinned Yubico root"
+            );
+            return chain;
+        }
+        match bundle.iter().find(|(subj, _)| *subj == issuer) {
+            Some((_, der)) => {
+                chain.push(der.clone());
+                cur = der.clone();
+            }
+            None => {
+                tracing::warn!(
+                    missing = %issuer,
+                    "accord provision-holder: Yubico intermediate not in the bundle — \
+                     attestation chain may not reach the pinned root (custody register may reject)"
+                );
+                break;
+            }
+        }
+    }
+    chain
+}
+
 /// Run `ykman <args>` capturing stdout as bytes (DER). `ykman` reads the token
 /// directly; a missing binary or a non-zero exit is a plain error.
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 fn run_ykman_capture(args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let out = std::process::Command::new("ykman")
         .args(args)
@@ -590,7 +755,7 @@ fn run_ykman_capture(args: &[&str]) -> anyhow::Result<Vec<u8>> {
 /// self-signed cert into the slot (signed by the slot key itself — may require a
 /// touch). The PIN is required (the management key is PIN-protected). Returns
 /// `Ok(true)` if a cert was generated, `Ok(false)` if one already existed.
-#[cfg(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows")))]
+#[cfg(feature = "pkcs11")]
 fn ensure_slot_cert(slot: &str, pin: Option<&str>, subject: &str) -> anyhow::Result<bool> {
     use std::io::Write;
 
@@ -658,7 +823,7 @@ fn ensure_slot_cert(slot: &str, pin: Option<&str>, subject: &str) -> anyhow::Res
 
 // ─── no-pkcs11 path: honest NotSupported ──────────────────────────────────────
 
-#[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
+#[cfg(not(feature = "pkcs11"))]
 async fn provision_holder_impl(_req: ProvisionHolderRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
@@ -668,7 +833,7 @@ async fn provision_holder_impl(_req: ProvisionHolderRequest) -> Response {
     )
 }
 
-#[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
+#[cfg(not(feature = "pkcs11"))]
 async fn cosign_family_impl(_req: CosignFamilyRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
@@ -761,7 +926,25 @@ fn probe_yubikey_status() -> serde_json::Value {
         }
     }
     let key_present = key_type.is_some();
-    let ready = fips && key_present && has_cert;
+    let is_ed25519 = key_type
+        .as_deref()
+        .map(|t| t.to_ascii_uppercase().contains("ED25519"))
+        .unwrap_or(false);
+
+    // CRITICAL: `ykman piv info` reads the key via libykpiv, which sees an Ed25519
+    // slot key fine — but the SIGNING path goes through pkcs11 (ykcs11), and ykcs11
+    // < 2.5.0 (Ubuntu 24.04 ships 2.2.0) CANNOT expose an Ed25519 PIV private key as
+    // a PKCS#11 object. So a slot can look perfect to ykman yet be unusable for
+    // signing. Probe pkcs11 DIRECTLY so we don't report a false "ready".
+    let pkcs11_ed25519_ok: Option<bool> = if key_present && has_cert && is_ed25519 {
+        probe_pkcs11_surfaces_slot9c()
+    } else {
+        None
+    };
+
+    // ready iff: FIPS + key + cert AND (pkcs11 confirmed surfacing, or we couldn't
+    // check — never block on an unknown, but DO block on a confirmed incompatibility).
+    let ready = fips && key_present && has_cert && pkcs11_ed25519_ok != Some(false);
 
     json!({
         "detected": true,
@@ -772,19 +955,56 @@ fn probe_yubikey_status() -> serde_json::Value {
         "slot_9c_key": key_present,
         "slot_9c_key_type": key_type,
         "slot_9c_cert": has_cert,
+        // Some(true)=pkcs11 surfaces the Ed25519 signing key; Some(false)=host ykcs11
+        // too old (UPGRADE needed); null=couldn't verify (pkcs11-tool absent).
+        "pkcs11_ed25519_ok": pkcs11_ed25519_ok,
         "ready": ready,
         // The slot needs a CERTIFICATE for ykcs11 to enumerate the key — surface the
         // exact next step when the key is there but the cert isn't.
-        "hint": if key_present && !has_cert {
-            Some("slot 9C has a key but NO certificate — ykcs11 can't see it; generate a self-signed cert in 9C")
+        "hint": if pkcs11_ed25519_ok == Some(false) {
+            Some("slot 9C is perfect (Ed25519 key + cert + FIPS), but this HOST's PKCS#11 module \
+                  (ykcs11/yubico-piv-tool) is too old to expose an Ed25519 key — UPGRADE to \
+                  yubico-piv-tool ≥ 2.5.0 (Ubuntu 24.04 ships 2.2.0: `add-apt-repository \
+                  ppa:yubico/stable && apt update && apt install ykcs11`). The YubiKey is fine.".to_string())
+        } else if key_present && !has_cert {
+            Some("slot 9C has a key but NO certificate — ykcs11 can't see it; generate a self-signed cert in 9C".to_string())
         } else if !key_present {
-            Some("slot 9C has no key — provision an Ed25519 key in slot 9C")
+            Some("slot 9C has no key — provision an Ed25519 key in slot 9C".to_string())
         } else if !fips {
-            Some("YubiKey is not FIPS-approved")
+            Some("YubiKey is not FIPS-approved".to_string())
         } else {
             None
         },
     })
+}
+
+/// Best-effort: does the host's ykcs11 actually expose the slot-9c **private key**
+/// as a PKCS#11 object? `ykman piv info` uses libykpiv (sees Ed25519 fine), but the
+/// signing path uses ykcs11 — and ykcs11 < 2.5.0 silently omits the Ed25519 private
+/// key object, yielding the cryptic "Key not found: Private key for Digital
+/// Signature" at sign time. We enumerate via `pkcs11-tool -O` (no login needed for
+/// object presence) and look for a Private Key Object. Returns `None` if we can't
+/// check (pkcs11-tool not installed) — callers must NOT treat unknown as failure.
+fn probe_pkcs11_surfaces_slot9c() -> Option<bool> {
+    let module = crate::identity::DEFAULT_YKCS11_MODULE;
+    let out = std::process::Command::new("pkcs11-tool")
+        .args(["--module", module, "-O"])
+        .output()
+        .ok()?;
+    // pkcs11-tool emits warnings on stderr for the Ed25519 key it can't parse; the
+    // object list is on stdout. If the binary ran at all, trust the enumeration.
+    if !out.status.success() && out.stdout.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // A capable ykcs11 (≥ 2.5.0) renders the slot-9c Ed25519 key as an EDWARDS key
+    // ("Public Key Object; EC_EDWARDS …"); the too-old 2.2.0 cannot represent it and
+    // garbles it to a nonsensical "RSA 256 bits", so EDWARDS is absent. (The private
+    // key object itself is login-gated and NOT listed pre-login, so we key off the
+    // public-key TYPE, which lists without login.) Caller only invokes this when the
+    // slot is known to hold an Ed25519 key, so EDWARDS present ⇒ usable.
+    let ed25519_representable = text.contains("EC_EDWARDS") || text.contains("EDWARDS");
+    Some(ed25519_representable)
 }
 
 /// The accord-provision router — merge onto the read-API listener behind the
@@ -869,7 +1089,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
+    #[cfg(not(feature = "pkcs11"))]
     #[tokio::test]
     async fn without_pkcs11_returns_not_implemented() {
         let app = router_with_engine().await;
@@ -927,7 +1147,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(all(feature = "pkcs11", any(target_os = "linux", target_os = "windows"))))]
+    #[cfg(not(feature = "pkcs11"))]
     #[tokio::test]
     async fn cosign_without_pkcs11_returns_not_implemented() {
         let app = router_with_engine().await;

@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.models.federation.CreateDelegationResponse
 import ai.ciris.mobile.shared.models.federation.DelegationDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
@@ -44,6 +45,10 @@ class DelegationsViewModel(
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
 
+    /** The most recently created delegation — the URL + PIN to hand to the agent. */
+    private val _lastCreated = MutableStateFlow<CreateDelegationResponse?>(null)
+    val lastCreated: StateFlow<CreateDelegationResponse?> = _lastCreated.asStateFlow()
+
     init {
         refresh()
     }
@@ -62,6 +67,54 @@ class DelegationsViewModel(
                 _loading.value = false
             }
         }
+    }
+
+    /**
+     * Create a delegation to hand to an agent. Requires the owner session (sign
+     * in first). `mode` is `"create"` (mint a fresh agent fed-ID) or `"existing"`
+     * (bind `existingKeyId`). On success [lastCreated] carries the claim URL +
+     * PIN the owner hands over, and the active list refreshes.
+     */
+    fun createDelegation(label: String, mode: String, existingKeyId: String?) {
+        val name = label.trim()
+        if (name.isEmpty()) {
+            _error.value = "Give the agent a label (e.g. my-laptop-agent)."
+            return
+        }
+        if (mode == "existing" && existingKeyId?.trim().isNullOrEmpty()) {
+            _error.value = "Enter the existing fed-ID key_id, or switch to creating a new one."
+            return
+        }
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val result = apiClient.createDelegation(
+                    label = name,
+                    mode = mode,
+                    existingKeyId = existingKeyId?.trim(),
+                )
+                _lastCreated.value = result
+                _notice.value = "Delegation created — hand the URL + PIN to the agent."
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[createDelegation] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") -> "Sign in as the owner first."
+                    else -> "Couldn't create the delegation: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** Dismiss the just-created delegation result card. */
+    fun clearLastCreated() {
+        _lastCreated.value = null
     }
 
     /**

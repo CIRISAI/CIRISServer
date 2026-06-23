@@ -102,7 +102,9 @@ use ciris_persist::federation::types::{
 };
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
-use ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation;
+use ciris_verify_core::accord_custody_attestation::{
+    custody_attestation_to_platform_attestation, verify_accord_custody_attestation,
+};
 use ciris_verify_core::accord_genesis::{
     accord_invocation_status, accord_roster_from_family, assemble_accord_family_genesis,
     build_accord_family_envelope, build_accord_invocation_object, humanity_accord_genesis,
@@ -461,19 +463,13 @@ async fn register_holder(
         mldsa65_public_key_base64: req.key_record.record.pubkey_ml_dsa_65_base64.clone(),
         role: None,
     };
-    let custody = match verify_accord_custody_attestation(
+    // Verify the custody attestation (fail-closed: admit only on Ok) and keep the verdict.
+    let verdict = match verify_accord_custody_attestation(
         custody,
         &holder_member,
         YUBICO_ATTESTATION_ROOT_1_DER,
     ) {
-        Ok(v) => serde_json::json!({
-            "verified": true,
-            "hardware_class": v.hardware_class,
-            "custody_tier": v.custody_tier,
-            "fips_certified": v.fips_certified,
-            "touch_always": v.touch_always,
-            "firmware": v.firmware,
-        }),
+        Ok(v) => v,
         Err(e) => {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -485,10 +481,50 @@ async fn register_holder(
         }
     };
 
-    match st.engine.register_federation_key(req.key_record).await {
+    // v7.1 BRIDGE (CIRISVerify#117 + CIRISPersist#268, v9.11.0): turn the VERIFIED
+    // custody attestation into a `PlatformAttestation::ExternalSecureElement` and
+    // package it in persist's `{platform_attestation, nonce_captured_at}`
+    // `AttestationEvidence` shape — the EXACT shape the accord_holder admission gate
+    // (`HardwareAttestationPolicy::check`) deserializes, with ExternalSecureElement
+    // now an accepted hardware type. The old hand-rolled `{verified, hardware_class,
+    // …}` JSON did NOT match the gate and was the #268 entrenchment blocker.
+    let platform_attestation = match custody_attestation_to_platform_attestation(custody, &verdict)
+    {
+        Ok(pa) => pa,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("custody → platform attestation bridge failed: {e}"),
+            )
+        }
+    };
+    let attestation_evidence = serde_json::json!({
+        "platform_attestation": platform_attestation,
+        // The registrar captures the admission nonce now; persist checks this is
+        // within `max_nonce_age` (24h) — same-session entrench is well inside it.
+        "nonce_captured_at": chrono::Utc::now().to_rfc3339(),
+    });
+    // Human-readable custody summary for the API response (NOT the row evidence).
+    let custody_summary = serde_json::json!({
+        "verified": true,
+        "hardware_class": verdict.hardware_class,
+        "custody_tier": verdict.custody_tier,
+        "fips_certified": verdict.fips_certified,
+        "touch_always": verdict.touch_always,
+        "firmware": verdict.firmware,
+    });
+
+    // Attach the bridged evidence to the row — persist's accord_holder admission gate
+    // requires this non-null, correctly-shaped `attestation_evidence`. It is row
+    // metadata, NOT part of the signed `registration_envelope`, so setting it
+    // post-verification does not disturb the proof-of-possession gate.
+    let mut key_record = req.key_record;
+    key_record.record.attestation_evidence = Some(attestation_evidence);
+
+    match st.engine.register_federation_key(key_record).await {
         Ok(_) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "registered": true, "key_id": key_id, "custody": custody })),
+            Json(serde_json::json!({ "registered": true, "key_id": key_id, "custody": custody_summary })),
         )
             .into_response(),
         Err(e) => err(
@@ -820,6 +856,30 @@ async fn genesis_assemble(
         // Fail-closed: a short/duplicate/non-founder quorum is a 409, not a 500.
         Err(e) => return err(StatusCode::CONFLICT, &format!("assemble genesis: {e}")),
     };
+
+    // OUTBOX: the quorum is already cryptographically verified here — `genesis.body`
+    // = { family, founder_signatures } carries the 2-of-3 cosignatures (the holders'
+    // consent). Save it to the SHARED CEG outbox NOW, BEFORE the (deferred)
+    // seat-registration entrench check below, so the holders' cosign TOUCHES are
+    // never wasted even when the seats aren't admitted yet. verify wraps the holder
+    // bundles + this genesis to entrench later.
+    {
+        let dir = ciris_verify_core::ceg_outbox::ceg_outbox().join("accord_family_genesis");
+        let path = dir.join("humanity_accord_genesis.json");
+        // Save the WHOLE founder-signed `SignedCegObject` (not just `.body`) — this
+        // is exactly what verify bakes into `HUMANITY_ACCORD_GENESIS_JSON`
+        // (`humanity_accord_genesis()`), so the file is directly pasteable.
+        match std::fs::create_dir_all(&dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| serde_json::to_vec_pretty(&genesis).map_err(|e| e.to_string()))
+            .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
+        {
+            Ok(()) => tracing::info!(path = %path.display(),
+                "accord genesis-assemble: assembled genesis (2/3 cosigns verified) saved to the CEG outbox"),
+            Err(e) => tracing::warn!(error = %e,
+                "accord genesis-assemble: could NOT write the assembled genesis to the outbox"),
+        }
+    }
 
     // The verified genesis is durably recorded as a node-authored CEG attestation
     // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`.

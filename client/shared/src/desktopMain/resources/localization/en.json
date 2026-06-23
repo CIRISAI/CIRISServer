@@ -2746,5 +2746,6 @@
   "setup_validation_select_provider": "Select an LLM provider",
   "network_ops": {
     "open_federation_hub": "Open federation hub →"
-  }
+  },
+  "provision_holder_usb_browse": "Browse…"
 }

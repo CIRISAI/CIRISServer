@@ -289,6 +289,397 @@ async fn device_code(State(st): State<DeviceGrantState>, body: axum::body::Bytes
         .into_response()
 }
 
+// ─── POST /v1/auth/device/delegate (OWNER-GATED) + /claim (PUBLIC) ────────────
+//
+// The OWNER-INITIATED delegation flow — a single consent step for the owner. Where
+// the RFC-8628 `device_code`→`approve`→`token` dance is CLIENT-initiated (the agent
+// asks, the owner approves out of band, the agent polls), `delegate` lets the OWNER
+// (already in a hardware-rooted owner session) mint the whole grant in one call:
+// optionally MINT the agent a fresh software fed-ID, create the device grant, AND
+// run the approval inline (the owner authoring it IS the consent). The agent then
+// redeems a single-use PIN at `claim` for the same delegated bearer the `token`
+// poll would have minted.
+
+/// `mode=create` mints the agent a fresh SOFTWARE fed-ID under this subdir of the
+/// owner seed dir (kept distinct from the owner's own user-seed blobs).
+const DELEGATE_SEED_SUBDIR: &str = "delegates";
+
+#[derive(Debug, Deserialize)]
+struct DelegateRequest {
+    /// `"create"` (mint a new agent fed-ID) or `"existing"` (reuse one).
+    mode: String,
+    /// Display label for the minted identity (mode=create only).
+    #[serde(default)]
+    label: Option<String>,
+    /// The agent's existing federation key_id (mode=existing only).
+    #[serde(default)]
+    existing_key_id: Option<String>,
+    /// The delegated scope(s); defaults to `[DEFAULT_SCOPE]`.
+    #[serde(default)]
+    scope: Option<Vec<String>>,
+}
+
+/// Register a freshly-MINTED agent key into `federation_keys` so the device flow's
+/// `lookup_public_key` (and the `delegates_to` put-time FK on the actor) succeed.
+/// `mint_user_identity` only stages the genesis CEG object to the on-disk outbox;
+/// nothing drains that into the live directory at runtime, so we admit the proven
+/// identity here from the minted pubkeys (mirrors `ownership::register_user_key`'s
+/// `put_public_key` bypass — proof-of-possession was established when the signer
+/// minted the row's self-signed genesis). Idempotent for an already-present row.
+async fn register_minted_agent_key(
+    engine: &Engine,
+    minted: &crate::identity::MintedUserIdentity,
+) -> Result<(), Response> {
+    use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
+    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
+    use sha2::{Digest, Sha256};
+
+    // Already admitted? (re-run delegate with the same minted key) → no-op.
+    if let Ok(Some(_)) = engine
+        .federation_directory()
+        .lookup_public_key(&minted.key_id)
+        .await
+    {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+    let reg_envelope = serde_json::json!({ "key_id": minted.key_id });
+    let canonical = ceg_produce_canonicalize(&reg_envelope).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("canonicalize minted agent registration envelope: {e}"),
+        )
+    })?;
+    let record = KeyRecord {
+        key_id: minted.key_id.clone(),
+        pubkey_ed25519_base64: minted.pubkey_ed25519_base64.clone(),
+        pubkey_ml_dsa_65_base64: Some(minted.pubkey_ml_dsa_65_base64.clone()),
+        algorithm: algorithm::HYBRID.into(),
+        // The agent is an accountable USER-role fed identity (the actor an owner
+        // delegates act-on-behalf authority to), NOT a node.
+        identity_type: identity_type::USER.into(),
+        identity_ref: minted.key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: reg_envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        // Self-attested: the minted genesis proves possession; scrub_key_id == key_id.
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
+        scrub_key_id: minted.key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("admit minted agent key into federation_keys: {e}"),
+            )
+        })?;
+    Ok(())
+}
+
+/// `POST /v1/auth/device/delegate` — OWNER-GATED one-step delegation. Resolves (or
+/// mints) the agent's fed-ID, creates a device grant, and runs the approval inline
+/// (the owner authoring this IS the consent — emits the signed `delegates_to`). The
+/// agent later redeems the returned PIN at `claim`.
+async fn delegate(
+    State(st): State<DeviceGrantState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // OWNER-GATE FIRST — same apex gate `approve` uses; no grant info leaks.
+    let owner = match require_owner(&st, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let req: DelegateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let scope_vec = req
+        .scope
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| vec![DEFAULT_SCOPE.to_string()]);
+    // The grant stores a single scope string (the edge scope); use the first.
+    let scope = scope_vec
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_SCOPE.to_string());
+
+    // Resolve the actor (client_id): mint a fresh agent fed-ID, or reuse an
+    // existing registered one.
+    let client_id =
+        match req.mode.as_str() {
+            "create" => {
+                let label = req.label.unwrap_or_default();
+                let label = label.trim();
+                if label.is_empty() {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "label is required when mode=create",
+                    );
+                }
+                let seed_dir = st.seed_dir.join(DELEGATE_SEED_SUBDIR);
+                if let Err(e) = std::fs::create_dir_all(&seed_dir) {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("create delegate seed dir {}: {e}", seed_dir.display()),
+                    );
+                }
+                // Software-backed agent identity (the agent is a process, not hardware).
+                let minted = match crate::identity::mint_user_identity(
+                    crate::identity::UserIdentityBackend::Software,
+                    label,
+                    Some(label),
+                    seed_dir,
+                )
+                .await
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("mint agent identity: {e}"),
+                        )
+                    }
+                };
+                // Admit the minted key into the live directory (the outbox genesis is
+                // not auto-drained) so lookup_public_key + the delegates_to FK pass.
+                if let Err(resp) = register_minted_agent_key(&st.engine, &minted).await {
+                    return resp;
+                }
+                minted.key_id
+            }
+            "existing" => {
+                let Some(existing) = req
+                    .existing_key_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "existing_key_id is required when mode=existing",
+                    );
+                };
+                // Must resolve in the directory (same check device_code does).
+                match st
+                    .engine
+                    .federation_directory()
+                    .lookup_public_key(existing)
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_client: existing_key_id is not a registered federation identity",
+                    ),
+                    Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+                }
+                existing.to_string()
+            }
+            other => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("invalid mode {other:?} (expected \"create\" or \"existing\")"),
+                )
+            }
+        };
+
+    // Create the device grant (same shape device_code mints).
+    let user_code = gen_user_code();
+    let device_code = gen_device_code();
+    let expires_at = now_unix() + st.grant_ttl_secs;
+    {
+        let grant = DeviceGrant {
+            user_code: user_code.clone(),
+            client_id: client_id.clone(),
+            scope: scope.clone(),
+            expires_at,
+            status: GrantStatus::Pending,
+        };
+        st.grants
+            .lock()
+            .expect("grants lock")
+            .insert(device_code.clone(), grant);
+        st.user_index
+            .lock()
+            .expect("user_index lock")
+            .insert(user_code.clone(), device_code.clone());
+    }
+
+    // Approve INLINE — the owner authoring this delegation IS the consent (mirrors
+    // the `approve` handler's emit-delegates_to path). Resolve the owner signer
+    // (hardware presence prompted on sign_hybrid), emit the durable signed
+    // delegates_to(owner → actor, [scope]), then mark the grant Approved.
+    let owner_signer = match resolve_owner_signer(&st).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let envelope = ciris_persist::federation::delegates_to_envelope(
+        &client_id,
+        std::slice::from_ref(&scope),
+        false,
+    );
+    let attestation_id = match crate::auth::ownership::emit_signed_attestation(
+        &st.engine,
+        &owner_signer,
+        attestation_type::DELEGATES_TO,
+        &client_id,
+        envelope,
+        vec![client_id.clone()],
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("emit delegates_to(owner→actor): {e}"),
+            )
+        }
+    };
+
+    {
+        let mut grants = st.grants.lock().expect("grants lock");
+        let Some(grant) = grants.get_mut(&device_code) else {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "grant vanished during delegate",
+            );
+        };
+        grant.status = GrantStatus::Approved {
+            owner_wa_id: owner.wa_id.clone(),
+            owner_role: owner.role,
+            owner_key_id: owner_signer.key_id().to_string(),
+        };
+    }
+    tracing::info!(
+        actor = %client_id,
+        owner = %owner_signer.key_id(),
+        attestation_id = %attestation_id,
+        mode = %req.mode,
+        "owner-initiated delegation — minted+approved grant, emitted signed delegates_to (act-on-behalf)"
+    );
+
+    let expires_in = expires_at.saturating_sub(now_unix());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "claim_url": "/v1/auth/device/claim",
+            "pin": user_code,
+            "client_id": client_id,
+            "scope": scope_vec,
+            "expires_in": expires_in,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimRequest {
+    pin: String,
+}
+
+/// `POST /v1/auth/device/claim` — PUBLIC (the PIN is the secret). The agent redeems
+/// the single-use PIN minted by `delegate` for the delegated bearer (the same mint
+/// the `token` poll runs on the Approved branch). Consumes the grant on success.
+async fn claim(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> Response {
+    let req: ClaimRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let pin = req.pin.trim();
+    let Some(device_code) = device_code_for_user_code(&st, pin) else {
+        return err(StatusCode::NOT_FOUND, "unknown pin");
+    };
+
+    // Drain the handshake state under the lock, dropping the (!Send) guard before
+    // any await (the register_delegated_grant mint is sync, but the graph gate
+    // below awaits). Terminal paths return from inside.
+    let (owner_wa_id, owner_role, owner_key_id, client_id, scope) = {
+        let mut grants = st.grants.lock().expect("grants lock");
+        let Some(grant) = grants.get(&device_code).cloned() else {
+            return err(StatusCode::NOT_FOUND, "unknown pin");
+        };
+        if grant.expires_at <= now_unix() {
+            grants.remove(&device_code);
+            st.user_index
+                .lock()
+                .expect("user_index lock")
+                .remove(&grant.user_code);
+            return err(StatusCode::GONE, "expired_token");
+        }
+        match grant.status {
+            GrantStatus::Pending => {
+                return err(StatusCode::PRECONDITION_REQUIRED, "authorization_pending")
+            }
+            GrantStatus::Denied => return err(StatusCode::FORBIDDEN, "access_denied"),
+            GrantStatus::Approved {
+                owner_wa_id,
+                owner_role,
+                owner_key_id,
+                ..
+            } => {
+                // Single-use: consume the handshake so a leaked PIN can't re-mint.
+                grants.remove(&device_code);
+                st.user_index
+                    .lock()
+                    .expect("user_index lock")
+                    .remove(&grant.user_code);
+                (
+                    owner_wa_id,
+                    owner_role,
+                    owner_key_id,
+                    grant.client_id,
+                    grant.scope,
+                )
+            }
+        }
+    };
+
+    // GRAPH GATE before minting (mirrors `token`): the delegates_to edge must be
+    // LIVE (not revoked between delegate and claim).
+    match st
+        .engine
+        .reachable_under_scope(&owner_key_id, &client_id, &scope, DELEGATION_DEPTH)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return err(StatusCode::FORBIDDEN, "access_denied"),
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    }
+
+    let access_token = register_delegated_grant(DelegatedGrant {
+        owner_wa_id,
+        owner_role,
+        owner_key_id,
+        client_id: client_id.clone(),
+        scope: scope.clone(),
+        expires_at: now_unix() + DELEGATED_TTL_SECS,
+    });
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "scope": scope,
+            "expires_in": DELEGATED_TTL_SECS,
+            "client_id": client_id,
+        })),
+    )
+        .into_response()
+}
+
 // ─── owner gate (mirrors federation_admin::require_owner) ─────────────────────
 
 /// Require a live OWNER session: the SAME apex gate `POST /v1/federation/peering`
@@ -768,6 +1159,8 @@ pub fn router_with_ttl(
     };
     Router::new()
         .route("/v1/auth/device/code", axum::routing::post(device_code))
+        .route("/v1/auth/device/delegate", axum::routing::post(delegate))
+        .route("/v1/auth/device/claim", axum::routing::post(claim))
         .route("/v1/auth/device/approve", axum::routing::post(approve))
         .route("/v1/auth/device/deny", axum::routing::post(deny))
         .route("/v1/auth/device/token", axum::routing::post(token))

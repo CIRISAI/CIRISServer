@@ -198,5 +198,9 @@ data class YubiKeyStatus(
     @SerialName("slot_9c_key") val slot9cKey: Boolean = false,
     @SerialName("slot_9c_key_type") val slot9cKeyType: String? = null,
     @SerialName("slot_9c_cert") val slot9cCert: Boolean = false,
+    // null = couldn't verify (pkcs11-tool absent); true = host ykcs11 exposes the
+    // Ed25519 signing key; false = host ykcs11 too old (< 2.5.0) — the slot is fine
+    // but the HOST library must be upgraded. Drives the "stale host" alert.
+    @SerialName("pkcs11_ed25519_ok") val pkcs11Ed25519Ok: Boolean? = null,
     val hint: String? = null,
 )

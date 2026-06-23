@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.localization.localizedString
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
@@ -31,10 +32,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -236,10 +241,10 @@ fun ProvisionAccordHolderScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            // A directory-picker affordance + a validated path field. A native
-            // directory chooser is platform-specific (expect/actual); until that is
-            // wired the holder types/pastes the mounted USB folder path. The field
-            // is the source of truth either way.
+            // A native directory-picker affordance ("Browse…") + a validated path
+            // field. The field stays the source of truth; the picker just fills it.
+            // Desktop opens a real folder chooser; mobile/wasm fall back to typing.
+            var showDirPicker by remember { mutableStateOf(false) }
             OutlinedTextField(
                 value = usbPath,
                 onValueChange = { viewModel.setUsbPath(it) },
@@ -251,7 +256,26 @@ fun ProvisionAccordHolderScreen(
                 leadingIcon = {
                     Icon(CIRISIcons.pkg, contentDescription = null, modifier = Modifier.size(18.dp))
                 },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { if (!busy) showDirPicker = true },
+                        enabled = !busy,
+                        modifier = Modifier.testableClickable("btn_provision_holder_usb_browse") {
+                            if (!busy) showDirPicker = true
+                        },
+                    ) {
+                        Text(localizedString("mobile.provision_holder_usb_browse"))
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().testable("input_provision_holder_usb_path"),
+            )
+            DirectoryPickerDialog(
+                show = showDirPicker,
+                onDirectoryPicked = {
+                    viewModel.setUsbPath(it)
+                    showDirPicker = false
+                },
+                onDismiss = { showDirPicker = false },
             )
             Spacer(Modifier.height(4.dp))
             Text(

@@ -579,6 +579,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::accord_provision::router(Arc::clone(&engine)).layer(
                         axum::middleware::from_fn(crate::auth::loopback::require_loopback),
                     ))
+                    // FEDERATION PEERS (agent-compat Network card): GET
+                    // /v1/federation/peers + GET /v1/federation/peers/{key_id}
+                    // — projects the federation_directory `federation_keys`
+                    // rows onto the client's LocalPeerState wire contract so
+                    // the desktop/mobile Network card works in server mode (the
+                    // data was there; the route was missing → 404). Read-only,
+                    // unauthenticated like the other directory read surfaces;
+                    // excludes the node's own self key.
+                    .merge(crate::federation_peers::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                    ))
+                    // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
+                    // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
+                    // GET /v1/memory/{node_id}, GET /v1/memory/{node_id}/edges. Projects
+                    // the cirisgraph_nodes / cirisgraph_edges SQLite tables onto the
+                    // client's wire contract so both cards work in server mode.
+                    // Unauthenticated (read-only public surface, same posture as
+                    // federation_peers and the health endpoint).
+                    .merge(crate::memory_api::router(Arc::clone(&engine)))
                     // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
                     // POST /lens-api/api/v1/accord/events (legacy path, forwarded
                     // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events

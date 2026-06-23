@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- On-device YubiKey PIV over NFC (YubiKey-backed fed-ID). Not required, so the
+         app still installs on devices without NFC (they keep the non-YubiKey path). -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="false" />
+
     <!-- Support 16KB page size for Android 15+ -->
     <uses-feature
         android:name="android.software.large_page_size"

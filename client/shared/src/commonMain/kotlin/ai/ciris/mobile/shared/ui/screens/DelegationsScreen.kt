@@ -31,6 +31,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,13 +58,37 @@ import androidx.compose.ui.unit.sp
 fun DelegationsScreen(
     viewModel: DelegationsViewModel,
     onBack: () -> Unit,
+    /** Navigate to the Contacts picker so the user can choose a known fed-ID. */
+    onOpenContacts: (() -> Unit)? = null,
+    /**
+     * When the user picks an identity in the Contacts picker and returns here,
+     * this is the selected key_id. Delegations reads it and fills [existingKeyId].
+     * The caller should clear this after it's been consumed (by passing null again).
+     */
+    pickedIdentityKeyId: String? = null,
+    /** Called after [pickedIdentityKeyId] has been consumed so the caller can clear it. */
+    onPickedIdentityConsumed: (() -> Unit)? = null,
 ) {
     val delegations by viewModel.delegations.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val error by viewModel.error.collectAsState()
     val notice by viewModel.notice.collectAsState()
+    val lastCreated by viewModel.lastCreated.collectAsState()
     var userCode by remember { mutableStateOf("") }
+    var delegateLabel by remember { mutableStateOf("") }
+    // mode: "create" = mint a fresh agent fed-ID; "existing" = bind a known key_id.
+    var delegateMode by remember { mutableStateOf("create") }
+    var existingKeyId by remember { mutableStateOf("") }
+
+    // When the Contacts picker returns a selection, fill the key_id field.
+    LaunchedEffect(pickedIdentityKeyId) {
+        if (!pickedIdentityKeyId.isNullOrBlank()) {
+            existingKeyId = pickedIdentityKeyId
+            delegateMode = "existing"
+            onPickedIdentityConsumed?.invoke()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -126,8 +151,190 @@ fun DelegationsScreen(
                 }
             }
 
-            // ── Approve a new delegation ─────────────────────────────────────
+            // ── Delegate to an agent (owner creates → hands URL + PIN) ───────
             Spacer(Modifier.height(16.dp))
+            Text(
+                "Delegate to an agent",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Authorize an agent to act on your behalf. You'll get a URL and PIN to hand to it.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = delegateLabel,
+                onValueChange = { delegateLabel = it },
+                singleLine = true,
+                enabled = !busy,
+                label = { Text("Agent label (e.g. my-laptop-agent)") },
+                modifier = Modifier.fillMaxWidth().testable("input_delegation_label"),
+            )
+            Spacer(Modifier.height(8.dp))
+            // Mode choice — create a new fed-ID vs use an existing one.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = { delegateMode = "create" },
+                    enabled = !busy,
+                    modifier = Modifier.testableClickable("btn_delegation_mode_create") {
+                        delegateMode = "create"
+                    },
+                ) {
+                    Text(
+                        "New fed-ID",
+                        fontWeight = if (delegateMode == "create") FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = { delegateMode = "existing" },
+                    enabled = !busy,
+                    modifier = Modifier.testableClickable("btn_delegation_mode_existing") {
+                        delegateMode = "existing"
+                    },
+                ) {
+                    Text(
+                        "Existing fed-ID",
+                        fontWeight = if (delegateMode == "existing") FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+            }
+            if (delegateMode == "existing") {
+                Spacer(Modifier.height(8.dp))
+                // "Choose identity" button — opens Contacts picker when available.
+                if (onOpenContacts != null) {
+                    OutlinedButton(
+                        onClick = onOpenContacts,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().testableClickable("btn_delegation_choose_identity") {
+                            onOpenContacts()
+                        },
+                    ) {
+                        Icon(
+                            CIRISIcons.person,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (existingKeyId.isBlank()) "Choose from Contacts"
+                            else "Change identity (${existingKeyId.take(12)}…)",
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                // Manual key_id fallback — always shown so the user can type directly.
+                OutlinedTextField(
+                    value = existingKeyId,
+                    onValueChange = { existingKeyId = it },
+                    singleLine = true,
+                    enabled = !busy,
+                    label = {
+                        Text(
+                            if (onOpenContacts != null) "Or paste a key_id manually"
+                            else "Existing fed-ID key_id"
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth().testable("input_delegation_key_id"),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    viewModel.createDelegation(delegateLabel, delegateMode, existingKeyId)
+                },
+                enabled = !busy && delegateLabel.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().testableClickable("btn_delegation_create") {
+                    viewModel.createDelegation(delegateLabel, delegateMode, existingKeyId)
+                },
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text("Create delegation")
+            }
+
+            // ── Created result — the URL + PIN to hand over ──────────────────
+            lastCreated?.let { created ->
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testable("delegation_created_card"),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text(
+                            "Hand this to the agent",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "PIN",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Text(
+                            created.pin,
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.testable("delegation_created_pin"),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Claim URL",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Text(
+                            created.claimUrl,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.testable("delegation_created_url"),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Client: ${created.clientId}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.testable("delegation_created_client_id"),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Hand this URL + PIN to the agent; it expires in ${created.expiresIn / 60} minutes.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Button(
+                            onClick = {
+                                viewModel.clearLastCreated()
+                                delegateLabel = ""
+                                existingKeyId = ""
+                            },
+                            modifier = Modifier.testableClickable("btn_delegation_created_done") {
+                                viewModel.clearLastCreated()
+                                delegateLabel = ""
+                                existingKeyId = ""
+                            },
+                        ) {
+                            Text("Done")
+                        }
+                    }
+                }
+            }
+
+            // ── Approve a new delegation ─────────────────────────────────────
+            Spacer(Modifier.height(20.dp))
             Text(
                 localizedString("mobile.delegations_add_title"),
                 fontSize = 15.sp,

@@ -781,15 +781,26 @@ class CIRISApiClient(
      * pattern used by [getAgentMode] / [getSystemStatus] — created per-call
      * so a stuck request never poisons unrelated traffic.
      */
-    private fun federationHttpClient(): io.ktor.client.HttpClient =
+    // Default timeout suits quick federation GETs. Touch-gated ceremony calls
+    // (provision-holder / family cosign) pass a LONG timeout: slot 9c with touch
+    // policy ALWAYS needs a physical touch per Ed25519 sign, and provisioning does
+    // three (USB ML-DSA wrap-challenge, holder record, custody attestation) — each
+    // a session-open + PIN + human-touch-wait + sign round-trip. 30s is far too
+    // short for three human touches; the request (and idle socket) must wait.
+    private fun federationHttpClient(
+        requestTimeoutMillis: Long = 30_000,
+    ): io.ktor.client.HttpClient =
         io.ktor.client.HttpClient {
             install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
             install(io.ktor.client.plugins.HttpTimeout) {
-                requestTimeoutMillis = 30_000
+                this.requestTimeoutMillis = requestTimeoutMillis
                 connectTimeoutMillis = 10_000
-                socketTimeoutMillis = 30_000
+                socketTimeoutMillis = requestTimeoutMillis
             }
         }
+
+    /** Timeout for touch-gated YubiKey ceremony calls (3 touches × human latency). */
+    private val ceremonyTimeoutMillis: Long = 180_000
 
     /**
      * Decode the ``{"data": <T>}`` envelope used by every federation
@@ -1637,6 +1648,51 @@ class CIRISApiClient(
     }
 
     /**
+     * Create a delegation the owner hands to an agent —
+     * `POST {nodeUrl}/v1/auth/device/delegate`. The owner names a `label` and
+     * chooses `mode`: `"create"` mints a fresh agent fed-ID, `"existing"` binds
+     * an `existingKeyId`. Owner-session-gated. Returns a claim URL + PIN to hand
+     * over (the agent then claims via `POST /v1/auth/device/claim`).
+     */
+    suspend fun createDelegation(
+        label: String,
+        mode: String, // "create" | "existing"
+        existingKeyId: String? = null,
+        scope: List<String> = listOf("owner:act-on-behalf"),
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CreateDelegationResponse {
+        val method = "createDelegation"
+        logInfo(method, "POST $nodeUrl/v1/auth/device/delegate mode=$mode label=$label")
+        val client = federationHttpClient()
+        return try {
+            val scopeJson = scope.joinToString(",", "[", "]") { "\"$it\"" }
+            val keyField = existingKeyId?.takeIf { it.isNotBlank() }
+                ?.let { ",\"existing_key_id\":\"${it.trim()}\"" } ?: ""
+            val body = "{\"mode\":\"${mode.trim()}\",\"label\":\"${label.trim()}\"" +
+                "$keyField,\"scope\":$scopeJson}"
+            val response = client.post("$nodeUrl/v1/auth/device/delegate") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("create delegation failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CreateDelegationResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * Approve a pending device code — `POST {nodeUrl}/v1/auth/device/approve`.
      * The owner enters the `user_code` the agent showed them; approving mints the
      * delegated token. Owner-session-gated; this is the human-consent gate.
@@ -1855,7 +1911,12 @@ class CIRISApiClient(
     ): ai.ciris.mobile.shared.models.federation.AccordProvisionResponse {
         val method = "provisionAccordHolder"
         logInfo(method, "POST $nodeUrl/v1/accord/provision-holder key_id=$keyId usb=$mldsaUsbPath")
-        val client = federationHttpClient()
+        // Touch-gated: slot 9c (touch policy ALWAYS) needs a physical touch per
+        // Ed25519 sign — provisioning does THREE (USB ML-DSA wrap-challenge, holder
+        // record, custody attestation). Long timeout + the caller surfaces the
+        // "touch each blink (~3×)" prompt.
+        logInfo(method, "this needs ~3 YubiKey touches (slot 9c is touch-ALWAYS); waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
@@ -1875,13 +1936,20 @@ class CIRISApiClient(
             if (!response.status.isSuccess()) {
                 throw RuntimeException("provision holder failed: ${response.status}: ${raw.take(220)}")
             }
-            jsonConfig.decodeFromString(
+            val parsed = jsonConfig.decodeFromString(
                 ai.ciris.mobile.shared.models.federation.AccordProvisionResponse.serializer(),
                 raw,
             )
+            logInfo(method, "provisioned key_id=${parsed.keyId} (custody=${parsed.custodyAttestation != null})")
+            parsed
         } catch (e: Exception) {
-            logException(method, e, "nodeUrl=$nodeUrl")
-            throw e
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for YubiKey touches; touch the key EACH time it blinks (≈3×) and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "provision failed"}$hint", e)
         } finally {
             client.close()
         }
@@ -1912,6 +1980,36 @@ class CIRISApiClient(
                 detected = false,
                 hint = "couldn't reach the node's YubiKey probe: ${e.message}",
             )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Is [token] a LIVE user-account session on the node? Probes `GET /v1/auth/me`
+     * (HTTP 200 ⇒ the opaque `sess:` token resolves to an active `wa_cert` row;
+     * 401 ⇒ unknown/expired/revoked). This is the gate behind "sign in as <fedID>":
+     * the founder's federation identity is accessible ONLY via the associated
+     * user-account session, never as a credential-less door. The node separately
+     * refuses to SIGN with the fedID without a live owner session (server-side
+     * `resolve_user_signer` choke point), so this client check mirrors that.
+     */
+    suspend fun hasLiveSession(
+        token: String,
+        nodeUrl: String = baseUrl,
+    ): Boolean {
+        val method = "hasLiveSession"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/auth/me") {
+                header("Authorization", "Bearer $token")
+            }
+            val ok = response.status.value == 200
+            logInfo(method, "session probe → HTTP ${response.status.value} (live=$ok)")
+            ok
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            false
         } finally {
             client.close()
         }
@@ -2016,7 +2114,10 @@ class CIRISApiClient(
     ): ai.ciris.mobile.shared.models.federation.CosignFamilyResponse {
         val method = "cosignAccordFamily"
         logInfo(method, "POST $nodeUrl/v1/accord/family/cosign key_id=$keyId usb=$mldsaUsbPath")
-        val client = federationHttpClient()
+        // Touch-gated like provisioning: re-opens the YubiKey + signs the envelope
+        // (slot 9c touch-ALWAYS). Long timeout + touch-each-blink prompt.
+        logInfo(method, "this needs YubiKey touch(es) (slot 9c is touch-ALWAYS); waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
@@ -2037,13 +2138,19 @@ class CIRISApiClient(
             if (!response.status.isSuccess()) {
                 throw RuntimeException("cosign family failed: ${response.status}: ${raw.take(220)}")
             }
+            logInfo(method, "cosigned key_id=$keyId")
             jsonConfig.decodeFromString(
                 ai.ciris.mobile.shared.models.federation.CosignFamilyResponse.serializer(),
                 raw,
             )
         } catch (e: Exception) {
-            logException(method, e, "nodeUrl=$nodeUrl")
-            throw e
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for YubiKey touch; touch the key EACH time it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "cosign failed"}$hint", e)
         } finally {
             client.close()
         }
@@ -2424,6 +2531,55 @@ class CIRISApiClient(
         } catch (e: Exception) {
             logException(method, e, "url=$baseUrl")
             throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Probe the node's structured server health at `/v1/health` (unauthenticated —
+     * liveness is public). Returns the [NodeHealth] facts that drive the universal
+     * client's node-vs-agent gate ([ai.ciris.mobile.shared.models.ClientMode]) and
+     * the version-mismatch banner: the node `version`, its `role`
+     * (`"fabric-node"` for a bare node), and the optional `cognitive_state` (present
+     * only when an agent enriches the endpoint).
+     */
+    suspend fun getNodeHealth(): NodeHealth {
+        val method = "getNodeHealth"
+        logDebug(method, "Probing node health at $baseUrl/v1/health")
+
+        val client = io.ktor.client.HttpClient {
+            install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
+            install(io.ktor.client.plugins.HttpTimeout) {
+                requestTimeoutMillis = 10000
+                connectTimeoutMillis = 5000
+            }
+        }
+
+        return try {
+            val response = client.get("$baseUrl/v1/health") {
+                authHeader()?.let { header("Authorization", it) }
+            }
+
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("Node health failed: ${response.status}")
+            }
+
+            val body = response.bodyAsText()
+            val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+            val data = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
+
+            val cognitiveState = data?.get("cognitive_state")?.jsonPrimitive?.contentOrNull
+            var serviceCount = 0
+            data?.get("services")?.jsonObject?.forEach { (_, _) -> serviceCount++ }
+
+            NodeHealth(
+                status = data?.get("status")?.jsonPrimitive?.contentOrNull ?: "unknown",
+                role = data?.get("role")?.jsonPrimitive?.contentOrNull,
+                version = data?.get("version")?.jsonPrimitive?.contentOrNull,
+                cognitiveState = cognitiveState,
+                serviceCount = serviceCount
+            )
         } finally {
             client.close()
         }
@@ -9665,6 +9821,20 @@ data class SystemHealthData(
     val cognitiveState: String,
     val warnings: List<SystemWarning> = emptyList(),
     val degradedMode: Boolean = false  // True when no working LLM provider
+)
+
+/**
+ * Structured server health from `/v1/health` — the facts the universal client's
+ * node-vs-agent gate keys off (see [ai.ciris.mobile.shared.models.ClientMode]).
+ * A bare node reports `role="fabric-node"` with no [cognitiveState] and an empty
+ * service map; an agent enriches the endpoint with [cognitiveState] + services.
+ */
+data class NodeHealth(
+    val status: String,
+    val role: String?,
+    val version: String?,
+    val cognitiveState: String?,
+    val serviceCount: Int
 )
 
 data class UnifiedTelemetryData(

@@ -579,7 +579,10 @@ private fun YubiKeyStatusBanner(status: YubiKeyStatus?, onRefresh: () -> Unit) {
                                     else -> " — 9C EMPTY"
                                 }
                             )
-                            if (ready) append(" — READY TO PROCEED")
+                            when {
+                                ready -> append(" — READY TO PROCEED")
+                                status.pkcs11Ed25519Ok == false -> append(" — ⚠ HOST PKCS#11 TOO OLD")
+                            }
                         }
                     },
                     fontWeight = FontWeight.Bold,
@@ -598,9 +601,26 @@ private fun YubiKeyStatusBanner(status: YubiKeyStatus?, onRefresh: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // Stale-HOST alert: the slot is perfect but the host's ykcs11 is too old
+            // for Ed25519 — make this loud and actionable (it is NOT a YubiKey fault).
+            if (status?.pkcs11Ed25519Ok == false) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "⚠ STALE HOST LIBRARY — UPGRADE REQUIRED",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             status?.hint?.takeIf { !ready }?.let {
                 Spacer(Modifier.height(2.dp))
-                Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                Text(
+                    it,
+                    fontSize = 11.sp,
+                    fontWeight = if (status.pkcs11Ed25519Ok == false) FontWeight.Medium else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
     }

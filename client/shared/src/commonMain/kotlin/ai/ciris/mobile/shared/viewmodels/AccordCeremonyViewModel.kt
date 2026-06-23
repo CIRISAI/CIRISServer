@@ -197,7 +197,13 @@ class AccordCeremonyViewModel(
         }
         _busy.value = true
         _error.value = null
-        _notice.value = null
+        // Progress feedback: slot 9c is touch-ALWAYS and provisioning does THREE
+        // Ed25519 signs (USB ML-DSA wrap-challenge, holder record, custody
+        // attestation), so the holder must touch the key for EACH blink. The call is
+        // one blocking request (no per-touch granularity) — set expectations up front.
+        _notice.value = "Provisioning ${slot.label}… TOUCH your YubiKey each time it " +
+            "blinks (≈3 touches; up to ~3 min). Keep it inserted."
+        PlatformLogger.i(TAG, "[provisionCurrent ${slot.label}] starting — expect ~3 YubiKey touches, key_id=$keyId")
         viewModelScope.launch {
             try {
                 val res = apiClient.provisionAccordHolder(
@@ -207,13 +213,29 @@ class AccordCeremonyViewModel(
                 )
                 val record = res.holderRecord
                     ?: throw RuntimeException("provision returned no holder_record")
-                apiClient.registerAccordHolder(
-                    holderRecord = record,
-                    custodyAttestation = res.custodyAttestation,
-                )
+                // Provision succeeded — the YubiKey signatures are done and the node
+                // SAVED the artifacts to its USB outbox file (the touches are never
+                // wasted). Registration's persist admission gate (a PlatformAttestation
+                // attestation_evidence) isn't wired for YubiKey PIV custody yet — try
+                // it, but DON'T block the ceremony: the outbox file is handed to verify
+                // to wrap + register later. So advance regardless.
+                val registered = try {
+                    apiClient.registerAccordHolder(
+                        holderRecord = record,
+                        custodyAttestation = res.custodyAttestation,
+                    )
+                    true
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[provisionCurrent ${slot.label}] register deferred (saved to outbox): ${e.message}")
+                    false
+                }
                 _provisioned.value = _provisioned.value + ProvisionedKey(slot, name, res.keyId, usb)
-                _notice.value = "${slot.label} (${if (slot.primary) "SEAT" else "VAULT"}) " +
-                    "provisioned + registered."
+                _notice.value = if (registered) {
+                    "${slot.label} (${if (slot.primary) "SEAT" else "VAULT"}) provisioned + registered."
+                } else {
+                    "${slot.label} provisioned — artifacts SAVED to the USB outbox " +
+                        "(accord_holder_${res.keyId}.json); registration deferred to verify. Advancing."
+                }
                 advanceSlot()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[provisionCurrent ${slot.label}] ${e.message}")

@@ -101,6 +101,12 @@ pub mod federation_admin;
 /// reads off the node and hands to a founder's app. Public so the integration
 /// test (`tests/nodecode.rs`) can drive the router directly.
 pub mod federation_nodecode;
+/// **Federation peers READ surface** (agent-compat Network card): `GET
+/// /v1/federation/peers` + `GET /v1/federation/peers/{key_id}`. Projects the
+/// `federation_directory` `federation_keys` rows onto the client's
+/// `LocalPeerState` wire contract so the desktop/mobile Network card works in
+/// server mode.
+pub mod federation_peers;
 /// **Config-as-CEG** (Server 0.5 Phase 1) — a signed, owner-gated GraphConfig
 /// service over the CEG, mirroring CIRISAgent's `GraphConfigService` but
 /// hybrid-signed + owner-gated. Config entries are self-attested `config:v1`
@@ -139,6 +145,12 @@ mod import;
 /// signature is the auth, so it is unauthenticated like the relay. Public so the
 /// integration test (`tests/ingest_http.rs`) can drive the router directly.
 pub mod ingest_http;
+/// **Memory READ surface** — agent-compat Memory + GraphMemory card endpoints
+/// (`GET /v1/memory/stats`, `GET /v1/memory/timeline`, `POST /v1/memory/query`,
+/// `GET /v1/memory/{node_id}`, `GET /v1/memory/{node_id}/edges`). Projects the
+/// `cirisgraph_nodes` / `cirisgraph_edges` SQLite tables onto the client's
+/// wire contract so both cards work in server mode.
+pub mod memory_api;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the

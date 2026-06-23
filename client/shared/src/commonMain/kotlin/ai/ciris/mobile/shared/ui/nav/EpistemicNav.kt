@@ -178,6 +178,14 @@ sealed class NavSurface(
         labelKey = "nav.surface.manage_consent",)
 
     /**
+     * Contacts / Identities — browsable list of known federation identities
+     * (the local node's peer store). Used both as a first-class explore surface
+     * and as the picker when delegating to an existing fed-ID. Live (no gate).
+     */
+    object Contacts : NavSurface("contacts", "Contacts", CIRISIcons.person,
+        labelKey = "nav.surface.contacts",)
+
+    /**
      * Delegations — who the owner has authorized to act on their behalf (active
      * device-authorization grants), plus approve-a-new / revoke. The
      * human-consent gate for an agent acting on-behalf-of. Live (no gate).
@@ -475,6 +483,7 @@ val MANAGE_GROUP = NavGroup(
     icon = CIRISIcons.handler,
     surfaces = listOf(
         NavSurface.HealthReputation,
+        NavSurface.Contacts,        // known federation identities (peer store browser)
         NavSurface.Nodes,           // first-class node management (CRUD + switch)
         NavSurface.ManageConsent,   // consent:replication + user-data consent
         NavSurface.Delegations,     // device-auth grants — authorize an agent on-behalf

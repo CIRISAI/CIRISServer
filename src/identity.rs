@@ -177,6 +177,8 @@ fn user_identity_config(
         UserIdentityBackend::Pkcs11(opts) => {
             // Default the PKCS#11 key label to the ykcs11 PIV-slot label when the
             // operator didn't pin one explicitly (matches `ykman` provisioning).
+            // CIRISVerify v6.13.0 (#112) resolves the public half via the private
+            // key's CKA_ID, so naming the PRIVATE object by label is sufficient.
             let key_label = opts
                 .key_label
                 .clone()

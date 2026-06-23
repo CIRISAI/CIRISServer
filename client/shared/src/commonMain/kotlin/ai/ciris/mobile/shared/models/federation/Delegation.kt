@@ -24,3 +24,26 @@ data class DelegationDto(
 data class DelegationsResponse(
     val grants: List<DelegationDto> = emptyList(),
 )
+
+/**
+ * The result of creating a delegation the owner hands to an agent — the response
+ * of ``POST /v1/auth/device/delegate``. The owner gives the agent the
+ * [claimUrl] + [pin]; the agent claims it (``POST /v1/auth/device/claim``) to
+ * receive its delegated token. The PIN expires after [expiresIn] seconds.
+ */
+@Serializable
+data class CreateDelegationResponse(
+    /** The relative claim endpoint the agent posts the PIN to. */
+    @SerialName("claim_url")
+    val claimUrl: String,
+    /** The short human-handover secret (e.g. ``ABCD-1234``). */
+    val pin: String,
+    /** The client/actor id the delegation is attributed to (e.g. ``ciris-...``). */
+    @SerialName("client_id")
+    val clientId: String,
+    /** The granted scope (e.g. ``["owner:act-on-behalf"]``). */
+    val scope: List<String> = emptyList(),
+    /** Seconds until the PIN expires. */
+    @SerialName("expires_in")
+    val expiresIn: Long = 0,
+)
