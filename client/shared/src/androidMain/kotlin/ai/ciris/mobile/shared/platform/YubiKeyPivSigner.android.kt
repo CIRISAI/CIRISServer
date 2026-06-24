@@ -139,9 +139,10 @@ private class AndroidPivSession(
 
     override suspend fun signEd25519(message: ByteArray): ByteArray {
         onWork()
-        // VERIFY: yubikit-android 3.1.0 PivSession Ed25519 sign surface. EdDSA over
-        // the raw message (Ed25519 hashes internally); the card does the full sign.
-        return piv.sign(Slot.SIGNATURE, KeyType.ED25519, message, java.security.Signature.getInstance("Ed25519"))
+        // yubikit-android 3.1.0 dropped the high-level PivSession.sign(); for Ed25519 the
+        // card does the full PureEdDSA over the raw message via rawSignOrDecrypt, returning
+        // the 64-byte signature directly.
+        return piv.rawSignOrDecrypt(Slot.SIGNATURE, KeyType.ED25519, message)
     }
 
     /**

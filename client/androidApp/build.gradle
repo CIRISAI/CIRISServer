@@ -6,9 +6,20 @@ plugins {
     id "org.jetbrains.compose"
 }
 
+// yubikit-android 3.1.0 transitively requests kotlin-stdlib 2.2.10 (metadata 2.2.0),
+// unreadable by the project's Kotlin 2.0.21 compiler. Pin stdlib to the compiler's
+// own version (same fix as shared/build.gradle.kts).
+configurations.all {
+    resolutionStrategy {
+        force "org.jetbrains.kotlin:kotlin-stdlib:2.0.21",
+              "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.0.21",
+              "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.0.21"
+    }
+}
+
 android {
     namespace "ai.ciris.mobile"
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "ai.ciris.mobile"
@@ -328,7 +339,10 @@ task syncPythonSources(type: Exec) {
     dependsOn cleanPythonSources
     dependsOn cleanChaquopyOutputs
 
-    workingDir "../.."
+    // In the agent repo the canonical runtime lives at ../.. ; when this client
+    // is vendored into another repo (e.g. CIRISServer/client) point at the
+    // CIRISAgent checkout via -PcirisAgentRoot=/path/to/CIRISAgent.
+    workingDir(findProperty("cirisAgentRoot") ?: file("../.."))
     commandLine "python3", "-m", "tools.dev.stage_runtime", "${buildDir}/python-src", "--quiet"
 
     // Strip host-platform binaries from the staged tree. The canonical
