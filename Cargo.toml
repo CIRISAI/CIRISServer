@@ -254,6 +254,15 @@ harness = false
 name = "stream_fanout"
 harness = false
 
+# N_eff capacity-scoring microbench — the lens constraint eigenspectrum pipeline
+# (ciris_server::scorer::n_eff). Feature-matrix build + Jacobi eigendecomposition
+# + PR/entropy derivation: the per-agent per-cadence-tick CPU cost of
+# `capacity:sustained_coherence:v1`. CI-runnable (pure arithmetic, no network,
+# no database).
+[[bench]]
+name = "n_eff_scoring"
+harness = false
+
 # Mesh-propagation benchmark — N in-process software-key nodes; ONE group-A
 # publisher advertises a synthetic "video" and a FountainSwarmRuntime per node
 # converges the holding-claim to its cohort ONLY. Measures propagation latency /

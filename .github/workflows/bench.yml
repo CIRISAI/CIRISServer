@@ -18,6 +18,7 @@ on:
       - "scripts/bench_report.py"
       - ".github/workflows/bench.yml"
       - "Cargo.toml"
+      - "data/live_mesh_*.json"
   workflow_dispatch:
   schedule:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
@@ -57,7 +58,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run benches (criterion)
-        run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain --bench stream_fanout
+        run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain --bench stream_fanout --bench n_eff_scoring
       - name: Generate holonomic scoreboard (CIRISServer#12/#13)
         # Pass the criterion dir so the substrate tier is promoted to MEASURED from
         # the real bench numbers above ("numbers through the fabric"); metrics with
@@ -68,7 +69,8 @@ jobs:
         run: |
           BENCH_DATE="$(date -u +%Y-%m-%d)" \
             python3 scripts/bench_report.py --out bench-site --commit "$GITHUB_SHA" \
-              --scoreboard scoreboard.json
+              --scoreboard scoreboard.json \
+              --live-mesh data/live_mesh_2026-06-22.json
       - uses: actions/configure-pages@v5
         with:
           enablement: true
