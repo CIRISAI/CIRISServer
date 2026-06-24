@@ -110,6 +110,118 @@ struct OccurrenceDto {
     transport_destinations: Vec<(String, String)>,
 }
 
+// ─── reusable occurrence-binding core (shared with portable_occurrence) ───────
+
+/// The bound-state of a freshly-admitted occurrence (the three persist effects).
+pub struct OccurrenceBindOutcome {
+    /// `true` when this call admitted the device's `federation_keys` row from a
+    /// supplied `occurrence_key_record`; `false` when the key already existed.
+    pub key_freshly_registered: bool,
+    /// How many `cohort_scope: self` at-rest DEKs were (re-)wrapped to the newcomer.
+    pub self_dek_granted: usize,
+    /// Occurrence key_ids fail-secure EXCLUDED from the cascade (no encryption pubkeys).
+    pub self_dek_excluded: Vec<String>,
+}
+
+/// **THE occurrence-binding core** — register the occurrence's signing key (if a
+/// PoP record is supplied and the key is fresh), bind it under `identity_key_id`,
+/// and run the Self-DEK cascade. This is the exact three-effect sequence
+/// [`add_occurrence`] performs after its authorization gate; factored out so the
+/// owner-gated portable-occurrence path ([`super::portable_occurrence`]) can bind a
+/// node-minted software key as an occurrence of the OWNER's self under the OWNER's
+/// authority — without going back over the signed-request HTTP path.
+///
+/// ## Authorization contract (the security-critical invariant)
+///
+/// This fn performs NO authorization itself — the CALLER must already have proven
+/// that the act of binding `occurrence_key_id` under `identity_key_id` is
+/// authorized by an active occurrence of (or the root of) that self. The two
+/// call sites discharge that obligation differently but equivalently:
+///   - [`add_occurrence`]: the request is hybrid-signed by an active occurrence
+///     of the self (`verify::signer_acts_for(caller, identity_key_id)`).
+///   - [`super::portable_occurrence`]: the route is owner-gated (a live SYSTEM_ADMIN
+///     owner session == the bound owner's login) AND `identity_key_id` is resolved
+///     from `is_owner_bound(node)` — i.e. the owner's OWN primary fed-ID. The
+///     local primary signer is opened (`resolve_user_signer(OwnerSession)`) to
+///     PROVE possession before this binds. The owner authorizing an occurrence of
+///     their own self is the apex authority.
+///
+/// After this returns Ok, `verify::signer_acts_for(engine, occurrence_key_id,
+/// identity_key_id) == true`.
+pub async fn bind_occurrence_core(
+    engine: &Engine,
+    identity_key_id: &str,
+    occurrence_key_id: &str,
+    device_class: &str,
+    hardware_attestation: Option<String>,
+    encryption_pubkeys: Option<EncryptionPubkeys>,
+    occurrence_key_record: Option<SignedKeyRecord>,
+) -> Result<OccurrenceBindOutcome, String> {
+    let directory = engine.federation_directory();
+
+    // (1) Admit the new device's signing key if a record was supplied and the key
+    // is not yet known. register_federation_key hybrid-verifies the self-signed
+    // proof-of-possession BEFORE store (fail-secure) — a forged record is rejected.
+    let already_known = directory
+        .lookup_public_key(occurrence_key_id)
+        .await
+        .map_err(|e| format!("directory lookup: {e}"))?
+        .is_some();
+    let mut key_freshly_registered = false;
+    if !already_known {
+        let record = occurrence_key_record.ok_or_else(|| {
+            "occurrence_key_id is not a registered federation key and no \
+             occurrence_key_record was supplied to admit it"
+                .to_string()
+        })?;
+        if record.record.key_id != occurrence_key_id {
+            return Err(
+                "occurrence_key_record.record.key_id does not match occurrence_key_id".to_string(),
+            );
+        }
+        engine
+            .register_federation_key(record)
+            .await
+            .map_err(|e| format!("occurrence key registration rejected: {e}"))?;
+        key_freshly_registered = true;
+    }
+
+    // (2) Bind the occurrence under the identity (idempotent on the
+    // (identity, occurrence) PK; persist runs check_device_class admission).
+    let now = chrono::Utc::now();
+    let row = IdentityOccurrence {
+        identity_key_id: identity_key_id.to_string(),
+        occurrence_key_id: occurrence_key_id.to_string(),
+        device_class: device_class.to_string(),
+        hardware_attestation,
+        asserted_at: now,
+        valid_until: None,
+        encryption_pubkeys,
+        persist_row_hash: String::new(),
+    };
+    directory
+        .put_identity_occurrence(SignedIdentityOccurrence {
+            identity_occurrence: row,
+        })
+        .await
+        .map_err(|e| format!("put_identity_occurrence: {e}"))?;
+
+    // (3) Self-DEK cascade: retroactively wrap every existing cohort_scope:self
+    // at-rest DEK to the newcomer so the new key decrypts the self's content.
+    // Idempotent + fail-secure (a keyless occurrence is EXCLUDED, never granted).
+    let newcomers = [occurrence_key_id.to_string()];
+    let rekey = engine
+        .rekey_self_occurrence_add(identity_key_id, &newcomers)
+        .await
+        .map_err(|e| format!("self-DEK cascade: {e}"))?;
+
+    Ok(OccurrenceBindOutcome {
+        key_freshly_registered,
+        self_dek_granted: rekey.granted.len(),
+        self_dek_excluded: rekey.excluded,
+    })
+}
+
 // ─── POST /v1/self/occurrence (ADD) ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -192,90 +304,40 @@ async fn add_occurrence(
 
     let directory = st.engine.federation_directory();
 
-    // (4a) Admit the new device's signing key if a record was supplied and the key
-    // is not yet known. register_federation_key hybrid-verifies the self-signed
-    // proof-of-possession BEFORE store (fail-secure) — a forged record is rejected.
-    let already_known = match directory
-        .lookup_public_key(&req.occurrence.occurrence_key_id)
-        .await
+    // (4a-c) Admit the new key (PoP-gated), bind the occurrence, and run the
+    // Self-DEK cascade — the three-effect core shared with the owner-gated
+    // portable-occurrence path. Authorization was discharged above by the
+    // signed-request gate (`signer_acts_for`).
+    let outcome = match bind_occurrence_core(
+        &st.engine,
+        &req.identity_key_id,
+        &req.occurrence.occurrence_key_id,
+        &req.occurrence.device_class,
+        req.occurrence.hardware_attestation.clone(),
+        req.occurrence.encryption_pubkeys.map(Into::into),
+        req.occurrence_key_record,
+    )
+    .await
     {
-        Ok(k) => k.is_some(),
+        Ok(o) => o,
         Err(e) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("directory lookup: {e}"),
-            )
+            // The "fresh key with no PoP record" / mismatch cases are caller errors
+            // (400); the rest are storage failures (500). Disambiguate on the text.
+            let code = if e.contains("occurrence_key_record")
+                || e.contains("not a registered federation key")
+                || e.contains("registration rejected")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return err(code, e);
         }
     };
-    let mut key_freshly_registered = false;
-    if !already_known {
-        let Some(record) = req.occurrence_key_record else {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "occurrence_key_id is not a registered federation key and no \
-                 occurrence_key_record was supplied to admit it",
-            );
-        };
-        if record.record.key_id != req.occurrence.occurrence_key_id {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "occurrence_key_record.record.key_id does not match occurrence.occurrence_key_id",
-            );
-        }
-        if let Err(e) = st.engine.register_federation_key(record).await {
-            return err(
-                StatusCode::BAD_REQUEST,
-                format!("occurrence key registration rejected: {e}"),
-            );
-        }
-        key_freshly_registered = true;
-    }
-
-    // (4b) Bind the occurrence under the identity (idempotent on the
-    // (identity, occurrence) PK; persist runs check_device_class admission).
-    let now = chrono::Utc::now();
-    let row = IdentityOccurrence {
-        identity_key_id: req.identity_key_id.clone(),
-        occurrence_key_id: req.occurrence.occurrence_key_id.clone(),
-        device_class: req.occurrence.device_class.clone(),
-        hardware_attestation: req.occurrence.hardware_attestation.clone(),
-        asserted_at: now,
-        valid_until: None,
-        encryption_pubkeys: req.occurrence.encryption_pubkeys.map(Into::into),
-        persist_row_hash: String::new(),
-    };
-    if let Err(e) = directory
-        .put_identity_occurrence(SignedIdentityOccurrence {
-            identity_occurrence: row,
-        })
-        .await
-    {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("put_identity_occurrence: {e}"),
-        );
-    }
-
-    // (4c) Self-DEK cascade: retroactively wrap every existing cohort_scope:self
-    // at-rest DEK to the newcomer (§8.1.12.4) so the new device decrypts the self's
-    // content. Idempotent + fail-secure (a keyless occurrence is EXCLUDED, never
-    // granted). This is the SAME persist surface self_at_login composes.
-    let newcomers = [req.occurrence.occurrence_key_id.clone()];
-    let rekey = match st
-        .engine
-        .rekey_self_occurrence_add(&req.identity_key_id, &newcomers)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("self-DEK cascade: {e}"),
-            )
-        }
-    };
+    let key_freshly_registered = outcome.key_freshly_registered;
 
     // (4d) Reachability rows (§5.6.8.8.1).
+    let now = chrono::Utc::now();
     let mut transport_rows = 0usize;
     for (kind, dest) in &req.occurrence.transport_destinations {
         if let Err(e) = directory
@@ -303,8 +365,8 @@ async fn add_occurrence(
             occurrence_key_id: req.occurrence.occurrence_key_id,
             device_class: req.occurrence.device_class,
             key_freshly_registered,
-            self_dek_granted: rekey.granted.len(),
-            self_dek_excluded: rekey.excluded,
+            self_dek_granted: outcome.self_dek_granted,
+            self_dek_excluded: outcome.self_dek_excluded,
             transport_destinations_registered: transport_rows,
         }),
     )

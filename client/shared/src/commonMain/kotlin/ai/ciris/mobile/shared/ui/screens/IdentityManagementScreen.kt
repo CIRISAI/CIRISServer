@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.localization.localizedString
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
@@ -85,6 +86,11 @@ fun IdentityManagementScreen(
 
     var deviceCode by remember { mutableStateOf("") }
     var pendingRevoke by remember { mutableStateOf<String?>(null) }
+    // Portable software identity occurrence + associate-existing-fedID state.
+    var portableDir by remember { mutableStateOf("") }
+    var showPortablePicker by remember { mutableStateOf(false) }
+    var associateDir by remember { mutableStateOf("") }
+    var showAssociatePicker by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -406,6 +412,148 @@ fun IdentityManagementScreen(
                             },
                         ) {
                             Text(localizedString("mobile.common_dismiss"))
+                        }
+                    }
+                }
+            }
+
+            // ── Create portable software identity occurrence → directory ──────
+            Spacer(Modifier.height(20.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth().testable("identity_portable_card"),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text(
+                        localizedString("mobile.identity_portable_title"),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    // The danger sublabel — a software keyset is inherently insecure.
+                    Text(
+                        localizedString("mobile.identity_portable_danger"),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        localizedString("mobile.identity_portable_desc"),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = portableDir,
+                        onValueChange = { portableDir = it },
+                        singleLine = true,
+                        enabled = !busy,
+                        label = { Text(localizedString("mobile.identity_portable_dir_label")) },
+                        placeholder = { Text(localizedString("mobile.identity_portable_dir_placeholder")) },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { if (!busy) showPortablePicker = true },
+                                enabled = !busy,
+                                modifier = Modifier.testableClickable("btn_identity_portable_browse") {
+                                    if (!busy) showPortablePicker = true
+                                },
+                            ) {
+                                Text(localizedString("mobile.identity_browse"))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testable("input_identity_portable_dir"),
+                    )
+                    DirectoryPickerDialog(
+                        show = showPortablePicker,
+                        onDirectoryPicked = {
+                            portableDir = it
+                            showPortablePicker = false
+                        },
+                        onDismiss = { showPortablePicker = false },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.createPortableOccurrence(portableDir) },
+                        enabled = !busy && portableDir.isNotBlank(),
+                        modifier = Modifier.testableClickable("btn_identity_portable_create") {
+                            viewModel.createPortableOccurrence(portableDir)
+                        },
+                    ) {
+                        Text(localizedString("mobile.identity_portable_button"))
+                    }
+                }
+            }
+
+            // ── Associate existing fedID ──────────────────────────────────────
+            Spacer(Modifier.height(20.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth().testable("identity_associate_card"),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text(
+                        localizedString("mobile.identity_associate_title"),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        localizedString("mobile.identity_associate_desc"),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = associateDir,
+                        onValueChange = { associateDir = it },
+                        singleLine = true,
+                        enabled = !busy,
+                        label = { Text(localizedString("mobile.identity_associate_dir_label")) },
+                        placeholder = { Text(localizedString("mobile.identity_portable_dir_placeholder")) },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { if (!busy) showAssociatePicker = true },
+                                enabled = !busy,
+                                modifier = Modifier.testableClickable("btn_identity_associate_browse") {
+                                    if (!busy) showAssociatePicker = true
+                                },
+                            ) {
+                                Text(localizedString("mobile.identity_browse"))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testable("input_identity_associate_dir"),
+                    )
+                    DirectoryPickerDialog(
+                        show = showAssociatePicker,
+                        onDirectoryPicked = {
+                            associateDir = it
+                            showAssociatePicker = false
+                        },
+                        onDismiss = { showAssociatePicker = false },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Button(
+                            onClick = { viewModel.associateFedId(sourceDir = associateDir) },
+                            enabled = !busy && associateDir.isNotBlank(),
+                            modifier = Modifier.testableClickable("btn_identity_associate_dir") {
+                                viewModel.associateFedId(sourceDir = associateDir)
+                            },
+                        ) {
+                            Text(localizedString("mobile.identity_associate_dir_button"))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        // YubiKey-backed association — clearly disabled "coming soon"
+                        // until the on-device PKCS#11 read is wired (server 501s today).
+                        OutlinedButton(
+                            onClick = { /* gated — see mobile.identity_associate_yubikey */ },
+                            enabled = false,
+                            modifier = Modifier.testable("btn_identity_associate_yubikey"),
+                        ) {
+                            Text(localizedString("mobile.identity_associate_yubikey"))
                         }
                     }
                 }

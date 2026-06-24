@@ -60,6 +60,12 @@ pub mod occurrence;
 /// verifier ([`ownership::scopes_are_infra_only`]), the owner-binding emitter,
 /// and the [`ownership::is_owner_bound`] reader.
 pub mod ownership;
+/// **Portable software identity occurrence** (bootstrap) — mint a fresh *software*
+/// hybrid keyset that the local TPM-bound primary authorizes as an occurrence of
+/// the same self (written to a USB directory), and associate a portable keyset as
+/// THIS device's user fed-ID. Owner-gated + loopback-only. See
+/// [`portable_occurrence`].
+pub mod portable_occurrence;
 pub mod roles;
 pub mod self_login;
 pub mod session;

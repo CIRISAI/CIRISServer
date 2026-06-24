@@ -1902,6 +1902,107 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * Create a **portable software identity occurrence** — `POST {nodeUrl}/v1/self/
+     * occurrence/portable`.
+     *
+     * The LOCAL node mints a fresh *software* hybrid keyset INTO [targetDir] (a USB
+     * folder the user picked) and binds it as a primary-authorized occurrence of the
+     * owner's self. The app passes only the PATH; the node writes the seeds + does
+     * the crypto. NO private bytes are returned. Owner-session POST (Bearer [token])
+     * + loopback-only.
+     *
+     * A software keyset is inherently insecure — the explicitly-accepted bootstrap
+     * trade-off (surfaced in the UI danger sublabel + the on-disk manifest).
+     *
+     * Mirrors `CIRISServer/src/auth/portable_occurrence.rs`.
+     */
+    suspend fun createPortableOccurrence(
+        targetDir: String,
+        label: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.PortableOccurrenceResponse {
+        val method = "createPortableOccurrence"
+        logInfo(method, "POST $nodeUrl/v1/self/occurrence/portable target=$targetDir label=${label ?: "(none)"}")
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.PortableOccurrenceRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.PortableOccurrenceRequest(
+                    targetDir = targetDir,
+                    label = label?.takeIf { it.isNotBlank() },
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/self/occurrence/portable") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("create portable occurrence failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.PortableOccurrenceResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, targetDir=$targetDir")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Associate an existing fed-ID** as THIS device's active user identity —
+     * `POST {nodeUrl}/v1/self/associate`.
+     *
+     * Directory path: [sourceDir] points at a folder holding a portable software
+     * keyset; the node installs it as this device's user fed-ID (so this device
+     * signs as that occurrence). YubiKey path ([yubikey] = true) is server-GATED in
+     * this pass (returns 501 until the on-device token read is wired). Owner-session
+     * POST + loopback-only.
+     */
+    suspend fun associateFedId(
+        sourceDir: String? = null,
+        yubikey: Boolean = false,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AssociateResponse {
+        val method = "associateFedId"
+        logInfo(method, "POST $nodeUrl/v1/self/associate source=${sourceDir ?: "(none)"} yubikey=$yubikey")
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.AssociateRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.AssociateRequest(
+                    sourceDir = sourceDir?.takeIf { it.isNotBlank() },
+                    yubikey = yubikey,
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/self/associate") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("associate fed-ID failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.AssociateResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, sourceDir=$sourceDir")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── HUMANITY_ACCORD surface (/v1/accord*) — CIRISServer #41 (src/accord.rs) ─
     //
     // The constitutional safe-mesh floor: a hardware-attested holder roster that

@@ -377,6 +377,268 @@ pub async fn mint_user_identity(
     })
 }
 
+// ─── Portable software identity occurrence (CIRISServer — bootstrap) ──────────
+
+/// A freshly-minted **portable software** hybrid keyset: both halves as plaintext
+/// seeds in a chosen directory (a USB key) + the self-signed proof-of-possession
+/// record needed to register it. Unlike [`mint_user_identity`] (which seals the
+/// ML-DSA-65 half under the platform secure store at `keys_dir()`), this writes
+/// BOTH halves to the target directory so the keyset is genuinely portable to
+/// another device — the explicitly-accepted INSECURE software trade-off.
+pub struct PortableSoftwareKeyset {
+    /// The derived federation `key_id` (`derive_key_id(alias, ed_pub)`).
+    pub key_id: String,
+    /// The keystore **alias** the seeds are named/keyed under (`derive_key_id`'s
+    /// label INPUT). Carried so the associate step can re-open under the SAME alias
+    /// and reproduce the SAME `key_id` (re-opening under a different alias would
+    /// re-derive a DIFFERENT id — the occurrence identity would not survive the
+    /// move). The mint records it in the manifest + the `.backend` filename stem.
+    pub alias: String,
+    /// The shareable `CIRIS-V2-…` usercode (FedKind::User).
+    pub fedcode: String,
+    /// Always `"user"`.
+    pub identity_type: String,
+    /// The new key's self-signed `SignedKeyRecord` (proof-of-possession) — pass
+    /// straight to `Engine::register_federation_key`.
+    pub key_record: ciris_persist::federation::SignedKeyRecord,
+    /// The seed/marker filenames written into the target dir (names only — NO
+    /// private bytes leave the node).
+    pub files_written: Vec<String>,
+}
+
+/// The conventional portable-keyset seed filenames for an `alias`. Named by the
+/// ALIAS (not the derived key_id) so re-opening under the alias reproduces the id.
+fn portable_ed_seed_name(alias: &str) -> String {
+    format!("{alias}.ed25519.seed")
+}
+fn portable_mldsa_seed_name(alias: &str) -> String {
+    format!("{alias}.mldsa65.seed")
+}
+fn portable_backend_marker_name(alias: &str) -> String {
+    format!("{alias}.backend")
+}
+
+#[cfg(unix)]
+fn write_seed_0600(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
+}
+#[cfg(not(unix))]
+fn write_seed_0600(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+/// **Mint a fresh portable SOFTWARE identity occurrence keyset** into `target_dir`.
+///
+/// Generates two 32-byte seeds (Ed25519 + ML-DSA-65), writes them as `0600` seed
+/// files keyed by `alias` (`<alias>.ed25519.seed`, `<alias>.mldsa65.seed`) plus an
+/// `<alias>.backend` marker into `target_dir`, derives the federation `key_id` from
+/// `derive_key_id(alias, ed_pub)`, and produces the self-signed PoP
+/// `SignedKeyRecord` via the verify-native `produce_self_key_record` so it
+/// registers through the canonical fail-secure admission gate.
+///
+/// The seeds are named by `alias` (NOT the derived id) on purpose: re-opening them
+/// under the SAME alias on another device reproduces the SAME `key_id`
+/// (`hardware_user_local_signer` re-derives `derive_key_id(alias, ed_pub)`), so the
+/// occurrence identity survives the move. `alias` is also the fedcode's alias hint.
+///
+/// The whole keyset is software — there is NO hardware seal. That is the labeled,
+/// deliberate trade-off (a copy that can MOVE to another device). The seeds never
+/// cross the wire; only the public record + filenames are returned.
+pub async fn mint_portable_software_occurrence(
+    target_dir: &std::path::Path,
+    alias: &str,
+) -> Result<PortableSoftwareKeyset> {
+    use ciris_crypto::{ClassicalSigner as _, Ed25519Signer, MlDsa65Signer};
+    use ciris_verify_core::self_at_login::HybridSigningIdentity;
+
+    std::fs::create_dir_all(target_dir)
+        .with_context(|| format!("create portable target dir {}", target_dir.display()))?;
+
+    // Generate both 32-byte seeds.
+    let mut ed_seed = [0u8; 32];
+    let mut ml_seed = [0u8; 32];
+    getrandom::fill(&mut ed_seed).map_err(|e| anyhow::anyhow!("mint ed25519 seed: {e}"))?;
+    getrandom::fill(&mut ml_seed).map_err(|e| anyhow::anyhow!("mint ml-dsa-65 seed: {e}"))?;
+
+    let ed = Ed25519Signer::from_seed(&ed_seed)
+        .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;
+    let mldsa = MlDsa65Signer::from_seed(&ml_seed)
+        .map_err(|e| anyhow::anyhow!("build ml-dsa-65 signer from seed: {e}"))?;
+
+    let ed_pub = ed
+        .public_key()
+        .map_err(|e| anyhow::anyhow!("read ed25519 pubkey: {e}"))?;
+    // key_id derived from the ALIAS (the re-open input) so a device re-opening the
+    // seeds under `alias` reproduces this exact id.
+    let key_id = fedcode::derive_key_id(alias, &ed_pub);
+
+    // The hybrid identity (a verify SelfSigner) over the two software halves.
+    let identity = HybridSigningIdentity::new(key_id.clone(), ed, mldsa);
+
+    // Self-signed genesis proof-of-possession (the exact bytes the persist
+    // register gate recomputes). Bridged verify→persist by the structurally
+    // identical JSON shape (the accord-holder path round-trips the same way).
+    let now = chrono::Utc::now().to_rfc3339();
+    let v_rec =
+        ciris_verify_core::federation_self_record::produce_self_key_record(&identity, "user", &now)
+            .await
+            .map_err(|e| anyhow::anyhow!("produce portable self key record: {e}"))?;
+    let key_record: ciris_persist::federation::SignedKeyRecord =
+        serde_json::from_value(serde_json::to_value(&v_rec)?)
+            .map_err(|e| anyhow::anyhow!("bridge verify→persist SignedKeyRecord: {e}"))?;
+
+    // The shareable usercode.
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let fedcode = fedcode::encode(&fedcode::FedCode {
+        kind: fedcode::FedKind::User,
+        key_id: key_id.clone(),
+        pubkey_ed25519_base64: b64.encode(&ed_pub),
+        transport_hint: None,
+        alias_hint: Some(alias.to_string()),
+        group_key_id: None,
+    })
+    .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
+
+    // Persist BOTH seeds + the custody marker to the target dir (0600), keyed by the
+    // alias. Only AFTER the record is built, so a crypto failure leaves no partial
+    // keyset behind.
+    let ed_path = target_dir.join(portable_ed_seed_name(alias));
+    let ml_path = target_dir.join(portable_mldsa_seed_name(alias));
+    let marker_path = target_dir.join(portable_backend_marker_name(alias));
+    write_seed_0600(&ed_path, &ed_seed)?;
+    write_seed_0600(&ml_path, &ml_seed)?;
+    std::fs::write(&marker_path, "software")
+        .with_context(|| format!("write {}", marker_path.display()))?;
+
+    Ok(PortableSoftwareKeyset {
+        key_id,
+        alias: alias.to_string(),
+        fedcode,
+        identity_type: "user".to_string(),
+        key_record,
+        files_written: vec![
+            portable_ed_seed_name(alias),
+            portable_mldsa_seed_name(alias),
+            portable_backend_marker_name(alias),
+        ],
+    })
+}
+
+/// **Install a portable software keyset** read from `source_dir` as THIS device's
+/// active user fed-ID, KEYED by the SAME `alias` it was minted under (so re-opening
+/// it on this device reproduces the SAME `key_id` — the occurrence identity is
+/// preserved). Copies the `<alias>.{ed25519,mldsa65}.seed` halves + writes the
+/// `<alias>.backend` marker into `dest_dir`, and re-seals the ML-DSA-65 half under
+/// `alias` into the platform `keys_dir()`.
+///
+/// The local node resolves the user signer via
+/// `hardware_user_local_signer(Software, alias, dest_dir)` — the Ed25519 seed is
+/// read from `dest_dir` and the sealed ML-DSA-65 half from `keys_dir()`, BOTH keyed
+/// by `alias`. So after this, opening the signer under `alias` yields the portable
+/// occurrence key. Returns the destination filenames written. No private bytes are
+/// returned.
+pub fn install_portable_software_keyset(
+    source_dir: &std::path::Path,
+    alias: &str,
+    dest_dir: &std::path::Path,
+) -> Result<Vec<String>> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("create dest seed dir {}", dest_dir.display()))?;
+
+    let mut installed = Vec::new();
+
+    // (1) Ed25519 seed → dest_dir/<alias>.ed25519.seed (what the software signer
+    //     re-opens under the alias to reproduce the key_id).
+    let src_ed = source_dir.join(portable_ed_seed_name(alias));
+    let ed_bytes = std::fs::read(&src_ed)
+        .with_context(|| format!("read portable ed25519 seed {}", src_ed.display()))?;
+    let dst_ed = dest_dir.join(portable_ed_seed_name(alias));
+    write_seed_0600(&dst_ed, &ed_bytes)?;
+    installed.push(portable_ed_seed_name(alias));
+
+    // (2) Custody marker → software.
+    let dst_marker = dest_dir.join(portable_backend_marker_name(alias));
+    std::fs::write(&dst_marker, "software")
+        .with_context(|| format!("write {}", dst_marker.display()))?;
+    installed.push(portable_backend_marker_name(alias));
+
+    // (3) Re-seal the portable ML-DSA-65 half under `alias` into keys_dir() so
+    //     `hardware_user_local_signer` re-opens the PQC half. Best-effort: a missing
+    //     PQC seed degrades to Ed25519-only (logged), never a hard failure.
+    let src_ml = source_dir.join(portable_mldsa_seed_name(alias));
+    match std::fs::read(&src_ml) {
+        Ok(ml_bytes) => match reseal_portable_mldsa(&ml_bytes, alias) {
+            Ok(()) => installed.push(format!("{alias} (ML-DSA-65 re-sealed)")),
+            Err(e) => tracing::warn!(
+                alias = %alias, error = %e,
+                "associate: could not re-seal the ML-DSA-65 half — the associated identity may \
+                 sign Ed25519-only until the PQC half is provisioned"
+            ),
+        },
+        Err(e) => tracing::warn!(
+            path = %src_ml.display(), error = %e,
+            "associate: no portable ML-DSA-65 seed found — associating Ed25519-only"
+        ),
+    }
+
+    Ok(installed)
+}
+
+/// Discover the portable keyset's **alias** in `dir` by its `<alias>.ed25519.seed`
+/// file. Errors if none / more than one (ambiguous). The alias is what the install
+/// + re-open key on (re-opening under it reproduces the occurrence `key_id`).
+pub fn find_portable_alias(dir: &std::path::Path) -> Result<String> {
+    let mut found: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if let Some(stem) = name.strip_suffix(".ed25519.seed") {
+                found.push(stem.to_string());
+            }
+        }
+    }
+    match found.len() {
+        0 => anyhow::bail!(
+            "no portable keyset found in {} — expected an <alias>.ed25519.seed file",
+            dir.display()
+        ),
+        1 => Ok(found.remove(0)),
+        _ => anyhow::bail!(
+            "{} portable keysets found in {} — point source_dir at a folder with exactly one",
+            found.len(),
+            dir.display()
+        ),
+    }
+}
+
+/// Re-seal a raw 32-byte ML-DSA-65 seed under `alias` into the platform
+/// `keys_dir()` so `get_platform_sealed_mldsa65_signer(alias, keys_dir())` re-opens
+/// it. Uses the keyring's `open_or_create(alias, keys_dir, adopt_seed)` import path
+/// — the software backend AES-GCM-SEALS the adopted seed at rest (not a plaintext
+/// file), so this is a true re-seal, not a raw copy. Idempotent: if a seed is
+/// already sealed under `alias` it is adopted verbatim and we error iff it differs
+/// (never silently clobber a distinct local PQC half).
+fn reseal_portable_mldsa(seed: &[u8], alias: &str) -> Result<()> {
+    use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
+
+    let seed32: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("ML-DSA-65 seed must be 32 bytes, got {}", seed.len()))?;
+    let keys_dir = ciris_verify_core::ceg_outbox::keys_dir();
+    std::fs::create_dir_all(&keys_dir)
+        .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
+    // adopt_seed seals the supplied seed ONLY when no seed is yet stored under the
+    // alias; an existing sealed seed is adopted as-is. Building the signer proves
+    // the seal round-trips.
+    SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&seed32))
+        .map_err(|e| anyhow::anyhow!("seal portable ML-DSA-65 seed under {alias}: {e}"))?;
+    Ok(())
+}
+
 /// Compose the minted USER identity into a persist
 /// [`LocalSigner`](ciris_persist::prelude::LocalSigner) for `POST /v1/setup/
 /// claim-remote`: the Ed25519 half stays hardware-custodied (signs through the
