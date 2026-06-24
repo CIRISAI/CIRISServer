@@ -45,6 +45,63 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        // `ciris-server bench-results [--criterion-dir <dir>] [--erasure-sidecar <file>]
+        //  [--commit <sha>] [--date <YYYY-MM-DD>] [--out <file>]` — emit the unified
+        // `bench_results.json` (schema v2). EVERY entry is measured-or-gated: substrate
+        // metrics from real criterion medians, the empirical erasure curve from the
+        // erasure_survival bench sidecar (gated if absent), and LIVE in-process mesh
+        // measurements (cohort propagation + isolation + A↔B replication) over the real
+        // FountainSwarmRuntime. This is the source of truth for the public bench page.
+        Some("bench-results") => {
+            let mut criterion_dir = String::from("target/criterion");
+            let mut erasure_sidecar = String::from("target/erasure_survival.json");
+            let mut commit = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
+            let mut date = current_utc_date();
+            let mut out: Option<String> = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--criterion-dir" => {
+                        criterion_dir = args.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: bench-results --criterion-dir <dir>")
+                        })?;
+                    }
+                    "--erasure-sidecar" => {
+                        erasure_sidecar = args.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: bench-results --erasure-sidecar <file>")
+                        })?;
+                    }
+                    "--commit" => {
+                        commit = args.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: bench-results --commit <sha>")
+                        })?;
+                    }
+                    "--date" => {
+                        date = args.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: bench-results --date <YYYY-MM-DD>")
+                        })?;
+                    }
+                    "--out" => {
+                        out =
+                            Some(args.next().ok_or_else(|| {
+                                anyhow::anyhow!("usage: bench-results --out <file>")
+                            })?);
+                    }
+                    other => {
+                        return Err(anyhow::anyhow!("unknown bench-results arg: {other}"));
+                    }
+                }
+            }
+            let json =
+                ciris_server::bench_results_json(&commit, &date, &criterion_dir, &erasure_sidecar);
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &json)?;
+                    eprintln!("wrote {path}");
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
         // `ciris-server identity create [--backend pkcs11|platform-sealed|software]
         //  [--label ...] [--piv-slot 9c] [--seed-dir ...]` — MINT a hardware-rooted
         // USER federation identity (CIRISServer#21). THIS is what the founder runs
@@ -336,4 +393,10 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
     println!("✅ claim accepted by {target_url}");
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// Today's date in UTC as `YYYY-MM-DD` (the default `--date` for `bench-results`,
+/// overridable so a CI run can stamp the exact build date).
+fn current_utc_date() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
 }

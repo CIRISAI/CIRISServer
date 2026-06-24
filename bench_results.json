@@ -1,0 +1,197 @@
+{
+  "schema": "ciris-server/bench-results/2",
+  "commit": "0b734869c569b3167712563c1e20924047e3346e",
+  "date": "2026-06-24",
+  "runner": "linux/x86_64",
+  "metrics": [
+    {
+      "id": "aead_throughput_per_core",
+      "value": 5.11,
+      "unit": "GiB/s/core",
+      "bench": "av_frame_halves/open/16384",
+      "status": "measured",
+      "plain": "One CPU core can decrypt about this many gigabytes of video per second on the receive side."
+    },
+    {
+      "id": "replication_ingest_per_sec",
+      "value": 4945.98,
+      "unit": "traces/s/core",
+      "bench": "replication_ingest/ingest_new",
+      "status": "measured",
+      "plain": "One CPU core absorbs about this many fresh signed traces per second (verify + decompose + persist)."
+    },
+    {
+      "id": "replication_dedup_per_sec",
+      "value": 5494.96,
+      "unit": "traces/s/core",
+      "bench": "replication_ingest/ingest_dedup",
+      "status": "measured",
+      "plain": "Re-delivered (already-seen) traces are rejected at about this rate — still paying full signature verify, so a gossip flood is bounded by verify speed."
+    },
+    {
+      "id": "alm_relay_hop_us",
+      "value": 0.438,
+      "unit": "µs/hop",
+      "bench": "alm_chain_hop/208",
+      "status": "measured",
+      "plain": "Relaying one small (~208 B) blinking-dot frame through one mesh hop costs about this many microseconds of CPU."
+    },
+    {
+      "id": "stream_fanout_core_frac",
+      "value": 0.0162,
+      "unit": "core-fraction @ N=2000, 30fps",
+      "bench": "stream_fanout_seal_tick/2000",
+      "status": "measured",
+      "plain": "Sealing 2,000 simultaneous blob streams at 30 fps uses about this fraction of one CPU core."
+    },
+    {
+      "id": "n_eff_scoring_per_agent_us",
+      "value": 49.39,
+      "unit": "µs/agent @ N=500 traces",
+      "bench": "n_eff_e2e/500",
+      "status": "measured",
+      "plain": "Computing one agent's coherence-capacity score over a full 500-trace window takes about this many microseconds."
+    },
+    {
+      "id": "kex_hybrid_initiate_us",
+      "value": 67.59,
+      "unit": "µs",
+      "bench": "pqc_kex/hybrid_initiate",
+      "status": "measured",
+      "plain": "Starting one post-quantum key exchange (X25519 + ML-KEM-768) takes about this many microseconds."
+    },
+    {
+      "id": "kex_classical_initiate_us",
+      "value": 39.07,
+      "unit": "µs",
+      "bench": "pqc_kex/classical_initiate",
+      "status": "measured",
+      "plain": "Starting one classical-only (X25519) key exchange takes about this many microseconds."
+    },
+    {
+      "id": "av_frame_e2e_16384_us",
+      "value": 7.03,
+      "unit": "µs/frame",
+      "bench": "av_frame_e2e/16384",
+      "status": "measured",
+      "plain": "Sealing then opening one 16 KiB 720p video frame end-to-end takes about this many microseconds."
+    }
+  ],
+  "mesh": {
+    "cohort": [
+      {
+        "n_total": 50,
+        "group_a_converged": 24,
+        "group_a_expected": 24,
+        "group_b_leaks": 0,
+        "latency_ms": 5.93,
+        "deliveries": 192,
+        "passed": true,
+        "status": "measured"
+      },
+      {
+        "n_total": 100,
+        "group_a_converged": 49,
+        "group_a_expected": 49,
+        "group_b_leaks": 0,
+        "latency_ms": 6.76,
+        "deliveries": 392,
+        "passed": true,
+        "status": "measured"
+      },
+      {
+        "n_total": 200,
+        "group_a_converged": 99,
+        "group_a_expected": 99,
+        "group_b_leaks": 0,
+        "latency_ms": 6.26,
+        "deliveries": 792,
+        "passed": true,
+        "status": "measured"
+      },
+      {
+        "n_total": 400,
+        "group_a_converged": 199,
+        "group_a_expected": 199,
+        "group_b_leaks": 0,
+        "latency_ms": 7.11,
+        "deliveries": 1592,
+        "passed": true,
+        "status": "measured"
+      }
+    ],
+    "replication": {
+      "emitted_at_a": 1,
+      "observed_at_b": 1,
+      "latency_ms": 6.45,
+      "status": "measured",
+      "plain": "A signed holding-claim emitted at node A is observed at node B over the real in-process swarm path in about this many milliseconds."
+    }
+  },
+  "erasure": {
+    "codec": "ciris_edge codec-fountain (RaptorQ RFC 6330)",
+    "n_source": 20,
+    "k_repair": 10,
+    "holders": 30,
+    "survival": [
+      {
+        "q": 0.95,
+        "label": "datacenter",
+        "p_reconstruct": 1.0,
+        "trials": 4000,
+        "mean_survivors": 28.486,
+        "status": "measured"
+      },
+      {
+        "q": 0.9,
+        "label": "typical wifi",
+        "p_reconstruct": 1.0,
+        "trials": 4000,
+        "mean_survivors": 26.994,
+        "status": "measured"
+      },
+      {
+        "q": 0.85,
+        "label": "medium churn (design target)",
+        "p_reconstruct": 0.997,
+        "trials": 4000,
+        "mean_survivors": 25.502,
+        "status": "measured"
+      },
+      {
+        "q": 0.8,
+        "label": "high churn",
+        "p_reconstruct": 0.976,
+        "trials": 4000,
+        "mean_survivors": 23.918,
+        "status": "measured"
+      },
+      {
+        "q": 0.7,
+        "label": "battlefield mesh",
+        "p_reconstruct": 0.72725,
+        "trials": 4000,
+        "mean_survivors": 20.955,
+        "status": "measured"
+      }
+    ],
+    "plain": "Content is split into redundant fountain shares across holders; this is the measured chance it can still be rebuilt as each tier's fraction of holders goes offline."
+  },
+  "signature_overhead": {
+    "classical_sign_verify_us": 35.93,
+    "hybrid_sign_verify_us": 549.93,
+    "overhead_pct": 1430.78,
+    "status": "measured",
+    "plain": "Post-quantum provenance (Ed25519+ML-DSA-65) costs about 1430.78% more CPU per signed event than classical Ed25519 alone."
+  },
+  "gated": [
+    {
+      "id": "mls_commit_barrier",
+      "reason": "no MLS-commit-barrier bench yet"
+    },
+    {
+      "id": "cold_join_burst_latency",
+      "reason": "no cold-join-burst-latency bench yet"
+    }
+  ]
+}

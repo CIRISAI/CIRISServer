@@ -15,10 +15,10 @@ on:
     branches: [main]
     paths:
       - "benches/**"
+      - "src/benchmarks/**"
       - "scripts/bench_report.py"
       - ".github/workflows/bench.yml"
       - "Cargo.toml"
-      - "data/live_mesh_*.json"
   workflow_dispatch:
   schedule:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
@@ -58,19 +58,41 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run benches (criterion)
-        run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain --bench stream_fanout --bench n_eff_scoring
-      - name: Generate holonomic scoreboard (CIRISServer#12/#13)
-        # Pass the criterion dir so the substrate tier is promoted to MEASURED from
-        # the real bench numbers above ("numbers through the fabric"); metrics with
-        # no bench (mls_commit/cold-join, the holonomic tier) stay honestly gated.
-        # Publish-only — not a pass/fail gate (shared runners are noisy).
-        run: cargo run --release --quiet -- scoreboard --criterion-dir target/criterion > scoreboard.json
+        # The throughput/latency criterion benches (each writes target/criterion/<group>/<id>).
+        # sig_overhead gives the classical-vs-hybrid signature numbers; the others give
+        # AEAD / replication / ALM / fan-out / N_eff / KEX.
+        run: cargo bench --bench pqc_av_streaming --bench replication_ingest --bench alm_chain --bench stream_fanout --bench n_eff_scoring --bench sig_overhead
+      - name: Run erasure-survival bench (empirical, real substrate codec)
+        # Writes target/erasure_survival.json — the MEASURED reconstruction rate per
+        # availability tier (RaptorQ encode → drop holders → real decode trials).
+        run: cargo bench --bench erasure_survival
+      - name: Emit unified bench_results.json (the source of truth — measured-or-gated only)
+        # Folds the criterion medians + the erasure sidecar + LIVE in-process mesh
+        # measurements (cohort propagation/isolation + A↔B replication over the real
+        # FountainSwarmRuntime) into one JSON. EVERY entry is "measured" or "gated";
+        # nothing modeled/attested. Publish-only — not a pass/fail gate (runners are noisy).
+        # RUST_LOG=error keeps the in-process mesh runtime's INFO chatter out of the
+        # runner log; the JSON goes to --out, not stdout.
+        run: |
+          RUST_LOG=error cargo run --release --quiet -- bench-results \
+            --criterion-dir target/criterion \
+            --erasure-sidecar target/erasure_survival.json \
+            --commit "$GITHUB_SHA" \
+            --date "$(date -u +%Y-%m-%d)" \
+            --out bench_results.json
       - name: Generate interpreted page
         run: |
           BENCH_DATE="$(date -u +%Y-%m-%d)" \
             python3 scripts/bench_report.py --out bench-site --commit "$GITHUB_SHA" \
-              --scoreboard scoreboard.json \
-              --live-mesh data/live_mesh_2026-06-22.json
+              --bench-results bench_results.json
+      - name: Upload bench_results.json + rendered site as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench_results.json
+            bench-site
+          if-no-files-found: error
       - uses: actions/configure-pages@v5
         with:
           enablement: true
