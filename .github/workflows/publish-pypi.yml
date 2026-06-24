@@ -51,6 +51,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # ── Build + stage the per-platform desktop JAR BEFORE maturin ──────────
+      # The Compose uber-jar is named CIRIS-<platform>-<ver>.jar by the gradle
+      # plugin (e.g. CIRIS-linux-x64-2.6.0.jar). maturin then bundles it into
+      # the wheel via [tool.maturin] include (see pyproject.toml). System Java
+      # only — no JRE is bundled, keeping each wheel under PyPI's 100 MB cap.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build + stage desktop JAR
+        working-directory: client
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
+          mkdir -p ../python/ciris_server/desktop_app
+          cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
+          ls -l ../python/ciris_server/desktop_app/
       - name: Build wheel (maturin)
         run: |
           python -m pip install --upgrade pip
@@ -65,6 +82,15 @@ jobs:
   macos:
     name: wheel macos-${{ matrix.target }}
     runs-on: macos-14
+    # KNOWN LIMITATION (macos x86_64 leg): the macos-14 runner is Apple Silicon,
+    # so `packageUberJarForCurrentOS` produces the arm64 macOS JAR for BOTH
+    # matrix legs. The x86_64 *wheel* (the Rust .so) is a proper cross-compile,
+    # but it carries the arm64 desktop JAR. Compose JARs are not single-arch JVM
+    # bytecode for the app classes, but the Compose/Skiko *native* libs inside
+    # are per-arch — so an Intel-mac user installing the x86_64 wheel may hit a
+    # Skiko load error. To ship a true Intel JAR, add a macos-13 (Intel) runner
+    # leg, or `gradlew packageUberJarForCurrentOS` under an x86_64 JDK. Left as a
+    # follow-up; arm64 (the common case) is correct.
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +100,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # The Compose plugin packages a current-OS uber-jar; on the macos-14
+      # runner that is the macOS JAR (CIRIS-macos-<arch>-<ver>.jar). The arch
+      # follows the runner/JDK, so the aarch64 + x86_64 matrix legs each stage
+      # the JAR matching their wheel target. maturin bundles it via include.
+      - name: Build + stage desktop JAR
+        working-directory: client
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
+          mkdir -p ../python/ciris_server/desktop_app
+          cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
+          ls -l ../python/ciris_server/desktop_app/
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -97,6 +139,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build + stage desktop JAR
+        working-directory: client
+        shell: bash
+        run: |
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
+          mkdir -p ../python/ciris_server/desktop_app
+          cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
+          ls -l ../python/ciris_server/desktop_app/
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:

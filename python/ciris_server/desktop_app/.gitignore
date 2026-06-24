@@ -1,0 +1,6 @@
+# The per-platform CIRIS Desktop JAR is a CI build artifact, staged here by the
+# publish-pypi workflow (gradle :desktopApp:packageUberJarForCurrentOS) right
+# before the maturin wheel build. It is NEVER committed (tens of MB; per-OS).
+# This directory must exist in git so maturin's python-source package layout is
+# present at build time even when no JAR has been staged (headless/source path).
+CIRIS-*.jar
