@@ -41,6 +41,33 @@ _NODE_TOKENS = {"import-traces", "--home", "--key-id"}
 # args reach the node, which does not understand them).
 _FORCE_HEADLESS = {"--server", "--headless"}
 
+# The desktop node's key label — matches what the desktop client app spawns
+# (`ciris-server --home <appdata>/ciris --key-id ciris-client`), so the bare
+# `ciris-server` command and the GUI app land on the SAME node identity.
+DEFAULT_DESKTOP_KEY_ID = "ciris-client"
+
+
+def _default_user_home() -> str:
+    """The desktop user data root, mirroring CIRISAgent's
+    ``ciris_engine.logic.utils.path_resolution.get_ciris_home()`` so the node and
+    the agent brain resolve the SAME home:
+
+      1. ``/app`` when CIRIS-Manager-managed (the container mount layout owns it),
+      2. ``$CIRIS_HOME`` when set (explicit operator override),
+      3. ``~/ciris`` otherwise (installed mode).
+
+    A bare ``ciris-server`` is a USER/desktop invocation, so it must NOT fall to
+    the node's baked ``DEFAULT_CIRIS_HOME`` (``/var/lib/ciris`` — the systemd
+    server default, not user-writable). (The Android/iOS branches are handled by
+    the mobile PythonRuntime, not this desktop CLI.)
+    """
+    if os.path.isdir("/app/agent") or os.path.isdir("/app/.ciris_manager"):
+        return "/app"
+    env = os.environ.get("CIRIS_HOME")
+    if env:
+        return os.path.expanduser(env)
+    return os.path.join(os.path.expanduser("~"), "ciris")
+
 
 def _run_node_headless() -> None:
     """Boot the headless node via the compiled extension's ``main``.
@@ -137,8 +164,18 @@ def _run_desktop_mode() -> None:
     port = 4243
     server_url = _read_api_url(port)
 
-    print("Starting CIRIS node...")
-    node_proc = _spawn_headless_node()
+    # Desktop default: a user-writable XDG home + the `ciris-client` key label —
+    # NOT the node's systemd default (/var/lib/ciris). Matches the GUI app so the
+    # bare command and the app share one node + identity. The user can still
+    # override by running `ciris-server --home <path>` (that routes headless).
+    home = _default_user_home()
+    try:
+        os.makedirs(home, exist_ok=True)
+    except OSError as e:
+        print(f"ERROR: cannot create CIRIS home {home}: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Starting CIRIS node (home={home})...")
+    node_proc = _spawn_headless_node(["--home", home, "--key-id", DEFAULT_DESKTOP_KEY_ID])
 
     # Give it a moment; surface an immediate crash clearly.
     time.sleep(2.0)
