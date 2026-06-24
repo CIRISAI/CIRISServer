@@ -162,6 +162,15 @@ pub mod nodecode;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod peer;
+/// Mount-by-proxy router (CIRISServer#80) — reverse-proxy a path prefix to a
+/// sibling service's upstream base URL, so an out-of-process brain folds onto the
+/// node's one read-API. Used by the Python adapter bridge ([`py_adapter`]).
+pub mod proxy;
+/// PyO3 adapter bridge (CIRISServer#80) — wrap a Python adapter object as an
+/// [`adapter::Adapter`] so a Python brain folds into the node's router via
+/// [`serve_with_adapter`] (`ciris_server.serve_with_python_adapter`).
+#[cfg(feature = "python")]
+mod py_adapter;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
@@ -441,6 +450,35 @@ mod python {
         rt_block_on(crate::import_traces(&dump_dir))
     }
 
+    /// Boot the node with a Python adapter folded in (CIRISServer#80) — the seam
+    /// that lets a Python "brain" mount onto the node's router without
+    /// re-composing the substrate. `adapter` is a duck-typed Python object (see
+    /// [`crate::py_adapter`]); its declared `proxy_routes()` are reverse-proxied
+    /// onto the node's read-API and its `start`/`stop` hooks fire around the
+    /// lifecycle. `home`/`key_id` default to the bare-node values, matching the
+    /// flagless boot.
+    #[pyfunction]
+    #[pyo3(name = "serve_with_python_adapter", signature = (adapter, home=None, key_id=None))]
+    fn py_serve_with_python_adapter(
+        py: Python<'_>,
+        adapter: Py<pyo3::PyAny>,
+        home: Option<String>,
+        key_id: Option<String>,
+    ) -> PyResult<()> {
+        crate::init_tracing();
+        // Read the Python adapter's static config under the GIL.
+        let adapter = crate::py_adapter::build(py, adapter)?;
+        let home = home
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::config::DEFAULT_CIRIS_HOME));
+        let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
+        let cfg = crate::config::ServerConfig::from_home(home, key_id)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        // Release the GIL while the (blocking) server runs so the adapter's
+        // start/stop hooks can re-acquire it on their blocking threads.
+        py.detach(|| rt_block_on(crate::serve_with_adapter(cfg, adapter)))
+    }
+
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
     // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
     // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
@@ -509,6 +547,7 @@ mod python {
     fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
+        m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +
