@@ -408,6 +408,96 @@ flat O(N) vs tree O(log N) per join/leave:</p>
 AV-9-safe choice). Levers: pre-verified relay path + batch verify (CIRISPersist#225).</p>"""
 
 
+def render_live_mesh(lm: dict | None) -> str:
+    """Render the 'Live mesh (bridge)' section from the attested live-mesh data.
+
+    These measurements come from the real two-node A↔B bridge mesh during the
+    v0.5.x federation bring-up (NOT from CI criterion runs — the CI runner has no
+    two-node mesh). They are presented as ATTESTED-with-provenance: each number
+    carries its source node identity, date, and a clear note about what was and
+    was not measured on the wire vs in-process.
+    """
+    if not lm:
+        return ""
+    prov = lm.get("provenance", {})
+    nodes = prov.get("nodes", {})
+    na = nodes.get("node_a", {})
+    nb = nodes.get("node_b", {})
+    floor = prov.get("substrate_floor", {})
+    cap = lm.get("capacity_scoring", {})
+    cohort = lm.get("cohort_propagation", {})
+    repl = lm.get("replication_ab", {})
+
+    # Propagation table
+    cohort_rows = ""
+    for r in cohort.get("results", []):
+        n = r.get("n_total_nodes", "?")
+        a_conv = r.get("group_a_converged", "?")
+        a_exp = r.get("group_a_expected", "?")
+        b_obs = r.get("group_b_observed", "?")
+        lat = r.get("propagation_latency_ms", "?")
+        isolation = "0 (structural)" if b_obs == 0 else str(b_obs)
+        cohort_rows += (
+            f"<tr><td><b>{H(str(n))}</b></td>"
+            f"<td class='ok'>{a_conv}/{a_exp} ✓</td>"
+            f"<td><b>{isolation}</b></td>"
+            f"<td class='note'>&lt; {H(str(lat))} ms</td></tr>"
+        )
+
+    node_a_id = H(na.get("key_id", "?"))
+    node_b_id = H(nb.get("key_id", "?"))
+    source_date = H(prov.get("date", "?"))
+    edge_ver = H(floor.get("ciris_edge", "?"))
+    persist_ver = H(floor.get("ciris_persist", "?"))
+    verify_ver = H(floor.get("ciris_verify", "?"))
+    ingest_ref = H(repl.get("ingest_throughput_ref", "—"))
+
+    return f"""<h2>Live mesh (bridge) — A&#x2194;B federation bring-up
+  <span class="badge attested">ATTESTED</span></h2>
+<p class="note"><b>Provenance:</b> real two-node bridge mesh — Node A
+<code>{node_a_id}</code> (lens/seed) &#x2194; Node B
+<code>{node_b_id}</code> (status). Substrate floor:
+edge {edge_ver} / persist {persist_ver} / verify {verify_ver}.
+Measured: {source_date}. These numbers are <b>not reproducible on a CI runner</b>
+(no two-node mesh in CI); they are attested with source node identity and date.
+CI criterion numbers (MEASURED badge) are separate and always runner-local.</p>
+
+<h3>Capacity scoring — <code>capacity:sustained_coherence:v1</code></h3>
+<p>Node A derives per-agent <b>n_eff</b> from ingested agent traces: builds the
+11-dimensional lens constraint feature matrix → Jacobi eigendecomposition →
+participation ratio n_eff_pr → <code>capacity(n_eff_pr, gate=20, target=8)</code>
+→ [0,1] score → emits a hybrid-signed <code>scores</code> CEG attestation
+(<code>capacity:sustained_coherence:v1</code>). Node B receives the attestation
+via <code>consent:replication:v1</code>. The per-agent per-cadence-tick CPU cost
+of this pipeline is <b>CI-measured</b> in the N_eff scoring bench
+(<code>n_eff_e2e/500</code>) — see the substrate metrics above.</p>
+<p class="note">The capacity score VALUE depends on the corpus (agent traces
+ingested). With a thin corpus (&lt;20 traces) the gate returns 0.0 honestly — a
+zero-row means "observed but not yet scored", not "missing". A corpus that clears
+the gate yields a score in [0,1].</p>
+
+<h3>Cohort propagation — FountainSwarmRuntime <span class="badge attested">ATTESTED</span></h3>
+<p>Each node runs the SAME <code>ciris_edge::swarm::FountainSwarmRuntime</code>
+that <code>src/holonomic.rs</code> wires into production. The publisher's cohort
+closure is derived from <code>replication_peers_from_consent(…)</code> — ONLY
+consented peers. Propagation and group-B isolation numbers below come from the
+<code>examples/mesh_propagation/main.rs</code> in-process driver on bridge-mesh
+hardware (in-memory bus = swarm LOGIC + cohort gate, not wire transport):</p>
+<table>
+<tr><th>N (total nodes)</th><th>group-A convergence</th>
+<th>group-B isolation (leaks)</th><th>propagation latency</th></tr>
+{cohort_rows}
+</table>
+<p class="note"><b>Group-B isolation = 0 is structural, not statistical.</b>
+{H(cohort.get("group_b_isolation_guarantee", ""))}</p>
+
+<h3>Replication A&#x2194;B — <code>consent:replication:v1</code></h3>
+<p>Bidirectional mutual-key-registered replication; each node owns its own corpus.
+Node A's imported agent traces replicate to Node B; Node A's
+<code>capacity:sustained_coherence:v1</code> scores are served via Node B.
+CPU cost per replicated trace: {ingest_ref}.</p>"""
+
+
 def render_scoreboard(sb: dict | None) -> str:
     if not sb:
         return ""
@@ -425,7 +515,8 @@ def render_scoreboard(sb: dict | None) -> str:
     # criterion benches, each with provenance) + a still-gated remainder.
     sub = sb.get("substrate", {})
     MEASURED_KEYS = ("aead_throughput_per_core", "alm_tree_depth_vs_n",
-                     "replication_ingest_per_sec", "stream_fanout_core_frac")
+                     "replication_ingest_per_sec", "stream_fanout_core_frac",
+                     "n_eff_scoring_per_agent")
     measured_rows = []
     for k in MEASURED_KEYS:
         mm = sub.get(k)
@@ -607,7 +698,7 @@ def render_references(model: dict) -> str:
 <table><tr><th>layer</th><th>CIRISServer (this run)</th><th>reference</th><th></th></tr>{body}</table>"""
 
 
-def render(model, est, commit, date, scoreboard=None) -> str:
+def render(model, est, commit, date, scoreboard=None, live_mesh=None) -> str:
     raw_rows = "\n".join(f"<tr><td>{H(k)}</td><td>{us(ns):.3f} µs</td></tr>" for k, ns in sorted(est.items()))
     honesty = "".join(f"<li>{H(x)}</li>" for x in model["assumptions"].values())
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -638,7 +729,7 @@ def render(model, est, commit, date, scoreboard=None) -> str:
  .pillar p{{font-size:.92rem;color:#2c313a;margin:0}}
  .badge{{font-size:.66rem;font-weight:700;letter-spacing:.04em;padding:.12rem .4rem;border-radius:5px;vertical-align:middle}}
  .badge.measured{{background:#e3f6e9;color:var(--green)}} .badge.model{{background:#e7eefc;color:var(--blue)}}
- .badge.frontier{{background:#fdf0dc;color:var(--amber)}}
+ .badge.frontier{{background:#fdf0dc;color:var(--amber)}} .badge.attested{{background:#f0e8ff;color:#6b21a8}}
  code{{background:#f1f2f4;padding:.05rem .3rem;border-radius:4px;font-size:.88em}}
  details{{margin-top:1.4rem}} footer{{margin-top:3rem;color:#8a909a;font-size:.82rem;border-top:1px solid var(--line);padding-top:1rem}}
  a{{color:var(--blue)}}
@@ -651,6 +742,7 @@ def render(model, est, commit, date, scoreboard=None) -> str:
 {render_how(model)}
 {render_characteristics(model, scoreboard)}
 {render_crypto_proof(model, est)}
+{render_live_mesh(live_mesh)}
 {render_scoreboard(scoreboard)}
 {render_references(model)}
 
@@ -674,6 +766,11 @@ def main() -> int:
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "local"))
     ap.add_argument("--date", default=os.environ.get("BENCH_DATE", ""))
     ap.add_argument("--scoreboard", default=None)
+    ap.add_argument(
+        "--live-mesh", default=None,
+        help="Path to the live-mesh attestation JSON (e.g. data/live_mesh_2026-06-22.json). "
+             "When supplied, a 'Live mesh (bridge)' section is rendered with the attested "
+             "A<->B measurements and provenance. Optional — omitting it just skips that section.")
     args = ap.parse_args()
 
     est = load_estimates(args.criterion_dir)
@@ -687,19 +784,35 @@ def main() -> int:
                 scoreboard = json.load(fh)
         except Exception as e:
             print(f"warning: could not read scoreboard {args.scoreboard}: {e}", file=sys.stderr)
+    live_mesh = None
+    live_mesh_path = args.live_mesh or "data/live_mesh_2026-06-22.json"
+    if os.path.exists(live_mesh_path):
+        try:
+            with open(live_mesh_path) as fh:
+                live_mesh = json.load(fh)
+            print(f"loaded live-mesh attestation from {live_mesh_path}")
+        except Exception as e:
+            print(f"warning: could not read live-mesh data {live_mesh_path}: {e}", file=sys.stderr)
+    else:
+        print(f"note: no live-mesh attestation at {live_mesh_path} — section omitted", file=sys.stderr)
     model = build_model(est)
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "data.json"), "w") as fh:
         json.dump({"schema": "ciris-server/bench/3", "commit": args.commit, "date": args.date,
-                   "model": model, "scoreboard": scoreboard,
+                   "model": model, "scoreboard": scoreboard, "live_mesh": live_mesh,
                    "raw_means_us": {k: round(v / 1000, 4) for k, v in est.items()}}, fh, indent=2)
     if scoreboard is not None:
         with open(os.path.join(args.out, "scoreboard.json"), "w") as fh:
             json.dump(scoreboard, fh, indent=2)
+    if live_mesh is not None:
+        with open(os.path.join(args.out, "live_mesh.json"), "w") as fh:
+            json.dump(live_mesh, fh, indent=2)
     with open(os.path.join(args.out, "index.html"), "w") as fh:
-        fh.write(render(model, est, args.commit, args.date, scoreboard))
-    print(f"wrote {args.out}/index.html ({len(est)} benches"
-          f"{', + scoreboard' if scoreboard else ''}) + data.json")
+        fh.write(render(model, est, args.commit, args.date, scoreboard, live_mesh))
+    n_extras = sum([scoreboard is not None, live_mesh is not None])
+    extras = ", + scoreboard" if scoreboard else ""
+    extras += ", + live-mesh" if live_mesh else ""
+    print(f"wrote {args.out}/index.html ({len(est)} benches{extras}) + data.json")
     return 0
 
 

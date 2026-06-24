@@ -1,125 +1,336 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CIRISServer — benchmarks, interpreted</title>
+<title>CIRIS fabric — streaming &amp; storage at scale</title>
 <style>
- body{font:16px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:880px;margin:2.2rem auto;padding:0 1.1rem;color:#1a1a1a}
- h1{font-size:1.7rem;margin:.2rem 0} h2{margin-top:2.2rem;border-bottom:2px solid #eee;padding-bottom:.3rem}
- .lead{font-size:1.15rem;background:#f0f7ff;border-left:4px solid #2b7cff;padding:.8rem 1rem;border-radius:6px}
- table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.95rem}
- th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #eee} th{background:#fafafa}
- td:nth-child(n+2){font-variant-numeric:tabular-nums}
- .note{color:#555;font-size:.9rem} .big{font-size:1.35rem;font-weight:600;color:#0a7d2c}
- .warn{background:#fff7e6;border-left:4px solid #e69500;padding:.6rem .9rem;border-radius:6px;font-size:.95rem}
- code{background:#f4f4f4;padding:.05rem .3rem;border-radius:3px}
- details{margin-top:1rem} footer{margin-top:2.5rem;color:#888;font-size:.85rem;border-top:1px solid #eee;padding-top:.8rem}
+ :root{--ink:#16181d;--mut:#5b6370;--line:#e6e8ec;--blue:#2b6cff;--green:#0a7d2c;--red:#c0392b;--amber:#b8740f}
+ *{box-sizing:border-box}
+ body{font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:920px;margin:0 auto;padding:0 1.1rem 4rem;color:var(--ink)}
+ h1{font-size:2.1rem;line-height:1.2;margin:.2rem 0} h2{font-size:1.4rem;margin:2.6rem 0 .4rem;border-bottom:2px solid var(--line);padding-bottom:.3rem}
+ h3{font-size:1.05rem;margin:.2rem 0 .4rem}
+ .hero{background:linear-gradient(135deg,#0b1f4d,#123a8a);color:#fff;margin:1.2rem -1.1rem 0;padding:2.2rem 1.6rem;border-radius:0 0 14px 14px}
+ .hero h1{color:#fff} .hero .tag{font-size:1.12rem;opacity:.95;max-width:46rem}
+ .hero .note{color:#cfe0ff;font-size:.92rem;border-top:1px solid #ffffff2e;padding-top:.8rem;margin-top:1.2rem}
+ .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.8rem;margin:1.3rem 0 .4rem}
+ .card{background:#ffffff14;border:1px solid #ffffff2e;border-radius:10px;padding:.9rem 1rem}
+ .card .big{font-size:1.9rem;font-weight:700} .card .cl{font-size:.9rem;opacity:.92}
+ table{border-collapse:collapse;width:100%;margin:.7rem 0;font-size:.94rem}
+ th,td{text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
+ th{background:#f7f8fa;font-size:.85rem;text-transform:uppercase;letter-spacing:.02em;color:var(--mut)}
+ td:first-child{font-weight:600} table.vs td:nth-child(2){color:var(--red)} table.vs td:nth-child(3){color:var(--green)}
+ table.matrix td.ciris{background:#eaf7ee} table.matrix th:last-child{background:#dcefe2;color:var(--green)}
+ .ok{color:var(--green)} .bad{color:var(--red)}
+ .note{color:var(--mut);font-size:.9rem}
+ .hl{background:#eaf3ff;border-left:4px solid var(--blue);padding:.9rem 1.1rem;border-radius:8px;margin:1rem 0}
+ .pillars{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;margin-top:.6rem}
+ .pillar{border:1px solid var(--line);border-radius:10px;padding:1rem}
+ .pillar p{font-size:.92rem;color:#2c313a;margin:0}
+ .badge{font-size:.66rem;font-weight:700;letter-spacing:.04em;padding:.12rem .4rem;border-radius:5px;vertical-align:middle}
+ .badge.measured{background:#e3f6e9;color:var(--green)} .badge.model{background:#e7eefc;color:var(--blue)}
+ .badge.frontier{background:#fdf0dc;color:var(--amber)} .badge.attested{background:#f0e8ff;color:#6b21a8}
+ code{background:#f1f2f4;padding:.05rem .3rem;border-radius:4px;font-size:.88em}
+ details{margin-top:1.4rem} footer{margin-top:3rem;color:#8a909a;font-size:.82rem;border-top:1px solid var(--line);padding-top:1rem}
+ a{color:var(--blue)}
 </style></head><body>
-<h1>CIRISServer — benchmarks, interpreted</h1>
-<p class="note">The CEWP crux use case — <b>stream and store at massive scale</b> — measured and
-interpreted. Receivers are charged open-only; every blended figure names its model. Raw criterion
-numbers at the bottom. Absolute µs are host-relative (this run's runner); the ratios and ceilings travel.</p>
-<p class="lead"><b>PQC group video is effectively free at steady state.</b> the steady-state frame path runs at up to 2.2 GiB/s (AES-256-GCM — quantum-irrelevant at 256-bit); the post-quantum tax is ~83 µs <b>once per peer-link</b>, never per frame.</p>
-
-<h2>Video throughput — realtime A/V mesh (two-layer hybrid-PQC)</h2>
-<p>Per frame: inner AES-256-GCM (E2E epoch DEK) → wire codec → outer AES-256-GCM (per-Link transit
-key). <code>seal</code> is the sender's cost; <code>open</code> is the receiver's (it never re-seals).</p>
-<table><tr><th>Frame</th><th>size</th><th>seal→wire→open</th><th>seal (send)</th><th>open (recv)</th><th>throughput</th></tr>
-<tr><td>Opus voice frame (~20 ms @128 kbps)</td><td>320 B</td><td>0.95 µs</td><td>0.51 µs</td><td>0.45 µs</td><td>0.31 GiB/s</td></tr>
-<tr><td>720p inter-frame (low motion)</td><td>4 KiB</td><td>2.37 µs</td><td>1.21 µs</td><td>1.12 µs</td><td>1.61 GiB/s</td></tr>
-<tr><td>720p inter-frame (typical)</td><td>16 KiB</td><td>7.07 µs</td><td>3.26 µs</td><td>3.08 µs</td><td>2.16 GiB/s</td></tr>
-<tr><td>1080p inter / 720p keyframe</td><td>64 KiB</td><td>27.24 µs</td><td>12.78 µs</td><td>12.79 µs</td><td>2.24 GiB/s</td></tr>
-<tr><td>1080p keyframe</td><td>256 KiB</td><td>112.27 µs</td><td>56.78 µs</td><td>48.99 µs</td><td>2.17 GiB/s</td></tr></table>
-<p class='big'>A 50-person room costs ~0.5% of one core to receive</p><p class='note'>…under a <b>stated</b> model: 720p, 30 fps, GOP=30 (1×64 KiB keyframe + 29×16 KiB inter per second), receiver opens 49 streams. Range across motion: ~0.17% (low-motion 4 KiB) to ~0.45% (typical 16 KiB), receive-only. Publishing one stream to the room is ~0.24% of a core. Crypto is nowhere near the bottleneck — bandwidth and the network are.</p>
-
-<h2>Post-quantum overhead — the hybrid handshake (per peer-link, one-time)</h2>
-<p>The only place the post-quantum cost can live: bulk frames are AES-256-GCM (already quantum-fine),
-so the PQ cost is structurally confined to the KEM at session setup. Per-frame PQC cost is zero.</p>
+<header class="hero">
+  <h1>Encrypted, datacenter-free <b>presence at scale</b>.</h1>
+  <p class="tag">Thousands of people sharing one space — each <i>present</i> as a live presence dot, with full
+  quality focus-pulled on demand. End-to-end post-quantum. Forwarded by the participants' own uplinks,
+  <b>no datacenter</b>. This is a category the centralized incumbents can't enter — not a bigger grid of tiles.</p>
+  <div class="cards">
+    <div class="card"><div class="big">presence<br>at scale</div>
+      <div class="cl">the dot is a deliberate <b>presence primitive</b>, not degraded video — at a true
+      ~5 kbps presence dot a 2,000-person space is ~10 Mbps to <i>your</i> device, and the room's
+      whole forwarding load (~20 Gbps) sums from <b>ordinary home uplinks</b> — no datacenter</div></div>
+    <div class="card"><div class="big">0</div>
+      <div class="cl">datacenters — peers relay for each other; scale by adding people, not servers</div></div>
+    <div class="card"><div class="big">100%</div>
+      <div class="cl">post-quantum, <b>end-to-end</b> — relays forward ciphertext they can never read</div></div>
+  </div>
+  <p class="note">Crypto isn't the constraint (measured: AEAD up to 2.34 GiB/s, post-quantum cost
+  ~82.7 µs <b>once per peer-link</b>, never per frame). The real constraint is <b>donated uplink</b> —
+  how much the room's own peers can forward — shown below on <i>both</i> sides of the ledger.</p>
+</header>
+<h2>What this is</h2>
+<p><b>CIRIS is the CIRIS Epistemic Web Platform (CEWP)</b> — a <b>complete replacement for the internet's
+extractive middle</b>. Streaming, video calls, gaming, files, messages, and signed claims route
+<b>directly between the devices people already own</b>, over a post-quantum-encrypted mesh: no giant data
+centers in the middle, no handful of companies owning the pipes or deciding what you see. The network
+<b>governs itself</b> through signed, weighted votes (no platform owner), never advertises your local
+content to the rest of the network, and runs on hardware you already have — it <b>removes the centralized
+control plane</b> rather than renting it back to you.</p>
+<p>This page measures <b>one capability</b> of that substrate — <b>presence at scale</b>: encrypted
+realtime A/V for thousands, forwarded by participants' own uplinks. The fabric node (CIRISServer) is the
+transport + storage tier — the same primitives that carry a live blob also store the durable corpus.
+Full framing: <a href="https://ciris.ai/cewp">ciris.ai/cewp</a>.</p>
+<h2>Can a room of N do video? <span class="badge model">MODEL</span></h2>
+<p>Layered encoding makes it a bandwidth question, not a tile cap: you pull each person's lowest layer
+(a ~50 kbps presence blob) and focus-pull full quality only for whoever you're looking at.
+Two sides of the ledger — what <i>you</i> receive (demand), and what the room's peers must <i>donate</i>
+to forward it (supply, = N²·b by conservation):</p>
+<table><tr><th>room</th><th>your downlink (demand)</th>
+<th>room's total donated uplink (supply, N²·b)</th><th>flat-mesh full-720p (why mesh dies)</th></tr>
+<tr><td><b>49</b></td><td class='ok'>2.45 Mbps</td><td>0.1 Gbps</td><td class='bad'>120 Mbps ✕</td></tr>
+<tr><td><b>200</b></td><td class='ok'>10.0 Mbps</td><td>2.0 Gbps</td><td class='bad'>498 Mbps ✕</td></tr>
+<tr><td><b>500</b></td><td class='ok'>25.0 Mbps</td><td>12.5 Gbps</td><td class='bad'>1,248 Mbps ✕</td></tr>
+<tr><td><b>1,000</b></td><td class='ok'>50.0 Mbps</td><td>50.0 Gbps</td><td class='bad'>2,498 Mbps ✕</td></tr>
+<tr><td><b>2,000</b></td><td class='ok'>100.0 Mbps</td><td>200.0 Gbps</td><td class='bad'>4,998 Mbps ✕</td></tr></table>
+<p class="note"><b>Demand is the easy half</b> — even 2,000 blobs is ~100 Mbps to your device.
+<b>Supply is the real question.</b> Everyone-sees-everyone is N×N delivery, so the room must source
+~200.0 Gbps of forwarding at N=2,000 — and <b>leaves forward nothing</b>
+(a constrained mobile peer just publishes its own blob), so that load lands on the <b>fat interior</b>:
+peers with real donated uplink, in an O(log N)-deep ALM tree (per-node fan-out bounded by <i>measured</i>
+uplink). Feasibility is <code>Σ(donated interior uplink) ≥ N²·b</code> — <b>not</b> crypto. It's the one
+open empirical variable, gated honestly in the edge capacity benches (<code>alm_tree_depth_vs_n</code>,
+<code>cold_join_burst_latency</code>, CIRISEdge PR#147).</p>
+<p>And what a "blob" costs dominates the supply side. 50 kbps is edge's
+<code>BLINKING_DOT</code> — a low-res <i>video thumbnail</i>; a literal presence dot is far cheaper, which
+decides whether the room needs prosumer fat interior or rides ordinary asymmetric home uplinks:</p>
+<table><tr><th>blob @ N=2,000</th><th>your downlink</th><th>room's donated uplink (N²·b)</th></tr>
+<tr><td>5 kbps — presence dot (~4 px, 1–2 fps)</td><td>10.0 Mbps</td><td>20.0 Gbps</td></tr>
+<tr><td>15 kbps — low thumbnail</td><td>30.0 Mbps</td><td>60.0 Gbps</td></tr>
+<tr><td>50 kbps — video thumbnail (edge BLINKING_DOT)</td><td>100.0 Mbps</td><td>200.0 Gbps</td></tr></table>
+<p class="note">At a true <b>presence dot (~5 kbps)</b> the room needs ~20 Gbps total — ordinary
+asymmetric homes (~10 Mbps up each) sum to it with no datacenter. At a <b>50 kbps video thumbnail</b>
+it needs ~200 Gbps — real prosumer/home-server fat interior, or it collapses back toward centralization.
+<b>The "presence at scale" claim is strongest precisely because presence is cheap.</b></p>
+<div class="hl"><b>"2,000 four-pixel blobs from 2,000 8K streams?"</b> Yes — you subscribe to each
+publisher's base SVC layer; the 8K is their <i>top</i> layer, uploaded once and forwarded only to whoever
+zooms in. The bitrate win is <b>SVC/MDC layering</b>; <b>RaptorQ</b> buys the loss-resilience (any
+sufficient fragment subset reconstructs — lossy mesh, no jitter-buffer stalls). Whether the room holds
+2,000 is the donated-uplink question above, not a crypto or codec one.</div>
+<h2>vs the state of the art</h2>
+<table class="vs"><tr><th>dimension</th><th>Zoom / Meet / Teams / SFU</th><th>CIRIS fabric</th></tr>
+<tr><td>Ambient presence of a large room</td><td class='bad'>no such mode — gallery caps at 49 tiles; beyond that you see a speaker + a participant count, not the room</td><td class='ok'>every person present at once as a live ~5 kbps dot — a category SFUs don&#x27;t have</td></tr>
+<tr><td>1,000+ in one space</td><td class='bad'>falls back to webinar / HLS-DASH (one-way, seconds of latency)</td><td class='ok'>presence for all + focus-pull full quality on demand (interactivity bounded by donated uplink, MODEL)</td></tr>
+<tr><td>Topology</td><td class='bad'>centralized SFU, cascaded in a datacenter</td><td class='ok'>peer ALM relay tree — no datacenter, every peer relays</td></tr>
+<tr><td>Per-core fan-out</td><td class='bad'>~500 consumers / worker-core (mediasoup), ~115 Mbps/core</td><td class='ok'>~3,000 blob / ~60 full-720p streams per core (egress)</td></tr>
+<tr><td>Encryption</td><td class='bad'>DTLS-SRTP hop-by-hop — the SFU sees plaintext</td><td class='ok'>two-layer hybrid-PQC E2E — the relay never sees plaintext</td></tr>
+<tr><td>Packet loss</td><td class='bad'>NACK / RTX / jitter buffer</td><td class='ok'>RaptorQ per layer — any sufficient subset reconstructs</td></tr>
+<tr><td>Capacity claims</td><td class='bad'>trusted infrastructure</td><td class='ok'>hybrid-PQC-signed, capped, deterministically verifiable tree</td></tr></table>
+<p class="note">Sources:
+<a href="https://support.google.com/meet/answer/9292748">Meet 49-tile cap</a>,
+<a href="https://mediasoup.discourse.group/t/maximum-number-of-consumers-per-worker-is-500-w-r-t-cpu/4058">mediasoup ~500 consumers/core</a>,
+<a href="https://getstream.io/glossary/sfu-cascading/">SFU cascading</a>,
+<a href="https://www.rfc-editor.org/rfc/rfc9605">SFrame (E2E media)</a>.
+The honest framing: <i>this isn't a bigger gallery — it's a different mode. An SFU can't show you the
+ambient presence of a 2,000-person room at all; the fabric makes that the primitive, end-to-end encrypted,
+scaling by peers instead of servers. Whether a given room sustains it is the donated-uplink question
+(MODEL) above, not a crypto one.</i></p>
+<h2>Where this sits among decentralized projects</h2>
+<p>Against the centralized incumbents the contrast is the 49-tile cap (above). Against the
+<i>decentralized</i> field, the distinction is <b>scope</b>: the others are mature, excellent,
+<i>single-purpose</i> layers; CEWP is the (pre-1.0) attempt at the <b>whole stack</b> — transport +
+durable storage + realtime-at-scale + self-governance — and 100% post-quantum.</p>
+<table class="matrix"><tr><th>dimension</th><th>IPFS</th><th>Nostr</th><th>Matrix</th><th>Reticulum</th><th>CIRIS / CEWP</th></tr>
+<tr><td>What it is</td><td>content-addressed storage</td><td>relayed social notes</td><td>federated chat</td><td>real-time mesh transport</td><td class='ciris'><b>full stack: stream + store + govern</b></td></tr>
+<tr><td>End-to-end encryption</td><td>✗ content public</td><td>✗ signed, not encrypted</td><td>✓ Olm/MLS</td><td>✓ transport</td><td class='ciris'><b>✓ two-layer hybrid</b></td></tr>
+<tr><td>Post-quantum by default</td><td>✗</td><td>✗</td><td>partial (exploratory)</td><td>✗</td><td class='ciris'><b>✓ Ed25519+ML-DSA · X25519+ML-KEM</b></td></tr>
+<tr><td>Realtime group video at scale</td><td>✗</td><td>✗</td><td>✗ (small WebRTC bridge)</td><td>building block</td><td class='ciris'><b>◐ ALM tree, ~2,000 presence (MODEL, uplink-gated)</b></td></tr>
+<tr><td>Durable storage (survives node loss)</td><td>partial (manual pinning)</td><td>✗ relays drop</td><td>server DB</td><td>✗</td><td class='ciris'><b>✓ fountain, any-N-of-H</b></td></tr>
+<tr><td>Self-governance (no owner)</td><td>✗</td><td>✗ relay operators</td><td>✗ server admins</td><td>✗</td><td class='ciris'><b>✓ signed weighted votes</b></td></tr>
+<tr><td>No datacenter / runs on owned HW</td><td>partial (mostly DC-pinned)</td><td>relays (often hosted)</td><td>homeservers (often hosted)</td><td>✓</td><td class='ciris'><b>✓ every peer relays</b></td></tr>
+<tr><td>Maturity</td><td>production (~230k nodes)</td><td>production</td><td>production</td><td>stable</td><td class='ciris'><b>RC-grade, pre-1.0</b></td></tr></table>
+<p class="note"><b>Composes, not only competes.</b> CEWP runs <i>on</i> Reticulum transport today, and can
+piggyback IPFS / Veilid / Iroh as blob-bootstrap &amp; cache substrates (CIRISPersist#147). The
+distinctive claim isn't beating any one layer — it's the whole stack in one post-quantum substrate, with
+realtime presence-at-scale and self-governance that none of the others attempt together. (Honest caveat:
+those projects are production-deployed at scale; CEWP is RC-grade.) Sources:
+<a href="https://news.ycombinator.com/item?id=41259030">Reticulum vs IPFS/Nostr/SSB (HN)</a>,
+<a href="https://www.iroh.computer/blog/comparing-iroh-and-libp2p">Iroh vs libp2p</a>,
+<a href="https://github.com/2gatherproject/decentralized-social-apps-guide">decentralized-apps guide</a>.</p>
+<h2>How</h2>
+<div class="pillars">
+  <div class="pillar"><h3>① ALM relay tree</h3>
+    <p>No node fans out to 2,000. Each publisher emits <b>one</b> sealed copy to a relay parent;
+    relays form a tree with per-node fan-out bounded by each peer's <i>measured</i> uplink budget —
+    O(log N) deep, primary + 2 backup parents. Every capacity claim is hybrid-PQC-signed and capped; the
+    topology is a deterministic pure function of witnessed state, so peers agree with <b>no leader and no
+    node can lie its way to the center</b>. No datacenter; switching cost ≈ 0. <b>Measured</b> (CIRISEdge#149 <code>open_av_outer</code>): ~436.6 ns CPU per relay hop, ~0.447 µs added per tier (<code>benches/alm_chain.rs</code>); the inner E2E ciphertext is byte-identical across arbitrary hops (<code>tests/chaos_mesh.rs</code>).</p></div>
+  <div class="pillar"><h3>② Holographic layered encoding <span class="badge frontier">SVC today · MDC frontier</span></h3>
+    <p>Streams are layered (spatial × temporal × quality). Subscribe to fewer layers → send/receive less;
+    the relay drops un-admitted layers <b>before</b> sealing (no bandwidth, no CPU). The base
+    <code>{0,0,0}</code> layer is the ~50 kbps "blinking dot." Under MDC, any subset of descriptions
+    decodes at proportional fidelity — "holographic": degrade gracefully, reconstruct from fragments.</p></div>
+  <div class="pillar"><h3>③ Two-layer hybrid-PQC E2E</h3>
+    <p>Inner AES-256-GCM under a per-epoch group key (end-to-end — relays never hold it); outer
+    AES-256-GCM under a per-link transit key from an X25519+ML-KEM-768 handshake. The bulk is symmetric
+    AES (already quantum-safe); the post-quantum cost is one handshake per link. A fully compromised
+    relay recovers only ciphertext.</p></div>
+</div>
+<h2>Guaranteed mesh characteristics <span class="note">— build the UX against these</span></h2>
+<p>The envelope the substrate guarantees, with provenance. A UX can rely on these directly — what a device
+renders at a given downlink, how presence degrades, what survives node churn — without re-deriving the physics.</p>
+<table><tr><th>characteristic</th><th>guarantee</th><th>basis</th><th>UX implication</th></tr>
+<tr><td>Presence blob</td><td><b>~50 kbps / stream</b></td><td><span class='badge model'>MODEL</span></td><td>max tiles ≈ your downlink ÷ 50 kbps (~100 Mbps → 2,000)</td></tr>
+<tr><td>Focus stream (full 720p)</td><td><b>2.5 Mbps</b></td><td><span class='badge model'>MODEL</span></td><td>one full view ≈ 50 blobs of bandwidth — focus-pull on tap</td></tr>
+<tr><td>Per relay hop</td><td><b>~436.6 ns CPU + 1 RTT</b></td><td><span class='badge measured'>MEASURED</span></td><td>a depth-d tree adds d network hops to glass-to-glass latency</td></tr>
+<tr><td>Tree depth at N</td><td><b>3–4 tiers @ 2,000 (ceil log_f N)</b></td><td><span class='badge model'>MODEL</span></td><td>budget ~3–4 added RTT at the largest rooms</td></tr>
+<tr><td>Join / membership rekey</td><td><b>flat 3.394 ms · tree 0.407 ms / delta</b></td><td><span class='badge model'>PROJECTED</span></td><td>join-latency budget; gated CIRISEdge#129</td></tr>
+<tr><td>Stream path-redundancy</td><td><b>survives loss of all-but-one of 3 paths</b></td><td><span class='badge measured'>MEASURED</span></td><td>presence holds through relay churn — no reconnect flicker</td></tr>
+<tr><td>Content survival</td><td><b>20/30 (33% loss) → 99.6% · 21/30 → 100%</b></td><td><span class='badge measured'>MEASURED</span></td><td>recordings &amp; corpus persist through node churn (edge v4.2.0 codec-fountain, real encode→drop→decode)</td></tr>
+<tr><td>Encryption</td><td><b>E2E hybrid-PQC, ~0 per-frame</b></td><td><span class='badge measured'>MEASURED</span></td><td>no quality/feature tradeoff for E2E; relays forward ciphertext they can&#x27;t read</td></tr></table>
+<h2>Is the crypto in the way? No — here's the measurement. <span class="badge measured">MEASURED</span></h2>
+<p>Per-frame the post-quantum cost is <b>structurally zero</b> (bulk is AES-256-GCM); the PQ cost is a
+one-time handshake per peer-link. The numbers, single-core, in-memory:</p>
+<table><tr><th>frame</th><th>size</th><th>seal→wire→open</th><th>seal (send)</th><th>open (recv)</th><th>throughput</th></tr>
+<tr><td>Opus voice frame (~20 ms @128 kbps)</td><td>320 B</td><td>0.96 µs</td><td>0.52 µs</td><td>0.43 µs</td><td>0.31 GiB/s</td></tr>
+<tr><td>720p inter-frame (low motion)</td><td>4 KiB</td><td>2.4 µs</td><td>1.22 µs</td><td>1.09 µs</td><td>1.59 GiB/s</td></tr>
+<tr><td>720p inter-frame (typical)</td><td>16 KiB</td><td>7.05 µs</td><td>3.46 µs</td><td>3.06 µs</td><td>2.16 GiB/s</td></tr>
+<tr><td>1080p inter / 720p keyframe</td><td>64 KiB</td><td>27.45 µs</td><td>12.35 µs</td><td>12.21 µs</td><td>2.22 GiB/s</td></tr>
+<tr><td>1080p keyframe</td><td>256 KiB</td><td>104.26 µs</td><td>47.85 µs</td><td>47.43 µs</td><td>2.34 GiB/s</td></tr></table>
 <table><tr><th>handshake</th><th>full (initiate+respond)</th></tr>
-<tr><td>Hybrid X25519 + ML-KEM-768 (PQ-safe)</td><td>161.9 µs</td></tr>
-<tr><td>Classical X25519 only</td><td>78.7 µs</td></tr>
-<tr><td><b>ML-KEM-768 tax</b></td><td><b>+83.2 µs, once per peer-link</b></td></tr></table>
+<tr><td>Hybrid X25519 + ML-KEM-768 (PQ-safe)</td><td>160.9 µs</td></tr>
+<tr><td>Classical X25519 only</td><td>78.2 µs</td></tr>
+<tr><td><b>ML-KEM-768 tax</b></td><td><b>+82.7 µs, once per peer-link</b></td></tr></table>
+<p class="note">A 50-person 30 fps room is ~0.49% of one core to
+<i>receive</i> (open-only) and ~0.27% to publish. Fan-out (inner-once/outer-N):</p>
+<table><tr><th>room (N)</th><th>naive</th><th>shared-inner</th><th>speedup</th></tr><tr><td>2</td><td>6.53 µs</td><td>5.32 µs</td><td>1.23×</td></tr>
+<tr><td>8</td><td>28.76 µs</td><td>15.9 µs</td><td>1.81×</td></tr>
+<tr><td>50</td><td>187.17 µs</td><td>89.54 µs</td><td>2.09×</td></tr></table>
+<p class="note"><b>Membership-rekey</b> <span class="badge model">PROJECTED · CIRISEdge#129</span>
+flat O(N) vs tree O(log N) per join/leave:</p>
+<table><tr><th>room (N)</th><th>flat O(N)/delta</th><th>tree O(log N)/delta</th><th>tree win</th></tr><tr><td>2</td><td>0.137 ms</td><td>0.068 ms</td><td>2.0×</td></tr>
+<tr><td>8</td><td>0.591 ms</td><td>0.203 ms</td><td>2.9×</td></tr>
+<tr><td>50</td><td>3.394 ms</td><td>0.407 ms</td><td>8.3×</td></tr></table>
+<p class="note"><b>Store spine</b>: hybrid trace ingest 194.36 µs
+(~5,145 traces/s/core); re-delivery saves only
+~9.3% (verify runs before dedup — replay is verify-bound by design, the
+AV-9-safe choice). Levers: pre-verified relay path + batch verify (CIRISPersist#225).</p>
+<h2>Live mesh (bridge) — A&#x2194;B federation bring-up
+  <span class="badge attested">ATTESTED</span></h2>
+<p class="note"><b>Provenance:</b> real two-node bridge mesh — Node A
+<code>ciris-canonical-trio-1-3v2kb7tbvs</code> (lens/seed) &#x2194; Node B
+<code>ciris-status-1</code> (status). Substrate floor:
+edge v7.0.0 / persist v10.0.0 / verify v7.2.0.
+Measured: 2026-06-22. These numbers are <b>not reproducible on a CI runner</b>
+(no two-node mesh in CI); they are attested with source node identity and date.
+CI criterion numbers (MEASURED badge) are separate and always runner-local.</p>
 
-<h2>Mesh fan-out — sender cost per frame (16 KiB)</h2>
-<p><code>naive</code> = N× full <code>seal_av_chunk</code>. <code>shared_inner</code> = v3.7.0's
-<code>seal_av_inner</code> once + <code>seal_av_outer</code> per Link (CIRISEdge#122) — wire-identical,
-inner AEAD done once.</p>
-<table><tr><th>room (N)</th><th>naive</th><th>shared-inner</th><th>speedup</th></tr>
-<tr><td>2</td><td>6.51 µs</td><td>4.79 µs</td><td>1.36×</td></tr>
-<tr><td>8</td><td>25.98 µs</td><td>14.02 µs</td><td>1.85×</td></tr>
-<tr><td>50</td><td>162.93 µs</td><td>78.57 µs</td><td>2.07×</td></tr></table>
+<h3>Capacity scoring — <code>capacity:sustained_coherence:v1</code></h3>
+<p>Node A derives per-agent <b>n_eff</b> from ingested agent traces: builds the
+11-dimensional lens constraint feature matrix → Jacobi eigendecomposition →
+participation ratio n_eff_pr → <code>capacity(n_eff_pr, gate=20, target=8)</code>
+→ [0,1] score → emits a hybrid-signed <code>scores</code> CEG attestation
+(<code>capacity:sustained_coherence:v1</code>). Node B receives the attestation
+via <code>consent:replication:v1</code>. The per-agent per-cadence-tick CPU cost
+of this pipeline is <b>CI-measured</b> in the N_eff scoring bench
+(<code>n_eff_e2e/500</code>) — see the substrate metrics above.</p>
+<p class="note">The capacity score VALUE depends on the corpus (agent traces
+ingested). With a thin corpus (&lt;20 traces) the gate returns 0.0 honestly — a
+zero-row means "observed but not yet scored", not "missing". A corpus that clears
+the gate yields a score in [0,1].</p>
 
-<h2>Membership-change rekey — the churn path <span class="note">(projected)</span></h2>
-<div class="warn">⚠ <b>Projected, not implemented.</b> The substrate does not yet rekey on join/leave
-(CIRISEdge#129 — <code>EpochDek</code> has no ratchet; epoch rotation is owned out-of-module). These
-numbers project the <i>intended</i> cost from the real hybrid-KEM <code>key_grant</code> wrap. They
-are the answer to "is rekey-on-membership-change affordable?" — not a measurement of shipped code.</div>
-<p>Each join/leave rewraps the fresh epoch DEK to the member-set. <code>flat</code> = O(N) (the
-unicast-mesh baseline, #129). <code>tree</code> = O(log N) (the TreeKEM optimization, needs multicast,
-#66). The outer per-Link key is <b>not</b> re-KEX'd on churn (KEX is one-shot per session).</p>
-<table><tr><th>room (N)</th><th>flat O(N) / delta</th><th>tree O(log N) / delta</th><th>tree win</th></tr>
-<tr><td>2</td><td>0.135 ms</td><td>0.068 ms</td><td>2.0×</td></tr>
-<tr><td>8</td><td>0.543 ms</td><td>0.203 ms</td><td>2.7×</td></tr>
-<tr><td>50</td><td>3.405 ms</td><td>0.412 ms</td><td>8.3×</td></tr></table>
-<p class="note">A 50-room paying the flat baseline spends ~3.41 ms per membership
-delta — ~10.2% of a single 33 ms frame, or ~0.34%
-of a core at one join/leave per second. Affordable even unoptimized; the tree (#66) removes it as a concern.
-Steady-state video is untouched by churn.</p>
+<h3>Cohort propagation — FountainSwarmRuntime <span class="badge attested">ATTESTED</span></h3>
+<p>Each node runs the SAME <code>ciris_edge::swarm::FountainSwarmRuntime</code>
+that <code>src/holonomic.rs</code> wires into production. The publisher's cohort
+closure is derived from <code>replication_peers_from_consent(…)</code> — ONLY
+consented peers. Propagation and group-B isolation numbers below come from the
+<code>examples/mesh_propagation/main.rs</code> in-process driver on bridge-mesh
+hardware (in-memory bus = swarm LOGIC + cohort gate, not wire transport):</p>
+<table>
+<tr><th>N (total nodes)</th><th>group-A convergence</th>
+<th>group-B isolation (leaks)</th><th>propagation latency</th></tr>
+<tr><td><b>50</b></td><td class='ok'>24/24 ✓</td><td><b>0 (structural)</b></td><td class='note'>&lt; &lt; 100 ms</td></tr><tr><td><b>100</b></td><td class='ok'>49/49 ✓</td><td><b>0 (structural)</b></td><td class='note'>&lt; &lt; 200 ms</td></tr><tr><td><b>200</b></td><td class='ok'>99/99 ✓</td><td><b>0 (structural)</b></td><td class='note'>&lt; &lt; 400 ms</td></tr>
+</table>
+<p class="note"><b>Group-B isolation = 0 is structural, not statistical.</b>
+Structural — the publisher&#x27;s cohort closure is derived from replication_peers_from_consent(...), which returns ONLY consented peers. A peer not in the consent graph is NEVER in the cohort closure and cannot receive a FountainHoldingClaim from this publisher regardless of network position. Zero leakage is not a statistical result — it is enforced by construction.</p>
 
-<h2>Replication speed — CEG-RC5 corpus ingest (the "store" spine)</h2>
-<p>What a node pays per replicated trace: Ed25519 verify → decompose → persist (5-tuple
-<code>ON CONFLICT DO NOTHING</code> dedup — not a content-hash lookup).</p>
-<table><tr><th>path</th><th>per trace</th><th>throughput</th></tr>
-<tr><td>new trace (insert — replication intake)</td><td>230.61 µs</td><td>4,336 traces/s/core</td></tr>
-<tr><td>re-delivery (dedup — anti gossip-loop)</td><td>205.79 µs</td><td>4,859 /s/core</td></tr></table>
-<p class="note"><b>The finding:</b> re-delivery saves only ~10.8% over a fresh
-insert — because <b>verify runs before dedup</b>, a duplicate still pays full Ed25519 verification. So a
-replay / gossip flood is bounded by verify throughput, not a cheap reject. This is <b>deliberate</b>
-(verify-before-mutation; reordering dedup ahead of verify is an AV-9 suppression oracle — the dedup key
-is attacker-controllable). The scale levers are the pre-verified relay path
-(<code>VerifyMode::TrustPreVerified</code> gated on an Edge <code>verify_outcome</code>) and batch
-verification (CIRISPersist#225) — not dedup-first.</p>
+<h3>Replication A&#x2194;B — <code>consent:replication:v1</code></h3>
+<p>Bidirectional mutual-key-registered replication; each node owns its own corpus.
+Node A's imported agent traces replicate to Node B; Node A's
+<code>capacity:sustained_coherence:v1</code> scores are served via Node B.
+CPU cost per replicated trace: replication_ingest criterion bench (CI-MEASURED): ~4,336 traces/s/core (fresh), ~4,859/s/core (dedup path).</p>
+<h2>Holonomic storage — survival of the replicated corpus <span class="badge model">MODEL</span></h2>
+<p>The same holographic property runs the "store" half: content is fountain-split into symbols, any
+sufficient subset reconstructs. Policy <code>N=20 K=6 H=30</code>;
+overhead 1.5× (vs ~5× whole-copy). Survival
+<code>P(Binomial(H,q) ≥ N)</code> — computed, reproducing scale_model v0.7. The <i>reconstruction itself</i>
+is no longer assumed: <code>tests/chaos_mesh.rs</code> drives <b>edge v4.2.0's own fountain codec</b>
+(<code>codec-fountain</code>) — really encoding content into H=30 holders, killing a third, and rebuilding
+it byte-identical — <b>MEASURED</b> at <b>99.6%</b> from any 20/30 (33% loss) and <b>100%</b> from 21/30
+(RaptorQ's small reception overhead at the exact floor). The q-curve below stays MODEL — it's the
+swarm-availability assumption, not the codec:</p>
+<table><tr><th>per-peer availability q</th><th>regime</th><th>P(reconstruct)</th></tr><tr><td>0.95</td><td>datacenter</td><td>100.000%</td></tr>
+<tr><td>0.9</td><td>typical wifi</td><td>99.991%</td></tr>
+<tr><td>0.85</td><td>medium churn (design target)</td><td>99.706%</td></tr>
+<tr><td>0.8</td><td>high churn</td><td>97.438%</td></tr>
+<tr><td>0.7</td><td>battlefield mesh</td><td>73.037%</td></tr></table>
+<p class="note">A live node recomputes survival from <i>measured</i> q + observed holders and alarms
+under the 99% floor.</p>
+<h3>Substrate — MEASURED (through the fabric) <span class="badge measured">MEASURED</span></h3><p class="note">Promoted from this run's criterion benches — each value traces to a real bench result (group/id), not a modeled target:</p><table><tr><th>metric</th><th>value</th><th>provenance (criterion group/id)</th><th>derivation</th></tr><tr><td>aead_throughput_per_core</td><td><b>4.99</b> GiB/s/core</td><td><code>av_frame_halves/open/16384</code></td><td class='note'>AEAD open throughput per core (receiver open-only, 16 KiB 720p inter-frame): frame_bytes ÷ median time/iter</td></tr>
+<tr><td>alm_tree_depth_vs_n</td><td><b>1.74</b> µs/frame @ 4-tier depth (per-hop = value ÷ 4)</td><td><code>alm_chain_hop/208</code></td><td class='note'>ALM relay per-frame CPU cost for a 2,000-room (FSD §3: 3–4-tier tree): per-hop median (208 B blob) × 4 tiers</td></tr>
+<tr><td>replication_ingest_per_sec</td><td><b>5215.23</b> traces/s/core</td><td><code>replication_ingest/ingest_new</code></td><td class='note'>Replication ingest rate (fresh signed trace: verify → decompose → persist): 1e9 ÷ median time/iter</td></tr>
+<tr><td>stream_fanout_core_frac</td><td><b>0.0158</b> core-fraction @ N=2000, 30fps</td><td><code>stream_fanout_seal_tick/2000</code></td><td class='note'>Publisher CPU to seal 2,000 blob streams per 30fps tick: (median time/iter in s) × 30 fps = fraction of one core</td></tr>
+<tr><td>n_eff_scoring_per_agent</td><td><b>50.08</b> µs/agent @ N=500 traces (window cap)</td><td><code>n_eff_e2e/500</code></td><td class='note'>Per-agent cost of capacity:sustained_coherence:v1 at the window cap (N=500 traces): feature-matrix build + Jacobi eigendecomposition + participation-ratio derivation. The scorer runs this once per agent per cadence tick (default: hourly).</td></tr></table>
+<p class="note">The remaining substrate metrics and the holonomic tier are explicit <code>gated</code>
+stubs (not fabricated — no bench grounds them yet):</p>
+<ul><li><b>substrate (remainder)</b> — <code>gated</code> on no MLS-commit / cold-join-latency bench yet (the five throughput/scoring metrics above are measured through the fabric when criterion results are supplied): mls_commit_barrier, cold_join_burst_latency</li><li><b>holonomic</b> — <code>gated</code> on fountain/holonomic API wiring (CIRISServer#11) + CIRISRegistry#88 composite model: wholeness_witness_reconciliation, alm_topology_compute, recursive_trust_bootstrap_walk, swarm_rarity_convergence</li></ul>
+<h2>Benchmarked against the field — per layer</h2>
+<p>No single "PQC streaming" suite exists, so each layer is held next to its recognized reference.</p>
+<table><tr><th>layer</th><th>CIRISServer (this run)</th><th>reference</th><th></th></tr><tr><td>PQ KEM (X25519+ML-KEM-768)</td><td>hybrid KEX 160.9 µs</td><td>liboqs ML-KEM-768: encap ~95 / decap ~118 µs</td><td><a href='https://openquantumsafe.org/benchmarking/'>src</a></td></tr>
+<tr><td>PQ handshake tax</td><td>+82.7 µs once/peer-link</td><td>PQ-TLS (Cloudflare/AWS): ~80–150 µs ML-KEM overhead</td><td><a href='https://aws.amazon.com/blogs/security/ml-kem-post-quantum-tls-now-supported-in-aws-kms-acm-and-secrets-manager/'>src</a></td></tr>
+<tr><td>E2E media AEAD</td><td>two-layer AES-256-GCM, up to 2.34 GiB/s</td><td>SFrame (RFC 9605): AES-GCM E2E, SFU-forwardable</td><td><a href='https://www.rfc-editor.org/rfc/rfc9605'>src</a></td></tr>
+<tr><td>Group rekey</td><td>flat 3.394 / tree 0.407 ms @N=50</td><td>OpenMLS / PQ-MLS combiner: O(log n)</td><td><a href='https://eprint.iacr.org/2026/034.pdf'>src</a></td></tr>
+<tr><td>Store verify</td><td>hybrid ingest 194.36 µs</td><td>liboqs ML-DSA-65 verify ~0.40 ms</td><td><a href='https://openquantumsafe.org/benchmarking/'>src</a></td></tr></table>
 
-<h2>Assumptions</h2>
-<ul><li>single thread, one core; real deployments fan out across cores</li><li>frame sizes are representative codec outputs, not a live encoder; the GOP blend states its model inline</li><li>receivers are charged OPEN-ONLY — a node never re-seals frames it receives</li><li>30 fps reference for all per-second / % -of-core figures</li><li>membership-change rekey is PROJECTED from the real hybrid-KEM primitive — the substrate does not implement it yet (CIRISEdge#129); steady-state cost is unaffected</li><li>crypto + wire-codec + persist spine (CIRISServer-owned); excludes the RNS network hop (bandwidth/RTT-bound) and codec encode/decode</li><li>100% hybrid PQC, hard cut — Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path</li></ul>
+<h2>Provenance &amp; honesty</h2>
+<ul class="note"><li>MEASURED rows are single-core in-memory criterion microbenches (AEAD-bound); over-the-wire deployment is NIC/kernel/Reticulum-bound. Absolute µs are host-relative; ratios travel.</li><li>MODEL rows are bandwidth arithmetic over edge FEDERATION_SCALING_MODEL.md bitrate anchors (720p30≈2.5 Mbps, blinking-dot≈50 kbps, relay egress≈150 Mbps/core) — not a live N-node test.</li><li>The blob path ships today via AV1 SVC base layers. Full symmetric M&gt;2 MDC video is FRONTIER — the wire/substrate ships; the production codec (NeuralMDC-class) does not exist yet. M=2 is the production default.</li><li>100% hybrid PQC, hard cut — Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path.</li><li>Membership-change rekey is PROJECTED from the real hybrid-KEM primitive (CIRISEdge#129 not yet implemented); steady-state video is unaffected.</li></ul>
 
-<details><summary>Raw criterion means (36)</summary>
-<table><tr><th>bench</th><th>mean</th></tr><tr><td>av_fanout_plan_50</td><td>15.405 µs</td></tr>
-<tr><td>av_frame_e2e/16384</td><td>7.065 µs</td></tr>
-<tr><td>av_frame_e2e/262144</td><td>112.272 µs</td></tr>
-<tr><td>av_frame_e2e/320</td><td>0.951 µs</td></tr>
-<tr><td>av_frame_e2e/4096</td><td>2.372 µs</td></tr>
-<tr><td>av_frame_e2e/65536</td><td>27.241 µs</td></tr>
-<tr><td>av_frame_halves/open/16384</td><td>3.080 µs</td></tr>
-<tr><td>av_frame_halves/open/262144</td><td>48.985 µs</td></tr>
-<tr><td>av_frame_halves/open/320</td><td>0.452 µs</td></tr>
-<tr><td>av_frame_halves/open/4096</td><td>1.125 µs</td></tr>
-<tr><td>av_frame_halves/open/65536</td><td>12.792 µs</td></tr>
-<tr><td>av_frame_halves/open_64KiB</td><td>12.361 µs</td></tr>
-<tr><td>av_frame_halves/seal/16384</td><td>3.258 µs</td></tr>
-<tr><td>av_frame_halves/seal/262144</td><td>56.775 µs</td></tr>
-<tr><td>av_frame_halves/seal/320</td><td>0.514 µs</td></tr>
-<tr><td>av_frame_halves/seal/4096</td><td>1.214 µs</td></tr>
-<tr><td>av_frame_halves/seal/65536</td><td>12.776 µs</td></tr>
-<tr><td>av_frame_halves/seal_64KiB</td><td>12.802 µs</td></tr>
-<tr><td>av_mesh_fanout/naive/2</td><td>6.507 µs</td></tr>
-<tr><td>av_mesh_fanout/naive/50</td><td>162.927 µs</td></tr>
-<tr><td>av_mesh_fanout/naive/8</td><td>25.978 µs</td></tr>
-<tr><td>av_mesh_fanout/shared_inner/2</td><td>4.787 µs</td></tr>
-<tr><td>av_mesh_fanout/shared_inner/50</td><td>78.574 µs</td></tr>
-<tr><td>av_mesh_fanout/shared_inner/8</td><td>14.020 µs</td></tr>
-<tr><td>av_rekey/flat_rewrap/2</td><td>134.567 µs</td></tr>
-<tr><td>av_rekey/flat_rewrap/50</td><td>3405.314 µs</td></tr>
-<tr><td>av_rekey/flat_rewrap/8</td><td>543.160 µs</td></tr>
-<tr><td>av_rekey/tree_rewrap/2</td><td>67.523 µs</td></tr>
-<tr><td>av_rekey/tree_rewrap/50</td><td>411.945 µs</td></tr>
-<tr><td>av_rekey/tree_rewrap/8</td><td>203.095 µs</td></tr>
-<tr><td>pqc_kex/classical_initiate</td><td>39.588 µs</td></tr>
-<tr><td>pqc_kex/classical_respond</td><td>39.104 µs</td></tr>
-<tr><td>pqc_kex/hybrid_initiate</td><td>68.210 µs</td></tr>
-<tr><td>pqc_kex/hybrid_respond</td><td>93.655 µs</td></tr>
-<tr><td>replication_ingest/ingest_dedup</td><td>205.788 µs</td></tr>
-<tr><td>replication_ingest/ingest_new</td><td>230.610 µs</td></tr></table></details>
+<details><summary>Raw criterion means (51)</summary>
+<table><tr><th>bench</th><th>mean</th></tr><tr><td>alm_chain_e2e_blob/tiers/1</td><td>1.375 µs</td></tr>
+<tr><td>alm_chain_e2e_blob/tiers/2</td><td>1.810 µs</td></tr>
+<tr><td>alm_chain_e2e_blob/tiers/3</td><td>2.254 µs</td></tr>
+<tr><td>alm_chain_e2e_blob/tiers/4</td><td>2.708 µs</td></tr>
+<tr><td>alm_chain_hop/16384</td><td>3.242 µs</td></tr>
+<tr><td>alm_chain_hop/208</td><td>0.437 µs</td></tr>
+<tr><td>av_fanout_plan_50</td><td>15.073 µs</td></tr>
+<tr><td>av_frame_e2e/16384</td><td>7.050 µs</td></tr>
+<tr><td>av_frame_e2e/262144</td><td>104.257 µs</td></tr>
+<tr><td>av_frame_e2e/320</td><td>0.956 µs</td></tr>
+<tr><td>av_frame_e2e/4096</td><td>2.403 µs</td></tr>
+<tr><td>av_frame_e2e/65536</td><td>27.447 µs</td></tr>
+<tr><td>av_frame_halves/open/16384</td><td>3.062 µs</td></tr>
+<tr><td>av_frame_halves/open/262144</td><td>47.430 µs</td></tr>
+<tr><td>av_frame_halves/open/320</td><td>0.426 µs</td></tr>
+<tr><td>av_frame_halves/open/4096</td><td>1.088 µs</td></tr>
+<tr><td>av_frame_halves/open/65536</td><td>12.206 µs</td></tr>
+<tr><td>av_frame_halves/seal/16384</td><td>3.457 µs</td></tr>
+<tr><td>av_frame_halves/seal/262144</td><td>47.847 µs</td></tr>
+<tr><td>av_frame_halves/seal/320</td><td>0.518 µs</td></tr>
+<tr><td>av_frame_halves/seal/4096</td><td>1.224 µs</td></tr>
+<tr><td>av_frame_halves/seal/65536</td><td>12.351 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/2</td><td>6.527 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/50</td><td>187.169 µs</td></tr>
+<tr><td>av_mesh_fanout/naive/8</td><td>28.763 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/2</td><td>5.322 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/50</td><td>89.535 µs</td></tr>
+<tr><td>av_mesh_fanout/shared_inner/8</td><td>15.897 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/2</td><td>136.967 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/50</td><td>3394.159 µs</td></tr>
+<tr><td>av_rekey/flat_rewrap/8</td><td>591.151 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/2</td><td>68.300 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/50</td><td>407.413 µs</td></tr>
+<tr><td>av_rekey/tree_rewrap/8</td><td>202.666 µs</td></tr>
+<tr><td>n_eff_compute/100</td><td>14.246 µs</td></tr>
+<tr><td>n_eff_compute/20</td><td>8.313 µs</td></tr>
+<tr><td>n_eff_compute/500</td><td>42.122 µs</td></tr>
+<tr><td>n_eff_e2e/50</td><td>11.113 µs</td></tr>
+<tr><td>n_eff_e2e/500</td><td>50.473 µs</td></tr>
+<tr><td>n_eff_matrix_build/100</td><td>1.517 µs</td></tr>
+<tr><td>n_eff_matrix_build/50</td><td>0.835 µs</td></tr>
+<tr><td>n_eff_matrix_build/500</td><td>7.445 µs</td></tr>
+<tr><td>pqc_kex/classical_initiate</td><td>38.899 µs</td></tr>
+<tr><td>pqc_kex/classical_respond</td><td>39.351 µs</td></tr>
+<tr><td>pqc_kex/hybrid_initiate</td><td>67.006 µs</td></tr>
+<tr><td>pqc_kex/hybrid_respond</td><td>93.922 µs</td></tr>
+<tr><td>replication_ingest/ingest_dedup</td><td>176.237 µs</td></tr>
+<tr><td>replication_ingest/ingest_new</td><td>194.356 µs</td></tr>
+<tr><td>stream_fanout_seal_tick/1000</td><td>262.287 µs</td></tr>
+<tr><td>stream_fanout_seal_tick/2000</td><td>526.974 µs</td></tr>
+<tr><td>stream_fanout_seal_tick/500</td><td>127.251 µs</td></tr></table></details>
 
-<footer>CIRISServer · benches/pqc_av_streaming.rs + replication_ingest.rs ·
-commit localtest · 2026-06-16 ·
-<a href="https://github.com/CIRISAI/CIRISServer/blob/main/FSD/PQC_AV_STREAMING_BENCH.md">methodology</a></footer>
+<footer>CIRIS fabric node (CIRISServer) · pqc_av_streaming + replication_ingest + holonomic scoreboard ·
+commit 709a94011d49 · 2026-06-23 ·
+<a href="https://github.com/CIRISAI/CIRISServer/blob/main/FSD/PQC_AV_STREAMING_BENCH.md">methodology</a> ·
+capacity model: CIRISEdge FEDERATION_SCALING_MODEL.md</footer>
 </body></html>

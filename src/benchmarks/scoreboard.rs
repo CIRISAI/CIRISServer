@@ -201,8 +201,8 @@ impl MeasuredMetric {
     }
 }
 
-/// The substrate tier (AEAD / ALM-relay / replication / stream-fanout). Unlike a
-/// pure [`GatedTier`], this tier is a HYBRID: the four metrics a bench really
+/// The substrate tier (AEAD / ALM-relay / replication / stream-fanout / N_eff).
+/// Unlike a pure [`GatedTier`], this tier is a HYBRID: the metrics a bench really
 /// measures are promoted to [`MeasuredMetric`] when criterion results are supplied
 /// (`scoreboard --criterion-dir …`), while the remainder that no bench grounds
 /// stays in an honest [`GatedTier`]. With no measurements supplied every measured
@@ -222,6 +222,11 @@ pub struct SubstrateTier {
     /// Core-fraction to seal N streams at 30 fps; from `stream_fanout_seal_tick`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_fanout_core_frac: Option<MeasuredMetric>,
+    /// Per-agent N_eff e2e cost (feature-matrix + Jacobi + PR); from `n_eff_e2e`.
+    /// This is the capacity:sustained_coherence:v1 computation the scorer runs
+    /// once per agent per cadence tick (default: hourly). N=500 is the window cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n_eff_scoring_per_agent: Option<MeasuredMetric>,
     /// The honestly-unmeasured remainder of the substrate tier.
     pub gated: GatedTier,
 }
@@ -236,6 +241,7 @@ impl SubstrateTier {
             alm_tree_depth_vs_n: None,
             replication_ingest_per_sec: None,
             stream_fanout_core_frac: None,
+            n_eff_scoring_per_agent: None,
             gated: GatedTier {
                 status: "gated",
                 gated_on: "no criterion results supplied (run `cargo bench` + \
@@ -245,6 +251,7 @@ impl SubstrateTier {
                     "alm_tree_depth_vs_n",
                     "replication_ingest_per_sec",
                     "stream_fanout_core_frac",
+                    "n_eff_scoring_per_agent",
                     "mls_commit_barrier",
                     "cold_join_burst_latency",
                 ],
@@ -263,9 +270,9 @@ impl SubstrateTier {
         metrics.push("cold_join_burst_latency");
         GatedTier {
             status: "gated",
-            gated_on: "no MLS-commit / cold-join-latency bench yet (the four \
-                       throughput metrics above are measured through the fabric \
-                       when criterion results are supplied)",
+            gated_on: "no MLS-commit / cold-join-latency bench yet (the five \
+                       throughput/scoring metrics above are measured through the \
+                       fabric when criterion results are supplied)",
             metrics,
         }
     }
@@ -276,6 +283,7 @@ impl SubstrateTier {
             || self.alm_tree_depth_vs_n.is_some()
             || self.replication_ingest_per_sec.is_some()
             || self.stream_fanout_core_frac.is_some()
+            || self.n_eff_scoring_per_agent.is_some()
     }
 }
 
@@ -447,6 +455,10 @@ const REPL_ID: &str = "ingest_new";
 /// Stream fan-out: seal N=2,000 distinct blob streams for one 30fps tick.
 const FANOUT_GROUP: &str = "stream_fanout_seal_tick";
 const FANOUT_ID: &str = "2000";
+/// N_eff e2e: feature-matrix + Jacobi eigendecomposition + PR/entropy derivation
+/// for N=500 traces (the window cap — worst-case per-agent-per-cadence cost).
+const N_EFF_GROUP: &str = "n_eff_e2e";
+const N_EFF_ID: &str = "500";
 
 /// Median time/iter (ns) for each criterion `"<group>/<id>"` benchmark.
 struct CriterionEstimates {
@@ -516,6 +528,7 @@ fn build_substrate(est: &CriterionEstimates) -> SubstrateTier {
         alm_tree_depth_vs_n: None,
         replication_ingest_per_sec: None,
         stream_fanout_core_frac: None,
+        n_eff_scoring_per_agent: None,
         gated: GatedTier {
             status: "gated",
             gated_on: "",
@@ -585,6 +598,24 @@ fn build_substrate(est: &CriterionEstimates) -> SubstrateTier {
             ));
         }
         _ => missing.push("stream_fanout_core_frac"),
+    }
+
+    // n_eff_scoring_per_agent: µs per agent for N=500 (the window cap, worst-case
+    // per-cadence-tick cost of capacity:sustained_coherence:v1).
+    match est.median_ns(N_EFF_GROUP, N_EFF_ID) {
+        Some(ns) if ns > 0.0 => {
+            tier.n_eff_scoring_per_agent = Some(MeasuredMetric::new(
+                round2(ns / 1_000.0),
+                "µs/agent @ N=500 traces (window cap)",
+                N_EFF_GROUP,
+                N_EFF_ID.to_string(),
+                "Per-agent cost of capacity:sustained_coherence:v1 at the window \
+                 cap (N=500 traces): feature-matrix build + Jacobi eigendecomposition \
+                 + participation-ratio derivation. The scorer runs this once per agent \
+                 per cadence tick (default: hourly).",
+            ));
+        }
+        _ => missing.push("n_eff_scoring_per_agent"),
     }
 
     tier.gated = SubstrateTier::remainder_gated(&missing);

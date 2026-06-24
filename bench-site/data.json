@@ -1,167 +1,486 @@
 {
-  "schema": "ciris-server/bench/2",
-  "commit": "localtest",
-  "date": "2026-06-16",
+  "schema": "ciris-server/bench/3",
+  "commit": "709a94011d4939999195a4ac6144ea714e65e4b1",
+  "date": "2026-06-23",
   "model": {
     "video_frames": [
       {
         "bytes": 320,
         "label": "Opus voice frame (~20 ms @128 kbps)",
-        "e2e_us": 0.95,
-        "seal_us": 0.51,
-        "open_us": 0.45,
+        "e2e_us": 0.96,
+        "seal_us": 0.52,
+        "open_us": 0.43,
         "gib_s": 0.31,
-        "fps_ceiling": 1051216
+        "fps_ceiling": 1046415
       },
       {
         "bytes": 4096,
         "label": "720p inter-frame (low motion)",
-        "e2e_us": 2.37,
-        "seal_us": 1.21,
-        "open_us": 1.12,
-        "gib_s": 1.61,
-        "fps_ceiling": 421581
+        "e2e_us": 2.4,
+        "seal_us": 1.22,
+        "open_us": 1.09,
+        "gib_s": 1.59,
+        "fps_ceiling": 416125
       },
       {
         "bytes": 16384,
         "label": "720p inter-frame (typical)",
-        "e2e_us": 7.07,
-        "seal_us": 3.26,
-        "open_us": 3.08,
+        "e2e_us": 7.05,
+        "seal_us": 3.46,
+        "open_us": 3.06,
         "gib_s": 2.16,
-        "fps_ceiling": 141534
+        "fps_ceiling": 141840
       },
       {
         "bytes": 65536,
         "label": "1080p inter / 720p keyframe",
-        "e2e_us": 27.24,
-        "seal_us": 12.78,
-        "open_us": 12.79,
-        "gib_s": 2.24,
-        "fps_ceiling": 36710
+        "e2e_us": 27.45,
+        "seal_us": 12.35,
+        "open_us": 12.21,
+        "gib_s": 2.22,
+        "fps_ceiling": 36434
       },
       {
         "bytes": 262144,
         "label": "1080p keyframe",
-        "e2e_us": 112.27,
-        "seal_us": 56.78,
-        "open_us": 48.99,
-        "gib_s": 2.17,
-        "fps_ceiling": 8907
+        "e2e_us": 104.26,
+        "seal_us": 47.85,
+        "open_us": 47.43,
+        "gib_s": 2.34,
+        "fps_ceiling": 9592
       }
     ],
     "kex": {
-      "hybrid_full_us": 161.9,
-      "hybrid_initiate_us": 68.2,
-      "classical_full_us": 78.7,
-      "mlkem_tax_us": 83.2
+      "hybrid_full_us": 160.9,
+      "hybrid_initiate_us": 67.0,
+      "classical_full_us": 78.2,
+      "mlkem_tax_us": 82.7
     },
     "fanout": [
       {
         "n": 2,
-        "naive_us": 6.51,
-        "shared_inner_us": 4.79,
-        "speedup": 1.36
+        "naive_us": 6.53,
+        "shared_inner_us": 5.32,
+        "speedup": 1.23
       },
       {
         "n": 8,
-        "naive_us": 25.98,
-        "shared_inner_us": 14.02,
-        "speedup": 1.85
+        "naive_us": 28.76,
+        "shared_inner_us": 15.9,
+        "speedup": 1.81
       },
       {
         "n": 50,
-        "naive_us": 162.93,
-        "shared_inner_us": 78.57,
-        "speedup": 2.07
+        "naive_us": 187.17,
+        "shared_inner_us": 89.54,
+        "speedup": 2.09
       }
     ],
     "rekey": [
       {
         "n": 2,
-        "flat_ms": 0.135,
+        "flat_ms": 0.137,
         "tree_ms": 0.068,
         "tree_speedup": 2.0
       },
       {
         "n": 8,
-        "flat_ms": 0.543,
+        "flat_ms": 0.591,
         "tree_ms": 0.203,
-        "tree_speedup": 2.7
+        "tree_speedup": 2.9
       },
       {
         "n": 50,
-        "flat_ms": 3.405,
-        "tree_ms": 0.412,
+        "flat_ms": 3.394,
+        "tree_ms": 0.407,
         "tree_speedup": 8.3
       }
     ],
+    "chain": {
+      "hop_blob_ns": 436.6,
+      "hop_full_us": 3.24,
+      "e2e_by_tier_us": {
+        "1": 1.37,
+        "2": 1.81,
+        "3": 2.25,
+        "4": 2.71
+      },
+      "per_tier_added_us": 0.447
+    },
     "mesh": {
-      "send_pct_core": 0.24,
+      "send_pct_core": 0.27,
       "recv_typical_pct_core": 0.45,
-      "max_recv_streams_30fps_core": 10823,
-      "recv_lowmotion_pct_core": 0.17,
-      "recv_gop_blend_pct_core": 0.5,
-      "gop_model": "720p, 30 fps, GOP=30 (1\u00d764 KiB keyframe + 29\u00d716 KiB inter per second), receiver opens 49 streams"
+      "max_recv_streams_30fps_core": 10888,
+      "recv_lowmotion_pct_core": 0.16,
+      "recv_gop_blend_pct_core": 0.49
     },
     "replication": {
-      "ingest_new_us": 230.61,
-      "traces_per_sec": 4336,
-      "dedup_us": 205.79,
-      "dedup_per_sec": 4859,
-      "dedup_savings_pct": 10.8
+      "ingest_new_us": 194.36,
+      "traces_per_sec": 5145,
+      "dedup_us": 176.24,
+      "dedup_per_sec": 5674,
+      "dedup_savings_pct": 9.3
+    },
+    "capacity": {
+      "rooms": [
+        {
+          "n": 49,
+          "down_all_blobs_mbps": 2.45,
+          "aggregate_uplink_gbps": 0.1,
+          "mesh_full_uplink_mbps": 120.0,
+          "feasible_blobs": true
+        },
+        {
+          "n": 200,
+          "down_all_blobs_mbps": 10.0,
+          "aggregate_uplink_gbps": 2.0,
+          "mesh_full_uplink_mbps": 497.5,
+          "feasible_blobs": true
+        },
+        {
+          "n": 500,
+          "down_all_blobs_mbps": 25.0,
+          "aggregate_uplink_gbps": 12.5,
+          "mesh_full_uplink_mbps": 1247.5,
+          "feasible_blobs": true
+        },
+        {
+          "n": 1000,
+          "down_all_blobs_mbps": 50.0,
+          "aggregate_uplink_gbps": 50.0,
+          "mesh_full_uplink_mbps": 2497.5,
+          "feasible_blobs": true
+        },
+        {
+          "n": 2000,
+          "down_all_blobs_mbps": 100.0,
+          "aggregate_uplink_gbps": 200.0,
+          "mesh_full_uplink_mbps": 4997.5,
+          "feasible_blobs": true
+        }
+      ],
+      "blob_kbps": 50,
+      "blob_per_core": 3000,
+      "full720_per_core": 60,
+      "mesh_full_cap": 13,
+      "relay_egress_mbps": 150.0,
+      "home_uplink_mbps": 30.0,
+      "sota_tile_cap": 49,
+      "bitrates_mbps": {
+        "Opus voice": 0.024,
+        "blinking-dot blob": 0.05,
+        "720p30 AV1-SVC": 2.5,
+        "1080p30": 4.5,
+        "4K30": 20.0,
+        "8K30 (top layer)": 80.0
+      },
+      "blob_sensitivity": [
+        {
+          "kbps": 5,
+          "label": "presence dot (~4 px, 1\u20132 fps)",
+          "per_viewer_down_mbps": 10.0,
+          "aggregate_gbps": 20.0
+        },
+        {
+          "kbps": 15,
+          "label": "low thumbnail",
+          "per_viewer_down_mbps": 30.0,
+          "aggregate_gbps": 60.0
+        },
+        {
+          "kbps": 50,
+          "label": "video thumbnail (edge BLINKING_DOT)",
+          "per_viewer_down_mbps": 100.0,
+          "aggregate_gbps": 200.0
+        }
+      ]
     },
     "assumptions": {
-      "cores": "single thread, one core; real deployments fan out across cores",
-      "frames": "frame sizes are representative codec outputs, not a live encoder; the GOP blend states its model inline",
-      "receiver": "receivers are charged OPEN-ONLY \u2014 a node never re-seals frames it receives",
-      "fps": "30 fps reference for all per-second / % -of-core figures",
-      "rekey": "membership-change rekey is PROJECTED from the real hybrid-KEM primitive \u2014 the substrate does not implement it yet (CIRISEdge#129); steady-state cost is unaffected",
-      "scope": "crypto + wire-codec + persist spine (CIRISServer-owned); excludes the RNS network hop (bandwidth/RTT-bound) and codec encode/decode",
-      "pqc": "100% hybrid PQC, hard cut \u2014 Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path"
+      "measured": "MEASURED rows are single-core in-memory criterion microbenches (AEAD-bound); over-the-wire deployment is NIC/kernel/Reticulum-bound. Absolute \u00b5s are host-relative; ratios travel.",
+      "model": "MODEL rows are bandwidth arithmetic over edge FEDERATION_SCALING_MODEL.md bitrate anchors (720p30\u22482.5 Mbps, blinking-dot\u224850 kbps, relay egress\u2248150 Mbps/core) \u2014 not a live N-node test.",
+      "frontier": "The blob path ships today via AV1 SVC base layers. Full symmetric M>2 MDC video is FRONTIER \u2014 the wire/substrate ships; the production codec (NeuralMDC-class) does not exist yet. M=2 is the production default.",
+      "pqc": "100% hybrid PQC, hard cut \u2014 Ed25519+ML-DSA-65 sigs, X25519+ML-KEM-768 KEM, no classical-only path.",
+      "rekey": "Membership-change rekey is PROJECTED from the real hybrid-KEM primitive (CIRISEdge#129 not yet implemented); steady-state video is unaffected."
+    }
+  },
+  "scoreboard": {
+    "schema": "ciris-server/holonomic-scoreboard/1",
+    "policy": {
+      "n": 20,
+      "k": 6,
+      "h": 30
     },
-    "rekey_note": {
-      "flat50_ms": 3.41,
-      "pct_core_per_delta_per_sec": 0.34,
-      "frame_budget_pct": 10.2
+    "storage": {
+      "replication_overhead": {
+        "modeled": 1.5,
+        "alarm_high": 2.0,
+        "alarm_low": 1.0
+      },
+      "per_peer_load_frac": {
+        "modeled": 0.05,
+        "alarm_high": 0.1
+      },
+      "eject_threshold_holders": 34.5,
+      "survival_floor": 0.99,
+      "survival_target": 0.9995,
+      "design_q": 0.85,
+      "survival_curve": [
+        {
+          "q": 0.95,
+          "label": "datacenter",
+          "p_reconstruct": 0.9999998903062337
+        },
+        {
+          "q": 0.9,
+          "label": "typical wifi",
+          "p_reconstruct": 0.9999109221261792
+        },
+        {
+          "q": 0.85,
+          "label": "medium churn (design target)",
+          "p_reconstruct": 0.9970576355895846
+        },
+        {
+          "q": 0.8,
+          "label": "high churn",
+          "p_reconstruct": 0.9743837446646769
+        },
+        {
+          "q": 0.7,
+          "label": "battlefield mesh",
+          "p_reconstruct": 0.730370386302726
+        }
+      ],
+      "degradation_tiers": [
+        {
+          "tier": "none",
+          "holders": 30,
+          "overhead_multiplier": 1.5
+        },
+        {
+          "tier": "warn",
+          "holders": 20,
+          "overhead_multiplier": 1.0
+        },
+        {
+          "tier": "crit",
+          "holders": 14,
+          "overhead_multiplier": 0.7
+        },
+        {
+          "tier": "stop",
+          "holders": 5,
+          "overhead_multiplier": 0.25
+        },
+        {
+          "tier": "host-at-risk",
+          "holders": 0,
+          "overhead_multiplier": 0.0
+        }
+      ]
+    },
+    "substrate": {
+      "aead_throughput_per_core": {
+        "status": "measured",
+        "value": 4.99,
+        "unit": "GiB/s/core",
+        "source_group": "av_frame_halves",
+        "source_id": "open/16384",
+        "note": "AEAD open throughput per core (receiver open-only, 16 KiB 720p inter-frame): frame_bytes \u00f7 median time/iter"
+      },
+      "alm_tree_depth_vs_n": {
+        "status": "measured",
+        "value": 1.74,
+        "unit": "\u00b5s/frame @ 4-tier depth (per-hop = value \u00f7 4)",
+        "source_group": "alm_chain_hop",
+        "source_id": "208",
+        "note": "ALM relay per-frame CPU cost for a 2,000-room (FSD \u00a73: 3\u20134-tier tree): per-hop median (208 B blob) \u00d7 4 tiers"
+      },
+      "replication_ingest_per_sec": {
+        "status": "measured",
+        "value": 5215.23,
+        "unit": "traces/s/core",
+        "source_group": "replication_ingest",
+        "source_id": "ingest_new",
+        "note": "Replication ingest rate (fresh signed trace: verify \u2192 decompose \u2192 persist): 1e9 \u00f7 median time/iter"
+      },
+      "stream_fanout_core_frac": {
+        "status": "measured",
+        "value": 0.0158,
+        "unit": "core-fraction @ N=2000, 30fps",
+        "source_group": "stream_fanout_seal_tick",
+        "source_id": "2000",
+        "note": "Publisher CPU to seal 2,000 blob streams per 30fps tick: (median time/iter in s) \u00d7 30 fps = fraction of one core"
+      },
+      "n_eff_scoring_per_agent": {
+        "status": "measured",
+        "value": 50.08,
+        "unit": "\u00b5s/agent @ N=500 traces (window cap)",
+        "source_group": "n_eff_e2e",
+        "source_id": "500",
+        "note": "Per-agent cost of capacity:sustained_coherence:v1 at the window cap (N=500 traces): feature-matrix build + Jacobi eigendecomposition + participation-ratio derivation. The scorer runs this once per agent per cadence tick (default: hourly)."
+      },
+      "gated": {
+        "status": "gated",
+        "gated_on": "no MLS-commit / cold-join-latency bench yet (the five throughput/scoring metrics above are measured through the fabric when criterion results are supplied)",
+        "metrics": [
+          "mls_commit_barrier",
+          "cold_join_burst_latency"
+        ]
+      }
+    },
+    "holonomic": {
+      "status": "gated",
+      "gated_on": "fountain/holonomic API wiring (CIRISServer#11) + CIRISRegistry#88 composite model",
+      "metrics": [
+        "wholeness_witness_reconciliation",
+        "alm_topology_compute",
+        "recursive_trust_bootstrap_walk",
+        "swarm_rarity_convergence"
+      ]
+    }
+  },
+  "live_mesh": {
+    "schema": "ciris-server/live-mesh-attestation/1",
+    "description": "Live A\u2194B bridge mesh measurements from the v0.5.x federation bring-up.",
+    "provenance": {
+      "source": "live bridge mesh \u2014 two-node federation (ciris-canonical-trio-1 + ciris-status-1)",
+      "date": "2026-06-22",
+      "operator": "Eric Moore <eric@ciris.ai>",
+      "substrate_floor": {
+        "ciris_edge": "v7.0.0",
+        "ciris_persist": "v10.0.0",
+        "ciris_verify": "v7.2.0"
+      },
+      "nodes": {
+        "node_a": {
+          "key_id": "ciris-canonical-trio-1-3v2kb7tbvs",
+          "role": "lens/seed \u2014 Node A",
+          "claimed_via": "TPM fed-ID"
+        },
+        "node_b": {
+          "key_id": "ciris-status-1",
+          "role": "status \u2014 Node B",
+          "claimed_via": "TPM fed-ID"
+        }
+      },
+      "notes": [
+        "These are attested measurements from the live two-node mesh, NOT reproducible on a CI runner (no two-node mesh in CI).",
+        "They are presented as ATTESTED provenance \u2014 each number has a source, date, and node identity. CI criterion numbers are separate (MEASURED on-runner).",
+        "The cohort propagation numbers (N=50/100/200) come from the mesh_propagation example (examples/mesh_propagation/main.rs) running in-process on the same hardware; the group-B isolation=0 is a structural property of the cohort gate (the publisher's cohort closure NEVER includes group-B peer ids, so no claim can reach them by construction)."
+      ]
+    },
+    "capacity_scoring": {
+      "metric": "capacity:sustained_coherence:v1",
+      "algorithm": "n_eff_pr (participation ratio of the lens constraint eigenspectrum)",
+      "description": "Node A derives per-agent n_eff from ingested traces \u2192 n_eff_pr \u2192 capacity(n_eff_pr, gate=20, target=8) \u2192 [0,1] score \u2192 emits capacity:sustained_coherence:v1 attestation (hybrid-signed CEG scores row).",
+      "live_observations": {
+        "node_a_emits": true,
+        "node_b_receives_via_replication": true,
+        "replication_protocol": "consent:replication:v1, mutual key-reg, each node owns its corpus",
+        "note": "The live capacity score value depends on the corpus (agent traces ingested). With a thin corpus (<20 traces) the gate returns 0.0 honestly. With a corpus meeting the gate the score is in [0,1]. The gate semantics are: emit 0.0 rather than skip \u2014 a zero-row is 'observed but not yet scored', not 'missing'."
+      }
+    },
+    "cohort_propagation": {
+      "runtime": "ciris_edge::swarm::FountainSwarmRuntime (same runtime src/holonomic.rs wires into production)",
+      "transport_in_measurement": "in-memory bus (measures swarm LOGIC + cohort gate; not wire/Reticulum \u2014 see examples/mesh_propagation/main.rs)",
+      "publisher": "node 0 in group A; cohort closure = group-A peers only",
+      "results": [
+        {
+          "n_total_nodes": 50,
+          "group_a_size": 25,
+          "group_b_size": 25,
+          "group_a_converged": 24,
+          "group_a_expected": 24,
+          "group_b_observed": 0,
+          "propagation_latency_ms": "< 100",
+          "isolation_leaks": 0
+        },
+        {
+          "n_total_nodes": 100,
+          "group_a_size": 50,
+          "group_b_size": 50,
+          "group_a_converged": 49,
+          "group_a_expected": 49,
+          "group_b_observed": 0,
+          "propagation_latency_ms": "< 200",
+          "isolation_leaks": 0
+        },
+        {
+          "n_total_nodes": 200,
+          "group_a_size": 100,
+          "group_b_size": 100,
+          "group_a_converged": 99,
+          "group_a_expected": 99,
+          "group_b_observed": 0,
+          "propagation_latency_ms": "< 400",
+          "isolation_leaks": 0
+        }
+      ],
+      "group_b_isolation_guarantee": "Structural \u2014 the publisher's cohort closure is derived from replication_peers_from_consent(...), which returns ONLY consented peers. A peer not in the consent graph is NEVER in the cohort closure and cannot receive a FountainHoldingClaim from this publisher regardless of network position. Zero leakage is not a statistical result \u2014 it is enforced by construction."
+    },
+    "replication_ab": {
+      "protocol": "consent:replication:v1",
+      "direction": "bidirectional A\u2194B",
+      "mutual_key_reg": true,
+      "corpus_ownership": "each node owns its own corpus (A does not own B's objects, and vice versa)",
+      "a_imports_traces_replicated_to_b": true,
+      "capacity_scores_served": true,
+      "ingest_throughput_ref": "replication_ingest criterion bench (CI-MEASURED): ~4,336 traces/s/core (fresh), ~4,859/s/core (dedup path)",
+      "note": "The live A\u2194B replication latency (network RTT) is not measured here \u2014 it is dominated by the Reticulum transport hop, which is bandwidth/RTT-bound, not CPU-bound. The CPU cost per replicated trace is measured by the criterion bench."
     }
   },
   "raw_means_us": {
-    "av_fanout_plan_50": 15.4052,
-    "av_mesh_fanout/shared_inner/50": 78.5737,
-    "av_mesh_fanout/shared_inner/2": 4.7866,
-    "av_mesh_fanout/shared_inner/8": 14.0196,
-    "av_mesh_fanout/naive/50": 162.9274,
-    "av_mesh_fanout/naive/2": 6.5074,
-    "av_mesh_fanout/naive/8": 25.9783,
-    "pqc_kex/classical_respond": 39.1042,
-    "pqc_kex/classical_initiate": 39.5884,
-    "pqc_kex/hybrid_respond": 93.6552,
-    "pqc_kex/hybrid_initiate": 68.2097,
-    "av_frame_e2e/16384": 7.0655,
-    "av_frame_e2e/65536": 27.2406,
-    "av_frame_e2e/262144": 112.2717,
-    "av_frame_e2e/320": 0.9513,
-    "av_frame_e2e/4096": 2.372,
-    "replication_ingest/ingest_dedup": 205.7878,
-    "replication_ingest/ingest_new": 230.6103,
-    "av_rekey/flat_rewrap/50": 3405.3139,
-    "av_rekey/flat_rewrap/2": 134.5673,
-    "av_rekey/flat_rewrap/8": 543.1598,
-    "av_rekey/tree_rewrap/50": 411.945,
-    "av_rekey/tree_rewrap/2": 67.523,
-    "av_rekey/tree_rewrap/8": 203.0953,
-    "av_frame_halves/seal_64KiB": 12.8019,
-    "av_frame_halves/seal/16384": 3.2576,
-    "av_frame_halves/seal/65536": 12.7764,
-    "av_frame_halves/seal/262144": 56.7753,
-    "av_frame_halves/seal/320": 0.5144,
-    "av_frame_halves/seal/4096": 1.2138,
-    "av_frame_halves/open_64KiB": 12.361,
-    "av_frame_halves/open/16384": 3.08,
-    "av_frame_halves/open/65536": 12.7923,
-    "av_frame_halves/open/262144": 48.9851,
-    "av_frame_halves/open/320": 0.4518,
-    "av_frame_halves/open/4096": 1.1246
+    "n_eff_matrix_build/100": 1.517,
+    "n_eff_matrix_build/500": 7.4454,
+    "n_eff_matrix_build/50": 0.8351,
+    "n_eff_compute/100": 14.2456,
+    "n_eff_compute/500": 42.122,
+    "n_eff_compute/20": 8.3125,
+    "stream_fanout_seal_tick/1000": 262.2874,
+    "stream_fanout_seal_tick/500": 127.2513,
+    "stream_fanout_seal_tick/2000": 526.9743,
+    "av_fanout_plan_50": 15.0732,
+    "alm_chain_hop/16384": 3.2417,
+    "alm_chain_hop/208": 0.4366,
+    "av_mesh_fanout/shared_inner/50": 89.5354,
+    "av_mesh_fanout/shared_inner/2": 5.3224,
+    "av_mesh_fanout/shared_inner/8": 15.897,
+    "av_mesh_fanout/naive/50": 187.1692,
+    "av_mesh_fanout/naive/2": 6.5269,
+    "av_mesh_fanout/naive/8": 28.7633,
+    "n_eff_e2e/500": 50.4735,
+    "n_eff_e2e/50": 11.113,
+    "pqc_kex/classical_respond": 39.3506,
+    "pqc_kex/classical_initiate": 38.8988,
+    "pqc_kex/hybrid_respond": 93.9218,
+    "pqc_kex/hybrid_initiate": 67.0062,
+    "av_frame_e2e/16384": 7.0502,
+    "av_frame_e2e/65536": 27.447,
+    "av_frame_e2e/262144": 104.2567,
+    "av_frame_e2e/320": 0.9556,
+    "av_frame_e2e/4096": 2.4031,
+    "replication_ingest/ingest_dedup": 176.237,
+    "replication_ingest/ingest_new": 194.3561,
+    "av_rekey/flat_rewrap/50": 3394.1587,
+    "av_rekey/flat_rewrap/2": 136.9675,
+    "av_rekey/flat_rewrap/8": 591.151,
+    "av_rekey/tree_rewrap/50": 407.4128,
+    "av_rekey/tree_rewrap/2": 68.3,
+    "av_rekey/tree_rewrap/8": 202.6656,
+    "av_frame_halves/seal/16384": 3.4574,
+    "av_frame_halves/seal/65536": 12.3511,
+    "av_frame_halves/seal/262144": 47.8469,
+    "av_frame_halves/seal/320": 0.5184,
+    "av_frame_halves/seal/4096": 1.2244,
+    "av_frame_halves/open/16384": 3.0615,
+    "av_frame_halves/open/65536": 12.2055,
+    "av_frame_halves/open/262144": 47.4305,
+    "av_frame_halves/open/320": 0.4263,
+    "av_frame_halves/open/4096": 1.0882,
+    "alm_chain_e2e_blob/tiers/3": 2.2541,
+    "alm_chain_e2e_blob/tiers/1": 1.3746,
+    "alm_chain_e2e_blob/tiers/2": 1.8105,
+    "alm_chain_e2e_blob/tiers/4": 2.7077
   }
 }
