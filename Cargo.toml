@@ -263,6 +263,24 @@ harness = false
 name = "n_eff_scoring"
 harness = false
 
+# Erasure-survival bench — EMPIRICAL reconstruction rate against the real substrate
+# fountain codec (edge codec-fountain / RaptorQ). Encodes a blob into H holders, drops
+# holders by a per-availability-tier Bernoulli(q) coin, runs many real decode trials,
+# and writes the measured p_reconstruct per tier to target/erasure_survival.json (read
+# by the scoreboard). `harness = false` — survival is a rate, not a latency. Codec is
+# dev-only, so this measurement lives in a bench. `cargo bench --bench erasure_survival`.
+[[bench]]
+name = "erasure_survival"
+harness = false
+
+# Signature-overhead micro-bench — per-event sign+verify latency for classical
+# (Ed25519-only) vs hybrid (Ed25519 + ML-DSA-65, the production provenance signature),
+# using the substrate's REAL ciris_crypto primitives. The scoreboard derives the honest
+# "+N%" post-quantum overhead from the two criterion medians. `cargo bench --bench sig_overhead`.
+[[bench]]
+name = "sig_overhead"
+harness = false
+
 # Mesh-propagation benchmark — N in-process software-key nodes; ONE group-A
 # publisher advertises a synthetic "video" and a FountainSwarmRuntime per node
 # converges the holding-claim to its cohort ONLY. Measures propagation latency /

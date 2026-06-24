@@ -344,6 +344,28 @@ pub fn scoreboard_json_with_criterion(criterion_dir: &str) -> String {
         .to_json()
 }
 
+/// Emit the unified **`bench_results.json`** (schema v2) — the honest source of truth
+/// for the public bench page. EVERY entry is `"measured"` or `"gated"` (never
+/// `modeled`/`attested`): substrate throughput/scoring/KEX/fanout/signature metrics from
+/// real criterion medians (`criterion_dir`), the EMPIRICAL erasure-survival curve from
+/// the `erasure_survival` bench sidecar (`erasure_sidecar`; GATED if absent), and live
+/// in-process MESH measurements (cohort propagation + isolation + A↔B replication) over
+/// the real `FountainSwarmRuntime`.
+pub fn bench_results_json(
+    commit: &str,
+    date: &str,
+    criterion_dir: &str,
+    erasure_sidecar: &str,
+) -> String {
+    benchmarks::build_bench_results(
+        commit,
+        date,
+        std::path::Path::new(criterion_dir),
+        std::path::Path::new(erasure_sidecar),
+    )
+    .to_json()
+}
+
 /// Initialize tracing (shared by the binary and the wheel entry point).
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};

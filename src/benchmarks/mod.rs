@@ -35,8 +35,11 @@
 //!     holonomic APIs (CIRISServer#11) + **CIRISRegistry#88**'s composite model
 //!     that grounds the targets.
 
+mod bench_results;
+mod mesh;
 mod scoreboard;
 
+pub use bench_results::{build as build_bench_results, BenchResults};
 pub use scoreboard::{
     DegradationTier, FountainPolicy, GatedTier, MeasuredMetric, MetricTarget, Scoreboard,
     StorageTier, SubstrateTier, SurvivalPoint,
