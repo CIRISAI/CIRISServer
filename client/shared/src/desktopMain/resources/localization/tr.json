@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "Bu doğuşu kaydedin — soğuk başlangıç tanıması için pişirme yapıtıdır.",
     "accord_ceremony_genesis_label": "Doğuş (pişirme yapıtı)",
     "accord_ceremony_save_note": "Yukarıdaki JSON'u kopyalayın ve cihaz dışında güvenli bir yerde saklayın. Bu ağ için soğuk başlangıç tanıma köküdür.",
-    "provision_holder_usb_browse": "Gözat…"
+    "provision_holder_usb_browse": "Gözat…",
+    "common_dismiss": "Kapat",
+    "identity_add_button": "Cihaz ekle",
+    "identity_add_desc": "Yeni cihazın fed-ID'sini (fedcode'unu) yapıştırın veya tarayın, ardından kaydedin. Yeni cihaz önce kendi fed-ID'sini oluşturmalıdır.",
+    "identity_add_title": "Cihaz ekle",
+    "identity_device_code_label": "Yeni cihaz fed-ID / fedcode",
+    "identity_enroll_button": "Bu cihazın fed-ID'sini oluştur",
+    "identity_enroll_desc": "YENİ cihazda yerel bir fed-ID oluşturun. Ardından kaydetmek için fedcode'unu birincil cihazınıza gösterin.",
+    "identity_enroll_show": "Bunu birincil cihazınıza gösterin (QR'ı tarayın veya fedcode'u yapıştırın):",
+    "identity_enroll_title": "Başka bir cihazda kendiniz olarak oturum açın",
+    "identity_has_encryption": "şifreleme",
+    "identity_revoke": "İptal et",
+    "identity_revoke_confirm": "Bu cihaz iptal edilsin mi?",
+    "identity_revoke_confirm_body": "Bu işlem cihazı self'inizden kaldırır. Artık sizin adınıza hareket edemez. Çalınan bir cihaz için, hayatta kalan bir cihazla imzalayın — asla kaybolanla değil.",
+    "identity_roster_empty": "Henüz kayıtlı cihaz yok. Aşağıdan bir tane ekleyin.",
+    "identity_roster_title": "Cihazlarınız",
+    "identity_scan_qr": "QR tara",
+    "identity_self_title": "fed-ID'niz",
+    "identity_self_unresolved": "Henüz çözümlenmedi — önce oturum açın veya bir fed-ID oluşturun.",
+    "identity_subtitle": "Kendi self fed-ID'nizi ve ona bağlı cihazları yönetin. İkinci bir cihaz eklemek, kimliğinizin ilkinin kaybında hayatta kalmasını sağlar. Uygulama hiçbir anahtar tutmaz; imzayı node atar.",
+    "identity_title": "Kimliğim"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Yetkilendirmeler",
       "accord": "Mutabakat",
       "provision_accord_holder": "Sahip Sağla",
-      "accord_ceremony": "Doğuş Töreni"
+      "accord_ceremony": "Doğuş Töreni",
+      "identity_management": "Kimliğim"
     }
   },
   "setup_validation_select_provider": "Bir LLM sağlayıcısı seçin",

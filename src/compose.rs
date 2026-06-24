@@ -396,6 +396,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         strict,
                         initial_config.admin_key_ids.clone(),
                     ))
+                    // self-occurrence enrollment (CIRISServer#76): add a second
+                    // device (phone) as an occurrence of the self + revoke a
+                    // lost/stolen one + list the device roster. Signed by an
+                    // existing active occurrence / the identity root (the
+                    // signature is the gate — same posture as self/login).
+                    .merge(crate::auth::occurrence::router(Arc::clone(&engine), strict))
                     // first-run ROOT claim (CIRISServer#19): POST /v1/setup/root —
                     // founder claims ROOT (→ SYSTEM_ADMIN) on a fresh, seedless node.
                     // Identity-pinned to THIS node's NodeCode (CEG §0.10): the claim

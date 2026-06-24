@@ -2095,7 +2095,27 @@
     "accord_ceremony_usb_label": "ML-DSA USB ਫੋਲਡਰ ਪਾਥ",
     "accord_ceremony_usb_placeholder": "/media/you/USB ਜਾਂ /Volumes/USB",
     "accord_ceremony_vault_desc": "ਕੋਲਡ ਸਪੇਅਰ — ਕਸਟਡੀ ਲਈ ਰਜਿਸਟਰ ਕੀਤਾ, ਪਰ ਸੀਟ ਨਹੀਂ ਦਿੱਤੀ (ਵਾਲਟ ਵਿੱਚ ਰੱਖਿਆ)।",
-    "provision_holder_usb_browse": "ਬ੍ਰਾਊਜ਼ ਕਰੋ…"
+    "provision_holder_usb_browse": "ਬ੍ਰਾਊਜ਼ ਕਰੋ…",
+    "common_dismiss": "ਖਾਰਜ ਕਰੋ",
+    "identity_add_button": "ਡਿਵਾਈਸ ਜੋੜੋ",
+    "identity_add_desc": "ਨਵੇਂ ਡਿਵਾਈਸ ਦੀ fed-ID (ਇਸਦਾ fedcode) ਪੇਸਟ ਜਾਂ ਸਕੈਨ ਕਰੋ, ਫਿਰ ਇਸ ਨੂੰ ਦਾਖਲ ਕਰੋ। ਨਵੇਂ ਡਿਵਾਈਸ ਨੂੰ ਪਹਿਲਾਂ ਆਪਣੀ ਖੁਦ ਦੀ fed-ID ਮਿੰਟ ਕਰਨੀ ਚਾਹੀਦੀ ਹੈ।",
+    "identity_add_title": "ਇੱਕ ਡਿਵਾਈਸ ਜੋੜੋ",
+    "identity_device_code_label": "ਨਵੇਂ ਡਿਵਾਈਸ ਦੀ fed-ID / fedcode",
+    "identity_enroll_button": "ਇਸ ਡਿਵਾਈਸ ਦੀ fed-ID ਮਿੰਟ ਕਰੋ",
+    "identity_enroll_desc": "ਨਵੇਂ ਡਿਵਾਈਸ 'ਤੇ, ਇੱਕ ਲੋਕਲ fed-ID ਮਿੰਟ ਕਰੋ। ਫਿਰ ਇਸ ਨੂੰ ਦਾਖਲ ਕਰਨ ਲਈ ਇਸਦਾ fedcode ਆਪਣੇ ਮੁੱਖ ਡਿਵਾਈਸ ਨੂੰ ਦਿਖਾਓ।",
+    "identity_enroll_show": "ਇਸ ਨੂੰ ਆਪਣੇ ਮੁੱਖ ਡਿਵਾਈਸ ਨੂੰ ਦਿਖਾਓ (QR ਸਕੈਨ ਕਰੋ ਜਾਂ fedcode ਪੇਸਟ ਕਰੋ):",
+    "identity_enroll_title": "ਕਿਸੇ ਹੋਰ ਡਿਵਾਈਸ 'ਤੇ ਆਪਣੇ ਆਪ ਵਜੋਂ ਲੌਗ ਇਨ ਕਰੋ",
+    "identity_has_encryption": "ਇਨਕ੍ਰਿਪਸ਼ਨ",
+    "identity_revoke": "ਰੱਦ ਕਰੋ",
+    "identity_revoke_confirm": "ਇਸ ਡਿਵਾਈਸ ਨੂੰ ਰੱਦ ਕਰਨਾ ਹੈ?",
+    "identity_revoke_confirm_body": "ਇਹ ਡਿਵਾਈਸ ਨੂੰ ਤੁਹਾਡੇ ਖੁਦ ਤੋਂ ਹਟਾ ਦਿੰਦਾ ਹੈ। ਇਹ ਹੁਣ ਤੁਹਾਡੇ ਵਜੋਂ ਕੰਮ ਨਹੀਂ ਕਰ ਸਕਦਾ। ਚੋਰੀ ਹੋਏ ਡਿਵਾਈਸ ਲਈ, ਕਿਸੇ ਬਚੇ ਹੋਏ ਡਿਵਾਈਸ ਨਾਲ ਸਾਈਨ ਕਰੋ — ਕਦੇ ਵੀ ਗੁਆਚੇ ਹੋਏ ਨਾਲ ਨਹੀਂ।",
+    "identity_roster_empty": "ਅਜੇ ਕੋਈ ਡਿਵਾਈਸ ਦਾਖਲ ਨਹੀਂ ਹੋਇਆ। ਹੇਠਾਂ ਇੱਕ ਜੋੜੋ।",
+    "identity_roster_title": "ਤੁਹਾਡੇ ਡਿਵਾਈਸ",
+    "identity_scan_qr": "QR ਸਕੈਨ ਕਰੋ",
+    "identity_self_title": "ਤੁਹਾਡੀ fed-ID",
+    "identity_self_unresolved": "ਅਜੇ ਹੱਲ ਨਹੀਂ ਹੋਈ — ਪਹਿਲਾਂ ਸਾਈਨ ਇਨ ਕਰੋ ਜਾਂ ਇੱਕ fed-ID ਮਿੰਟ ਕਰੋ।",
+    "identity_subtitle": "ਆਪਣੀ ਖੁਦ ਦੀ fed-ID ਅਤੇ ਇਸ ਨਾਲ ਜੁੜੇ ਡਿਵਾਈਸਾਂ ਦਾ ਪ੍ਰਬੰਧ ਕਰੋ। ਦੂਜਾ ਡਿਵਾਈਸ ਜੋੜਨ ਨਾਲ ਤੁਹਾਡੀ ਪਛਾਣ ਪਹਿਲੇ ਦੇ ਗੁਆਚਣ 'ਤੇ ਵੀ ਬਚੀ ਰਹਿੰਦੀ ਹੈ। ਐਪ ਕੋਈ ਕੁੰਜੀ ਨਹੀਂ ਰੱਖਦੀ; ਨੋਡ ਸਾਈਨ ਕਰਦਾ ਹੈ।",
+    "identity_title": "ਮੇਰੀ ਪਛਾਣ"
   },
   "conscience": {
     "ponder_attempted": "ਮੈਂ {action} ਕਰਨ ਦੀ ਕੋਸ਼ਿਸ਼ ਕੀਤੀ",
@@ -2740,7 +2760,8 @@
       "delegations": "ਸੌਂਪਣੀਆਂ",
       "accord": "ਅਕੋਰਡ",
       "provision_accord_holder": "ਹੋਲਡਰ ਪ੍ਰੋਵਿਜ਼ਨ ਕਰੋ",
-      "accord_ceremony": "ਜੈਨੇਸਿਸ ਸਮਾਰੋਹ"
+      "accord_ceremony": "ਜੈਨੇਸਿਸ ਸਮਾਰੋਹ",
+      "identity_management": "ਮੇਰੀ ਪਛਾਣ"
     }
   },
   "setup_validation_select_provider": "ਇੱਕ LLM ਪ੍ਰਦਾਤਾ ਚੁਣੋ",

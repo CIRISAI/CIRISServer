@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "この創設を保存してください — コールドスタート認識のためのベイク成果物です。",
     "accord_ceremony_genesis_label": "創設（ベイク成果物）",
     "accord_ceremony_save_note": "上記の JSON をコピーし、デバイス外に安全に保管してください。これはこのメッシュのコールドスタート認識ルートです。",
-    "provision_holder_usb_browse": "参照…"
+    "provision_holder_usb_browse": "参照…",
+    "common_dismiss": "閉じる",
+    "identity_title": "マイ ID",
+    "identity_subtitle": "自分の自己 Fed ID と、それに紐付けられたデバイスを管理します。2台目のデバイスを追加すると、最初のデバイスを失っても ID を維持できます。アプリは鍵を保持しません。署名はノードが行います。",
+    "identity_self_title": "あなたの Fed ID",
+    "identity_self_unresolved": "まだ解決されていません — 先にサインインするか Fed ID を発行してください。",
+    "identity_roster_title": "あなたのデバイス",
+    "identity_roster_empty": "まだデバイスが登録されていません。以下から追加してください。",
+    "identity_has_encryption": "暗号化",
+    "identity_revoke": "取り消す",
+    "identity_revoke_confirm": "このデバイスを取り消しますか？",
+    "identity_revoke_confirm_body": "これにより、デバイスがあなたの自己から削除されます。そのデバイスはもうあなたとして動作できなくなります。盗まれたデバイスの場合は、残っているデバイスで署名してください — 失ったデバイスでは絶対に行わないでください。",
+    "identity_add_title": "デバイスを追加",
+    "identity_add_desc": "新しいデバイスの Fed ID（その fedcode）を貼り付けるかスキャンして、登録します。新しいデバイスは先に自身の Fed ID を発行する必要があります。",
+    "identity_device_code_label": "新しいデバイスの Fed ID / fedcode",
+    "identity_add_button": "デバイスを追加",
+    "identity_scan_qr": "QR をスキャン",
+    "identity_enroll_title": "別のデバイスで自分としてログイン",
+    "identity_enroll_desc": "新しいデバイスで、ローカルの Fed ID を発行します。次に、その fedcode をプライマリ デバイスに表示して登録します。",
+    "identity_enroll_button": "このデバイスの Fed ID を発行",
+    "identity_enroll_show": "これをプライマリ デバイスに表示してください（QR をスキャンするか fedcode を貼り付けます）："
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "委任",
       "accord": "アコード",
       "provision_accord_holder": "ホルダーをプロビジョニング",
-      "accord_ceremony": "創設の儀式"
+      "accord_ceremony": "創設の儀式",
+      "identity_management": "マイ ID"
     }
   },
   "setup_validation_select_provider": "LLMプロバイダーを選択してください",

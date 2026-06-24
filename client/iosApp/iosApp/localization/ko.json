@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "이 제네시스를 저장하세요 — 콜드 스타트 인식을 위한 베이크 아티팩트입니다.",
     "accord_ceremony_genesis_label": "제네시스 (베이크 아티팩트)",
     "accord_ceremony_save_note": "위의 JSON을 복사하여 기기 외부에 안전하게 보관하세요. 이는 이 메시의 콜드 스타트 인식 루트입니다.",
-    "provision_holder_usb_browse": "찾아보기…"
+    "provision_holder_usb_browse": "찾아보기…",
+    "common_dismiss": "닫기",
+    "identity_add_button": "기기 추가",
+    "identity_add_desc": "새 기기의 fed-ID(해당 fedcode)를 붙여넣거나 스캔한 다음 등록하세요. 새 기기는 먼저 자체 fed-ID를 발급해야 합니다.",
+    "identity_add_title": "기기 추가",
+    "identity_device_code_label": "새 기기 fed-ID / fedcode",
+    "identity_enroll_button": "이 기기의 fed-ID 발급",
+    "identity_enroll_desc": "새 기기에서 로컬 fed-ID를 발급하세요. 그런 다음 해당 fedcode를 기본 기기에 보여 주어 등록하세요.",
+    "identity_enroll_show": "이것을 기본 기기에 보여 주세요(QR을 스캔하거나 fedcode를 붙여넣으세요):",
+    "identity_enroll_title": "다른 기기에서 본인으로 로그인",
+    "identity_has_encryption": "암호화",
+    "identity_revoke": "취소",
+    "identity_revoke_confirm": "이 기기를 취소하시겠습니까?",
+    "identity_revoke_confirm_body": "이 작업은 본인의 self에서 기기를 제거합니다. 해당 기기는 더 이상 본인으로서 동작할 수 없습니다. 도난당한 기기의 경우, 분실한 기기가 아니라 남아 있는 기기로 서명하세요.",
+    "identity_roster_empty": "아직 등록된 기기가 없습니다. 아래에서 추가하세요.",
+    "identity_roster_title": "내 기기",
+    "identity_scan_qr": "QR 스캔",
+    "identity_self_title": "내 fed-ID",
+    "identity_self_unresolved": "아직 확인되지 않았습니다 — 먼저 로그인하거나 fed-ID를 발급하세요.",
+    "identity_subtitle": "본인의 self fed-ID와 거기에 연결된 기기를 관리하세요. 두 번째 기기를 추가하면 첫 번째 기기를 분실해도 신원이 유지됩니다. 앱은 키를 보관하지 않으며, 서명은 노드가 수행합니다.",
+    "identity_title": "내 신원"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "위임",
       "accord": "협약",
       "provision_accord_holder": "홀더 프로비저닝",
-      "accord_ceremony": "제네시스 의식"
+      "accord_ceremony": "제네시스 의식",
+      "identity_management": "내 신원"
     }
   },
   "setup_validation_select_provider": "LLM 제공업체를 선택하세요",

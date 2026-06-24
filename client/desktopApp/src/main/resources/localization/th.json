@@ -2095,7 +2095,27 @@
     "accord_ceremony_save_genesis": "บันทึกปฐมกำเนิดนี้ — เป็นอาร์ติแฟกต์สำหรับการจดจำตอนเริ่มต้นแบบเย็น",
     "accord_ceremony_genesis_label": "ปฐมกำเนิด (อาร์ติแฟกต์ที่อบไว้)",
     "accord_ceremony_save_note": "คัดลอก JSON ด้านบนและจัดเก็บไว้อย่างปลอดภัยนอกอุปกรณ์ มันคือรากของการจดจำตอนเริ่มต้นแบบเย็นสำหรับเมชนี้",
-    "provision_holder_usb_browse": "เรียกดู…"
+    "provision_holder_usb_browse": "เรียกดู…",
+    "common_dismiss": "ปิด",
+    "identity_add_button": "เพิ่มอุปกรณ์",
+    "identity_add_desc": "วางหรือสแกน fed-ID (fedcode) ของอุปกรณ์ใหม่ จากนั้นลงทะเบียน อุปกรณ์ใหม่ต้องสร้าง fed-ID ของตนเองก่อน",
+    "identity_add_title": "เพิ่มอุปกรณ์",
+    "identity_device_code_label": "fed-ID / fedcode ของอุปกรณ์ใหม่",
+    "identity_enroll_button": "สร้าง fed-ID ของอุปกรณ์นี้",
+    "identity_enroll_desc": "บนอุปกรณ์ใหม่ ให้สร้าง fed-ID ในเครื่อง จากนั้นแสดง fedcode ของอุปกรณ์นั้นต่ออุปกรณ์หลักของคุณเพื่อลงทะเบียน",
+    "identity_enroll_show": "แสดงสิ่งนี้ต่ออุปกรณ์หลักของคุณ (สแกน QR หรือวาง fedcode):",
+    "identity_enroll_title": "ลงชื่อเข้าใช้ในฐานะตัวคุณเองบนอุปกรณ์อื่น",
+    "identity_has_encryption": "การเข้ารหัส",
+    "identity_revoke": "เพิกถอน",
+    "identity_revoke_confirm": "เพิกถอนอุปกรณ์นี้หรือไม่",
+    "identity_revoke_confirm_body": "การดำเนินการนี้จะลบอุปกรณ์ออกจากตัวตนของคุณ อุปกรณ์จะไม่สามารถทำหน้าที่แทนคุณได้อีกต่อไป สำหรับอุปกรณ์ที่ถูกขโมย ให้ลงนามด้วยอุปกรณ์ที่ยังเหลืออยู่ — อย่าใช้อุปกรณ์ที่สูญหาย",
+    "identity_roster_empty": "ยังไม่มีอุปกรณ์ที่ลงทะเบียน เพิ่มอุปกรณ์ด้านล่าง",
+    "identity_roster_title": "อุปกรณ์ของคุณ",
+    "identity_scan_qr": "สแกน QR",
+    "identity_self_title": "fed-ID ของคุณ",
+    "identity_self_unresolved": "ยังไม่ได้แก้ไข — โปรดลงชื่อเข้าใช้หรือสร้าง fed-ID ก่อน",
+    "identity_subtitle": "จัดการ self fed-ID ของคุณและอุปกรณ์ที่ผูกไว้ การเพิ่มอุปกรณ์ที่สองทำให้ตัวตนของคุณยังคงอยู่แม้สูญเสียอุปกรณ์แรก แอปไม่ได้เก็บคีย์ใด ๆ โหนดเป็นผู้ลงนาม",
+    "identity_title": "ตัวตนของฉัน"
   },
   "conscience": {
     "ponder_attempted": "ฉันได้พยายามที่จะ {action}",
@@ -2740,7 +2760,8 @@
       "delegations": "การมอบอำนาจ",
       "accord": "ข้อตกลง",
       "provision_accord_holder": "จัดเตรียมผู้ถือ",
-      "accord_ceremony": "พิธีปฐมกำเนิด"
+      "accord_ceremony": "พิธีปฐมกำเนิด",
+      "identity_management": "ตัวตนของฉัน"
     }
   },
   "setup_validation_select_provider": "เลือกผู้ให้บริการ LLM",

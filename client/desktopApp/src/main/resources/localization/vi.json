@@ -2329,7 +2329,27 @@
     "accord_ceremony_usb_label": "Đường dẫn thư mục USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB hoặc /Volumes/USB",
     "accord_ceremony_vault_desc": "Bản dự phòng nguội — được đăng ký để lưu giữ, nhưng KHÔNG được xếp ghế (giữ trong kho lưu trữ).",
-    "provision_holder_usb_browse": "Duyệt…"
+    "provision_holder_usb_browse": "Duyệt…",
+    "common_dismiss": "Bỏ qua",
+    "identity_title": "Danh tính của tôi",
+    "identity_subtitle": "Quản lý self fed-ID của bạn và các thiết bị được liên kết với nó. Thêm thiết bị thứ hai giúp danh tính của bạn tồn tại ngay cả khi mất thiết bị đầu tiên. Ứng dụng không giữ khóa nào; node thực hiện việc ký.",
+    "identity_self_title": "Fed ID của bạn",
+    "identity_self_unresolved": "Chưa được phân giải — hãy đăng nhập hoặc tạo Fed ID trước.",
+    "identity_roster_title": "Thiết bị của bạn",
+    "identity_roster_empty": "Chưa có thiết bị nào được đăng ký. Thêm một thiết bị bên dưới.",
+    "identity_has_encryption": "mã hóa",
+    "identity_revoke": "Thu hồi",
+    "identity_revoke_confirm": "Thu hồi thiết bị này?",
+    "identity_revoke_confirm_body": "Thao tác này xóa thiết bị khỏi danh tính của bạn. Nó không còn có thể hành động thay bạn. Đối với thiết bị bị đánh cắp, hãy ký bằng một thiết bị còn lại — không bao giờ dùng thiết bị đã mất.",
+    "identity_add_title": "Thêm thiết bị",
+    "identity_add_desc": "Dán hoặc quét Fed ID của thiết bị mới (fedcode của nó), sau đó đăng ký nó. Thiết bị mới phải tạo Fed ID riêng của nó trước.",
+    "identity_device_code_label": "Fed ID / fedcode của thiết bị mới",
+    "identity_add_button": "Thêm thiết bị",
+    "identity_scan_qr": "Quét QR",
+    "identity_enroll_title": "Đăng nhập với danh tính của bạn trên thiết bị khác",
+    "identity_enroll_desc": "Trên thiết bị MỚI, hãy tạo một Fed ID cục bộ. Sau đó hiển thị fedcode của nó cho thiết bị chính để đăng ký nó.",
+    "identity_enroll_button": "Tạo Fed ID cho thiết bị này",
+    "identity_enroll_show": "Hiển thị thông tin này cho thiết bị chính của bạn (quét mã QR hoặc dán fedcode):"
   },
   "network": {
     "title": "Mạng",
@@ -2740,7 +2760,8 @@
       "delegations": "Ủy quyền",
       "accord": "Accord",
       "provision_accord_holder": "Cấp phát Holder",
-      "accord_ceremony": "Lễ khởi tạo Genesis"
+      "accord_ceremony": "Lễ khởi tạo Genesis",
+      "identity_management": "Danh tính của tôi"
     }
   },
   "setup_validation_select_provider": "Chọn nhà cung cấp LLM",

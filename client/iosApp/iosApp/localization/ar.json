@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "احفظ هذه النشأة — فهي ناتج الترسيخ للتعرّف عند البدء البارد.",
     "accord_ceremony_genesis_label": "النشأة (ناتج الترسيخ)",
     "accord_ceremony_save_note": "انسخ ملف JSON أعلاه وخزّنه بأمان خارج الجهاز. فهو جذر التعرّف للبدء البارد لهذه الشبكة.",
-    "provision_holder_usb_browse": "تصفح…"
+    "provision_holder_usb_browse": "تصفح…",
+    "common_dismiss": "تجاهل",
+    "identity_title": "هويتي",
+    "identity_subtitle": "أدِر هوية Fed ID الخاصة بك والأجهزة المرتبطة بها. إضافة جهاز ثانٍ يجعل هويتك تصمد بعد فقدان الجهاز الأول. لا يحتفظ التطبيق بأي مفاتيح؛ العقدة هي التي توقّع.",
+    "identity_self_title": "Fed ID الخاص بك",
+    "identity_self_unresolved": "لم يُحَلّ بعد — سجّل الدخول أو أنشئ Fed ID أولاً.",
+    "identity_roster_title": "أجهزتك",
+    "identity_roster_empty": "لم يُسجَّل أي جهاز بعد. أضف واحداً أدناه.",
+    "identity_has_encryption": "تشفير",
+    "identity_revoke": "إلغاء",
+    "identity_revoke_confirm": "إلغاء هذا الجهاز؟",
+    "identity_revoke_confirm_body": "يؤدي هذا إلى إزالة الجهاز من هويتك. لن يعود قادراً على التصرف نيابةً عنك. بالنسبة لجهاز مسروق، وقّع باستخدام جهاز ناجٍ — لا تستخدم الجهاز المفقود أبداً.",
+    "identity_add_title": "إضافة جهاز",
+    "identity_add_desc": "الصق أو امسح Fed ID الخاص بالجهاز الجديد (رمز fedcode الخاص به)، ثم سجّله. يجب على الجهاز الجديد إنشاء Fed ID الخاص به أولاً.",
+    "identity_device_code_label": "Fed ID / fedcode للجهاز الجديد",
+    "identity_add_button": "إضافة جهاز",
+    "identity_scan_qr": "مسح رمز QR",
+    "identity_enroll_title": "سجّل الدخول بهويتك على جهاز آخر",
+    "identity_enroll_desc": "على الجهاز الجديد، أنشئ Fed ID محلياً. ثم اعرض رمز fedcode الخاص به على جهازك الأساسي لتسجيله.",
+    "identity_enroll_button": "إنشاء Fed ID لهذا الجهاز",
+    "identity_enroll_show": "اعرض هذا على جهازك الأساسي (امسح رمز QR أو الصق رمز fedcode):"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "التفويضات",
       "accord": "الميثاق",
       "provision_accord_holder": "تزويد حامل",
-      "accord_ceremony": "مراسم النشأة"
+      "accord_ceremony": "مراسم النشأة",
+      "identity_management": "هويتي"
     }
   },
   "setup_validation_select_provider": "اختر مزوّد LLM",

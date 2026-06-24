@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "یہ جینیسس محفوظ کریں — یہ کولڈ-اسٹارٹ شناخت کے لیے بیک آرٹفیکٹ ہے۔",
     "accord_ceremony_genesis_label": "جینیسس (بیک آرٹفیکٹ)",
     "accord_ceremony_save_note": "اوپر دیا گیا JSON کاپی کریں اور اسے ڈیوائس سے باہر محفوظ طریقے سے ذخیرہ کریں۔ یہ اس میش کے لیے کولڈ-اسٹارٹ شناخت کی جڑ ہے۔",
-    "provision_holder_usb_browse": "براؤز کریں…"
+    "provision_holder_usb_browse": "براؤز کریں…",
+    "common_dismiss": "برخاست کریں",
+    "identity_add_button": "آلہ شامل کریں",
+    "identity_add_desc": "نئے آلے کی fed-ID (اس کا fedcode) چسپاں یا اسکین کریں، پھر اسے اندراج کریں۔ نئے آلے کو پہلے اپنی fed-ID خود بنانی ہوگی۔",
+    "identity_add_title": "ایک آلہ شامل کریں",
+    "identity_device_code_label": "نئے آلے کی fed-ID / fedcode",
+    "identity_enroll_button": "اس آلے کی fed-ID بنائیں",
+    "identity_enroll_desc": "نئے آلے پر، ایک مقامی fed-ID بنائیں۔ پھر اسے اندراج کرنے کے لیے اس کا fedcode اپنے بنیادی آلے کو دکھائیں۔",
+    "identity_enroll_show": "اسے اپنے بنیادی آلے کو دکھائیں (QR اسکین کریں یا fedcode چسپاں کریں):",
+    "identity_enroll_title": "کسی دوسرے آلے پر بطور خود لاگ ان کریں",
+    "identity_has_encryption": "خفیہ کاری",
+    "identity_revoke": "منسوخ کریں",
+    "identity_revoke_confirm": "اس آلے کو منسوخ کریں؟",
+    "identity_revoke_confirm_body": "یہ آلے کو آپ کی self سے ہٹا دیتا ہے۔ یہ مزید آپ کی حیثیت سے عمل نہیں کر سکتا۔ چوری شدہ آلے کے لیے، کسی باقی رہنے والے آلے سے دستخط کریں — کبھی کھوئے ہوئے آلے سے نہیں۔",
+    "identity_roster_empty": "ابھی تک کوئی آلہ اندراج شدہ نہیں۔ نیچے ایک شامل کریں۔",
+    "identity_roster_title": "آپ کے آلات",
+    "identity_scan_qr": "QR اسکین کریں",
+    "identity_self_title": "آپ کی fed-ID",
+    "identity_self_unresolved": "ابھی حل نہیں ہوئی — پہلے سائن ان کریں یا fed-ID بنائیں۔",
+    "identity_subtitle": "اپنی self fed-ID اور اس سے منسلک آلات کا انتظام کریں۔ دوسرا آلہ شامل کرنے سے آپ کی شناخت پہلے آلے کے کھو جانے پر بھی برقرار رہتی ہے۔ ایپ کوئی کلید نہیں رکھتی؛ نوڈ دستخط کرتا ہے۔",
+    "identity_title": "میری شناخت"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "تفویضات",
       "accord": "ایکارڈ",
       "provision_accord_holder": "ہولڈر فراہم کریں",
-      "accord_ceremony": "جینیسس تقریب"
+      "accord_ceremony": "جینیسس تقریب",
+      "identity_management": "میری شناخت"
     }
   },
   "setup_validation_select_provider": "ایک LLM فراہم کنندہ منتخب کریں",

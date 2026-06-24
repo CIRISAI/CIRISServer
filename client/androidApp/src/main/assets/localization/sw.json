@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "Njia ya folda ya USB ya ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB au /Volumes/USB",
     "accord_ceremony_vault_desc": "Kibadala cha hifadhi — kimesajiliwa kwa ulinzi, lakini HAKIJAWEKWA kwenye kiti (kinawekwa hifadhini).",
-    "provision_holder_usb_browse": "Vinjari…"
+    "provision_holder_usb_browse": "Vinjari…",
+    "common_dismiss": "Ondoa",
+    "identity_add_button": "Ongeza kifaa",
+    "identity_add_desc": "Bandika au changanua fed-ID ya kifaa kipya (fedcode yake), kisha kisajili. Kifaa kipya lazima kwanza kitengeneze fed-ID yake mwenyewe.",
+    "identity_add_title": "Ongeza kifaa",
+    "identity_device_code_label": "Fed-ID / fedcode ya kifaa kipya",
+    "identity_enroll_button": "Tengeneza fed-ID ya kifaa hiki",
+    "identity_enroll_desc": "Kwenye kifaa KIPYA, tengeneza fed-ID ya ndani. Kisha onyesha fedcode yake kwa kifaa chako kikuu ili kukisajili.",
+    "identity_enroll_show": "Onyesha hii kwa kifaa chako kikuu (changanua QR au bandika fedcode):",
+    "identity_enroll_title": "Ingia kama wewe mwenyewe kwenye kifaa kingine",
+    "identity_has_encryption": "usimbaji fiche",
+    "identity_revoke": "Batilisha",
+    "identity_revoke_confirm": "Batilisha kifaa hiki?",
+    "identity_revoke_confirm_body": "Hii huondoa kifaa kutoka kwa nafsi yako. Hakiwezi tena kutenda kama wewe. Kwa kifaa kilichoibwa, tia saini kwa kifaa kilichosalia — kamwe si kile kilichopotea.",
+    "identity_roster_empty": "Bado hakuna vifaa vilivyosajiliwa. Ongeza kimoja hapa chini.",
+    "identity_roster_title": "Vifaa vyako",
+    "identity_scan_qr": "Changanua QR",
+    "identity_self_title": "Fed ID yako",
+    "identity_self_unresolved": "Bado haijatatuliwa — ingia au tengeneza fed-ID kwanza.",
+    "identity_subtitle": "Dhibiti fed-ID yako mwenyewe na vifaa vilivyofungamanishwa nayo. Kuongeza kifaa cha pili hufanya utambulisho wako uendelee kuwepo hata ukipoteza cha kwanza. Programu haishikilii funguo yoyote; nodi ndiyo inayotia saini.",
+    "identity_title": "Utambulisho Wangu"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Ukabidhi",
       "accord": "Mkataba",
       "provision_accord_holder": "Toa Mshikaji",
-      "accord_ceremony": "Sherehe ya Mwanzo"
+      "accord_ceremony": "Sherehe ya Mwanzo",
+      "identity_management": "Utambulisho Wangu"
     }
   },
   "setup_validation_select_provider": "Chagua mtoa huduma wa LLM",

@@ -2095,7 +2095,27 @@
     "accord_ceremony_save_genesis": "Fi ìpilẹ̀ṣẹ̀ yìí pamọ́ — ó jẹ́ ohun èlò bake fún ìdánimọ̀ ìbẹ̀rẹ̀-tútù.",
     "accord_ceremony_genesis_label": "Ìpilẹ̀ṣẹ̀ (ohun èlò bake)",
     "accord_ceremony_save_note": "Ṣe àdàkọ JSON tó wà lókè kí o sì fi pamọ́ dáadáa kúrò lórí ẹrọ. Ó jẹ́ gbòǹgbò ìdánimọ̀ ìbẹ̀rẹ̀-tútù fún mesh yìí.",
-    "provision_holder_usb_browse": "Wáròyìn…"
+    "provision_holder_usb_browse": "Wáròyìn…",
+    "common_dismiss": "Pa á rẹ́",
+    "identity_add_button": "Fi ẹ̀rọ kún un",
+    "identity_add_desc": "Lẹ̀ mọ́ tàbí ṣ̀àyẹ̀wò fed-ID ẹ̀rọ tuntun náà (fedcode rẹ̀), lẹ́yìn náà forúkọ rẹ̀ sílẹ̀. Ẹ̀rọ tuntun náà gbọ́dọ̀ kọ́kọ́ ṣe fed-ID tirẹ̀.",
+    "identity_add_title": "Fi ẹ̀rọ kún un",
+    "identity_device_code_label": "fed-ID / fedcode ẹ̀rọ tuntun",
+    "identity_enroll_button": "Ṣe fed-ID ẹ̀rọ yìí",
+    "identity_enroll_desc": "Lórí ẹ̀rọ TUNTUN náà, ṣe fed-ID àdúgbò kan. Lẹ́yìn náà fi fedcode rẹ̀ han ẹ̀rọ àkọ́kọ́ rẹ kí o lè forúkọ rẹ̀ sílẹ̀.",
+    "identity_enroll_show": "Fi èyí han ẹ̀rọ àkọ́kọ́ rẹ (ṣ̀àyẹ̀wò QR náà tàbí lẹ̀ fedcode mọ́):",
+    "identity_enroll_title": "Wọlé bí ara rẹ lórí ẹ̀rọ mìíràn",
+    "identity_has_encryption": "ìpamọ́-àkọsílẹ̀",
+    "identity_revoke": "Fagilé",
+    "identity_revoke_confirm": "Fagilé ẹ̀rọ yìí?",
+    "identity_revoke_confirm_body": "Èyí yọ ẹ̀rọ náà kúrò nínú ara rẹ. Kò lè ṣe bí ẹni rẹ mọ́. Fún ẹ̀rọ tí a jí, fọwọ́ sí pẹ̀lú ẹ̀rọ tí ó là á já — kì í ṣe èyí tí ó nù láé.",
+    "identity_roster_empty": "Kò sí ẹ̀rọ tí a forúkọ sílẹ̀ síbẹ̀. Fi ọ̀kan kún un nísàlẹ̀.",
+    "identity_roster_title": "Àwọn ẹ̀rọ rẹ",
+    "identity_scan_qr": "Ṣ̀àyẹ̀wò QR",
+    "identity_self_title": "fed-ID rẹ",
+    "identity_self_unresolved": "Kò tíì yanjú — wọlé tàbí kọ́kọ́ ṣe fed-ID kan.",
+    "identity_subtitle": "Ṣàkóso fed-ID ti ara rẹ àti àwọn ẹ̀rọ tí a so mọ́ ọn. Fífi ẹ̀rọ kejì kún un máa ń jẹ́ kí idánimọ̀ rẹ là á já bí o bá pàdánù àkọ́kọ́. Áàpù náà kò ní kọ́kọ́rọ́ kankan; ọnà-ìsopọ̀ (node) ló ń fọwọ́ sí.",
+    "identity_title": "Idánimọ̀ Mi"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -2740,7 +2760,8 @@
       "delegations": "Awọn Aṣẹ-fifúnni",
       "accord": "Àdéhùn",
       "provision_accord_holder": "Pèsè Olùdìmú",
-      "accord_ceremony": "Ayẹyẹ Ìpilẹ̀ṣẹ̀"
+      "accord_ceremony": "Ayẹyẹ Ìpilẹ̀ṣẹ̀",
+      "identity_management": "Idánimọ̀ Mi"
     }
   },
   "setup_validation_select_provider": "Yan olùpèsè LLM",

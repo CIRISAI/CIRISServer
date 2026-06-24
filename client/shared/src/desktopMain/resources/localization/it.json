@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "Percorso della cartella USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/tu/USB o /Volumes/USB",
     "accord_ceremony_vault_desc": "Copia di riserva a freddo — registrata per la custodia, ma NON assegnata a un posto (conservata nel caveau).",
-    "provision_holder_usb_browse": "Sfoglia…"
+    "provision_holder_usb_browse": "Sfoglia…",
+    "common_dismiss": "Ignora",
+    "identity_title": "La mia identità",
+    "identity_subtitle": "Gestisci il tuo fed-ID personale e i dispositivi associati. Aggiungere un secondo dispositivo permette alla tua identità di sopravvivere alla perdita del primo. L'app non conserva chiavi; è il nodo a firmare.",
+    "identity_self_title": "Il tuo fed-ID",
+    "identity_self_unresolved": "Non ancora risolto — accedi o crea prima un fed-ID.",
+    "identity_roster_title": "I tuoi dispositivi",
+    "identity_roster_empty": "Nessun dispositivo ancora registrato. Aggiungine uno qui sotto.",
+    "identity_has_encryption": "crittografia",
+    "identity_revoke": "Revoca",
+    "identity_revoke_confirm": "Revocare questo dispositivo?",
+    "identity_revoke_confirm_body": "Questa azione rimuove il dispositivo dalla tua identità. Non potrà più agire a tuo nome. Per un dispositivo rubato, firma con un dispositivo ancora in tuo possesso — mai con quello perduto.",
+    "identity_add_title": "Aggiungi un dispositivo",
+    "identity_add_desc": "Incolla o scansiona il fed-ID del nuovo dispositivo (il suo fedcode), poi registralo. Il nuovo dispositivo deve prima creare il proprio fed-ID.",
+    "identity_device_code_label": "Fed-ID / fedcode del nuovo dispositivo",
+    "identity_add_button": "Aggiungi dispositivo",
+    "identity_scan_qr": "Scansiona QR",
+    "identity_enroll_title": "Accedi come te stesso su un altro dispositivo",
+    "identity_enroll_desc": "Sul NUOVO dispositivo, crea un fed-ID locale. Poi mostra il suo fedcode al tuo dispositivo principale per registrarlo.",
+    "identity_enroll_button": "Crea il fed-ID di questo dispositivo",
+    "identity_enroll_show": "Mostra questo al tuo dispositivo principale (scansiona il QR o incolla il fedcode):"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Deleghe",
       "accord": "Accordo",
       "provision_accord_holder": "Provisiona titolare",
-      "accord_ceremony": "Cerimonia di genesi"
+      "accord_ceremony": "Cerimonia di genesi",
+      "identity_management": "La mia identità"
     }
   },
   "setup_validation_select_provider": "Seleziona un provider LLM",

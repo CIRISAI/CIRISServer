@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "Enregistrez cette genèse — c'est l'artefact de cuisson pour la reconnaissance au démarrage à froid.",
     "accord_ceremony_genesis_label": "Genèse (artefact de cuisson)",
     "accord_ceremony_save_note": "Copiez le JSON ci-dessus et stockez-le en lieu sûr hors de l'appareil. C'est la racine de reconnaissance au démarrage à froid pour ce maillage.",
-    "provision_holder_usb_browse": "Parcourir…"
+    "provision_holder_usb_browse": "Parcourir…",
+    "common_dismiss": "Ignorer",
+    "identity_add_button": "Ajouter l'appareil",
+    "identity_add_desc": "Collez ou scannez le fed-ID du nouvel appareil (son fedcode), puis enrôlez-le. Le nouvel appareil doit d'abord créer son propre fed-ID.",
+    "identity_add_title": "Ajouter un appareil",
+    "identity_device_code_label": "Fed-ID / fedcode du nouvel appareil",
+    "identity_enroll_button": "Créer le fed-ID de cet appareil",
+    "identity_enroll_desc": "Sur le NOUVEL appareil, créez un fed-ID local. Présentez ensuite son fedcode à votre appareil principal pour l'enrôler.",
+    "identity_enroll_show": "Montrez ceci à votre appareil principal (scannez le QR ou collez le fedcode) :",
+    "identity_enroll_title": "Connectez-vous en tant que vous-même sur un autre appareil",
+    "identity_has_encryption": "chiffrement",
+    "identity_revoke": "Révoquer",
+    "identity_revoke_confirm": "Révoquer cet appareil ?",
+    "identity_revoke_confirm_body": "Cela retire l'appareil de votre identité. Il ne peut plus agir en votre nom. Pour un appareil volé, signez avec un appareil restant — jamais avec celui qui est perdu.",
+    "identity_roster_empty": "Aucun appareil enrôlé pour l'instant. Ajoutez-en un ci-dessous.",
+    "identity_roster_title": "Vos appareils",
+    "identity_scan_qr": "Scanner le QR",
+    "identity_self_title": "Votre fed-ID",
+    "identity_self_unresolved": "Pas encore résolu — connectez-vous ou créez d'abord un fed-ID.",
+    "identity_subtitle": "Gérez votre fed-ID personnel et les appareils qui y sont liés. Ajouter un deuxième appareil permet à votre identité de survivre à la perte du premier. L'application ne détient aucune clé ; c'est le nœud qui signe.",
+    "identity_title": "Mon identité"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Délégations",
       "accord": "Accord",
       "provision_accord_holder": "Provisionner le détenteur",
-      "accord_ceremony": "Cérémonie de genèse"
+      "accord_ceremony": "Cérémonie de genèse",
+      "identity_management": "Mon identité"
     }
   },
   "setup_validation_select_provider": "Sélectionnez un fournisseur LLM",

@@ -2095,7 +2095,27 @@
     "accord_ceremony_save_genesis": "Simpan genesis ini — ini adalah artefak bake untuk pengenalan cold-start.",
     "accord_ceremony_genesis_label": "Genesis (artefak bake)",
     "accord_ceremony_save_note": "Salin JSON di atas dan simpan dengan aman di luar perangkat. Ini adalah akar pengenalan cold-start untuk mesh ini.",
-    "provision_holder_usb_browse": "Jelajahi…"
+    "provision_holder_usb_browse": "Jelajahi…",
+    "common_dismiss": "Tutup",
+    "identity_add_button": "Tambah perangkat",
+    "identity_add_desc": "Tempel atau pindai Fed ID perangkat baru (fedcode-nya), lalu daftarkan. Perangkat baru harus membuat Fed ID-nya sendiri terlebih dahulu.",
+    "identity_add_title": "Tambah perangkat",
+    "identity_device_code_label": "Fed ID / fedcode perangkat baru",
+    "identity_enroll_button": "Buat Fed ID perangkat ini",
+    "identity_enroll_desc": "Pada perangkat BARU, buat Fed ID lokal. Lalu tampilkan fedcode-nya ke perangkat utama Anda untuk mendaftarkannya.",
+    "identity_enroll_show": "Tampilkan ini ke perangkat utama Anda (pindai QR atau tempel fedcode):",
+    "identity_enroll_title": "Masuk sebagai diri Anda di perangkat lain",
+    "identity_has_encryption": "enkripsi",
+    "identity_revoke": "Cabut",
+    "identity_revoke_confirm": "Cabut perangkat ini?",
+    "identity_revoke_confirm_body": "Ini menghapus perangkat dari self Anda. Perangkat tidak dapat lagi bertindak sebagai Anda. Untuk perangkat yang dicuri, tanda tangani dengan perangkat yang masih ada — jangan pernah dengan perangkat yang hilang.",
+    "identity_roster_empty": "Belum ada perangkat yang terdaftar. Tambahkan satu di bawah.",
+    "identity_roster_title": "Perangkat Anda",
+    "identity_scan_qr": "Pindai QR",
+    "identity_self_title": "Fed ID Anda",
+    "identity_self_unresolved": "Belum terselesaikan — masuk atau buat Fed ID terlebih dahulu.",
+    "identity_subtitle": "Kelola self fed-ID Anda dan perangkat yang terikat padanya. Menambahkan perangkat kedua membuat identitas Anda tetap bertahan jika perangkat pertama hilang. Aplikasi tidak menyimpan kunci; node yang menandatangani.",
+    "identity_title": "Identitas Saya"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",
@@ -2740,7 +2760,8 @@
       "delegations": "Pendelegasian",
       "accord": "Akord",
       "provision_accord_holder": "Sediakan Pemegang",
-      "accord_ceremony": "Upacara Genesis"
+      "accord_ceremony": "Upacara Genesis",
+      "identity_management": "Identitas Saya"
     }
   },
   "setup_validation_select_provider": "Pilih penyedia LLM",

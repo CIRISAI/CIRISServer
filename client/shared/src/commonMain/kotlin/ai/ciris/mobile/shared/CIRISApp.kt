@@ -676,6 +676,9 @@ fun CIRISApp(
     val delegationsViewModel: ai.ciris.mobile.shared.viewmodels.DelegationsViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.DelegationsViewModel(apiClient)
     }
+    val identityManagementViewModel: ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel(apiClient)
+    }
     val contactsViewModel: ContactsViewModel = viewModel {
         ContactsViewModel(apiClient)
     }
@@ -2888,6 +2891,17 @@ fun CIRISApp(
                 )
             }
 
+            Screen.IdentityManagement -> {
+                // Identity Management (Manage group): my self fed-ID + the roster of
+                // devices (occurrences) bound to it — add / revoke a device, or "log
+                // in as yourself on another device". The node signs; the app holds no keys.
+                PlatformLogger.d(TAG, "[Screen.IdentityManagement] Rendering identity management screen")
+                IdentityManagementScreen(
+                    viewModel = identityManagementViewModel,
+                    onBack = { currentScreen = Screen.Interact },
+                )
+            }
+
             Screen.Accord -> {
                 // Accord card (Manage group): the HUMANITY_ACCORD constitutional
                 // surface — entrenched family + quorum:2/3 holder roster + pending
@@ -4259,6 +4273,9 @@ private sealed class Screen {
     object Contacts : Screen()
     // Delegations (device-auth grants — authorize an agent to act on-behalf).
     object Delegations : Screen()
+    // Identity Management (my self fed-ID + device roster / occurrences — add /
+    // revoke a device; "log in as yourself on another device").
+    object IdentityManagement : Screen()
     // Accord (HUMANITY_ACCORD — constitutional 2/3 kill-switch + holder roster).
     object Accord : Screen()
     // Provision Accord Holder (mint a portable-2FA accord-holder identity).
@@ -4366,6 +4383,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.ManageConsent -> ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent
     Screen.Contacts -> ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts
     Screen.Delegations -> ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations
+    Screen.IdentityManagement -> ai.ciris.mobile.shared.ui.nav.NavSurface.IdentityManagement
     Screen.Accord -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ProvisionAccordHolder -> ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder
     Screen.AccordCeremony -> ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony
@@ -4420,6 +4438,7 @@ private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen
     ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent -> Screen.ManageConsent
     ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts -> Screen.Contacts
     ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations -> Screen.Delegations
+    ai.ciris.mobile.shared.ui.nav.NavSurface.IdentityManagement -> Screen.IdentityManagement
     ai.ciris.mobile.shared.ui.nav.NavSurface.Accord -> Screen.Accord
     ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder -> Screen.ProvisionAccordHolder
     ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony -> Screen.AccordCeremony

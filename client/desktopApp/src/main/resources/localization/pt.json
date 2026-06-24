@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "Caminho da pasta USB ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB ou /Volumes/USB",
     "accord_ceremony_vault_desc": "Reserva fria — registrada para custódia, mas SEM assento (mantida no cofre).",
-    "provision_holder_usb_browse": "Procurar…"
+    "provision_holder_usb_browse": "Procurar…",
+    "common_dismiss": "Dispensar",
+    "identity_add_button": "Adicionar dispositivo",
+    "identity_add_desc": "Cole ou escaneie o fed-ID do novo dispositivo (seu fedcode) e depois cadastre-o. O novo dispositivo deve criar seu próprio fed-ID primeiro.",
+    "identity_add_title": "Adicionar um dispositivo",
+    "identity_device_code_label": "fed-ID / fedcode do novo dispositivo",
+    "identity_enroll_button": "Criar o fed-ID deste dispositivo",
+    "identity_enroll_desc": "No NOVO dispositivo, crie um fed-ID local. Depois mostre seu fedcode ao dispositivo principal para cadastrá-lo.",
+    "identity_enroll_show": "Mostre isto ao seu dispositivo principal (escaneie o QR ou cole o fedcode):",
+    "identity_enroll_title": "Entre como você mesmo em outro dispositivo",
+    "identity_has_encryption": "criptografia",
+    "identity_revoke": "Revogar",
+    "identity_revoke_confirm": "Revogar este dispositivo?",
+    "identity_revoke_confirm_body": "Isso remove o dispositivo do seu eu. Ele não pode mais agir como você. Para um dispositivo roubado, assine com um dispositivo que ainda tem — nunca com o perdido.",
+    "identity_roster_empty": "Nenhum dispositivo cadastrado ainda. Adicione um abaixo.",
+    "identity_roster_title": "Seus dispositivos",
+    "identity_scan_qr": "Escanear QR",
+    "identity_self_title": "Seu fed-ID",
+    "identity_self_unresolved": "Ainda não resolvido — entre ou crie um fed-ID primeiro.",
+    "identity_subtitle": "Gerencie seu fed-ID e os dispositivos vinculados a ele. Adicionar um segundo dispositivo faz sua identidade sobreviver à perda do primeiro. O app não guarda chaves; o nó assina.",
+    "identity_title": "Minha Identidade"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Delegações",
       "accord": "Acordo",
       "provision_accord_holder": "Provisionar Detentor",
-      "accord_ceremony": "Cerimônia de Gênese"
+      "accord_ceremony": "Cerimônia de Gênese",
+      "identity_management": "Minha Identidade"
     }
   },
   "setup_validation_select_provider": "Selecione um provedor de LLM",

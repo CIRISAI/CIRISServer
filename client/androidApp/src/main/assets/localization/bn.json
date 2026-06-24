@@ -2096,7 +2096,27 @@
     "accord_ceremony_save_genesis": "এই জেনেসিস সংরক্ষণ করুন — এটি কোল্ড-স্টার্ট স্বীকৃতির জন্য বেক আর্টিফ্যাক্ট।",
     "accord_ceremony_genesis_label": "জেনেসিস (বেক আর্টিফ্যাক্ট)",
     "accord_ceremony_save_note": "উপরের JSON কপি করুন এবং ডিভাইসের বাইরে নিরাপদে সংরক্ষণ করুন। এটি এই মেশের কোল্ড-স্টার্ট স্বীকৃতি মূল।",
-    "provision_holder_usb_browse": "ব্রাউজ করুন…"
+    "provision_holder_usb_browse": "ব্রাউজ করুন…",
+    "common_dismiss": "খারিজ করুন",
+    "identity_add_button": "ডিভাইস যোগ করুন",
+    "identity_add_desc": "নতুন ডিভাইসের fed-ID (এর fedcode) পেস্ট বা স্ক্যান করুন, তারপর এটি নথিভুক্ত করুন। নতুন ডিভাইসটিকে প্রথমে নিজস্ব fed-ID তৈরি করতে হবে।",
+    "identity_add_title": "একটি ডিভাইস যোগ করুন",
+    "identity_device_code_label": "নতুন ডিভাইসের fed-ID / fedcode",
+    "identity_enroll_button": "এই ডিভাইসের fed-ID তৈরি করুন",
+    "identity_enroll_desc": "নতুন ডিভাইসে, একটি স্থানীয় fed-ID তৈরি করুন। তারপর এটি নথিভুক্ত করতে আপনার প্রাথমিক ডিভাইসকে এর fedcode দেখান।",
+    "identity_enroll_show": "এটি আপনার প্রাথমিক ডিভাইসকে দেখান (QR স্ক্যান করুন বা fedcode পেস্ট করুন):",
+    "identity_enroll_title": "অন্য একটি ডিভাইসে নিজের পরিচয়ে লগ ইন করুন",
+    "identity_has_encryption": "এনক্রিপশন",
+    "identity_revoke": "প্রত্যাহার করুন",
+    "identity_revoke_confirm": "এই ডিভাইসটি প্রত্যাহার করবেন?",
+    "identity_revoke_confirm_body": "এটি আপনার নিজস্ব পরিচয় থেকে ডিভাইসটি সরিয়ে দেয়। এটি আর আপনার হয়ে কাজ করতে পারবে না। চুরি হওয়া ডিভাইসের ক্ষেত্রে, টিকে থাকা একটি ডিভাইস দিয়ে স্বাক্ষর করুন — কখনোই হারানো ডিভাইস দিয়ে নয়।",
+    "identity_roster_empty": "এখনও কোনো ডিভাইস নথিভুক্ত হয়নি। নিচে একটি যোগ করুন।",
+    "identity_roster_title": "আপনার ডিভাইসসমূহ",
+    "identity_scan_qr": "QR স্ক্যান করুন",
+    "identity_self_title": "আপনার fed-ID",
+    "identity_self_unresolved": "এখনও সমাধান হয়নি — প্রথমে সাইন ইন করুন বা একটি fed-ID তৈরি করুন।",
+    "identity_subtitle": "আপনার নিজস্ব fed-ID এবং এতে যুক্ত ডিভাইসগুলি পরিচালনা করুন। দ্বিতীয় একটি ডিভাইস যোগ করলে প্রথমটি হারিয়ে গেলেও আপনার পরিচয় টিকে থাকে। অ্যাপটি কোনো কী রাখে না; নোড স্বাক্ষর করে।",
+    "identity_title": "আমার পরিচয়"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",
@@ -2741,7 +2761,8 @@
       "delegations": "প্রতিনিধিত্ব",
       "accord": "অ্যাকর্ড",
       "provision_accord_holder": "হোল্ডার প্রভিশন করুন",
-      "accord_ceremony": "জেনেসিস অনুষ্ঠান"
+      "accord_ceremony": "জেনেসিস অনুষ্ঠান",
+      "identity_management": "আমার পরিচয়"
     }
   },
   "setup_validation_select_provider": "একটি LLM প্রদানকারী নির্বাচন করুন",

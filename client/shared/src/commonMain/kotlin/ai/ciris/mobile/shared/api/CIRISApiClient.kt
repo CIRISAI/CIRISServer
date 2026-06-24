@@ -1752,6 +1752,156 @@ class CIRISApiClient(
         }
     }
 
+    // ─── Self-occurrence enrollment (/v1/self/occurrence*) — CIRISServer #76 ─────
+    //
+    // "Manage my self + log in as myself on another device" (src/auth/occurrence.rs,
+    // CEG §5.6.8.8 / §11.7). A "self" is a roster of occurrence rows over ONE root
+    // fed-ID; any ACTIVE occurrence stands in for the self, so a second device makes
+    // the founder's identity survive the loss of the first.
+    //
+    //   GET  /v1/self/occurrences?identity_key_id=… → roster (PUBLIC, unauthenticated)
+    //   POST /v1/self/occurrence                     → ADD a device (federation-signed)
+    //   POST /v1/self/occurrence/revoke              → REVOKE a device (federation-signed)
+    //
+    // The ADD / REVOKE are federation-signed requests. The app holds NO keys and
+    // performs NO crypto: it drives the LOCAL node with a plain owner-session POST and
+    // the node signs with the user's resolved fed-ID signer — the SAME posture as the
+    // consent / peering / claim-remote / delegation cards (see [createDelegation],
+    // [claimRemote], [selfLogin]). There is no x-ciris signing in Kotlin.
+
+    /**
+     * The device roster — `GET {nodeUrl}/v1/self/occurrences?identity_key_id=…`.
+     *
+     * UNAUTHENTICATED by design: an occurrence roster is public §5.6.8.8 binding
+     * metadata (pubkeys + device_class), same posture as the self-key-record. Returns
+     * the currently-ACTIVE occurrences (admitted, not revoked) of [identityKeyId].
+     */
+    suspend fun getSelfOccurrences(
+        identityKeyId: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+    ): ai.ciris.mobile.shared.models.federation.SelfOccurrencesResponse {
+        val method = "getSelfOccurrences"
+        logDebug(method, "GET $nodeUrl/v1/self/occurrences identity=${identityKeyId.take(16)}…")
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/self/occurrences") {
+                url { parameters.append("identity_key_id", identityKeyId) }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("self-occurrences fetch failed: ${response.status}: ${raw.take(160)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.SelfOccurrencesResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, identity=$identityKeyId")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Add a device as an occurrence — `POST {nodeUrl}/v1/self/occurrence`.
+     *
+     * Federation-signed by the live primary (the user's fed-ID). The app sends a
+     * plain owner-session POST to the LOCAL node; the node signs the body with the
+     * resolved user signer (same as [createDelegation] / [claimRemote]). When the new
+     * device's signing key is not yet in the directory, supply [request.occurrenceKeyRecord]
+     * to admit it via the fail-secure proof-of-possession gate.
+     */
+    suspend fun addOccurrence(
+        request: ai.ciris.mobile.shared.models.federation.AddOccurrenceRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AddOccurrenceResponse {
+        val method = "addOccurrence"
+        logInfo(
+            method,
+            "POST $nodeUrl/v1/self/occurrence identity=${request.identityKeyId.take(16)}… " +
+                "occurrence=${request.occurrence.occurrenceKeyId.take(16)}… class=${request.occurrence.deviceClass}",
+        )
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.AddOccurrenceRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/self/occurrence") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("add occurrence failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.AddOccurrenceResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, identity=${request.identityKeyId}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Revoke a (lost / stolen) device — `POST {nodeUrl}/v1/self/occurrence/revoke`.
+     *
+     * Federation-signed by a SURVIVING occurrence (or the root). For a STOLEN device
+     * you must sign with a different surviving key — never the compromised one
+     * (CEG §11.7.4). The app sends a plain owner-session POST to the LOCAL node; the
+     * node signs with the resolved user signer.
+     */
+    suspend fun revokeOccurrence(
+        identityKeyId: String,
+        occurrenceKeyId: String,
+        reason: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.RevokeOccurrenceResponse {
+        val method = "revokeOccurrence"
+        logInfo(
+            method,
+            "POST $nodeUrl/v1/self/occurrence/revoke identity=${identityKeyId.take(16)}… " +
+                "occurrence=${occurrenceKeyId.take(16)}…",
+        )
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.RevokeOccurrenceRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.RevokeOccurrenceRequest(
+                    identityKeyId = identityKeyId,
+                    occurrenceKeyId = occurrenceKeyId,
+                    reason = reason?.takeIf { it.isNotBlank() },
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/self/occurrence/revoke") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("revoke occurrence failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.RevokeOccurrenceResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, identity=$identityKeyId")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── HUMANITY_ACCORD surface (/v1/accord*) — CIRISServer #41 (src/accord.rs) ─
     //
     // The constitutional safe-mesh floor: a hardware-attested holder roster that

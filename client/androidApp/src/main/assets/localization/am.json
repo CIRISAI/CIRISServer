@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "የ ML-DSA USB አቃፊ መንገድ",
     "accord_ceremony_usb_placeholder": "/media/you/USB ወይም /Volumes/USB",
     "accord_ceremony_vault_desc": "ቀዝቃዛ መለዋወጫ — ለጥበቃ ተመዝግቧል፣ ነገር ግን አልተቀመጠም (በቮልት ውስጥ ይቀመጣል)።",
-    "provision_holder_usb_browse": "ያስሱ…"
+    "provision_holder_usb_browse": "ያስሱ…",
+    "common_dismiss": "አስወግድ",
+    "identity_add_button": "መሣሪያ ያክሉ",
+    "identity_add_desc": "የአዲሱን መሣሪያ fed-ID (fedcode ውን) ይለጥፉ ወይም ይቃኙ፣ ከዚያም ይመዝግቡት። አዲሱ መሣሪያ መጀመሪያ የራሱን fed-ID መፍጠር አለበት።",
+    "identity_add_title": "መሣሪያ ያክሉ",
+    "identity_device_code_label": "የአዲስ መሣሪያ fed-ID / fedcode",
+    "identity_enroll_button": "የዚህን መሣሪያ fed-ID ይፍጠሩ",
+    "identity_enroll_desc": "በአዲሱ መሣሪያ ላይ የአካባቢ fed-ID ይፍጠሩ። ከዚያም ለማስመዝገብ fedcode ውን ለዋናው መሣሪያዎ ያሳዩ።",
+    "identity_enroll_show": "ይህን ለዋናው መሣሪያዎ ያሳዩ (QR ይቃኙ ወይም fedcode ውን ይለጥፉ):",
+    "identity_enroll_title": "በሌላ መሣሪያ ላይ እንደ ራስዎ ይግቡ",
+    "identity_has_encryption": "ምስጠራ",
+    "identity_revoke": "ሻር",
+    "identity_revoke_confirm": "ይህን መሣሪያ ይሻሩ?",
+    "identity_revoke_confirm_body": "ይህ መሣሪያውን ከራስዎ ያስወግደዋል። ከእንግዲህ እንደ እርስዎ ሆኖ መሥራት አይችልም። ለተሰረቀ መሣሪያ፣ በቀረ መሣሪያ ይፈርሙ — ፈጽሞ በጠፋው አይደለም።",
+    "identity_roster_empty": "እስካሁን ምንም መሣሪያ አልተመዘገበም። ከታች አንዱን ያክሉ።",
+    "identity_roster_title": "የእርስዎ መሣሪያዎች",
+    "identity_scan_qr": "QR ይቃኙ",
+    "identity_self_title": "የእርስዎ fed-ID",
+    "identity_self_unresolved": "እስካሁን አልተፈታም — መጀመሪያ ይግቡ ወይም fed-ID ይፍጠሩ።",
+    "identity_subtitle": "የራስዎን self fed-ID እና ከእሱ ጋር የተሳሰሩ መሣሪያዎችን ያስተዳድሩ። ሁለተኛ መሣሪያ ማከል ማንነትዎ የመጀመሪያውን መሣሪያ ቢያጡም እንዲቆይ ያደርጋል። መተግበሪያው ምንም ቁልፍ አይይዝም፤ ኖዱ ይፈርማል።",
+    "identity_title": "የእኔ ማንነት"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "ውክልናዎች",
       "accord": "ስምምነት",
       "provision_accord_holder": "ያዥ ያቅርቡ",
-      "accord_ceremony": "የጀነሲስ ሥነ ሥርዓት"
+      "accord_ceremony": "የጀነሲስ ሥነ ሥርዓት",
+      "identity_management": "የእኔ ማንነት"
     }
   },
   "setup_validation_select_provider": "የLLM አቅራቢ ይምረጡ",

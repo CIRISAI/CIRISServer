@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "Сохраните этот генезис — это запечённый артефакт для распознавания при холодном старте.",
     "accord_ceremony_genesis_label": "Генезис (запечённый артефакт)",
     "accord_ceremony_save_note": "Скопируйте приведённый выше JSON и надёжно сохраните его вне устройства. Это корень распознавания при холодном старте для этой сети.",
-    "provision_holder_usb_browse": "Обзор…"
+    "provision_holder_usb_browse": "Обзор…",
+    "common_dismiss": "Закрыть",
+    "identity_add_button": "Добавить устройство",
+    "identity_add_desc": "Вставьте или отсканируйте fed-ID нового устройства (его fedcode), затем зарегистрируйте его. Новое устройство должно сначала создать собственный fed-ID.",
+    "identity_add_title": "Добавить устройство",
+    "identity_device_code_label": "fed-ID / fedcode нового устройства",
+    "identity_enroll_button": "Создать fed-ID этого устройства",
+    "identity_enroll_desc": "На НОВОМ устройстве создайте локальный fed-ID. Затем покажите его fedcode своему основному устройству, чтобы зарегистрировать его.",
+    "identity_enroll_show": "Покажите это своему основному устройству (отсканируйте QR или вставьте fedcode):",
+    "identity_enroll_title": "Войдите как вы сами на другом устройстве",
+    "identity_has_encryption": "шифрование",
+    "identity_revoke": "Отозвать",
+    "identity_revoke_confirm": "Отозвать это устройство?",
+    "identity_revoke_confirm_body": "Это удалит устройство из вашей личности. Оно больше не сможет действовать от вашего имени. Для украденного устройства подписывайте с уцелевшего устройства — никогда не с потерянного.",
+    "identity_roster_empty": "Пока не зарегистрировано ни одного устройства. Добавьте его ниже.",
+    "identity_roster_title": "Ваши устройства",
+    "identity_scan_qr": "Сканировать QR",
+    "identity_self_title": "Ваш fed-ID",
+    "identity_self_unresolved": "Ещё не определён — сначала войдите или создайте fed-ID.",
+    "identity_subtitle": "Управляйте своим собственным fed-ID и привязанными к нему устройствами. Добавление второго устройства позволяет вашей личности пережить потерю первого. Приложение не хранит ключей; подпись выполняет узел.",
+    "identity_title": "Моя личность"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Делегирования",
       "accord": "Соглашение",
       "provision_accord_holder": "Подготовить держателя",
-      "accord_ceremony": "Церемония генезиса"
+      "accord_ceremony": "Церемония генезиса",
+      "identity_management": "Моя личность"
     }
   },
   "setup_validation_select_provider": "Выберите провайдера LLM",

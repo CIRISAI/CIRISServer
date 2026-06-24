@@ -2095,7 +2095,27 @@
     "accord_ceremony_usb_label": "ML-DSA USB ఫోల్డర్ మార్గం",
     "accord_ceremony_usb_placeholder": "/media/you/USB లేదా /Volumes/USB",
     "accord_ceremony_vault_desc": "కోల్డ్ స్పేర్ — కస్టడీ కోసం నమోదు చేయబడింది, కానీ సీటు కేటాయించబడలేదు (వాల్ట్‌లో ఉంచబడింది).",
-    "provision_holder_usb_browse": "బ్రౌజ్ చేయండి…"
+    "provision_holder_usb_browse": "బ్రౌజ్ చేయండి…",
+    "common_dismiss": "విస్మరించు",
+    "identity_add_button": "పరికరాన్ని జోడించు",
+    "identity_add_desc": "కొత్త పరికరం యొక్క fed-ID (దాని fedcode) ను అతికించండి లేదా స్కాన్ చేయండి, ఆపై దాన్ని నమోదు చేయండి. కొత్త పరికరం ముందుగా దాని స్వంత fed-ID ను రూపొందించాలి.",
+    "identity_add_title": "ఒక పరికరాన్ని జోడించండి",
+    "identity_device_code_label": "కొత్త పరికరం fed-ID / fedcode",
+    "identity_enroll_button": "ఈ పరికరం యొక్క fed-ID ను రూపొందించు",
+    "identity_enroll_desc": "కొత్త పరికరంలో, స్థానిక fed-ID ను రూపొందించండి. ఆపై దాన్ని నమోదు చేయడానికి దాని fedcode ను మీ ప్రాథమిక పరికరానికి చూపండి.",
+    "identity_enroll_show": "దీన్ని మీ ప్రాథమిక పరికరానికి చూపండి (QR ను స్కాన్ చేయండి లేదా fedcode ను అతికించండి):",
+    "identity_enroll_title": "మరో పరికరంలో మీలాగా లాగిన్ అవ్వండి",
+    "identity_has_encryption": "ఎన్‌క్రిప్షన్",
+    "identity_revoke": "ఉపసంహరించు",
+    "identity_revoke_confirm": "ఈ పరికరాన్ని ఉపసంహరించాలా?",
+    "identity_revoke_confirm_body": "ఇది మీ స్వంత గుర్తింపు నుండి పరికరాన్ని తొలగిస్తుంది. ఇది ఇకపై మీలా వ్యవహరించలేదు. దొంగిలించబడిన పరికరం కోసం, మిగిలి ఉన్న పరికరంతో సంతకం చేయండి — ఎప్పుడూ పోయిన దానితో కాదు.",
+    "identity_roster_empty": "ఇంకా ఏ పరికరాలూ నమోదు కాలేదు. క్రింద ఒకదాన్ని జోడించండి.",
+    "identity_roster_title": "మీ పరికరాలు",
+    "identity_scan_qr": "QR స్కాన్ చేయి",
+    "identity_self_title": "మీ fed-ID",
+    "identity_self_unresolved": "ఇంకా పరిష్కరించబడలేదు — ముందుగా సైన్ ఇన్ చేయండి లేదా fed-ID ను రూపొందించండి.",
+    "identity_subtitle": "మీ స్వంత fed-ID మరియు దానికి అనుసంధానించబడిన పరికరాలను నిర్వహించండి. రెండవ పరికరాన్ని జోడించడం వల్ల మొదటిది పోయినా మీ గుర్తింపు నిలిచి ఉంటుంది. యాప్ ఎటువంటి కీలను కలిగి ఉండదు; నోడ్ సంతకం చేస్తుంది.",
+    "identity_title": "నా గుర్తింపు"
   },
   "conscience": {
     "ponder_attempted": "నేను {action} చేయడానికి ప్రయత్నించాను",
@@ -2740,7 +2760,8 @@
       "delegations": "ప్రతినిధ్యాలు",
       "accord": "ఒడంబడిక",
       "provision_accord_holder": "హోల్డర్‌ను ప్రొవిజన్ చేయండి",
-      "accord_ceremony": "జెనెసిస్ వేడుక"
+      "accord_ceremony": "జెనెసిస్ వేడుక",
+      "identity_management": "నా గుర్తింపు"
     }
   },
   "setup_validation_select_provider": "ఒక LLM ప్రొవైడర్‌ను ఎంచుకోండి",

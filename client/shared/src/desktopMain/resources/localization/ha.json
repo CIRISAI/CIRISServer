@@ -2095,7 +2095,27 @@
     "accord_ceremony_usb_label": "Hanyar babban fayil na USB na ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB ko /Volumes/USB",
     "accord_ceremony_vault_desc": "Na ajiya mai sanyi — an yi rajista don kulawa, amma BA a zaunar ba (an ajiye a ma'aji).",
-    "provision_holder_usb_browse": "Bincika…"
+    "provision_holder_usb_browse": "Bincika…",
+    "common_dismiss": "Kawar",
+    "identity_add_button": "Kara na'ura",
+    "identity_add_desc": "Liƙa ko ka duba fed-ID na sabuwar na'ura (fedcode dinta), sannan ka shigar da ita. Sabuwar na'ura dole ne ta kirkiri fed-ID nata da farko.",
+    "identity_add_title": "Kara na'ura",
+    "identity_device_code_label": "fed-ID / fedcode na sabuwar na'ura",
+    "identity_enroll_button": "Kirkiri fed-ID na wannan na'ura",
+    "identity_enroll_desc": "A kan SABUWAR na'ura, kirkiri fed-ID na cikin gida. Sannan nuna fedcode dinta ga na'urarka ta farko domin a shigar da ita.",
+    "identity_enroll_show": "Nuna wannan ga na'urarka ta farko (duba QR ko liƙa fedcode):",
+    "identity_enroll_title": "Shiga a matsayin kanka a wata na'ura",
+    "identity_has_encryption": "boyewa",
+    "identity_revoke": "Soke",
+    "identity_revoke_confirm": "Soke wannan na'urar?",
+    "identity_revoke_confirm_body": "Wannan yana cire na'urar daga kanka. Ba za ta iya yin aiki a matsayinka ba. Ga na'urar da aka sace, sa hannu da na'urar da ta tsira — kada ka taba amfani da wadda ta bata.",
+    "identity_roster_empty": "Babu na'urar da aka shigar tukuna. Kara daya a kasa.",
+    "identity_roster_title": "Na'urorinka",
+    "identity_scan_qr": "Duba QR",
+    "identity_self_title": "fed-ID naka",
+    "identity_self_unresolved": "Ba a warware shi ba tukuna — shiga ko ka kirkiri fed-ID da farko.",
+    "identity_subtitle": "Sarrafa fed-ID naka da na'urorin da ke daure da shi. Kara na'ura ta biyu yana sa shaidarka ta tsira da asarar ta farko. App din ba ya rike makullai; node din ne ke sa hannu.",
+    "identity_title": "Shaidata"
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",
@@ -2740,7 +2760,8 @@
       "delegations": "Wakilci",
       "accord": "Yarjejeniya",
       "provision_accord_holder": "Tanada Mai Riƙe",
-      "accord_ceremony": "Bikin Farawa"
+      "accord_ceremony": "Bikin Farawa",
+      "identity_management": "Shaidata"
     }
   },
   "setup_validation_select_provider": "Zaɓi mai bayar da LLM",

@@ -2003,7 +2003,27 @@
     "accord_ceremony_save_genesis": "Збережіть цей генезис — це артефакт запікання для розпізнавання при холодному старті.",
     "accord_ceremony_genesis_label": "Генезис (артефакт запікання)",
     "accord_ceremony_save_note": "Скопіюйте наведений вище JSON і зберігайте його надійно поза пристроєм. Це корінь розпізнавання при холодному старті для цієї мережі.",
-    "provision_holder_usb_browse": "Огляд…"
+    "provision_holder_usb_browse": "Огляд…",
+    "common_dismiss": "Закрити",
+    "identity_add_button": "Додати пристрій",
+    "identity_add_desc": "Вставте або відскануйте fed-ID нового пристрою (його fedcode), потім зареєструйте його. Новий пристрій спочатку має створити власний fed-ID.",
+    "identity_add_title": "Додати пристрій",
+    "identity_device_code_label": "fed-ID / fedcode нового пристрою",
+    "identity_enroll_button": "Створити fed-ID цього пристрою",
+    "identity_enroll_desc": "На НОВОМУ пристрої створіть локальний fed-ID. Потім покажіть його fedcode вашому основному пристрою, щоб зареєструвати його.",
+    "identity_enroll_show": "Покажіть це вашому основному пристрою (відскануйте QR або вставте fedcode):",
+    "identity_enroll_title": "Увійдіть від свого імені на іншому пристрої",
+    "identity_has_encryption": "шифрування",
+    "identity_revoke": "Відкликати",
+    "identity_revoke_confirm": "Відкликати цей пристрій?",
+    "identity_revoke_confirm_body": "Це видалить пристрій з вашої ідентичності. Він більше не зможе діяти від вашого імені. Для викраденого пристрою підписуйте за допомогою наявного пристрою — ніколи не використовуйте втрачений.",
+    "identity_roster_empty": "Ще не зареєстровано жодного пристрою. Додайте його нижче.",
+    "identity_roster_title": "Ваші пристрої",
+    "identity_scan_qr": "Сканувати QR",
+    "identity_self_title": "Ваш fed-ID",
+    "identity_self_unresolved": "Ще не визначено — спочатку увійдіть або створіть fed-ID.",
+    "identity_subtitle": "Керуйте своїм власним fed-ID та прив'язаними до нього пристроями. Додавання другого пристрою дозволяє вашій ідентичності пережити втрату першого. Застосунок не зберігає ключів; підписує вузол.",
+    "identity_title": "Моя ідентичність"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Делегування",
       "accord": "Угода",
       "provision_accord_holder": "Надати облікові дані власника",
-      "accord_ceremony": "Церемонія генезису"
+      "accord_ceremony": "Церемонія генезису",
+      "identity_management": "Моя ідентичність"
     }
   },
   "setup_validation_select_provider": "Виберіть провайдера LLM",

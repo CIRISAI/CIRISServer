@@ -2009,7 +2009,27 @@
     "accord_ceremony_usb_label": "مسیر پوشه‌ی USB مربوط به ML-DSA",
     "accord_ceremony_usb_placeholder": "/media/you/USB یا /Volumes/USB",
     "accord_ceremony_vault_desc": "ذخیره‌ی سرد — برای نگهداری ثبت شده، اما صندلی نگرفته (در گاوصندوق نگهداری می‌شود).",
-    "provision_holder_usb_browse": "مرور…"
+    "provision_holder_usb_browse": "مرور…",
+    "common_dismiss": "بستن",
+    "identity_add_button": "افزودن دستگاه",
+    "identity_add_desc": "fed-ID دستگاه جدید (fedcode آن) را جای‌گذاری یا اسکن کنید، سپس آن را ثبت کنید. دستگاه جدید باید ابتدا fed-ID خود را بسازد.",
+    "identity_add_title": "افزودن دستگاه",
+    "identity_device_code_label": "fed-ID / fedcode دستگاه جدید",
+    "identity_enroll_button": "ساخت fed-ID این دستگاه",
+    "identity_enroll_desc": "روی دستگاه جدید، یک fed-ID محلی بسازید. سپس fedcode آن را به دستگاه اصلی خود نشان دهید تا ثبت شود.",
+    "identity_enroll_show": "این را به دستگاه اصلی خود نشان دهید (QR را اسکن کنید یا fedcode را جای‌گذاری کنید):",
+    "identity_enroll_title": "روی دستگاه دیگری به‌عنوان خودتان وارد شوید",
+    "identity_has_encryption": "رمزگذاری",
+    "identity_revoke": "ابطال",
+    "identity_revoke_confirm": "این دستگاه ابطال شود؟",
+    "identity_revoke_confirm_body": "این کار دستگاه را از هویت شما حذف می‌کند. دیگر نمی‌تواند به جای شما عمل کند. برای دستگاه دزدیده‌شده، با یک دستگاه باقی‌مانده امضا کنید — هرگز با دستگاه گم‌شده.",
+    "identity_roster_empty": "هنوز هیچ دستگاهی ثبت نشده است. یکی را در زیر اضافه کنید.",
+    "identity_roster_title": "دستگاه‌های شما",
+    "identity_scan_qr": "اسکن QR",
+    "identity_self_title": "fed-ID شما",
+    "identity_self_unresolved": "هنوز شناسایی نشده — ابتدا وارد شوید یا یک fed-ID بسازید.",
+    "identity_subtitle": "fed-ID شخصی خود و دستگاه‌های متصل به آن را مدیریت کنید. افزودن یک دستگاه دوم باعث می‌شود هویت شما در صورت از دست رفتن دستگاه اول باقی بماند. این برنامه هیچ کلیدی نگه نمی‌دارد؛ امضا توسط گره انجام می‌شود.",
+    "identity_title": "هویت من"
   },
   "prompts": {
     "dma": {
@@ -2746,7 +2766,8 @@
       "delegations": "واگذاری‌ها",
       "accord": "پیمان",
       "provision_accord_holder": "تأمین دارنده",
-      "accord_ceremony": "مراسم پیدایش"
+      "accord_ceremony": "مراسم پیدایش",
+      "identity_management": "هویت من"
     }
   },
   "setup_validation_select_provider": "یک ارائه‌دهنده LLM را انتخاب کنید",

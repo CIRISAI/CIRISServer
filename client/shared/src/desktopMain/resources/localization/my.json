@@ -2095,7 +2095,27 @@
     "accord_ceremony_usb_label": "ML-DSA USB ဖိုလ်ဒါ လမ်းကြောင်း",
     "accord_ceremony_usb_placeholder": "/media/you/USB သို့မဟုတ် /Volumes/USB",
     "accord_ceremony_vault_desc": "အအေးခံ အရံ — ထိန်းသိမ်းမှုအတွက် မှတ်ပုံတင်ထားသော်လည်း ထိုင်ခုံ မချထားပါ (သိုလှောင်ခန်းတွင် သိမ်းထားသည်)။",
-    "provision_holder_usb_browse": "ရှာဖွေရန်…"
+    "provision_holder_usb_browse": "ရှာဖွေရန်…",
+    "common_dismiss": "ပယ်ဖျက်ရန်",
+    "identity_add_button": "ကိရိယာ ထည့်ရန်",
+    "identity_add_desc": "ကိရိယာအသစ်၏ fed-ID (၎င်း၏ fedcode) ကို ကူးထည့်ပါ သို့မဟုတ် စကင်ဖတ်ပြီး စာရင်းသွင်းပါ။ ကိရိယာအသစ်သည် ၎င်း၏ကိုယ်ပိုင် fed-ID ကို ဦးစွာ ဖန်တီးရမည်။",
+    "identity_add_title": "ကိရိယာတစ်ခု ထည့်ရန်",
+    "identity_device_code_label": "ကိရိယာအသစ် fed-ID / fedcode",
+    "identity_enroll_button": "ဤကိရိယာ၏ fed-ID ကို ဖန်တီးရန်",
+    "identity_enroll_desc": "ကိရိယာအသစ်တွင် local fed-ID တစ်ခု ဖန်တီးပါ။ ထို့နောက် ၎င်း၏ fedcode ကို သင့်အဓိကကိရိယာသို့ ပြသပြီး စာရင်းသွင်းပါ။",
+    "identity_enroll_show": "ဤအရာကို သင့်အဓိကကိရိယာသို့ ပြသပါ (QR ကို စကင်ဖတ်ပါ သို့မဟုတ် fedcode ကို ကူးထည့်ပါ):",
+    "identity_enroll_title": "အခြားကိရိယာတစ်ခုတွင် သင်ကိုယ်တိုင်အဖြစ် အကောင့်ဝင်ပါ",
+    "identity_has_encryption": "ကုဒ်ဝှက်ခြင်း",
+    "identity_revoke": "ရုပ်သိမ်းရန်",
+    "identity_revoke_confirm": "ဤကိရိယာကို ရုပ်သိမ်းမည်လား?",
+    "identity_revoke_confirm_body": "ဤသည် ကိရိယာကို သင့်ကိုယ်ပိုင်မှ ဖယ်ရှားပေးသည်။ ၎င်းသည် သင့်အဖြစ် ဆက်လက်ဆောင်ရွက်နိုင်တော့မည် မဟုတ်ပါ။ ခိုးယူခံရသော ကိရိယာအတွက် ရှင်သန်နေသေးသော ကိရိယာဖြင့် လက်မှတ်ရေးထိုးပါ — ပျောက်ဆုံးသွားသော ကိရိယာဖြင့် ဘယ်တော့မှ မလုပ်ပါနှင့်။",
+    "identity_roster_empty": "ကိရိယာတစ်ခုမျှ စာရင်းသွင်းမထားသေးပါ။ အောက်တွင် တစ်ခု ထည့်ပါ။",
+    "identity_roster_title": "သင့်ကိရိယာများ",
+    "identity_scan_qr": "QR စကင်ဖတ်ရန်",
+    "identity_self_title": "သင့် fed-ID",
+    "identity_self_unresolved": "မဖြေရှင်းရသေးပါ — ဦးစွာ အကောင့်ဝင်ပါ သို့မဟုတ် fed-ID တစ်ခု ဖန်တီးပါ။",
+    "identity_subtitle": "သင့်ကိုယ်ပိုင် fed-ID နှင့် ၎င်းနှင့်ချိတ်ဆက်ထားသော ကိရိယာများကို စီမံပါ။ ဒုတိယကိရိယာတစ်ခု ထည့်ခြင်းဖြင့် ပထမကိရိယာ ပျောက်ဆုံးသွားသော်လည်း သင့်အထောက်အထား ရှင်သန်နေပါသည်။ အက်ပ်သည် သော့များ မထိန်းသိမ်းပါ၊ node မှ လက်မှတ်ရေးထိုးသည်။",
+    "identity_title": "ကျွန်ုပ်၏ အထောက်အထား"
   },
   "conscience": {
     "ponder_attempted": "ကျွန်ုပ် {action} ကို ကြိုးစားခဲ့သည်",
@@ -2740,7 +2760,8 @@
       "delegations": "လွှဲအပ်မှုများ",
       "accord": "သဘောတူညီချက်",
       "provision_accord_holder": "Holder ပြင်ဆင်ပါ",
-      "accord_ceremony": "မူလအစ အခမ်းအနား"
+      "accord_ceremony": "မူလအစ အခမ်းအနား",
+      "identity_management": "ကျွန်ုပ်၏ အထောက်အထား"
     }
   },
   "setup_validation_select_provider": "LLM ဝန်ဆောင်မှုပေးသူကို ရွေးချယ်ပါ",

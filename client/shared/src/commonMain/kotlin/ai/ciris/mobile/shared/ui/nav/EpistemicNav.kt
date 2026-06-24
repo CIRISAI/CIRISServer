@@ -194,6 +194,15 @@ sealed class NavSurface(
         labelKey = "nav.surface.delegations",)
 
     /**
+     * Identity Management — manage your self fed-ID + the roster of devices
+     * (occurrences) bound to it, add a new device, revoke a lost / stolen one, or
+     * "log in as yourself on another device". Laptop-loss resilience (§5.6.8.8 /
+     * §11.7). The app holds no keys; the node signs. Live (no gate).
+     */
+    object IdentityManagement : NavSurface("identity-management", "My Identity", CIRISIcons.identity,
+        labelKey = "nav.surface.identity_management",)
+
+    /**
      * Accord — the HUMANITY_ACCORD constitutional surface (CIRISServer #41). The
      * entrenched accord family + its `quorum:2/3` kill-switch consensus protocol,
      * the FIPS / hardware-attested holder roster, and the pending invocations
@@ -484,6 +493,7 @@ val MANAGE_GROUP = NavGroup(
     surfaces = listOf(
         NavSurface.HealthReputation,
         NavSurface.Contacts,        // known federation identities (peer store browser)
+        NavSurface.IdentityManagement, // my self fed-ID + device roster (occurrences)
         NavSurface.Nodes,           // first-class node management (CRUD + switch)
         NavSurface.ManageConsent,   // consent:replication + user-data consent
         NavSurface.Delegations,     // device-auth grants — authorize an agent on-behalf

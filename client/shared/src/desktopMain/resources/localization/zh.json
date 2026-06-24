@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "ML-DSA USB 文件夹路径",
     "accord_ceremony_usb_placeholder": "/media/you/USB 或 /Volumes/USB",
     "accord_ceremony_vault_desc": "冷备份——已注册以供保管，但未占用席位（存放于保险库中）。",
-    "provision_holder_usb_browse": "浏览…"
+    "provision_holder_usb_browse": "浏览…",
+    "common_dismiss": "关闭",
+    "identity_add_button": "添加设备",
+    "identity_add_desc": "粘贴或扫描新设备的 fed-ID（即它的 fedcode），然后注册它。新设备必须先铸造自己的 fed-ID。",
+    "identity_add_title": "添加设备",
+    "identity_device_code_label": "新设备 fed-ID / fedcode",
+    "identity_enroll_button": "铸造此设备的 fed-ID",
+    "identity_enroll_desc": "在新设备上铸造一个本地 fed-ID。然后将它的 fedcode 出示给你的主设备以完成注册。",
+    "identity_enroll_show": "将此出示给你的主设备（扫描二维码或粘贴 fedcode）：",
+    "identity_enroll_title": "在另一台设备上以你自己的身份登录",
+    "identity_has_encryption": "加密",
+    "identity_revoke": "撤销",
+    "identity_revoke_confirm": "撤销此设备？",
+    "identity_revoke_confirm_body": "此操作会将该设备从你的身份中移除。它将无法再代表你行事。如果设备被盗，请用仍在手中的设备签名——切勿使用丢失的那台。",
+    "identity_roster_empty": "尚未注册任何设备。请在下方添加一台。",
+    "identity_roster_title": "你的设备",
+    "identity_scan_qr": "扫描二维码",
+    "identity_self_title": "你的 fed-ID",
+    "identity_self_unresolved": "尚未解析——请先登录或铸造一个 fed-ID。",
+    "identity_subtitle": "管理你的自有 fed-ID 及绑定到它的设备。添加第二台设备可让你的身份在失去第一台设备后依然存续。本应用不保存任何密钥；签名由节点完成。",
+    "identity_title": "我的身份"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "委托",
       "accord": "协约",
       "provision_accord_holder": "配置持有者",
-      "accord_ceremony": "创世仪式"
+      "accord_ceremony": "创世仪式",
+      "identity_management": "我的身份"
     }
   },
   "setup_validation_select_provider": "请选择一个 LLM 提供商",

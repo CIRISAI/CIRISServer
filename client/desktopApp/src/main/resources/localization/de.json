@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "Pfad zum ML-DSA-USB-Ordner",
     "accord_ceremony_usb_placeholder": "/media/you/USB oder /Volumes/USB",
     "accord_ceremony_vault_desc": "Cold-Reserve — für die Verwahrung registriert, aber NICHT besetzt (im Tresor aufbewahrt).",
-    "provision_holder_usb_browse": "Durchsuchen…"
+    "provision_holder_usb_browse": "Durchsuchen…",
+    "common_dismiss": "Schließen",
+    "identity_add_button": "Gerät hinzufügen",
+    "identity_add_desc": "Fügen Sie die Fed ID (den Fedcode) des neuen Geräts ein oder scannen Sie sie und registrieren Sie es anschließend. Das neue Gerät muss zuerst seine eigene Fed ID erstellen.",
+    "identity_add_title": "Gerät hinzufügen",
+    "identity_device_code_label": "Fed ID / Fedcode des neuen Geräts",
+    "identity_enroll_button": "Fed ID dieses Geräts erstellen",
+    "identity_enroll_desc": "Erstellen Sie auf dem NEUEN Gerät eine lokale Fed ID. Zeigen Sie dann dessen Fedcode Ihrem Hauptgerät, um es zu registrieren.",
+    "identity_enroll_show": "Zeigen Sie dies Ihrem Hauptgerät (scannen Sie den QR-Code oder fügen Sie den Fedcode ein):",
+    "identity_enroll_title": "Auf einem anderen Gerät als Sie selbst anmelden",
+    "identity_has_encryption": "Verschlüsselung",
+    "identity_revoke": "Widerrufen",
+    "identity_revoke_confirm": "Dieses Gerät widerrufen?",
+    "identity_revoke_confirm_body": "Dadurch wird das Gerät aus Ihrer Identität entfernt. Es kann nicht mehr in Ihrem Namen handeln. Signieren Sie bei einem gestohlenen Gerät mit einem verbleibenden Gerät — niemals mit dem verlorenen.",
+    "identity_roster_empty": "Noch keine Geräte registriert. Fügen Sie unten eines hinzu.",
+    "identity_roster_title": "Ihre Geräte",
+    "identity_scan_qr": "QR scannen",
+    "identity_self_title": "Ihre Fed ID",
+    "identity_self_unresolved": "Noch nicht aufgelöst — melden Sie sich an oder erstellen Sie zuerst eine Fed ID.",
+    "identity_subtitle": "Verwalten Sie Ihre eigene Fed ID und die damit verbundenen Geräte. Ein zweites Gerät sorgt dafür, dass Ihre Identität den Verlust des ersten übersteht. Die App speichert keine Schlüssel; der Knoten signiert.",
+    "identity_title": "Meine Identität"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "Delegationen",
       "accord": "Accord",
       "provision_accord_holder": "Inhaber bereitstellen",
-      "accord_ceremony": "Genesis-Zeremonie"
+      "accord_ceremony": "Genesis-Zeremonie",
+      "identity_management": "Meine Identität"
     }
   },
   "setup_validation_select_provider": "LLM-Anbieter auswählen",

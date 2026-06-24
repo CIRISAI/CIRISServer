@@ -2095,7 +2095,27 @@
     "accord_ceremony_save_genesis": "हे जेनेसिस सेव्ह करा — हे कोल्ड-स्टार्ट ओळखीसाठीचे बेक आर्टिफॅक्ट आहे.",
     "accord_ceremony_genesis_label": "जेनेसिस (बेक आर्टिफॅक्ट)",
     "accord_ceremony_save_note": "वरील JSON कॉपी करा आणि ते डिव्हाइसच्या बाहेर सुरक्षितपणे साठवा. हे या मेशसाठी कोल्ड-स्टार्ट ओळखीचे मूळ आहे.",
-    "provision_holder_usb_browse": "ब्राउझ करा…"
+    "provision_holder_usb_browse": "ब्राउझ करा…",
+    "common_dismiss": "बंद करा",
+    "identity_add_button": "उपकरण जोडा",
+    "identity_add_desc": "नवीन उपकरणाची fed-ID (तिचा fedcode) पेस्ट करा किंवा स्कॅन करा, नंतर ती नोंदवा. नवीन उपकरणाने आधी स्वतःची fed-ID तयार केली पाहिजे.",
+    "identity_add_title": "उपकरण जोडा",
+    "identity_device_code_label": "नवीन उपकरण fed-ID / fedcode",
+    "identity_enroll_button": "या उपकरणाची fed-ID तयार करा",
+    "identity_enroll_desc": "नवीन उपकरणावर, एक स्थानिक fed-ID तयार करा. नंतर ती नोंदवण्यासाठी तिचा fedcode तुमच्या प्राथमिक उपकरणाला दाखवा.",
+    "identity_enroll_show": "हे तुमच्या प्राथमिक उपकरणाला दाखवा (QR स्कॅन करा किंवा fedcode पेस्ट करा):",
+    "identity_enroll_title": "दुसर्‍या उपकरणावर स्वतः म्हणून लॉग इन करा",
+    "identity_has_encryption": "एन्क्रिप्शन",
+    "identity_revoke": "रद्द करा",
+    "identity_revoke_confirm": "हे उपकरण रद्द करायचे?",
+    "identity_revoke_confirm_body": "यामुळे उपकरण तुमच्या स्वतःमधून काढून टाकले जाते. ते यापुढे तुमच्याप्रमाणे कार्य करू शकत नाही. चोरीला गेलेल्या उपकरणासाठी, टिकून असलेल्या उपकरणाने स्वाक्षरी करा — कधीही हरवलेल्या उपकरणाने नाही.",
+    "identity_roster_empty": "अद्याप कोणतेही उपकरण नोंदवलेले नाही. खाली एक जोडा.",
+    "identity_roster_title": "तुमची उपकरणे",
+    "identity_scan_qr": "QR स्कॅन करा",
+    "identity_self_title": "तुमची fed-ID",
+    "identity_self_unresolved": "अद्याप निराकरण झाले नाही — आधी साइन इन करा किंवा fed-ID तयार करा.",
+    "identity_subtitle": "तुमची स्वतःची fed-ID आणि तिच्याशी जोडलेली उपकरणे व्यवस्थापित करा. दुसरे उपकरण जोडल्याने पहिले हरवले तरी तुमची ओळख टिकून राहते. अॅप कोणत्याही की धारण करत नाही; नोड स्वाक्षरी करतो.",
+    "identity_title": "माझी ओळख"
   },
   "conscience": {
     "ponder_attempted": "मी {action} करण्याचा प्रयत्न केला",
@@ -2740,7 +2760,8 @@
       "delegations": "प्रतिनिधीत्वे",
       "accord": "Accord",
       "provision_accord_holder": "होल्डर तरतूद करा",
-      "accord_ceremony": "जेनेसिस सोहळा"
+      "accord_ceremony": "जेनेसिस सोहळा",
+      "identity_management": "माझी ओळख"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता निवडा",

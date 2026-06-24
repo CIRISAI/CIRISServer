@@ -47,6 +47,12 @@ pub mod erasure;
 pub mod gate;
 pub mod loopback;
 pub mod oauth;
+/// Self-occurrence **enrollment** (CIRISServer#76): add a second device (e.g. a
+/// phone) as an occurrence of your self so a hardware-sealed fed-ID survives the
+/// loss of its first device, and revoke a lost/stolen device. The clean,
+/// single-purpose version of the [`self_login`] app-slot path: one occurrence
+/// binding + the Self-DEK cascade, gated by [`verify::signer_acts_for`].
+pub mod occurrence;
 /// Node ownership = the **responsible-party** model (CC 4.4.3.5 + CC 3.2 +
 /// CC 1.13.5): a fabric node has NO agency, so ownership is a `user`-role
 /// responsible party bound by an `infra:*`-only `delegates_to` — NOT the

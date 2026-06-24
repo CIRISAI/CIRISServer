@@ -2003,7 +2003,27 @@
     "accord_ceremony_usb_label": "ML-DSA USB फ़ोल्डर पथ",
     "accord_ceremony_usb_placeholder": "/media/you/USB या /Volumes/USB",
     "accord_ceremony_vault_desc": "कोल्ड स्पेयर — कस्टडी के लिए पंजीकृत, पर सीट नहीं दी गई (वॉल्ट में रखी गई)।",
-    "provision_holder_usb_browse": "ब्राउज़ करें…"
+    "provision_holder_usb_browse": "ब्राउज़ करें…",
+    "common_dismiss": "खारिज करें",
+    "identity_title": "मेरी पहचान",
+    "identity_subtitle": "अपनी स्वयं की fed-ID और उससे बंधे उपकरणों को प्रबंधित करें। दूसरा उपकरण जोड़ने से आपकी पहचान पहले उपकरण के खोने पर भी बनी रहती है। ऐप कोई कुंजी नहीं रखता; नोड हस्ताक्षर करता है।",
+    "identity_self_title": "आपकी fed-ID",
+    "identity_self_unresolved": "अभी तक हल नहीं हुआ — पहले साइन इन करें या fed-ID बनाएं।",
+    "identity_roster_title": "आपके उपकरण",
+    "identity_roster_empty": "अभी तक कोई उपकरण नामांकित नहीं है। नीचे एक जोड़ें।",
+    "identity_has_encryption": "एन्क्रिप्शन",
+    "identity_revoke": "रद्द करें",
+    "identity_revoke_confirm": "इस उपकरण को रद्द करें?",
+    "identity_revoke_confirm_body": "यह उपकरण को आपकी स्वयं से हटा देता है। यह अब आपके रूप में कार्य नहीं कर सकता। चोरी हुए उपकरण के लिए, किसी बचे हुए उपकरण से हस्ताक्षर करें — कभी भी खोए हुए उपकरण से नहीं।",
+    "identity_add_title": "एक उपकरण जोड़ें",
+    "identity_add_desc": "नए उपकरण की fed-ID (उसका fedcode) पेस्ट करें या स्कैन करें, फिर उसे नामांकित करें। नए उपकरण को पहले अपनी स्वयं की fed-ID बनानी होगी।",
+    "identity_device_code_label": "नए उपकरण की fed-ID / fedcode",
+    "identity_add_button": "उपकरण जोड़ें",
+    "identity_scan_qr": "QR स्कैन करें",
+    "identity_enroll_title": "किसी अन्य उपकरण पर स्वयं के रूप में लॉग इन करें",
+    "identity_enroll_desc": "नए उपकरण पर, एक स्थानीय fed-ID बनाएं। फिर उसे नामांकित करने के लिए उसका fedcode अपने प्राथमिक उपकरण को दिखाएं।",
+    "identity_enroll_button": "इस उपकरण की fed-ID बनाएं",
+    "identity_enroll_show": "इसे अपने प्राथमिक उपकरण को दिखाएं (QR स्कैन करें या fedcode पेस्ट करें):"
   },
   "prompts": {
     "dma": {
@@ -2740,7 +2760,8 @@
       "delegations": "प्रत्यायोजन",
       "accord": "समझौता",
       "provision_accord_holder": "Holder प्रावधान करें",
-      "accord_ceremony": "जेनेसिस समारोह"
+      "accord_ceremony": "जेनेसिस समारोह",
+      "identity_management": "मेरी पहचान"
     }
   },
   "setup_validation_select_provider": "एक LLM प्रदाता चुनें",
