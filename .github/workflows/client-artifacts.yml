@@ -1,0 +1,96 @@
+name: client-artifacts
+
+# Builds the user-facing CIRIS client artifacts and uploads them for download:
+#   * Android debug APK (the vendored KMP client — identity page, contacts,
+#     delegations, on-device YubiKey NFC fed-ID, embedded Python agent runtime).
+#   * Windows desktop installer (added in a follow-up job).
+#
+# These are CI artifacts for humans to grab, NOT a pass/fail gate on the Rust
+# build (that is ci.yml). They run on main, on PRs that touch the client/build,
+# and on demand.
+#
+# The Android build embeds the canonical Python runtime via Chaquopy, staged by
+# `tools.dev.stage_runtime`, which lives in CIRISAgent — this client was vendored
+# out of that repo. So the APK job checks out CIRISAgent alongside and points the
+# gradle staging step at it via -PcirisAgentRoot.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "client/**"
+      - ".github/workflows/client-artifacts.yml"
+  pull_request:
+    paths:
+      - "client/**"
+      - ".github/workflows/client-artifacts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout CIRISServer
+        uses: actions/checkout@v4
+
+      - name: Checkout CIRISAgent (canonical Python runtime for Chaquopy)
+        uses: actions/checkout@v4
+        with:
+          repository: CIRISAI/CIRISAgent
+          path: .ciris-agent
+          # Public repo: the default GITHUB_TOKEN reads it. If CIRISAgent is
+          # ever made private, set a CIRISAGENT_TOKEN PAT here.
+          token: ${{ secrets.CIRISAGENT_TOKEN || github.token }}
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle (distribution + dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Set up Python 3.10 (required by Chaquopy)
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Symlink python3.10 for Chaquopy
+        run: |
+          PYTHON_PATH=$(which python3.10)
+          if [ ! -f /usr/bin/python3.10 ] && [ -n "$PYTHON_PATH" ]; then
+            sudo ln -s "$PYTHON_PATH" /usr/bin/python3.10
+          fi
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='ciris-server'))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ciris-server version: $VERSION"
+
+      - name: Build debug APK
+        run: |
+          cd client
+          ./gradlew :androidApp:assembleDebug \
+            -PcirisAgentRoot="$GITHUB_WORKSPACE/.ciris-agent" --no-daemon
+          VERSION="${{ steps.version.outputs.version }}"
+          cp androidApp/build/outputs/apk/debug/androidApp-debug.apk \
+             "androidApp/build/outputs/apk/debug/CIRIS-Server-$VERSION-debug.apk"
+          ls -lh androidApp/build/outputs/apk/debug/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-android-apk
+          path: client/androidApp/build/outputs/apk/debug/CIRIS-Server-*.apk
+          retention-days: 14
