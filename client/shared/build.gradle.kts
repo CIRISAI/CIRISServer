@@ -9,6 +9,20 @@ plugins {
     kotlin("plugin.compose")
 }
 
+// yubikit-android 3.1.0 transitively requests kotlin-stdlib 2.2.10 (metadata 2.2.0),
+// which the project's Kotlin 2.0.21 compiler can't read (it crashes the FIR checker).
+// Pin stdlib to the compiler's own version — the API yubikit uses is unchanged; only
+// the .kotlin_module metadata version differs.
+configurations.all {
+    resolutionStrategy {
+        force(
+            "org.jetbrains.kotlin:kotlin-stdlib:2.0.21",
+            "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.0.21",
+            "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.0.21",
+        )
+    }
+}
+
 kotlin {
     // Suppress expect/actual beta warnings - feature is stable enough for production use
     targets.all {
@@ -204,7 +218,7 @@ kotlin {
 
 android {
     namespace = "ai.ciris.mobile.shared"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24

@@ -504,9 +504,17 @@ mod python {
         Ok(())
     }
 
-    /// `import ciris_server` — the composition CIRISAgent embeds.
+    /// The compiled abi3 extension. Built by maturin as the in-package submodule
+    /// `ciris_server._native` (`module-name = "ciris_server._native"`), so the
+    /// init symbol is `PyInit__native` and the fn is named `_native`. The
+    /// hand-written `python/ciris_server/__init__.py` does `from ._native import *`,
+    /// so `import ciris_server` still exposes this whole surface — `main`,
+    /// `import_traces`, the re-hosted persist/lens pyclasses (`Engine`,
+    /// `LensClient`, …) and the `ciris_server.persist` / `ciris_server.edge`
+    /// submodules registered below. The composition CIRISAgent embeds is
+    /// unchanged at the import sites; only the .so's in-wheel location moved.
     #[pymodule]
-    fn ciris_server(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap

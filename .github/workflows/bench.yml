@@ -42,7 +42,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libsqlite3-dev
+        run: |
+          # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
+          # 403s and tanks apt-get update (its packages are not needed here).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
+          sudo apt-get update
+          sudo apt-get install -y libtss2-dev libsqlite3-dev
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
         with:

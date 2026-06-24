@@ -4,3 +4,11 @@ Cargo.lock.bak
 .DS_Store
 *.identity
 /keyring
+
+# Claude Code worktrees / local agent state
+.claude/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+dist-wheel/

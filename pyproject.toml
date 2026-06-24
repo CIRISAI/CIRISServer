@@ -29,17 +29,39 @@ requires-python = ">=3.10"
 Repository = "https://github.com/CIRISAI/CIRISServer"
 
 [project.scripts]
-# `pip install ciris-server` → the `ciris-server` command. Boots a node with
-# zero-setup defaults (mode = server, trusting ciris-canonical) — no wizard.
-# Resolves to the PyO3 `main` exported from src/lib.rs (block_on(run())).
-ciris-server = "ciris_server:main"
+# `pip install ciris-server` → three commands, mirroring how `ciris-agent`
+# ships (a desktop-first launcher + a headless server + a UI-only launcher):
+#
+#   ciris-server            → start the node AND launch the desktop UI (default)
+#   ciris-server serve …    → headless node only (Node A/B path; --home/--key-id)
+#   ciris-server-headless   → always headless (alias for `serve`)
+#   ciris-desktop           → desktop UI only (assumes a node is already serving)
+#
+# These resolve to the thin Python launcher (`python-source = "python"` below),
+# which for any node-directed invocation delegates to the PyO3 `main` exported
+# from src/lib.rs (now reachable as `ciris_server._native.main`). The headless
+# contract is unchanged: `ciris-server serve --home X --key-id Y` boots a node.
+ciris-server = "ciris_server.cli:main"
+ciris-server-headless = "ciris_server.cli:server"
+ciris-desktop = "ciris_server.cli:desktop"
 
 [tool.maturin]
 # Build the abi3 wheel with the extension-module feature (the binary builds
 # WITHOUT it, so a plain `cargo build` never links libpython — Cargo.toml).
 features = ["extension-module"]
-module-name = "ciris_server"
-# Pure-Rust extension (no Python wrapper source); abi3 forward-compat wheel.
+# MIXED Rust+Python layout. The compiled abi3 extension is built as the IN-
+# PACKAGE submodule `ciris_server._native` (not the bare top-level module it was
+# through 0.5.x). `python/ciris_server/__init__.py` then `from ._native import *`,
+# so every historical import keeps resolving — `from ciris_server import Engine,
+# NotFound, LensClient` and `import ciris_server; ciris_server.main()` are
+# unchanged for the agent/CIRISStatus consumers. This layout is what lets the
+# wheel also ship the desktop launcher (cli.py / desktop_launcher.py) and the
+# per-platform JAR alongside the .so.
+module-name = "ciris_server._native"
+# The hand-written Python package (launcher + __init__ re-export) lives here.
+# maturin copies this tree into the wheel and drops the compiled `_native.<abi3>`
+# into the matching `ciris_server/` package dir.
+python-source = "python"
 # Keep the Python sdist under PyPI's 100 MB/file limit: drop the vendored
 # KMP/Compose client (~234 MB) + the other non-Rust-build trees from the sdist.
 # None are needed to build the abi3 extension — the wheel carries the compiled
@@ -49,4 +71,18 @@ exclude = [
     { path = "qa/**/*", format = "sdist" },
     { path = "app/**/*", format = "sdist" },
     { path = "FSD/**/*", format = "sdist" },
+    # The desktop_app/.gitignore is a repo-hygiene marker (keeps the JAR out of
+    # git, keeps the dir tracked). It is not runtime data — keep it out of both
+    # artifacts. A bare string excludes from every format (maturin's table form
+    # requires an explicit `format`, so it can't express "both" — the string can).
+    "python/ciris_server/desktop_app/.gitignore",
 ]
+# Bundle the per-platform desktop JAR INTO THE WHEEL ONLY. CI stages exactly one
+# `CIRIS-<platform>-<ver>.jar` (gradle :desktopApp:packageUberJarForCurrentOS)
+# under python/ciris_server/desktop_app/ right before `maturin build`, so each
+# platform wheel carries only its own JAR (tens of MB; system Java, no JRE →
+# comfortably under PyPI's 100 MB cap). Never bundled into the sdist (the JAR is
+# a build output, and the sdist already excludes the client source it builds
+# from). The .jar is git-ignored; the empty desktop_app/ dir is tracked so the
+# package layout exists even on a headless/source build with no JAR staged.
+include = [{ path = "python/ciris_server/desktop_app/CIRIS-*.jar", format = "wheel" }]
