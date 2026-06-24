@@ -427,63 +427,33 @@ mod python {
     // `init_edge_runtime` is the SAME registered type both crates see, so the
     // CIRISPersist#109 cross-wheel type-identity bug class cannot occur.
     //
-    // MECHANISM NOTE (load-bearing — see FSD/ONE_WHEEL_REEXPORT.md): persist and
-    // edge expose ONLY their macro-generated `#[pymodule]` init fns, which are
-    // PRIVATE (`fn ciris_persist`, `fn ciris_edge` — no `pub`). The PyO3 0.29
-    // `#[pymodule]`/`#[pyfunction]` macros emit their `_PYO3_DEF` glue with the
-    // item's own visibility, so `wrap_pymodule!`/`wrap_pyfunction!` cannot reach
-    // them from this crate. We therefore re-register the PUB-reachable surface
-    // directly: the `#[pyclass]`es (`pub struct PyEngine`/`PyEdge`/…) and
-    // persist's `pub use`d exception types. The free `#[pyfunction]`s the agent
-    // needs — persist `reset_engine`, edge `init_edge_runtime` — are PRIVATE and
-    // CANNOT be re-hosted from here; they require an upstream `pub fn register`
-    // (the lens-core pattern). Tracked as the two upstream asks in the FSD.
+    // MECHANISM NOTE (load-bearing — see FSD/ONE_WHEEL_REEXPORT.md): each substrate
+    // crate exposes a `pub fn register(m)` (the lens-core pattern) that its own
+    // standalone `#[pymodule]` delegates to. We call the SAME `register` here, so
+    // THIS module re-hosts the crate's FULL PyO3 surface — pyclasses, exception
+    // types, AND the free `#[pyfunction]`s — into one `.so` / one type registry.
+    // Both hooks now ship in our pinned substrate: persist v10 (CIRISPersist#231)
+    // exposes `reset_engine`; edge v7.0.2 (CIRISEdge#199, restoring the v4.3.1 hook
+    // that regressed in the v7.x line) exposes `init_edge_runtime`. So the agent
+    // re-hosts the FULL persist+edge surface from the single `ciris-server` wheel
+    // and can drop its standalone `ciris_persist` / `ciris_edge` wheels.
 
-    /// Re-host persist's pub `#[pyclass]`es + exception types onto a host module.
-    /// Covers `from ciris_server import Engine, NotFound` (the agent's persist
-    /// import sites). Does NOT cover `reset_engine` (private upstream fn — needs
-    /// `CIRISPersist: pub fn register`).
+    /// Re-host persist's FULL PyO3 surface via its `pub fn register` (persist v10,
+    /// CIRISPersist#231): the `Engine` pyclass, the typed exception hierarchy, and
+    /// the free `reset_engine`. Covers `from ciris_server import Engine, NotFound,
+    /// reset_engine` and the rest of the agent's persist import sites.
     fn register_persist(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-        use ciris_persist::ffi::pyo3 as persist_pyo3;
-        m.add_class::<persist_pyo3::PyEngine>()?; // exposed to Python as `Engine`
-                                                  // Typed exception hierarchy (`from ciris_persist import NotFound, …`).
-        m.add("PersistError", py.get_type::<persist_pyo3::PersistError>())?;
-        m.add("NotFound", py.get_type::<persist_pyo3::NotFound>())?;
-        m.add("Conflict", py.get_type::<persist_pyo3::Conflict>())?;
-        m.add("Transient", py.get_type::<persist_pyo3::Transient>())?;
-        m.add("Permanent", py.get_type::<persist_pyo3::Permanent>())?;
-        m.add(
-            "EngineConfigMismatch",
-            py.get_type::<persist_pyo3::EngineConfigMismatch>(),
-        )?;
-        m.add("EngineClosed", py.get_type::<persist_pyo3::EngineClosed>())?;
-        m.add(
-            "EngineUsedAcrossFork",
-            py.get_type::<persist_pyo3::EngineUsedAcrossFork>(),
-        )?;
-        m.add(
-            "LensQueryError",
-            py.get_type::<persist_pyo3::LensQueryError>(),
-        )?;
-        Ok(())
+        ciris_persist::ffi::pyo3::register(py, m)
     }
 
-    /// Re-host edge's pub `#[pyclass]`es onto a host module. Covers the `Edge`
-    /// handle + the conformance/session pyclasses. Does NOT cover the free
-    /// `init_edge_runtime` constructor (private upstream fn — needs
-    /// `CIRISEdge: pub fn register`); without it the agent cannot actually mint
-    /// an `Edge` from this wheel, so edge re-export is INCOMPLETE until upstream.
+    /// Re-host edge's FULL PyO3 surface via its `pub fn register` (edge v7.0.2,
+    /// CIRISEdge#199): the `Edge` handle, the session/conformance pyclasses, and
+    /// the free `init_edge_runtime` constructor. The agent can now mint an `Edge`
+    /// from this one wheel — the federated boot no longer needs `ciris_edge`.
+    /// (edge's `register` takes only the module; `_py` is unused but kept to match
+    /// the `add_child_module` build-closure signature.)
     fn register_edge(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-        use ciris_edge::ffi::pyo3 as edge_pyo3;
-        m.add_class::<edge_pyo3::PyEdge>()?; // exposed to Python as `Edge`
-        m.add_class::<edge_pyo3::PyDurableHandle>()?;
-        m.add_class::<edge_pyo3::PySubscriptionHandle>()?;
-        m.add_class::<edge_pyo3::PyVerifiedFeedSubscription>()?;
-        m.add_class::<edge_pyo3::PyNetworkEventSubscription>()?;
-        m.add_class::<edge_pyo3::PyReplicationHandle>()?;
-        m.add_class::<edge_pyo3::PyAvSession>()?;
-        m.add_class::<edge_pyo3::PyRelayNode>()?;
-        Ok(())
+        ciris_edge::ffi::pyo3::register(m)
     }
 
     /// Add a child module to `ciris_server` AND register it in `sys.modules` as

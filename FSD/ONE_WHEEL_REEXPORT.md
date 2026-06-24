@@ -1,5 +1,16 @@
 # FSD — One-Wheel Re-Export Surface (CIRISServer#4)
 
+> **STATUS: RESOLVED (v0.5.39).** Both upstream `pub fn register` hooks now ship in
+> our pinned substrate — persist **v10.0.0** (CIRISPersist#231, `reset_engine`) and
+> edge **v7.0.2** (CIRISEdge#199, `init_edge_runtime`; the v4.3.1 hook had regressed
+> out of the v7.x line and was restored). `src/lib.rs::register_persist`/`register_edge`
+> now delegate to those `register` fns, so the wheel re-hosts the FULL persist+edge
+> surface (free functions included). Verified on the built wheel: `from ciris_server
+> import reset_engine, init_edge_runtime` resolve, and `ciris_server.Engine is
+> ciris_server.persist.Engine` / `ciris_server.Edge is ciris_server.edge.Edge` both
+> hold. The "two gaps" / "v8.4.0 / v4.3.0" analysis below is the historical record
+> from when the hooks were private; kept for context, not as current state.
+
 **Goal.** Let CIRISAgent consume the substrate as the SINGLE `ciris-server`
 wheel and drop its three standalone substrate wheels (`ciris_persist`,
 `ciris_edge`, `ciris_verify`) plus the in-tree `ciris_lens_core`.
