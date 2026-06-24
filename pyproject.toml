@@ -73,8 +73,9 @@ exclude = [
     { path = "FSD/**/*", format = "sdist" },
     # The desktop_app/.gitignore is a repo-hygiene marker (keeps the JAR out of
     # git, keeps the dir tracked). It is not runtime data — keep it out of both
-    # artifacts.
-    { path = "python/ciris_server/desktop_app/.gitignore" },
+    # artifacts. A bare string excludes from every format (maturin's table form
+    # requires an explicit `format`, so it can't express "both" — the string can).
+    "python/ciris_server/desktop_app/.gitignore",
 ]
 # Bundle the per-platform desktop JAR INTO THE WHEEL ONLY. CI stages exactly one
 # `CIRIS-<platform>-<ver>.jar` (gradle :desktopApp:packageUberJarForCurrentOS)
