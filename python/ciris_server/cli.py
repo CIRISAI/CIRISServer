@@ -118,7 +118,15 @@ def _spawn_headless_node(extra_args: Optional[list] = None) -> "subprocess.Popen
     subprocess (not in-process) lets the node's tokio runtime and the JVM run
     concurrently, and lets the launcher tear the node down when the UI exits.
     """
-    cmd = [sys.executable, "-m", "ciris_server", "--headless"]
+    if getattr(sys, "frozen", False):
+        # PyInstaller bundle (the Windows installer): there is no `python -m`
+        # runpy inside a frozen build, and ``sys.executable`` is ciris-server.exe
+        # itself. Re-invoke the same frozen exe with ``--headless`` — cli.main()
+        # routes that straight to the headless node (never the UI), so this is
+        # the bare-node child the desktop parent waits on.
+        cmd = [sys.executable, "--headless"]
+    else:
+        cmd = [sys.executable, "-m", "ciris_server", "--headless"]
     if extra_args:
         cmd.extend(extra_args)
     return subprocess.Popen(cmd, env=os.environ.copy())

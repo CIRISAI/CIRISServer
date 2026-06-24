@@ -29,8 +29,15 @@ def _java_exe_name() -> str:
 def find_java() -> Optional[str]:
     """Find the system Java executable (JAVA_HOME, then PATH).
 
-    No bundled-JRE path: the ciris-server wheel relies on a system Java 17+.
+    The pip-installed wheel relies on a system Java 17+. The Windows installer,
+    however, ships a trimmed JRE next to the frozen executable (``<app>/runtime``)
+    so it "just works" with no prerequisite — prefer that when present.
     """
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys.executable).parent / "runtime" / "bin" / _java_exe_name()
+        if bundled.exists():
+            return str(bundled)
+
     java_home = os.environ.get("JAVA_HOME")
     if java_home:
         java_path = Path(java_home) / "bin" / _java_exe_name()
