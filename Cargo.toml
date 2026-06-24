@@ -134,6 +134,10 @@ ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v7.0.
 # arg the #247 user-key-derived fix consumes. (6.4–6.6 are HUMANITY_ACCORD + STH
 # stack — the accord-genesis surface CIRISServer#41 consumes.)
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v7.2.0" }
+# The hybrid crypto primitives (Ed25519 + ML-DSA-65 software signers) — used by
+# the portable software identity occurrence to build a `HybridSigningIdentity`
+# over two software seeds. Same tag as the rest of the verify family.
+ciris-crypto = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v7.2.0", version = "7", features = ["pqc-ml-dsa"] }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the

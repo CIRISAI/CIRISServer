@@ -474,6 +474,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             crate::auth::loopback::require_loopback,
                         )),
                     )
+                    // PORTABLE software identity occurrence (bootstrap): POST
+                    // /v1/self/occurrence/portable mints a fresh *software* hybrid
+                    // keyset into a chosen USB dir + binds it as a primary-authorized
+                    // occurrence of the owner's self; POST /v1/self/associate installs
+                    // a portable keyset as THIS device's user fed-ID. Owner-gated
+                    // per-handler + loopback-only (the node does all the file I/O; no
+                    // key material crosses the wire). The owner accepts that a software
+                    // keyset is inherently insecure — the labeled trade-off.
+                    .merge(
+                        crate::auth::portable_occurrence::router(
+                            Arc::clone(&engine),
+                            node_code.key_id.clone(),
+                            Arc::new(cfg.clone()),
+                        )
+                        .layer(axum::middleware::from_fn(
+                            crate::auth::loopback::require_loopback,
+                        )),
+                    )
                     // sessions/tokens: login / logout / me / refresh / owner-hint
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple. The callback base

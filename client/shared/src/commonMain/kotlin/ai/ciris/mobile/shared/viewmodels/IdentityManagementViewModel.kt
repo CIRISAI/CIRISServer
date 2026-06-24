@@ -239,6 +239,83 @@ class IdentityManagementViewModel(
         _enrolledIdentity.value = null
     }
 
+    /**
+     * Create a **portable software identity occurrence** into [targetDir] (a USB
+     * folder). The LOCAL node mints a fresh *software* hybrid keyset there and binds
+     * it as a primary-authorized occurrence of the owner's self. The app passes only
+     * the path; the node writes the seeds + does the crypto. A software keyset is
+     * inherently insecure — the accepted bootstrap trade-off.
+     */
+    fun createPortableOccurrence(targetDir: String, label: String? = null) {
+        val dir = targetDir.trim()
+        if (dir.isEmpty()) {
+            _error.value = "Choose the USB folder to write the portable keyset into."
+            return
+        }
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val result = apiClient.createPortableOccurrence(dir, label)
+                _notice.value =
+                    "Portable software identity occurrence created: ${result.keyId.take(20)}… — stored on $dir"
+                _identityKeyId.value?.let { refreshRoster(it) }
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[createPortableOccurrence] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner first, then create the portable occurrence."
+                    msg.contains("no bound owner") || msg.contains("503") ->
+                        "This node has no bound owner fed-ID yet — claim ownership first."
+                    else -> "Couldn't create the portable occurrence: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Associate an existing fed-ID** as THIS device's active user identity. The
+     * directory path installs a portable software keyset from [sourceDir]; the
+     * YubiKey path ([yubikey] = true) is server-gated for now (501).
+     */
+    fun associateFedId(sourceDir: String? = null, yubikey: Boolean = false) {
+        if (!yubikey && sourceDir.isNullOrBlank()) {
+            _error.value = "Choose the folder holding the portable keyset to associate."
+            return
+        }
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val result = apiClient.associateFedId(sourceDir = sourceDir, yubikey = yubikey)
+                _notice.value =
+                    "Associated this device as ${result.associatedKeyId?.take(20) ?: result.alias}…"
+                load()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[associateFedId] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("501") ->
+                        "YubiKey association isn't available yet — use a directory for now."
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner first, then associate the fed-ID."
+                    msg.contains("no portable keyset") ->
+                        "No portable keyset found in that folder — pick the folder you wrote it to."
+                    else -> "Couldn't associate the fed-ID: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
     fun clearMessages() {
         _error.value = null
         _notice.value = null
