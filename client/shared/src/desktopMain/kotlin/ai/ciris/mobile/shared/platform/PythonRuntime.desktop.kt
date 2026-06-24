@@ -292,24 +292,27 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     }
 
     /**
-     * Per-user data directory for the local node's substrate/keyring.
-     * Created if missing. Resolves to:
-     *   - Linux:   $XDG_DATA_HOME/ciris  (or ~/.local/share/ciris)
-     *   - macOS:   ~/Library/Application Support/ciris
-     *   - Windows: %LOCALAPPDATA%/ciris  (or ~/AppData/Local/ciris)
+     * Per-user data directory for the local node's substrate/keyring. Mirrors
+     * CIRISAgent's `ciris_engine.logic.utils.path_resolution.get_ciris_home()`
+     * (and the `ciris-server` wheel's desktop launcher) so the node, the agent
+     * brain, and the bare `ciris-server` command all resolve the SAME home:
+     *   1. `/app` when CIRIS-Manager-managed,
+     *   2. `$CIRIS_HOME` when set (explicit override),
+     *   3. `~/ciris` otherwise (installed mode) — cross-platform, NOT the OS
+     *      app-data dir, so it matches the agent.
+     * Created if missing.
      */
     private fun nodeHomeDir(): java.io.File {
-        val os = System.getProperty("os.name", "").lowercase()
-        val userHome = System.getProperty("user.home", ".")
-        val base = when {
-            os.contains("win") ->
-                System.getenv("LOCALAPPDATA") ?: "$userHome\\AppData\\Local"
-            os.contains("mac") || os.contains("darwin") ->
-                "$userHome/Library/Application Support"
-            else ->
-                System.getenv("XDG_DATA_HOME") ?: "$userHome/.local/share"
+        val managed = java.io.File("/app/agent").isDirectory ||
+            java.io.File("/app/.ciris_manager").isDirectory
+        val dir = when {
+            managed -> java.io.File("/app")
+            else -> {
+                val env = System.getenv("CIRIS_HOME")
+                if (!env.isNullOrBlank()) java.io.File(env)
+                else java.io.File(System.getProperty("user.home", "."), "ciris")
+            }
         }
-        val dir = java.io.File(base, "ciris")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
