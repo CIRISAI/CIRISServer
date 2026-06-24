@@ -69,6 +69,16 @@ async fn main() -> Result<()> {
                 other
             )),
         },
+        // `ciris-server claim --home <path> --key-id <alias> --backend platform-sealed \
+        //  --node-code <CIRIS-V1-...> --claim-pin <PIN> --target-url <node read-API URL> \
+        //  [--cohort-scope self] [--owner-password ...] [--owner-username ...]`
+        // — claim ROOT ownership of a REMOTE node FOR your fed-ID. Opens your local
+        // user fed-ID (TPM-sealed / YubiKey / software), builds + hybrid-signs the
+        // owner-binding, and POSTs the 1-phase claim to the target's /v1/setup/root
+        // (v0.5.37: that route is PIN + signed-binding gated, no loopback — so this
+        // works against a remote node's public read-API). The "local client" that
+        // claims a node with just its NodeCode + PIN.
+        Some("claim") => run_claim(args).await,
         // `ciris-server identity create ...` consumed the first arg already; the
         // default arm boots the fabric node. The default-serve path takes the ONLY
         // two bootstrap inputs (Server 0.5 zero-env): `--home <path>` (the data
@@ -222,5 +232,108 @@ async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<(
     println!("  The ML-DSA-65 PQC half is sealed at rest under your CIRIS keys dir.");
     println!("  This local node now holds your USER identity — POST /v1/setup/claim-remote");
     println!("  will sign owner-bindings with this key.");
+    Ok(())
+}
+
+/// `ciris-server claim ...` — claim ROOT ownership of a REMOTE node FOR your local
+/// user fed-ID. Opens your fed-ID signer (the SAME alias/path the node resolves:
+/// `<keystore_alias>-user` at the conventional user-seed dir), builds + hybrid-signs
+/// the `delegates_to(you → node, infra:*)` owner-binding, and POSTs the 1-phase
+/// claim to the target's `/v1/setup/root` (gated by PIN + the signed binding;
+/// network-reachable since v0.5.37). The "local client that claims a node with just
+/// its NodeCode + PIN."
+async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
+    use ciris_server::identity::{Pkcs11Options, UserIdentityBackend};
+
+    let mut backend_name = "platform-sealed".to_string();
+    let mut home: Option<String> = None;
+    let mut key_id: Option<String> = None;
+    let mut piv_slot = ciris_server::identity::DEFAULT_PIV_SLOT.to_string();
+    let mut pkcs11_module: Option<String> = None;
+    let mut node_code: Option<String> = None;
+    let mut claim_pin: Option<String> = None;
+    let mut cohort_scope = "self".to_string();
+    let mut target_url: Option<String> = None;
+    let mut owner_password: Option<String> = None;
+    let mut owner_username: Option<String> = None;
+
+    while let Some(arg) = args.next() {
+        let need = |a: &mut dyn Iterator<Item = String>, f: &str| -> Result<String> {
+            a.next().ok_or_else(|| anyhow::anyhow!("{f} needs a value"))
+        };
+        match arg.as_str() {
+            "--home" => home = Some(need(&mut args, "--home")?),
+            "--key-id" => key_id = Some(need(&mut args, "--key-id")?),
+            "--backend" => backend_name = need(&mut args, "--backend")?,
+            "--piv-slot" => piv_slot = need(&mut args, "--piv-slot")?,
+            "--pkcs11-module" => pkcs11_module = Some(need(&mut args, "--pkcs11-module")?),
+            "--node-code" => node_code = Some(need(&mut args, "--node-code")?),
+            "--claim-pin" => claim_pin = Some(need(&mut args, "--claim-pin")?),
+            "--cohort-scope" => cohort_scope = need(&mut args, "--cohort-scope")?,
+            "--target-url" => target_url = Some(need(&mut args, "--target-url")?),
+            "--owner-password" => owner_password = Some(need(&mut args, "--owner-password")?),
+            "--owner-username" => owner_username = Some(need(&mut args, "--owner-username")?),
+            other => return Err(anyhow::anyhow!("unknown claim arg: {other}")),
+        }
+    }
+
+    let backend = match backend_name.as_str() {
+        "software" => UserIdentityBackend::Software,
+        "platform-sealed" | "platform_sealed" | "tpm" => UserIdentityBackend::PlatformSealed,
+        "pkcs11" | "yubikey" => {
+            let mut opts = Pkcs11Options {
+                piv_slot: piv_slot.clone(),
+                ..Pkcs11Options::default()
+            };
+            if let Some(m) = pkcs11_module {
+                opts.module_path = m.into();
+            }
+            UserIdentityBackend::Pkcs11(opts)
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "unknown --backend {other:?} — use tpm | yubikey | software"
+            ))
+        }
+    };
+
+    let node_code = node_code
+        .ok_or_else(|| anyhow::anyhow!("--node-code required (the target's CIRIS-V1-... code)"))?;
+    let claim_pin = claim_pin
+        .ok_or_else(|| anyhow::anyhow!("--claim-pin required (the target's one-time PIN)"))?;
+    let target_url = target_url.ok_or_else(|| {
+        anyhow::anyhow!("--target-url required (the target read-API URL, e.g. http://1.2.3.4:4243)")
+    })?;
+
+    // Open YOUR local user fed-ID exactly as the node resolves it: alias
+    // `<keystore_alias>-user` at the conventional user-seed path.
+    let cfg = ciris_server::ServerConfig::from_home(
+        std::path::PathBuf::from(
+            home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
+        ),
+        key_id.unwrap_or_else(|| ciris_server::config::DEFAULT_KEY_ID.to_string()),
+    )?;
+    let user_key_id = format!("{}-user", cfg.keystore_alias);
+    let seed_dir = ciris_server::user_seed_dir(&cfg);
+    eprintln!("opening user fed-ID {user_key_id} ({backend_name}) — touch your token if prompted…");
+    let signer =
+        ciris_server::identity::hardware_user_local_signer(backend, &user_key_id, seed_dir).await?;
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let result = ciris_server::claim_remote::claim_remote(
+        &http,
+        &signer,
+        &node_code,
+        &claim_pin,
+        &cohort_scope,
+        Some(target_url.as_str()),
+        owner_password.as_deref(),
+        owner_username.as_deref(),
+    )
+    .await?;
+    println!("✅ claim accepted by {target_url}");
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

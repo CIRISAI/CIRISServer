@@ -405,22 +405,22 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // open during first-run WITHOUT an owner session, so they are
                     // additionally restricted to LOOPBACK peers (the read API binds
                     // 0.0.0.0; federation reads stay public, these do not).
-                    .merge(
-                        crate::auth::bootstrap::router(
-                            Arc::clone(&engine),
-                            strict,
-                            node_code.key_id.clone(),
-                            node_code.pubkey_ed25519_base64.clone(),
-                            claim_pin.clone(),
-                            // The durable PIN file to delete on a successful claim
-                            // (the same conventional path announce_ownership_unclaimed
-                            // writes). Only meaningful when a PIN was minted.
-                            claim_pin.as_ref().map(|_| cfg.claim_pin_file()),
-                        )
-                        .layer(axum::middleware::from_fn(
-                            crate::auth::loopback::require_loopback,
-                        )),
-                    )
+                    // bootstrap::router self-guards now (v0.5.37): /v1/setup/root is
+                    // PIN + signed-owner-binding gated and network-reachable (no
+                    // tunnel needed for a remote/delegated claim); the no-PIN setup
+                    // reads (status, owned-nodes) keep their own loopback layer
+                    // INSIDE the router. So no blanket loopback layer here.
+                    .merge(crate::auth::bootstrap::router(
+                        Arc::clone(&engine),
+                        strict,
+                        node_code.key_id.clone(),
+                        node_code.pubkey_ed25519_base64.clone(),
+                        claim_pin.clone(),
+                        // The durable PIN file to delete on a successful claim
+                        // (the same conventional path announce_ownership_unclaimed
+                        // writes). Only meaningful when a PIN was minted.
+                        claim_pin.as_ref().map(|_| cfg.claim_pin_file()),
+                    ))
                     // claim REMOTE ownership (substrate-native, node-to-node):
                     // POST /v1/setup/claim-remote — the LOCAL node decodes the
                     // target NodeCode, builds + hybrid-signs the owner-binding

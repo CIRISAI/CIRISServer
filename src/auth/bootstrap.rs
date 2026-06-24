@@ -1054,18 +1054,33 @@ pub fn router(
     claim_pin: Option<String>,
     claim_pin_file: Option<std::path::PathBuf>,
 ) -> Router {
-    Router::new()
+    let state = SetupState {
+        engine,
+        policy,
+        node_key_id,
+        node_pubkey_ed25519_base64,
+        claim_pin: Arc::new(Mutex::new(claim_pin)),
+        claim_pin_file,
+    };
+    // The first-run ROOT claim is NOT loopback-bound (v0.5.37). It is gated by the
+    // one-time claim PIN — itself a host-access secret (a 0600 file on the node) —
+    // PLUS the hybrid-signed owner-binding the claim carries (the owner is
+    // cryptographically fixed to the claimer's fed-ID). PIN + signed binding is the
+    // gate; the operator's firewall is the network-exposure control. This lets a
+    // remote / delegated claim succeed without an SSH tunnel (the "node code + PIN"
+    // model). The no-PIN setup READS below stay loopback-only — they would leak
+    // first-run / ownership state to the network.
+    let claim = Router::new()
         .route("/v1/setup/root", axum::routing::post(setup_root))
+        .with_state(state.clone());
+    let loopback_reads = Router::new()
         .route("/v1/setup/status", axum::routing::get(setup_status))
         .route("/v1/setup/owned-nodes", axum::routing::get(owned_nodes))
-        .with_state(SetupState {
-            engine,
-            policy,
-            node_key_id,
-            node_pubkey_ed25519_base64,
-            claim_pin: Arc::new(Mutex::new(claim_pin)),
-            claim_pin_file,
-        })
+        .with_state(state)
+        .layer(axum::middleware::from_fn(
+            crate::auth::loopback::require_loopback,
+        ));
+    claim.merge(loopback_reads)
 }
 
 #[cfg(test)]
