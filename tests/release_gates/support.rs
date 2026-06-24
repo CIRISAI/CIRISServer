@@ -24,9 +24,12 @@ use std::path::PathBuf;
 // 0.5.36: edge v6.4.0→v7.0.0 (CIRISEdge#191 — N1 explicit-hash on the IP transport,
 // so the node code determines the routable RNS destination) + persist v9.11.0→v10.0.0
 // (FederationDirectory carries fountain evict directly). verify stays v7.2.0.
+// 0.5.39: edge v7.0.0→v7.0.2 (CIRISEdge#199 — restores the `pub fn register` /
+// `init_edge_runtime` re-export hook that regressed out of the v7.x line; completes
+// the one-wheel re-export, CIRISServer#4).
 pub const TARGET_VERIFY: &str = "v7.2.0";
 pub const TARGET_PERSIST: &str = "v10.0.0";
-pub const TARGET_EDGE: &str = "v7.0.0";
+pub const TARGET_EDGE: &str = "v7.0.2";
 /// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
 pub const TARGET_PERSIST_V10: &str = "v10";
 
