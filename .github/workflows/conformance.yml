@@ -23,6 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Cache the cargo registry/git + the release target/ deps. This is the
+      # WARMER for the tag-triggered publish-pypi linux-x86_64 wheel: it builds
+      # the SAME `maturin build --release` on the SAME runner, so the substrate
+      # (persist/edge/verify + transitive) compiled here is restored there.
+      # `shared-key` overrides rust-cache's default per-job key so the two
+      # workflows share one cache; saving is restricted to main (GitHub scopes
+      # caches by ref — only the default branch is readable from a tag run).
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          shared-key: release-linux-x86_64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install build deps
         # libtss2-dev: the family links the TPM keyring backend on Linux.
         # libsqlite3-dev: persist's sqlite backend.

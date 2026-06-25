@@ -46,6 +46,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Restore the release substrate compile warmed by conformance.yml on main
+      # (same shared-key / runner / profile). Restore-only: a tag run cannot read
+      # caches scoped to a previous tag, only the default branch's — and a save
+      # here would scope to THIS tag (unreadable by the next), so it would just
+      # burn the 10 GB budget. linux-x86_64 hits the warmer; linux-aarch64 has no
+      # main warmer (arm runner) and stays a cold build — harmless.
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          shared-key: release-${{ matrix.plat.name }}
+          save-if: false
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
@@ -144,6 +156,11 @@ jobs:
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
+          # maturin-action's built-in compiler cache (sccache over the GHA cache
+          # backend). No main warmer exists for the macOS targets yet, so the
+          # cross-release benefit is limited to same-tag re-runs today; it lights
+          # up fully once a macOS release build runs on main. Harmless otherwise.
+          sccache: true
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -188,6 +205,9 @@ jobs:
         with:
           target: x64
           args: --release --out dist
+          # Compiler cache (sccache over the GHA backend). Same-tag-rerun benefit
+          # today (no main warmer for the Windows target); harmless otherwise.
+          sccache: true
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64
@@ -213,6 +233,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Cache the NDK cross-compile of the substrate per-ABI. No main warmer for
+      # the Android targets, so this mainly accelerates the frequent same-tag
+      # re-runs this lane sees (continue-on-error while it iterates to green);
+      # keyed per-ABI so the two targets don't clobber each other.
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-bin: false
+          shared-key: release-android-${{ matrix.abi }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
