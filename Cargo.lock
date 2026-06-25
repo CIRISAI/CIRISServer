@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "7.4.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.4.0#b4924d154f615f89033d46d099dd91686563d726"
+version = "7.5.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "7.0.11"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.0.11#d76aceb0705503c561aeae071a7291454b5802d3"
+version = "7.0.12"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.0.12#943cdcd210e99ed19bf17a6c66e892fe22376060"
 dependencies = [
  "async-trait",
  "axum",
@@ -855,6 +855,7 @@ dependencies = [
  "ciris-persist",
  "ciris-verify-core",
  "futures",
+ "futures-timer",
  "hex",
  "hyper",
  "jsonwebtoken",
@@ -895,8 +896,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "7.4.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.4.0#b4924d154f615f89033d46d099dd91686563d726"
+version = "7.5.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -960,8 +961,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "10.2.1"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v10.2.1#e3866125c9881dcc55c6a7d58d08c3ae41193ed5"
+version = "10.2.2"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v10.2.2#8ba46de97a0c460f6acf55c74cf6d5cb3ee91ce5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1000,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.51"
+version = "0.5.52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1040,8 +1041,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "7.4.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.4.0#b4924d154f615f89033d46d099dd91686563d726"
+version = "7.5.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2025,6 +2026,12 @@ name = "futures-task"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
