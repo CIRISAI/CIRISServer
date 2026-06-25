@@ -16,6 +16,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write   # CIRISCache save (GHCR) on main — see the build-wheel job
+
 jobs:
   build-wheel:
     name: build ciris-server wheel (linux-x86_64)
@@ -36,6 +40,24 @@ jobs:
           cache-bin: false
           shared-key: release-linux-x86_64
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # CIRISCache (CIRISServer#99) — the GHCR-backed CROSS-REPO L2 layered over
+      # the Swatinem GHA L1 above (the documented two-tier model). This is the
+      # reference adopter of the canonical shared key, so CIRISServer's on-main
+      # release-linux build POPULATES ghcr.io/cirisai/ciriscache. rust-toolchain.toml
+      # pins stable so the rustc in the key matches across repos.
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          KEY="ciris-substrate-v1-${RUNNER_OS,,}-${RUNNER_ARCH,,}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}"
+          echo "CIRISCACHE_KEY=${KEY}" >> "$GITHUB_ENV"
+          echo "CIRISCache key: ${KEY}"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
       - name: Install build deps
         # libtss2-dev: the family links the TPM keyring backend on Linux.
         # libsqlite3-dev: persist's sqlite backend.
@@ -63,6 +85,14 @@ jobs:
           name: ciris_server-wheel-linux-x86_64
           path: dist/*.whl
           if-no-files-found: error
+      # Populate the cross-repo CIRISCache blob on main (restore is anonymous on
+      # PRs; only main writes — public package, GITHUB_TOKEN, no external secret).
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   cohabitation-conformance:
     name: cohabitation (linux-x86_64 × ${{ matrix.backend }})
