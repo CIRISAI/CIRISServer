@@ -1,0 +1,36 @@
+name: warm-release-cache
+
+# Pre-warm the release build cache for EVERY publish target on main, so the
+# tag-triggered publish-pypi run restores it instead of recompiling the whole
+# substrate (persist + edge + verify + transitive) from scratch on each leg.
+#
+# Gated on substrate changes: a warmer only adds value when the dependency
+# graph changes — i.e. exactly when the next release would otherwise be cold.
+# Cargo.lock captures every substrate pin bump (it resolves into the lockfile),
+# so it's the primary trigger; the manifests + the build workflows are included
+# so a recipe change also re-warms. Between bumps the warm cache persists and is
+# kept alive by each release's restore (GitHub evicts only after 7 idle days).
+#
+# It calls the SAME build-wheels.yml the release uses. On a main push github.ref
+# is refs/heads/main, so that workflow's rust-cache steps SAVE (and the
+# maturin-action legs populate their sccache GHA objects) — the cache the tag
+# publish later restores. Output wheels are a throwaway side effect (1-day
+# retention); the cache is the product.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - ".github/workflows/build-wheels.yml"
+      - ".github/workflows/warm-release-cache.yml"
+  workflow_dispatch: # manual re-warm (e.g. after a 7-day idle eviction)
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    uses: ./.github/workflows/build-wheels.yml
