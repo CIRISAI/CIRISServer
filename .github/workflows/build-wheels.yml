@@ -93,7 +93,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
-          maturin build --release --out dist
+          maturin build --release --strip --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.plat.name }}
@@ -151,7 +151,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --strip --out dist
           # maturin-action's built-in compiler cache (sccache over the GHA cache
           # backend), warmed on main by warm-release-cache.yml calling this same
           # workflow. Restores main-scoped sccache objects on a tag publish.
@@ -200,7 +200,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist
+          args: --release --strip --out dist
           # Compiler cache (sccache over the GHA backend), warmed on main via
           # warm-release-cache.yml. Restore-on-tag; harmless otherwise.
           sccache: true
@@ -293,7 +293,7 @@ jobs:
           export RUSTFLAGS="-L ${RUNNER_TEMP}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
-          maturin build --release --out dist --target ${{ matrix.target }}
+          maturin build --release --strip --out dist --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-android-${{ matrix.abi }}
