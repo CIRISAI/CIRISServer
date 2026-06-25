@@ -1,6 +1,6 @@
 [package]
 name = "ciris-lens-core"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2021"
 description = "Science-layer runtime for the CIRIS federation: cohort-routes, scores manifold conformity, signs detection events"
 license = "AGPL-3.0-or-later"

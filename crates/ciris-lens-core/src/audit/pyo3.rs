@@ -48,7 +48,9 @@
 //! Python methods called on the engine object (cross-wheel-safe by
 //! dispatch-through-Python, same as `LensClient`):
 //!
-//! - `engine.local_key_id()` → str
+//! - `engine.local_public_key_b64()` → str (the actor_id = pubkey)
+//! - `engine.audit_next_chain_position(tenant_id: str)` → JSON
+//!   `{"next_sequence_number": int, "prev_hash": "<64 hex>"}`
 //! - `engine.audit_canonicalize_for_hash(entry_json: str)` → bytes
 //! - `engine.audit_canonicalize_for_signing(entry_json: str)` → bytes
 //! - `engine.local_sign(canonical_bytes: bytes)` → 64-byte Ed25519 sig
@@ -375,15 +377,64 @@ impl PyLensAudit {
             AuditEngineInner::Cohabitation { py_engine } => {
                 let engine = py_engine.bind(py);
 
-                // 1. Get actor_id (the signing key's public-key / key_id).
+                // 1. Get actor_id — the signing key's PUBLIC KEY (base64).
+                // persist's self-signed audit model is "actor_id IS the pubkey":
+                // record_entry decodes actor_id as the Ed25519 verifying key and
+                // checks the entry signature against it. It must therefore be
+                // local_public_key_b64() (base64-STANDARD pubkey), NOT
+                // local_key_id() — the latter returns the key_id LABEL (e.g.
+                // "<label>-<fp>") whose '-' fails the pubkey base64 decode
+                // ("ed25519_pubkey: Invalid symbol 45"). (CIRISServer#93 — the
+                // third wheel-boundary mismatch, after sequence_number + the
+                // signature alphabet.)
                 let actor_id: String = engine
-                    .call_method0("local_key_id")
-                    .map_err(|e| PyRuntimeError::new_err(format!("engine.local_key_id(): {e}")))?
+                    .call_method0("local_public_key_b64")
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("engine.local_public_key_b64(): {e}"))
+                    })?
                     .extract()?;
+
+                // 1b. Read the chain head this entry must extend. persist's
+                // record_entry REQUIRES sequence_number >= 1 + a 32-byte
+                // prev_hash == the previous entry's entry_hash (genesis = 32
+                // zero bytes at sequence 1); it does NOT fill them on INSERT.
+                // (CIRISServer#93 — the old draft sent 0 / "" and was rejected
+                // with "sequence_number must be >= 1".) audit_next_chain_position
+                // (CIRISPersist#281) returns {next_sequence_number, prev_hash}
+                // with prev_hash as 64 hex chars → decode to the raw 32 bytes.
+                let pos_json: String = engine
+                    .call_method1("audit_next_chain_position", (self.tenant_id.as_str(),))
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("engine.audit_next_chain_position: {e}"))
+                    })?
+                    .extract()?;
+                let pos: serde_json::Value = serde_json::from_str(&pos_json).map_err(|e| {
+                    PyRuntimeError::new_err(format!("parse chain position JSON: {e}"))
+                })?;
+                let sequence_number = pos["next_sequence_number"].as_i64().ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "chain position missing integer next_sequence_number: {pos_json}"
+                    ))
+                })?;
+                let prev_hash_hex = pos["prev_hash"].as_str().ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "chain position missing string prev_hash: {pos_json}"
+                    ))
+                })?;
+                let prev_hash = hex::decode(prev_hash_hex)
+                    .map_err(|e| PyRuntimeError::new_err(format!("decode prev_hash hex: {e}")))?;
 
                 // 2. Build the initial draft (pure Rust — no I/O).
                 let now = event.recorded_at();
-                let draft = build_entry_draft(&event, &self.tenant_id, &actor_id, entry_id, now);
+                let draft = build_entry_draft(
+                    &event,
+                    &self.tenant_id,
+                    &actor_id,
+                    entry_id,
+                    now,
+                    sequence_number,
+                    &prev_hash,
+                );
                 let draft_json_str = draft
                     .to_json_str()
                     .map_err(|e| PyRuntimeError::new_err(format!("serialize audit draft: {e}")))?;
