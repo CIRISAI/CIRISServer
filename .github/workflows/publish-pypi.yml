@@ -73,8 +73,10 @@ jobs:
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
           CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
-            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
+          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
+          rm -f "$CVF.bak"
           echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
@@ -128,8 +130,10 @@ jobs:
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
           CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
-            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
+          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
+          rm -f "$CVF.bak"
           echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
@@ -170,8 +174,10 @@ jobs:
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
           CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
-            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
+          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
+          rm -f "$CVF.bak"
           echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
