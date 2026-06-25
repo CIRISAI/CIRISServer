@@ -76,6 +76,11 @@ class NodeSwitcherViewModel(
      */
     suspend fun reload() {
         val stored = store.loadProfiles()
+        PlatformLogger.i(
+            TAG,
+            "[reload] stored profiles: ${stored.size} — " +
+                stored.joinToString { "${it.name}(${it.baseUrl}, owned=${it.isOwned}, key=${it.pinnedKeyId})" },
+        )
         val owned = try {
             apiClient.getOwnedNodes()
         } catch (e: Exception) {
@@ -84,7 +89,12 @@ class NodeSwitcherViewModel(
         }
 
         if (owned != null) {
-            _profiles.value = owned.nodes.map { on ->
+            PlatformLogger.i(
+                TAG,
+                "[reload] local node owned-nodes projection: ${owned.nodes.size} — " +
+                    owned.nodes.joinToString { "${it.keyId}(self=${it.isSelf})" },
+            )
+            val projected = owned.nodes.map { on ->
                 val match = stored.firstOrNull { it.pinnedKeyId == on.keyId }
                 if (on.isSelf) {
                     NodeProfile(
@@ -105,11 +115,36 @@ class NodeSwitcherViewModel(
                         .copy(isOwned = true)
                 }
             }
+            // MERGE, don't replace. The local node's graph only lists nodes IT
+            // holds an owner-binding for (itself). Remote nodes you claimed against
+            // THEIR OWN graphs (e.g. Node A/B) live in those graphs, not here — but
+            // a stored owned profile is still yours and must stay listed. Append
+            // any stored profile the projection didn't already represent (de-dup by
+            // pinned key_id, then by id).
+            val projectedKeys = projected.mapNotNull { it.pinnedKeyId }.toSet()
+            val projectedIds = projected.map { it.id }.toSet()
+            val extra = stored.filter { sp ->
+                (sp.pinnedKeyId == null || sp.pinnedKeyId !in projectedKeys) && sp.id !in projectedIds
+            }
+            if (extra.isNotEmpty()) {
+                PlatformLogger.i(
+                    TAG,
+                    "[reload] merging ${extra.size} stored node(s) the local graph didn't list " +
+                        "(owned remote nodes): ${extra.joinToString { "${it.name}(owned=${it.isOwned})" }}",
+                )
+            }
+            _profiles.value = projected + extra
+            PlatformLogger.i(
+                TAG,
+                "[reload] FINAL node list: ${_profiles.value.size} — " +
+                    _profiles.value.joinToString { "${it.name}(local=${it.isLocal}, owned=${it.isOwned})" },
+            )
             _activeProfileId.value = store.getActiveProfileId()
                 ?: _profiles.value.firstOrNull { it.isLocal }?.id
                 ?: _profiles.value.firstOrNull()?.id
         } else {
             _profiles.value = stored
+            PlatformLogger.i(TAG, "[reload] FINAL node list (stored fallback): ${stored.size} — ${stored.joinToString { it.name }}")
             _activeProfileId.value = store.getActiveProfileId()
                 ?: stored.firstOrNull { it.baseUrl == apiClient.baseUrl }?.id
         }

@@ -49,7 +49,7 @@ fun clientModeFrom(cognitiveState: String?, serviceCount: Int): ClientMode =
  * (e.g. a generated `BuildKonfig`) when one is available. Kept in sync by hand
  * with the server release for now.
  */
-const val CLIENT_VERSION = "0.5.34"
+const val CLIENT_VERSION = "0.5.46"
 
 /**
  * Whether [nodeVersion] differs materially from [CLIENT_VERSION] — i.e. a

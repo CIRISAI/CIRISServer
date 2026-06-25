@@ -69,6 +69,13 @@ jobs:
         working-directory: client
         run: |
           chmod +x ./gradlew
+          # Keep the desktop client's CLIENT_VERSION in lockstep with the release
+          # version (Cargo.toml) so the node-vs-client "update recommended" banner
+          # never false-fires on a wheel-bundled local node.
+          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
+            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -117,6 +124,13 @@ jobs:
         working-directory: client
         run: |
           chmod +x ./gradlew
+          # Keep the desktop client's CLIENT_VERSION in lockstep with the release
+          # version (Cargo.toml) so the node-vs-client "update recommended" banner
+          # never false-fires on a wheel-bundled local node.
+          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
+            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -152,6 +166,13 @@ jobs:
         working-directory: client
         shell: bash
         run: |
+          # Keep the desktop client's CLIENT_VERSION in lockstep with the release
+          # version (Cargo.toml) so the node-vs-client "update recommended" banner
+          # never false-fires on a wheel-bundled local node.
+          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          sed -i "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" \
+            shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
+          echo "synced CLIENT_VERSION -> $CV"
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
