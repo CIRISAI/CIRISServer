@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.localization.localizedString
+import ai.ciris.mobile.shared.platform.TestAutomation
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
@@ -80,6 +81,30 @@ fun DelegationsScreen(
     // mode: "create" = mint a fresh agent fed-ID; "existing" = bind a known key_id.
     var delegateMode by remember { mutableStateOf("create") }
     var existingKeyId by remember { mutableStateOf("") }
+
+    // Test automation: let the UI-automation server's /input drive this screen's
+    // text fields (they're `testable()` = position-only, so without this collector
+    // /input silently no-ops and createDelegation bails on an empty label). Mirrors
+    // LoginScreen/SetupScreen.
+    val textInputRequest by TestAutomation.textInputRequests.collectAsState()
+    LaunchedEffect(textInputRequest) {
+        textInputRequest?.let { request ->
+            when (request.testTag) {
+                "input_delegation_label" -> {
+                    delegateLabel = if (request.clearFirst) request.text else delegateLabel + request.text
+                    TestAutomation.clearTextInputRequest()
+                }
+                "input_delegation_key_id" -> {
+                    existingKeyId = if (request.clearFirst) request.text else existingKeyId + request.text
+                    TestAutomation.clearTextInputRequest()
+                }
+                "input_delegation_code" -> {
+                    userCode = if (request.clearFirst) request.text else userCode + request.text
+                    TestAutomation.clearTextInputRequest()
+                }
+            }
+        }
+    }
 
     // When the Contacts picker returns a selection, fill the key_id field.
     LaunchedEffect(pickedIdentityKeyId) {
