@@ -3662,20 +3662,13 @@ class CIRISApiClient(
         refresh: Boolean = false
     ): VerifyStatusResponse {
         val method = "getVerifyStatus"
-        // NODE-mode gap: the bare ciris-server node has NO read-only verify /
-        // attestation STATUS route. `/v1/auth/attestation` is POST-only (it
-        // EMITS a federation-signed CEG attestation, src/auth/attestation.rs) —
-        // a GET 405s — and there is no `/v1/setup/verify-status` route (only
-        // `/v1/setup/status`). So in NODE mode we skip the call instead of
-        // flooding 405s, and report "not loaded". SERVER GAP to file: expose a
-        // GET verify/attestation status on the node substrate (CIRISVerify is
-        // part of the node, so this should be node-valid once a read route
-        // exists). See CIRISApiClient.getVerifyStatus().
-        if (nodeSkip(method)) return VerifyStatusResponse(
-            loaded = false,
-            error = "verify status not exposed by ciris-server node (no GET route)",
-        )
-        logDebug(method, "Fetching CIRISVerify status (hasPlayIntegrity=${playIntegrityToken != null})")
+        // NODE mode: the ciris-server fabric node serves a read-only
+        // `GET /v1/system/verify-status` (src/health.rs verify_status_router) —
+        // CIRISVerify is part of the node substrate, so it reports loaded +
+        // the node's derived federation key_id + custody class + attestation
+        // checks. (The agent path below uses /v1/auth/attestation, which on a
+        // bare node is a POST-only EMIT route and 405s on a GET.)
+        logDebug(method, "Fetching CIRISVerify status (node=${isNodeMode()}, hasPlayIntegrity=${playIntegrityToken != null})")
 
         // Uses cached attestation from auth service - should be fast
         // Full attestation with Play Integrity may take longer
@@ -3692,7 +3685,10 @@ class CIRISApiClient(
         return try {
             // Use auth/attestation endpoint for cached attestation (fast, no network calls)
             // Falls back to setup/verify-status only during first-run setup with Play Integrity
-            val url = if (playIntegrityToken != null && playIntegrityNonce != null) {
+            val url = if (isNodeMode()) {
+                // Fabric node: the read-only verify-status route on the substrate.
+                "$baseUrl/v1/system/verify-status"
+            } else if (playIntegrityToken != null && playIntegrityNonce != null) {
                 // Full attestation with Play Integrity - use setup endpoint (first-run only)
                 "$baseUrl/v1/setup/verify-status?mode=full&play_integrity_token=$playIntegrityToken&play_integrity_nonce=$playIntegrityNonce"
             } else if (refresh) {
