@@ -610,9 +610,11 @@ class SetupViewModel(
     }
 
     /**
-     * Set the optional human display name for the federation identity. Flows into
-     * the local node's `POST /v1/self/identity` as `label` → the FSD-002
-     * `label-fingerprint` key_id.
+     * Set the REQUIRED unique identity name for the federation identity. Flows
+     * into the local node's `POST /v1/self/identity` as `label` → the FSD-002
+     * `label-fingerprint` key_id. This is the ONE canonical name the user's
+     * federation identity is keyed by; the wizard blocks proceeding until it is
+     * non-blank and not a generic default (see `FederationIdentitySetupState`).
      */
     fun setFederationLabel(label: String) {
         _state.value = _state.value.copy(

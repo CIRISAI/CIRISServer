@@ -297,7 +297,10 @@ data class FederationIdentitySetupState(
     val identityKeyId: String? = null,
     val error: String? = null,
     // ── Mint inputs (driven into the local node's POST /v1/self/identity) ──
-    /** Optional human display name → the local node's `label-fingerprint` key_id. */
+    /** REQUIRED unique identity name → the local node's `label-fingerprint`
+     *  key_id. Must be non-blank and not a generic default (see [isLabelValid]);
+     *  this is the single canonical name the user's federation identity is keyed
+     *  by, so an empty/generic value would collide identities across devices. */
     val label: String = "",
     /** Custody backend hint. ALWAYS `null` now — the only option is the SECURE
      *  one: the substrate auto-picks the most secure custody available
@@ -316,7 +319,35 @@ data class FederationIdentitySetupState(
     /** The honest hardware-tier label ("YubiKey" / "TPM / Secure Enclave" /
      *  "software") the local node reported. */
     val hardwareLabel: String? = null,
-)
+) {
+    /**
+     * Is the entered [label] a usable, UNIQUE federation-identity name?
+     *
+     * The label is now REQUIRED (it names + keys the user's federation identity,
+     * via the local node's `derive_key_id(label, pubkey)`). We reject:
+     *  - blank / whitespace-only input (a name is mandatory), and
+     *  - the generic node defaults `ciris-client` / `ciris-client-user`, which
+     *    caused TWO machines to mint DIFFERENT identities under the SAME alias —
+     *    the collision this gate exists to prevent. The user must choose a
+     *    meaningful, unique name (e.g. `firstname-lastname-v1`).
+     */
+    fun isLabelValid(): Boolean {
+        val trimmed = label.trim()
+        if (trimmed.isEmpty()) return false
+        return trimmed.lowercase() !in REJECTED_GENERIC_LABELS
+    }
+
+    companion object {
+        /**
+         * Generic default labels that MUST NOT name a federation identity. These
+         * are the node-launch `--key-id` (`ciris-client`) and the identity it
+         * would derive by default (`ciris-client-user`); reusing them across
+         * devices collides distinct identities under one alias. Matched
+         * case-insensitively against the trimmed label.
+         */
+        val REJECTED_GENERIC_LABELS = setOf("ciris-client", "ciris-client-user")
+    }
+}
 
 /**
  * State for the AGE_RANGE onboarding step (the foundational protective gate).
@@ -572,9 +603,15 @@ data class SetupFormState(
             }
 
             SetupStep.FEDERATION_IDENTITY_SETUP -> {
-                // Federation identity is optional — the user may skip it on
-                // platforms without a usable hardware authenticator.
-                true
+                // The federation identity is the ONE canonical "you" established at
+                // wizard time, so a meaningful, UNIQUE name is now REQUIRED before
+                // proceeding (an empty name made the node fall back to the generic
+                // `ciris-client-user`, colliding two machines under one alias).
+                // An already-minted/associated identity (which carries its own
+                // label/key) may proceed regardless.
+                federationIdentity.minted ||
+                    federationIdentity.admitted ||
+                    federationIdentity.isLabelValid()
             }
 
             SetupStep.AGE_RANGE -> {
@@ -708,8 +745,20 @@ data class SetupFormState(
             }
 
             SetupStep.FEDERATION_IDENTITY_SETUP -> {
-                // Optional — never blocks proceeding.
-                null
+                // A unique, meaningful identity name is required (unless an
+                // identity was already minted/associated this session).
+                if (federationIdentity.minted || federationIdentity.admitted) {
+                    null
+                } else {
+                    val trimmed = federationIdentity.label.trim()
+                    when {
+                        trimmed.isEmpty() ->
+                            LocalizationHelper.getString("setup_validation_fedid_label_required")
+                        trimmed.lowercase() in FederationIdentitySetupState.REJECTED_GENERIC_LABELS ->
+                            LocalizationHelper.getString("setup_validation_fedid_label_generic")
+                        else -> null
+                    }
+                }
             }
 
             SetupStep.AGE_RANGE -> {

@@ -26,6 +26,7 @@ import ai.ciris.mobile.shared.ui.components.AdapterWizardDialog
 import ai.ciris.mobile.shared.ui.components.LocalLlmServerDiscovery
 import ai.ciris.mobile.shared.ui.components.rememberLocalLlmDiscoveryState
 import ai.ciris.mobile.shared.viewmodels.DeviceAuthStatus
+import ai.ciris.mobile.shared.viewmodels.FederationIdentitySetupState
 import ai.ciris.mobile.shared.viewmodels.LlmValidationResult
 import ai.ciris.mobile.shared.viewmodels.ModelInfo
 import ai.ciris.mobile.shared.viewmodels.SetupStep
@@ -203,6 +204,15 @@ fun SetupScreen(
                         viewModel.setUserPasswordConfirm(request.text)
                     } else {
                         viewModel.setUserPasswordConfirm(state.userPasswordConfirm + request.text)
+                    }
+                    TestAutomation.clearTextInputRequest()
+                }
+                // REQUIRED federation-identity name (FEDERATION_IDENTITY_SETUP).
+                "input_fedid_label" -> {
+                    if (request.clearFirst) {
+                        viewModel.setFederationLabel(request.text)
+                    } else {
+                        viewModel.setFederationLabel(state.federationIdentity.label + request.text)
                     }
                     TestAutomation.clearTextInputRequest()
                 }
@@ -2330,8 +2340,37 @@ private fun FederationIdentityStep(
             text = localizedString("mobile.federation_create_explainer"),
             color = SetupColors.TextSecondary,
             fontSize = 14.sp,
-            modifier = Modifier.padding(bottom = 24.dp)
+            modifier = Modifier.padding(bottom = 16.dp)
         )
+
+        // Plain-language explanation of the whole identity flow (middle-school
+        // English): what a federation ID is, why the name must be unique, that
+        // it's created once + can be restored elsewhere as the same you, and that
+        // the app holds no keys.
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = SetupColors.GrayLight,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                listOf(
+                    "mobile.setup_fedid_explain_what",
+                    "mobile.setup_fedid_explain_name",
+                    "mobile.setup_fedid_explain_once",
+                    "mobile.setup_fedid_explain_keys",
+                ).forEachIndexed { index, key ->
+                    Text(
+                        text = "• ${localizedString(key)}",
+                        color = SetupColors.TextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.padding(top = if (index == 0) 0.dp else 8.dp)
+                    )
+                }
+            }
+        }
 
         Surface(
             shape = RoundedCornerShape(12.dp),
@@ -2445,24 +2484,47 @@ private fun FederationIdentityStep(
                             modifier = Modifier.padding(bottom = 12.dp)
                         )
 
-                        // Optional display-name label.
+                        // REQUIRED federation-identity name. This names + keys the
+                        // ONE canonical "you" (via the node's derive_key_id) — so it
+                        // must be present and must not be a generic default. The
+                        // field is invalid (and Next is blocked) until the user
+                        // enters a real, unique name like `firstname-lastname-v1`.
+                        val labelTrimmed = fed.label.trim()
+                        val labelIsGeneric = labelTrimmed.lowercase() in
+                            FederationIdentitySetupState.REJECTED_GENERIC_LABELS
+                        val labelHasError = labelTrimmed.isEmpty() || labelIsGeneric
                         OutlinedTextField(
                             value = fed.label,
                             onValueChange = { viewModel.setFederationLabel(it) },
-                            label = { Text(localizedString("mobile.federation_create_label_hint")) },
+                            label = { Text(localizedString("mobile.setup_fedid_label")) },
+                            placeholder = { Text(localizedString("mobile.setup_fedid_label_hint")) },
                             singleLine = true,
+                            isError = labelHasError,
                             enabled = !fed.inProgress,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(bottom = 12.dp)
-                                .testable("input_federation_label"),
+                                .testable("input_fedid_label"),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = SetupColors.TextPrimary,
                                 unfocusedTextColor = SetupColors.TextPrimary,
                                 focusedBorderColor = SetupColors.Primary,
                                 unfocusedBorderColor = SetupColors.TextSecondary.copy(alpha = 0.5f),
-                                cursorColor = SetupColors.Primary
+                                cursorColor = SetupColors.Primary,
+                                errorBorderColor = SetupColors.ErrorText
                             )
+                        )
+                        // Inline requirement / rejection hint under the field.
+                        Text(
+                            text = when {
+                                labelTrimmed.isEmpty() ->
+                                    localizedString("mobile.setup_fedid_label_required")
+                                labelIsGeneric ->
+                                    localizedString("mobile.setup_fedid_label_generic")
+                                else -> localizedString("mobile.setup_fedid_label_ok")
+                            },
+                            color = if (labelHasError) SetupColors.ErrorText else SetupColors.SuccessText,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
                         )
 
                         // No custody choice: the only option is the SECURE one.
@@ -2483,10 +2545,13 @@ private fun FederationIdentityStep(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Button(
+                            // Block minting until the name is valid: minting with a
+                            // blank/generic name is exactly what produced the
+                            // colliding `ciris-client-user` identity.
                             onClick = { viewModel.runFederationIdentitySetup() },
-                            enabled = !fed.inProgress,
+                            enabled = !fed.inProgress && !labelHasError,
                             modifier = Modifier.testableClickable("btn_federation_identity") {
-                                viewModel.runFederationIdentitySetup()
+                                if (!labelHasError) viewModel.runFederationIdentitySetup()
                             }
                         ) {
                             if (fed.inProgress) {
@@ -2558,7 +2623,7 @@ private fun FederationIdentityStep(
         }
 
         Text(
-            text = localizedString("mobile.federation_create_optional"),
+            text = localizedString("mobile.setup_fedid_required_note"),
             color = SetupColors.TextSecondary,
             fontSize = 12.sp,
         )

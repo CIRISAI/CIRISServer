@@ -77,11 +77,12 @@ import kotlin.math.sqrt
  * VERTICES = { the user's Fed ID (1), each delegated Agent ID (N), each owned /
  * managed node (M) }.
  *
- * EDGES (four distinct types, by colour/style + direction):
- *  - [NodeEdgeKind.OWNER_BINDING]       human → node  (delegates_to owner-binding)
- *  - [NodeEdgeKind.DELEGATION]          human → agent (device-auth grant)
- *  - [NodeEdgeKind.AGENT_ACTS_ON]       agent → node  (the grant's authority on a node)
- *  - [NodeEdgeKind.CONSENT_REPLICATION] node  → node  (bilateral consent:replication)
+ * EDGES are coloured / styled by the user's FOUR relationship CATEGORIES (see
+ * [EdgeCategory]). A category is the SEMANTIC of a relationship; the raw data
+ * sources map onto it (owner-binding → OWNERSHIP, delegation → PARTNERSHIP, plus
+ * its agent→node half → OWNERSHIP, consent:replication → CONSENT, trust → TRUST).
+ * Forbidden source/target combinations are NEVER drawn even when the underlying
+ * data would suggest them — see [isAllowedEdge].
  *
  * The renderer is intentionally NOT a physics engine — vertices are laid out
  * deterministically (Fed ID at the centre, owned nodes on an inner ring, agents
@@ -91,8 +92,24 @@ import kotlin.math.sqrt
 /** A vertex kind in the node mesh. */
 enum class NodeVertexKind { FED_ID, NODE, AGENT }
 
-/** One of the four edge types over the mesh. */
-enum class NodeEdgeKind { OWNER_BINDING, DELEGATION, AGENT_ACTS_ON, CONSENT_REPLICATION }
+/**
+ * The user's four relationship CATEGORIES. Each is a distinct semantic with its
+ * own allowed/forbidden topology (enforced by [isAllowedEdge]) and its own
+ * colour/style + one-sentence legend.
+ */
+enum class EdgeCategory {
+    /** Control of infrastructure. ALWAYS targets a node. */
+    OWNERSHIP,
+
+    /** A working relationship between you and agents (and agent↔agent via you). */
+    PARTNERSHIP,
+
+    /** A scoped, revocable data flow from one point to another. */
+    CONSENT,
+
+    /** Delegated authority over a whole domain (registries, news, medical, legal…). */
+    TRUST,
+}
 
 /** A laid-out vertex (world coordinates centred on origin). */
 data class NodeGraphVertex(
@@ -109,13 +126,17 @@ data class NodeGraphVertex(
     val isActive: Boolean = false,
 )
 
-/** A directed edge between two vertices, typed + optionally state-bearing. */
+/** A directed edge between two vertices, categorised + optionally state-bearing. */
 data class NodeGraphEdge(
     val source: String,
     val target: String,
-    val kind: NodeEdgeKind,
-    /** Direction-state for consent:replication grants (null for the rest). */
+    val category: EdgeCategory,
+    /** Direction-state for CONSENT grants (null for the rest). */
     val state: GrantDirectionState? = null,
+    /** Optional scope hint (CONSENT prefixes, or the TRUST domain). */
+    val scope: String? = null,
+    /** TRUST only: a blanket trust routes a whole domain's data. */
+    val blanket: Boolean = false,
 )
 
 /** The fully-built mesh ready to render. */
@@ -134,13 +155,36 @@ private val FedIdColor = Color(0xFF06B6D4)   // Cyan — identity
 private val NodeColor = Color(0xFF3B82F6)     // Blue — node
 private val AgentColor = Color(0xFF10B981)    // Green — agent
 
-// Edge palette — each of the four types is visually distinct.
-private val OwnerBindingColor = Color(0xFF3B82F6)      // Blue, solid
-private val DelegationColor = Color(0xFF10B981)        // Green, solid
-private val AgentActsOnColor = Color(0xFFF59E0B)       // Amber, dashed
-private val ConsentColor = Color(0xFF8B5CF6)           // Purple, solid (dashed until granted)
+// Edge palette — one distinct colour per relationship CATEGORY.
+private val OwnershipColor = Color(0xFF3B82F6)    // Blue   — control of infra
+private val PartnershipColor = Color(0xFF10B981)  // Green  — working relationship
+private val ConsentColor = Color(0xFF8B5CF6)      // Purple — scoped, revocable flow
+private val TrustColor = Color(0xFFF59E0B)        // Amber  — delegated domain authority
 
 private const val FED_ID_VERTEX = "fedid:self"
+
+/**
+ * Enforce the relationship topology rules — return false for a FORBIDDEN
+ * source/target/category combination so the renderer never draws it, even when
+ * the raw data would suggest one.
+ *
+ *  - OWNERSHIP   : ALWAYS targets a node (covers user→node, agent→node, node→node).
+ *                  FORBIDDEN: user→user, user→agent, agent→community (≠ node).
+ *  - PARTNERSHIP : you↔agent, or agent↔agent. FORBIDDEN: user↔user (that is FAMILY).
+ *  - CONSENT     : a scoped directional flow (today node→node).
+ *  - TRUST       : delegated domain authority (no in-graph constraint modelled yet).
+ */
+fun isAllowedEdge(category: EdgeCategory, source: NodeVertexKind, target: NodeVertexKind): Boolean =
+    when (category) {
+        EdgeCategory.OWNERSHIP -> target == NodeVertexKind.NODE
+        EdgeCategory.PARTNERSHIP -> {
+            val kinds = listOf(source, target)
+            kinds.all { it == NodeVertexKind.FED_ID || it == NodeVertexKind.AGENT } &&
+                kinds.any { it == NodeVertexKind.AGENT } // excludes user↔user
+        }
+        EdgeCategory.CONSENT -> true
+        EdgeCategory.TRUST -> true
+    }
 
 /**
  * Project the three ViewModels' state into a typed, laid-out node mesh.
@@ -211,66 +255,92 @@ fun buildNodeGraph(
     }
 
     val present = vertices.map { it.id }.toSet()
+    val byId = vertices.associateBy { it.id }
 
-    // ── Edge: human → node (owner-binding) ──────────────────────────────────
+    // Single funnel for every candidate edge: enforce the topology rules so a
+    // FORBIDDEN combination is never drawn, even if the data suggests it.
+    fun addEdge(
+        source: String,
+        target: String,
+        category: EdgeCategory,
+        state: GrantDirectionState? = null,
+        scope: String? = null,
+        blanket: Boolean = false,
+    ) {
+        if (source == target) return
+        val s = byId[source] ?: return
+        val t = byId[target] ?: return
+        if (!isAllowedEdge(category, s.kind, t.kind)) return
+        edges += NodeGraphEdge(source, target, category, state, scope, blanket)
+    }
+
+    // ── OWNERSHIP: you → node (owner-binding) ───────────────────────────────
+    // Source: the owner-binding (delegates_to user→node) projected into
+    // NodeProfile.isOwned. Always targets a node → allowed.
     profiles.filter { it.isOwned }.forEach { p ->
-        edges += NodeGraphEdge(FED_ID_VERTEX, nodeVid(p), NodeEdgeKind.OWNER_BINDING)
+        addEdge(FED_ID_VERTEX, nodeVid(p), EdgeCategory.OWNERSHIP)
     }
 
-    // ── Edge: human → agent (delegation) ────────────────────────────────────
+    // ── PARTNERSHIP: you → agent (delegation) ───────────────────────────────
+    // Source: a device-auth grant. you↔agent is allowed; you↔user would be
+    // FAMILY (forbidden here) and is excluded by isAllowedEdge.
     agentIds.forEach { clientId ->
-        edges += NodeGraphEdge(FED_ID_VERTEX, agentVid(clientId), NodeEdgeKind.DELEGATION)
+        addEdge(FED_ID_VERTEX, agentVid(clientId), EdgeCategory.PARTNERSHIP)
     }
 
-    // ── Edge: agent → node (the grant's authority to act on a node) ─────────
-    // Delegations are issued by the LOCAL node, so a delegated agent has
-    // authority to act ON the local node. Fall back to the active node, then
-    // the first node, when no local node is listed.
+    // ── OWNERSHIP: agent → node (the grant's authority over a node) ──────────
+    // A delegation whose target is a node = control of that infrastructure.
+    // Delegations are issued by the LOCAL node, so the agent's authority lands
+    // on the local node (fallback: active, then first).
     val authorityNode = profiles.firstOrNull { it.isLocal }
         ?: profiles.firstOrNull { it.id == activeProfileId }
         ?: profiles.firstOrNull()
     if (authorityNode != null) {
         agentIds.forEach { clientId ->
-            edges += NodeGraphEdge(agentVid(clientId), nodeVid(authorityNode), NodeEdgeKind.AGENT_ACTS_ON)
+            addEdge(agentVid(clientId), nodeVid(authorityNode), EdgeCategory.OWNERSHIP)
         }
     }
 
-    // ── Edge: node → node (bilateral consent:replication) ───────────────────
+    // ── CONSENT: node → node (scoped, revocable consent:replication) ─────────
+    // A directional, heavily-scoped, easily-revoked data flow A → B and B → A.
     val ca = consent.nodeA
     val cb = consent.nodeB
     if (ca != null && cb != null) {
-        val aId = nodeVid(ca)
-        val bId = nodeVid(cb)
-        if (aId in present && bId in present) {
-            edges += NodeGraphEdge(aId, bId, NodeEdgeKind.CONSENT_REPLICATION, consent.aToB)
-            edges += NodeGraphEdge(bId, aId, NodeEdgeKind.CONSENT_REPLICATION, consent.bToA)
-        }
+        addEdge(nodeVid(ca), nodeVid(cb), EdgeCategory.CONSENT, consent.aToB)
+        addEdge(nodeVid(cb), nodeVid(ca), EdgeCategory.CONSENT, consent.bToA)
     }
 
-    // Drop any dangling edges (defensive — keeps the renderer total).
+    // ── TRUST: delegated authority over a whole domain ──────────────────────
+    // No trust objects are surfaced by the current ViewModels yet, so none are
+    // drawn — but the category stays in the legend so the model is legible. A
+    // trust edge (when wired) bundles consent objects; a blanket trust routes a
+    // whole domain (medical/legal/financial/governance/advisory). Add via
+    // addEdge(..., EdgeCategory.TRUST, scope = "<domain>", blanket = <bool>).
+
+    // Defensive: keep the renderer total (addEdge already guards, belt+braces).
     val safeEdges = edges.filter { it.source in present && it.target in present }
     return NodeGraphData(vertices, safeEdges)
 }
 
-private fun NodeEdgeKind.color(): Color = when (this) {
-    NodeEdgeKind.OWNER_BINDING -> OwnerBindingColor
-    NodeEdgeKind.DELEGATION -> DelegationColor
-    NodeEdgeKind.AGENT_ACTS_ON -> AgentActsOnColor
-    NodeEdgeKind.CONSENT_REPLICATION -> ConsentColor
+private fun EdgeCategory.color(): Color = when (this) {
+    EdgeCategory.OWNERSHIP -> OwnershipColor
+    EdgeCategory.PARTNERSHIP -> PartnershipColor
+    EdgeCategory.CONSENT -> ConsentColor
+    EdgeCategory.TRUST -> TrustColor
 }
 
-private fun NodeGraphEdge.dashed(): Boolean = when (kind) {
-    NodeEdgeKind.AGENT_ACTS_ON -> true
-    // Consent edges render dashed until the grant is actually ratified.
-    NodeEdgeKind.CONSENT_REPLICATION -> state != GrantDirectionState.GRANTED
+private fun NodeGraphEdge.dashed(): Boolean = when (category) {
+    // CONSENT is scoped + revocable — always rendered dashed to read as such.
+    EdgeCategory.CONSENT -> true
     else -> false
 }
 
-private fun NodeEdgeKind.legendLabel(): String = when (this) {
-    NodeEdgeKind.OWNER_BINDING -> "owner-binding (you → node)"
-    NodeEdgeKind.DELEGATION -> "delegation (you → agent)"
-    NodeEdgeKind.AGENT_ACTS_ON -> "agent acts on node"
-    NodeEdgeKind.CONSENT_REPLICATION -> "consent:replication (node ↔ node)"
+/** One plain-English sentence per category, for the legend + detail panel. */
+private fun EdgeCategory.legendLabel(): String = when (this) {
+    EdgeCategory.OWNERSHIP -> "Ownership — who controls a node (infrastructure)."
+    EdgeCategory.PARTNERSHIP -> "Partnership — a working relationship between you and agents."
+    EdgeCategory.CONSENT -> "Consent — a scoped, revocable data flow from one point to another."
+    EdgeCategory.TRUST -> "Trust — delegated authority over a whole domain (e.g. medical, legal)."
 }
 
 /**
@@ -433,7 +503,16 @@ fun NodeGraphView(
                 LegendRow(NodeColor, "node")
                 LegendRow(AgentColor, "agent")
                 Spacer(Modifier.height(2.dp))
-                NodeEdgeKind.entries.forEach { kind -> LegendRow(kind.color(), kind.legendLabel()) }
+                Text(
+                    text = "Relationships",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = GraphColors.LabelColor,
+                    fontWeight = FontWeight.Bold,
+                )
+                // One plain-English sentence per relationship category. TRUST is
+                // always listed even when no trust objects exist yet, so the
+                // four-category model stays legible.
+                EdgeCategory.entries.forEach { cat -> LegendRow(cat.color(), cat.legendLabel()) }
             }
         }
 
@@ -542,10 +621,11 @@ private fun VertexDetailPanel(
                 val other = data.byId[otherId]?.label ?: otherId
                 val arrow = if (outgoing) "→" else "←"
                 val stateSuffix = e.state?.let { " (${it.name.lowercase()})" } ?: ""
+                val catName = e.category.name.lowercase().replaceFirstChar { it.uppercase() }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(e.kind.color()))
+                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(e.category.color()))
                     Text(
-                        text = "$arrow $other · ${e.kind.legendLabel()}$stateSuffix",
+                        text = "$arrow $other · $catName$stateSuffix",
                         style = MaterialTheme.typography.labelSmall,
                         color = GraphColors.LabelColorMuted,
                     )
@@ -590,9 +670,11 @@ private fun DrawScope.drawMeshEdge(
     scale: Float,
     isHighlighted: Boolean,
 ) {
-    val base = edge.kind.color()
+    val base = edge.category.color()
     val color = if (isHighlighted) GraphColors.lighten(base, 0.3f) else base.copy(alpha = 0.7f)
-    val strokeWidth = if (isHighlighted) 3.5f * scale else 2f * scale
+    // A blanket TRUST edge bundles a whole domain → render it heavier.
+    val baseWidth = if (edge.category == EdgeCategory.TRUST && edge.blanket) 3f else 2f
+    val strokeWidth = if (isHighlighted) (baseWidth + 1.5f) * scale else baseWidth * scale
     val pathEffect = if (edge.dashed()) {
         PathEffect.dashPathEffect(floatArrayOf(10f * scale, 6f * scale), 0f)
     } else null
@@ -638,6 +720,26 @@ private fun DrawScope.drawMeshEdge(
     val rightY = tipY - headLen * sin(angle + spread)
     drawLine(color, Offset(tipX, tipY), Offset(leftX, leftY), strokeWidth = strokeWidth, cap = StrokeCap.Round)
     drawLine(color, Offset(tipX, tipY), Offset(rightX, rightY), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+
+    // CONSENT scope/lock affordance: a small "gate" glyph sitting on the curve
+    // midpoint marks the flow as scoped + revocable. A ratified grant gets a
+    // filled gate; a pending/failed one stays an open outline.
+    if (edge.category == EdgeCategory.CONSENT) {
+        val gateR = 5f * scale
+        val granted = edge.state == GrantDirectionState.GRANTED
+        // Backing disc so the gate reads against the edge line.
+        drawCircle(GraphColors.Background, radius = gateR + 2f, center = Offset(controlX, controlY))
+        if (granted) {
+            drawCircle(color, radius = gateR, center = Offset(controlX, controlY))
+        } else {
+            drawCircle(
+                color,
+                radius = gateR,
+                center = Offset(controlX, controlY),
+                style = Stroke(width = 1.5f * scale),
+            )
+        }
+    }
 }
 
 private fun DrawScope.drawMeshVertex(
