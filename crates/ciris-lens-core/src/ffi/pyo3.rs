@@ -47,6 +47,37 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Resolve the host Engine's **DERIVED federation key_id** — the id its own
+/// `receive_and_persist` verifies seals against.
+///
+/// persist's `engine.local_key_id()` returns the **BARE keystore alias** (the
+/// signer keys its blobs off it), but the federation floor (#247/#275) registers
+/// and verifies under `fedcode::derive_key_id(<alias>, <ed25519 pubkey>)`. The
+/// lens seal-and-sign path must stamp the DERIVED id or `receive_and_persist`
+/// rejects every seal with `verify_unknown_key` (CIRISServer#118 — the exact
+/// class CIRISEdge#203 fixed for the edge *outbound* path).
+///
+/// We compute it here from the two values persist DOES expose to Python
+/// (`local_key_id` + `local_public_key_b64`). Collapse this to a single
+/// `engine.local_derived_key_id()` call once persist exposes that method to
+/// Python (CIRISPersist DX issue — it has the Rust method, just not the pyo3
+/// binding).
+fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<String> {
+    use base64::Engine as _;
+    let alias: String = engine
+        .call_method0("local_key_id")
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_key_id(): {e}")))?
+        .extract()?;
+    let pub_b64: String = engine
+        .call_method0("local_public_key_b64")
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_public_key_b64(): {e}")))?
+        .extract()?;
+    let pubkey = base64::engine::general_purpose::STANDARD
+        .decode(pub_b64.trim())
+        .map_err(|e| PyRuntimeError::new_err(format!("decode local_public_key_b64: {e}")))?;
+    Ok(ciris_verify_core::fedcode::derive_key_id(&alias, &pubkey))
+}
+
 use crate::capture::client::{CaptureClient, CaptureEventOutcome};
 use crate::capture::consent::ConsentConfig;
 use crate::capture::correlation::CorrelationMetadata;
@@ -199,10 +230,9 @@ fn process_trace_batch<'py>(
     );
 
     let batch_id = Uuid::new_v4().to_string();
-    let signing_key_id: String = engine
-        .call_method0("local_key_id")
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_key_id(): {e}")))?
-        .extract()?;
+    // Stamp the DERIVED federation key_id, not the bare alias — `receive_and_persist`
+    // verifies seals against the derived id (CIRISServer#118).
+    let signing_key_id: String = engine_federation_key_id(engine)?;
 
     let detections = PyList::empty(py);
     let mut traces_processed: usize = 0;
@@ -880,13 +910,10 @@ impl PyLensClient {
                                 PyRuntimeError::new_err(format!("canonical_bytes: {e}"))
                             })?;
 
-                        // 3b. Key ID via Python.
-                        let key_id: String = engine
-                            .call_method0("local_key_id")
-                            .map_err(|e| {
-                                PyRuntimeError::new_err(format!("engine.local_key_id(): {e}"))
-                            })?
-                            .extract()?;
+                        // 3b. Key ID via Python — the DERIVED federation key_id, not
+                        // the bare alias (CIRISServer#118; `receive_and_persist`
+                        // verifies against the derived id).
+                        let key_id: String = engine_federation_key_id(engine)?;
 
                         // 3c. Sign via Python (returns 64-byte Ed25519 sig).
                         let canonical_pybytes = PyBytes::new(py, &canonical);

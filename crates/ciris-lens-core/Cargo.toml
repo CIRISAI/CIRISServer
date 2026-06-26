@@ -37,6 +37,11 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v7.0.1
 # release; MAJOR 4→5 but additive for lens-core) — single verify version.
 # features mirror edge's keyring pin exactly.
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v7.5.0", version = "7", features = ["software", "pqc-ml-dsa"] }
+# verify-core for `fedcode::derive_key_id` — the lens seal path must stamp the
+# DERIVED federation key_id (`derive_key_id(<alias>, <ed25519 pubkey>)`), the id
+# `receive_and_persist` verifies against, NOT the bare `local_key_id` alias
+# (CIRISServer#118; same class as the closed CIRISEdge#203). Single verify version.
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v7.5.0", version = "7" }
 
 # persist's `sqlite` feature: relay mode persists inbound batches via
 # `Engine::receive_and_persist` + reads `Engine::sqlite_backend()` for
