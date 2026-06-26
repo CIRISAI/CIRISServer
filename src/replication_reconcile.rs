@@ -51,11 +51,15 @@ use crate::config_reconcile::ResolvedConfig;
 ///
 /// A directory read error returns `Err` (the caller logs + skips the tick); this
 /// fn itself never panics.
+///
+/// Returns the number of converged consent peers so the controller loop can log
+/// at INFO only on a genuine change (and `debug!` otherwise — a steady count
+/// every cadence is noise on an idle node).
 pub async fn reconcile_once(
     engine: &Arc<Engine>,
     node_key_id: &str,
     runtime: &Arc<ReplicationRuntime>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     // Desired topology from the corpus (the consent objects ARE the topology).
     let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
 
@@ -94,12 +98,14 @@ pub async fn reconcile_once(
         anyhow::bail!("replication set_peers failed to converge: {e}");
     }
 
-    tracing::info!(
+    // Steady-state per-tick detail (the controller loop logs the INFO line only
+    // when this count actually changes, so an idle node doesn't spam INFO).
+    tracing::debug!(
         consent_peers = count,
-        "replication converged to {count} consent peers",
+        "replication reconcile tick: converged to {count} consent peers",
     );
 
-    Ok(())
+    Ok(count)
 }
 
 /// Spawn the reconcile controller loop. Returns the task handle (held by the
@@ -134,6 +140,11 @@ pub fn spawn(
 
         // An initial reconcile is already implied by the first immediate
         // interval.tick(); no extra pass needed.
+        //
+        // Only log the converged-peers INFO line when the count CHANGES from the
+        // previous cycle (e.g. 0→2, 2→0); a steady count logs at debug! inside
+        // reconcile_once so an idle node doesn't spam INFO every cadence.
+        let mut last_logged: Option<usize> = None;
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
@@ -163,9 +174,22 @@ pub fn spawn(
                 );
             }
 
-            if let Err(e) = reconcile_once(&engine, &node_key_id, &runtime).await {
-                // Never panic the controller on a transient directory read error.
-                tracing::warn!(error = %e, "replication reconcile tick failed — skipping");
+            match reconcile_once(&engine, &node_key_id, &runtime).await {
+                Ok(count) => {
+                    // INFO only on a genuine transition; otherwise the per-tick
+                    // detail already went to debug! inside reconcile_once.
+                    if last_logged != Some(count) {
+                        tracing::info!(
+                            consent_peers = count,
+                            "replication converged to {count} consent peers",
+                        );
+                        last_logged = Some(count);
+                    }
+                }
+                Err(e) => {
+                    // Never panic the controller on a transient directory read error.
+                    tracing::warn!(error = %e, "replication reconcile tick failed — skipping");
+                }
             }
         }
     })

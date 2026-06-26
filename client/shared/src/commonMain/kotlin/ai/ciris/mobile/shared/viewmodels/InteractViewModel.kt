@@ -1825,6 +1825,14 @@ class InteractViewModel(
      */
     private fun startSseStream() {
         val method = "startSseStream"
+        // NODE mode (a fabric node with no agent brain) has no reasoning stream:
+        // the SSE endpoint immediately disconnects, so starting it just spams
+        // "SSE disconnected / Reconnecting" forever. Skip it entirely; AGENT
+        // mode (real reasoning stream) still runs below.
+        if (apiClient.isNodeMode()) {
+            logInfo(method, "NODE mode — no agent reasoning stream, SSE skipped")
+            return
+        }
         logInfo(method, "Starting SSE reasoning stream")
 
         sseJob = viewModelScope.launch {

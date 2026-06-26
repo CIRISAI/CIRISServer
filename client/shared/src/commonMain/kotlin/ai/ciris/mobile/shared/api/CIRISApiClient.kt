@@ -5974,7 +5974,9 @@ class CIRISApiClient(
 
     suspend fun getSystemHealth(): SystemHealthData {
         val method = "getSystemHealth"
-        logInfo(method, "Fetching system health")
+        // Per-poll fetch (every 30s) — debug; the INFO line below fires only when
+        // something is actually wrong, so a steady status=ok node doesn't spam.
+        logDebug(method, "Fetching system health")
 
         return try {
             // Use direct HTTP call to properly parse warnings
@@ -6021,7 +6023,15 @@ class CIRISApiClient(
             // Parse degraded_mode flag
             val degradedMode = data["degraded_mode"]?.jsonPrimitive?.boolean ?: false
 
-            logInfo(method, "System health: status=$status, cognitiveState=$cognitiveState, warnings=${warnings.size}, degradedMode=$degradedMode")
+            // Only surface at INFO when something is actually wrong (status not
+            // ok, degraded mode, or warnings present). A steady "status=ok" every
+            // 30s is noise → debug.
+            val healthMsg = "System health: status=$status, cognitiveState=$cognitiveState, warnings=${warnings.size}, degradedMode=$degradedMode"
+            if (status != "ok" || degradedMode || warnings.isNotEmpty()) {
+                logInfo(method, healthMsg)
+            } else {
+                logDebug(method, healthMsg)
+            }
 
             SystemHealthData(
                 status = status,
