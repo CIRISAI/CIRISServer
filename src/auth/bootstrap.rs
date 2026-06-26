@@ -997,7 +997,7 @@ struct OwnedNodesResponse {
 
 async fn owned_nodes(State(st): State<SetupState>) -> Response {
     let owner = super::ownership::is_owner_bound(&st.engine, &st.node_key_id).await;
-    let nodes = match &owner {
+    let nodes: Vec<OwnedNode> = match &owner {
         Some(user) => super::ownership::nodes_owned_by(&st.engine, user)
             .await
             .into_iter()
@@ -1008,6 +1008,21 @@ async fn owned_nodes(State(st): State<SetupState>) -> Response {
             .collect(),
         None => Vec::new(),
     };
+    // "Stupid-clear" diagnostic: the owned-nodes projection is the source of truth
+    // for the client's node switcher. Log WHO owns this node + EXACTLY which nodes
+    // it returns, so an empty list (e.g. queried before the self-claim) is obvious
+    // in the node log instead of a guess.
+    tracing::info!(
+        node_key_id = %st.node_key_id,
+        owner = owner.as_deref().unwrap_or("<UNCLAIMED>"),
+        owned_count = nodes.len(),
+        owned = %nodes
+            .iter()
+            .map(|n| format!("{}(self={})", n.key_id, n.is_self))
+            .collect::<Vec<_>>()
+            .join(", "),
+        "GET /v1/setup/owned-nodes — CEG owned-nodes projection (drives the node switcher)"
+    );
     (StatusCode::OK, Json(OwnedNodesResponse { owner, nodes })).into_response()
 }
 

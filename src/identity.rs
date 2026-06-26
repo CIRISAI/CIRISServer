@@ -324,6 +324,21 @@ pub async fn mint_user_identity(
     // 1. Open the user's Ed25519 signing half (YubiKey / sealed / software).
     let hw_signer = open_user_signer(&backend, &cfg, true)?;
     let hardware_type = format!("{:?}", hw_signer.hardware_type());
+    // Honest custody log (the "did it actually use the Secure Enclave?" answer).
+    // The keyring names its macOS store `SecureEnclaveSecureBlobStorage` even when
+    // SE generation fails with errSecMissingEntitlement and it falls back to a
+    // keychain/software P-256 wrapper — so its "Using Secure Enclave-backed" line is
+    // misleading. The signer's REAL tier is reported here: a fallback shows
+    // `SoftwareOnly` / hw_backed=false. (verify keyring log fix tracked upstream.)
+    let hw_backed = !hardware_type.contains("SoftwareOnly");
+    tracing::info!(
+        backend = backend.label(),
+        custody = %hardware_type,
+        hw_backed,
+        "USER fed-ID mint — ACTUAL custody class (hw_backed=false ⇒ no hardware secure \
+         storage available to this process; e.g. an unsigned/unentitled macOS CLI cannot \
+         reach the Secure Enclave and falls back to keychain/software)"
+    );
     let hw_signer: Arc<dyn HardwareSigner> = Arc::from(hw_signer);
 
     // #247 (CIRISVerify#89): the RECORDED federation key_id is the FSD-003 DERIVED
