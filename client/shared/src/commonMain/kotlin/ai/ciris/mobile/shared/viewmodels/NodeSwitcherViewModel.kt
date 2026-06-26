@@ -219,7 +219,7 @@ class NodeSwitcherViewModel(
         _error.value = null
         viewModelScope.launch {
             try {
-                PlatformLogger.i(TAG, "[switchTo] Switching to node '${profile.name}' @ ${profile.baseUrl}")
+                PlatformLogger.i(TAG, "[switchTo] Switching to node '${profile.name}' @ ${profile.baseUrl} (local=${profile.isLocal})")
                 apiClient.updateBaseUrl(profile.baseUrl)
                 // Apply (or clear) the node's session token on the shared client.
                 if (profile.isAuthenticated) {
@@ -229,8 +229,24 @@ class NodeSwitcherViewModel(
                     secureStorage.saveAccessToken(profile.sessionToken)
                 }
                 val now = kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
-                _profiles.value = store.markActive(profile.id, now)
+                // Persist active-id (+ bump lastUsed for any STORED match) so a cold
+                // start restores this node. NOTE: markActive returns the *stored*
+                // list only, which does NOT contain projection-only entries (the
+                // local node, owned remotes not yet saved). Assigning that list to
+                // _profiles would DROP the just-activated local node from the UI —
+                // the activate-makes-it-disappear bug. Instead, keep the current
+                // in-memory merged list and only flip active-id + bump lastUsed in
+                // place, so every node (local or remote) stays listed.
+                store.markActive(profile.id, now)
                 _activeProfileId.value = profile.id
+                _profiles.value = _profiles.value.map {
+                    if (it.id == profile.id) it.copy(lastUsedEpochMs = now) else it
+                }
+                PlatformLogger.i(
+                    TAG,
+                    "[switchTo] active='${profile.id}' — node list (${_profiles.value.size}): " +
+                        _profiles.value.joinToString { "${it.name}(local=${it.isLocal}, active=${it.id == profile.id})" },
+                )
             } catch (e: Exception) {
                 PlatformLogger.e(TAG, "[switchTo] Failed: ${e.message}", e)
                 _error.value = "Could not switch to ${profile.name}: ${e.message}"
