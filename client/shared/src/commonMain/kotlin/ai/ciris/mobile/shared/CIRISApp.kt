@@ -2851,6 +2851,12 @@ fun CIRISApp(
                     viewModel = nodeSwitcherViewModel,
                     onBack = { currentScreen = Screen.Interact },
                     onClaimNode = { currentScreen = Screen.ClaimNode },
+                    // Graph-view data sources: delegations (you → agent),
+                    // consent:replication (node ↔ node), plus the shared API
+                    // client that powers the live neural background.
+                    delegationsViewModel = delegationsViewModel,
+                    consentObjectsViewModel = consentObjectsViewModel,
+                    apiClient = apiClient,
                 )
             }
 

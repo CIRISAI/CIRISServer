@@ -1,17 +1,23 @@
 package ai.ciris.mobile.shared.ui.screens
 
+import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.localization.localizedString
 import ai.ciris.mobile.shared.models.NodeProfile
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.nav.LocalIsCompactWindow
+import ai.ciris.mobile.shared.ui.screens.graph.NodeGraphView
 import ai.ciris.mobile.shared.viewmodels.BootstrapPhase
+import ai.ciris.mobile.shared.viewmodels.ConsentObjectsState
+import ai.ciris.mobile.shared.viewmodels.ConsentObjectsViewModel
+import ai.ciris.mobile.shared.viewmodels.DelegationsViewModel
 import ai.ciris.mobile.shared.viewmodels.NodeSwitcherViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,6 +33,7 @@ import androidx.compose.foundation.background
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -78,24 +85,15 @@ fun ManageNodesScreen(
     onBack: () -> Unit,
     /** Navigate to the claim-ownership flow (ClaimNodeScreen). */
     onClaimNode: () -> Unit,
+    /** Delegations (owner → agent edges) — drives the graph's delegation/agent vertices. */
+    delegationsViewModel: DelegationsViewModel? = null,
+    /** consent:replication peering (node ↔ node) — drives the graph's consent edges. */
+    consentObjectsViewModel: ConsentObjectsViewModel? = null,
+    /** Shared API client — powers the live neural background behind the graph. */
+    apiClient: CIRISApiClient? = null,
 ) {
-    val profiles by viewModel.profiles.collectAsState()
-    val activeId by viewModel.activeProfileId.collectAsState()
-    val isSwitching by viewModel.isSwitching.collectAsState()
-    val error by viewModel.error.collectAsState()
-    val bootstrap by viewModel.bootstrap.collectAsState()
-
-    // Add-by-* panel state.
-    var showAddByCode by remember { mutableStateOf(false) }
-    var showAddByUrl by remember { mutableStateOf(false) }
-    var codeInput by remember { mutableStateOf("") }
-    var codeUrlOverride by remember { mutableStateOf("") }
-    var urlName by remember { mutableStateOf("") }
-    var urlInput by remember { mutableStateOf("") }
-
-    // Per-row edit state — id of the profile currently being edited (rename).
-    var editingId by remember { mutableStateOf<String?>(null) }
-    var editName by remember { mutableStateOf("") }
+    // graph ⇄ list toggle — defaults to GRAPH (the headline node-mesh view).
+    var view by remember { mutableStateOf("graph") }
 
     Scaffold(
         topBar = {
@@ -120,18 +118,121 @@ fun ManageNodesScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(padding),
         ) {
-            Text(
-                text = localizedString("mobile.manage_nodes_subtitle"),
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // ── Graph / List segmented selector ──────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ViewTab("Graph", view == "graph", "btn_nodes_view_graph") { view = "graph" }
+                ViewTab("List", view == "list", "btn_nodes_view_list") { view = "list" }
+            }
 
-            error?.let { msg ->
+            if (view == "graph") {
+                val profiles by viewModel.profiles.collectAsState()
+                val activeId by viewModel.activeProfileId.collectAsState()
+                val delegations = if (delegationsViewModel != null) {
+                    delegationsViewModel.delegations.collectAsState().value
+                } else {
+                    emptyList()
+                }
+                val consent = if (consentObjectsViewModel != null) {
+                    consentObjectsViewModel.state.collectAsState().value
+                } else {
+                    ConsentObjectsState()
+                }
+                NodeGraphView(
+                    profiles = profiles,
+                    activeProfileId = activeId,
+                    delegations = delegations,
+                    consent = consent,
+                    apiClient = apiClient,
+                    onSwitchNode = { viewModel.switchTo(it) },
+                    onRemoveNode = { viewModel.removeProfile(it.id) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 16.dp),
+                )
+            } else {
+                NodesListView(
+                    viewModel = viewModel,
+                    onClaimNode = onClaimNode,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/** One segmented selector button. Selected = filled-tonal, unselected = outlined. */
+@Composable
+private fun RowScope.ViewTab(
+    label: String,
+    selected: Boolean,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    if (selected) {
+        FilledTonalButton(
+            onClick = onClick,
+            modifier = Modifier.weight(1f).testableClickable(testTag) { onClick() },
+        ) {
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            modifier = Modifier.weight(1f).testableClickable(testTag) { onClick() },
+        ) {
+            Text(label, fontSize = 12.sp)
+        }
+    }
+}
+
+/**
+ * The LIST half of the toggle — the original Manage Nodes CRUD surface, intact.
+ */
+@Composable
+private fun NodesListView(
+    viewModel: NodeSwitcherViewModel,
+    onClaimNode: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val profiles by viewModel.profiles.collectAsState()
+    val activeId by viewModel.activeProfileId.collectAsState()
+    val isSwitching by viewModel.isSwitching.collectAsState()
+    val error by viewModel.error.collectAsState()
+    val bootstrap by viewModel.bootstrap.collectAsState()
+
+    // Add-by-* panel state.
+    var showAddByCode by remember { mutableStateOf(false) }
+    var showAddByUrl by remember { mutableStateOf(false) }
+    var codeInput by remember { mutableStateOf("") }
+    var codeUrlOverride by remember { mutableStateOf("") }
+    var urlName by remember { mutableStateOf("") }
+    var urlInput by remember { mutableStateOf("") }
+
+    // Per-row edit state — id of the profile currently being edited (rename).
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var editName by remember { mutableStateOf("") }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = localizedString("mobile.manage_nodes_subtitle"),
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        error?.let { msg ->
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
                     shape = RoundedCornerShape(6.dp),
@@ -362,7 +463,6 @@ fun ManageNodesScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
 }
 
 @Composable
