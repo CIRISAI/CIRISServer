@@ -28,15 +28,14 @@
 //!
 //! ## What this gate asserts
 //!
-//! 1. AGREEMENT      — initiator and responder derive the identical 32-byte key.
-//! 2. TAMPER CLOSED  — a flipped / dropped ML-KEM ciphertext NEVER yields an
-//!                     agreed key (error, or a non-matching key — never a
-//!                     silent classical-only success).
-//! 3. HYBRID REQUIRED— `KexAlgorithm::HybridRequired` (the HNDL-strict policy
-//!                     flag) rejects a classical-only peer instead of degrading;
-//!                     and there is NO classical-only success path inside a
-//!                     hybrid message (the hybrid wire form always carries the
-//!                     ML-KEM ciphertext).
+//! 1. AGREEMENT — initiator and responder derive the identical 32-byte key.
+//! 2. TAMPER CLOSED — a flipped / dropped ML-KEM ciphertext NEVER yields an
+//!    agreed key (error, or a non-matching key — never a silent classical-only
+//!    success).
+//! 3. HYBRID REQUIRED — `KexAlgorithm::HybridRequired` (the HNDL-strict policy
+//!    flag) rejects a classical-only peer instead of degrading; and there is NO
+//!    classical-only success path inside a hybrid message (the hybrid wire form
+//!    always carries the ML-KEM ciphertext).
 
 use ciris_crypto::{ml_kem, x25519};
 use ciris_edge::transport::federation_session::{
@@ -220,8 +219,8 @@ fn hybrid_required_succeeds_and_agrees_against_hybrid_peer() {
     let responder = fresh_responder();
     let peer = advertise_hybrid(&responder);
 
-    let (msg, initiator_key) =
-        FederationSession::initiate(&peer, KexAlgorithm::HybridRequired).expect("hybrid-required initiate");
+    let (msg, initiator_key) = FederationSession::initiate(&peer, KexAlgorithm::HybridRequired)
+        .expect("hybrid-required initiate");
     assert_eq!(msg.algorithm(), ALGORITHM_HYBRID_V1);
     let responder_key = FederationSession::respond(&responder, &msg).expect("respond");
     assert_eq!(
