@@ -778,6 +778,11 @@ fun CIRISApp(
                 // Node mode has no 22 cognitive service lights — drive the count
                 // from the gate rather than the hardcoded agent default.
                 startupViewModel.setClientMode(mode)
+                // Push the gate into the shared API client so EVERY poller that
+                // shares it stops calling AGENT-only endpoints (history / billing
+                // / llm config / WA / adapters / capacity / agent audit / verify)
+                // on a bare node — those 404/405 and just flood the log.
+                apiClient.setClientMode(mode)
                 platformLog(
                     TAG,
                     "[INFO][gate] clientMode=$mode (role=${nodeHealth.role}, " +

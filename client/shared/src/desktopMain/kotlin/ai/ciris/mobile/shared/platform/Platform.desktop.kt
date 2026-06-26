@@ -6,7 +6,11 @@ import java.net.URI
 actual fun getPlatform(): Platform = Platform.DESKTOP
 
 actual fun platformLog(tag: String, message: String) {
+    // Keep stdout (matches the rest of the desktop logging), AND mirror to the
+    // persistent log file at ~/ciris/logs/kmp_app.log (same sink PlatformLogger
+    // uses) so desktop diagnostics survive past the ephemeral console.
     println("[$tag] $message")
+    KMPFileLogger.log("INFO", tag, message)
 }
 
 actual fun getDeviceDebugInfo(): String {
