@@ -218,6 +218,14 @@ base64        = "0.22"
 chrono        = { version = "0.4", features = ["serde"] }
 serde_json    = "1"
 criterion     = { version = "0.5", features = ["async_tokio"] }
+# Tamper-side raw SQLite handle for the audit hash-chain conformance gate
+# (tests/audit_chain.rs): opens the engine's file-backed DB on a SECOND
+# connection to corrupt one stored row, the only way to land a tampered entry
+# (record_entry validates + rejects, so a broken row can't go in through the
+# trait). Pinned to persist's locked 0.31 + same features (NO `bundled` — links
+# the platform libsqlite3, matching persist's non-mobile target so the two
+# `links = "sqlite3"` crates unify to one symbol set).
+rusqlite      = { version = "0.31", features = ["chrono", "serde_json"] }
 # Drive the merged axum Router in-process for the HTTP trace-ingest test
 # (tests/ingest_http.rs): `ServiceExt::oneshot` + read the response body. tower
 # 0.5 / http-body-util 0.1 match axum 0.8's floor (already in-tree transitively).
