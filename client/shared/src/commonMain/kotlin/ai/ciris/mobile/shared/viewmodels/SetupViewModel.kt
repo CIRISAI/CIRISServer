@@ -165,6 +165,15 @@ class SetupViewModel(
     }
 
     companion object {
+        /**
+         * Scope carried on the under-18 stewardship request (CC 0.5.1 §2580).
+         * Names the adult's relationship to the minor as RESPONSIBILITY, not
+         * property — a steward is responsible *for* a ward, never a holder *of*
+         * one. Used as the interim delegation-offer scope until the dedicated
+         * minor steward-binding endpoint lands.
+         */
+        const val STEWARD_SCOPE = "steward:responsible-for"
+
         /** Canonical backend provider id for on-device Gemma 4 inference. */
         const val LOCAL_ON_DEVICE_PROVIDER_ID = "mobile_local"
 
@@ -812,8 +821,101 @@ class SetupViewModel(
             ageRange = _state.value.ageRange.copy(
                 selectedBandToken = if (band == AgeBand.MINOR) "minor" else "adult",
                 error = null,
-            )
+            ),
+            // Switching to ADULT clears any pending under-18 stewardship request
+            // (the adult self-claims as normal). Switching to MINOR keeps the
+            // existing state so a re-selection doesn't discard a generated request.
+            minorStewardship = if (band == AgeBand.ADULT) {
+                MinorStewardshipState()
+            } else {
+                _state.value.minorStewardship
+            },
         )
+    }
+
+    // ========== Under-18 Stewardship (CC 0.5.1 §2580 — minor-stewardship rule) ==
+
+    /**
+     * **Generate the under-18 STEWARDSHIP REQUEST** the minor hands to an over-18
+     * adult. Per CC 0.5.1 §2580 a `minor` user MUST NOT self-claim ownership and
+     * MUST have a live `delegates_to(adult-user → minor-user)` at all times; the
+     * adult's signature on that envelope IS the agreement-to-stewardship. The
+     * account is fail-secure: the minor cannot operate until a live adult steward
+     * accepts, and pauses again if the steward is ever withdrawn/superseded
+     * without replacement.
+     *
+     * The app holds NO keys. It DRIVES the LOCAL node to produce a hand-off
+     * artifact (a claim URL + PIN, mirroring the delegation-offer shape) that the
+     * minor gives to their adult. The adult opens it on their OWN device/session
+     * and ACCEPTS, at which point the adult's node mints + hybrid-signs the
+     * `delegates_to(adult → minor)` steward-binding in its substrate.
+     *
+     * INTERIM TRANSPORT: there is no dedicated minor steward-binding endpoint on
+     * ciris-server yet, so this reuses the existing delegation-offer surface
+     * (`POST /v1/auth/device/delegate`) with a `steward:*` scope purely to mint a
+     * URL+PIN to hand over. The DEDICATED endpoints needed are documented in the
+     * round report:
+     *   - mint the request:  `POST /v1/safety/minor-steward/request`
+     *       { minor_key_id } → { claim_url, pin, expires_in }
+     *   - adult accepts:     `POST /v1/safety/minor-steward/accept`
+     *       { pin } (adult owner session, age_band==adult) → signs
+     *       `delegates_to(adult-user → minor-user)` (CC 2.4.1); its
+     *       attesting_key_id == the adult = the agreement-to-stewardship.
+     *
+     * Failures are surfaced honestly and never silently self-claim — fail-secure.
+     */
+    fun requestMinorSteward() {
+        val client = apiClient as? CIRISApiClient
+        if (client == null) {
+            _state.value = _state.value.copy(
+                minorStewardship = _state.value.minorStewardship.copy(
+                    error = "Local node unavailable: API client does not support it",
+                )
+            )
+            return
+        }
+        val fed = _state.value.federationIdentity
+        // Name the request after the minor's federation identity so the adult can
+        // see WHO they are accepting responsibility for.
+        val minorLabel = fed.label.trim().ifBlank { fed.identityKeyId ?: "minor" }
+        _state.value = _state.value.copy(
+            minorStewardship = _state.value.minorStewardship.copy(inProgress = true, error = null)
+        )
+        viewModelScope.launch {
+            try {
+                // INTERIM: reuse the delegation-offer surface to produce the
+                // URL+PIN the minor hands over. Replace with the dedicated
+                // `/v1/safety/minor-steward/request` endpoint when it lands.
+                val offer = client.createDelegation(
+                    label = "steward-for-$minorLabel",
+                    mode = "create",
+                    scope = listOf(STEWARD_SCOPE),
+                    nodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                )
+                _state.value = _state.value.copy(
+                    minorStewardship = _state.value.minorStewardship.copy(
+                        inProgress = false,
+                        requested = true,
+                        requestUrl = offer.claimUrl,
+                        requestPin = offer.pin,
+                        expiresIn = offer.expiresIn,
+                        error = null,
+                    )
+                )
+                PlatformLogger.i(TAG, "requestMinorSteward: stewardship request generated for '$minorLabel'")
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "requestMinorSteward: failed to generate request: ${e.message}")
+                _state.value = _state.value.copy(
+                    minorStewardship = _state.value.minorStewardship.copy(
+                        inProgress = false,
+                        requested = false,
+                        error = "Couldn't create your stewardship request yet: " +
+                            "${e.message ?: "unknown error"}. You can try again, or an " +
+                            "adult can set up stewardship for you later.",
+                    )
+                )
+            }
+        }
     }
 
     // ========== LOCAL-node ownership self-claim (on COMPLETE) ===============
@@ -850,6 +952,21 @@ class SetupViewModel(
         capturedNodeCode: String? = null,
         cohortScope: String = "self",
     ) {
+        // FAIL-SECURE under-18 gate (CC 0.5.1 §2580): a minor MUST NOT self-claim
+        // ownership. The account stays steward-less (cannot operate) until a live
+        // adult steward accepts the `delegates_to(adult → minor)` out-of-band. Do
+        // NOT touch the local node's owner-binding here; surface the pending state.
+        if (_state.value.isMinorBand()) {
+            PlatformLogger.i(TAG, "claimLocalNodeOwnership: minor band — skipping self-claim (fail-secure, awaiting adult steward)")
+            _state.value = _state.value.copy(
+                ownershipClaim = _state.value.ownershipClaim.copy(
+                    inProgress = false,
+                    claimed = false,
+                    error = null,
+                )
+            )
+            return
+        }
         val client = apiClient as? CIRISApiClient
         if (client == null) {
             _state.value = _state.value.copy(

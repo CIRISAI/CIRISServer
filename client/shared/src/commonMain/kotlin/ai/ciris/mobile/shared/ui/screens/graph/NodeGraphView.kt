@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -79,8 +80,12 @@ import kotlin.math.sqrt
  *
  * EDGES are coloured / styled by the user's FOUR relationship CATEGORIES (see
  * [EdgeCategory]). A category is the SEMANTIC of a relationship; the raw data
- * sources map onto it (owner-binding → OWNERSHIP, delegation → PARTNERSHIP, plus
- * its agent→node half → OWNERSHIP, consent:replication → CONSENT, trust → TRUST).
+ * sources map onto it (owner-binding → STEWARDSHIP, delegation → PARTNERSHIP, plus
+ * its agent→node half → STEWARDSHIP, consent:replication → CONSENT, trust → TRUST).
+ *
+ * NOTE the CC 0.5.1 distinction the renderer encodes: STEWARDSHIP is OF a node
+ * (community/child) — you are responsible for it; PARTNERSHIP/delegation is TO an
+ * agent (or trusted person) — you hand them a duty. Different relationships.
  * Forbidden source/target combinations are NEVER drawn even when the underlying
  * data would suggest them — see [isAllowedEdge].
  *
@@ -93,15 +98,34 @@ import kotlin.math.sqrt
 enum class NodeVertexKind { FED_ID, NODE, AGENT }
 
 /**
+ * A clearly DISTINCT, recognizable glyph per vertex kind so the mesh reads at a
+ * glance: a person for the user's Fed ID, a server box for a node, a robot head
+ * for an agent.
+ */
+fun NodeVertexKind.glyph(): ImageVector = when (this) {
+    NodeVertexKind.FED_ID -> CIRISIcons.person   // person / identity
+    NodeVertexKind.NODE -> CIRISIcons.nodeBox    // server / node box
+    NodeVertexKind.AGENT -> CIRISIcons.robot     // robot / agent
+}
+
+/**
  * The user's four relationship CATEGORIES. Each is a distinct semantic with its
  * own allowed/forbidden topology (enforced by [isAllowedEdge]) and its own
  * colour/style + one-sentence legend.
  */
 enum class EdgeCategory {
-    /** Control of infrastructure. ALWAYS targets a node. */
-    OWNERSHIP,
+    /**
+     * STEWARDSHIP (CC 0.5.1) — you are the accountable, responsible party FOR a
+     * node / community / child. Responsibility, never property. ALWAYS targets a
+     * node (community / child vertices are not modelled yet). This is distinct
+     * from PARTNERSHIP/delegation, which is a duty handed TO an agent or person.
+     */
+    STEWARDSHIP,
 
-    /** A working relationship between you and agents (and agent↔agent via you). */
+    /**
+     * PARTNERSHIP / delegation — you hand a duty/agency TO an agent (or a trusted
+     * person). The relationship is WITH whoever you delegate to, not OF a thing.
+     */
     PARTNERSHIP,
 
     /** A scoped, revocable data flow from one point to another. */
@@ -156,8 +180,8 @@ private val NodeColor = Color(0xFF3B82F6)     // Blue — node
 private val AgentColor = Color(0xFF10B981)    // Green — agent
 
 // Edge palette — one distinct colour per relationship CATEGORY.
-private val OwnershipColor = Color(0xFF3B82F6)    // Blue   — control of infra
-private val PartnershipColor = Color(0xFF10B981)  // Green  — working relationship
+private val StewardshipColor = Color(0xFF3B82F6)  // Blue   — responsible FOR a node/community/child
+private val PartnershipColor = Color(0xFF10B981)  // Green  — delegation: a duty handed to an agent/person
 private val ConsentColor = Color(0xFF8B5CF6)      // Purple — scoped, revocable flow
 private val TrustColor = Color(0xFFF59E0B)        // Amber  — delegated domain authority
 
@@ -168,15 +192,17 @@ private const val FED_ID_VERTEX = "fedid:self"
  * source/target/category combination so the renderer never draws it, even when
  * the raw data would suggest one.
  *
- *  - OWNERSHIP   : ALWAYS targets a node (covers user→node, agent→node, node→node).
+ *  - STEWARDSHIP : OF a node — ALWAYS targets a node (covers user→node, agent→node,
+ *                  node→node; community/child are future node-like targets).
  *                  FORBIDDEN: user→user, user→agent, agent→community (≠ node).
- *  - PARTNERSHIP : you↔agent, or agent↔agent. FORBIDDEN: user↔user (that is FAMILY).
+ *  - PARTNERSHIP : delegation TO an agent (you↔agent, or agent↔agent). FORBIDDEN:
+ *                  user↔user (that is FAMILY).
  *  - CONSENT     : a scoped directional flow (today node→node).
  *  - TRUST       : delegated domain authority (no in-graph constraint modelled yet).
  */
 fun isAllowedEdge(category: EdgeCategory, source: NodeVertexKind, target: NodeVertexKind): Boolean =
     when (category) {
-        EdgeCategory.OWNERSHIP -> target == NodeVertexKind.NODE
+        EdgeCategory.STEWARDSHIP -> target == NodeVertexKind.NODE
         EdgeCategory.PARTNERSHIP -> {
             val kinds = listOf(source, target)
             kinds.all { it == NodeVertexKind.FED_ID || it == NodeVertexKind.AGENT } &&
@@ -274,30 +300,31 @@ fun buildNodeGraph(
         edges += NodeGraphEdge(source, target, category, state, scope, blanket)
     }
 
-    // ── OWNERSHIP: you → node (owner-binding) ───────────────────────────────
-    // Source: the owner-binding (delegates_to user→node) projected into
-    // NodeProfile.isOwned. Always targets a node → allowed.
+    // ── STEWARDSHIP: you → node (owner-binding) ─────────────────────────────
+    // Source: the steward-binding (delegates_to user→node) projected into
+    // NodeProfile.isOwned. You are responsible FOR the node → always targets a
+    // node → allowed.
     profiles.filter { it.isOwned }.forEach { p ->
-        addEdge(FED_ID_VERTEX, nodeVid(p), EdgeCategory.OWNERSHIP)
+        addEdge(FED_ID_VERTEX, nodeVid(p), EdgeCategory.STEWARDSHIP)
     }
 
-    // ── PARTNERSHIP: you → agent (delegation) ───────────────────────────────
+    // ── PARTNERSHIP: you → agent (delegation TO an agent) ────────────────────
     // Source: a device-auth grant. you↔agent is allowed; you↔user would be
     // FAMILY (forbidden here) and is excluded by isAllowedEdge.
     agentIds.forEach { clientId ->
         addEdge(FED_ID_VERTEX, agentVid(clientId), EdgeCategory.PARTNERSHIP)
     }
 
-    // ── OWNERSHIP: agent → node (the grant's authority over a node) ──────────
-    // A delegation whose target is a node = control of that infrastructure.
-    // Delegations are issued by the LOCAL node, so the agent's authority lands
-    // on the local node (fallback: active, then first).
+    // ── STEWARDSHIP: agent → node (the grant's responsibility for a node) ────
+    // A delegation whose target is a node = responsibility for that
+    // infrastructure. Delegations are issued by the LOCAL node, so the agent's
+    // stewardship lands on the local node (fallback: active, then first).
     val authorityNode = profiles.firstOrNull { it.isLocal }
         ?: profiles.firstOrNull { it.id == activeProfileId }
         ?: profiles.firstOrNull()
     if (authorityNode != null) {
         agentIds.forEach { clientId ->
-            addEdge(agentVid(clientId), nodeVid(authorityNode), EdgeCategory.OWNERSHIP)
+            addEdge(agentVid(clientId), nodeVid(authorityNode), EdgeCategory.STEWARDSHIP)
         }
     }
 
@@ -323,7 +350,7 @@ fun buildNodeGraph(
 }
 
 private fun EdgeCategory.color(): Color = when (this) {
-    EdgeCategory.OWNERSHIP -> OwnershipColor
+    EdgeCategory.STEWARDSHIP -> StewardshipColor
     EdgeCategory.PARTNERSHIP -> PartnershipColor
     EdgeCategory.CONSENT -> ConsentColor
     EdgeCategory.TRUST -> TrustColor
@@ -337,8 +364,8 @@ private fun NodeGraphEdge.dashed(): Boolean = when (category) {
 
 /** One plain-English sentence per category, for the legend + detail panel. */
 private fun EdgeCategory.legendLabel(): String = when (this) {
-    EdgeCategory.OWNERSHIP -> "Ownership — who controls a node (infrastructure)."
-    EdgeCategory.PARTNERSHIP -> "Partnership — a working relationship between you and agents."
+    EdgeCategory.STEWARDSHIP -> "Stewardship — you are responsible FOR a node/community/child, never an owner OF one."
+    EdgeCategory.PARTNERSHIP -> "Partnership / delegation — you hand a duty TO an agent (or a trusted person)."
     EdgeCategory.CONSENT -> "Consent — a scoped, revocable data flow from one point to another."
     EdgeCategory.TRUST -> "Trust — delegated authority over a whole domain (e.g. medical, legal)."
 }
@@ -467,23 +494,34 @@ fun NodeGraphView(
             }
         }
 
-        // ── Invisible per-vertex tap/test targets ───────────────────────────
-        // Canvas-drawn motes can't carry testTags, so we overlay a tiny
-        // transparent clickable box per vertex (tag node_graph_node_<key_id>).
-        // These also drive selection on platforms without gesture pointers.
+        // ── Per-vertex glyph overlay + tap/test targets ─────────────────────
+        // Canvas-drawn motes can't host an ImageVector or carry testTags, so we
+        // overlay a clickable box per vertex (tag node_graph_node_<key_id>) that
+        // also renders the kind's distinct glyph (person / server / robot) on top
+        // of the drawn disc. These also drive selection on platforms without
+        // gesture pointers.
         val density = LocalDensity.current
         data.vertices.forEach { v ->
             val screenX = viewport.transformX(v.x)
             val screenY = viewport.transformY(v.y)
             val rPx = (v.radius * viewport.scale).coerceAtLeast(14f)
             val sizeDp = with(density) { (rPx * 2).toDp() }
+            val glyphDp = with(density) { (rPx * 1.1f).toDp() }
             val tagKey = (v.keyId ?: v.id).replace(Regex("[^A-Za-z0-9_-]"), "_")
             Box(
                 modifier = Modifier
                     .offset { IntOffset((screenX - rPx).roundToInt(), (screenY - rPx).roundToInt()) }
                     .size(sizeDp)
                     .testableClickable("node_graph_node_$tagKey") { selectedId = v.id },
-            )
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = v.kind.glyph(),
+                    contentDescription = v.kind.name,
+                    tint = Color.White,
+                    modifier = Modifier.size(glyphDp),
+                )
+            }
         }
 
         // ── Legend (top-start) ──────────────────────────────────────────────
@@ -499,9 +537,9 @@ fun NodeGraphView(
                     color = GraphColors.LabelColor,
                     fontWeight = FontWeight.Bold,
                 )
-                LegendRow(FedIdColor, "you · Fed ID")
-                LegendRow(NodeColor, "node")
-                LegendRow(AgentColor, "agent")
+                LegendIconRow(NodeVertexKind.FED_ID.glyph(), FedIdColor, "you · Fed ID")
+                LegendIconRow(NodeVertexKind.NODE.glyph(), NodeColor, "node")
+                LegendIconRow(NodeVertexKind.AGENT.glyph(), AgentColor, "agent")
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = "Relationships",
@@ -513,6 +551,15 @@ fun NodeGraphView(
                 // always listed even when no trust objects exist yet, so the
                 // four-category model stays legible.
                 EdgeCategory.entries.forEach { cat -> LegendRow(cat.color(), cat.legendLabel()) }
+                Spacer(Modifier.height(2.dp))
+                // The CC 0.5.1 distinction, in one line: you DELEGATE to people /
+                // agents, but you STEWARD nodes / communities / children.
+                Text(
+                    text = "Delegate → agent/person · Steward → node/community/child",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = GraphColors.LabelColorMuted,
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
 
@@ -554,6 +601,15 @@ fun NodeGraphView(
 private fun LegendRow(color: Color, label: String) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(color))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = GraphColors.LabelColorMuted)
+    }
+}
+
+/** Legend row for a vertex KIND — shows the kind's distinct glyph, tinted. */
+@Composable
+private fun LegendIconRow(icon: ImageVector, color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(14.dp))
         Text(label, style = MaterialTheme.typography.labelSmall, color = GraphColors.LabelColorMuted)
     }
 }

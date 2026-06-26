@@ -130,6 +130,12 @@ private object SetupColors {
     val ErrorDark = semantic.onError
     val ErrorText = semantic.error
 
+    // Warning (amber) - derived from SemanticColors light mode. Used by the
+    // under-18 stewardship panel (protective, attention-drawing, but kind).
+    val WarningLight = semantic.surfaceWarning
+    val WarningDark = semantic.onWarning
+    val WarningText = semantic.warning
+
     // Gray for cards
     val GrayLight = Color(0xFFF3F4F6)
 
@@ -2710,6 +2716,14 @@ private fun AgeRangeStep(
             }
         }
 
+        // UNDER-18 STEWARDSHIP (CC 0.5.1 §2580). When the founder self-declares
+        // the `minor` band they cannot self-claim ownership; a kind, plain-English
+        // panel explains that an adult must accept responsibility (stewardship),
+        // and lets the minor generate a stewardship request to hand over.
+        if (age.selectedBandToken == "minor") {
+            MinorStewardshipCard(viewModel, state)
+        }
+
         // Child-safe explainer card — honest framing kept TRUE (matches the
         // age.rs honesty discipline: protective default; self-declared; the
         // subject controls their own band; misdeclaration is never punitive).
@@ -2786,6 +2800,198 @@ private fun AgeRangeStep(
             color = SetupColors.TextSecondary,
             fontSize = 12.sp,
         )
+    }
+}
+
+/**
+ * UNDER-18 STEWARDSHIP panel (CIRIS Constitution 0.5.1 §2580 — minor-stewardship
+ * rule). Shown inside [AgeRangeStep] when the founder selects the `minor` band.
+ *
+ * A minor MUST NOT self-claim ownership; instead an over-18 adult must accept
+ * responsibility (stewardship) by signing a live `delegates_to(adult → minor)`.
+ * This panel (a) explains that kindly and plainly, (b) lets the minor generate a
+ * stewardship request — a code/URL + PIN they hand to their adult — and (c) makes
+ * the fail-secure posture explicit: the account cannot operate until a live adult
+ * steward accepts, and pauses again if the steward is ever removed.
+ */
+@Composable
+private fun MinorStewardshipCard(
+    viewModel: SetupViewModel,
+    state: SetupFormState,
+) {
+    val steward = state.minorStewardship
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = SetupColors.WarningLight,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .testable("minor_stewardship_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 8.dp)
+            ) {
+                Text(text = "🧡", fontSize = 20.sp, modifier = Modifier.padding(end = 8.dp))
+                Text(
+                    text = localizedString("mobile.setup_minor_title"),
+                    color = SetupColors.WarningDark,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Kind, plain-English explanation of WHY and WHAT stewardship is.
+            Text(
+                text = localizedString("mobile.setup_minor_explainer"),
+                color = SetupColors.WarningText,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
+
+            // Fail-secure note — the account cannot operate until an adult accepts.
+            Text(
+                text = localizedString("mobile.setup_minor_failsecure"),
+                color = SetupColors.WarningText,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(bottom = 14.dp)
+            )
+
+            when {
+                // A request was generated — show the hand-off code/URL + PIN.
+                steward.requested -> {
+                    Text(
+                        text = localizedString("mobile.setup_minor_handoff_title"),
+                        color = SetupColors.WarningDark,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    Text(
+                        text = localizedString("mobile.setup_minor_handoff_body"),
+                        color = SetupColors.WarningText,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    // The PIN the adult enters to accept stewardship.
+                    steward.requestPin?.let { pin ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SetupColors.InfoLight,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = localizedString("mobile.setup_minor_pin_label"),
+                                    color = SetupColors.TextSecondary,
+                                    fontSize = 11.sp,
+                                )
+                                Text(
+                                    text = pin,
+                                    color = SetupColors.InfoDark,
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .padding(top = 2.dp)
+                                        .testable("minor_steward_pin", pin)
+                                )
+                            }
+                        }
+                    }
+                    // The claim URL the adult opens on their own device to accept.
+                    steward.requestUrl?.let { url ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SetupColors.InfoLight,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = localizedString("mobile.setup_minor_url_label"),
+                                    color = SetupColors.TextSecondary,
+                                    fontSize = 11.sp,
+                                )
+                                Text(
+                                    text = url,
+                                    color = SetupColors.InfoDark,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier
+                                        .padding(top = 2.dp)
+                                        .testable("minor_steward_url", url)
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = localizedString("mobile.setup_minor_pending"),
+                        color = SetupColors.WarningDark,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+
+                // In flight.
+                steward.inProgress -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = SetupColors.Primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = localizedString("mobile.setup_minor_requesting"),
+                            color = SetupColors.WarningText,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+
+                // Initial state — offer the "ask an adult" button.
+                else -> {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = SetupColors.Primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testableClickable("btn_request_steward") {
+                                viewModel.requestMinorSteward()
+                            }
+                    ) {
+                        Text(
+                            text = localizedString("mobile.setup_minor_request_btn"),
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 14.dp)
+                        )
+                    }
+                }
+            }
+
+            steward.error?.let { err ->
+                Text(
+                    text = err,
+                    color = SetupColors.ErrorText,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+        }
     }
 }
 

@@ -159,6 +159,40 @@ fun DelegationsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
+            // ── Delegate vs Steward explainer (CC 0.5.1) ─────────────────────
+            // Two DIFFERENT relationships the user must not conflate:
+            //  • Delegate → TO an agent or trusted person (a duty/agency) — THIS page.
+            //  • Steward  → OF a node / community / child (accountable responsibility)
+            //    — managed under Nodes, not here.
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth().testable("delegations_relationship_explainer"),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text(
+                        "Two different relationships",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    RelationshipRow(
+                        icon = CIRISIcons.robot,
+                        title = "Delegate → to an agent or person",
+                        body = "You hand a duty / agency TO someone (an agent or a trusted person) " +
+                            "so they can act for you. That's what this page does.",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    RelationshipRow(
+                        icon = CIRISIcons.nodeBox,
+                        title = "Steward → of a node, community, or child",
+                        body = "You are the accountable, responsible party FOR a node / community / " +
+                            "child — never an owner OF one. Manage those under Nodes, not here.",
+                    )
+                }
+            }
+
             // ── Messages (always visible across panes) ───────────────────────
             notice?.let { msg ->
                 Spacer(Modifier.height(8.dp))
@@ -235,6 +269,32 @@ fun DelegationsScreen(
                 )
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/** One row of the Delegate-vs-Steward explainer: glyph + bold title + body. */
+@Composable
+private fun RelationshipRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    body: String,
+) {
+    Row(verticalAlignment = Alignment.Top) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(title, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(
+                body,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

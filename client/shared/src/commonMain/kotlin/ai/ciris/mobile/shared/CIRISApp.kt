@@ -676,6 +676,11 @@ fun CIRISApp(
     val delegationsViewModel: ai.ciris.mobile.shared.viewmodels.DelegationsViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.DelegationsViewModel(apiClient)
     }
+    // Reverse-quorum moderation (CC 0.5.1 §4.5.13) — drives the per-content
+    // "raise with the community" affordance + 48h-window proposal flow.
+    val moderationViewModel: ai.ciris.mobile.shared.viewmodels.ModerationViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.ModerationViewModel(apiClient)
+    }
     val identityManagementViewModel: ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel(apiClient)
     }
@@ -1866,6 +1871,7 @@ fun CIRISApp(
 
                     InteractScreen(
                         viewModel = interactViewModel,
+                        moderationViewModel = moderationViewModel,
                         onNavigateBack = { /* Already at root */ },
                         onSessionExpired = {
                             // Navigate to login screen when session expires

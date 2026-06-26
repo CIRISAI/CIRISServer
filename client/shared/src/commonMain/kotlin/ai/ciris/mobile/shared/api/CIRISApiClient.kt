@@ -111,6 +111,21 @@ data class AdapterLoadResult(
 )
 
 /**
+ * Result of a CC 4.5.13 reverse-quorum moderation PROPOSAL (the
+ * open-labeling / report→`scores` path — anyone MAY propose).
+ *
+ * Both fields are best-effort: the server route is not yet implemented
+ * (see [CIRISApiClient.proposeModeration]) so [contributionId] /
+ * [windowClosesAt] may be null even on a 2xx. The 48-hour window is the
+ * constitutional default — the UI states it regardless of whether the
+ * server echoes a concrete close time.
+ */
+data class ModerationProposalResult(
+    val contributionId: String? = null,
+    val windowClosesAt: String? = null,
+)
+
+/**
  * LLM configuration data for display in settings
  */
 data class LlmConfigData(
@@ -1125,6 +1140,78 @@ class CIRISApiClient(
             decodeFederationEnvelope(response.bodyAsText(), FederationContentResponse.serializer())
         } catch (e: Exception) {
             logException(method, e, "contentId=$contentId, peer=$peerKeyId")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Propose a moderation action on a piece of content — the CC 4.5.13
+     * **reverse-quorum open-labeling path**. ANYONE (any adult member)
+     * MAY propose; this is deliberately NOT the authoritative duty-holder
+     * action (that is the gated ``POST /v1/safety/moderation``). It files
+     * a report→``scores`` Contribution against [targetId] and opens the
+     * **48-hour participation window** within which a present
+     * moderator/steward may act unilaterally, else the community
+     * (reverse-quorum of live responders) decides.
+     *
+     * [action] is the wire token — one of ``report`` | ``takedown`` |
+     * ``question`` (see [ai.ciris.mobile.shared.viewmodels.ModerationAction]).
+     * [reason] is an optional free-form rationale.
+     *
+     * Hits ``POST /v1/safety/reports`` — the FSD/MODERATION_CHILD_SAFETY.md
+     * §4.4 "report → surface → act" surface. **NOTE: this server route is
+     * NOT YET IMPLEMENTED** (there is no ``src/safety/report.rs`` today;
+     * only ``/v1/safety/moderation``, the gated duty-holder action). This
+     * client targets the FSD-specified path so the UI affordance ships
+     * ahead of the route; see the round report for the exact contract the
+     * server must honor. The body is tolerant of either a ``{"data": …}``
+     * envelope or a bare object on response.
+     */
+    suspend fun proposeModeration(
+        targetId: String,
+        action: String,
+        reason: String? = null,
+    ): ModerationProposalResult {
+        val method = "proposeModeration"
+        logInfo(method, "POST /v1/safety/reports target=$targetId action=$action reason=${reason?.take(40)}")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$baseUrl/v1/safety/reports") {
+                authHeader()?.let { header("Authorization", it) }
+                contentType(ContentType.Application.Json)
+                setBody(jsonConfig.encodeToString(
+                    JsonObject.serializer(),
+                    buildJsonObject {
+                        // The CC 4.5.5 target — content/contributor the report names.
+                        put("target_key_id", targetId)
+                        // report | takedown | question (the proposed action).
+                        put("action", action)
+                        // The open-labeling allegation token; rides `scores`.
+                        put("allegation_type", "moderation:proposed:$action")
+                        if (!reason.isNullOrBlank()) put("reason", reason)
+                    },
+                ))
+            }
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("Moderation proposal failed: ${response.status}")
+            }
+            // Tolerant parse — the window/contribution id may or may not be
+            // echoed (the route is not yet live). Absence is not an error:
+            // the 48h window is the constitutional default.
+            val rawBody = response.bodyAsText()
+            val root = runCatching { Json.parseToJsonElement(rawBody).jsonObject }.getOrNull()
+            val data = root?.get("data")?.let {
+                runCatching { it.jsonObject }.getOrNull()
+            } ?: root
+            ModerationProposalResult(
+                contributionId = data?.get("contribution_id")?.jsonPrimitive?.contentOrNull
+                    ?: data?.get("attestation_id")?.jsonPrimitive?.contentOrNull,
+                windowClosesAt = data?.get("window_closes_at")?.jsonPrimitive?.contentOrNull,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "target=$targetId action=$action")
             throw e
         } finally {
             client.close()

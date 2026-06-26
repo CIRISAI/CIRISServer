@@ -372,6 +372,42 @@ data class AgeRangeSetupState(
 )
 
 /**
+ * State for the UNDER-18 STEWARDSHIP request (CIRIS Constitution 0.5.1 §2580 —
+ * the minor-stewardship rule).
+ *
+ * When the founder self-declares the `minor` age band they MUST NOT self-claim
+ * ownership; instead the wizard produces a **stewardship request** the minor
+ * hands to an over-18 adult. The adult's signature on a live
+ * `delegates_to(adult-user → minor-user)` (CC 2.4.1) IS the agreement to be the
+ * accountable responsible party (CC 0.5.1 §2580). Until a live adult steward
+ * accepts, the minor's account is **fail-secure**: it cannot operate. If the
+ * steward is ever withdrawn/superseded-without-replacement the account pauses
+ * until re-stewarded — identical posture to a steward-less node/agent.
+ *
+ * The app holds NO keys. This state only tracks the hand-off artifact (a claim
+ * URL + PIN, mirroring the delegation-offer shape) and the in-flight/result of
+ * generating it. The adult ACCEPTS out-of-band on their own device/session.
+ */
+@Serializable
+data class MinorStewardshipState(
+    val inProgress: Boolean = false,
+    /** True once a hand-off stewardship request artifact has been generated. */
+    val requested: Boolean = false,
+    /** The claim URL the minor hands to their adult steward (the adult opens it
+     *  on their own device to ACCEPT and sign `delegates_to(adult → minor)`). */
+    val requestUrl: String? = null,
+    /** The short human-handover PIN the adult enters to accept stewardship. */
+    val requestPin: String? = null,
+    /** Seconds until the request PIN expires. */
+    val expiresIn: Long = 0,
+    /** True once a live adult steward has accepted (account unlocked). Stays
+     *  false through the wizard — acceptance happens out-of-band — so the
+     *  account remains fail-secure until the steward signs. */
+    val stewardAccepted: Boolean = false,
+    val error: String? = null,
+)
+
+/**
  * State for the LOCAL-node ownership self-claim performed on setup COMPLETE.
  *
  * After the local account + federation ID exist, the setup flow drives the LOCAL
@@ -423,6 +459,11 @@ data class SetupFormState(
 
     // Age-range step state (AGE_RANGE step — the foundational protective gate)
     val ageRange: AgeRangeSetupState = AgeRangeSetupState(),
+
+    // Under-18 stewardship request state (CC 0.5.1 §2580). Populated only when
+    // the founder self-declares the `minor` band; the minor cannot self-claim
+    // ownership and must hand an adult a stewardship request to be accepted.
+    val minorStewardship: MinorStewardshipState = MinorStewardshipState(),
 
     // LOCAL-node ownership self-claim state (driven on setup COMPLETE)
     val ownershipClaim: NodeOwnershipClaimState = NodeOwnershipClaimState(),
@@ -546,6 +587,18 @@ data class SetupFormState(
     }
 
     /**
+     * Did the founder self-declare the `minor` (under-18) age band?
+     *
+     * When true the minor-stewardship rule (CC 0.5.1 §2580) applies: the minor
+     * MUST NOT self-claim ownership and must instead hand an over-18 adult a
+     * stewardship request. Drives the AGE_RANGE step's under-18 branch and the
+     * fail-secure skip of the local-node self-claim on COMPLETE.
+     */
+    fun isMinorBand(): Boolean {
+        return ageRange.selectedBandToken == "minor"
+    }
+
+    /**
      * Check if local user account fields should be shown.
      * Source: SetupViewModel.kt:133-135
      */
@@ -615,11 +668,15 @@ data class SetupFormState(
             }
 
             SetupStep.AGE_RANGE -> {
-                // The foundational protective gate. Always allow proceeding —
-                // declining to state resolves to the PROTECTIVE default (minor)
-                // and a band can be (re)stated later from the Safety surface.
-                // A failed record (node offline) must never trap the user.
-                true
+                // The foundational protective gate. ADULTS proceed freely —
+                // declining to state resolves to the PROTECTIVE default and a
+                // band can be (re)stated later from the Safety surface; a failed
+                // record (node offline) must never trap the user.
+                //
+                // MINORS are fail-secure (CC 0.5.1 §2580): an under-18 user MUST
+                // NOT self-claim ownership, so finishing requires that a
+                // stewardship request has been generated to hand to an adult.
+                if (isMinorBand()) minorStewardship.requested else true
             }
 
             SetupStep.ACCOUNT_AND_CONFIRMATION -> {
@@ -762,8 +819,13 @@ data class SetupFormState(
             }
 
             SetupStep.AGE_RANGE -> {
-                // Never blocks proceeding (declining = protective default).
-                null
+                // Adults: never blocked. Minors: must generate a stewardship
+                // request (fail-secure, CC 0.5.1 §2580) before finishing.
+                if (isMinorBand() && !minorStewardship.requested) {
+                    LocalizationHelper.getString("setup_validation_minor_steward_required")
+                } else {
+                    null
+                }
             }
 
             SetupStep.ACCOUNT_AND_CONFIRMATION -> {
