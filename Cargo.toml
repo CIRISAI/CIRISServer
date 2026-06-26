@@ -190,6 +190,9 @@ reqwest    = { version = "0.12", default-features = false, features = ["rustls-t
 flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Non-blocking rolling file sink for the node log (so a headless node launched by
+# the desktop app logs RELIABLY to <home>/logs/, not just the captured console).
+tracing-appender = "0.2"
 
 # Linux-only hardware + Postgres: cargo UNIONS these onto the base deps above.
 # - persist `postgres` (libpq/openssl) — Linux deployment + the postgres

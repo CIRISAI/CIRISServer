@@ -375,13 +375,66 @@ pub fn bench_results_json(
     .to_json()
 }
 
-/// Initialize tracing (shared by the binary and the wheel entry point).
+/// Initialize tracing — stdout ONLY. Kept for short-lived CLI subcommands that
+/// have no data root. Node serve paths use [`init_tracing_with`] so the node logs
+/// reliably to a file.
 pub fn init_tracing() {
+    init_tracing_with(None);
+}
+
+/// Initialize tracing with an optional file sink under `log_dir`.
+///
+/// A headless node is launched as a subprocess by the desktop app, so its stdout
+/// is whatever the launcher captures (often nothing durable). That left the
+/// node's logs unrecoverable for debugging. When `log_dir` is `Some`, we ALSO
+/// install a non-blocking daily-rolling file appender (`<log_dir>/ciris-server.log`)
+/// — the node logs RELIABLY to disk, mirroring how the agent logs to files.
+/// stdout stays on too (the console still works when present).
+pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_layer = log_dir.and_then(|dir| {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!(
+                "ciris-server: WARN could not create log dir {} ({e}) — file logging disabled",
+                dir.display()
+            );
+            return None;
+        }
+        let appender = tracing_appender::rolling::daily(dir, "ciris-server.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+        // The WorkerGuard must outlive the process or buffered lines are dropped on
+        // exit. A node runs until killed, so leaking it is the correct lifetime.
+        Box::leak(Box::new(guard));
+        eprintln!(
+            "ciris-server: logging to {}/ciris-server.log",
+            dir.display()
+        );
+        Some(fmt::layer().with_ansi(false).with_writer(non_blocking))
+    });
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(fmt::layer())
+        .with(filter)
+        .with(fmt::layer()) // stdout/console
+        .with(file_layer) // file sink (Option<Layer> is a no-op when None)
         .init();
+}
+
+/// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
+/// the value of `--home <path>` / `--home=<path>` if present, else
+/// [`config::DEFAULT_CIRIS_HOME`]. Used by every node serve entry so file logging
+/// targets the same data root the node boots against.
+pub fn log_dir_from_args(args: &[String]) -> std::path::PathBuf {
+    let mut home: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--home" {
+            home = it.next().cloned();
+        } else if let Some(v) = a.strip_prefix("--home=") {
+            home = Some(v.to_string());
+        }
+    }
+    std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()))
+        .join("logs")
 }
 
 // ── PyO3 abi3 wheel surface (the shape CIRISAgent consumes) ──────────────────
@@ -406,7 +459,6 @@ mod python {
     #[pyfunction]
     #[pyo3(name = "main")]
     fn py_main(py: Python<'_>) -> PyResult<()> {
-        crate::init_tracing();
         // Read PYTHON's `sys.argv`, NOT Rust's `std::env::args()`. Under the
         // pip console-script the OS process is `python <script-path> <args…>`, so
         // `std::env::args()` carries the interpreter + the script path as spurious
@@ -416,6 +468,9 @@ mod python {
         // sets `sys.argv[0]` = the program and `sys.argv[1:]` = the real args, so
         // `skip(1)` here yields exactly the user args — matching the binary path.
         let argv: Vec<String> = py.import("sys")?.getattr("argv")?.extract()?;
+        // File logging to <home>/logs (the node serve paths); resolved from argv so
+        // it targets the same --home the node boots against.
+        crate::init_tracing_with(Some(&crate::log_dir_from_args(&argv)));
         let mut args = argv.into_iter().skip(1);
         let first = args.next();
         match first.as_deref() {
@@ -446,7 +501,9 @@ mod python {
     #[pyfunction]
     #[pyo3(name = "import_traces")]
     fn py_import_traces(dump_dir: String) -> PyResult<()> {
-        crate::init_tracing();
+        crate::init_tracing_with(Some(
+            &std::path::PathBuf::from(crate::config::DEFAULT_CIRIS_HOME).join("logs"),
+        ));
         rt_block_on(crate::import_traces(&dump_dir))
     }
 
@@ -465,12 +522,12 @@ mod python {
         home: Option<String>,
         key_id: Option<String>,
     ) -> PyResult<()> {
-        crate::init_tracing();
-        // Read the Python adapter's static config under the GIL.
-        let adapter = crate::py_adapter::build(py, adapter)?;
         let home = home
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(crate::config::DEFAULT_CIRIS_HOME));
+        crate::init_tracing_with(Some(&home.join("logs")));
+        // Read the Python adapter's static config under the GIL.
+        let adapter = crate::py_adapter::build(py, adapter)?;
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
         let cfg = crate::config::ServerConfig::from_home(home, key_id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
