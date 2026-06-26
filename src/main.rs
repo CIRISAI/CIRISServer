@@ -9,7 +9,10 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    ciris_server::init_tracing();
+    // File logging to <home>/logs (resolved from --home, else the default data
+    // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    ciris_server::init_tracing_with(Some(&ciris_server::log_dir_from_args(&argv)));
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         // `ciris-server import-traces <dump-dir>` — one-shot legacy-trace import
