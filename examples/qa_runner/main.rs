@@ -12,6 +12,7 @@
 mod accord;
 mod common;
 mod family;
+mod verify;
 
 use common::Report;
 
@@ -24,6 +25,7 @@ async fn main() {
     accord::run(&mut report).await;
     accord::run_membership(&mut report).await;
     accord::run_ceremony(&mut report).await;
+    verify::run(&mut report).await;
 
     let ok = report.print_and_status();
     std::process::exit(i32::from(!ok));

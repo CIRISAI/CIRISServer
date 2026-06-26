@@ -388,6 +388,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // /v1/system/health). Mandatory base; the agent enriches the
                     // /v1/system/health endpoint with optional cognitive health.
                     .merge(crate::health::router())
+                    // GET /v1/system/verify-status — read-only CIRISVerify status
+                    // (loaded + the node's derived key_id + custody class) for the
+                    // client's Trust & Security display. The verify family is in the
+                    // node substrate, so this is node-valid. TODO(verify-status):
+                    // report the real custody class from the federation signer's
+                    // attestation; SOFTWARE_ONLY is the honest floor until then.
+                    .merge(crate::health::verify_status_router(
+                        Arc::clone(&engine),
+                        "SOFTWARE_ONLY".to_string(),
+                    ))
                     // login ceremony (self-at-login → user-managed consent). The
                     // admin-eligibility allowlist is the boot-resolved config:*
                     // auth.admin_key_ids (Server 0.5 — replaces CIRIS_ADMIN_KEY_IDS).
