@@ -218,11 +218,30 @@ fn user_identity_config(
 fn open_user_signer(
     backend: &UserIdentityBackend,
     cfg: &UserIdentityConfig,
+    create: bool,
 ) -> Result<Box<dyn HardwareSigner>> {
     // Software: a persisted Ed25519 seed (the keyring Software backend is ECDSA,
     // which the federation-identity core rejects).
     if let UserIdentityBackend::Software = backend {
         return open_software_ed25519_signer(&cfg.key_id, &cfg.seed_dir);
+    }
+
+    // MINT (`create`) of a PlatformSealed identity is the deliberate first-seal:
+    // `open_or_create` generates + seals the Ed25519 if absent. RE-OPEN
+    // (`!create`) goes through `get_user_identity_signer`, which since verify
+    // v7.6.0 (CIRISVerify#134) FAILS LOUD on a missing seal instead of silently
+    // minting a fresh (mismatched) key — exactly the footgun that corrupted the
+    // prior FedID (Ed25519 kept, ML-DSA silently regenerated → verify failures).
+    if create {
+        if let UserIdentityBackend::PlatformSealed = backend {
+            let signer = ciris_keyring::SealedEd25519Signer::open_or_create(
+                cfg.key_id.clone(),
+                cfg.seed_dir.clone(),
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("first-seal the platform-sealed user Ed25519 key: {e}"))?;
+            return Ok(Box::new(signer));
+        }
     }
 
     match get_user_identity_signer(cfg) {
@@ -303,7 +322,7 @@ pub async fn mint_user_identity(
     let cfg = user_identity_config(&backend, key_id_alias, seed_dir);
 
     // 1. Open the user's Ed25519 signing half (YubiKey / sealed / software).
-    let hw_signer = open_user_signer(&backend, &cfg)?;
+    let hw_signer = open_user_signer(&backend, &cfg, true)?;
     let hardware_type = format!("{:?}", hw_signer.hardware_type());
     let hw_signer: Arc<dyn HardwareSigner> = Arc::from(hw_signer);
 
@@ -659,7 +678,7 @@ pub async fn hardware_user_local_signer(
     seed_dir: PathBuf,
 ) -> Result<ciris_persist::prelude::LocalSigner> {
     let cfg = user_identity_config(&backend, user_key_id, seed_dir);
-    let hw = open_user_signer(&backend, &cfg)?;
+    let hw = open_user_signer(&backend, &cfg, false)?;
     // Derive the recorded federation key_id from the alias + the opened pubkey
     // (the value mint recorded the identity under).
     let ed_pub = hw
@@ -714,7 +733,7 @@ pub fn open_yubikey_ed25519_signer(opts: Pkcs11Options) -> Result<Box<dyn Hardwa
     // Ed25519 lives in the PIV slot directly (no seed_dir blob is read for the
     // YubiKey backend), so a throwaway seed_dir is fine.
     let cfg = user_identity_config(&backend, "accord-holder", std::env::temp_dir());
-    open_user_signer(&backend, &cfg)
+    open_user_signer(&backend, &cfg, false)
 }
 
 /// Provision an Ed25519 key + self-signed cert in a YubiKey PIV slot via
