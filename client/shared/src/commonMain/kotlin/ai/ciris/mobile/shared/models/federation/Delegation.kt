@@ -15,9 +15,13 @@ data class DelegationDto(
     val clientId: String,
     /** The granted scope (e.g. ``owner:act-on-behalf``). */
     val scope: String,
-    /** Unix-epoch seconds the delegated token expires. */
+    /**
+     * Unix-epoch seconds the delegated token expires. **Nullable** — the node
+     * omits this for a non-expiring (durable) grant, so a required field broke
+     * `listDelegations` deserialization (`MissingFieldException`). `null` = no expiry.
+     */
     @SerialName("expires_at")
-    val expiresAt: Long,
+    val expiresAt: Long? = null,
 )
 
 @Serializable

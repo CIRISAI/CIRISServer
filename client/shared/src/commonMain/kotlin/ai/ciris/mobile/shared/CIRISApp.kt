@@ -1768,6 +1768,17 @@ fun CIRISApp(
                                 PlatformLogger.e(TAG, " Stack trace: ${e.stackTraceToString().take(500)}")
                             }
 
+                            // Reload the node switcher now that the local node is
+                            // self-claimed + owned. Its owned-nodes projection ran at
+                            // startup when the node was still UNCLAIMED (→ 0 nodes), so
+                            // without this reload the just-claimed local node never
+                            // appears in the list until an app restart.
+                            try {
+                                nodeSwitcherViewModel.reload()
+                            } catch (e: Exception) {
+                                PlatformLogger.w(TAG, "[setup] node-switcher reload after claim failed: ${e.message}")
+                            }
+
                             // After setup completes, Python resumes and starts remaining 12 services
                             // Go back to StartupScreen to show the remaining services starting
                             // Reset the startup phase so it re-polls for services
