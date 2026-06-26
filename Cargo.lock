@@ -812,8 +812,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "7.5.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
+version = "7.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "7.2.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.2.0#5bcaca0131928f218ea715a7f42644e3531c8faf"
+version = "7.2.1"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.2.1#bbd76940748f4eda0bd28520e85b04ee9ae28982"
 dependencies = [
  "async-trait",
  "axum",
@@ -896,8 +896,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "7.5.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
+version = "7.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -962,8 +962,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "10.5.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v10.5.0#613bf5e4aabf5db16b432d0330e133d6f370f8fb"
+version = "10.6.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v10.6.0#54e8367048f2132a7c47f7556e96adbf75ec099a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.53"
+version = "0.5.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1044,8 +1044,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "7.5.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.5.0#cad2b143da8d132362d96eb9dace348eb86b511d"
+version = "7.6.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
 dependencies = [
  "android_system_properties",
  "anyhow",
