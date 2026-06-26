@@ -915,25 +915,70 @@ impl PyLensClient {
                         // verifies against the derived id).
                         let key_id: String = engine_federation_key_id(engine)?;
 
-                        // 3c. Sign via Python (returns 64-byte Ed25519 sig).
+                        // 3c. HYBRID-sign via Python — the federation-admissible
+                        // seal persist v10's VerifyMode::Full hard cut requires
+                        // (CIRISServer#121; an Ed25519-only seal is rejected with
+                        // verify_hybrid_required). Ed25519 signs `canonical`;
+                        // ML-DSA-65 signs the bound `canonical ‖ ed25519_sig`
+                        // (prevents classical-half stripping) — mirrors persist's
+                        // own LocalSigner::sign_hybrid / verify_trace_hybrid.
                         let canonical_pybytes = PyBytes::new(py, &canonical);
-                        let sig_obj = engine
+                        let ed_sig: Vec<u8> = engine
                             .call_method1("local_sign", (canonical_pybytes,))
                             .map_err(|e| {
                                 PyRuntimeError::new_err(format!("engine.local_sign: {e}"))
-                            })?;
-                        let sig: Vec<u8> = sig_obj.cast::<PyBytes>()?.as_bytes().to_vec();
-                        if sig.len() != 64 {
+                            })?
+                            .cast::<PyBytes>()?
+                            .as_bytes()
+                            .to_vec();
+                        if ed_sig.len() != 64 {
                             return Err(PyRuntimeError::new_err(format!(
                                 "engine.local_sign returned {} bytes, expected 64",
-                                sig.len()
+                                ed_sig.len()
                             )));
                         }
+                        // ML-DSA-65 over `canonical ‖ ed25519_sig`.
+                        let mut bound = canonical.clone();
+                        bound.extend_from_slice(&ed_sig);
+                        let bound_pybytes = PyBytes::new(py, &bound);
+                        let pqc_sig: Vec<u8> = engine
+                            .call_method1("local_pqc_sign", (bound_pybytes,))
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!("engine.local_pqc_sign: {e}"))
+                            })?
+                            .cast::<PyBytes>()?
+                            .as_bytes()
+                            .to_vec();
+                        // The producer's ML-DSA-65 pubkey rides the envelope (the
+                        // federation directory is Ed25519-only).
+                        let pqc_pub: Vec<u8> = {
+                            use base64::Engine as _;
+                            let b64: String = engine
+                                .call_method0("local_pqc_public_key_b64")
+                                .map_err(|e| {
+                                    PyRuntimeError::new_err(format!(
+                                        "engine.local_pqc_public_key_b64: {e}"
+                                    ))
+                                })?
+                                .extract()?;
+                            base64::engine::general_purpose::STANDARD
+                                .decode(b64.trim())
+                                .map_err(|e| {
+                                    PyRuntimeError::new_err(format!(
+                                        "decode local_pqc_public_key_b64: {e}"
+                                    ))
+                                })?
+                        };
 
-                        // 3d. Apply signature + build batch bytes (Rust).
-                        let batch_bytes = PyEngineCapture::apply_signature_and_batch(
+                        // 3d. Apply the HYBRID signature + build batch bytes (Rust).
+                        // pqc_key_id == the derived federation key_id (the host
+                        // registers ONE hybrid self key for both halves).
+                        let batch_bytes = PyEngineCapture::apply_hybrid_signature_and_batch(
                             &mut trace,
-                            &sig,
+                            &ed_sig,
+                            &key_id,
+                            &pqc_sig,
+                            &pqc_pub,
                             &key_id,
                             &provenance,
                         )

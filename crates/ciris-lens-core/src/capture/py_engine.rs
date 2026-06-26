@@ -293,6 +293,35 @@ impl PyEngineCapture {
         build_batch_bytes(std::slice::from_ref(trace), provenance)
     }
 
+    /// Apply a HYBRID (Ed25519 + ML-DSA-65) signature to a prepared trace,
+    /// then build the `BatchEnvelope` wire bytes — the federation-admissible
+    /// seal persist v10's `VerifyMode::Full` hard cut (`HybridPolicy::Strict`)
+    /// requires (CIRISServer#121 / CIRISPersist#225). Called by ffi::pyo3 after
+    /// it obtains the Ed25519 half from `engine.local_sign(canonical)` and the
+    /// ML-DSA-65 half from `engine.local_pqc_sign(canonical ‖ ed25519_sig)`
+    /// (the bound construction), plus the producer's ML-DSA-65 pubkey.
+    /// Delegates to [`seal::apply_hybrid_signature`] — never rolls crypto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_hybrid_signature_and_batch(
+        trace: &mut CompleteTrace,
+        ed25519_sig: &[u8],
+        key_id: &str,
+        ml_dsa_65_sig: &[u8],
+        pubkey_ml_dsa_65: &[u8],
+        pqc_key_id: &str,
+        provenance: &BatchProvenance,
+    ) -> Result<Vec<u8>, BatchBuildError> {
+        seal::apply_hybrid_signature(
+            trace,
+            ed25519_sig,
+            key_id,
+            ml_dsa_65_sig,
+            pubkey_ml_dsa_65,
+            pqc_key_id,
+        );
+        build_batch_bytes(std::slice::from_ref(trace), provenance)
+    }
+
     /// Write batch bytes to the local-copy tee directory (best-effort).
     ///
     /// Shared with the Rust-path `CaptureClient::tee_write_if_configured`
