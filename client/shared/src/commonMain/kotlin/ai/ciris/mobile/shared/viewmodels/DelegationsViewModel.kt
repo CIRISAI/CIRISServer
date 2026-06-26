@@ -49,9 +49,11 @@ class DelegationsViewModel(
     private val _lastCreated = MutableStateFlow<CreateDelegationResponse?>(null)
     val lastCreated: StateFlow<CreateDelegationResponse?> = _lastCreated.asStateFlow()
 
-    init {
-        refresh()
-    }
+    // NOTE: do NOT refresh() in init — the VM is constructed at app startup, before
+    // the owner has logged in, so an init fetch hits /v1/auth/device/grants with no
+    // bearer → 401 "missing bearer session token", and that error sticks in the UI.
+    // The Delegations screen calls refresh() on entry (LaunchedEffect), by which
+    // point the owner session token is set. (CIRISServer node-client: deferred-until-auth.)
 
     /** Reload the active delegations from the local node. */
     fun refresh() {

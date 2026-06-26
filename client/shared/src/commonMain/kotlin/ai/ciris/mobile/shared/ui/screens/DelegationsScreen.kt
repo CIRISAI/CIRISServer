@@ -81,6 +81,13 @@ fun DelegationsScreen(
     var delegateMode by remember { mutableStateOf("create") }
     var existingKeyId by remember { mutableStateOf("") }
 
+    // Fetch the active delegations when the screen is shown — by now the owner is
+    // logged in and the bearer is set (the VM intentionally does NOT fetch at init,
+    // which runs pre-login → 401). This is the page's load + the post-login retry.
+    LaunchedEffect(Unit) {
+        viewModel.refresh()
+    }
+
     // When the Contacts picker returns a selection, fill the key_id field.
     LaunchedEffect(pickedIdentityKeyId) {
         if (!pickedIdentityKeyId.isNullOrBlank()) {
