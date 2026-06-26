@@ -650,7 +650,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 for ar in adapter.routers(&adapter_ctx) {
                     r = r.merge(ar);
                 }
-                r
+                // "Never guess" — log every 4xx/5xx (method + path + status + FULL
+                // body) to the node log file, so a failed request always leaves a
+                // complete server-side trace even when the client truncates it.
+                r.layer(axum::middleware::from_fn(
+                    crate::http_log::log_error_responses,
+                ))
             },
         )
         .await

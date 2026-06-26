@@ -117,6 +117,8 @@ pub mod graph_config;
 /// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
 /// `/v1/system/health` with optional cognitive health.
 pub mod health;
+/// HTTP error-response logging middleware (the "never guess" layer).
+pub mod http_log;
 /// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
 /// (the publisher + converger that advertise this node's held fountain
 /// content and act on peers' holding claims) into the shared Edge. The

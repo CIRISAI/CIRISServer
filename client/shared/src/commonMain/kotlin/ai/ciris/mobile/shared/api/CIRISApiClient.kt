@@ -1706,7 +1706,10 @@ class CIRISApiClient(
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {
-                throw RuntimeException("create delegation failed: ${response.status}: ${raw.take(160)}")
+                // Full body — never truncate a server error (the createDelegation-500
+                // lesson: the load-bearing verify_hybrid_required / attesting_key_id
+                // detail lived past char 160). The node also logs it server-side.
+                throw RuntimeException("create delegation failed: ${response.status}: $raw")
             }
             jsonConfig.decodeFromString(
                 ai.ciris.mobile.shared.models.federation.CreateDelegationResponse.serializer(),
