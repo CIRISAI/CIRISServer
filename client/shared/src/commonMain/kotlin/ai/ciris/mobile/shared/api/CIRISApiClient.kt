@@ -204,6 +204,32 @@ class CIRISApiClient(
     var baseUrl: String = baseUrl
         private set
 
+    // ─── The node-vs-agent gate (see CIRISApiClientProtocol.setClientMode) ────
+    // Held here so EVERY poller that shares this client benefits from one gate.
+    // null = not probed yet (treated as agent — existing behavior unchanged).
+    private var clientMode: ai.ciris.mobile.shared.models.ClientMode? = null
+
+    override fun setClientMode(mode: ai.ciris.mobile.shared.models.ClientMode) {
+        clientMode = mode
+        logInfo("setClientMode", "API client gate set to $mode")
+    }
+
+    override fun isNodeMode(): Boolean = clientMode?.isNode == true
+
+    /**
+     * Short-circuit guard for AGENT-only cognitive endpoints. Returns true (and
+     * logs a single quiet debug line) when the client is running against a bare
+     * NODE that does not serve [method]'s endpoint — the caller then returns an
+     * empty/default value instead of issuing the HTTP call that would 404/405.
+     */
+    private fun nodeSkip(method: String): Boolean {
+        if (clientMode?.isNode == true) {
+            logDebug(method, "[GATE] NODE mode — skipping agent-only endpoint")
+            return true
+        }
+        return false
+    }
+
     /**
      * Update the base URL for API calls.
      * This updates the URL used for direct HTTP calls and recreates all SDK API instances.
@@ -592,6 +618,8 @@ class CIRISApiClient(
 
     override suspend fun getMessages(limit: Int): List<ChatMessage> {
         val method = "getMessages"
+        // AGENT-only: GET /v1/agent/history is 404 on a bare node (no brain).
+        if (nodeSkip(method)) return emptyList()
         val authHeaderValue = authHeader()
         logDebug(method, "Fetching messages: limit=$limit, hasAuthHeader=${authHeaderValue != null}, " +
                 "tokenPresent=${accessToken != null}, tokenPreview=${maskToken(accessToken)}")
@@ -3634,7 +3662,13 @@ class CIRISApiClient(
         refresh: Boolean = false
     ): VerifyStatusResponse {
         val method = "getVerifyStatus"
-        logDebug(method, "Fetching CIRISVerify status (hasPlayIntegrity=${playIntegrityToken != null})")
+        // NODE mode: the ciris-server fabric node serves a read-only
+        // `GET /v1/system/verify-status` (src/health.rs verify_status_router) —
+        // CIRISVerify is part of the node substrate, so it reports loaded +
+        // the node's derived federation key_id + custody class + attestation
+        // checks. (The agent path below uses /v1/auth/attestation, which on a
+        // bare node is a POST-only EMIT route and 405s on a GET.)
+        logDebug(method, "Fetching CIRISVerify status (node=${isNodeMode()}, hasPlayIntegrity=${playIntegrityToken != null})")
 
         // Uses cached attestation from auth service - should be fast
         // Full attestation with Play Integrity may take longer
@@ -3651,7 +3685,10 @@ class CIRISApiClient(
         return try {
             // Use auth/attestation endpoint for cached attestation (fast, no network calls)
             // Falls back to setup/verify-status only during first-run setup with Play Integrity
-            val url = if (playIntegrityToken != null && playIntegrityNonce != null) {
+            val url = if (isNodeMode()) {
+                // Fabric node: the read-only verify-status route on the substrate.
+                "$baseUrl/v1/system/verify-status"
+            } else if (playIntegrityToken != null && playIntegrityNonce != null) {
                 // Full attestation with Play Integrity - use setup endpoint (first-run only)
                 "$baseUrl/v1/setup/verify-status?mode=full&play_integrity_token=$playIntegrityToken&play_integrity_nonce=$playIntegrityNonce"
             } else if (refresh) {
@@ -4125,6 +4162,17 @@ class CIRISApiClient(
      */
     override suspend fun getLlmConfig(): LlmConfigData {
         val method = "getLlmConfig"
+        // AGENT-only: LLM config is 404 on a bare node (no brain to configure).
+        if (nodeSkip(method)) return LlmConfigData(
+            provider = "",
+            baseUrl = null,
+            model = "",
+            apiKeySet = false,
+            isCirisProxy = false,
+            backupBaseUrl = null,
+            backupModel = null,
+            backupApiKeySet = false,
+        )
         logDebug(method, "Fetching current LLM configuration")
         logDebug(method, "Auth header: ${authHeader()}")
 
@@ -4284,6 +4332,17 @@ class CIRISApiClient(
 
     override suspend fun getCredits(): CreditStatusData {
         val method = "getCredits"
+        // AGENT-only: billing/credits is 404 on a bare node. Report "free / no
+        // billing" so the node UI shows no purchase prompts.
+        if (nodeSkip(method)) return CreditStatusData(
+            hasCredit = true,
+            creditsRemaining = 0,
+            freeUsesRemaining = 0,
+            dailyFreeUsesRemaining = null,
+            totalUses = 0,
+            planName = null,
+            purchaseRequired = false,
+        )
         logDebug(method, "Fetching credit status")
 
         return try {
@@ -4362,6 +4421,12 @@ class CIRISApiClient(
 
     override suspend fun listAdapters(): AdaptersListData {
         val method = "listAdapters"
+        // AGENT-only: GET /v1/system/adapters is 404 on a bare node.
+        if (nodeSkip(method)) return AdaptersListData(
+            adapters = emptyList(),
+            totalCount = 0,
+            runningCount = 0,
+        )
         logInfo(method, "Listing adapters")
 
         return try {
@@ -5100,6 +5165,16 @@ class CIRISApiClient(
 
     suspend fun getWAStatus(): WAStatusData {
         val method = "getWAStatus"
+        // AGENT-only: the WA (Wise Authority) status endpoint is 404 on a bare
+        // node. Report an inactive WA service.
+        if (nodeSkip(method)) return WAStatusData(
+            serviceHealthy = false,
+            activeWAs = 0,
+            pendingDeferrals = 0,
+            deferrals24h = 0,
+            averageResolutionTimeMinutes = 0.0,
+            timestamp = null,
+        )
         logInfo(method, "Fetching WA status")
 
         return try {
@@ -5163,6 +5238,9 @@ class CIRISApiClient(
 
     suspend fun getWalletStatus(): ai.ciris.mobile.shared.ui.screens.WalletStatusResponse {
         val method = "getWalletStatus"
+        // AGENT-only: the wallet/billing balance endpoint is 404 on a bare node.
+        // Defaults = "no wallet" (all fields default to the no-wallet state).
+        if (nodeSkip(method)) return ai.ciris.mobile.shared.ui.screens.WalletStatusResponse()
         logInfo(method, "Fetching wallet status")
 
         return try {
@@ -6948,6 +7026,13 @@ class CIRISApiClient(
             offset: Int = 0
         ): AuditEntriesData {
             val method = "getAuditEntries"
+            // AGENT-only: the agent audit feed is 404 on a bare node.
+            if (nodeSkip(method)) return AuditEntriesData(
+                entries = emptyList(),
+                total = 0,
+                offset = offset,
+                limit = limit,
+            )
             logDebug(method, "Fetching audit entries: severity=$severity, outcome=$outcome, limit=$limit, offset=$offset")
 
             return try {

@@ -31,6 +31,10 @@ actual fun getCurrentTimestamp(): String {
 }
 
 actual fun getKMPLogDir(): String {
+    // Mirror CIRISAgent's path convention (path_resolution.py): honor CIRIS_HOME
+    // when set, else fall back to ~/ciris. Logs land in <home>/ciris/logs.
+    val cirisHome = System.getenv("CIRIS_HOME")?.takeIf { it.isNotBlank() }
+    if (cirisHome != null) return "$cirisHome/logs"
     val home = System.getProperty("user.home") ?: "/tmp"
     return "$home/ciris/logs"
 }

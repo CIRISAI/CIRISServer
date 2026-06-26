@@ -1027,6 +1027,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
