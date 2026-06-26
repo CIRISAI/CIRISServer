@@ -941,6 +941,7 @@ dependencies = [
  "ciris-edge",
  "ciris-keyring",
  "ciris-persist",
+ "ciris-verify-core",
  "criterion",
  "ed25519-dalek",
  "hex",
