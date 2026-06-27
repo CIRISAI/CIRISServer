@@ -53,15 +53,17 @@ jobs:
           toolchain: nightly-2026-06-12
           components: rust-src
 
-      # CIRISCache (CIRISServer#99) — 4-layer centipede. PLAT=win7-x64; RUSTC is a
-      # nightly string so it keys separately from the stable lanes. Restore
-      # verify→persist→edge→server; SAVE under the server -s key on main (this is
-      # workflow_dispatch only, so the save fires only when dispatched from main).
+      # CIRISCache (CIRISServer#99) — 4-layer centipede. PLAT=windows-x64 (NOT a
+      # separate win7 token): the win7-build-std blob is keyed under windows-x64 and
+      # disambiguated by the NIGHTLY rustc token, so the shared nightly-2026-06-12
+      # pin makes the verify/persist/edge cross-repo layers HIT (target/ included).
+      # SAVE under the server -s key on main (workflow_dispatch only ⇒ save fires
+      # only when dispatched from main).
       - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
         id: cachekey
         shell: bash
         run: |
-          PLAT=win7-x64
+          PLAT=windows-x64
           RUSTC=$(rustc -V | awk '{print $2}')
           S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')

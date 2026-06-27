@@ -145,6 +145,11 @@ jobs:
   win7-build-std:
     name: Win7 build-std check
     runs-on: windows-latest
+    # NON-GATING: Win7 is a Tier-3 best-effort lane (nightly + -Zbuild-std on a
+    # pinned nightly). A nightly regression / pin issue must not redden CI — it
+    # builds when it can. The pinned-nightly main run still warms the win7
+    # CIRISCache server-layer blob for later win7 builds either way.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       # PINNED to nightly-2026-06-12 (the date persist uses for its build-std
@@ -162,14 +167,18 @@ jobs:
         with:
           cache-bin: false
           key: ci-win7-build-std
-      # CIRISCache (CIRISServer#99) — 4-layer centipede. PLAT=win7-x64; RUSTC is a
-      # nightly string so it keys separately from the stable lanes. Restore
-      # verify→persist→edge→server; SAVE under the server -s key on main.
+      # CIRISCache (CIRISServer#99) — 4-layer centipede. PLAT=windows-x64 (NOT a
+      # separate win7 token): persist/edge save their win7-build-std blob under
+      # `windows-x64`, disambiguated by the NIGHTLY rustc token — which this leg
+      # also reports (`rustc -V` = the pinned nightly, since stable isn't installed
+      # on the windows leg). Shared nightly-2026-06-12 pin ⇒ matching rustc token ⇒
+      # the verify/persist/edge cross-repo layers HIT (target/ included), not just
+      # registry. Distinct from the stable windows wheel (different rustc token).
       - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
         id: cachekey
         shell: bash
         run: |
-          PLAT=win7-x64
+          PLAT=windows-x64
           RUSTC=$(rustc -V | awk '{print $2}')
           S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')

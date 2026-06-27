@@ -123,7 +123,7 @@ jobs:
             x86_64-apple-darwin)             PLAT=macos-x86_64 ;;
             aarch64-apple-darwin)            PLAT=macos-aarch64 ;;
             x86_64-pc-windows-msvc)          PLAT=windows-x64 ;;
-            x86_64-win7-windows-msvc)        PLAT=win7-x64 ;;
+            x86_64-win7-windows-msvc)        PLAT=windows-x64 ;;  # win7 build-std shares the windows-x64 key; nightly rustc token disambiguates + cross-hits persist/edge
             aarch64-linux-android)           PLAT=android-arm64-v8a ;;
             armv7-linux-androideabi)         PLAT=android-armeabi-v7a ;;
             armv7-unknown-linux-gnueabihf)   PLAT=linux-armv7 ;;
