@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+  packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -46,6 +50,60 @@ jobs:
         continue-on-error: true
         with:
           cache-bin: false
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # PLAT from the NATIVE target of each runner (macos-latest = arm64). Restore
+      # verify→persist→edge→server; SAVE under the server-specific -s key on main.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest)  PLAT=linux-x86_64 ;;
+            macos-latest)   PLAT=macos-aarch64 ;;
+            windows-latest) PLAT=windows-x64 ;;
+            *)              PLAT=unknown ;;
+          esac
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       # Default features build everywhere (sqlite + the binary path); postgres +
       # tpm are Linux-only (per-target). NOT --all-features: that drags
       # `extension-module` (libpython-no-link) into the test binary.
@@ -65,3 +123,11 @@ jobs:
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --features python -- -D warnings
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key.
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}

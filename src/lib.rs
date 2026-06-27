@@ -180,7 +180,18 @@ pub mod quorum;
 /// (CIRISServer LoRa medium). Desktop-only (the `serialport` crate is not
 /// available on the android/ios wheels), so the whole module is gated off the
 /// mobile targets.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+// Serial-capable targets only (matches the `serialport` dep gate in Cargo.toml):
+// macOS, Windows, linux-gnu x86_64/aarch64. Excludes armv7/musl (no cross libudev)
+// + android/ios (sandboxed).
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 pub mod radio;
 /// The **CEG-driven replication reconciler** (the controller loop): the corpus's
 /// `consent:replication` objects ARE the desired replication topology, and this

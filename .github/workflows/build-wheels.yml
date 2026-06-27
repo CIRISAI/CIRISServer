@@ -54,20 +54,55 @@ jobs:
           cache-bin: false
           shared-key: release-${{ matrix.plat.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
-      # GHA L1 above. Shares the canonical key with conformance.yml's linux-x86_64
-      # build so the substrate compile is reused across repos.
-      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # Restore widest→narrowest (verify→persist→edge→server); SAVE under the
+      # server-specific -s key so we never collide with edge's canonical blob.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
         shell: bash
         run: |
+          PLAT="${{ matrix.plat.name }}"
           RUSTC=$(rustc -V | awk '{print $2}')
-          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
-          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          echo "CIRISCACHE_KEY=ciris-substrate-v1-${{ matrix.plat.name }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
-      - uses: CIRISAI/CIRISCache/restore@v1
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
@@ -115,13 +150,15 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 1
-      # Populate the cross-repo CIRISCache blob on main (restore is anonymous on
-      # PRs; only main writes — public package, GITHUB_TOKEN, no external secret).
-      - uses: CIRISAI/CIRISCache/save@v1
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key
+      # (restore is anonymous on PRs; only main writes — public package,
+      # GITHUB_TOKEN, no external secret).
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   macos:
@@ -170,19 +207,55 @@ jobs:
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
           ls -l ../python/ciris_server/desktop_app/
-      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO substrate cache,
-      # layered over maturin-action's sccache below.
-      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+      # CIRISCache (CIRISServer#99) — 4-layer centipede, layered over
+      # maturin-action's sccache below. Restore verify→persist→edge→server;
+      # SAVE under the server-specific -s key.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
         shell: bash
         run: |
+          PLAT="macos-${{ matrix.target }}"
           RUSTC=$(rustc -V | awk '{print $2}')
-          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
-          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          echo "CIRISCACHE_KEY=ciris-substrate-v1-macos-${{ matrix.target }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
-      - uses: CIRISAI/CIRISCache/restore@v1
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -198,12 +271,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 1
-      # Populate the cross-repo CIRISCache blob on main.
-      - uses: CIRISAI/CIRISCache/save@v1
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key.
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   windows:
@@ -239,19 +313,55 @@ jobs:
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
           ls -l ../python/ciris_server/desktop_app/
-      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO substrate cache,
-      # layered over maturin-action's sccache below. shell: bash (default is pwsh).
-      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+      # CIRISCache (CIRISServer#99) — 4-layer centipede, layered over
+      # maturin-action's sccache below. shell: bash (default is pwsh). Restore
+      # verify→persist→edge→server; SAVE under the server-specific -s key.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
         shell: bash
         run: |
+          PLAT="windows-x64"
           RUSTC=$(rustc -V | awk '{print $2}')
-          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
-          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          echo "CIRISCACHE_KEY=ciris-substrate-v1-windows-x64-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
-      - uses: CIRISAI/CIRISCache/restore@v1
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -266,12 +376,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: warn
           retention-days: 1
-      # Populate the cross-repo CIRISCache blob on main.
-      - uses: CIRISAI/CIRISCache/save@v1
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key.
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # Android abi3 wheels (incl. arm32 armeabi-v7a) — the CIRISAgent KMP client's
@@ -303,19 +414,55 @@ jobs:
           cache-bin: false
           shared-key: release-android-${{ matrix.abi }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
-      # GHA L1 above, per-ABI NDK cross-compile of the substrate.
-      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1,
+      # per-ABI NDK cross-compile of the substrate. Restore verify→persist→edge→
+      # server; SAVE under the server-specific -s key.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
         shell: bash
         run: |
+          PLAT="android-${{ matrix.abi }}"
           RUSTC=$(rustc -V | awk '{print $2}')
-          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
-          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          echo "CIRISCACHE_KEY=ciris-substrate-v1-android-${{ matrix.abi }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
-      - uses: CIRISAI/CIRISCache/restore@v1
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -376,12 +523,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: warn
           retention-days: 1
-      # Populate the cross-repo CIRISCache blob on main.
-      - uses: CIRISAI/CIRISCache/save@v1
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key.
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   sdist:

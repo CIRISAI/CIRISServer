@@ -1423,12 +1423,20 @@ async fn build_edge(
         .reticulum_transport(transport);
 
     // CIRISServer 0.5.58 — attach a serial LoRa/RNode radio transport when
-    // `net.radio.enabled` is set (Transport card). DESKTOP-ONLY: `serialport`
-    // isn't built on the android/ios wheels, so the whole attach is cfg-gated off
-    // the mobile targets (a sandboxed mobile node can't open a serial port anyway
-    // — that's the host-app shim path). A driver-open failure is logged and the
-    // node continues on Reticulum alone (never fatal to boot).
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    // `net.radio.enabled` is set (Transport card). SERIAL-CAPABLE TARGETS ONLY
+    // (matches the `serialport`/`mod radio` gate): macOS, Windows, linux-gnu
+    // x86_64/aarch64. Excluded on armv7/musl (no cross libudev) + android/ios
+    // (sandboxed — that's the host-app shim path). A driver-open failure is logged
+    // and the node continues on Reticulum alone (never fatal to boot).
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     if resolved.radio_enabled && !resolved.radio_serial_port.trim().is_empty() {
         let params = crate::radio::RadioParams {
             serial_port: resolved.radio_serial_port.clone(),
@@ -1454,8 +1462,18 @@ async fn build_edge(
             ),
         }
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let _ = resolved; // radio is desktop-only; silence unused on mobile wheels.
+    // On non-serial-capable targets (armv7/musl/android/ios) the radio attach is
+    // compiled out, so `resolved` would be unused there — silence it.
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    let _ = resolved;
 
     let edge = builder
         .build()

@@ -27,6 +27,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
 
 # Never cancel an in-flight Pages deploy; let bench runs serialize.
 concurrency:
@@ -54,6 +55,55 @@ jobs:
         with:
           cache-bin: false
           key: bench
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # Single leg: PLAT=linux-x86_64. Restore verify→persist→edge→server; SAVE
+      # under the server-specific -s key on main.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT="linux-x86_64"
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -101,3 +151,12 @@ jobs:
           path: bench-site
       - id: deploy
         uses: actions/deploy-pages@v4
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key
+      # (all cargo compilation above is now cached).
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}

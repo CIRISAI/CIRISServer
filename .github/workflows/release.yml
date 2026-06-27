@@ -95,20 +95,67 @@ jobs:
           cache-bin: false
           key: release-${{ matrix.build_target || matrix.target }}-${{ github.ref_name }}
 
-      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
-      # GHA L1 above. Binaries are a distinct feature set from the wheels, so the
-      # `bin-` prefix keeps these blobs from colliding with build-wheels' keys.
-      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # PLAT mapped from the canonical build-target table (armv7 → linux-armv7,
+      # off-table → harmless miss). Binaries are a distinct feature set from the
+      # wheels, but use the same canonical server keys for consistency (hits are
+      # limited but the scheme stays uniform). Restore verify→persist→edge→server.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
         shell: bash
         run: |
+          case "${{ matrix.build_target || matrix.target }}" in
+            x86_64-unknown-linux-gnu)        PLAT=linux-x86_64 ;;
+            aarch64-unknown-linux-gnu)       PLAT=linux-aarch64 ;;
+            x86_64-apple-darwin)             PLAT=macos-x86_64 ;;
+            aarch64-apple-darwin)            PLAT=macos-aarch64 ;;
+            x86_64-pc-windows-msvc)          PLAT=windows-x64 ;;
+            aarch64-linux-android)           PLAT=android-arm64-v8a ;;
+            armv7-linux-androideabi)         PLAT=android-armeabi-v7a ;;
+            armv7-unknown-linux-gnueabihf)   PLAT=linux-armv7 ;;
+            *)                               PLAT=${{ matrix.build_target || matrix.target }} ;;
+          esac
           RUSTC=$(rustc -V | awk '{print $2}')
-          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
-          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          echo "CIRISCACHE_KEY=ciris-substrate-v1-bin-${{ matrix.build_target || matrix.target }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
-      - uses: CIRISAI/CIRISCache/restore@v1
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
 
       - name: Install cross (retry on timeout)
         if: matrix.cross
@@ -151,13 +198,15 @@ jobs:
           path: stage/
           if-no-files-found: error
 
-      # Populate the cross-repo CIRISCache blob on main (release runs on tags, so
-      # this is restore-only here; the warm-release-cache main run does the save).
-      - uses: CIRISAI/CIRISCache/save@v1
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key
+      # (release runs on tags, so this is restore-only here; the warm-release-cache
+      # main run does the save). Guard kept for correctness.
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
-          key: ${{ env.CIRISCACHE_KEY }}
+          key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # Linux ARM64 musl (Alpine / Home Assistant) — static, via zigbuild.
@@ -177,6 +226,55 @@ jobs:
         with:
           cache-bin: false
           key: release-musl-aarch64-${{ github.ref_name }}
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # PLAT=linux-aarch64-musl (off the canonical table → harmless miss, but the
+      # scheme stays uniform). Restore verify→persist→edge→server; save on main.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT="linux-aarch64-musl"
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (verify layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-verify }}
+      - name: CIRISCache restore (persist layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-persist }}
+      - name: CIRISCache restore (edge layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key-edge }}
+      - name: CIRISCache restore (server layer)
+        uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
@@ -199,6 +297,15 @@ jobs:
           name: ciris-server-aarch64-unknown-linux-musl
           path: stage/
           if-no-files-found: error
+      # Populate the cross-repo CIRISCache blob on main under the SERVER key
+      # (release runs on tags, so this is restore-only here; guard kept anyway).
+      - name: CIRISCache save (server layer, main only)
+        uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   create-release:
     name: Create Release
