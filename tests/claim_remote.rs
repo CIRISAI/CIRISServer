@@ -9,7 +9,7 @@
 //!   - T receives via the 1-phase `POST /v1/setup/root`, verifies the USER's
 //!     hybrid signature, registers the user, persists a delegates_to whose
 //!     signature verifies against the USER's pubkeys (`scrub_key_id == user`),
-//!     binds ROOT, and `is_owner_bound(T) == the user`;
+//!     binds ROOT, and `is_steward_bound(T) == the user`;
 //!   - tamper (agency scope / attested != T / wrong sig) → rejected, no ROOT.
 //!
 //! Both the directory-level pieces (build on L, apply on T directly) AND the full
@@ -32,7 +32,7 @@ use ciris_persist::wa_cert::WaRole;
 
 use ciris_server::auth::bootstrap;
 use ciris_server::auth::ownership::{
-    apply_signed_owner_binding, build_signed_owner_binding, is_owner_bound,
+    apply_signed_owner_binding, build_signed_owner_binding, is_steward_bound,
     OWNER_BINDING_INFRA_SCOPES,
 };
 use ciris_server::auth::store;
@@ -181,7 +181,7 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
 
     // T now reads a user-signed owner edge.
     assert_eq!(
-        is_owner_bound(&t, T_NODE_KEY_ID).await.as_deref(),
+        is_steward_bound(&t, T_NODE_KEY_ID).await.as_deref(),
         Some(L_USER_KEY_ID)
     );
 
@@ -250,9 +250,9 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].pubkey, L_USER_KEY_ID);
 
-    // is_owner_bound(T) == the user.
+    // is_steward_bound(T) == the user.
     assert_eq!(
-        is_owner_bound(&t, T_NODE_KEY_ID).await.as_deref(),
+        is_steward_bound(&t, T_NODE_KEY_ID).await.as_deref(),
         Some(L_USER_KEY_ID)
     );
 }
@@ -319,5 +319,5 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
         .await
         .unwrap()
         .is_empty());
-    assert!(is_owner_bound(&t, T_NODE_KEY_ID).await.is_none());
+    assert!(is_steward_bound(&t, T_NODE_KEY_ID).await.is_none());
 }

@@ -538,26 +538,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitfield"
-version = "0.19.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21ba6517c6b0f2bf08be60e187ab64b038438f22dd755614d8fe4d4098c46419"
-dependencies = [
- "bitfield-macros",
-]
-
-[[package]]
-name = "bitfield-macros"
-version = "0.19.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f48d6ace212fdf1b45fd6b566bb40808415344642b76c3224c07c8df9da81e97"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -812,8 +792,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "7.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
+version = "8.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +821,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "7.2.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.2.1#bbd76940748f4eda0bd28520e85b04ee9ae28982"
+version = "7.3.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.3.0#e7e0ae15b4ef617e0c9f19a31ff2ec9b1536cc46"
 dependencies = [
  "async-trait",
  "axum",
@@ -896,8 +876,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "7.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
+version = "8.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -912,6 +892,7 @@ dependencies = [
  "hkdf",
  "jni",
  "keyring",
+ "libloading",
  "objc2",
  "objc2-foundation",
  "p256",
@@ -926,7 +907,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "tss-esapi",
  "winapi",
 ]
 
@@ -962,8 +942,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "10.6.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v10.6.0#54e8367048f2132a7c47f7556e96adbf75ec099a"
+version = "11.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v11.0.0#94a5e26fc968a770b13f3daaab4193b484ad1727"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1002,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.54"
+version = "0.5.55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1044,8 +1024,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "7.6.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v7.6.0#b4039b3126c601357aa8365a9dac51874e84a6bb"
+version = "8.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -2427,12 +2407,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname-validator"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f558a64ac9af88b5ba400d99b579451af0d39c6d360980045b91aac966d705e2"
-
-[[package]]
 name = "hpke-rs"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3427,16 +3401,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "mbox"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d142aeadbc4e8c679fc6d93fbe7efe1c021fa7d80629e615915b519e3bc6de"
-dependencies = [
- "libc",
- "stable_deref_trait",
-]
-
-[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3670,17 +3634,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
-name = "num-derive"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3776,15 +3729,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7216bd11cbda54ccabcab84d523dc93b858ec75ecfb3a7d89513fa22464da396"
 dependencies = [
  "objc2-core-foundation",
-]
-
-[[package]]
-name = "oid"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c19903c598813dba001b53beeae59bb77ad4892c5c1b9b3500ce4293a0d06c2"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -4105,41 +4049,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "picky-asn1"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ff038f9360b934342fb3c0a1d6e82c438a2624b51c3c6e3e6d7cf252b6f3ee3"
-dependencies = [
- "oid",
- "serde",
- "serde_bytes",
-]
-
-[[package]]
-name = "picky-asn1-der"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d413165e4bf7f808b9a27cbaba657657a2921f0965db833f488c4d4be96dcd2e"
-dependencies = [
- "picky-asn1",
- "serde",
- "serde_bytes",
-]
-
-[[package]]
-name = "picky-asn1-x509"
-version = "0.15.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859d4117bd1b1dc5646359ee7243c50c5000c0920ea2d1fb120335a2f4c684b8"
-dependencies = [
- "base64 0.22.1",
- "oid",
- "picky-asn1",
- "picky-asn1-der",
- "serde",
 ]
 
 [[package]]
@@ -4501,7 +4410,7 @@ version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5e2a7d2f0d013342f295c048ad19237add5154a55b1c5a254c0ec93d4109078"
 dependencies = [
- "target-lexicon 0.13.5",
+ "target-lexicon",
 ]
 
 [[package]]
@@ -5843,12 +5752,6 @@ dependencies = [
 
 [[package]]
 name = "target-lexicon"
-version = "0.12.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
-
-[[package]]
-name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
@@ -6389,39 +6292,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "tss-esapi"
-version = "7.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f10b25a84912b894d0e6d68f4a3771c923e9c44ddaaed7920cde92ed28aa84e"
-dependencies = [
- "bitfield",
- "enumflags2",
- "getrandom 0.4.3",
- "hostname-validator",
- "log",
- "mbox",
- "num-derive",
- "num-traits",
- "oid",
- "picky-asn1",
- "picky-asn1-x509",
- "regex",
- "serde",
- "tss-esapi-sys",
- "zeroize",
-]
-
-[[package]]
-name = "tss-esapi-sys"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7f972672926a3d3d18ecc04524720e4d20b7d1664a3fb73dbf7d4274196dbd9"
-dependencies = [
- "pkg-config",
- "target-lexicon 0.12.16",
-]
 
 [[package]]
 name = "typenum"

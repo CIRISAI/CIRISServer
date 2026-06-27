@@ -16,12 +16,12 @@
 //! refuses every owner-op and serves cleartext federation data from the
 //! **canonical root ONLY** — it relays/serves but does not author cross-node
 //! consent, join non-infra groups, or otherwise act with the standing of an
-//! owned member. [`is_owner_bound`] is the producer of the `owner_bound` bit;
+//! owned member. [`is_steward_bound`] is the producer of the `owner_bound` bit;
 //! [`require_owner_bound`] is the operational gate.
 
 use ciris_persist::prelude::Engine;
 
-pub use crate::auth::ownership::is_owner_bound;
+pub use crate::auth::ownership::is_steward_bound;
 
 /// The community class for the gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub fn may_join(kind: CommunityKind, owner_bound: bool) -> bool {
 /// `delegates_to(user → node, infra:*)` owner-binding may join only
 /// infrastructure communities.
 pub async fn may_join_resolved(engine: &Engine, node_key_id: &str, kind: CommunityKind) -> bool {
-    let owner_bound = is_owner_bound(engine, node_key_id).await.is_some();
+    let owner_bound = is_steward_bound(engine, node_key_id).await.is_some();
     may_join(kind, owner_bound)
 }
 
@@ -62,7 +62,7 @@ pub async fn may_join_resolved(engine: &Engine, node_key_id: &str, kind: Communi
 /// routes (e.g. `POST /v1/federation/peering`): an unowned node refuses
 /// owner-ops, period — independent of any session/role the caller presents.
 pub async fn require_owner_bound(engine: &Engine, node_key_id: &str) -> Result<String, ()> {
-    is_owner_bound(engine, node_key_id).await.ok_or(())
+    is_steward_bound(engine, node_key_id).await.ok_or(())
 }
 
 #[cfg(test)]

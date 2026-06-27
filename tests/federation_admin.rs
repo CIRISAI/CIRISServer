@@ -115,7 +115,7 @@ const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
 
 /// Establish the CC 3.2 owner-binding for THIS node: register a `user`-role
 /// responsible party in the directory, then emit
-/// `delegates_to(user → node, infra:*)`. After this, `is_owner_bound(node)` is
+/// `delegates_to(user → node, infra:*)`. After this, `is_steward_bound(node)` is
 /// `Some(owner)` and the serve-only-floor gate on peering passes. The node key
 /// must already be registered ([`register_self`]).
 async fn bind_owner(engine: &Engine) {
@@ -172,9 +172,14 @@ async fn bind_owner(engine: &Engine) {
         .map(|s| s.to_string())
         .collect();
     let node_key_id = node_a_key_id(engine).await;
-    ciris_server::auth::ownership::emit_owner_binding(engine, &owner_signer, &node_key_id, &scopes)
-        .await
-        .expect("emit owner-binding delegates_to(user -> node, infra:*)");
+    ciris_server::auth::ownership::emit_steward_binding(
+        engine,
+        &owner_signer,
+        &node_key_id,
+        &scopes,
+    )
+    .await
+    .expect("emit owner-binding delegates_to(user -> node, infra:*)");
 }
 
 /// The owner user's deterministic Ed25519 / ML-DSA-65 seeds (distinct from the
@@ -561,7 +566,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
     register_self(&engine).await;
     // Deliberately DO NOT bind_owner — the node is owner-unbound.
     assert!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, &node_a_key_id(&engine).await)
+        ciris_server::auth::ownership::is_steward_bound(&engine, &node_a_key_id(&engine).await)
             .await
             .is_none(),
         "precondition: node is owner-unbound"
@@ -605,7 +610,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
     // Now bind an owner and re-POST: it succeeds (the floor lifts).
     bind_owner(&engine).await;
     assert!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, &node_a_key_id(&engine).await)
+        ciris_server::auth::ownership::is_steward_bound(&engine, &node_a_key_id(&engine).await)
             .await
             .is_some(),
         "node is owner-bound after bind_owner"

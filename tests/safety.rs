@@ -251,7 +251,7 @@ async fn emit_delegation(
 }
 
 /// Make `member` owner-bound: register a `user`-role identity and a live
-/// `delegates_to(user → member, infra:*)`. persist's `is_owner_bound` then reads
+/// `delegates_to(user → member, infra:*)`. persist's `is_steward_bound` then reads
 /// `member` as owner-bound (the named-moderator + auto-promotion eligibility
 /// precondition, AND the `put_community` admission precondition for node/agent
 /// members). MUST be called BEFORE `put_community`. Returns the owner signer so
@@ -864,8 +864,8 @@ async fn watchlist_publish_hook_is_opt_in_and_defers_the_matcher() {
 //     graph readers are reachable through ciris-server's Engine, so future
 //     consumers compose them instead of re-deriving the walks. Mirrors the
 //     CIRISEdge v6.2.0 adoption's active_roster / delegation_reads e2e proofs.
-//     `is_owner_bound`/`nodes_owned_by` already consume `owner_bindings_of`
-//     (this PR's reader collapse); `owner_binding_chain` / `reachable_under_scope`
+//     `is_steward_bound`/`nodes_stewarded_by` already consume `steward_bindings_of`
+//     (this PR's reader collapse); `steward_binding_chain` / `reachable_under_scope`
 //     / `active_{community,family}_members` are proven reachable here for the
 //     consumers that will fold onto them next.
 // ════════════════════════════════════════════════════════════════════════════
@@ -879,21 +879,21 @@ async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
     let owner = make_owner_bound(&engine, node_key).await;
     let owner_id = owner.key_id().to_string();
 
-    // owner_bindings_of — the human anchor(s) that owner-bind the node.
+    // steward_bindings_of — the human anchor(s) that owner-bind the node.
     assert_eq!(
         engine
-            .owner_bindings_of(node_key)
+            .steward_bindings_of(node_key)
             .await
-            .expect("owner_bindings_of reachable"),
+            .expect("steward_bindings_of reachable"),
         vec![owner_id.clone()],
         "node owner-bound to the user"
     );
-    // owner_binding_chain — the resolving path, anchor-first.
+    // steward_binding_chain — the resolving path, anchor-first.
     assert_eq!(
         engine
-            .owner_binding_chain(node_key)
+            .steward_binding_chain(node_key)
             .await
-            .expect("owner_binding_chain reachable"),
+            .expect("steward_binding_chain reachable"),
         vec![owner_id.clone(), node_key.to_string()],
     );
     // reachable_under_scope — the user reaches the node under the granted scope.
@@ -904,34 +904,38 @@ async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
             .expect("reachable_under_scope reachable"),
         "owner reaches node under infra:membership"
     );
-    // The server's collapsed reader (now owner_bindings_of-backed) agrees, and
+    // The server's collapsed reader (now steward_bindings_of-backed) agrees, and
     // the inverse projection lists the node under the owner.
     assert_eq!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, node_key).await,
+        ciris_server::auth::ownership::is_steward_bound(&engine, node_key).await,
         Some(owner_id.clone()),
     );
     assert_eq!(
-        ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id).await,
+        ciris_server::auth::ownership::nodes_stewarded_by(&engine, &owner_id).await,
         vec![node_key.to_string()],
     );
 
     // Withdraw → every reader reflects the lapse (the §11.10 withdraws/recants
-    // edge-retraction is folded into owner_bindings_of, so the whole projection
+    // edge-retraction is folded into steward_bindings_of, so the whole projection
     // collapses, not just the predicate).
     withdraw_owner_binding(&engine, &owner, node_key).await;
-    assert!(engine.owner_bindings_of(node_key).await.unwrap().is_empty());
     assert!(engine
-        .owner_binding_chain(node_key)
+        .steward_bindings_of(node_key)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(engine
+        .steward_binding_chain(node_key)
         .await
         .unwrap()
         .is_empty());
     assert!(
-        ciris_server::auth::ownership::is_owner_bound(&engine, node_key)
+        ciris_server::auth::ownership::is_steward_bound(&engine, node_key)
             .await
             .is_none()
     );
     assert!(
-        ciris_server::auth::ownership::nodes_owned_by(&engine, &owner_id)
+        ciris_server::auth::ownership::nodes_stewarded_by(&engine, &owner_id)
             .await
             .is_empty()
     );

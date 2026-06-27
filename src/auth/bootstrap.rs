@@ -996,9 +996,9 @@ struct OwnedNodesResponse {
 }
 
 async fn owned_nodes(State(st): State<SetupState>) -> Response {
-    let owner = super::ownership::is_owner_bound(&st.engine, &st.node_key_id).await;
+    let owner = super::ownership::is_steward_bound(&st.engine, &st.node_key_id).await;
     let nodes: Vec<OwnedNode> = match &owner {
-        Some(user) => super::ownership::nodes_owned_by(&st.engine, user)
+        Some(user) => super::ownership::nodes_stewarded_by(&st.engine, user)
             .await
             .into_iter()
             .map(|key_id| OwnedNode {

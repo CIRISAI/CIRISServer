@@ -27,7 +27,7 @@
 //!   admits — fail-secure).
 //! - `federation::admission::duty_holders_for_community` /
 //!   `duty_holders_from_signed_subjects` — the duty-holder set resolution.
-//! - `federation::admission::is_owner_bound` — the CC 3.2 owner-binding leaf
+//! - `federation::admission::is_steward_bound` — the CC 3.2 owner-binding leaf
 //!   (the moderator must root in an accountable human).
 //!
 //! ## What is BUILT server-side (the genuine gaps — flagged for upstream)

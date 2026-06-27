@@ -58,7 +58,7 @@ pub mod occurrence;
 /// responsible party bound by an `infra:*`-only `delegates_to` — NOT the
 /// agent's joint-agency partnership. Carries the infra/agency scope-split
 /// verifier ([`ownership::scopes_are_infra_only`]), the owner-binding emitter,
-/// and the [`ownership::is_owner_bound`] reader.
+/// and the [`ownership::is_steward_bound`] reader.
 pub mod ownership;
 /// **Portable software identity occurrence** (bootstrap) — mint a fresh *software*
 /// hybrid keyset that the local TPM-bound primary authorizes as an occurrence of

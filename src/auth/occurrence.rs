@@ -141,7 +141,7 @@ pub struct OccurrenceBindOutcome {
 ///     of the self (`verify::signer_acts_for(caller, identity_key_id)`).
 ///   - [`super::portable_occurrence`]: the route is owner-gated (a live SYSTEM_ADMIN
 ///     owner session == the bound owner's login) AND `identity_key_id` is resolved
-///     from `is_owner_bound(node)` — i.e. the owner's OWN primary fed-ID. The
+///     from `is_steward_bound(node)` — i.e. the owner's OWN primary fed-ID. The
 ///     local primary signer is opened (`resolve_user_signer(OwnerSession)`) to
 ///     PROVE possession before this binds. The owner authorizing an occurrence of
 ///     their own self is the apex authority.

@@ -30,7 +30,7 @@
 //!   - The route is **owner-gated**: a live SYSTEM_ADMIN + FullAccess session IS
 //!     the bound owner's login (`require_owner`).
 //!   - The `identity_key_id` we bind under is resolved from
-//!     `ownership::is_owner_bound(node)` — i.e. the owner's OWN primary fed-ID, not
+//!     `ownership::is_steward_bound(node)` — i.e. the owner's OWN primary fed-ID, not
 //!     an attacker-supplied value.
 //!   - We OPEN the local primary signer via
 //!     `compose::resolve_user_signer(OwnerSession)` and assert its `key_id()` IS
@@ -120,7 +120,7 @@ fn owner_user_alias(cfg: &ServerConfig) -> String {
 /// holds the primary whose self we are about to add an occurrence of. Returns a
 /// ready error Response on any failure.
 ///
-/// SECURITY: `identity_key_id` comes from `is_owner_bound(node)` (the durable
+/// SECURITY: `identity_key_id` comes from `is_steward_bound(node)` (the durable
 /// owner-binding), never the request. The primary signer is opened only under a
 /// verified owner session (`FedIdUse::OwnerSession`), and we assert its `key_id()`
 /// matches — so a portable occurrence can ONLY ever be minted against the owner's
@@ -128,7 +128,7 @@ fn owner_user_alias(cfg: &ServerConfig) -> String {
 async fn resolve_owner_primary(
     st: &PortableState,
 ) -> Result<(String, Arc<ciris_persist::prelude::LocalSigner>), Response> {
-    let identity_key_id = match ownership::is_owner_bound(&st.engine, &st.node_key_id).await {
+    let identity_key_id = match ownership::is_steward_bound(&st.engine, &st.node_key_id).await {
         Some(id) => id,
         None => {
             return Err(http_err(

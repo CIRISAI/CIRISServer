@@ -5,8 +5,8 @@
 //!
 //!   - the infra/agency scope-split verifier accepts `infra:*` and REJECTS
 //!     `agency:*` + legacy unprefixed agency kinds (CC 1.13.5);
-//!   - `emit_owner_binding` refuses agency scopes (producer-side gate);
-//!   - `is_owner_bound` is `Some(user)` after a live `user → node` infra
+//!   - `emit_steward_binding` refuses agency scopes (producer-side gate);
+//!   - `is_steward_bound` is `Some(user)` after a live `user → node` infra
 //!     delegation, and `None` without one / when the granter isn't `user`-role /
 //!     when the binding is revoked;
 //!   - the first-run `POST /v1/setup/root` claim establishes the owner-binding +
@@ -32,7 +32,7 @@ use ciris_persist::wa_cert::WaRole;
 
 use ciris_server::auth::bootstrap;
 use ciris_server::auth::ownership::{
-    emit_owner_binding, is_owner_bound, scopes_are_infra_only, OwnershipError,
+    emit_steward_binding, is_steward_bound, scopes_are_infra_only, OwnershipError,
     OWNER_BINDING_INFRA_SCOPES,
 };
 use ciris_server::auth::roles::UserRole;
@@ -214,15 +214,15 @@ fn scopes_are_infra_only_accepts_infra_rejects_agency_and_legacy() {
     assert!(!scopes_are_infra_only(&[]));
 }
 
-// ─── (2) emit_owner_binding refuses agency ──────────────────────────────────
+// ─── (2) emit_steward_binding refuses agency ──────────────────────────────────
 
 #[tokio::test]
-async fn emit_owner_binding_refuses_agency_scopes() {
+async fn emit_steward_binding_refuses_agency_scopes() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
-    let err = emit_owner_binding(
+    let err = emit_steward_binding(
         &engine,
         &owner,
         NODE_KEY_ID,
@@ -233,65 +233,65 @@ async fn emit_owner_binding_refuses_agency_scopes() {
     assert!(matches!(err, OwnershipError::AgencyScopeRefused));
 
     // And it persisted nothing → still unowned.
-    assert!(is_owner_bound(&engine, NODE_KEY_ID).await.is_none());
+    assert!(is_steward_bound(&engine, NODE_KEY_ID).await.is_none());
 }
 
-// ─── (3) is_owner_bound: true / false / revoked / non-user granter ──────────
+// ─── (3) is_steward_bound: true / false / revoked / non-user granter ──────────
 
 #[tokio::test]
-async fn is_owner_bound_true_after_user_infra_delegation() {
+async fn is_steward_bound_true_after_user_infra_delegation() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
     assert!(
-        is_owner_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
         "unbound before any delegation"
     );
 
-    emit_owner_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit infra-only owner-binding");
 
     assert_eq!(
-        is_owner_bound(&engine, NODE_KEY_ID).await.as_deref(),
+        is_steward_bound(&engine, NODE_KEY_ID).await.as_deref(),
         Some("owner-user"),
         "bound to the responsible user after a live user → node infra delegation"
     );
 }
 
 #[tokio::test]
-async fn is_owner_bound_false_when_granter_is_not_user_role() {
+async fn is_steward_bound_false_when_granter_is_not_user_role() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
     // The granter is a NODE-role key, NOT a user — ownership must NOT root in it.
     let other_node = register_party_signed(&engine, "other-node", identity_type::NODE).await;
 
-    emit_owner_binding(&engine, &other_node, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &other_node, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit (granter is node-role)");
 
     assert!(
-        is_owner_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
         "a node-role granter does not confer ownership (CC 3.2: must be a user)"
     );
 }
 
 #[tokio::test]
-async fn is_owner_bound_false_when_revoked() {
+async fn is_steward_bound_false_when_revoked() {
     let engine = node(NODE_KEY_ID).await;
     register_node(&engine, NODE_KEY_ID).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
-    emit_owner_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
         .await
         .expect("emit owner-binding");
-    assert!(is_owner_bound(&engine, NODE_KEY_ID).await.is_some());
+    assert!(is_steward_bound(&engine, NODE_KEY_ID).await.is_some());
 
     // The granter withdraws the binding against the node → ownership ends.
     emit_withdraws(&engine, &owner, NODE_KEY_ID).await;
 
     assert!(
-        is_owner_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
         "a withdrawn owner-binding no longer confers ownership"
     );
 }
@@ -491,9 +491,9 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
         .expect("user key present after claim");
     assert_eq!(user_key.identity_type, identity_type::USER);
 
-    // is_owner_bound → the user.
+    // is_steward_bound → the user.
     assert_eq!(
-        is_owner_bound(&engine, node_key_id).await.as_deref(),
+        is_steward_bound(&engine, node_key_id).await.as_deref(),
         Some(user_key_id),
         "the claim emitted a live delegates_to(user → node, infra:*) owner-binding"
     );
@@ -653,7 +653,7 @@ async fn claim_rejects_tampered_binding_and_signature() {
     );
 
     // The node is still unowned after all rejected claims.
-    assert!(is_owner_bound(&engine, node_key_id).await.is_none());
+    assert!(is_steward_bound(&engine, node_key_id).await.is_none());
 }
 
 #[tokio::test]
@@ -738,5 +738,5 @@ async fn claim_with_wrong_pin_is_rejected() {
         .await
         .expect("POST (wrong pin)");
     assert_eq!(resp.status(), 401, "a wrong claim PIN is rejected");
-    assert!(is_owner_bound(&engine, node_key_id).await.is_none());
+    assert!(is_steward_bound(&engine, node_key_id).await.is_none());
 }

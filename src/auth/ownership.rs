@@ -43,10 +43,10 @@
 //!
 //! What stays server-side (a STRICTER, return-richer wrapper over the substrate):
 //!
-//! - [`is_owner_bound`] returns the granter `key_id` (callers bind ROOT to the
+//! - [`is_steward_bound`] returns the granter `key_id` (callers bind ROOT to the
 //!   responsible user) AND requires the owner-binding edge to be `infra:*`-only
 //!   (the CC 1.13.5 read-time gate). persist's general
-//!   `federation::admission::is_owner_bound` is scope-agnostic and returns only
+//!   `federation::admission::is_steward_bound` is scope-agnostic and returns only
 //!   `bool` — it is the substrate-internal predicate the v9.0.0 community-
 //!   membership gate composes; ours is the node-ownership wrapper the auth
 //!   subsystem needs, so it is KEPT (it composes the substrate's leaf predicates
@@ -78,9 +78,9 @@
 //!   signature over them against the user's SUPPLIED pubkeys (Strict), registers
 //!   the user's key (`identity_type "user"`), then [`persist_user_signed_owner_binding`]
 //!   stores the `SignedAttestation` whose `scrub_*` fields hold the USER's
-//!   `key_id` + signatures. [`is_owner_bound`] then reads a USER-signed edge.
+//!   `key_id` + signatures. [`is_steward_bound`] then reads a USER-signed edge.
 //!
-//! [`emit_owner_binding`] is the one-shot user-signed emit (it takes the user's
+//! [`emit_steward_binding`] is the one-shot user-signed emit (it takes the user's
 //! `LocalSigner` directly: attester == signer, the v9.0.0-conformant shape) for
 //! internal emit sites that already hold the user's signer; the CLAIM path uses
 //! the 1-phase [`build_signed_owner_binding`] / [`apply_signed_owner_binding`].
@@ -119,7 +119,7 @@ pub const INFRA_SERVE: &str = "infra:serve";
 
 /// The canonical owner-binding scope set: identity + membership standing +
 /// serve, all infra-class, in sorted (canonical) order. This is what
-/// [`emit_owner_binding`] stamps when the caller does not narrow it.
+/// [`emit_steward_binding`] stamps when the caller does not narrow it.
 pub const OWNER_BINDING_INFRA_SCOPES: &[&str] =
     &[INFRA_MEMBERSHIP, INFRA_NETWORK_PRESENCE, INFRA_SERVE];
 
@@ -205,7 +205,7 @@ pub fn identity_type_contains(identity_type: &str, role: &str) -> bool {
 /// the WRITE-side validation gate ([`apply_signed_owner_binding`] /
 /// [`build_owner_binding_envelope`]) to enforce CC 1.13.5 (`infra:*`-only) at
 /// emit time; the READ-side owner-binding check defers entirely to the
-/// substrate's [`Engine::owner_bindings_of`] (#249 Cut B).
+/// substrate's [`Engine::steward_bindings_of`] (#249 Cut B).
 fn scope_set_of(envelope: &serde_json::Value) -> Vec<String> {
     match envelope.get("scope") {
         Some(serde_json::Value::String(s)) => vec![s.clone()],
@@ -281,7 +281,7 @@ pub fn canonicalize_owner_binding_envelope(
 /// Assemble a [`SignedAttestation`] from a user-built `delegates_to` envelope
 /// PLUS the responsible party's OWN hybrid signatures over its canonical bytes,
 /// and persist it via `put_attestation` — so the stored owner-binding is
-/// GENUINELY USER-SIGNED ([`is_owner_bound`] then reads a user-signed edge).
+/// GENUINELY USER-SIGNED ([`is_steward_bound`] then reads a user-signed edge).
 ///
 /// This is the principled fix for the prior node-attested-on-behalf binding:
 /// the `scrub_*` fields carry the USER's `key_id` + the user's Ed25519 + ML-DSA-65
@@ -502,7 +502,7 @@ pub struct AppliedOwnerBinding {
 /// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
 /// as `identity_type "user"` BEFORE persisting the binding (so
 /// `put_attestation`'s attesting-key-exists FK is satisfied and
-/// [`is_owner_bound`]'s granter-is-user check resolves).
+/// [`is_steward_bound`]'s granter-is-user check resolves).
 pub async fn apply_signed_owner_binding(
     engine: &Engine,
     this_node_key_id: &str,
@@ -699,7 +699,7 @@ async fn register_user_key(
 /// [`build_signed_owner_binding`] / [`persist_user_signed_owner_binding`] use for
 /// the 1-phase CLAIM; this entry point is for internal emit sites that hold the
 /// user's `LocalSigner` directly.
-pub async fn emit_owner_binding(
+pub async fn emit_steward_binding(
     engine: &Engine,
     user_signer: &LocalSigner,
     node_key_id: &str,
@@ -773,7 +773,7 @@ pub async fn emit_owner_binding(
 /// shape the v9.0.0 ingest gate verifies against the signer's REGISTERED key) →
 /// `put_attestation`. Returns the `attestation_id`.
 ///
-/// This is the WORKING federation-emit path (the one `emit_owner_binding` uses and
+/// This is the WORKING federation-emit path (the one `emit_steward_binding` uses and
 /// that reads back) — it deliberately does NOT go through `attestation_promote`,
 /// which is currently broken on real nodes ([CIRISPersist#247]: promote writes
 /// `scrub_key_id = signer.current_alias()`, not the derived federation key_id → FK
@@ -838,7 +838,7 @@ pub async fn emit_signed_attestation(
 ///
 /// This was a hand-rolled inbound-edge walk over `list_attestations_for` +
 /// `lookup_public_key` + a local `delegation_revoked`. v9.3.0 exposes the
-/// purpose-built reader [`Engine::owner_bindings_of`], which enumerates the
+/// purpose-built reader [`Engine::steward_bindings_of`], which enumerates the
 /// same three clauses our walk tested (own user-key / occurrence-of-a-user /
 /// live `delegates_to(U → k)`), with edge expiry **and** the §11.10
 /// `withdraws`/`recants` edge-retraction bucketing folded in. We return the
@@ -852,19 +852,19 @@ pub async fn emit_signed_attestation(
 /// (`put_attestation` rejects a non-`infra:*` `delegates_to` to a node-only
 /// key), so any `delegates_to(U → node)` that EXISTS already carried only
 /// `infra:*` scope. The write gate is the load-bearing one; re-deriving it on
-/// every read was duplicate work. (`owner_bindings_of` also omits the granter
+/// every read was duplicate work. (`steward_bindings_of` also omits the granter
 /// `valid_until` liveness check our walk did — edge expiry + retraction are the
 /// canonical liveness signals in the §11.10 model.)
-pub async fn is_owner_bound(engine: &Engine, node_key_id: &str) -> Option<String> {
+pub async fn is_steward_bound(engine: &Engine, node_key_id: &str) -> Option<String> {
     engine
-        .owner_bindings_of(node_key_id)
+        .steward_bindings_of(node_key_id)
         .await
         .ok()
         .and_then(|owners| owners.into_iter().next())
 }
 
 /// **CEG projection — "nodes owned by this fed ID".** The inverse of
-/// [`is_owner_bound`]: every node key_id `owner_user_key_id` owner-binds. The
+/// [`is_steward_bound`]: every node key_id `owner_user_key_id` owner-binds. The
 /// owner-bindings ARE the graph, so the list is a projection over them (no
 /// client-side parallel store). By construction it returns the local node once
 /// it has been self-claimed (the claim persists exactly that `delegates_to`).
@@ -872,41 +872,33 @@ pub async fn is_owner_bound(engine: &Engine, node_key_id: &str) -> Option<String
 /// ## Collapsed onto the substrate (CIRISPersist#249 Cut B)
 ///
 /// persist exposes no "delegations BY a key" reader (only the inbound
-/// [`Engine::delegations_to`] / [`Engine::owner_bindings_of`]), so we still scan
+/// [`Engine::delegations_to`] / [`Engine::steward_bindings_of`]), so we still scan
 /// the user's OUTGOING `delegates_to` edges (`list_attestations_by`) to find
 /// candidate recipients — but the liveness / revocation / user-role / infra
 /// logic is no longer hand-walked: each candidate is **confirmed** through
-/// [`Engine::owner_bindings_of`] (which folds all of that in). The recipient is
+/// [`Engine::steward_bindings_of`] (which folds all of that in). The recipient is
 /// the edge's `attested_key_id` — persist's canonical recipient field, which the
-/// §11.10 retraction bucketing and `owner_bindings_of` both key on — NOT an
+/// §11.10 retraction bucketing and `steward_bindings_of` both key on — NOT an
 /// `envelope["node_key_id"]` field (so this stays correct under either the
 /// hand-rolled or the `owner_bind` `delegates_to` envelope shape).
-pub async fn nodes_owned_by(engine: &Engine, owner_user_key_id: &str) -> Vec<String> {
-    let directory = engine.federation_directory();
-    let Ok(rows) = directory.list_attestations_by(owner_user_key_id).await else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = Vec::new();
-    for edge in rows {
-        if edge.attestation_type != attestation_type::DELEGATES_TO {
-            continue;
-        }
-        let node = edge.attested_key_id;
-        if node.is_empty() || out.iter().any(|n| n == &node) {
-            continue;
-        }
-        // Confirm via the substrate reader: liveness + withdraws/recants
-        // retraction + the granter being a live user-role anchor.
-        if let Ok(owners) = engine.owner_bindings_of(&node).await {
-            if owners.iter().any(|o| o == owner_user_key_id) {
-                out.push(node);
-            }
-        }
-    }
-    out
+pub async fn nodes_stewarded_by(engine: &Engine, steward_user_key_id: &str) -> Vec<String> {
+    // CIRISPersist#299: persist 11 exposes the outbound steward-binding reader as a
+    // first-class substrate call — "list the nodes I steward" is now ONE read with
+    // read-after-write correctness owned by persist, not a hand-rolled edge scan.
+    engine
+        .nodes_stewarded_by(steward_user_key_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        // persist 11's reader includes the steward's own identity (a user is
+        // is_steward_bound — self-sovereign); a steward does not *steward
+        // themselves*, so exclude self from the "wards I steward" projection
+        // that drives the node switcher.
+        .filter(|k| k != steward_user_key_id)
+        .collect()
 }
 
-/// Errors [`emit_owner_binding`] can surface.
+/// Errors [`emit_steward_binding`] can surface.
 #[derive(Debug)]
 pub enum OwnershipError {
     /// The supplied scope set carried a non-`infra:*` (agency / legacy-agency)

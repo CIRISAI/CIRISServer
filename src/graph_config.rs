@@ -33,7 +33,7 @@
 //! a `withdraws`/`recants` against a config row's `attestation_id` is honored
 //! here (a recanted key reads as absent), via [`config_key_revoked`], which is
 //! the same `withdraws`/`recants`-by-the-node + `revocations_for` shape
-//! [`crate::auth::ownership::is_owner_bound`]'s `delegation_revoked` uses. There
+//! [`crate::auth::ownership::is_steward_bound`]'s `delegation_revoked` uses. There
 //! is no substrate `supersede`-aware reader yet (the finer RC29 §5.6.8.15
 //! supersede flow is TODO upstream); the version-fold already gives last-write-
 //! wins for the common path.

@@ -47,7 +47,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # ARM64 builds NATIVELY on an ARM runner (apt libtss2-dev applies) —
+          # ARM64 builds NATIVELY on an ARM runner (apt applies) —
           # cross-compiling tss-esapi from x86 has no target libtss2.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -93,7 +93,7 @@ jobs:
           # 403s and tanks apt-get update (its packages are not needed here).
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
           sudo apt-get update
-          sudo apt-get install -y libtss2-dev libsqlite3-dev
+          sudo apt-get install -y libsqlite3-dev
 
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true

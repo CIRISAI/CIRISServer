@@ -165,7 +165,7 @@ pub async fn existence_verdict(
 /// be auto-granted `moderate` when the last named moderator lapses.
 ///
 /// Eligibility: the member must be **owner-bound** (a real provisioned
-/// accountable identity, or an occurrence of one — persist's `is_owner_bound`).
+/// accountable identity, or an occurrence of one — persist's `is_steward_bound`).
 /// A bare unowned node can never become the moderator.
 ///
 /// Deterministic ranking (so every node computes the SAME promotion — no
@@ -194,9 +194,9 @@ pub async fn auto_promotion_candidate(
     // Score each eligible (owner-bound) member.
     let mut ranked: Vec<RankedMember> = Vec::new();
     for member in &community.members {
-        let eligible = admission::is_owner_bound(directory.as_ref(), &member.key_id)
+        let eligible = admission::is_steward_bound(directory.as_ref(), &member.key_id)
             .await
-            .map_err(|e| format!("is_owner_bound: {e}"))?;
+            .map_err(|e| format!("is_steward_bound: {e}"))?;
         if !eligible {
             continue;
         }
@@ -246,7 +246,7 @@ pub async fn is_eligible_candidate(engine: &Engine, member: &CommunityMember) ->
     let Some(directory) = engine.sqlite_backend() else {
         return false;
     };
-    admission::is_owner_bound(directory.as_ref(), &member.key_id)
+    admission::is_steward_bound(directory.as_ref(), &member.key_id)
         .await
         .unwrap_or(false)
 }

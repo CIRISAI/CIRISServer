@@ -424,7 +424,7 @@ async fn claim_remote_handler(
 /// — the SAME CC 3.2 owner-binding the first-run claim uses, but authorized by the
 /// EXISTING owner's session (not first-run/PIN) and applied locally (no setup/root,
 /// so the existing ROOT is untouched and the password/OAuth login is PRESERVED).
-/// Non-destructive (owner-binding model). After it, `is_owner_bound(node)` resolves
+/// Non-destructive (owner-binding model). After it, `is_steward_bound(node)` resolves
 /// to the fed-ID user, and the node appears in the CEG-native owned-nodes list.
 ///
 /// Flow: client logs in as the existing admin → mints the fed-ID
@@ -524,7 +524,7 @@ struct SetAgeSelfRequest {
 /// route requires an x-ciris-signed REQUEST (the subject signs), which the app
 /// (no crypto) cannot produce. This wizard-time sibling lets the LOCAL node record
 /// the owner's self-declared age in its substrate: the subject is the node's bound
-/// owner fed-ID ([`ownership::is_owner_bound`]) and
+/// owner fed-ID ([`ownership::is_steward_bound`]) and
 /// [`crate::safety::age::emit_age_assurance`] persists + node-co-signs the
 /// promotion (no caller signature needed). MUST run AFTER the claim (the owner
 /// must exist), before the wizard closes.
