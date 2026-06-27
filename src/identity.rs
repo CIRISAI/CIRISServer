@@ -1118,7 +1118,10 @@ fn backend_ladder(requested: UserIdentityBackend) -> Vec<UserIdentityBackend> {
             UserIdentityBackend::Software,
         ],
         UserIdentityBackend::PlatformSealed => {
-            vec![UserIdentityBackend::PlatformSealed, UserIdentityBackend::Software]
+            vec![
+                UserIdentityBackend::PlatformSealed,
+                UserIdentityBackend::Software,
+            ]
         }
         UserIdentityBackend::Software => vec![UserIdentityBackend::Software],
     }
