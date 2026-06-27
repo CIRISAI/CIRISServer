@@ -16,7 +16,7 @@
 //!      that device's re-opened signer resolves to the SAME self (its `key_id()` is
 //!      the portable occurrence key, which is an active occurrence of the self).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -30,6 +30,12 @@ use ciris_server::auth::occurrence::bind_occurrence_core;
 use ciris_server::auth::verify::signer_acts_for;
 
 const NODE_KEY_ID: &str = "ciris-server-portable-test";
+
+/// Both tests in this file mutate the **process-global** `CIRIS_HOME`/`CIRIS_DATA_DIR`
+/// env (and share the ML-DSA seal root under `keys_dir()`), so they MUST NOT run
+/// concurrently — cargo runs a file's tests in parallel by default. Serialize them
+/// on this lock (poison-tolerant: a panic in one test must not wedge the other).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A unique temp dir per test/tag.
 fn tmp(tag: &str) -> std::path::PathBuf {
@@ -99,6 +105,7 @@ async fn register_self_key(engine: &Engine, key_id: &str) {
 
 #[tokio::test]
 async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the_self() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // The verify outbox + the ML-DSA seal root must live somewhere writable + unique
     // per run (the portable mint produces a self-record; the install re-seals).
     let home = tmp("home");
@@ -234,6 +241,7 @@ async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the
 /// self-DEK cascade instead of fail-secure excluding it.**
 #[tokio::test]
 async fn portable_keyset_derives_self_enc_pubkeys_and_enters_the_dek_cascade() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tmp("dek-home");
     let data = tmp("dek-data");
     std::env::set_var("CIRIS_HOME", &home);
