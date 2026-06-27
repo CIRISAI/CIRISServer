@@ -38,4 +38,16 @@ try:  # pragma: no cover - defensive; submodules are registered by the ext
 except Exception:  # pragma: no cover
     pass
 
-__all__ = ["main", "import_traces"]
+# The one-wheel ``import *`` above pulls in the bundled substrate's ``__version__``
+# (edge began exporting one at v7.3.1), which would otherwise SHADOW this package's
+# version on ``ciris_server.__version__``. Pin it to THIS package's real version —
+# the same ``CARGO_PKG_VERSION`` the node reports on ``/health`` (and that PyPI /
+# pip / importlib.metadata index) — so the attribute never reads the substrate's.
+try:  # pragma: no cover - metadata is always present for an installed wheel
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("ciris-server")
+except Exception:  # pragma: no cover
+    pass
+
+__all__ = ["main", "import_traces", "__version__"]

@@ -25,8 +25,8 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v11.0.0", version = "11", features = ["extract", "sqlite"] }
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v7.3.0", version = "7", features = ["transport-http", "transport-reticulum"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v11.2.0", version = "11", features = ["extract", "sqlite"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v7.3.1", version = "7", features = ["transport-http", "transport-reticulum"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
 # signing identity via `ciris_keyring::load_local_seed`. Edge's
@@ -36,12 +36,12 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v7.3.0
 # CIRISVerify tag persist + edge pin (v5.0.0 — CEG 1.0 / Agent 3.0 substrate
 # release; MAJOR 4→5 but additive for lens-core) — single verify version.
 # features mirror edge's keyring pin exactly.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.0.0", version = "8", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.3.0", version = "8", features = ["software", "pqc-ml-dsa"] }
 # verify-core for `fedcode::derive_key_id` — the lens seal path must stamp the
 # DERIVED federation key_id (`derive_key_id(<alias>, <ed25519 pubkey>)`), the id
 # `receive_and_persist` verifies against, NOT the bare `local_key_id` alias
 # (CIRISServer#118; same class as the closed CIRISEdge#203). Single verify version.
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.0.0", version = "8" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.3.0", version = "8" }
 
 # persist's `sqlite` feature: relay mode persists inbound batches via
 # `Engine::receive_and_persist` + reads `Engine::sqlite_backend()` for

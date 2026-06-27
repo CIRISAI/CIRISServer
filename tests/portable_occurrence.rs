@@ -227,3 +227,97 @@ async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// **Self-DEK (0.5.56 / CIRISVerify#151 + CIRISPersist#304): the portable keyset's
+/// content-encryption keypair is DERIVED from the Ed25519 seed, so it is portable
+/// (a restore re-derives the IDENTICAL key) and admits the occurrence into the
+/// self-DEK cascade instead of fail-secure excluding it.**
+#[tokio::test]
+async fn portable_keyset_derives_self_enc_pubkeys_and_enters_the_dek_cascade() {
+    let home = tmp("dek-home");
+    let data = tmp("dek-data");
+    std::env::set_var("CIRIS_HOME", &home);
+    std::env::set_var("CIRIS_DATA_DIR", &data);
+
+    let engine = node().await;
+    let self_key = "owner-self-dek";
+    register_self_key(&engine, self_key).await;
+
+    // (1) Mint a portable keyset — it MUST carry derived enc pubkeys.
+    let usb = tmp("dek-usb");
+    let alias = "owner-dek-portable-1";
+    let keyset = ciris_server::identity::mint_portable_software_occurrence(&usb, alias)
+        .await
+        .expect("mint portable keyset");
+    let enc = keyset
+        .encryption_pubkeys
+        .clone()
+        .expect("portable mint MUST derive self content-enc pubkeys from the seed");
+
+    // (2) PORTABILITY: re-deriving from the seed bytes on the USB reproduces the
+    //     EXACT same pubkeys — the property that lets a restore read self content
+    //     with no re-key (CIRISPersist#304 wrap-once).
+    let seed_bytes = std::fs::read(usb.join(format!("{alias}.ed25519.seed"))).unwrap();
+    let seed: [u8; 32] = seed_bytes.as_slice().try_into().unwrap();
+    let rederived = ciris_server::identity::derive_self_enc_pubkeys(&seed)
+        .expect("re-derive self enc pubkeys from the seed");
+    assert_eq!(
+        rederived.x25519_base64, enc.x25519_base64,
+        "x25519 pubkey is a deterministic function of the seed (portable)"
+    );
+    assert_eq!(
+        rederived.ml_kem_768_base64, enc.ml_kem_768_base64,
+        "ML-KEM-768 ek pubkey is a deterministic function of the seed (portable)"
+    );
+    // Shapes: x25519 pub = 32 B, ML-KEM-768 ek = 1184 B.
+    assert_eq!(BASE64.decode(&enc.x25519_base64).unwrap().len(), 32);
+    assert_eq!(BASE64.decode(&enc.ml_kem_768_base64).unwrap().len(), 1184);
+
+    // (3) Bind WITH the derived enc pubkeys → the occurrence is ADMITTED into the
+    //     self-DEK cascade (NOT in the fail-secure excluded list).
+    let bound = bind_occurrence_core(
+        &engine,
+        self_key,
+        &keyset.key_id,
+        "laptop",
+        None,
+        keyset.encryption_pubkeys.clone(),
+        Some(keyset.key_record.clone()),
+    )
+    .await
+    .expect("bind with enc pubkeys");
+    assert!(
+        !bound.self_dek_excluded.contains(&keyset.key_id),
+        "an occurrence WITH derived enc pubkeys must NOT be fail-secure excluded \
+         from the cascade (excluded={:?})",
+        bound.self_dek_excluded
+    );
+
+    // (4) CONTROL: a second occurrence bound WITHOUT enc pubkeys IS excluded — proof
+    //     the admission turns on the enc pubkeys, and that the derive is what flips it.
+    let keyless =
+        ciris_server::identity::mint_portable_software_occurrence(&usb, "owner-keyless-1")
+            .await
+            .expect("mint keyless control");
+    let keyless_excluded = bind_occurrence_core(
+        &engine,
+        self_key,
+        &keyless.key_id,
+        "laptop",
+        None,
+        None, // deliberately omit enc pubkeys
+        Some(keyless.key_record.clone()),
+    )
+    .await
+    .expect("bind keyless control");
+    assert!(
+        keyless_excluded.self_dek_excluded.contains(&keyless.key_id),
+        "an occurrence with NO enc pubkeys must be fail-secure excluded"
+    );
+
+    std::env::remove_var("CIRIS_HOME");
+    std::env::remove_var("CIRIS_DATA_DIR");
+    for d in [&home, &data, &usb] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

@@ -435,6 +435,13 @@ pub struct PortableSoftwareKeyset {
     /// The new key's self-signed `SignedKeyRecord` (proof-of-possession) — pass
     /// straight to `Engine::register_federation_key`.
     pub key_record: ciris_persist::federation::SignedKeyRecord,
+    /// The self content-encryption pubkeys (x25519 + ML-KEM-768) **derived from
+    /// the Ed25519 base seed** (CIRISVerify#151 / verify v8.3.0). Attaching these
+    /// to the occurrence admits it into the Self-DEK cascade; because they are a
+    /// deterministic function of the seed, any device that restores this keyset
+    /// re-derives the IDENTICAL keypair (CIRISPersist#304 wrap-once). `None` only
+    /// if the derive ever fails (logged; the bind then fail-secure excludes it).
+    pub encryption_pubkeys: Option<ciris_persist::federation::EncryptionPubkeys>,
     /// The seed/marker filenames written into the target dir (names only — NO
     /// private bytes leave the node).
     pub files_written: Vec<String>,
@@ -462,6 +469,32 @@ fn write_seed_0600(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 #[cfg(not(unix))]
 fn write_seed_0600(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+/// **Derive the self content-encryption pubkeys from an Ed25519 base seed.**
+///
+/// Mirrors `ciris_crypto::secp256k1::derive_wallet_keypair`: HKDF-SHA256 over the
+/// seed with per-scheme domain separation (CIRISVerify#151, verify v8.3.0). Returns
+/// the **public** halves only (x25519 32 B + ML-KEM-768 ek 1184 B, base64) — the
+/// private halves are zeroed inside `ciris_crypto::self_enc` and re-derived on use.
+///
+/// This is THE portability primitive for the self-DEK: it is a pure function of the
+/// seed, so every device that holds the seed (the original or a restore) re-derives
+/// the IDENTICAL keypair. The self-DEK is therefore wrapped once to this pubkey
+/// (CIRISPersist#304) and any seed-holder opens it — no per-device re-key ceremony.
+pub fn derive_self_enc_pubkeys(
+    ed25519_seed: &[u8; 32],
+) -> Result<ciris_persist::federation::EncryptionPubkeys> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (_x_secret, x_public) = ciris_crypto::self_enc::derive_self_enc_x25519(ed25519_seed);
+    let (_ml_dk_seed, ml_ek_public) =
+        ciris_crypto::self_enc::derive_self_enc_mlkem768(ed25519_seed)
+            .map_err(|e| anyhow::anyhow!("derive self ML-KEM-768 content-enc key: {e}"))?;
+    Ok(ciris_persist::federation::EncryptionPubkeys {
+        x25519_base64: b64.encode(x_public),
+        ml_kem_768_base64: b64.encode(ml_ek_public),
+    })
 }
 
 /// **Mint a fresh portable SOFTWARE identity occurrence keyset** into `target_dir`.
@@ -501,6 +534,19 @@ pub async fn mint_portable_software_occurrence(
         .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;
     let mldsa = MlDsa65Signer::from_seed(&ml_seed)
         .map_err(|e| anyhow::anyhow!("build ml-dsa-65 signer from seed: {e}"))?;
+
+    // Self content-encryption pubkeys, DERIVED from the Ed25519 seed (verify v8.3.0
+    // #151). The seed is the portable secret this keyset carries, so deriving here
+    // means a restore re-derives the IDENTICAL keypair → the occurrence enters the
+    // Self-DEK cascade and the wrap is shared across every seed-holder (#304).
+    let encryption_pubkeys = match derive_self_enc_pubkeys(&ed_seed) {
+        Ok(pk) => Some(pk),
+        Err(e) => {
+            tracing::warn!(error = %e, "portable mint: self content-enc derive failed — \
+                this occurrence will be fail-secure EXCLUDED from the self-DEK cascade");
+            None
+        }
+    };
 
     let ed_pub = ed
         .public_key()
@@ -554,6 +600,7 @@ pub async fn mint_portable_software_occurrence(
         fedcode,
         identity_type: "user".to_string(),
         key_record,
+        encryption_pubkeys,
         files_written: vec![
             portable_ed_seed_name(alias),
             portable_mldsa_seed_name(alias),

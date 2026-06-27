@@ -792,8 +792,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "8.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
+version = "8.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.3.0#b21ec50cbd6050b51bb827386b2f4f4ef590732b"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -821,8 +821,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "7.3.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.3.0#e7e0ae15b4ef617e0c9f19a31ff2ec9b1536cc46"
+version = "7.3.1"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v7.3.1#92ce78926000a6935f1ac9e5c670046ace81ef60"
 dependencies = [
  "async-trait",
  "axum",
@@ -876,8 +876,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "8.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
+version = "8.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.3.0#b21ec50cbd6050b51bb827386b2f4f4ef590732b"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -942,8 +942,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "11.0.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v11.0.0#94a5e26fc968a770b13f3daaab4193b484ad1727"
+version = "11.2.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v11.2.0#5293f99e66aafac85c8820d1c9e3c5bc3e99178a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1024,8 +1024,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "8.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.0.0#19a8e03861a0706c944bf3a4f15e2ba5d9701d72"
+version = "8.3.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.3.0#b21ec50cbd6050b51bb827386b2f4f4ef590732b"
 dependencies = [
  "android_system_properties",
  "anyhow",

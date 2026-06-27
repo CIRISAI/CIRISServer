@@ -254,7 +254,10 @@ async fn portable_handler(
         &keyset.key_id,
         "laptop",
         None,
-        None,
+        // Self content-enc pubkeys derived from the portable seed (#151): admits this
+        // occurrence into the self-DEK cascade so a restore of this keyset decrypts
+        // the self's at-rest content. None only if the derive failed (excluded).
+        keyset.encryption_pubkeys.clone(),
         Some(keyset.key_record.clone()),
     )
     .await

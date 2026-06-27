@@ -206,6 +206,13 @@ mod tests {
             invocation: Invocation {
                 invocation_kind: kind,
                 invocation_id: "react-001".into(),
+                // verify v8.3.0: `lifecycle:active` (resumption) MUST name the halt it
+                // ends; every other kind MUST omit it (verify_invocation enforces both).
+                resumes_halt_id: if matches!(kind, InvocationKind::LifecycleActive) {
+                    Some("halt-001".into())
+                } else {
+                    None
+                },
                 nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
                 asserted_at: "2026-06-21T00:00:00.000Z".into(),
                 valid_until: "2030-01-01T00:00:00.000Z".into(),

@@ -307,6 +307,8 @@ fn constitutional_invocation(id: &str) -> Invocation {
     Invocation {
         invocation_kind: InvocationKind::Constitutional,
         invocation_id: id.to_string(),
+        // verify v8.3.0: forbidden for every kind except `lifecycle:active`.
+        resumes_halt_id: None,
         nonce: BASE64.encode([9u8; 32]),
         asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
         valid_until: "2030-01-01T00:00:00.000Z".to_string(),
@@ -379,6 +381,8 @@ fn drill_invocation(id: &str) -> Invocation {
     Invocation {
         invocation_kind: InvocationKind::Drill,
         invocation_id: id.to_string(),
+        // verify v8.3.0: forbidden for every kind except `lifecycle:active`.
+        resumes_halt_id: None,
         nonce: BASE64.encode([7u8; 32]),
         asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
         valid_until: "2030-01-01T00:00:00.000Z".to_string(),
