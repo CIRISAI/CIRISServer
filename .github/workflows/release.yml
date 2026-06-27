@@ -19,7 +19,9 @@ permissions:
 # (Edge / Persist / Verify / LensCore) build, restricted to targets a headless
 # server actually runs on, plus **ARM32** (armv7 linux — Pi / embedded
 # Reticulum-mesh nodes; de-singletonization includes hardware diversity, M-1).
-# (The Tier-3 Windows 7 build-std lane was dropped in 0.5.57.)
+# (The Tier-3 Windows 7 build-std lane was dropped in 0.5.57 and RE-ENABLED in
+# 0.5.59 once the cross-repo CIRISCache was warm — the build-std substrate relink
+# is cheap again.)
 #
 # The mobile FFI lanes (Android .aar / iOS .xcframework) are NOT here: a headless
 # server binary does not ship as a mobile library. Those belong to the core
@@ -62,11 +64,19 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Windows 10+ (standard stable msvc). The Tier-3 Win7 build-std lane was
-          # dropped in 0.5.57 — it cost a nightly + rust-src + build-std relink on
-          # every cut for a platform we no longer support.
+          # Windows 7 → Win11 lane (CIRISVerify#67). `target` stays
+          # x86_64-pc-windows-msvc so the artifact name is stable; `build_target`
+          # is the Tier-3 win7 triple cargo actually compiles (nightly +
+          # build-std keeps std's Win7 syscall fallbacks). panic_abort is in the
+          # build-std crate list because std's build references it (else E0463);
+          # the active panic strategy stays "unwind" via the Cargo.toml profile.
+          # RE-ENABLED in 0.5.59 (cross-repo CIRISCache warm → the build-std
+          # relink is cheap again; this lane was dropped in 0.5.57).
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            build_target: x86_64-win7-windows-msvc
+            toolchain: nightly
+            build_std: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +85,10 @@ jobs:
         if: ${{ matrix.toolchain != 'nightly' }}
         with:
           targets: ${{ matrix.target }}
+      # NOTE: @nightly tracks the LATEST nightly (matches the historical config).
+      # Pinning a fixed nightly date here would improve win7 CIRISCache cache-key
+      # stability (RUSTC is part of the key) — follow-up, NOT done now because a
+      # wrong/yanked date can break -Zbuild-std.
       - uses: dtolnay/rust-toolchain@nightly
         if: ${{ matrix.toolchain == 'nightly' }}
         with:
@@ -110,6 +124,7 @@ jobs:
             x86_64-apple-darwin)             PLAT=macos-x86_64 ;;
             aarch64-apple-darwin)            PLAT=macos-aarch64 ;;
             x86_64-pc-windows-msvc)          PLAT=windows-x64 ;;
+            x86_64-win7-windows-msvc)        PLAT=win7-x64 ;;
             aarch64-linux-android)           PLAT=android-arm64-v8a ;;
             armv7-linux-androideabi)         PLAT=android-armeabi-v7a ;;
             armv7-unknown-linux-gnueabihf)   PLAT=linux-armv7 ;;
