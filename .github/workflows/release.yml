@@ -85,13 +85,12 @@ jobs:
         if: ${{ matrix.toolchain != 'nightly' }}
         with:
           targets: ${{ matrix.target }}
-      # NOTE: @nightly tracks the LATEST nightly (matches the historical config).
-      # Pinning a fixed nightly date here would improve win7 CIRISCache cache-key
-      # stability (RUSTC is part of the key) — follow-up, NOT done now because a
-      # wrong/yanked date can break -Zbuild-std.
-      - uses: dtolnay/rust-toolchain@nightly
+      # PINNED to nightly-2026-06-12 (persist's proven build-std date) so the win7
+      # CIRISCache key (RUSTC-keyed) is stable + the server-layer blob is re-found.
+      - uses: dtolnay/rust-toolchain@master
         if: ${{ matrix.toolchain == 'nightly' }}
         with:
+          toolchain: nightly-2026-06-12
           components: rust-src
 
       - name: Install build deps (Linux native)

@@ -45,12 +45,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # NOTE: @nightly tracks the LATEST nightly (matches the historical config).
-      # Pinning a fixed nightly date here would improve win7 CIRISCache cache-key
-      # stability (RUSTC is part of the key) — follow-up, NOT done now because a
-      # wrong/yanked date can break -Zbuild-std.
+      # PINNED to nightly-2026-06-12 (persist's proven build-std date) so the win7
+      # CIRISCache key is stable + the server-layer blob is re-found across runs.
       - name: Set up nightly Rust (build-std for the Win7 target)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-06-12
           components: rust-src
 
       # CIRISCache (CIRISServer#99) — 4-layer centipede. PLAT=win7-x64; RUSTC is a

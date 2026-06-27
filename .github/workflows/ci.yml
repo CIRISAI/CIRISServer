@@ -147,12 +147,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # NOTE: @nightly tracks the LATEST nightly (matches the historical config).
-      # Pinning a fixed nightly date here would improve win7 CIRISCache cache-key
-      # stability (RUSTC is part of the key) — follow-up, NOT done now because a
-      # wrong/yanked date can break -Zbuild-std.
-      - uses: dtolnay/rust-toolchain@nightly
+      # PINNED to nightly-2026-06-12 (the date persist uses for its build-std
+      # windows lane — proven good) so RUSTC in the CIRISCache key is STABLE: the
+      # win7 server-layer blob this job saves on main is then re-found by every
+      # later win7 build, instead of the key drifting daily under @nightly.
+      # (Upstream verify/persist/edge never build this target, so only the server
+      # layer can hit — see CIRISServer#99.)
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-06-12
           components: rust-src
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true

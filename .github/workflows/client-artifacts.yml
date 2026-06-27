@@ -109,6 +109,7 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+      packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +120,41 @@ jobs:
 
       - name: Set up Rust (maturin builds the abi3 wheel)
         uses: dtolnay/rust-toolchain@stable
+
+      # CIRISCache 4-layer centipede (CIRISServer#99) — restore the substrate
+      # compile so the windows-installer maturin build doesn't cold-compile
+      # persist/edge/verify every run. PLAT=windows-x64 (matches the wheel leg).
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/' || echo "")
+          PLAT="windows-x64"
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with: { key: "${{ steps.cachekey.outputs.key-verify }}" }
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with: { key: "${{ steps.cachekey.outputs.key-persist }}" }
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with: { key: "${{ steps.cachekey.outputs.key-edge }}" }
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with: { key: "${{ steps.cachekey.outputs.key }}" }
 
       - name: Set up Java 17 (Liberica — Win7-capable jlink runtime)
         # Liberica/Zulu retain Windows 7 support; Temurin dropped it. The
@@ -173,6 +209,14 @@ jobs:
           echo "installing $WHL"
           pip install "$WHL"
           python -c "import ciris_server; from ciris_server.cli import main; print('ciris_server import OK')"
+
+      - name: CIRISCache save (windows-x64 server layer)
+        if: github.ref == 'refs/heads/main'
+        uses: CIRISAI/CIRISCache/save@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build PyInstaller bundle
         shell: bash
