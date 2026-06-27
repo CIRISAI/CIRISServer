@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  packages: write   # build-wheels (reusable) CIRISCache save on main — CIRISServer#99
 
 jobs:
   warm:

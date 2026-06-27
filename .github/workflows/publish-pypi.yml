@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  packages: write   # build-wheels (reusable) CIRISCache save on main — CIRISServer#99
 
 jobs:
   # Build every platform wheel + the sdist via the shared reusable workflow.
