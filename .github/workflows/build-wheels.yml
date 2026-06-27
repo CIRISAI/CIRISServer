@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
 
 jobs:
   # ── Build abi3 wheels per platform ─────────────────────────────────────────
@@ -53,6 +54,20 @@ jobs:
           cache-bin: false
           shared-key: release-${{ matrix.plat.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
+      # GHA L1 above. Shares the canonical key with conformance.yml's linux-x86_64
+      # build so the substrate compile is reused across repos.
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          echo "CIRISCACHE_KEY=ciris-substrate-v1-${{ matrix.plat.name }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
@@ -100,6 +115,14 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 1
+      # Populate the cross-repo CIRISCache blob on main (restore is anonymous on
+      # PRs; only main writes — public package, GITHUB_TOKEN, no external secret).
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   macos:
     name: wheel macos-${{ matrix.target }}
@@ -147,6 +170,19 @@ jobs:
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
           ls -l ../python/ciris_server/desktop_app/
+      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO substrate cache,
+      # layered over maturin-action's sccache below.
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          echo "CIRISCACHE_KEY=ciris-substrate-v1-macos-${{ matrix.target }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -162,6 +198,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 1
+      # Populate the cross-repo CIRISCache blob on main.
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   windows:
     name: wheel windows-x64
@@ -196,6 +239,19 @@ jobs:
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
           ls -l ../python/ciris_server/desktop_app/
+      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO substrate cache,
+      # layered over maturin-action's sccache below. shell: bash (default is pwsh).
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          echo "CIRISCACHE_KEY=ciris-substrate-v1-windows-x64-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -210,6 +266,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: warn
           retention-days: 1
+      # Populate the cross-repo CIRISCache blob on main.
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # Android abi3 wheels (incl. arm32 armeabi-v7a) — the CIRISAgent KMP client's
   # mobile targets. NDK cross-compile + libpython stub, the substrate recipe
@@ -240,6 +303,19 @@ jobs:
           cache-bin: false
           shared-key: release-android-${{ matrix.abi }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
+      # GHA L1 above, per-ABI NDK cross-compile of the substrate.
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          echo "CIRISCACHE_KEY=ciris-substrate-v1-android-${{ matrix.abi }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -300,6 +376,13 @@ jobs:
           path: dist/*.whl
           if-no-files-found: warn
           retention-days: 1
+      # Populate the cross-repo CIRISCache blob on main.
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   sdist:
     name: sdist

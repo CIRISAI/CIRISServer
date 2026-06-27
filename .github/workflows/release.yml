@@ -11,15 +11,15 @@ env:
 permissions:
   contents: write
   id-token: write  # Sigstore keyless signing
+  packages: write  # CIRISCache save (GHCR) on main — CIRISServer#99
 
 # ============================================================================
 # CIRISServer ships the `ciris-server` BINARY (the fabric node) across the full
 # server/embedded matrix — the same platform set the upstream substrate crates
 # (Edge / Persist / Verify / LensCore) build, restricted to targets a headless
-# server actually runs on, plus the two the maintainer requires explicitly:
-# **Windows 7** (the Tier-3 build-std lane) and **ARM32** (armv7 linux — Pi /
-# embedded Reticulum-mesh nodes; de-singletonization includes hardware
-# diversity, M-1).
+# server actually runs on, plus **ARM32** (armv7 linux — Pi / embedded
+# Reticulum-mesh nodes; de-singletonization includes hardware diversity, M-1).
+# (The Tier-3 Windows 7 build-std lane was dropped in 0.5.57.)
 #
 # The mobile FFI lanes (Android .aar / iOS .xcframework) are NOT here: a headless
 # server binary does not ship as a mobile library. Those belong to the core
@@ -62,17 +62,11 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Windows 7 → Win11 lane (CIRISVerify#67). `target` stays
-          # x86_64-pc-windows-msvc so the artifact name is stable; `build_target`
-          # is the Tier-3 win7 triple cargo actually compiles (nightly +
-          # build-std keeps std's Win7 syscall fallbacks). panic_abort is in the
-          # build-std crate list because std's build references it (else E0463);
-          # the active panic strategy stays "unwind" via the Cargo.toml profile.
+          # Windows 10+ (standard stable msvc). The Tier-3 Win7 build-std lane was
+          # dropped in 0.5.57 — it cost a nightly + rust-src + build-std relink on
+          # every cut for a platform we no longer support.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            build_target: x86_64-win7-windows-msvc
-            toolchain: nightly
-            build_std: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +94,21 @@ jobs:
         with:
           cache-bin: false
           key: release-${{ matrix.build_target || matrix.target }}-${{ github.ref_name }}
+
+      # CIRISCache (CIRISServer#99) — GHCR-backed CROSS-REPO L2 over the Swatinem
+      # GHA L1 above. Binaries are a distinct feature set from the wheels, so the
+      # `bin-` prefix keeps these blobs from colliding with build-wheels' keys.
+      - name: Compute CIRISCache key (canonical, CIRISServer#99)
+        shell: bash
+        run: |
+          RUSTC=$(rustc -V | awk '{print $2}')
+          ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
+          P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
+          echo "CIRISCACHE_KEY=ciris-substrate-v1-bin-${{ matrix.build_target || matrix.target }}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}" >> "$GITHUB_ENV"
+      - uses: CIRISAI/CIRISCache/restore@v1
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
 
       - name: Install cross (retry on timeout)
         if: matrix.cross
@@ -141,6 +150,15 @@ jobs:
           name: ciris-server-${{ matrix.target }}
           path: stage/
           if-no-files-found: error
+
+      # Populate the cross-repo CIRISCache blob on main (release runs on tags, so
+      # this is restore-only here; the warm-release-cache main run does the save).
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ env.CIRISCACHE_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # Linux ARM64 musl (Alpine / Home Assistant) — static, via zigbuild.
   build-musl:

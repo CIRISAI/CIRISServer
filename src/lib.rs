@@ -196,6 +196,8 @@ pub mod safety;
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
 /// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
 pub mod scorer;
+pub mod system_data;
+pub mod telemetry_logs;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
 

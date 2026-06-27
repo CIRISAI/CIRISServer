@@ -51,7 +51,7 @@ jobs:
           RUSTC=$(rustc -V | awk '{print $2}')
           ver() { { grep -A1 "name = \"$1\"" Cargo.lock | grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; } || true; }
           P=$(ver ciris-persist); E=$(ver ciris-edge); V=$(ver ciris-verify-core)
-          KEY="ciris-substrate-v1-${RUNNER_OS,,}-${RUNNER_ARCH,,}-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}"
+          KEY="ciris-substrate-v1-linux-x86_64-release-rustc${RUSTC}-p${P:-none}-e${E:-none}-v${V:-none}"
           echo "CIRISCACHE_KEY=${KEY}" >> "$GITHUB_ENV"
           echo "CIRISCache key: ${KEY}"
       - uses: CIRISAI/CIRISCache/restore@v1

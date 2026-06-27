@@ -177,18 +177,44 @@ private fun IdentityHeaderCard(identity: FederationIdentity?) {
             Spacer(Modifier.height(8.dp))
 
             val keyId = identity?.signerKeyId
+            val hasKey = !keyId.isNullOrBlank()
+            // Collapsed by default — the full Ed25519 fedcode is long enough to
+            // eclipse the rest of the card on narrow viewports, so we show a
+            // truncated form (first 8 … last 6) and gate the full key behind a
+            // "?" expander.
+            var keyExpanded by remember { mutableStateOf(false) }
+            val truncatedKey = if (!hasKey) {
+                "—"
+            } else {
+                val k = keyId!!
+                if (k.length > 16) "<${k.take(8)}…${k.takeLast(6)}>" else "<$k>"
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                SelectionContainer(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (keyExpanded && hasKey) "<$keyId>" else truncatedKey,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 13.sp,
+                    modifier = Modifier.weight(1f).testable("text_signer_key_id_short"),
+                )
+                // "?" affordance toggles the full-key expander. Tapping it
+                // expands/collapses the full monospace fedcode below.
+                IconButton(
+                    onClick = { if (hasKey) keyExpanded = !keyExpanded },
+                    enabled = hasKey,
+                    modifier = Modifier.testableClickable("btn_node_key_expand") {
+                        if (hasKey) keyExpanded = !keyExpanded
+                    },
+                ) {
                     Text(
-                        text = if (keyId.isNullOrBlank()) "—" else "<$keyId>",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 13.sp,
-                        modifier = Modifier.testable("text_signer_key_id"),
+                        text = "?",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = CIRISColors.AccentCyan,
                     )
                 }
                 // Always render the copy IconButton — `enabled` gates the
@@ -196,34 +222,46 @@ private fun IdentityHeaderCard(identity: FederationIdentity?) {
                 // hid `btn_copy_signer_key` from the QA walk-test during the
                 // brief pre-seed window (same composition-timing race as the
                 // hub IdentityCard fix in T-T2 / 868ad9226).
-                run {
-                    val hasKey = !keyId.isNullOrBlank()
-                    IconButton(
-                        onClick = {
-                            if (hasKey) {
-                                clipboard.setText(AnnotatedString(keyId!!))
-                                copied = true
-                                scope.launch {
-                                    delay(1500)
-                                    copied = false
-                                }
+                IconButton(
+                    onClick = {
+                        if (hasKey) {
+                            clipboard.setText(AnnotatedString(keyId!!))
+                            copied = true
+                            scope.launch {
+                                delay(1500)
+                                copied = false
                             }
-                        },
-                        enabled = hasKey,
-                        modifier = Modifier.testableClickable("btn_copy_signer_key") {
-                            if (hasKey) {
-                                clipboard.setText(AnnotatedString(keyId!!))
-                                copied = true
-                            }
-                        },
-                    ) {
-                        Icon(
-                            imageVector = CIRISMaterialIcons.Filled.ContentCopy,
-                            contentDescription = localizedString("network.identity_card.copy_address"),
-                            tint = CIRISColors.AccentCyan,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
+                        }
+                    },
+                    enabled = hasKey,
+                    modifier = Modifier.testableClickable("btn_copy_signer_key") {
+                        if (hasKey) {
+                            clipboard.setText(AnnotatedString(keyId!!))
+                            copied = true
+                        }
+                    },
+                ) {
+                    Icon(
+                        imageVector = CIRISMaterialIcons.Filled.ContentCopy,
+                        contentDescription = localizedString("network.identity_card.copy_address"),
+                        tint = CIRISColors.AccentCyan,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            // Full, selectable monospace key — only when the "?" expander is
+            // toggled open. Keeps the SelectionContainer/copy behavior intact.
+            if (keyExpanded && hasKey) {
+                Spacer(Modifier.height(8.dp))
+                SelectionContainer(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "<$keyId>",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.sp,
+                        modifier = Modifier.testable("text_signer_key_id"),
+                    )
                 }
             }
             if (copied) {

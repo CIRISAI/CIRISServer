@@ -134,6 +134,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
 
+    // Seed the node's federation identity into the graph so the client's Graph page
+    // is never empty on a fresh install (mirrors the agent's agent/identity seed).
+    crate::memory_api::seed_identity_graph(&engine, &cfg.key_id, "node").await;
+
     // ── CONFIG-AS-CEG resolution (Server 0.5 Phase 2) ─────────────────────────
     // Resolve the migrated runtime-tunable knobs from the corpus's signed
     // `config:*` objects (baked default per absent key) into the initial snapshot,
@@ -633,6 +637,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // Unauthenticated (read-only public surface, same posture as
                     // federation_peers and the health endpoint).
                     .merge(crate::memory_api::router(Arc::clone(&engine)))
+                    // GET /v1/telemetry/logs — the node's own logs for the client
+                    // Logs screen (tails <home>/logs/ciris-server.log*). Read-only.
+                    .merge(crate::telemetry_logs::router(cfg.home.join("logs")))
+                    // Data page: owner-gated data wipe (reset-account = data-only;
+                    // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
+                    .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()))
                     // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
                     // POST /lens-api/api/v1/accord/events (legacy path, forwarded
                     // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events

@@ -2556,7 +2556,10 @@ fun CIRISApp(
                         PlatformLogger.i("CIRISApp", "[Screen.Logs] Toggle auto-scroll")
                         logsViewModel.toggleAutoScroll()
                     },
-                    onNavigateBack = { currentScreen = Screen.Interact }
+                    onNavigateBack = { currentScreen = Screen.Interact },
+                    // Reflect the existing backend mode: in node mode the "Agent"
+                    // log source is disabled/grayed in the source dropdown.
+                    isNodeMode = !isAgentMode
                 )
             }
 

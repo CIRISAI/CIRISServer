@@ -79,6 +79,61 @@ use ciris_persist::graph::types::{EdgeDirection, GraphScope, NodeFilter};
 use ciris_persist::graph::GraphService;
 use ciris_persist::prelude::Engine;
 
+// ── Boot-time identity seed ───────────────────────────────────────────────────
+
+/// Seed the node's own federation identity as a graph node so the client's Graph
+/// page is never empty on a fresh install — the node mirror of the agent's
+/// `agent/identity` startup seed (CIRISAgent `identity_manager.initialize_identity`).
+///
+/// Idempotent and **refreshes `updated_at` every boot** (so it stays inside the
+/// timeline's `updated_after` window). Best-effort: a Postgres-only node (no sqlite
+/// backend) is a no-op, and any write error is logged, never fatal to boot.
+pub async fn seed_identity_graph(engine: &Engine, node_key_id: &str, identity_type: &str) {
+    let Some(sq) = engine.sqlite_backend() else {
+        return;
+    };
+    let graph = SqliteGraphBackend::new(sq.conn_handle());
+    let node_id = "node/identity".to_string();
+    let scope = GraphScope::Identity;
+    let now = chrono::Utc::now();
+
+    // Read the current row (if any) so the upsert's optimistic-concurrency
+    // `expected_version` matches — a fresh insert uses expected_version = 0.
+    let (version, expected_version, created_at) = match graph.get_node(&node_id, scope).await {
+        Ok(Some(existing)) => (existing.version, existing.version, existing.created_at),
+        _ => (1, 0, now),
+    };
+
+    let node = ciris_persist::graph::types::GraphNode {
+        node_id,
+        scope,
+        node_type: "identity".to_string(),
+        attributes: serde_json::json!({
+            "key_id": node_key_id,
+            "identity_type": identity_type,
+            "role": "node",
+            "name": node_key_id,
+            "description": "This CIRIS fabric node's federation identity.",
+        }),
+        version,
+        updated_by: node_key_id.to_string(),
+        updated_at: now,
+        created_at,
+        signature: None,
+        signing_key_id: None,
+        signature_verified: false,
+    };
+
+    if let Err(e) = graph.upsert_node(node, expected_version, false).await {
+        tracing::warn!(error = %e, "seed_identity_graph: could not seed the node identity into the graph (Graph page may show empty)");
+    } else {
+        tracing::info!(
+            node_key_id,
+            "seeded node identity into the graph (node/identity)"
+        );
+    }
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
