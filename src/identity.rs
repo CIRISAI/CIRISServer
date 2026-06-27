@@ -1046,38 +1046,81 @@ async fn self_identity_handler(
         );
     }
 
-    let backend_label = backend.label();
-    match mint_user_identity(backend, &alias, req.label.as_deref(), st.seed_dir.clone()).await {
-        Ok(minted) => {
-            // Record WHICH custody backend minted this identity, so the claim-remote
-            // signer (resolved at request time) re-opens it with the SAME backend
-            // (software seed file / TPM-sealed / YubiKey). Without this, resolution
-            // would guess `software` and miss a platform-sealed or YubiKey mint.
-            write_user_backend_marker(&st.seed_dir, &alias, backend_label);
-            // Record the active owner user alias so claim-remote + portable +
-            // post-claim owner-signer resolution (read at request time) find the
-            // signer the user just minted under THEIR chosen name, not `<node>-user`.
-            if let Err(e) = crate::write_active_user_alias(&st.seed_dir, &alias) {
-                tracing::warn!(error = %e, alias = %alias,
-                    "could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
+    // Custody ladder (the operator's stated priority): YubiKey (if available AND
+    // selected) → TPM/Secure-Enclave (if available) → software (last resort). A
+    // rung whose hardware can't be opened (e.g. pkcs11 selected but no token →
+    // libykcs11 missing) falls to the NEXT rung instead of 500-ing the mint. The
+    // signer open is the FIRST effectful step of mint_user_identity, so a failed
+    // rung leaves no partial state and the next rung mints cleanly. The marker +
+    // active-alias are written for whichever rung actually succeeded.
+    let ladder = backend_ladder(backend);
+    let mut last_err: Option<anyhow::Error> = None;
+    for (rung, b) in ladder.into_iter().enumerate() {
+        let backend_label = b.label();
+        match mint_user_identity(b, &alias, req.label.as_deref(), st.seed_dir.clone()).await {
+            Ok(minted) => {
+                if rung > 0 {
+                    tracing::warn!(
+                        actual = backend_label,
+                        "custody fell back down the ladder — the requested hardware was unavailable"
+                    );
+                }
+                // Record WHICH custody backend minted this identity, so the
+                // claim-remote signer (resolved at request time) re-opens it with
+                // the SAME backend (software seed file / TPM-sealed / YubiKey).
+                write_user_backend_marker(&st.seed_dir, &alias, backend_label);
+                // Record the active owner user alias so claim-remote + portable +
+                // post-claim owner-signer resolution (read at request time) find the
+                // signer the user just minted under THEIR chosen name, not <node>-user.
+                if let Err(e) = crate::write_active_user_alias(&st.seed_dir, &alias) {
+                    tracing::warn!(error = %e, alias = %alias,
+                        "could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
+                }
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "key_id": minted.key_id,
+                        "fedcode": minted.fedcode,
+                        "identity_type": minted.identity_type,
+                        "pubkey_ed25519_base64": minted.pubkey_ed25519_base64,
+                        "pubkey_ml_dsa_65_base64": minted.pubkey_ml_dsa_65_base64,
+                        "hardware_type": minted.hardware_type,
+                    })),
+                )
+                    .into_response();
             }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "key_id": minted.key_id,
-                    "fedcode": minted.fedcode,
-                    "identity_type": minted.identity_type,
-                    "pubkey_ed25519_base64": minted.pubkey_ed25519_base64,
-                    "pubkey_ml_dsa_65_base64": minted.pubkey_ml_dsa_65_base64,
-                    "hardware_type": minted.hardware_type,
-                })),
-            )
-                .into_response()
+            Err(e) => {
+                tracing::warn!(backend = backend_label, error = %e,
+                    "custody rung failed to open; trying the next rung down the ladder");
+                last_err = Some(e);
+            }
         }
-        Err(e) => http_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("mint user identity: {e}"),
+    }
+    http_err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "mint user identity (every custody rung failed): {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "no backend available".into())
         ),
+    )
+}
+
+/// The descending custody ladder for a requested backend (operator priority:
+/// YubiKey if selected → platform-sealed (TPM/SE, keychain fallback) → software).
+/// An explicit `software` request stays software — it is already the last resort.
+fn backend_ladder(requested: UserIdentityBackend) -> Vec<UserIdentityBackend> {
+    match requested {
+        UserIdentityBackend::Pkcs11(_) => vec![
+            requested,
+            UserIdentityBackend::PlatformSealed,
+            UserIdentityBackend::Software,
+        ],
+        UserIdentityBackend::PlatformSealed => {
+            vec![UserIdentityBackend::PlatformSealed, UserIdentityBackend::Software]
+        }
+        UserIdentityBackend::Software => vec![UserIdentityBackend::Software],
     }
 }
 

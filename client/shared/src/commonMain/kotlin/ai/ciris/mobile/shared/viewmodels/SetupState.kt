@@ -524,14 +524,18 @@ data class SetupFormState(
     val deviceName: String = "",
 
     /**
-     * Secure the local account with a second factor (2FA). The factor is
-     * provided NATIVELY by CIRISVerify — the device's hardware authenticator
-     * (YubiKey → TPM/Secure-Enclave) — and exposed by the local node as the
-     * `hardware_attestation` on the self-login occurrence (`POST /v1/self/login`)
-     * minted in the federation-identity step. Defaults ON; the account step lets
-     * the user opt out (password-only) if they choose.
+     * Opt IN to an EXTERNAL hardware token (YubiKey / PKCS#11) as the custody
+     * root for the federation identity. Defaults OFF: the mint then requests the
+     * platform ladder — TPM/Secure-Enclave when available, software (keychain /
+     * sealed-at-rest) as the last resort — which works on every device without a
+     * token. Turning this ON routes the mint to pkcs11; if no token is present the
+     * node falls back DOWN the same ladder rather than failing (server-side).
+     *
+     * Was defaulted ON + hard-mapped to pkcs11, which 500'd on any machine without
+     * a YubiKey (libykcs11 missing) — see CIRISServer 0.5.61. The full priority is:
+     * YubiKey (if available AND selected) → TPM/SE (if available) → software.
      */
-    val secureWith2FA: Boolean = true,
+    val secureWith2FA: Boolean = false,
 
     // Accord Metrics opt-in (for AI alignment research)
     // Data shared: reasoning scores, decision patterns, LLM provider/API base URL
