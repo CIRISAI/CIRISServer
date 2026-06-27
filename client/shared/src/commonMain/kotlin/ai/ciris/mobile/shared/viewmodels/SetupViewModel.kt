@@ -1013,6 +1013,39 @@ class SetupViewModel(
         )
         viewModelScope.launch {
             try {
+                // MINT-IF-ABSENT: the self-claim REQUIRES a responsible-user fed-ID
+                // (the node 503s "no responsible-user identity yet" otherwise). The
+                // FEDERATION_IDENTITY_SETUP step lets the user proceed on a valid
+                // *typed* label alone (canProceed = minted || admitted ||
+                // isLabelValid), so a user who fills the name but never taps "Create
+                // fed-ID" reaches here un-minted. Rather than fail the claim, mint it
+                // now from the name they provided — mint-if-absent, mirroring the
+                // node's own open_or_create unbrick. Awaited, so the fed-ID exists
+                // before claim-remote runs. A mint failure falls to the outer catch.
+                val fed0 = _state.value.federationIdentity
+                if (!fed0.minted && !fed0.admitted) {
+                    val mintBackend = fed0.backend
+                        ?: if (_state.value.secureWith2FA) "pkcs11" else null
+                    val minted = client.mintUserIdentity(
+                        label = fed0.label.trim().ifBlank { null },
+                        backend = mintBackend,
+                        localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                    )
+                    _state.value = _state.value.copy(
+                        federationIdentity = _state.value.federationIdentity.copy(
+                            inProgress = false,
+                            admitted = true,
+                            minted = true,
+                            hardwareAvailable = true,
+                            identityKeyId = minted.keyId,
+                            fedcode = minted.fedcode,
+                            hardwareLabel = minted.hardwareLabel,
+                            error = null,
+                        )
+                    )
+                    PlatformLogger.i(TAG, "claimLocalNodeOwnership: minted fed-ID before claim (was absent) key_id=${minted.keyId}")
+                }
+
                 // Resolve THIS node's own NodeCode (PUBLIC handle). Prefer the one
                 // captured from the banner; otherwise fetch it from the local node.
                 val nodeCode = capturedNodeCode?.takeIf { it.isNotBlank() }

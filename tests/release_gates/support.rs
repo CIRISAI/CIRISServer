@@ -29,7 +29,7 @@ use std::path::PathBuf;
 // the one-wheel re-export, CIRISServer#4).
 pub const TARGET_VERIFY: &str = "v8.3.0";
 pub const TARGET_PERSIST: &str = "v11.2.0";
-pub const TARGET_EDGE: &str = "v7.3.1";
+pub const TARGET_EDGE: &str = "v7.4.0";
 /// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
 pub const TARGET_PERSIST_V10: &str = "v10";
 

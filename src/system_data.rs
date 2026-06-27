@@ -154,6 +154,7 @@ async fn reset_account(
             errors.join("; ")
         )
     };
+    exit_after_response("data-only reset");
     (
         StatusCode::OK,
         Json(json!({
@@ -165,6 +166,29 @@ async fn reset_account(
         })),
     )
         .into_response()
+}
+
+/// Schedule a clean process exit shortly after the current response flushes.
+///
+/// A wipe clears the persist DB (and, for the key wipe, the signing keys) out
+/// from under THIS still-running process, which keeps open handles — so every
+/// subsequent query death-spirals with "disk I/O error" (observed in the field).
+/// The data are already the desired clean state; the only consistent way back is
+/// a fresh boot, which re-runs first-run (the 0.5.58 `open_or_create` unbrick
+/// mints a new identity, migrations re-apply, the claim PIN reprints). So we
+/// exit ~800ms after responding (enough for the body to reach the client): a
+/// desktop launcher / systemd / the operator restarts into the setup wizard.
+/// Mirrors the CIRIS agent's wipe-then-restart.
+fn exit_after_response(kind: &'static str) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        tracing::warn!(
+            wipe = kind,
+            "post-wipe: exiting so the node restarts clean into first-run \
+             (avoids the disk-I/O death-spiral against the wiped DB)"
+        );
+        std::process::exit(0);
+    });
 }
 
 // ─── POST /v1/system/data/wipe-signing-key (data + keys) ──────────────────────
@@ -227,6 +251,7 @@ async fn wipe_signing_key(
             errors.join("; ")
         )
     };
+    exit_after_response("data+keys");
     (
         StatusCode::OK,
         Json(json!({

@@ -569,6 +569,22 @@ fun SetupScreen(
                             }
                         }
                     } else {
+                        // AUTO-MINT ON NEXT: leaving the fed-ID step without an
+                        // identity? The proceed-gate allows advancing on a valid
+                        // *typed* label alone (so "Create fed-ID" is optional to
+                        // tap), but the later self-claim REQUIRES a minted fed-ID.
+                        // So if the user typed a name and didn't tap Create, mint it
+                        // now from that name as they advance. The mint runs async and
+                        // surfaces on this step; the claim also mints-if-absent as a
+                        // backstop. An association-in-progress is left alone.
+                        val fed = state.federationIdentity
+                        if (state.currentStep == SetupStep.FEDERATION_IDENTITY_SETUP &&
+                            !fed.minted && !fed.admitted && !fed.inProgress &&
+                            fed.isLabelValid()
+                        ) {
+                            PlatformLogger.i(TAG, " fed-ID not minted but name is set — auto-minting on Next")
+                            viewModel.runFederationIdentitySetup()
+                        }
                         PlatformLogger.i(TAG, " Not final step - calling viewModel.nextStep()")
                         viewModel.nextStep()
                     }
