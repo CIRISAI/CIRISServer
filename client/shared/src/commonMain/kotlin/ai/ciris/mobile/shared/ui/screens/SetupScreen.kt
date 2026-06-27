@@ -222,6 +222,16 @@ fun SetupScreen(
                     }
                     TestAutomation.clearTextInputRequest()
                 }
+                // OPTIONAL friendly per-device name (e.g. "Mac mini") — distinct
+                // from the fed-ID label. Empty is allowed.
+                "input_device_name" -> {
+                    if (request.clearFirst) {
+                        viewModel.setDeviceName(request.text)
+                    } else {
+                        viewModel.setDeviceName(state.deviceName + request.text)
+                    }
+                    TestAutomation.clearTextInputRequest()
+                }
                 // Both the advanced-setup tags (input_*) and the Quick Setup
                 // tags (quick_input_*) route here: Android text input is
                 // dispatched by resourceId through this handler, so a field
@@ -2529,6 +2539,46 @@ private fun FederationIdentityStep(
                                 else -> localizedString("mobile.setup_fedid_label_ok")
                             },
                             color = if (labelHasError) SetupColors.ErrorText else SetupColors.SuccessText,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                        )
+
+                        // OPTIONAL friendly per-device name (e.g. "Mac mini") —
+                        // distinct from the fed-ID name above. Empty is allowed; it
+                        // labels THIS device in the UI and is stored client-side
+                        // (no server field on the wizard's mint/claim yet).
+                        OutlinedTextField(
+                            value = state.deviceName,
+                            onValueChange = { viewModel.setDeviceName(it) },
+                            label = {
+                                Text(
+                                    localizedString("mobile.setup_device_name_label")
+                                        .ifEmpty { "Name this device (optional)" }
+                                )
+                            },
+                            placeholder = {
+                                Text(
+                                    localizedString("mobile.setup_device_name_hint")
+                                        .ifEmpty { "e.g. Mac mini" }
+                                )
+                            },
+                            singleLine = true,
+                            enabled = !fed.inProgress,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testable("input_device_name"),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = SetupColors.TextPrimary,
+                                unfocusedTextColor = SetupColors.TextPrimary,
+                                focusedBorderColor = SetupColors.Primary,
+                                unfocusedBorderColor = SetupColors.TextSecondary.copy(alpha = 0.5f),
+                                cursorColor = SetupColors.Primary,
+                            )
+                        )
+                        Text(
+                            text = localizedString("mobile.setup_device_name_helper")
+                                .ifEmpty { "A friendly name for this device. You can leave this blank." },
+                            color = SetupColors.TextSecondary,
                             fontSize = 12.sp,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
                         )

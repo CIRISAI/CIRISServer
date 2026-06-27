@@ -3,6 +3,7 @@ package ai.ciris.mobile.shared.viewmodels
 import ai.ciris.mobile.shared.config.CIRISConfig
 import ai.ciris.mobile.shared.models.*
 import ai.ciris.mobile.shared.platform.PlatformLogger
+import ai.ciris.mobile.shared.platform.createSecureStorage
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -174,6 +175,14 @@ class SetupViewModel(
          */
         const val STEWARD_SCOPE = "steward:responsible-for"
 
+        /**
+         * SecureStorage key for the OPTIONAL friendly per-device name the wizard
+         * collects (e.g. "Mac mini"). Client-side only — there is no server field
+         * for it on the wizard's mint/claim requests yet. Read by the UI to label
+         * "this device" (e.g. the My Identity device roster / node switcher).
+         */
+        const val PREF_DEVICE_NAME = "device_friendly_name"
+
         /** Canonical backend provider id for on-device Gemma 4 inference. */
         const val LOCAL_ON_DEVICE_PROVIDER_ID = "mobile_local"
 
@@ -321,6 +330,16 @@ class SetupViewModel(
 
     fun setUserPasswordConfirm(password: String) {
         _state.value = _state.value.copy(userPasswordConfirm = password)
+    }
+
+    /**
+     * Set the OPTIONAL friendly per-device name (e.g. "Mac mini"). Distinct from
+     * the federation-identity label (which names the human's fed-ID). Empty is
+     * allowed. Stored only in state here; persisted as a client-side preference
+     * on a successful ownership claim (see [claimLocalNodeOwnership]).
+     */
+    fun setDeviceName(name: String) {
+        _state.value = _state.value.copy(deviceName = name)
     }
 
     fun setSecureWith2FA(enabled: Boolean) {
@@ -1060,6 +1079,21 @@ class SetupViewModel(
                                     error = "Couldn't record your age range yet: ${e.message ?: "unknown error"}",
                                 )
                             )
+                        }
+                    }
+
+                    // Persist the OPTIONAL friendly device name (e.g. "Mac mini")
+                    // the user typed in the fed-ID step as a CLIENT-SIDE preference
+                    // so the UI can label "this device". Best-effort; never blocks.
+                    // TODO(0.5.60): persist device name to the occurrence once the
+                    // server has a label field on the wizard's mint/claim request.
+                    val deviceName = _state.value.deviceName.trim()
+                    if (deviceName.isNotBlank()) {
+                        try {
+                            createSecureStorage().save(PREF_DEVICE_NAME, deviceName)
+                            PlatformLogger.i(TAG, "claimLocalNodeOwnership: device name '$deviceName' saved (client-side pref)")
+                        } catch (e: Exception) {
+                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: failed to persist device name: ${e.message}")
                         }
                     }
                 }

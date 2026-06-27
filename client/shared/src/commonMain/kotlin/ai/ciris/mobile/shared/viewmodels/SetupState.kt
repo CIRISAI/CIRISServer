@@ -515,6 +515,15 @@ data class SetupFormState(
     val userPasswordConfirm: String = "",
 
     /**
+     * OPTIONAL friendly per-device name (e.g. "Mac mini") — distinct from the
+     * federation-identity label (which names the human's fed-ID). Empty is
+     * allowed. There is no server field for this on the wizard's mint/claim
+     * requests today, so it is persisted as a CLIENT-SIDE preference and used to
+     * label "this device" in the UI. See [SetupViewModel.setDeviceName].
+     */
+    val deviceName: String = "",
+
+    /**
      * Secure the local account with a second factor (2FA). The factor is
      * provided NATIVELY by CIRISVerify — the device's hardware authenticator
      * (YubiKey → TPM/Secure-Enclave) — and exposed by the local node as the

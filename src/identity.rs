@@ -972,6 +972,25 @@ fn parse_backend(req: &SelfIdentityRequest) -> Result<UserIdentityBackend, Respo
     }
 }
 
+/// Slugify a human label into a `key_id`-safe alias (`[a-z0-9-]`, collapsed
+/// dashes, trimmed) — the `derive_key_id` input + the keystore/seed filename stem,
+/// so the user's chosen name yields a clean `<alias>-<fp>` fed-ID. Empty when the
+/// label has no usable chars (caller falls back to `<node>-user`).
+fn slug_alias(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut last_dash = false;
+    for c in label.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
 async fn self_identity_handler(
     State(st): State<SelfIdentityState>,
     headers: HeaderMap,
@@ -1002,9 +1021,22 @@ async fn self_identity_handler(
         Ok(b) => b,
         Err(resp) => return resp,
     };
+    // The user's CHOSEN NAME drives their fed-ID key_id (CIRISServer 0.5.59): the
+    // alias (the `derive_key_id` input → `<alias>-<fp>`) is the slug of the label
+    // the wizard sent (e.g. "eric-moore-v1" → key_id `eric-moore-v1-<fp>`). An
+    // explicit `key_id` in the request still wins; only when NEITHER is given do we
+    // fall back to the node-derived `<node_key_id>-user`. (Before this, the name went
+    // ONLY into the fedcode alias_hint and every identity became `<node>-user-<fp>`.)
     let alias = req
         .key_id
         .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            req.label
+                .as_deref()
+                .map(slug_alias)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| format!("{}-user", st.node_key_id));
 
     if let Err(e) = std::fs::create_dir_all(&st.seed_dir) {
@@ -1022,6 +1054,13 @@ async fn self_identity_handler(
             // (software seed file / TPM-sealed / YubiKey). Without this, resolution
             // would guess `software` and miss a platform-sealed or YubiKey mint.
             write_user_backend_marker(&st.seed_dir, &alias, backend_label);
+            // Record the active owner user alias so claim-remote + portable +
+            // post-claim owner-signer resolution (read at request time) find the
+            // signer the user just minted under THEIR chosen name, not `<node>-user`.
+            if let Err(e) = crate::write_active_user_alias(&st.seed_dir, &alias) {
+                tracing::warn!(error = %e, alias = %alias,
+                    "could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

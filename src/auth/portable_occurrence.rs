@@ -113,7 +113,14 @@ async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Respo
 /// The owner's primary user alias (`<keystore_alias>-user`) — the keystore blob the
 /// local primary signer re-opens under (matches `compose.rs` claim-remote wiring).
 fn owner_user_alias(cfg: &ServerConfig) -> String {
-    format!("{}-user", cfg.keystore_alias)
+    // Read the active-alias pointer the mint wrote (CIRISServer 0.5.59) so the
+    // owner's portable occurrence resolves the signer under the user's CHOSEN name
+    // (e.g. `eric-moore-v1`), not the conventional `<keystore_alias>-user`. Falls
+    // back to the convention for a pre-pointer identity.
+    crate::active_user_alias(
+        &crate::user_seed_dir(cfg),
+        &format!("{}-user", cfg.keystore_alias),
+    )
 }
 
 /// Resolve `(identity_key_id, primary_signer)` for the bound owner, PROVING the node

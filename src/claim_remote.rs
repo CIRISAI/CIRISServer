@@ -362,7 +362,11 @@ async fn claim_remote_handler(
     let user_signer = match crate::compose::resolve_user_signer(
         &st.engine,
         auth,
-        &st.user_key_id,
+        // Resolve the owner user alias at REQUEST TIME from the active-alias pointer
+        // the mint wrote (CIRISServer 0.5.59) — the user's chosen name (e.g.
+        // `eric-moore-v1`), NOT the boot-captured `<node>-user`. Falls back to the
+        // boot value for an identity minted before the pointer existed.
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
         st.user_seed_dir.clone(),
     )
     .await
@@ -439,7 +443,11 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
     let user_signer = match crate::compose::resolve_user_signer(
         &st.engine,
         crate::compose::FedIdUse::OwnerSession,
-        &st.user_key_id,
+        // Resolve the owner user alias at REQUEST TIME from the active-alias pointer
+        // the mint wrote (CIRISServer 0.5.59) — the user's chosen name (e.g.
+        // `eric-moore-v1`), NOT the boot-captured `<node>-user`. Falls back to the
+        // boot value for an identity minted before the pointer existed.
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
         st.user_seed_dir.clone(),
     )
     .await

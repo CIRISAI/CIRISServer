@@ -138,7 +138,9 @@ async fn resolve_owner_signer(
     match crate::compose::resolve_user_signer(
         &st.engine,
         crate::compose::FedIdUse::OwnerSession,
-        &st.owner_key_id,
+        // Active-alias pointer (CIRISServer 0.5.59): resolve the owner signer under
+        // the user's chosen name at request time, falling back to <node>-user.
+        &crate::active_user_alias(&st.seed_dir, &st.owner_key_id),
         st.seed_dir.clone(),
     )
     .await

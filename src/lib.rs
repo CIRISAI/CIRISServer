@@ -330,6 +330,39 @@ pub fn user_seed_dir(cfg: &ServerConfig) -> std::path::PathBuf {
     cfg.identity_dir.join("user")
 }
 
+/// The filename, inside [`user_seed_dir`], that records the **active owner user
+/// identity's keystore alias** — the slug the user chose at mint (e.g.
+/// `eric-moore-v1`), so the user's chosen name DRIVES their fed-ID `key_id`
+/// (`<alias>-<fp>`) instead of the node-derived `<keystore_alias>-user` fallback.
+pub const ACTIVE_USER_ALIAS_FILE: &str = "active_user_alias";
+
+/// Resolve the active owner user-signer alias, READ AT REQUEST TIME (not boot):
+/// the mint writes [`ACTIVE_USER_ALIAS_FILE`] into `user_seed_dir`, and every
+/// owner-signer resolution (claim-remote, portable-occurrence, post-claim owner
+/// ops) reads it here so it finds the signer the user actually minted under their
+/// chosen name. Falls back to `default_alias` (the conventional
+/// `<keystore_alias>-user`) when the pointer is absent — back-compat for an
+/// identity minted before this pointer existed.
+pub fn active_user_alias(user_seed_dir: &std::path::Path, default_alias: &str) -> String {
+    let p = user_seed_dir.join(ACTIVE_USER_ALIAS_FILE);
+    match std::fs::read_to_string(&p) {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => default_alias.to_string(),
+    }
+}
+
+/// Record the active owner user alias (the slug the user chose at mint) into
+/// `user_seed_dir/active_user_alias`, so subsequent owner-signer resolutions
+/// ([`active_user_alias`]) find it. Best-effort: a write failure is logged by the
+/// caller, never fatal to the mint.
+pub fn write_active_user_alias(
+    user_seed_dir: &std::path::Path,
+    alias: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(user_seed_dir)?;
+    std::fs::write(user_seed_dir.join(ACTIVE_USER_ALIAS_FILE), alias)
+}
+
 /// Drive `ciris-server identity create` — the founder's "mint my YubiKey-backed
 /// federation ID via ciris-server" command. Mints the USER identity for `backend`
 /// (defaulting the alias/seed-dir from config), persists the genesis CEG object,

@@ -69,6 +69,7 @@ fun NetworkIdentityScreen(
     val identity by viewModel.identity.collectAsState()
     val nodeCode by viewModel.nodeCode.collectAsState()
     val federationId by viewModel.federationId.collectAsState()
+    val ownerKeyId by viewModel.ownerKeyId.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val error by viewModel.error.collectAsState()
 
@@ -132,7 +133,7 @@ fun NetworkIdentityScreen(
                 if (error != null) {
                     ErrorBanner(message = error!!, onDismiss = { viewModel.clearError() })
                 }
-                IdentityHeaderCard(identity = identity)
+                IdentityHeaderCard(identity = identity, ownerKeyId = ownerKeyId)
                 StatsRow(identity = identity)
                 CapabilitiesCard(identity = identity)
                 NodeCodeCard(nodeCode = nodeCode)
@@ -154,7 +155,7 @@ fun NetworkIdentityScreen(
 // ═══════════════════════════════════════════════════════════════════════════
 
 @Composable
-private fun IdentityHeaderCard(identity: FederationIdentity?) {
+private fun IdentityHeaderCard(identity: FederationIdentity?, ownerKeyId: String?) {
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
@@ -168,15 +169,28 @@ private fun IdentityHeaderCard(identity: FederationIdentity?) {
         ),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // PRIMARY = the OWNER/USER fed-ID (the human's identity, e.g.
+            // `eric-moore-v1-<fp>`), sourced from the local node's owner-binding
+            // (`GET /v1/setup/owned-nodes` → `owner`). The node's own signer key is
+            // shown SECONDARY below ("This node"). When the node is still unclaimed
+            // (`ownerKeyId == null`) we fall back to the node key here so the card
+            // never shows an empty primary — but it is then explicitly labeled as
+            // the node, not the owner.
+            val ownerAvailable = !ownerKeyId.isNullOrBlank()
             Text(
-                text = localizedString("network.identity_card.signer_key_label"),
+                text = if (ownerAvailable) {
+                    localizedString("network.identity_card.owner_key_label").ifEmpty { "Your fed-ID" }
+                } else {
+                    localizedString("network.identity_card.signer_key_label")
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(8.dp))
 
-            val keyId = identity?.signerKeyId
+            // Primary key id = owner fed-ID when claimed, else the node key.
+            val keyId = if (ownerAvailable) ownerKeyId else identity?.signerKeyId
             val hasKey = !keyId.isNullOrBlank()
             // Collapsed by default — the full Ed25519 fedcode is long enough to
             // eclipse the rest of the card on narrow viewports, so we show a
@@ -271,6 +285,31 @@ private fun IdentityHeaderCard(identity: FederationIdentity?) {
                     style = MaterialTheme.typography.labelSmall,
                     color = CIRISColors.SuccessGreen,
                 )
+            }
+
+            // SECONDARY = THIS node's own federation signer key. Only shown when
+            // the primary above is the owner fed-ID (claimed); pre-claim the
+            // primary already IS the node key, so we don't duplicate it.
+            val nodeKeyId = identity?.signerKeyId
+            if (ownerAvailable && !nodeKeyId.isNullOrBlank()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = localizedString("network.identity_card.node_key_label").ifEmpty { "This node" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                SelectionContainer(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "<$nodeKeyId>",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                        modifier = Modifier.testable("text_node_key_id"),
+                    )
+                }
             }
 
             Spacer(Modifier.height(12.dp))
