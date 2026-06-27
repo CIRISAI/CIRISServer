@@ -74,7 +74,7 @@ jobs:
           # 403s and tanks apt-get update (its packages are not needed here).
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev patchelf
+          sudo apt-get install -y libsqlite3-dev libudev-dev patchelf
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

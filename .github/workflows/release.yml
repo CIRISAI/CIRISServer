@@ -87,7 +87,7 @@ jobs:
           # 403s and tanks apt-get update (its packages are not needed here).
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
+          sudo apt-get install -y libsqlite3-dev libudev-dev
 
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true

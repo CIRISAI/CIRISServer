@@ -25,8 +25,8 @@ use ciris_edge::transport::store_and_forward::{
 use ciris_edge::transport::PendingDelivery;
 use ciris_edge::{Edge, LocalSigner as EdgeSigner};
 use ciris_keyring::{
-    get_platform_ed25519_signer, BlobTransportKeystore, HardwareSigner, MlDsa65SoftwareSigner,
-    PqcSigner, SealedEd25519Signer, TransportIdentityKeystore,
+    BlobTransportKeystore, HardwareSigner, MlDsa65SoftwareSigner, PqcSigner, SealedEd25519Signer,
+    TransportIdentityKeystore,
 };
 use ciris_lens_core::{LensCore, PeerAcl, ScoringConfig, UxConfig};
 use ciris_persist::prelude::Engine;
@@ -254,6 +254,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         &cfg,
         initial_config.transport_node,
         initial_config.store_and_forward,
+        &initial_config,
         Arc::clone(&signer),
         Arc::clone(&pqc),
     )
@@ -971,8 +972,20 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         );
         Ok(Box::new(signer))
     } else {
-        get_platform_ed25519_signer(&cfg.keystore_alias, cfg.identity_dir.clone())
-            .map_err(|e| anyhow::anyhow!("open sealed-Ed25519 federation signer: {e}"))
+        // Open the sealed seed, or MINT a fresh one if absent — first-boot mint,
+        // mirroring federation_pqc_signer's mint-if-absent (CIRISServer 0.5.58). The
+        // old `get_platform_ed25519_signer` was open-ONLY (SealedEd25519Signer::open),
+        // so a fresh OR wiped home (e.g. after POST /v1/system/data/wipe-signing-key)
+        // bricked the node with "Key not found: ed25519.seed" instead of coming back
+        // up to first-run. `open_or_create(.., None)` mints a random sealed seed when
+        // none exists, so the node self-bootstraps its federation identity.
+        SealedEd25519Signer::open_or_create(
+            cfg.keystore_alias.clone(),
+            cfg.identity_dir.clone(),
+            None,
+        )
+        .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+        .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
     }
 }
 
@@ -1316,6 +1329,7 @@ async fn build_edge(
     cfg: &ServerConfig,
     transport_node: bool,
     store_and_forward: bool,
+    resolved: &crate::config_reconcile::ResolvedConfig,
     signer: Arc<dyn HardwareSigner>,
     pqc: Arc<dyn PqcSigner>,
 ) -> Result<Edge> {
@@ -1398,7 +1412,7 @@ async fn build_edge(
         store_and_forward,
         "reticulum NAT-traversal infra configured (CIRISServer#24): transport-node forwarding + store-and-forward propagation"
     );
-    let edge = Edge::builder()
+    let mut builder = Edge::builder()
         .directory(backend.clone())
         .queue(backend)
         .signer(signer)
@@ -1406,7 +1420,44 @@ async fn build_edge(
         // it both wires the transport for run/dispatch AND records it so
         // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
         // populate the RET-transport role of GET /v1/identity.
-        .reticulum_transport(transport)
+        .reticulum_transport(transport);
+
+    // CIRISServer 0.5.58 — attach a serial LoRa/RNode radio transport when
+    // `net.radio.enabled` is set (Transport card). DESKTOP-ONLY: `serialport`
+    // isn't built on the android/ios wheels, so the whole attach is cfg-gated off
+    // the mobile targets (a sandboxed mobile node can't open a serial port anyway
+    // — that's the host-app shim path). A driver-open failure is logged and the
+    // node continues on Reticulum alone (never fatal to boot).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if resolved.radio_enabled && !resolved.radio_serial_port.trim().is_empty() {
+        let params = crate::radio::RadioParams {
+            serial_port: resolved.radio_serial_port.clone(),
+            frequency_hz: resolved.radio_frequency_hz,
+            bandwidth_hz: resolved.radio_bandwidth_hz,
+            spreading_factor: resolved.radio_spreading_factor,
+            coding_rate: resolved.radio_coding_rate,
+            tx_power_dbm: resolved.radio_tx_power_dbm,
+        };
+        match crate::radio::build_packet_radio_transport(&params, Arc::clone(engine)) {
+            Ok(radio) => {
+                builder = builder.transport(radio as Arc<dyn ciris_edge::transport::Transport>);
+                tracing::info!(
+                    port = %resolved.radio_serial_port,
+                    freq_hz = resolved.radio_frequency_hz,
+                    sf = resolved.radio_spreading_factor,
+                    "attached serial LoRa/RNode radio transport to the Edge"
+                );
+            }
+            Err(e) => tracing::error!(
+                error = %e, port = %resolved.radio_serial_port,
+                "radio transport open FAILED — continuing on Reticulum only"
+            ),
+        }
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = resolved; // radio is desktop-only; silence unused on mobile wheels.
+
+    let edge = builder
         .build()
         .map_err(|e| anyhow::anyhow!("build shared Edge: {e}"))?;
     tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");

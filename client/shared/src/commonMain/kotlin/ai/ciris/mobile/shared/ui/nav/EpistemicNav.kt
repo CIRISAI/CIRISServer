@@ -85,6 +85,15 @@ sealed class NavSurface(
 
     object Logs : NavSurface("logs", "Logs", CIRISIcons.log,
         labelKey = "nav.surface.logs",)
+
+    /**
+     * Transport — node transports + serial LoRa (RNode) radio configuration. A
+     * node-infra surface: shows the node's current Reticulum transport/peers
+     * (read-only) and an owner-gated radio config form persisting `net.radio.*`
+     * config. Radio activation is desktop-only. Live (no gate).
+     */
+    object Transport : NavSurface("transport", "Transport", CIRISIcons.bus,
+        labelKey = "nav.surface.transport",)
     object Telemetry : NavSurface(
         id = "telemetry", label = "Telemetry", icon = CIRISIcons.telemetry,
         children = listOf(Logs),
@@ -462,6 +471,7 @@ val NODE_GROUP = NavGroup(
         NavSurface.GraphMemory,     // memory graph (moved from Agent)
         NavSurface.WiseAuthority,   // escalations / deferrals (moved from Agent)
         NavSurface.Telemetry,       // + Logs (node-infra)
+        NavSurface.Transport,       // node transports + LoRa/RNode radio config
         NavSurface.Services,        // node-infra (Tools child dropped)
         NavSurface.System,          // node-infra (lifted out of agent Settings)
         NavSurface.Runtime,         // node-infra (lifted out of agent Settings)

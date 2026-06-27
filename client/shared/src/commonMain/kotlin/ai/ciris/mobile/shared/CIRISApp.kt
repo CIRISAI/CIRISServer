@@ -712,6 +712,9 @@ fun CIRISApp(
     val logsViewModel: LogsViewModel = viewModel {
         LogsViewModel(apiClient)
     }
+    val transportViewModel: ai.ciris.mobile.shared.viewmodels.TransportViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.TransportViewModel(apiClient)
+    }
     val memoryViewModel: MemoryViewModel = viewModel {
         MemoryViewModel(apiClient)
     }
@@ -2563,6 +2566,39 @@ fun CIRISApp(
                 )
             }
 
+            Screen.Transport -> {
+                val transportState by transportViewModel.state.collectAsState()
+
+                DisposableEffect(Unit) {
+                    PlatformLogger.i(TAG, "[Screen.Transport] Loading transports")
+                    transportViewModel.startPolling()
+                    onDispose {
+                        PlatformLogger.i(TAG, "[Screen.Transport] Disposing")
+                        transportViewModel.stopPolling()
+                    }
+                }
+
+                LaunchedEffect(transportState.error) {
+                    transportState.error?.let { error ->
+                        PlatformLogger.e(TAG, "[Screen.Transport] error: $error")
+                    }
+                }
+
+                TransportScreen(
+                    state = transportState,
+                    onRefresh = { transportViewModel.refresh() },
+                    onEnabledChange = { transportViewModel.updateEnabled(it) },
+                    onSerialPortChange = { transportViewModel.updateSerialPort(it) },
+                    onFrequencyChange = { transportViewModel.updateFrequencyHz(it) },
+                    onBandwidthChange = { transportViewModel.updateBandwidthHz(it) },
+                    onSpreadingFactorChange = { transportViewModel.updateSpreadingFactor(it) },
+                    onCodingRateChange = { transportViewModel.updateCodingRate(it) },
+                    onTxPowerChange = { transportViewModel.updateTxPowerDbm(it) },
+                    onApply = { transportViewModel.applyRadioConfig() },
+                    isNodeMode = !isAgentMode,
+                )
+            }
+
             Screen.Memory -> {
                 val memoryState by memoryViewModel.state.collectAsState()
 
@@ -3682,6 +3718,7 @@ fun CIRISApp(
                                 Screen.Help,
                                 Screen.LLMSettings,
                                 Screen.Logs,
+                                Screen.Transport,
                                 Screen.Memory,
                                 Screen.Runtime,
                                 Screen.Scheduler,
@@ -4268,6 +4305,7 @@ private sealed class Screen {
     object Services : Screen()
     object Audit : Screen()
     object Logs : Screen()
+    object Transport : Screen()  // node transports + LoRa/RNode radio config
     object Memory : Screen()
     object GraphMemory : Screen()
     object Config : Screen()
@@ -4380,6 +4418,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.Tools -> ai.ciris.mobile.shared.ui.nav.NavSurface.Tools
     Screen.Telemetry -> ai.ciris.mobile.shared.ui.nav.NavSurface.Telemetry
     Screen.Logs -> ai.ciris.mobile.shared.ui.nav.NavSurface.Logs
+    Screen.Transport -> ai.ciris.mobile.shared.ui.nav.NavSurface.Transport
     Screen.Memory -> ai.ciris.mobile.shared.ui.nav.NavSurface.Memory
     Screen.GraphMemory -> ai.ciris.mobile.shared.ui.nav.NavSurface.GraphMemory
     Screen.WiseAuthority -> ai.ciris.mobile.shared.ui.nav.NavSurface.WiseAuthority
@@ -4448,6 +4487,7 @@ private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen
     ai.ciris.mobile.shared.ui.nav.NavSurface.Tools -> Screen.Tools
     ai.ciris.mobile.shared.ui.nav.NavSurface.Telemetry -> Screen.Telemetry
     ai.ciris.mobile.shared.ui.nav.NavSurface.Logs -> Screen.Logs
+    ai.ciris.mobile.shared.ui.nav.NavSurface.Transport -> Screen.Transport
     ai.ciris.mobile.shared.ui.nav.NavSurface.Memory -> Screen.Memory
     ai.ciris.mobile.shared.ui.nav.NavSurface.GraphMemory -> Screen.GraphMemory
     ai.ciris.mobile.shared.ui.nav.NavSurface.WiseAuthority -> Screen.WiseAuthority

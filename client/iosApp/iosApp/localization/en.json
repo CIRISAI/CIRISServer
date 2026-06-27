@@ -2801,11 +2801,34 @@
       "identity_management": "My Identity",
       "accord": "Accord",
       "provision_accord_holder": "Provision Holder",
-      "accord_ceremony": "Genesis Ceremony"
+      "accord_ceremony": "Genesis Ceremony",
+      "transport": "Transport"
     }
   },
   "setup_validation_select_provider": "Select an LLM provider",
   "network_ops": {
     "open_federation_hub": "Open federation hub →"
+  },
+  "transport": {
+    "title": "Transport",
+    "subtitle": "Reticulum + radio · this node",
+    "refresh": "Refresh",
+    "current_transports": "Current transports",
+    "loading": "Loading…",
+    "unavailable": "Transport facts unavailable (node degraded?).",
+    "reticulum_address": "Reticulum address",
+    "peers": "Peers",
+    "capabilities": "Capabilities",
+    "radio_title": "Radio (LoRa / RNode)",
+    "radio_enable": "Enable radio",
+    "radio_serial_port": "Serial port",
+    "radio_frequency": "Frequency (Hz)",
+    "radio_bandwidth": "Bandwidth (Hz)",
+    "radio_spreading_factor": "Spreading factor (7–12)",
+    "radio_coding_rate": "Coding rate (5–8)",
+    "radio_tx_power": "TX power (dBm)",
+    "radio_apply": "Apply",
+    "radio_desktop_only": "Radio support is desktop-only — a sandboxed mobile node cannot open a serial port. Apply still persists this configuration; it activates on a desktop node with the radio backend.",
+    "agent_mode_hint": "This node is in agent mode; transport config applies to the underlying node."
   }
 }

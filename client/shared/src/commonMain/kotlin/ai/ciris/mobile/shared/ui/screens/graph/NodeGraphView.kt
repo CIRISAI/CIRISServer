@@ -373,10 +373,12 @@ private fun EdgeCategory.legendLabel(): String = when (this) {
 /**
  * The node-mesh graph composable.
  *
- * Reuses [LiveGraphBackground] as the ambient neural backdrop (when an
- * [apiClient] is available) and the [GraphCanvas]-style canvas renderer for the
- * mesh on top. Tappable vertices select; a detail panel surfaces the selected
- * vertex's name / key_id / edges and (for nodes) the switch + remove actions.
+ * Uses the [GraphCanvas]-style canvas renderer for the mesh. NOTE: the agent
+ * Interact page's animated neural backdrop ([LiveGraphBackground]) is
+ * deliberately NOT drawn here — it depicts an agent's cognitive/processing
+ * state, which a fabric node does not have. Tappable vertices select; a detail
+ * panel surfaces the selected vertex's name / key_id / edges and (for nodes)
+ * the switch + remove actions.
  */
 @Composable
 fun NodeGraphView(
@@ -421,14 +423,13 @@ fun NodeGraphView(
                 }
             },
     ) {
-        // ── Neural animated background (reused from the Interact page) ───────
-        if (apiClient != null) {
-            LiveGraphBackground(
-                apiClient = apiClient,
-                modifier = Modifier.matchParentSize(),
-                baseOpacity = 0.35f,
-            )
-        }
+        // ── (No neural/"rings" backdrop here) ───────────────────────────────
+        // The agent Interact page's animated neural background (LiveGraphBackground)
+        // visualises an AGENT's cognitive/processing state. This is the fabric
+        // NODE mesh card — a node has no agent processing, so the rings must NOT
+        // render here. LiveGraphBackground stays intact for the agent-mode
+        // Interact screen; it is simply not drawn on the nodes card. (apiClient
+        // is retained on the signature for callers / future node-side use.)
 
         // ── Mesh canvas (pan / zoom / tap-select) ───────────────────────────
         Canvas(
@@ -524,42 +525,86 @@ fun NodeGraphView(
             }
         }
 
-        // ── Legend (top-start) ──────────────────────────────────────────────
+        // ── Legend (top-start) — COLLAPSED by default ───────────────────────
+        // The full legend (vertex kinds + four relationship categories) is tall
+        // enough to eclipse the mesh on narrow viewports, so it starts collapsed
+        // behind a small "Legend" chip the user taps to expand. (Distinct from
+        // the NetworkIdentityScreen node-KEY "?" expander — this is the graph
+        // relationship legend.)
+        var legendExpanded by remember { mutableStateOf(false) }
         Surface(
             modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
             color = GraphColors.BackgroundLight.copy(alpha = 0.9f),
             shape = RoundedCornerShape(8.dp),
         ) {
-            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = "Node mesh",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = GraphColors.LabelColor,
-                    fontWeight = FontWeight.Bold,
-                )
-                LegendIconRow(NodeVertexKind.FED_ID.glyph(), FedIdColor, "you · Fed ID")
-                LegendIconRow(NodeVertexKind.NODE.glyph(), NodeColor, "node")
-                LegendIconRow(NodeVertexKind.AGENT.glyph(), AgentColor, "agent")
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = "Relationships",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = GraphColors.LabelColor,
-                    fontWeight = FontWeight.Bold,
-                )
-                // One plain-English sentence per relationship category. TRUST is
-                // always listed even when no trust objects exist yet, so the
-                // four-category model stays legible.
-                EdgeCategory.entries.forEach { cat -> LegendRow(cat.color(), cat.legendLabel()) }
-                Spacer(Modifier.height(2.dp))
-                // The CC 0.5.1 distinction, in one line: you DELEGATE to people /
-                // agents, but you STEWARD nodes / communities / children.
-                Text(
-                    text = "Delegate → agent/person · Steward → node/community/child",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = GraphColors.LabelColorMuted,
-                    fontWeight = FontWeight.Bold,
-                )
+            if (!legendExpanded) {
+                // Collapsed: a compact tappable chip.
+                Row(
+                    modifier = Modifier
+                        .testableClickable("btn_graph_legend_toggle") { legendExpanded = true }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = CIRISIcons.info,
+                        contentDescription = null,
+                        tint = GraphColors.LabelColor,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = "Legend",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = GraphColors.LabelColor,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            } else {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Header row doubles as the collapse toggle.
+                    Row(
+                        modifier = Modifier
+                            .testableClickable("btn_graph_legend_toggle") { legendExpanded = false },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "Node mesh",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = GraphColors.LabelColor,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Icon(
+                            imageVector = CIRISIcons.close,
+                            contentDescription = null,
+                            tint = GraphColors.LabelColorMuted,
+                            modifier = Modifier.size(12.dp),
+                        )
+                    }
+                    LegendIconRow(NodeVertexKind.FED_ID.glyph(), FedIdColor, "you · Fed ID")
+                    LegendIconRow(NodeVertexKind.NODE.glyph(), NodeColor, "node")
+                    LegendIconRow(NodeVertexKind.AGENT.glyph(), AgentColor, "agent")
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Relationships",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GraphColors.LabelColor,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    // One plain-English sentence per relationship category. TRUST is
+                    // always listed even when no trust objects exist yet, so the
+                    // four-category model stays legible.
+                    EdgeCategory.entries.forEach { cat -> LegendRow(cat.color(), cat.legendLabel()) }
+                    Spacer(Modifier.height(2.dp))
+                    // The CC 0.5.1 distinction, in one line: you DELEGATE to people /
+                    // agents, but you STEWARD nodes / communities / children.
+                    Text(
+                        text = "Delegate → agent/person · Steward → node/community/child",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GraphColors.LabelColorMuted,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
         }
 

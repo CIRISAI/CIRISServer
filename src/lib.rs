@@ -176,6 +176,12 @@ mod py_adapter;
 /// The `ciris-canonical` founder-quorum (steward-key replacement) — shared with
 /// the registry slice at Server 0.5 (CIRISServer#1; FSD/REGISTRY_FOLD_DERISK.md).
 pub mod quorum;
+/// Serial-attached RNode LoRa radio driver for the edge packet-radio transport
+/// (CIRISServer LoRa medium). Desktop-only (the `serialport` crate is not
+/// available on the android/ios wheels), so the whole module is gated off the
+/// mobile targets.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod radio;
 /// The **CEG-driven replication reconciler** (the controller loop): the corpus's
 /// `consent:replication` objects ARE the desired replication topology, and this
 /// loop converges the live `ReplicationRuntime` to them. The API never touches

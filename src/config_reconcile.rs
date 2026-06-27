@@ -124,6 +124,21 @@ pub const KEY_MODE: &str = "mode";
 pub const KEY_LISTEN_ADDR: &str = "net.listen_addr";
 /// `net.bootstrap_peers` — Reticulum mesh entry addresses (boot-structural, list).
 pub const KEY_BOOTSTRAP_PEERS: &str = "net.bootstrap_peers";
+/// `net.radio.*` — serial LoRa/RNode radio transport (boot-structural; desktop-only).
+pub const KEY_RADIO_ENABLED: &str = "net.radio.enabled";
+pub const KEY_RADIO_SERIAL_PORT: &str = "net.radio.serial_port";
+pub const KEY_RADIO_FREQUENCY: &str = "net.radio.frequency_hz";
+pub const KEY_RADIO_BANDWIDTH: &str = "net.radio.bandwidth_hz";
+pub const KEY_RADIO_SF: &str = "net.radio.spreading_factor";
+pub const KEY_RADIO_CR: &str = "net.radio.coding_rate";
+pub const KEY_RADIO_TXPOWER: &str = "net.radio.tx_power_dbm";
+/// Baked LoRa defaults (915 MHz ISM / SF7 / CR4-5 / 17 dBm) — overridden by the
+/// `net.radio.*` config:* objects the Transport card writes.
+const DEFAULT_RADIO_FREQUENCY_HZ: u32 = 915_000_000;
+const DEFAULT_RADIO_BANDWIDTH_HZ: u32 = 125_000;
+const DEFAULT_RADIO_SF: u8 = 7;
+const DEFAULT_RADIO_CR: u8 = 5;
+const DEFAULT_RADIO_TX_POWER_DBM: u8 = 17;
 /// `node.alias` — the human-readable alias the node suggests for itself.
 pub const KEY_NODE_ALIAS: &str = "node.alias";
 /// `auth.admin_key_ids` — admin-eligible federation `key_id`s (auto-mint gate, list).
@@ -169,6 +184,23 @@ pub struct ResolvedConfig {
     /// `auth.oauth_callback_base_url` (boot-structural). The OAuth front-door
     /// callback base URL (empty = the baked localhost default at the build site).
     pub oauth_callback_base_url: String,
+    /// `net.radio.enabled` (boot-structural). Attach a serial LoRa/RNode radio
+    /// transport to the Edge (desktop nodes only; the android/ios wheels can't
+    /// open a serial port, so the attach is cfg-gated off at the build site).
+    pub radio_enabled: bool,
+    /// `net.radio.serial_port` — the RNode serial device (e.g. `/dev/ttyUSB0`,
+    /// `/dev/tty.usbserial-XXXX`, `COM3`). Empty ⇒ no radio attached.
+    pub radio_serial_port: String,
+    /// `net.radio.frequency_hz` — LoRa centre frequency in Hz.
+    pub radio_frequency_hz: u32,
+    /// `net.radio.bandwidth_hz` — LoRa bandwidth in Hz.
+    pub radio_bandwidth_hz: u32,
+    /// `net.radio.spreading_factor` — LoRa SF (7–12).
+    pub radio_spreading_factor: u8,
+    /// `net.radio.coding_rate` — LoRa CR denominator (5–8).
+    pub radio_coding_rate: u8,
+    /// `net.radio.tx_power_dbm` — LoRa TX power in dBm.
+    pub radio_tx_power_dbm: u8,
 }
 
 impl Default for ResolvedConfig {
@@ -190,6 +222,13 @@ impl Default for ResolvedConfig {
             node_alias: String::new(),
             admin_key_ids: Vec::new(),
             oauth_callback_base_url: String::new(),
+            radio_enabled: false,
+            radio_serial_port: String::new(),
+            radio_frequency_hz: DEFAULT_RADIO_FREQUENCY_HZ,
+            radio_bandwidth_hz: DEFAULT_RADIO_BANDWIDTH_HZ,
+            radio_spreading_factor: DEFAULT_RADIO_SF,
+            radio_coding_rate: DEFAULT_RADIO_CR,
+            radio_tx_power_dbm: DEFAULT_RADIO_TX_POWER_DBM,
         }
     }
 }
@@ -306,6 +345,63 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
             .ok()
             .flatten()
             .unwrap_or(d.oauth_callback_base_url);
+    // net.radio.* — serial LoRa/RNode radio transport (boot-structural; the build
+    // site attaches it on desktop only). Integers come in via get_i64 (the config
+    // store's numeric shape) and are range-clamped into u32/u8.
+    let radio_enabled = graph_config::get_bool(engine, node_key_id, KEY_RADIO_ENABLED)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.radio_enabled);
+    let radio_serial_port = graph_config::get_str(engine, node_key_id, KEY_RADIO_SERIAL_PORT)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(d.radio_serial_port);
+    let radio_u32 = |v: Option<i64>, dflt: u32| -> u32 {
+        v.filter(|n| *n > 0).map(|n| n as u32).unwrap_or(dflt)
+    };
+    let radio_u8 = |v: Option<i64>, dflt: u8| -> u8 {
+        v.filter(|n| *n > 0 && *n <= 255)
+            .map(|n| n as u8)
+            .unwrap_or(dflt)
+    };
+    let radio_frequency_hz = radio_u32(
+        graph_config::get_i64(engine, node_key_id, KEY_RADIO_FREQUENCY)
+            .await
+            .ok()
+            .flatten(),
+        d.radio_frequency_hz,
+    );
+    let radio_bandwidth_hz = radio_u32(
+        graph_config::get_i64(engine, node_key_id, KEY_RADIO_BANDWIDTH)
+            .await
+            .ok()
+            .flatten(),
+        d.radio_bandwidth_hz,
+    );
+    let radio_spreading_factor = radio_u8(
+        graph_config::get_i64(engine, node_key_id, KEY_RADIO_SF)
+            .await
+            .ok()
+            .flatten(),
+        d.radio_spreading_factor,
+    );
+    let radio_coding_rate = radio_u8(
+        graph_config::get_i64(engine, node_key_id, KEY_RADIO_CR)
+            .await
+            .ok()
+            .flatten(),
+        d.radio_coding_rate,
+    );
+    let radio_tx_power_dbm = radio_u8(
+        graph_config::get_i64(engine, node_key_id, KEY_RADIO_TXPOWER)
+            .await
+            .ok()
+            .flatten(),
+        d.radio_tx_power_dbm,
+    );
 
     ResolvedConfig {
         transport_node,
@@ -318,6 +414,13 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
         mode,
         listen_addr,
         bootstrap_peers,
+        radio_enabled,
+        radio_serial_port,
+        radio_frequency_hz,
+        radio_bandwidth_hz,
+        radio_spreading_factor,
+        radio_coding_rate,
+        radio_tx_power_dbm,
         node_alias,
         admin_key_ids,
         oauth_callback_base_url,
