@@ -77,6 +77,7 @@ jobs:
             build_target: x86_64-win7-windows-msvc
             toolchain: nightly
             build_std: "true"
+            allow_fail: true   # Tier-3 best-effort; a nightly/build-std hiccup must not redden Release
 
     steps:
       - uses: actions/checkout@v4
@@ -191,7 +192,9 @@ jobs:
         run: |
           TARGET="${{ matrix.build_target || matrix.target }}"
           if [ "${{ matrix.build_std }}" = "true" ]; then
-            cargo +nightly build --release --target "$TARGET" -Z build-std=std,panic_abort -p ciris-server
+            # Pinned nightly (has rust-src; matches the CIRISCache token) — NOT bare
+            # `+nightly`, which force-installs the latest nightly (no rust-src here).
+            cargo +nightly-2026-06-12 build --release --target "$TARGET" -Z build-std=std,panic_abort -p ciris-server
           else
             cargo build --release --target "$TARGET" -p ciris-server
           fi

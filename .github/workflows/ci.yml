@@ -233,7 +233,11 @@ jobs:
             extra="${extra};$(cygpath -w "$d")"
           done < <(find "$HOME/.cargo/registry/src" -type d -path '*windows_x86_64_msvc-*/lib' 2>/dev/null | sort -u)
           [ -n "$extra" ] && export LIB="${LIB:-}${extra}"
-          cargo +nightly build --release \
+          # Use the PINNED nightly (the one dtolnay installed WITH rust-src), NOT
+          # bare `+nightly` — `+nightly` forces rustup to install the LATEST nightly
+          # on demand, which (a) has no rust-src here → build-std fails "Cargo.lock
+          # does not exist", and (b) breaks the CIRISCache rustc-token pin.
+          cargo +nightly-2026-06-12 build --release \
             --target x86_64-win7-windows-msvc \
             -Z build-std=std,panic_abort \
             -p ciris-server
