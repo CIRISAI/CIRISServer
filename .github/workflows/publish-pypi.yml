@@ -4,10 +4,12 @@ name: publish-pypi
 # CIRISConformance cohabitation suite, then publish to PyPI via **Trusted
 # Publishing** (OIDC — no stored API token). Fires on a v* tag.
 #
-# The per-platform build matrix lives in the reusable build-wheels.yml so the
-# tag publish and the on-main cache warmer (warm-release-cache.yml) build
-# byte-identically — that is what makes the warmed cache actually hit here,
-# skipping the ~12–15 min substrate recompile on each leg.
+# The per-platform build matrix lives in the reusable build-wheels.yml. Each leg
+# restores the 4-layer CIRISCache centipede: the verify/persist/edge SUBSTRATE
+# layers hit from the upstream repos' caches (+ CI's saves on main), so the
+# ~12–15 min substrate recompile is skipped; only CIRISServer's own server layer
+# compiles here on the tag and is saved for re-runs. (The on-main warmer was
+# removed — it rebuilt the server layer the tag immediately rebuilt, a wash.)
 #
 # Trusted-publisher registration (one-time, done on PyPI by a maintainer):
 #   PyPI project:      ciris-server
@@ -34,8 +36,8 @@ permissions:
 
 jobs:
   # Build every platform wheel + the sdist via the shared reusable workflow.
-  # On a tag, github.ref is refs/tags/v* → its rust-cache/sccache steps run
-  # restore-only and reuse the cache warm-release-cache.yml saved on main.
+  # On a tag, github.ref is refs/tags/v* → the substrate cache layers restore
+  # (upstream + CI saves); the server layer compiles + saves on this tag.
   build:
     uses: ./.github/workflows/build-wheels.yml
 

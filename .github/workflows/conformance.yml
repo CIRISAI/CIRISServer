@@ -13,8 +13,22 @@ name: conformance
 on:
   push:
     branches: [main]
+    # Docs-only commits don't change the wheel or the cohabitation contract.
+    paths-ignore:
+      - "**/*.md"
+      - "FSD/**"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "FSD/**"
+      - "docs/**"
   workflow_dispatch:
+
+# Supersede stale runs on the same ref; a tag ref is distinct (release safe).
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

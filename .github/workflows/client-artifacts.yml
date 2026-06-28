@@ -26,6 +26,11 @@ on:
       - ".github/workflows/client-artifacts.yml"
   workflow_dispatch:
 
+# Supersede stale runs on the same ref (PR re-push); tag refs are distinct.
+concurrency:
+  group: client-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

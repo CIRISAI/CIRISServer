@@ -3,7 +3,22 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs-only commits don't change the Rust build — skip the full compile.
+    paths-ignore:
+      - "**/*.md"
+      - "FSD/**"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "FSD/**"
+      - "docs/**"
+
+# Cancel a superseded run on the same ref (PR re-push / newer main commit). A tag
+# ref is distinct, so this never cancels a release pipeline.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
