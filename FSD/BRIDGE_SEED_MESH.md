@@ -11,7 +11,7 @@ nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
 edge **v7.4.4** · persist **v11.5.0** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1.
-`pip install -U ciris-server` (the wheel carries the pinned substrate; persist auto-migrates
+`pip install ciris-server==0.5.68` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
 
