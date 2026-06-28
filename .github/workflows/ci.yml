@@ -133,11 +133,9 @@ jobs:
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --features python -- -D warnings
-      # Populate the cross-repo CIRISCache blob on main under the SERVER key.
-      - name: CIRISCache save (server layer, main only)
-        uses: CIRISAI/CIRISCache/save@v1
-        if: github.ref == 'refs/heads/main'
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # NB: CI does NOT save a cache blob. It builds DEBUG (clippy+test); saving a
+      # debug `target/` measured ~586s (10 min) on main to spare only the ~30s
+      # debug ciris-server recompile next run — a net loss — and it collided with
+      # conformance's RELEASE `-s<version>` blob (same key). The release `-s` is
+      # populated by conformance (on main) + build-wheels (on tags); CI only
+      # RESTORES (the centipede above) and lets cargo do the cheap debug delta.
