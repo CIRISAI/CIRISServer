@@ -99,26 +99,19 @@ jobs:
           echo "::notice::${KEY_PERSIST}"
           echo "::notice::${KEY_EDGE}"
           echo "::notice::${KEY_SERVER}"
-      - name: CIRISCache restore (verify layer)
-        uses: CIRISAI/CIRISCache/restore@v1
+      # Deepest-first, first-hit-wins (CIRISCache restore@v2): the layers are
+      # cumulative supersets, so one restore of the deepest available blob beats
+      # extracting verify→persist→edge→server in sequence (the edge layer alone
+      # measured 452s/7.5min on v1 — redundant overwrite I/O).
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
         continue-on-error: true
         with:
-          key: ${{ steps.cachekey.outputs.key-verify }}
-      - name: CIRISCache restore (persist layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key-persist }}
-      - name: CIRISCache restore (edge layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key-edge }}
-      - name: CIRISCache restore (server layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key }}
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
       # Default features build everywhere (sqlite + the binary path); postgres +
       # tpm are Linux-only (per-target). NOT --all-features: that drags
       # `extension-module` (libpython-no-link) into the test binary.

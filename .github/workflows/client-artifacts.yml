@@ -148,18 +148,15 @@ jobs:
             echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
-      - uses: CIRISAI/CIRISCache/restore@v1
+      # Deepest-first, first-hit-wins (CIRISCache restore@v2): one extraction.
+      - uses: CIRISAI/CIRISCache/restore@v2
         continue-on-error: true
-        with: { key: "${{ steps.cachekey.outputs.key-verify }}" }
-      - uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with: { key: "${{ steps.cachekey.outputs.key-persist }}" }
-      - uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with: { key: "${{ steps.cachekey.outputs.key-edge }}" }
-      - uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with: { key: "${{ steps.cachekey.outputs.key }}" }
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
 
       - name: Set up Java 17 (Liberica)
         # Liberica 17 provides the trimmed jlink runtime bundled into the

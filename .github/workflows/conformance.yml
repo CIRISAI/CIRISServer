@@ -85,26 +85,17 @@ jobs:
           echo "::notice::${KEY_PERSIST}"
           echo "::notice::${KEY_EDGE}"
           echo "::notice::${KEY_SERVER}"
-      - name: CIRISCache restore (verify layer)
-        uses: CIRISAI/CIRISCache/restore@v1
+      # Deepest-first, first-hit-wins (CIRISCache restore@v2): one extraction of
+      # the deepest available blob (cumulative supersets) instead of N redundant.
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
         continue-on-error: true
         with:
-          key: ${{ steps.cachekey.outputs.key-verify }}
-      - name: CIRISCache restore (persist layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key-persist }}
-      - name: CIRISCache restore (edge layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key-edge }}
-      - name: CIRISCache restore (server layer)
-        uses: CIRISAI/CIRISCache/restore@v1
-        continue-on-error: true
-        with:
-          key: ${{ steps.cachekey.outputs.key }}
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
       - name: Install build deps
         #: the family links the TPM keyring backend on Linux.
         # libsqlite3-dev: persist's sqlite backend.
