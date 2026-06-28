@@ -161,10 +161,11 @@ jobs:
         continue-on-error: true
         with: { key: "${{ steps.cachekey.outputs.key }}" }
 
-      - name: Set up Java 17 (Liberica — Win7-capable jlink runtime)
-        # Liberica/Zulu retain Windows 7 support; Temurin dropped it. The
-        # trimmed jlink runtime here ships inside the installer, so even the
-        # mainline (Win8.1-floor) build uses a Win7-capable JDK for the JRE.
+      - name: Set up Java 17 (Liberica)
+        # Liberica 17 provides the trimmed jlink runtime bundled into the
+        # installer. Modern Windows floor (Win10+/Server 2016+) since 0.5.65 —
+        # the Win7 support that drove this distro choice is no longer a
+        # requirement, but Liberica stays (stable jlink source).
         uses: actions/setup-java@v4
         with:
           distribution: 'liberica'
@@ -246,16 +247,8 @@ jobs:
           if (-not $jar) { Write-Error "No CIRIS-windows-*.jar found"; exit 1 }
           .\installers\windows\bundle-jre.ps1 -JarPath $jar.FullName -OutputDir dist\runtime
 
-      - name: Fetch Universal CRT redist (Windows 7 prerequisite, best-effort)
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $dst = "installers/windows/redist"
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          $url = "https://download.microsoft.com/download/5/B/C/5BC5DBB3-652D-4DCE-B14A-475AB85EEF6E/Windows6.1-KB2999226-x64.msu"
-          try {
-            Invoke-WebRequest -Uri $url -OutFile "$dst/Windows6.1-KB2999226-x64.msu" -UseBasicParsing -TimeoutSec 120
-          } catch { Write-Warning "UCRT fetch failed ($_); Win7 users hand-provision." }
+      # (Removed in 0.5.65: the Universal CRT redist fetch was a Win7 SP1
+      # prerequisite — Win10+/Server 2016+ ship the UCRT in-box.)
 
       - name: Install Inno Setup
         uses: nick-fields/retry@v4

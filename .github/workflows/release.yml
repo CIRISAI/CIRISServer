@@ -19,9 +19,9 @@ permissions:
 # (Edge / Persist / Verify / LensCore) build, restricted to targets a headless
 # server actually runs on, plus **ARM32** (armv7 linux — Pi / embedded
 # Reticulum-mesh nodes; de-singletonization includes hardware diversity, M-1).
-# (The Tier-3 Windows 7 build-std lane was dropped in 0.5.57 and RE-ENABLED in
-# 0.5.59 once the cross-repo CIRISCache was warm — the build-std substrate relink
-# is cheap again.)
+# (Windows builds on STABLE + the standard x86_64-pc-windows-msvc target since
+# 0.5.65 — modern Windows floor, matching persist/verify/edge v7.4.3. The Tier-3
+# Win7 build-std lane was retired; Win7 SP1 / Server 2008 R2 are EOL.)
 #
 # The mobile FFI lanes (Android .aar / iOS .xcframework) are NOT here: a headless
 # server binary does not ship as a mobile library. Those belong to the core
@@ -64,35 +64,23 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Windows 7 → Win11 lane (CIRISVerify#67). `target` stays
-          # x86_64-pc-windows-msvc so the artifact name is stable; `build_target`
-          # is the Tier-3 win7 triple cargo actually compiles (nightly +
-          # build-std keeps std's Win7 syscall fallbacks). panic_abort is in the
-          # build-std crate list because std's build references it (else E0463);
-          # the active panic strategy stays "unwind" via the Cargo.toml profile.
-          # RE-ENABLED in 0.5.59 (cross-repo CIRISCache warm → the build-std
-          # relink is cheap again; this lane was dropped in 0.5.57).
+          # Windows x86_64 — modern Windows floor (Win10+/Server 2016+), STABLE
+          # toolchain + the standard target, matching persist + verify + edge
+          # v7.4.3 (CIRISEdge#236) so the cross-repo CIRISCache centipede hits on
+          # Windows. The Tier-3 Win7 build-std lane (nightly + -Zbuild-std) was
+          # dropped in 0.5.65 — Win7 SP1 / Server 2008 R2 are EOL (2020). Kept
+          # allow-fail: the release BINARY on Windows is best-effort (the wheel +
+          # CI clippy/test are the gating Windows surfaces).
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            build_target: x86_64-win7-windows-msvc
-            toolchain: nightly
-            build_std: "true"
-            allow_fail: true   # Tier-3 best-effort; a nightly/build-std hiccup must not redden Release
+            allow_fail: true
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ matrix.toolchain != 'nightly' }}
         with:
           targets: ${{ matrix.target }}
-      # PINNED to nightly-2026-06-12 (persist's proven build-std date) so the win7
-      # CIRISCache key (RUSTC-keyed) is stable + the server-layer blob is re-found.
-      - uses: dtolnay/rust-toolchain@master
-        if: ${{ matrix.toolchain == 'nightly' }}
-        with:
-          toolchain: nightly-2026-06-12
-          components: rust-src
 
       - name: Install build deps (Linux native)
         if: runner.os == 'Linux' && !matrix.cross
@@ -107,7 +95,7 @@ jobs:
         continue-on-error: true
         with:
           cache-bin: false
-          key: release-${{ matrix.build_target || matrix.target }}-${{ github.ref_name }}
+          key: release-${{ matrix.target }}-${{ github.ref_name }}
 
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # PLAT mapped from the canonical build-target table (armv7 → linux-armv7,
@@ -118,17 +106,16 @@ jobs:
         id: cachekey
         shell: bash
         run: |
-          case "${{ matrix.build_target || matrix.target }}" in
+          case "${{ matrix.target }}" in
             x86_64-unknown-linux-gnu)        PLAT=linux-x86_64 ;;
             aarch64-unknown-linux-gnu)       PLAT=linux-aarch64 ;;
             x86_64-apple-darwin)             PLAT=macos-x86_64 ;;
             aarch64-apple-darwin)            PLAT=macos-aarch64 ;;
             x86_64-pc-windows-msvc)          PLAT=windows-x64 ;;
-            x86_64-win7-windows-msvc)        PLAT=windows-x64 ;;  # win7 build-std shares the windows-x64 key; nightly rustc token disambiguates + cross-hits persist/edge
             aarch64-linux-android)           PLAT=android-arm64-v8a ;;
             armv7-linux-androideabi)         PLAT=android-armeabi-v7a ;;
             armv7-unknown-linux-gnueabihf)   PLAT=linux-armv7 ;;
-            *)                               PLAT=${{ matrix.build_target || matrix.target }} ;;
+            *)                               PLAT=${{ matrix.target }} ;;
           esac
           RUSTC=$(rustc -V | awk '{print $2}')
           S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
@@ -189,20 +176,12 @@ jobs:
       - name: Build (native)
         if: ${{ !matrix.cross }}
         shell: bash
-        run: |
-          TARGET="${{ matrix.build_target || matrix.target }}"
-          if [ "${{ matrix.build_std }}" = "true" ]; then
-            # Pinned nightly (has rust-src; matches the CIRISCache token) — NOT bare
-            # `+nightly`, which force-installs the latest nightly (no rust-src here).
-            cargo +nightly-2026-06-12 build --release --target "$TARGET" -Z build-std=std,panic_abort -p ciris-server
-          else
-            cargo build --release --target "$TARGET" -p ciris-server
-          fi
+        run: cargo build --release --target "${{ matrix.target }}" -p ciris-server
 
       - name: Stage + strip binary
         shell: bash
         run: |
-          TARGET="${{ matrix.build_target || matrix.target }}"
+          TARGET="${{ matrix.target }}"
           EXT=""; [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
           BIN="target/$TARGET/release/ciris-server$EXT"
           mkdir -p stage
