@@ -336,8 +336,20 @@ async fn associate_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = require_owner(&st.engine, &headers).await {
-        return resp;
+    // Owner-gated ONCE the node is owned (replace-in-place is a self-service
+    // re-home by the current owner). During first-run (no ROOT yet) there is no
+    // owner to authenticate as, and importing the founder's fed-ID is itself how
+    // the node becomes owned — so the gate opens (the route is loopback-only).
+    // Mirrors self_identity_handler / claim_remote_handler. This is what makes
+    // "import an existing fed-ID at the first-run wizard" possible.
+    if !crate::auth::bootstrap::is_first_run(&st.engine).await {
+        if let Err(resp) = require_owner(&st.engine, &headers).await {
+            return resp;
+        }
+    } else {
+        tracing::info!(
+            "associate: first-run (no ROOT) — importing fed-ID without an owner session (loopback-only)"
+        );
     }
     let req: AssociateRequest = if body.is_empty() {
         AssociateRequest::default()
@@ -420,10 +432,21 @@ async fn associate_handler(
                     None
                 }
             };
+            // REPLACE this device's user identity with the imported one: point the
+            // active-user-alias at the imported keyset so claim-remote / upgrade-owner
+            // / set-age (all resolve the alias at request time) re-own + operate under
+            // the IMPORTED fed-ID, not the throwaway wizard `<node>-user`. One device =
+            // one person; import replaces, it does not coexist (families are the
+            // multi-person construct, not two IDs on one node).
+            if let Err(e) = crate::write_active_user_alias(&dest_dir, &alias) {
+                tracing::warn!(error = %e, alias = %alias,
+                    "associate: could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
+            }
             tracing::info!(
                 alias = %alias,
                 resolved_key_id = ?resolved_key_id,
-                "associated a portable software keyset as this device's user fed-ID"
+                "associated (REPLACED) this device's user fed-ID with the imported keyset; \
+                 claim/upgrade-owner will re-own the node under it"
             );
             (
                 StatusCode::OK,

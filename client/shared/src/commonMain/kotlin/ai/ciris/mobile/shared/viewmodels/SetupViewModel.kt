@@ -737,6 +737,61 @@ class SetupViewModel(
     }
 
     /**
+     * **Import an EXISTING fed-ID from a USB / folder keyset** — the "same person,
+     * new device" path. Drives the local node's `POST /v1/self/associate` with the
+     * portable keyset directory; the node installs the keyset and **REPLACES** this
+     * device's active user identity with it. The subsequent self-claim
+     * ([claimLocalNodeOwnership]) then re-owns the node under the IMPORTED fed-ID
+     * (the active alias the node now points at). One device = one person — import
+     * replaces, it never coexists (families are the multi-person construct).
+     *
+     * Sets `minted`/`admitted` on success so the wizard proceeds straight to the
+     * self-claim (the auto-mint-on-Next + mint-if-absent backstop both no-op once
+     * an identity is present).
+     */
+    fun importPortableFromUsb(sourceDir: String) {
+        val client = apiClient as? CIRISApiClient ?: run {
+            _state.value = _state.value.copy(
+                federationIdentity = _state.value.federationIdentity.copy(
+                    error = "Local node unavailable: API client does not support it"
+                )
+            )
+            return
+        }
+        val src = sourceDir.trim()
+        if (src.isBlank()) return
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(inProgress = true, error = null)
+        )
+        viewModelScope.launch {
+            try {
+                val res = client.associateFedId(sourceDir = src)
+                _state.value = _state.value.copy(
+                    federationIdentity = _state.value.federationIdentity.copy(
+                        inProgress = false,
+                        admitted = true,
+                        minted = true,
+                        hardwareAvailable = true,
+                        identityKeyId = res.associatedKeyId,
+                        error = null,
+                    )
+                )
+                PlatformLogger.i(TAG, "importPortableFromUsb: imported fed-ID ${res.associatedKeyId} from $src")
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "importPortableFromUsb failed: ${e.message}")
+                _state.value = _state.value.copy(
+                    federationIdentity = _state.value.federationIdentity.copy(
+                        inProgress = false,
+                        admitted = false,
+                        minted = false,
+                        error = "Couldn't import a fed-ID from that folder: ${e.message ?: "unknown error"}",
+                    )
+                )
+            }
+        }
+    }
+
+    /**
      * **Create the founder's federation ID by DRIVING the LOCAL node** to MINT a
      * hardware-rooted USER identity — `POST /v1/self/identity`.
      *

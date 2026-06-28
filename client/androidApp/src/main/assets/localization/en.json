@@ -743,6 +743,7 @@
     "federation_create_associate": "Associate existing Fed ID",
     "federation_create_associate_hint": "Existing federation key id or fedcode",
     "federation_create_associate_button": "Associate",
+    "federation_import_usb": "Import existing Fed ID from USB",
     "federation_create_minting": "Creating…",
     "federation_create_minted": "Your federation ID was created on this device ✓",
     "federation_create_exists": "This device's local node already holds a federation identity ✓",

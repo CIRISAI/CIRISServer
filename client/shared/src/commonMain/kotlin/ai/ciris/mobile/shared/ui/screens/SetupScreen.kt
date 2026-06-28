@@ -8,6 +8,7 @@ import ai.ciris.mobile.shared.models.Platform
 import ai.ciris.mobile.shared.models.SetupMode
 import ai.ciris.mobile.shared.models.safety.AgeBand
 import ai.ciris.mobile.shared.models.filterAdaptersForPlatform
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.LocalInferenceCapability
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import ai.ciris.mobile.shared.platform.getOAuthProviderName
@@ -2680,6 +2681,31 @@ private fun FederationIdentityStep(
                                 Text(localizedString("mobile.federation_create_associate_button"))
                             }
                         }
+
+                        // IMPORT an existing fed-ID from a USB / folder keyset — the
+                        // "same person, new device" path. The node REPLACES this
+                        // device's identity with the imported one and the self-claim
+                        // re-owns the node under it (works at first-run). One device =
+                        // one person; import replaces, it does not coexist.
+                        Spacer(modifier = Modifier.height(6.dp))
+                        var showImportPicker by remember { mutableStateOf(false) }
+                        TextButton(
+                            onClick = { showImportPicker = true },
+                            enabled = !fed.inProgress,
+                            modifier = Modifier.testableClickable("btn_federation_import_usb") {
+                                showImportPicker = true
+                            }
+                        ) {
+                            Text(localizedString("mobile.federation_import_usb"))
+                        }
+                        DirectoryPickerDialog(
+                            show = showImportPicker,
+                            onDirectoryPicked = { dir ->
+                                showImportPicker = false
+                                if (dir.isNotBlank()) viewModel.importPortableFromUsb(dir)
+                            },
+                            onDismiss = { showImportPicker = false },
+                        )
                     }
                 }
 
