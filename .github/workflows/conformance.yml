@@ -79,6 +79,7 @@ jobs:
             echo "key-persist=${KEY_PERSIST}"
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -93,6 +94,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}

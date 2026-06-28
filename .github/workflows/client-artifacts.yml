@@ -146,6 +146,7 @@ jobs:
             echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
             echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
             echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
       # Deepest-first, first-hit-wins (CIRISCache restore@v2): one extraction.
@@ -154,6 +155,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}

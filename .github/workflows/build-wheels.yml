@@ -9,13 +9,16 @@ name: build-wheels
 # or the cache they share never hits. Keeping the steps in one place guarantees
 # that — there is no second copy to drift.
 #
-# Cache model (GitHub scopes caches by ref — a tag run can only restore the
-# default branch's caches): every rust-cache step SAVES only on main
-# (`save-if: github.ref == 'refs/heads/main'`) and RESTORES everywhere. So when
-# warm-release-cache calls this on a main push it populates the cache; when
-# publish-pypi calls it on a tag it restores that warm cache and skips the
-# ~12–15 min substrate recompile. The maturin-action legs (macOS/Windows) use
-# the action's built-in `sccache` (its GHA object cache), warmed the same way.
+# Cache model (two tiers):
+#   • Swatinem rust-cache (GHA L1) — GitHub scopes GHA caches by ref, and a tag
+#     run can only READ the default branch's caches, so it SAVES only on main
+#     (`save-if: main`) and restores everywhere.
+#   • CIRISCache (GHCR L2, restore@v2) — a GHCR package is NOT ref-scoped, so the
+#     SERVER `-s<version>` blob is saved on main AND on the v* tag publish (this
+#     workflow's only caller now that warm-release-cache is retired). That keeps a
+#     per-version `-s` blob so the next release's restore@v2 `-s*` prefix fallback
+#     pulls the latest lean ~1 GB server blob instead of the larger edge layer.
+# The maturin-action legs (macOS/Windows) use the action's built-in `sccache`.
 
 on:
   workflow_call:
@@ -77,6 +80,7 @@ jobs:
             echo "key-persist=${KEY_PERSIST}"
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -91,6 +95,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
@@ -146,7 +151,7 @@ jobs:
       # GITHUB_TOKEN, no external secret).
       - name: CIRISCache save (server layer, main only)
         uses: CIRISAI/CIRISCache/save@v1
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
         with:
           key: ${{ steps.cachekey.outputs.key }}
@@ -221,6 +226,7 @@ jobs:
             echo "key-persist=${KEY_PERSIST}"
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -235,6 +241,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
@@ -256,7 +263,7 @@ jobs:
       # Populate the cross-repo CIRISCache blob on main under the SERVER key.
       - name: CIRISCache save (server layer, main only)
         uses: CIRISAI/CIRISCache/save@v1
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
         with:
           key: ${{ steps.cachekey.outputs.key }}
@@ -318,6 +325,7 @@ jobs:
             echo "key-persist=${KEY_PERSIST}"
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -332,6 +340,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
@@ -352,7 +361,7 @@ jobs:
       # Populate the cross-repo CIRISCache blob on main under the SERVER key.
       - name: CIRISCache save (server layer, main only)
         uses: CIRISAI/CIRISCache/save@v1
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
         with:
           key: ${{ steps.cachekey.outputs.key }}
@@ -410,6 +419,7 @@ jobs:
             echo "key-persist=${KEY_PERSIST}"
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -424,6 +434,7 @@ jobs:
         with:
           keys: |
             ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
@@ -490,7 +501,7 @@ jobs:
       # Populate the cross-repo CIRISCache blob on main under the SERVER key.
       - name: CIRISCache save (server layer, main only)
         uses: CIRISAI/CIRISCache/save@v1
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
         with:
           key: ${{ steps.cachekey.outputs.key }}
