@@ -19,7 +19,7 @@ identity label is `--key-id`; everything else is baked constants or `config:*` C
 | Node | Role | `--key-id` | Source of truth |
 |------|------|-----------|-----------------|
 | **A** | lens / **canonical seed** (in-group; the mesh entry the others dial) | **`ciris-canonical-1`** | `tests/release_gates/support.rs::CANONICAL_TRANSPORT_KEY_ID` (Stage-5 gate target) |
-| **B** | `ciris-status` node (OUT of the canonical group; bidirectional A↔B replication only) | **`ciris-status`** | `src/config.rs` / `src/peer.rs` |
+| **B** | `ciris-status-1` node (OUT of the canonical group; bidirectional A↔B replication only) | **`ciris-status-1`** | `src/config.rs` / `src/peer.rs` |
 
 `--key-id` is the keystore alias; the wire/directory `key_id` is the FSD-003 derived
 `<label>-<fp(sha256(ed_pubkey))>` (so the public identity is e.g. `ciris-canonical-1-<fp>`).
@@ -47,7 +47,7 @@ The filesystem `rm -rf <home>` above is the simplest for a re-seed.)
 # Node A:
 ciris-server --home /var/lib/ciris --key-id ciris-canonical-1
 # Node B:
-ciris-server --home /var/lib/ciris --key-id ciris-status
+ciris-server --home /var/lib/ciris --key-id ciris-status-1
 ```
 On a wiped/fresh home the node mints its hybrid (Ed25519 + ML-DSA-65) federation key under
 the `--key-id` label, applies all persist migrations, and (no ROOT yet) prints the
@@ -71,7 +71,7 @@ ciris-server claim --home /var/lib/ciris --key-id ciris-canonical-1 \
   --target-url http://127.0.0.1:4243 \
   --owner-username eric --owner-password '…'      # sets the ROOT login for a SYSTEM_ADMIN session
 ```
-Repeat steps 2–4 on Node B with `--key-id ciris-status`. (The desktop/mobile wizard's
+Repeat steps 2–4 on Node B with `--key-id ciris-status-1`. (The desktop/mobile wizard's
 first-run flow does the equivalent — mint fed-ID → self-claim — if you prefer a GUI; the
 0.5.61 custody ladder means no YubiKey is required.)
 
@@ -89,7 +89,7 @@ curl -sS -X POST http://127.0.0.1:4243/v1/federation/peering \
   -H "Authorization: Bearer <owner session>" \
   -H "Content-Type: application/json" \
   -d '{
-        "peer_key_id": "<B key_id, e.g. ciris-status-<fp>>",
+        "peer_key_id": "<B key_id, e.g. ciris-status-1-<fp>>",
         "peer_key_record": { …B's self-signed SignedKeyRecord JSON from B's boot log… },
         "attestation_prefixes": ["scores:", "capacity:"]
       }'
@@ -118,7 +118,7 @@ curl -s http://127.0.0.1:4243/v1/federation/node-code   # key_id starts ciris-ca
 
 ## Checklist
 - [ ] A + B both **wiped** (no stale keys/data)
-- [ ] A booted as **`ciris-canonical-1`**, B as **`ciris-status`**
+- [ ] A booted as **`ciris-canonical-1`**, B as **`ciris-status-1`**
 - [ ] Founder fed-ID minted; **both nodes owner-claimed** (owned-nodes shows your fed-ID)
 - [ ] **Bidirectional** A↔B `consent:replication:v1` converged
 - [ ] B's `net.bootstrap_peers` points at A (A is the seed)
