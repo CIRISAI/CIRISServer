@@ -358,9 +358,14 @@ async fn register_minted_agent_key(
         pubkey_ed25519_base64: minted.pubkey_ed25519_base64.clone(),
         pubkey_ml_dsa_65_base64: Some(minted.pubkey_ml_dsa_65_base64.clone()),
         algorithm: algorithm::HYBRID.into(),
-        // The agent is an accountable USER-role fed identity (the actor an owner
-        // delegates act-on-behalf authority to), NOT a node.
-        identity_type: identity_type::USER.into(),
+        // The agent is an accountable AGENT-role fed identity (the actor an owner
+        // delegates act-on-behalf authority to), NOT a node and NOT a user. It
+        // MUST be agent-role: persist v11.5.0 (CC 3.2 / CC 1.15.6) refuses a
+        // `delegates_to` onto a USER-role target unless it is adult→minor
+        // guardianship (an adult user is un-stewardable — presumption of
+        // sovereignty). The on-behalf-of grant is a capability delegation, not
+        // stewardship, so the actor is an agent identity.
+        identity_type: identity_type::AGENT.into(),
         identity_ref: minted.key_id.clone(),
         valid_from: now,
         valid_until: None,

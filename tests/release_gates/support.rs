@@ -28,8 +28,8 @@ use std::path::PathBuf;
 // `init_edge_runtime` re-export hook that regressed out of the v7.x line; completes
 // the one-wheel re-export, CIRISServer#4).
 pub const TARGET_VERIFY: &str = "v8.3.0";
-pub const TARGET_PERSIST: &str = "v11.2.0";
-pub const TARGET_EDGE: &str = "v7.4.0";
+pub const TARGET_PERSIST: &str = "v11.5.0";
+pub const TARGET_EDGE: &str = "v7.4.1";
 /// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
 pub const TARGET_PERSIST_V10: &str = "v10";
 

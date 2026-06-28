@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -225,6 +226,7 @@ fun buildNodeGraph(
     activeProfileId: String?,
     delegations: List<DelegationDto>,
     consent: ConsentObjectsState,
+    ownerKeyId: String? = null,
 ): NodeGraphData {
     val vertices = mutableListOf<NodeGraphVertex>()
     val edges = mutableListOf<NodeGraphEdge>()
@@ -233,11 +235,17 @@ fun buildNodeGraph(
     fun agentVid(clientId: String) = "agent:$clientId"
 
     // ── Vertex: the user's Fed ID (centre) ──────────────────────────────────
+    // Label with the BOUND OWNER's actual fed-ID (the human, e.g. eric-moore-v1)
+    // when the node is claimed — the friendly name is the key_id minus its
+    // -<fingerprint> suffix (derive_key_id = <label>-<fp>); the full key_id rides
+    // in `keyId` for the detail panel. Falls back to the generic label when the
+    // node is unclaimed (no owner yet).
+    val ownerLabel = ownerKeyId?.takeIf { it.isNotBlank() }?.substringBeforeLast('-')
     vertices += NodeGraphVertex(
         id = FED_ID_VERTEX,
         kind = NodeVertexKind.FED_ID,
-        label = "You (Fed ID)",
-        keyId = null,
+        label = ownerLabel?.let { "$it (Fed ID)" } ?: "You (Fed ID)",
+        keyId = ownerKeyId?.takeIf { it.isNotBlank() },
         radius = 40f,
         color = FedIdColor,
         x = 0f,
@@ -391,8 +399,15 @@ fun NodeGraphView(
     onRemoveNode: (NodeProfile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val data = remember(profiles, activeProfileId, delegations, consent) {
-        buildNodeGraph(profiles, activeProfileId, delegations, consent)
+    // The bound OWNER fed-ID (the human, e.g. eric-moore-v1) for the centre
+    // vertex label. Best-effort; null on an unclaimed node or fetch failure
+    // (the builder then shows the generic "You (Fed ID)").
+    val ownerKeyId by produceState<String?>(initialValue = null, apiClient) {
+        value = apiClient?.let { c -> runCatching { c.getOwnedNodes().owner }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+    }
+    val data = remember(profiles, activeProfileId, delegations, consent, ownerKeyId) {
+        buildNodeGraph(profiles, activeProfileId, delegations, consent, ownerKeyId)
     }
     val textMeasurer = rememberTextMeasurer()
 

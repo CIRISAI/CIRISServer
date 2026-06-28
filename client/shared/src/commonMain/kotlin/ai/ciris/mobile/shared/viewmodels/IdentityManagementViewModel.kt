@@ -83,10 +83,21 @@ class IdentityManagementViewModel(
         viewModelScope.launch {
             try {
                 _error.value = null
-                val keyId = _identityKeyId.value ?: runCatching { apiClient.getSelfKeyRecord() }
-                    .onFailure { PlatformLogger.w(TAG, "[load] self-key-record: ${it.message}") }
-                    .getOrNull()
-                    ?.keyId
+                // Prefer the BOUND OWNER fed-ID (the human — e.g. eric-moore-v1).
+                // getSelfKeyRecord() returns the NODE key (ciris-client), which is
+                // the node's own signer, NOT the owner; on a self-claimed node the
+                // roster we list/manage is the OWNER's occurrence roster, so the
+                // owner fed-ID is the correct identity_key_id. Fall back to the node
+                // self-key-record only when the node is still unclaimed (no owner).
+                val keyId = _identityKeyId.value
+                    ?: runCatching { apiClient.getOwnedNodes().owner }
+                        .onFailure { PlatformLogger.w(TAG, "[load] owned-nodes owner: ${it.message}") }
+                        .getOrNull()
+                        ?.takeIf { it.isNotBlank() }
+                    ?: runCatching { apiClient.getSelfKeyRecord() }
+                        .onFailure { PlatformLogger.w(TAG, "[load] self-key-record: ${it.message}") }
+                        .getOrNull()
+                        ?.keyId
                 if (keyId == null) {
                     _error.value = "Couldn't resolve this device's identity. Sign in / mint a fed-ID first."
                     _occurrences.value = emptyList()

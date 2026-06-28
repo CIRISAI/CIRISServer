@@ -564,7 +564,12 @@ async fn set_age_self(
         match crate::compose::resolve_user_signer(
             &st.engine,
             crate::compose::FedIdUse::OwnerSession,
-            &st.user_key_id,
+            // Resolve the ACTIVE owner alias (the name-driven fed-ID, e.g.
+            // eric-moore-v1) via the pointer file — NOT the raw <node>-user
+            // default. Without this, set-age looked for <node>-user, missed the
+            // just-minted fed-ID, and 409'd post-claim (the age band never got
+            // recorded). Mirrors the claim-remote signer resolution above.
+            &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
             st.user_seed_dir.clone(),
         )
         .await
