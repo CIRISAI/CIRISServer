@@ -214,6 +214,101 @@ async fn get_config(
     }
 }
 
+// ─── PUT /v1/config/{key} (owner-gated upsert; the shared-client contract) ────
+
+/// The agent's `ConfigUpdate` body shape (the vendored client SDK targets it):
+/// `{ value, reason? }`. The key is in the path; scope defaults (the by-key upsert
+/// is the runtime-tunable path — `config:* Local`). `reason` is advisory (audited
+/// in the log; the signed row already records `updated_by`).
+#[derive(Debug, Deserialize)]
+struct UpdateConfigRequest {
+    value: ConfigValue,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn update_config(
+    State(st): State<ConfigApiState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner_bound(&st).await {
+        return resp;
+    }
+    let caller = match require_owner(&st, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    if key.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "config key must not be empty");
+    }
+    let req: UpdateConfigRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    let updated_by = caller.wa_id.clone();
+    match graph_config::set_config(
+        &st.engine,
+        &st.node_key_id,
+        &key,
+        req.value,
+        &updated_by,
+        ConfigScope::default(),
+    )
+    .await
+    {
+        Ok(entry) => {
+            if let Some(reason) = req.reason.as_deref() {
+                tracing::info!(key = %key, reason, "config upsert (PUT /v1/config/{{key}})");
+            }
+            if let Some(notify) = st.reconcile_notify.as_ref() {
+                notify.notify_one();
+            }
+            (StatusCode::OK, Json(entry)).into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("set config: {e}"),
+        ),
+    }
+}
+
+// ─── DELETE /v1/config/{key} (owner-gated tombstone) ─────────────────────────
+
+async fn delete_config(
+    State(st): State<ConfigApiState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Err(resp) = require_owner_bound(&st).await {
+        return resp;
+    }
+    let caller = match require_owner(&st, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    if key.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "config key must not be empty");
+    }
+    match graph_config::delete_config(&st.engine, &st.node_key_id, &key, &caller.wa_id).await {
+        Ok(_) => {
+            if let Some(notify) = st.reconcile_notify.as_ref() {
+                notify.notify_one();
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "deleted", "key": key })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("delete config: {e}"),
+        ),
+    }
+}
+
 /// The owner-gated config router — merge onto the read-API listener beside the
 /// other auth/federation routers in `compose.rs`.
 ///
@@ -234,6 +329,11 @@ pub fn router(
             "/v1/config",
             axum::routing::post(set_config).get(list_config),
         )
-        .route("/v1/config/{key}", axum::routing::get(get_config))
+        .route(
+            "/v1/config/{key}",
+            axum::routing::get(get_config)
+                .put(update_config)
+                .delete(delete_config),
+        )
         .with_state(state)
 }

@@ -69,6 +69,13 @@ pub const CONFIG_DIMENSION: &str = "config:v1";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConfigValue {
+    /// A tombstone (JSON `null`) — the canonical "deleted" marker. A `DELETE`
+    /// writes a new version carrying this; the latest-wins fold makes the key read
+    /// as absent ([`get_config`]/[`list_configs`] skip a Null-valued latest). Mirrors
+    /// CIRISAgent's "set to None as deletion" (the agent will adopt THIS Rust impl as
+    /// the common one). Declared FIRST so the untagged matcher maps `null` here before
+    /// any value arm (no value arm matches `null` anyway).
+    Null,
     /// A boolean. (Declared BEFORE the integer arms: serde's untagged matcher
     /// tries variants top-down, and a JSON `true`/`false` must not be coerced
     /// into an integer arm.)
@@ -320,7 +327,10 @@ pub async fn get_config(
     key: &str,
 ) -> Result<Option<ConfigEntry>> {
     let rows = live_config_rows(engine, node_key_id).await?;
-    Ok(latest_for_key(&rows, key).map(|r| r.entry.clone()))
+    Ok(latest_for_key(&rows, key)
+        // A Null-valued latest is a tombstone (deleted) — reads as absent.
+        .filter(|r| !matches!(r.entry.value, ConfigValue::Null))
+        .map(|r| r.entry.clone()))
 }
 
 /// List the latest [`ConfigEntry`] per key (latest-wins fold), optionally filtered
@@ -344,6 +354,10 @@ pub async fn list_configs(
             continue;
         }
         if let Some(latest) = latest_for_key(&rows, &r.entry.key) {
+            // Skip a tombstoned key (latest value is Null = deleted).
+            if matches!(latest.entry.value, ConfigValue::Null) {
+                continue;
+            }
             out.insert(latest.entry.key.clone(), latest.entry.clone());
         }
     }
@@ -410,6 +424,33 @@ pub async fn set_config(
         "wrote config:v1 entry (signed, owner-gated at the API layer)"
     );
     Ok(entry)
+}
+
+/// Delete a config `key` by writing a tombstone — a new version carrying
+/// [`ConfigValue::Null`]. The latest-wins fold makes the key read as absent
+/// thereafter ([`get_config`]/[`list_configs`] skip a Null latest). Append-only and
+/// signed like any other write (no destructive row removal); the tombstone preserves
+/// the key's current [`ConfigScope`] (or the default when the key was absent).
+/// Mirrors CIRISAgent's "set to None as deletion" — this Rust impl is the common one.
+pub async fn delete_config(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    key: &str,
+    updated_by: &str,
+) -> Result<ConfigEntry> {
+    let scope = get_config(engine, node_key_id, key)
+        .await?
+        .map(|e| e.scope)
+        .unwrap_or_default();
+    set_config(
+        engine,
+        node_key_id,
+        key,
+        ConfigValue::Null,
+        updated_by,
+        scope,
+    )
+    .await
 }
 
 /// Typed convenience: the latest string value for `key` (iff it is a [`ConfigValue::Str`]).
