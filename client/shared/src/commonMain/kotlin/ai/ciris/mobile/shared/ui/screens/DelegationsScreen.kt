@@ -6,6 +6,7 @@ import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.icons.CIRISMaterialIcons
+import ai.ciris.mobile.shared.ui.icons.ContentCopy
 import ai.ciris.mobile.shared.viewmodels.DelegationsViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column

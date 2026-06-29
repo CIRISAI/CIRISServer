@@ -11,9 +11,11 @@ import kotlinx.serialization.Serializable
  * persisted handle the user holds to switch between the nodes they participate
  * in (node A, node B, …) without re-typing URLs or re-authenticating.
  *
- * Persisted (encrypted) via [ai.ciris.mobile.shared.services.NodeProfileStore].
- * The [sessionToken] is the bearer token already minted for this node; it is
- * sensitive and lives only in [ai.ciris.mobile.shared.platform.SecureStorage].
+ * Held LIVE in memory by [ai.ciris.mobile.shared.viewmodels.NodeSwitcherViewModel]
+ * — the node list is read from the local node's owned-nodes projection each
+ * session and is no longer persisted client-side (CIRISServer#125). The
+ * [sessionToken] is the bearer token minted for this node; it is sensitive and
+ * kept in memory only for the live session.
  */
 @Serializable
 data class NodeProfile(

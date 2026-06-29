@@ -62,7 +62,8 @@ import androidx.compose.ui.unit.sp
  *
  * In fabric terms there is no "server list" — the user participates in several
  * **nodes** (their local node, node A, node B, …). This screen is the CRUD over
- * the persisted [NodeProfile]s held by [ai.ciris.mobile.shared.services.NodeProfileStore]:
+ * the LIVE [NodeProfile]s held in memory by [NodeSwitcherViewModel] (read from the
+ * local node's owned-nodes projection each session; not persisted — CIRISServer#125):
  *
  *  - **list** every node (name, URL, key_id, pinned status, active marker)
  *  - **add** a node by NodeCode (identity-pinned via
