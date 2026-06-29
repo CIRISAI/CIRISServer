@@ -313,6 +313,11 @@ struct ClaimRemoteRequest {
     claim_pin: String,
     /// The cohort scope to claim the target under (`self` / `family` / `community`).
     cohort_scope: String,
+    /// OPTIONAL explicit target base URL (e.g. `http://108.61.242.236:4243`).
+    /// Overrides the NodeCode's `transport_hint` — use when the NodeCode has no
+    /// hint (server nodes that don't know their external IP) or the hint is stale.
+    #[serde(default)]
+    target_url: Option<String>,
     /// OPTIONAL owner login password (loopback self-claim only) — forwarded to the
     /// target's setup/root to set the ROOT cert's password_hash, so the owner can
     /// get a SYSTEM_ADMIN session (the device-grant approve prerequisite).
@@ -387,13 +392,19 @@ async fn claim_remote_handler(
         }
     };
 
+    // `target_url` overrides the NodeCode's transport_hint — needed for server
+    // nodes that don't embed their external IP in the NodeCode.
+    let fallback = req
+        .target_url
+        .as_deref()
+        .unwrap_or(st.local_self_url.as_str());
     match claim_remote(
         &st.http,
         &user_signer,
         &req.node_code,
         &req.claim_pin,
         &req.cohort_scope,
-        Some(st.local_self_url.as_str()),
+        Some(fallback),
         req.owner_password.as_deref(),
         req.owner_username.as_deref(),
     )
