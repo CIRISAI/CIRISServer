@@ -11,9 +11,18 @@ nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
 edge **v7.4.4** · persist **v11.5.0** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1.
-`pip install ciris-server==0.5.68` (the wheel carries the pinned substrate; persist auto-migrates
+`pip install ciris-server==0.5.69` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
+
+> **0.5.69 — ownership is SELF-SCOPED by default (private).** A freshly-claimed node
+> emits its owner-binding at `cohort_scope: self`: full self/family use + cross-device
+> owned-nodes sync to the owner's OWN nodes, but it is **invisible to the federation and
+> does NOT advertise its identity** until you opt in. **For the canonical mesh this matters:
+> A and B MUST announce** (Step 4b below) or they will not be federation-discoverable and
+> peering/community will not converge. (Private operators who want a single-owner mesh can
+> skip the announce and carry their node list between devices via the Nodes-screen USB
+> save/restore — that path needs no federation.)
 
 ## Canonical node names (the `--key-id` for each node)
 | Node | Role | `--key-id` | Source of truth |
@@ -73,7 +82,24 @@ ciris-server claim --home /var/lib/ciris --key-id ciris-canonical-1 \
 ```
 Repeat steps 2–4 on Node B with `--key-id ciris-status-1`. (The desktop/mobile wizard's
 first-run flow does the equivalent — mint fed-ID → self-claim — if you prefer a GUI; the
-0.5.61 custody ladder means no YubiKey is required.)
+0.5.61 custody ladder means no YubiKey is required. In the wizard, flip on
+**"Announce yourself to the federation"** to fold Step 4b into the claim.)
+
+### 4b. ANNOUNCE — promote ownership to FEDERATION (0.5.69; REQUIRED for the canonical mesh)
+A self-claim (Step 4) leaves the node **self-scoped/private** — it will not advertise its
+federation identity, so peering won't converge. Announce on **both A and B** to promote
+the owner-binding self→FEDERATION and enable the identity announce:
+```sh
+# Owner-gated + loopback-only; one-shot, idempotent. Use the SYSTEM_ADMIN session from the claim.
+curl -sS -X POST http://127.0.0.1:4243/v1/federation/announce \
+  -H "Authorization: Bearer <owner session>" -H "Content-Type: application/json" -d '{}'
+# -> { owner, cohort_scope:"federation", announce_ownership:true, announce_takes_effect:"next_boot" }
+```
+This promotes the owner-binding (re-persists the already-signed envelope at `cohort_scope:
+federation`) **and** sets `config:* net.announce_ownership=true`. The Reticulum identity
+announce is **boot-structural** — it is wired at transport init — so **restart the node
+after announcing** for it to advertise. (Equivalent without the API: set
+`net.announce_ownership=true` via `PUT /v1/config/net.announce_ownership` and reboot.)
 
 ## Wire the mesh
 ### 5. Bidirectional A↔B consent replication (owner-gated; emits `consent:replication:v1`)
@@ -112,6 +138,8 @@ mesh grows from A. Other nodes reach A operationally by setting `net.bootstrap_p
 curl -s http://127.0.0.1:4243/v1/setup/owned-nodes      # owner=<your fed-ID>, owned_count>=1
 # Node A carries the canonical transport key:
 curl -s http://127.0.0.1:4243/v1/federation/node-code   # key_id starts ciris-canonical-1-…
+# Ownership ANNOUNCED (0.5.69) — required to federate:
+curl -s http://127.0.0.1:4243/v1/config/net.announce_ownership   # value=true (after Step 4b + reboot)
 # Peering converged + scores flowing:
 #   node logs: "replication converged to N consent peers"; A scores capacity:sustained_coherence:v1
 ```
@@ -120,6 +148,7 @@ curl -s http://127.0.0.1:4243/v1/federation/node-code   # key_id starts ciris-ca
 - [ ] A + B both **wiped** (no stale keys/data)
 - [ ] A booted as **`ciris-canonical-1`**, B as **`ciris-status-1`**
 - [ ] Founder fed-ID minted; **both nodes owner-claimed** (owned-nodes shows your fed-ID)
+- [ ] **Both A + B ANNOUNCED** (Step 4b) — `net.announce_ownership=true` + rebooted (0.5.69; else self-scoped/private and won't federate)
 - [ ] **Bidirectional** A↔B `consent:replication:v1` converged
 - [ ] B's `net.bootstrap_peers` points at A (A is the seed)
 - [ ] A emitting `capacity:sustained_coherence:v1`; B out-of-group; each owns its corpus
