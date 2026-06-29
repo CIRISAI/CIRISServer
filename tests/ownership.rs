@@ -457,7 +457,10 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
 
     // 1-phase POST /v1/setup/root: verify + persist the user-signed binding + bind
     // ROOT in ONE round-trip.
-    let body = one_phase_claim_body(node_key_id, &user, "family", binding).await;
+    // CIRISServer#125: claim SELF-scoped (the new default). A family/community
+    // owner-binding would now (correctly) require family/community membership at
+    // the substrate write-cohort gate; self is the field-proven default path.
+    let body = one_phase_claim_body(node_key_id, &user, "self", binding).await;
     let resp = client
         .post(format!("{base}/v1/setup/root"))
         .body(body)
@@ -467,7 +470,7 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     assert_eq!(resp.status(), 201, "1-phase claim must succeed");
     let fin: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(fin["identity_key_id"], user_key_id);
-    assert_eq!(fin["cohort_scope"], "family", "cohort scope echoed");
+    assert_eq!(fin["cohort_scope"], "self", "cohort scope echoed");
     assert_eq!(fin["role"], "SYSTEM_ADMIN");
     assert!(
         fin["owner_binding_attestation_id"].as_str().is_some(),
@@ -512,6 +515,18 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     assert_eq!(
         binding_row.scrub_key_id, user_key_id,
         "scrub_key_id is the USER (genuinely user-signed), not the node"
+    );
+    // CIRISServer#125: persisted self-scoped (no longer hardcoded FEDERATION),
+    // tier stays federation (the row is genuinely hybrid-signed).
+    assert_eq!(
+        binding_row.cohort_scope,
+        ciris_persist::federation::types::cohort_scope::SELF,
+        "owner-binding stamped with the CLAIMED cohort (self), not hardcoded FEDERATION"
+    );
+    assert_eq!(
+        binding_row.tier,
+        ciris_persist::federation::types::attestation_tier::FEDERATION,
+        "owner-binding stays federation-tier (genuinely hybrid-signed, ingest-re-verified)"
     );
     let canonical =
         ceg_produce_canonicalize(&binding_row.attestation_envelope).expect("re-canonicalize");
@@ -739,4 +754,111 @@ async fn claim_with_wrong_pin_is_rejected() {
         .expect("POST (wrong pin)");
     assert_eq!(resp.status(), 401, "a wrong claim PIN is rejected");
     assert!(is_steward_bound(&engine, node_key_id).await.is_none());
+}
+
+// ─── CIRISServer#125 — promote owner-binding self → FEDERATION (announce opt-in) ─
+
+/// A self-scoped owner-binding promotes to FEDERATION by re-persisting the SAME
+/// user-signed envelope + signatures at the wider cohort; the proven signature
+/// re-verifies, `is_steward_bound` still resolves the owner, and a re-promote is an
+/// idempotent no-op.
+#[tokio::test]
+async fn promote_owner_binding_self_to_federation_is_idempotent() {
+    use ciris_persist::federation::types::cohort_scope;
+
+    let node_key_id = "ciris-promote-node";
+    let user_key_id = "ciris-promote-user";
+    let engine = node(node_key_id).await;
+    register_node(&engine, node_key_id).await;
+
+    // Apply a SELF-scoped, genuinely user-signed owner-binding (substrate-native,
+    // no HTTP) — registers the user key + persists delegates_to(user → node, self).
+    let user = user_signer(user_key_id);
+    let binding =
+        ciris_server::auth::ownership::build_signed_owner_binding(&user, node_key_id, &infra_scopes())
+            .await
+            .expect("build signed owner-binding");
+    ciris_server::auth::ownership::apply_signed_owner_binding(
+        &engine,
+        node_key_id,
+        cohort_scope::SELF,
+        HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("apply self-scoped owner-binding");
+
+    // Precondition: exactly one owner-binding, cohort_scope=self.
+    let before = engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+        .expect("inbound edges");
+    let self_bindings: Vec<_> = before
+        .iter()
+        .filter(|e| e.attestation_type == attestation_type::DELEGATES_TO)
+        .collect();
+    assert_eq!(self_bindings.len(), 1, "one owner-binding before promote");
+    assert_eq!(self_bindings[0].cohort_scope, cohort_scope::SELF);
+    assert_eq!(
+        is_steward_bound(&engine, node_key_id).await.as_deref(),
+        Some(user_key_id)
+    );
+
+    // Promote → a FEDERATION-cohort owner-binding is persisted (new id), and the
+    // node is still owner-bound to the same user.
+    let promoted = ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &engine,
+        node_key_id,
+    )
+    .await
+    .expect("promote owner-binding");
+    assert_eq!(promoted.responsible_user_key_id, user_key_id);
+    assert!(
+        promoted.attestation_id.is_some(),
+        "first promote persists a new federation-scoped binding"
+    );
+    assert_eq!(
+        is_steward_bound(&engine, node_key_id).await.as_deref(),
+        Some(user_key_id),
+        "ownership still recognized after promote"
+    );
+    let after = engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+        .expect("inbound edges after promote");
+    assert!(
+        after
+            .iter()
+            .any(|e| e.attestation_type == attestation_type::DELEGATES_TO
+                && e.cohort_scope == cohort_scope::FEDERATION),
+        "a federation-cohort owner-binding now exists (the re-persisted proven envelope \
+         admitted through the federation-tier ingest re-verify gate)"
+    );
+
+    // Idempotent: a second promote is a no-op (already federation-scoped).
+    let again = ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &engine,
+        node_key_id,
+    )
+    .await
+    .expect("idempotent re-promote");
+    assert!(
+        again.attestation_id.is_none(),
+        "re-promote is an idempotent no-op (already federation-scoped)"
+    );
+}
+
+/// Promoting an UNOWNED node is refused (you cannot announce an ownership you do
+/// not hold).
+#[tokio::test]
+async fn promote_unowned_node_is_refused() {
+    let node_key_id = "ciris-promote-unowned";
+    let engine = node(node_key_id).await;
+    register_node(&engine, node_key_id).await;
+    let e = ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
+        .await
+        .expect_err("promote of an unowned node must fail");
+    assert!(matches!(e, OwnershipError::Validation(_)));
 }

@@ -347,6 +347,17 @@ class SetupViewModel(
         _state.value = _state.value.copy(secureWith2FA = enabled)
     }
 
+    /**
+     * Opt IN / OUT of announcing this owner to the federation (default OFF —
+     * private/self-scoped). When ON, a successful claim promotes ownership
+     * self→FEDERATION + enables the node's identity announce, applied best-effort
+     * post-claim (see [claimLocalNodeOwnership]); takes effect on next boot.
+     */
+    fun setAnnounceOwnership(enabled: Boolean) {
+        PlatformLogger.i(TAG, "setAnnounceOwnership: federation announce ${if (enabled) "ON (opt-in)" else "OFF (private)"}")
+        _state.value = _state.value.copy(announceOwnership = enabled)
+    }
+
     // ========== Language & Location Preferences ==========
     // Mirrors CLI wizard: ciris_engine/logic/setup/wizard.py:324-395
 
@@ -1165,6 +1176,36 @@ class SetupViewModel(
                                 ageRange = _state.value.ageRange.copy(
                                     recorded = false,
                                     error = "Couldn't record your age range yet: ${e.message ?: "unknown error"}",
+                                )
+                            )
+                        }
+                    }
+
+                    // OPTIONAL federation opt-in: if the user toggled "Announce
+                    // yourself to the federation" ON, promote the owner-binding
+                    // self→FEDERATION and enable the node's identity announce. The
+                    // claim already succeeded, so this is NON-FATAL — on failure we
+                    // surface a soft notice and let the user retry later; it never
+                    // blocks COMPLETE. Takes effect on the node's next boot.
+                    if (_state.value.announceOwnership) {
+                        try {
+                            val ann = client.announceOwnership(localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
+                            PlatformLogger.i(
+                                TAG,
+                                "claimLocalNodeOwnership: announced to federation " +
+                                    "(owner=${ann.owner} cohort=${ann.cohortScope}); " +
+                                    "takes effect ${ann.announceTakesEffect ?: "next boot"}",
+                            )
+                            _state.value = _state.value.copy(
+                                ownershipClaim = _state.value.ownershipClaim.copy(announceNotice = null)
+                            )
+                        } catch (e: Exception) {
+                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: federation announce failed (non-fatal): ${e.message}")
+                            _state.value = _state.value.copy(
+                                ownershipClaim = _state.value.ownershipClaim.copy(
+                                    announceNotice = "You're set up, but announcing to the " +
+                                        "federation didn't complete: ${e.message ?: "unknown error"}. " +
+                                        "You can turn it on later.",
                                 )
                             )
                         }

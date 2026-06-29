@@ -5,6 +5,8 @@ import ai.ciris.mobile.shared.platform.TestAutomation
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
+import ai.ciris.mobile.shared.ui.icons.CIRISMaterialIcons
+import ai.ciris.mobile.shared.ui.icons.ContentCopy
 import ai.ciris.mobile.shared.viewmodels.DelegationsViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -39,12 +42,18 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * **Delegations** — authorize an agent or another person to act on your behalf.
@@ -442,29 +451,30 @@ private fun OfferPane(
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("PIN", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text(
-                        created.pin,
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.testable("delegation_created_pin"),
+                    // Every handed-over value is both SELECTABLE (SelectionContainer)
+                    // and one-tap COPYABLE — desktop has no easy text-grab otherwise.
+                    CopyableValue(
+                        label = "PIN",
+                        value = created.pin,
+                        valueFontSize = 32.sp,
+                        testTag = "delegation_created_pin",
+                        copyTestTag = "btn_copy_delegation_pin",
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Claim URL", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text(
-                        created.claimUrl,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.testable("delegation_created_url"),
+                    CopyableValue(
+                        label = "Claim URL",
+                        value = created.claimUrl,
+                        valueFontSize = 13.sp,
+                        testTag = "delegation_created_url",
+                        copyTestTag = "btn_copy_delegation_url",
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Client: ${created.clientId}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.testable("delegation_created_client_id"),
+                    CopyableValue(
+                        label = "Client",
+                        value = created.clientId,
+                        valueFontSize = 12.sp,
+                        testTag = "delegation_created_client_id",
+                        copyTestTag = "btn_copy_delegation_client_id",
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -482,6 +492,63 @@ private fun OfferPane(
                 }
             }
         }
+    }
+}
+
+/**
+ * A labeled value the user must hand over — selectable (drag/⌘C) AND one-tap
+ * copyable, with a brief "Copied" confirmation. Tinted for the primaryContainer
+ * card it sits in (the created-offer surface).
+ */
+@Composable
+private fun CopyableValue(
+    label: String,
+    value: String,
+    valueFontSize: TextUnit,
+    testTag: String,
+    copyTestTag: String,
+) {
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    var copied by remember { mutableStateOf(false) }
+    val onCopy = {
+        clipboard.setText(AnnotatedString(value))
+        copied = true
+        scope.launch {
+            delay(1500)
+            copied = false
+        }
+    }
+    Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        SelectionContainer(modifier = Modifier.weight(1f)) {
+            Text(
+                value,
+                fontSize = valueFontSize,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.testable(testTag),
+            )
+        }
+        IconButton(
+            onClick = { onCopy() },
+            modifier = Modifier.testableClickable(copyTestTag) { onCopy() },
+        ) {
+            Icon(
+                imageVector = CIRISMaterialIcons.Filled.ContentCopy,
+                contentDescription = "Copy $label",
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+    if (copied) {
+        Text(
+            "Copied",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.testable("${testTag}_copied"),
+        )
     }
 }
 

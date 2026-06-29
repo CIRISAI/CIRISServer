@@ -3,17 +3,20 @@ package ai.ciris.mobile.shared.viewmodels
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.models.NodeProfile
 import ai.ciris.mobile.shared.platform.PlatformLogger
-import ai.ciris.mobile.shared.platform.SecureStorage
+import ai.ciris.mobile.shared.platform.readTextFile
 import ai.ciris.mobile.shared.platform.util.DecodedNodeCode
 import ai.ciris.mobile.shared.platform.util.NodeCodeCodec
 import ai.ciris.mobile.shared.platform.util.NodeCodeException
-import ai.ciris.mobile.shared.services.NodeProfileStore
+import ai.ciris.mobile.shared.platform.writeTextFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 /**
  * Drives the first-class **node switcher** surfaced in the main page top bar.
@@ -25,10 +28,20 @@ import kotlinx.coroutines.launch
  * that node's session token. Reloading of the per-node UI state is the
  * responsibility of the screens reacting to [activeProfile] changing, exactly
  * like the existing ServerConnection reconnect path.
+ *
+ * **CIRISServer#125 (live, stateless client).** The node list is read LIVE from
+ * the local node's `GET /v1/setup/owned-nodes` projection (owner + the key_ids
+ * the owner holds an owner-binding for), NOT from a client-side Java-prefs cache.
+ * The old `NodeProfileStore` (a `~/.java/.userPrefs` side store OUTSIDE the ciris
+ * folder) was the source of the #125 staleness bugs: a wipe left phantom nodes in
+ * the switcher, the identity name was only correct after a restart, etc. There is
+ * now NO cross-launch persistence of nodes here — the local node is the source of
+ * truth, rebuilt on every [reload]. Nodes the user adds by URL / NodeCode within a
+ * session ([saveProfile] / [connectByNodeCode]) live in memory only and are gone
+ * on relaunch (re-add from the live node, mirroring the stateless posture).
  */
 class NodeSwitcherViewModel(
     private val apiClient: CIRISApiClient,
-    private val secureStorage: SecureStorage,
 ) : ViewModel() {
 
     companion object {
@@ -40,9 +53,16 @@ class NodeSwitcherViewModel(
          * `cohort_scope` body field against exactly these values (else `400`).
          */
         val COHORT_SCOPES = listOf("self", "family", "community")
-    }
 
-    private val store = NodeProfileStore(secureStorage)
+        /** Filename of the node list written to / read from a chosen USB folder. */
+        const val NODE_LIST_FILENAME = "ciris-nodes.json"
+
+        private val NODE_LIST_JSON = Json {
+            prettyPrint = true
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
+    }
 
     private val _profiles = MutableStateFlow<List<NodeProfile>>(emptyList())
     val profiles: StateFlow<List<NodeProfile>> = _profiles.asStateFlow()
@@ -56,6 +76,17 @@ class NodeSwitcherViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** Transient success notice (e.g. "Saved 3 nodes to USB"); cleared by the UI. */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    /**
+     * Session-scoped, in-memory nodes the user added by URL or NodeCode this run
+     * (NOT persisted — #125). Carried across [reload] so a live owned-nodes refresh
+     * doesn't drop a node the user just typed in. Keyed/de-duped by [NodeProfile.id].
+     */
+    private val sessionProfiles = mutableListOf<NodeProfile>()
+
     val activeProfile: NodeProfile?
         get() = _profiles.value.firstOrNull { it.id == _activeProfileId.value }
 
@@ -64,180 +95,174 @@ class NodeSwitcherViewModel(
     }
 
     /**
-     * Reload the node list. **CEG-native:** the list is the set of nodes owned by
-     * this fed ID — projected from the local node's `delegates_to(user → node)`
-     * owner-binding objects (`GET /v1/setup/owned-nodes`), NOT a client-side store.
-     * By construction the local node appears once self-claimed. Each CEG entry is
-     * enriched with a stored profile (URL / token / name) matched by pinned key_id;
-     * the local node uses [CIRISApiClient.LOCAL_NODE_URL]. The stored profiles
-     * remain the carrier for reachability (URL/token) — the graph is the source of
-     * truth for WHICH nodes are yours. Falls back to the bare store if the local
-     * node can't be reached.
+     * Reload the node list LIVE. **CEG-native, no client cache:** the list is the
+     * set of nodes this fed ID owns — the local node's `delegates_to(user → node)`
+     * owner-binding objects, read via `GET /v1/setup/owned-nodes` (now
+     * self-replicated across the owner's devices). The local node (the one this app
+     * launches + drives at [CIRISApiClient.LOCAL_NODE_URL]) is always listed once
+     * self-claimed. Owned REMOTE nodes are listed by their `key_id` but carry no
+     * reachable endpoint yet — mesh addressing by key_id is a separate transport
+     * phase (see [switchTo]). Any node the user added this session ([saveProfile] /
+     * [connectByNodeCode]) is appended (de-duped). If the local node can't be
+     * reached, fall back to a bare local-node entry so the loopback stays usable.
      */
     suspend fun reload() {
-        val stored = store.loadProfiles()
-        PlatformLogger.i(
-            TAG,
-            "[reload] stored profiles: ${stored.size} — " +
-                stored.joinToString { "${it.name}(${it.baseUrl}, owned=${it.isOwned}, key=${it.pinnedKeyId})" },
-        )
         val owned = try {
             apiClient.getOwnedNodes()
         } catch (e: Exception) {
-            PlatformLogger.w(TAG, "[reload] owned-nodes unavailable (${e.message}) — falling back to stored profiles")
+            PlatformLogger.w(TAG, "[reload] owned-nodes unavailable (${e.message}) — local node only")
             null
         }
 
-        if (owned != null) {
+        val projected: List<NodeProfile> = if (owned != null) {
             PlatformLogger.i(
                 TAG,
-                "[reload] local node owned-nodes projection: ${owned.nodes.size} — " +
+                "[reload] owned-nodes projection: owner=${owned.owner} nodes=${owned.nodes.size} — " +
                     owned.nodes.joinToString { "${it.keyId}(self=${it.isSelf})" },
             )
-            val projected = owned.nodes.map { on ->
-                val match = stored.firstOrNull { it.pinnedKeyId == on.keyId }
+            // Ensure the local node is always present even if owned-nodes hasn't
+            // listed a self entry yet (e.g. freshly booted, not yet self-claimed).
+            val fromGraph = owned.nodes.map { on ->
                 if (on.isSelf) {
+                    localNodeProfile(on.keyId)
+                } else {
+                    // An owned REMOTE node — present per the graph but URL-less:
+                    // reachable over the mesh by key_id, which is not wired yet.
                     NodeProfile(
-                        id = NodeProfile.idFor(CIRISApiClient.LOCAL_NODE_URL),
-                        name = match?.name?.takeIf { it.isNotBlank() } ?: "This device",
-                        baseUrl = CIRISApiClient.LOCAL_NODE_URL,
-                        sessionToken = match?.sessionToken,
+                        id = on.keyId,
+                        name = on.keyId,
+                        baseUrl = "",
                         pinnedKeyId = on.keyId,
-                        pinnedPubkeyBase64 = match?.pinnedPubkeyBase64,
-                        isLocal = true,
                         isOwned = true,
                     )
-                } else {
-                    // An owned REMOTE node. Use its stored profile (carrying the
-                    // reachable URL/token) when present; otherwise surface a
-                    // URL-less entry — owned per the graph but not yet reachable.
-                    (match ?: NodeProfile(id = on.keyId, name = on.keyId, baseUrl = "", pinnedKeyId = on.keyId))
-                        .copy(isOwned = true)
                 }
             }
-            // MERGE, don't replace. The local node's graph only lists nodes IT
-            // holds an owner-binding for (itself). Remote nodes you claimed against
-            // THEIR OWN graphs (e.g. Node A/B) live in those graphs, not here — but
-            // a stored owned profile is still yours and must stay listed. Append
-            // any stored profile the projection didn't already represent (de-dup by
-            // pinned key_id, then by id).
-            val projectedKeys = projected.mapNotNull { it.pinnedKeyId }.toSet()
-            val projectedIds = projected.map { it.id }.toSet()
-            val extra = stored.filter { sp ->
-                (sp.pinnedKeyId == null || sp.pinnedKeyId !in projectedKeys) && sp.id !in projectedIds
-            }
-            if (extra.isNotEmpty()) {
-                PlatformLogger.i(
-                    TAG,
-                    "[reload] merging ${extra.size} stored node(s) the local graph didn't list " +
-                        "(owned remote nodes): ${extra.joinToString { "${it.name}(owned=${it.isOwned})" }}",
-                )
-            }
-            _profiles.value = projected + extra
-            PlatformLogger.i(
-                TAG,
-                "[reload] FINAL node list: ${_profiles.value.size} — " +
-                    _profiles.value.joinToString { "${it.name}(local=${it.isLocal}, owned=${it.isOwned})" },
-            )
-            _activeProfileId.value = store.getActiveProfileId()
-                ?: _profiles.value.firstOrNull { it.isLocal }?.id
-                ?: _profiles.value.firstOrNull()?.id
+            if (fromGraph.any { it.isLocal }) fromGraph else listOf(localNodeProfile(null)) + fromGraph
         } else {
-            _profiles.value = stored
-            PlatformLogger.i(TAG, "[reload] FINAL node list (stored fallback): ${stored.size} — ${stored.joinToString { it.name }}")
-            _activeProfileId.value = store.getActiveProfileId()
-                ?: stored.firstOrNull { it.baseUrl == apiClient.baseUrl }?.id
+            // Local node unreachable for the projection — still list it so the
+            // loopback node remains selectable/usable (the common, field-proven case).
+            listOf(localNodeProfile(null))
         }
+
+        // Append session-added nodes the projection didn't already represent
+        // (de-dup by id, then by pinned key_id).
+        val projectedIds = projected.map { it.id }.toSet()
+        val projectedKeys = projected.mapNotNull { it.pinnedKeyId }.toSet()
+        val extra = sessionProfiles.filter { sp ->
+            sp.id !in projectedIds && (sp.pinnedKeyId == null || sp.pinnedKeyId !in projectedKeys)
+        }
+        _profiles.value = projected + extra
+        PlatformLogger.i(
+            TAG,
+            "[reload] FINAL node list: ${_profiles.value.size} — " +
+                _profiles.value.joinToString { "${it.name}(local=${it.isLocal}, owned=${it.isOwned})" },
+        )
+
+        // Keep the current selection if it's still present, else default to local.
+        val current = _activeProfileId.value
+        _activeProfileId.value = _profiles.value.firstOrNull { it.id == current }?.id
+            ?: _profiles.value.firstOrNull { it.isLocal }?.id
+            ?: _profiles.value.firstOrNull()?.id
+    }
+
+    /** The canonical local-node profile, optionally tagged with its CEG key_id. */
+    private fun localNodeProfile(keyId: String?): NodeProfile = NodeProfile(
+        id = NodeProfile.idFor(CIRISApiClient.LOCAL_NODE_URL),
+        name = "This device",
+        baseUrl = CIRISApiClient.LOCAL_NODE_URL,
+        pinnedKeyId = keyId,
+        isLocal = true,
+        isOwned = true,
+    )
+
+    /** Insert or replace a session profile in both the in-memory list and the UI flow. */
+    private fun upsertSessionProfile(profile: NodeProfile) {
+        val idx = sessionProfiles.indexOfFirst { it.id == profile.id }
+        if (idx >= 0) sessionProfiles[idx] = profile else sessionProfiles.add(profile)
+        val cur = _profiles.value.toMutableList()
+        val ci = cur.indexOfFirst { it.id == profile.id }
+        if (ci >= 0) cur[ci] = profile else cur.add(profile)
+        _profiles.value = cur
     }
 
     /**
-     * Add or update a node profile. Mirrors the add/edit path of
-     * ServerConnectionScreen but persists a full [NodeProfile] rather than a
-     * bare URL string.
+     * Add or update a node profile (by URL) for THIS session only. Mirrors the
+     * add/edit path of ServerConnectionScreen but holds a full [NodeProfile] in
+     * memory rather than persisting it (#125 — no client cache).
      */
     fun saveProfile(name: String, baseUrl: String, sessionToken: String? = null) {
-        viewModelScope.launch {
-            val normalized = baseUrl.trim().trimEnd('/')
-            val profile = NodeProfile(
+        val normalized = baseUrl.trim().trimEnd('/')
+        upsertSessionProfile(
+            NodeProfile(
                 id = NodeProfile.idFor(normalized),
                 name = name.ifBlank { normalized },
                 baseUrl = normalized,
                 sessionToken = sessionToken,
                 lastUsedEpochMs = kotlinx.datetime.Clock.System.now().toEpochMilliseconds(),
-            )
-            _profiles.value = store.upsert(profile)
-        }
+            ),
+        )
     }
 
     fun removeProfile(id: String) {
-        viewModelScope.launch { _profiles.value = store.remove(id) }
+        sessionProfiles.removeAll { it.id == id }
+        _profiles.value = _profiles.value.filterNot { it.id == id }
+        // A live owned/local node reappears on the next reload — only session-added
+        // nodes are truly removable. That is by design: the graph is the truth.
     }
 
     /**
-     * Rename a saved node profile in place (keeps URL, token and any identity
-     * pin — [NodeProfileStore.upsert] merges by id). Used by the Manage Nodes
-     * CRUD surface. No-op for a blank name or an unknown id.
+     * Rename a node in place for this session (in-memory; reverts on the next live
+     * [reload] for graph-derived nodes). Used by the Manage Nodes CRUD surface.
      */
     fun renameProfile(id: String, newName: String) {
         val name = newName.trim()
         if (name.isBlank()) return
-        viewModelScope.launch {
-            val existing = _profiles.value.firstOrNull { it.id == id } ?: return@launch
-            _profiles.value = store.upsert(existing.copy(name = name))
-        }
+        val existing = _profiles.value.firstOrNull { it.id == id } ?: return
+        upsertSessionProfile(existing.copy(name = name))
     }
 
     /**
-     * Re-token a profile: replace the stored session token (or clear it when
-     * [token] is blank). Manage Nodes "retoken" affordance. Note [NodeProfileStore.upsert]
-     * preserves an existing token when the incoming one is null, so an explicit
-     * clear writes the profile directly rather than via upsert.
+     * Re-token a session profile: replace (or clear when blank) the in-memory
+     * session token. Manage Nodes "retoken" affordance.
      */
     fun retokenProfile(id: String, token: String?) {
-        viewModelScope.launch {
-            val existing = _profiles.value.firstOrNull { it.id == id } ?: return@launch
-            val trimmed = token?.trim()?.takeIf { it.isNotBlank() }
-            _profiles.value = if (trimmed == null) {
-                // Explicit clear: upsert would preserve the old token, so go
-                // through remove + re-add to drop it.
-                store.remove(id)
-                store.upsert(existing.copy(sessionToken = null))
-            } else {
-                store.upsert(existing.copy(sessionToken = trimmed))
-            }
-        }
+        val existing = _profiles.value.firstOrNull { it.id == id } ?: return
+        val trimmed = token?.trim()?.takeIf { it.isNotBlank() }
+        upsertSessionProfile(existing.copy(sessionToken = trimmed))
     }
 
     /**
-     * Switch the active node. Repoints the shared API client at the chosen
-     * node and applies its token, then marks it active. Screens observing
-     * [activeProfileId] should reload their data when it changes.
+     * Switch the active node. Repoints the shared API client at the chosen node and
+     * applies its token (in memory — the session token is NOT persisted, #125), then
+     * marks it active. Screens observing [activeProfileId] should reload their data.
+     *
+     * REMOTE-by-key_id is OUT OF SCOPE: an owned remote node from the live
+     * owned-nodes projection carries no reachable endpoint (`baseUrl == ""`).
+     * Selecting one is refused with a clear "coming soon" message until mesh
+     * addressing-by-key_id is wired.
      */
     fun switchTo(profile: NodeProfile) {
         if (_isSwitching.value) return
+        // TODO(#125 mesh-addressing phase): reach an owned remote node by its
+        // key_id over the mesh. Today owned-nodes returns only {key_id, is_self}
+        // with no endpoint, so a URL-less node cannot be selected. Nodes added by
+        // URL / NodeCode this session DO carry a baseUrl and remain switchable.
+        if (profile.baseUrl.isBlank()) {
+            _error.value = "${profile.name} is reachable over the mesh — switching to it is coming soon."
+            return
+        }
         _isSwitching.value = true
         _error.value = null
         viewModelScope.launch {
             try {
                 PlatformLogger.i(TAG, "[switchTo] Switching to node '${profile.name}' @ ${profile.baseUrl} (local=${profile.isLocal})")
                 apiClient.updateBaseUrl(profile.baseUrl)
-                // Apply (or clear) the node's session token on the shared client.
+                // Apply (or skip) the node's session token on the shared client.
+                // In-memory only — #125 drops cross-launch token persistence.
                 if (profile.isAuthenticated) {
                     apiClient.setAccessToken(profile.sessionToken!!)
-                    // Keep the canonical access-token slot in sync so a cold
-                    // start restores the same node's session.
-                    secureStorage.saveAccessToken(profile.sessionToken)
                 }
                 val now = kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
-                // Persist active-id (+ bump lastUsed for any STORED match) so a cold
-                // start restores this node. NOTE: markActive returns the *stored*
-                // list only, which does NOT contain projection-only entries (the
-                // local node, owned remotes not yet saved). Assigning that list to
-                // _profiles would DROP the just-activated local node from the UI —
-                // the activate-makes-it-disappear bug. Instead, keep the current
-                // in-memory merged list and only flip active-id + bump lastUsed in
-                // place, so every node (local or remote) stays listed.
-                store.markActive(profile.id, now)
                 _activeProfileId.value = profile.id
                 _profiles.value = _profiles.value.map {
                     if (it.id == profile.id) it.copy(lastUsedEpochMs = now) else it
@@ -257,6 +282,116 @@ class NodeSwitcherViewModel(
     }
 
     fun clearError() { _error.value = null }
+
+    fun clearNotice() { _notice.value = null }
+
+    // ─── Save / Restore node list to USB (private/offline sneakernet) ──────────
+    //
+    // After #125 the client is stateless: the switcher derives its list LIVE from
+    // owned-nodes, and owned bindings self-replicate to the owner's devices ONLY
+    // over their mesh (once announced/connected). An owner who stays PRIVATE — or
+    // sets up a fresh/offline device — has no way to carry their known nodes
+    // across devices. This is the USB sneakernet for the node list, mirroring the
+    // fed-ID USB import UX. Restored nodes carry a baseUrl, so they land in the
+    // session list AND become switchable — which also fills the interim
+    // remote-reachability gap until mesh addressing-by-key_id is wired.
+
+    /**
+     * The nodes worth carrying to another device: everything EXCEPT this device's
+     * pure local-loopback entry (its [CIRISApiClient.LOCAL_NODE_URL] is
+     * device-specific, not portable). Owned remotes with an empty baseUrl are
+     * included for completeness; the switchable value is the ones with a real
+     * endpoint (session/URL/NodeCode-added).
+     */
+    private fun exportableNodes(): List<NodeProfile> =
+        _profiles.value.filterNot { it.isLocal || it.baseUrl == CIRISApiClient.LOCAL_NODE_URL }
+
+    /**
+     * Serialize the user's known nodes to the portable node-list JSON. Pure +
+     * testable — the file write is [saveNodeListToUsb]'s job.
+     */
+    fun exportNodeListJson(): String =
+        NODE_LIST_JSON.encodeToString(
+            ExportedNodeList(
+                nodes = exportableNodes().map {
+                    ExportedNode(keyId = it.pinnedKeyId.orEmpty(), name = it.name, baseUrl = it.baseUrl)
+                },
+            ),
+        )
+
+    /**
+     * Parse a portable node-list JSON and ADD each switchable entry (non-empty
+     * baseUrl) into the in-memory session list so it shows in the switcher and can
+     * be switched to. De-dupes by [NodeProfile.idFor] (the normalised baseUrl), so
+     * re-importing the same node just refreshes it. Returns the count added. Pure +
+     * testable — the file read is [restoreNodeListFromUsb]'s job.
+     */
+    fun importNodeListJson(json: String): Int {
+        val parsed = try {
+            NODE_LIST_JSON.decodeFromString<ExportedNodeList>(json)
+        } catch (e: Exception) {
+            PlatformLogger.w(TAG, "[importNodeListJson] parse failed: ${e.message}")
+            _error.value = "That file isn't a valid CIRIS node list: ${e.message}"
+            return 0
+        }
+        var added = 0
+        for (entry in parsed.nodes) {
+            val url = entry.baseUrl.trim().trimEnd('/')
+            // Owned remotes carry no endpoint yet (not switchable) and a foreign
+            // device's loopback is meaningless here — skip both.
+            if (url.isBlank() || url == CIRISApiClient.LOCAL_NODE_URL) continue
+            upsertSessionProfile(
+                NodeProfile(
+                    id = NodeProfile.idFor(url),
+                    name = entry.name.ifBlank { url },
+                    baseUrl = url,
+                    pinnedKeyId = entry.keyId.ifBlank { null },
+                ),
+            )
+            added++
+        }
+        PlatformLogger.i(TAG, "[importNodeListJson] restored $added switchable node(s)")
+        return added
+    }
+
+    /** Write the node list to [NODE_LIST_FILENAME] in the chosen USB [dir]. */
+    fun saveNodeListToUsb(dir: String) {
+        val target = dir.trim()
+        if (target.isBlank()) return
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            val count = exportableNodes().size
+            val ok = writeTextFile(target, NODE_LIST_FILENAME, exportNodeListJson())
+            if (ok) {
+                PlatformLogger.i(TAG, "[saveNodeListToUsb] wrote $count node(s) to $target/$NODE_LIST_FILENAME")
+                _notice.value = "Saved $count node(s) to $NODE_LIST_FILENAME on the USB folder."
+            } else {
+                _error.value = "Couldn't write $NODE_LIST_FILENAME to that folder — saving to USB isn't available on this device yet."
+            }
+        }
+    }
+
+    /** Read [NODE_LIST_FILENAME] from the chosen USB [dir] and add its nodes. */
+    fun restoreNodeListFromUsb(dir: String) {
+        val target = dir.trim()
+        if (target.isBlank()) return
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            val json = readTextFile(target, NODE_LIST_FILENAME)
+            if (json == null) {
+                _error.value = "No $NODE_LIST_FILENAME found in that folder — or restoring from USB isn't available on this device yet."
+                return@launch
+            }
+            val count = importNodeListJson(json)
+            if (count > 0) {
+                _notice.value = "Restored $count node(s) from USB."
+            } else if (_error.value == null) {
+                _notice.value = "No switchable nodes found in $NODE_LIST_FILENAME."
+            }
+        }
+    }
 
     private val _upgradeInProgress = MutableStateFlow(false)
     val upgradeInProgress: StateFlow<Boolean> = _upgradeInProgress.asStateFlow()
@@ -307,7 +442,7 @@ class NodeSwitcherViewModel(
     // LOCALLY (no server round-trip to learn what node it is), derive a base URL
     // from the transport hint, connect, then identity-pin: fetch the node's own
     // served NodeCode and refuse unless its key_id + pubkey match the decoded
-    // code. Only a pinned node is saved as a profile.
+    // code. Only a pinned node is added as a session profile.
 
     private val _bootstrap = MutableStateFlow(NodeBootstrapState())
     val bootstrap: StateFlow<NodeBootstrapState> = _bootstrap.asStateFlow()
@@ -329,9 +464,10 @@ class NodeSwitcherViewModel(
      * Connect to a node from a pasted/scanned NodeCode and identity-pin it.
      *
      * On success a verified [NodeProfile] (carrying the pinned key_id + pubkey)
-     * is saved and the bootstrap state reports [NodeBootstrapState.pinnedProfile]
-     * so the UI can offer "Claim admin" next. [overrideUrl] lets the user supply
-     * the base URL when the code carries no usable transport hint.
+     * is added (session-only) and the bootstrap state reports
+     * [NodeBootstrapState.pinnedProfile] so the UI can offer "Claim admin" next.
+     * [overrideUrl] lets the user supply the base URL when the code carries no
+     * usable transport hint.
      */
     fun connectByNodeCode(code: String, name: String? = null, overrideUrl: String? = null) {
         if (_bootstrap.value.inProgress) return
@@ -385,7 +521,7 @@ class NodeSwitcherViewModel(
                     pinnedKeyId = decoded.keyId,
                     pinnedPubkeyBase64 = decoded.pubkeyEd25519Base64,
                 )
-                _profiles.value = store.upsert(profile)
+                upsertSessionProfile(profile)
                 PlatformLogger.i(TAG, "[connectByNodeCode] pinned node '${profile.name}' @ $baseUrl key=${decoded.keyId}")
                 _bootstrap.value = _bootstrap.value.copy(
                     decoded = decoded,
@@ -469,8 +605,8 @@ class NodeSwitcherViewModel(
                     claimedRole = resp.role,
                     claimError = if (resp.role == null) resp.error else null,
                 )
-                // Refresh the profile list (claim may have minted a session later).
-                _profiles.value = store.loadProfiles()
+                // Refresh the node list LIVE (the claim minted a new owner-binding).
+                reload()
             } catch (e: Exception) {
                 PlatformLogger.e(TAG, "[claimAdmin] failed: ${e.message}", e)
                 // Surface a clear PIN error when the claim was rejected for the
@@ -519,3 +655,18 @@ data class NodeBootstrapState(
     val isPinned: Boolean get() = pinnedProfile != null
     val isAdminClaimed: Boolean get() = claimedRole != null
 }
+
+/** One node in the portable USB node-list file ([NodeSwitcherViewModel.NODE_LIST_FILENAME]). */
+@Serializable
+data class ExportedNode(
+    val keyId: String = "",
+    val name: String = "",
+    val baseUrl: String = "",
+)
+
+/** The portable USB node-list file payload. */
+@Serializable
+data class ExportedNodeList(
+    val version: Int = 1,
+    val nodes: List<ExportedNode> = emptyList(),
+)

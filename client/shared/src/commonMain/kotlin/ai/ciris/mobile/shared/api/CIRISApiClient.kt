@@ -1728,6 +1728,41 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Opt IN to the federation** — `POST {localNodeUrl}/v1/federation/announce`.
+     * Ownership is self-scoped (private) by default; this promotes the owner-binding
+     * self→FEDERATION and enables the node's identity announce so the community can
+     * find and federate with it. Owner-session-gated + loopback-only; idempotent and
+     * takes effect on the node's NEXT boot. Run AFTER the claim (the owner must
+     * exist) with the owner session. Returns the parsed [AnnounceOwnershipResponse].
+     */
+    suspend fun announceOwnership(
+        localNodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AnnounceOwnershipResponse {
+        val method = "announceOwnership"
+        logInfo(method, "POST $localNodeUrl/v1/federation/announce")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$localNodeUrl/v1/federation/announce") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logException(method, RuntimeException("status=${response.status} body=${raw.take(300)}"), "localNodeUrl=$localNodeUrl")
+                throw RuntimeException("announce failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(raw, ai.ciris.mobile.shared.models.federation.AnnounceOwnershipResponse.serializer())
+        } catch (e: Exception) {
+            logException(method, e, "localNodeUrl=$localNodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── Delegations (device-authorization grants) — owner authorizes an agent ──
     //
     // The owner approves a device code an agent generated out-of-band, minting a

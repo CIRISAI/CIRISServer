@@ -839,6 +839,9 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     let applied = match super::ownership::apply_signed_owner_binding(
         &st.engine,
         &st.node_key_id,
+        // CIRISServer#125: stamp the owner-binding with the cohort the node is
+        // claimed under (self by default), not a hardcoded FEDERATION.
+        &cohort_scope,
         st.policy,
         owner_binding,
     )

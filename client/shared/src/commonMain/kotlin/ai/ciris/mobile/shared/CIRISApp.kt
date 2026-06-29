@@ -668,10 +668,10 @@ fun CIRISApp(
     }
     // Node switcher (change #1) + consent-objects (change #3a)
     val nodeSwitcherViewModel: NodeSwitcherViewModel = viewModel {
-        NodeSwitcherViewModel(apiClient, secureStorage)
+        NodeSwitcherViewModel(apiClient)
     }
     val consentObjectsViewModel: ConsentObjectsViewModel = viewModel {
-        ConsentObjectsViewModel(apiClient, secureStorage)
+        ConsentObjectsViewModel(apiClient)
     }
     val delegationsViewModel: ai.ciris.mobile.shared.viewmodels.DelegationsViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.DelegationsViewModel(apiClient)
@@ -940,10 +940,14 @@ fun CIRISApp(
                 // Just update the status message which is shown on the startup screen
                 startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_authenticating"))
 
-                // Add timeout for token loading (shouldn't take more than 5 seconds)
+                // #125 (stateless client): do NOT auto-restore a persisted session
+                // token on boot. The token is kept in memory only for the live
+                // session; a fresh launch requires re-login. Returning a null token
+                // here routes through the existing "No stored token → Login" path
+                // below, so the local-node login flow stays intact.
                 val tokenResult = try {
                     kotlinx.coroutines.withTimeout(5000) {
-                        secureStorage.getAccessToken()
+                        Result.success<String?>(null)
                     }
                 } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                     startupViewModel.setStatus("Token load timeout!")

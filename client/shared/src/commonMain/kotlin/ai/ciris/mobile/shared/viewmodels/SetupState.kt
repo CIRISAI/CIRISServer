@@ -427,6 +427,12 @@ data class NodeOwnershipClaimState(
     val waId: String? = null,
     /** Human-readable failure reason (e.g. "claim PIN not captured"). */
     val error: String? = null,
+    /**
+     * Non-fatal soft notice from the optional federation-announce opt-in. The
+     * claim itself already succeeded; the announce can be retried later, so a
+     * failure here is surfaced (not fatal). Null when not attempted / succeeded.
+     */
+    val announceNotice: String? = null,
 )
 
 /**
@@ -536,6 +542,17 @@ data class SetupFormState(
      * YubiKey (if available AND selected) → TPM/SE (if available) → software.
      */
     val secureWith2FA: Boolean = false,
+
+    /**
+     * Opt IN to ANNOUNCING this owner to the federation. Defaults OFF
+     * (privacy-first): ownership is self-scoped — full personal/self-family use,
+     * the owner's nodes sync across their own devices, invisible to the
+     * federation. Turning this ON promotes the owner-binding self→FEDERATION and
+     * enables the node's identity announce (POST /v1/federation/announce) so the
+     * community can find and federate with this node. Takes effect on next boot;
+     * applied best-effort post-claim (see [SetupViewModel.claimLocalNodeOwnership]).
+     */
+    val announceOwnership: Boolean = false,
 
     // Accord Metrics opt-in (for AI alignment research)
     // Data shared: reasoning scores, decision patterns, LLM provider/API base URL
