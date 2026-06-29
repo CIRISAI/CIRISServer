@@ -2617,6 +2617,12 @@ private fun FederationIdentityStep(
                         SecureWith2FACard(state = state, viewModel = viewModel)
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        // Federation opt-in — privacy-first, default OFF. Ownership
+                        // is self-scoped (private) unless the user chooses to
+                        // announce; the toggle lives with the other fed-ID choices.
+                        AnnounceOwnershipCard(state = state, viewModel = viewModel)
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         Button(
                             // Block minting until the name is valid: minting with a
                             // blank/generic name is exactly what produced the
@@ -3483,6 +3489,61 @@ private fun SecureWith2FACard(
                 onCheckedChange = { viewModel.setSecureWith2FA(it) },
                 modifier = Modifier.testableClickable("toggle_secure_2fa") {
                     viewModel.setSecureWith2FA(!state.secureWith2FA)
+                }
+            )
+        }
+    }
+}
+
+/**
+ * The "Announce yourself to the federation" opt-in — rendered on the
+ * FEDERATION-IDENTITY step alongside the other fed-ID custody choices. Default
+ * OFF (privacy-first): ownership is SELF-SCOPED (private) — full personal use, the
+ * owner's nodes sync across their own devices but are invisible to the federation.
+ * Turning it ON, after a successful claim, promotes the owner-binding
+ * self→FEDERATION and enables the node's identity announce so the community can
+ * find and federate with this node. Takes effect on the node's next launch.
+ */
+@Composable
+private fun AnnounceOwnershipCard(
+    state: SetupFormState,
+    viewModel: SetupViewModel,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = SetupColors.GrayLight,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = localizedString("mobile.setup_announce_title"),
+                    color = SetupColors.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    // Make the tradeoff clear: distinct copy for OFF (private,
+                    // recommended) vs ON (join the community, effective next launch).
+                    text = if (state.announceOwnership) {
+                        localizedString("mobile.setup_announce_desc_on")
+                    } else {
+                        localizedString("mobile.setup_announce_desc_off")
+                    },
+                    color = SetupColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = state.announceOwnership,
+                onCheckedChange = { viewModel.setAnnounceOwnership(it) },
+                modifier = Modifier.testableClickable("toggle_announce_ownership") {
+                    viewModel.setAnnounceOwnership(!state.announceOwnership)
                 }
             )
         }
