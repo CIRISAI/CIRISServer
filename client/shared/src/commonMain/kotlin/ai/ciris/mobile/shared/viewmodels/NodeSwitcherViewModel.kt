@@ -3,15 +3,20 @@ package ai.ciris.mobile.shared.viewmodels
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.models.NodeProfile
 import ai.ciris.mobile.shared.platform.PlatformLogger
+import ai.ciris.mobile.shared.platform.readTextFile
 import ai.ciris.mobile.shared.platform.util.DecodedNodeCode
 import ai.ciris.mobile.shared.platform.util.NodeCodeCodec
 import ai.ciris.mobile.shared.platform.util.NodeCodeException
+import ai.ciris.mobile.shared.platform.writeTextFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 /**
  * Drives the first-class **node switcher** surfaced in the main page top bar.
@@ -48,6 +53,15 @@ class NodeSwitcherViewModel(
          * `cohort_scope` body field against exactly these values (else `400`).
          */
         val COHORT_SCOPES = listOf("self", "family", "community")
+
+        /** Filename of the node list written to / read from a chosen USB folder. */
+        const val NODE_LIST_FILENAME = "ciris-nodes.json"
+
+        private val NODE_LIST_JSON = Json {
+            prettyPrint = true
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
     }
 
     private val _profiles = MutableStateFlow<List<NodeProfile>>(emptyList())
@@ -61,6 +75,10 @@ class NodeSwitcherViewModel(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    /** Transient success notice (e.g. "Saved 3 nodes to USB"); cleared by the UI. */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
 
     /**
      * Session-scoped, in-memory nodes the user added by URL or NodeCode this run
@@ -264,6 +282,116 @@ class NodeSwitcherViewModel(
     }
 
     fun clearError() { _error.value = null }
+
+    fun clearNotice() { _notice.value = null }
+
+    // ─── Save / Restore node list to USB (private/offline sneakernet) ──────────
+    //
+    // After #125 the client is stateless: the switcher derives its list LIVE from
+    // owned-nodes, and owned bindings self-replicate to the owner's devices ONLY
+    // over their mesh (once announced/connected). An owner who stays PRIVATE — or
+    // sets up a fresh/offline device — has no way to carry their known nodes
+    // across devices. This is the USB sneakernet for the node list, mirroring the
+    // fed-ID USB import UX. Restored nodes carry a baseUrl, so they land in the
+    // session list AND become switchable — which also fills the interim
+    // remote-reachability gap until mesh addressing-by-key_id is wired.
+
+    /**
+     * The nodes worth carrying to another device: everything EXCEPT this device's
+     * pure local-loopback entry (its [CIRISApiClient.LOCAL_NODE_URL] is
+     * device-specific, not portable). Owned remotes with an empty baseUrl are
+     * included for completeness; the switchable value is the ones with a real
+     * endpoint (session/URL/NodeCode-added).
+     */
+    private fun exportableNodes(): List<NodeProfile> =
+        _profiles.value.filterNot { it.isLocal || it.baseUrl == CIRISApiClient.LOCAL_NODE_URL }
+
+    /**
+     * Serialize the user's known nodes to the portable node-list JSON. Pure +
+     * testable — the file write is [saveNodeListToUsb]'s job.
+     */
+    fun exportNodeListJson(): String =
+        NODE_LIST_JSON.encodeToString(
+            ExportedNodeList(
+                nodes = exportableNodes().map {
+                    ExportedNode(keyId = it.pinnedKeyId.orEmpty(), name = it.name, baseUrl = it.baseUrl)
+                },
+            ),
+        )
+
+    /**
+     * Parse a portable node-list JSON and ADD each switchable entry (non-empty
+     * baseUrl) into the in-memory session list so it shows in the switcher and can
+     * be switched to. De-dupes by [NodeProfile.idFor] (the normalised baseUrl), so
+     * re-importing the same node just refreshes it. Returns the count added. Pure +
+     * testable — the file read is [restoreNodeListFromUsb]'s job.
+     */
+    fun importNodeListJson(json: String): Int {
+        val parsed = try {
+            NODE_LIST_JSON.decodeFromString<ExportedNodeList>(json)
+        } catch (e: Exception) {
+            PlatformLogger.w(TAG, "[importNodeListJson] parse failed: ${e.message}")
+            _error.value = "That file isn't a valid CIRIS node list: ${e.message}"
+            return 0
+        }
+        var added = 0
+        for (entry in parsed.nodes) {
+            val url = entry.baseUrl.trim().trimEnd('/')
+            // Owned remotes carry no endpoint yet (not switchable) and a foreign
+            // device's loopback is meaningless here — skip both.
+            if (url.isBlank() || url == CIRISApiClient.LOCAL_NODE_URL) continue
+            upsertSessionProfile(
+                NodeProfile(
+                    id = NodeProfile.idFor(url),
+                    name = entry.name.ifBlank { url },
+                    baseUrl = url,
+                    pinnedKeyId = entry.keyId.ifBlank { null },
+                ),
+            )
+            added++
+        }
+        PlatformLogger.i(TAG, "[importNodeListJson] restored $added switchable node(s)")
+        return added
+    }
+
+    /** Write the node list to [NODE_LIST_FILENAME] in the chosen USB [dir]. */
+    fun saveNodeListToUsb(dir: String) {
+        val target = dir.trim()
+        if (target.isBlank()) return
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            val count = exportableNodes().size
+            val ok = writeTextFile(target, NODE_LIST_FILENAME, exportNodeListJson())
+            if (ok) {
+                PlatformLogger.i(TAG, "[saveNodeListToUsb] wrote $count node(s) to $target/$NODE_LIST_FILENAME")
+                _notice.value = "Saved $count node(s) to $NODE_LIST_FILENAME on the USB folder."
+            } else {
+                _error.value = "Couldn't write $NODE_LIST_FILENAME to that folder — saving to USB isn't available on this device yet."
+            }
+        }
+    }
+
+    /** Read [NODE_LIST_FILENAME] from the chosen USB [dir] and add its nodes. */
+    fun restoreNodeListFromUsb(dir: String) {
+        val target = dir.trim()
+        if (target.isBlank()) return
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            val json = readTextFile(target, NODE_LIST_FILENAME)
+            if (json == null) {
+                _error.value = "No $NODE_LIST_FILENAME found in that folder — or restoring from USB isn't available on this device yet."
+                return@launch
+            }
+            val count = importNodeListJson(json)
+            if (count > 0) {
+                _notice.value = "Restored $count node(s) from USB."
+            } else if (_error.value == null) {
+                _notice.value = "No switchable nodes found in $NODE_LIST_FILENAME."
+            }
+        }
+    }
 
     private val _upgradeInProgress = MutableStateFlow(false)
     val upgradeInProgress: StateFlow<Boolean> = _upgradeInProgress.asStateFlow()
@@ -527,3 +655,18 @@ data class NodeBootstrapState(
     val isPinned: Boolean get() = pinnedProfile != null
     val isAdminClaimed: Boolean get() = claimedRole != null
 }
+
+/** One node in the portable USB node-list file ([NodeSwitcherViewModel.NODE_LIST_FILENAME]). */
+@Serializable
+data class ExportedNode(
+    val keyId: String = "",
+    val name: String = "",
+    val baseUrl: String = "",
+)
+
+/** The portable USB node-list file payload. */
+@Serializable
+data class ExportedNodeList(
+    val version: Int = 1,
+    val nodes: List<ExportedNode> = emptyList(),
+)

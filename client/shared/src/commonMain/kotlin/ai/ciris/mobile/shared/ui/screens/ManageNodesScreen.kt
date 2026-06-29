@@ -3,6 +3,7 @@ package ai.ciris.mobile.shared.ui.screens
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.localization.localizedString
 import ai.ciris.mobile.shared.models.NodeProfile
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
@@ -206,7 +207,12 @@ private fun NodesListView(
     val activeId by viewModel.activeProfileId.collectAsState()
     val isSwitching by viewModel.isSwitching.collectAsState()
     val error by viewModel.error.collectAsState()
+    val notice by viewModel.notice.collectAsState()
     val bootstrap by viewModel.bootstrap.collectAsState()
+
+    // USB node-list save/restore folder pickers (private/offline sneakernet).
+    var showSaveUsbPicker by remember { mutableStateOf(false) }
+    var showRestoreUsbPicker by remember { mutableStateOf(false) }
 
     // Add-by-* panel state.
     var showAddByCode by remember { mutableStateOf(false) }
@@ -255,6 +261,29 @@ private fun NodesListView(
                     }
                 }
             }
+
+        notice?.let { msg ->
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = msg,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { viewModel.clearNotice() }) {
+                        Text(localizedString("mobile.common_close"))
+                    }
+                }
+            }
+        }
 
             // ── Node list ────────────────────────────────────────────────────
             if (profiles.isEmpty()) {
@@ -463,7 +492,56 @@ private fun NodesListView(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ── Carry your nodes to another device (USB sneakernet) ──────────
+            // Private/offline owners don't announce, so owned-node bindings never
+            // self-replicate to their other devices. Save the node list to a USB
+            // folder here and restore it on the other device — no federation
+            // announce required.
+            Text(
+                text = localizedString("mobile.manage_nodes_usb_title"),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+            )
+            Text(
+                text = localizedString("mobile.manage_nodes_usb_note"),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { showSaveUsbPicker = true },
+                    modifier = Modifier.weight(1f).testable("btn_nodes_save_usb"),
+                ) {
+                    Text(localizedString("mobile.manage_nodes_save_usb"))
+                }
+                OutlinedButton(
+                    onClick = { showRestoreUsbPicker = true },
+                    modifier = Modifier.weight(1f).testable("btn_nodes_restore_usb"),
+                ) {
+                    Text(localizedString("mobile.manage_nodes_restore_usb"))
+                }
+            }
         }
+
+    DirectoryPickerDialog(
+        show = showSaveUsbPicker,
+        onDirectoryPicked = { dir ->
+            showSaveUsbPicker = false
+            if (dir.isNotBlank()) viewModel.saveNodeListToUsb(dir)
+        },
+        onDismiss = { showSaveUsbPicker = false },
+    )
+    DirectoryPickerDialog(
+        show = showRestoreUsbPicker,
+        onDirectoryPicked = { dir ->
+            showRestoreUsbPicker = false
+            if (dir.isNotBlank()) viewModel.restoreNodeListFromUsb(dir)
+        },
+        onDismiss = { showRestoreUsbPicker = false },
+    )
 }
 
 @Composable
