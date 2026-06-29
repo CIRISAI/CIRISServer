@@ -1395,22 +1395,29 @@ async fn build_edge(
     // construction), so the authenticated announce takes effect on the NEXT boot.
     // This does NOT touch the envelope-signing path: the Edge builder's `.signer(…)`
     // below still wires the SAME signer for federation envelope signatures.
-    let announce_identity = resolved.announce_ownership;
-    if announce_identity {
+    // Edge v7.0+ requires the federation signer for BOTH the announce attestation
+    // (AV-42 app-data) AND the explicit-hash destination derivation. Setting signer=None
+    // was valid in v6.x for "no attestation in announce", but now hard-fails at transport
+    // construction. The signer is always wired.
+    //
+    // Privacy is delivered by the OWNER BINDING being `cohort_scope: self` by default
+    // (not by suppressing the transport announce). The announce attests the NODE key
+    // (ciris-client-XXX) — NOT the owner's fed-ID; the owner identity is invisible until
+    // promoted via POST /v1/federation/announce (cohort_scope: federation).
+    if resolved.announce_ownership {
         tracing::info!(
-            "net.announce_ownership=true — wiring the federation signer into the Reticulum \
-             announce (AV-42 authenticated identity attestation; federation-discoverable)"
+            "net.announce_ownership=true — owner binding promoted to federation scope; \
+             federation-identity-discoverable"
         );
     } else {
         tracing::info!(
-            "net.announce_ownership=false (self-scoped default) — Reticulum announce carries NO \
-             federation-identity attestation (transport brings up + announces its raw destination, \
-             but rooting peers drop the un-attested announce; not federation-identity-discoverable). \
-             Promote via POST /v1/federation/announce — takes effect on next boot."
+            "net.announce_ownership=false (self-scoped default) — owner binding is private \
+             (cohort_scope: self); transport announces the NODE key for routing but the OWNER \
+             identity is not federation-visible. Promote via POST /v1/federation/announce."
         );
     }
     let ret_auth = ReticulumAuth {
-        signer: announce_identity.then(|| Arc::clone(&signer)),
+        signer: Some(Arc::clone(&signer)),
         rooting: None,
         resolver: None,
         transport_identity_keystore: Some(transport_keystore),
