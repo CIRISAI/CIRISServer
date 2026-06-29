@@ -1381,8 +1381,36 @@ async fn build_edge(
         interfaces: vec![],
         enable_transport: transport_node,
     };
+    // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
+    // attestation on the `net.announce_ownership` opt-in (default FALSE). The
+    // `ReticulumAuth.signer` is used ONCE at construction to sign edge's own
+    // announce attestation (the AV-42 binding `key_id → transport destination` that
+    // rooting peers verify). When the owner has NOT announced (self-scoped default),
+    // we wire `None`: the transport still brings up + announces its raw destination
+    // hash (so transport-node forwarding / NAT-traversal / link establishment all
+    // work), but the announce carries NO identity attestation → rooting peers drop
+    // it (fail-honest) → the node is not federation-identity-discoverable. The
+    // promote op (POST /v1/federation/announce) sets `net.announce_ownership=true`;
+    // this is BOOT-STRUCTURAL (the attestation is built once at transport
+    // construction), so the authenticated announce takes effect on the NEXT boot.
+    // This does NOT touch the envelope-signing path: the Edge builder's `.signer(…)`
+    // below still wires the SAME signer for federation envelope signatures.
+    let announce_identity = resolved.announce_ownership;
+    if announce_identity {
+        tracing::info!(
+            "net.announce_ownership=true — wiring the federation signer into the Reticulum \
+             announce (AV-42 authenticated identity attestation; federation-discoverable)"
+        );
+    } else {
+        tracing::info!(
+            "net.announce_ownership=false (self-scoped default) — Reticulum announce carries NO \
+             federation-identity attestation (transport brings up + announces its raw destination, \
+             but rooting peers drop the un-attested announce; not federation-identity-discoverable). \
+             Promote via POST /v1/federation/announce — takes effect on next boot."
+        );
+    }
     let ret_auth = ReticulumAuth {
-        signer: Some(Arc::clone(&signer)),
+        signer: announce_identity.then(|| Arc::clone(&signer)),
         rooting: None,
         resolver: None,
         transport_identity_keystore: Some(transport_keystore),

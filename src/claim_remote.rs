@@ -619,6 +619,97 @@ async fn set_age_self(
     }
 }
 
+/// `POST /v1/federation/announce` — **announce yourself to the federation**
+/// (CIRISServer#125, owner-gated, loopback-only). The OPT-IN that turns a
+/// self-scoped node into a federation participant. Two TIED effects:
+///
+///   1. **PROMOTE** this node's owner-binding `delegates_to(owner → node)` from
+///      `cohort_scope: self` to `federation` ([`ownership::promote_owner_binding_to_federation`])
+///      — public responsible-party accountability. Re-persists the EXISTING
+///      user-signed envelope + the owner's original signatures at the wider cohort
+///      (cohort is not in the signed envelope, so the proven signature re-verifies);
+///      no fresh signing / no user signer needed.
+///   2. **ENABLE the Reticulum identity announce** — set the boot-structural
+///      `net.announce_ownership` config:* key to `true` (owner-authored CEG write).
+///      On the NEXT boot [`crate::compose`] wires the federation signer into the
+///      announce so it carries the AV-42 authenticated identity attestation (peers
+///      can root `key_id → destination`). Until then the node stays
+///      identity-silent on the mesh (transport bring-up is unaffected either way).
+///
+/// Idempotent (a re-announce no-ops the already-federation promote and re-affirms
+/// the config). Owner-session-gated (SYSTEM_ADMIN) — and the promote itself errors
+/// if the node is not yet owner-bound (you cannot announce an ownership you do not
+/// hold). DEFAULT (no announce) = self-scoped + no identity announce; you only
+/// promote if you want a federation role.
+async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: HeaderMap) -> Response {
+    // Always owner-session-gated: announcing your node to the federation is an apex
+    // act, never reachable first-run/unowned (the promote below also enforces
+    // owner-bound). No first-run bypass (unlike claim-remote, which BOOTSTRAPS
+    // ownership — this op presupposes it).
+    let caller = match require_owner(&st, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    // (1) Promote the owner-binding self → FEDERATION.
+    let promoted = match crate::auth::ownership::promote_owner_binding_to_federation(
+        &st.engine,
+        &st.node_key_id,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            let code = match e {
+                ownership::OwnershipError::Validation(_) => StatusCode::CONFLICT,
+                ownership::OwnershipError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return err(code, format!("announce (promote owner-binding) failed: {e}"));
+        }
+    };
+
+    // (2) Enable the boot-structural Reticulum identity announce (owner-authored
+    // CEG write). Takes effect on the next boot (the announce attestation is built
+    // once at transport construction).
+    if let Err(e) = crate::graph_config::set_config(
+        &st.engine,
+        &st.node_key_id,
+        crate::config_reconcile::KEY_ANNOUNCE_OWNERSHIP,
+        crate::graph_config::ConfigValue::Bool(true),
+        &caller.wa_id,
+        crate::graph_config::ConfigScope::default(),
+    )
+    .await
+    {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("announce (enable Reticulum identity announce) failed: {e}"),
+        );
+    }
+
+    tracing::info!(
+        responsible_user = %promoted.responsible_user_key_id,
+        node_key_id = %st.node_key_id,
+        promoted_attestation_id = ?promoted.attestation_id,
+        "announce-self: owner-binding promoted to FEDERATION + net.announce_ownership=true \
+         (Reticulum identity announce takes effect on next boot)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "owner": promoted.responsible_user_key_id,
+            "node_key_id": st.node_key_id,
+            "cohort_scope": ciris_persist::federation::types::cohort_scope::FEDERATION,
+            // None ⇒ the binding was already federation-scoped (idempotent re-announce).
+            "promoted_owner_binding_attestation_id": promoted.attestation_id,
+            "announce_ownership": true,
+            "announce_takes_effect": "next_boot",
+        })),
+    )
+        .into_response()
+}
+
 /// The claim-remote router — merge onto the control API listener. `user_signer`
 /// is the responsible USER's signer (NOT the node steward signer); see the module
 /// docs for how it is obtained and the keyring/YubiKey gap.
@@ -653,5 +744,9 @@ pub fn router(
             axum::routing::post(upgrade_owner_handler),
         )
         .route("/v1/self/age", axum::routing::post(set_age_self))
+        .route(
+            "/v1/federation/announce",
+            axum::routing::post(announce_self_handler),
+        )
         .with_state(state)
 }

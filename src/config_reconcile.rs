@@ -124,6 +124,16 @@ pub const KEY_MODE: &str = "mode";
 pub const KEY_LISTEN_ADDR: &str = "net.listen_addr";
 /// `net.bootstrap_peers` — Reticulum mesh entry addresses (boot-structural, list).
 pub const KEY_BOOTSTRAP_PEERS: &str = "net.bootstrap_peers";
+/// `net.announce_ownership` — the "announce yourself to the federation" opt-in
+/// (boot-structural). DEFAULT FALSE: a fresh / self-scoped node does NOT advertise
+/// its federation IDENTITY on the Reticulum announce (CIRISServer#125). When the
+/// owner promotes (POST /v1/federation/announce), the promote sets this `true`; on
+/// the next boot the node wires its federation signer into the announce so its
+/// announce carries the AV-42 authenticated identity attestation (peers can root
+/// `key_id → destination`). When false the transport still brings up + announces
+/// its raw destination hash, but with NO identity attestation → rooting peers drop
+/// it (fail-honest) → the node is not federation-identity-discoverable.
+pub const KEY_ANNOUNCE_OWNERSHIP: &str = "net.announce_ownership";
 /// `net.radio.*` — serial LoRa/RNode radio transport (boot-structural; desktop-only).
 pub const KEY_RADIO_ENABLED: &str = "net.radio.enabled";
 pub const KEY_RADIO_SERIAL_PORT: &str = "net.radio.serial_port";
@@ -175,6 +185,11 @@ pub struct ResolvedConfig {
     /// strings; parsed to `SocketAddr` at the build site (invalid entries skipped
     /// + warned).
     pub bootstrap_peers: Vec<String>,
+    /// `net.announce_ownership` (boot-structural). The "announce yourself to the
+    /// federation" opt-in (CIRISServer#125). DEFAULT FALSE — a self-scoped node
+    /// does not advertise its federation identity. When true, the build site wires
+    /// the federation signer into the Reticulum announce attestation (AV-42).
+    pub announce_ownership: bool,
     /// `node.alias` (boot-structural). The human-readable alias the node suggests
     /// for itself in its NodeCode (empty = none).
     pub node_alias: String,
@@ -219,6 +234,7 @@ impl Default for ResolvedConfig {
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
+            announce_ownership: false,
             node_alias: String::new(),
             admin_key_ids: Vec::new(),
             oauth_callback_base_url: String::new(),
@@ -328,6 +344,11 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
         .ok()
         .flatten()
         .unwrap_or(d.bootstrap_peers);
+    let announce_ownership = graph_config::get_bool(engine, node_key_id, KEY_ANNOUNCE_OWNERSHIP)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.announce_ownership);
     // `node.alias` defaults to empty (the build site falls back to key_id).
     let node_alias = graph_config::get_str(engine, node_key_id, KEY_NODE_ALIAS)
         .await
@@ -414,6 +435,7 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
         mode,
         listen_addr,
         bootstrap_peers,
+        announce_ownership,
         radio_enabled,
         radio_serial_port,
         radio_frequency_hz,

@@ -927,6 +927,157 @@ pub async fn nodes_stewarded_by(engine: &Engine, steward_user_key_id: &str) -> V
         .collect()
 }
 
+// ─── Promote the owner-binding self → FEDERATION (CIRISServer#125 opt-in) ─────
+
+/// The outcome of [`promote_owner_binding_to_federation`].
+#[derive(Debug, Clone)]
+pub struct PromotedOwnerBinding {
+    /// The responsible owner whose binding is now (or already was) federation-scoped.
+    pub responsible_user_key_id: String,
+    /// The newly-persisted FEDERATION-cohort owner-binding attestation id, or `None`
+    /// when a federation-cohort binding already existed (idempotent no-op).
+    pub attestation_id: Option<String>,
+}
+
+/// **Promote this node's owner-binding self → FEDERATION (CIRISServer#125 — the
+/// "announce yourself to the federation" opt-in).**
+///
+/// The default owner-binding is persisted `cohort_scope: self` (full self/family +
+/// local node-admin use, structurally invisible to the federation). Announcing to
+/// the federation is the owner's explicit opt-in; it WIDENS the responsible-party
+/// owner-binding to `cohort_scope: federation` (public accountability) so the node
+/// counts as a federation participant.
+///
+/// ## Mechanism — re-persist the PROVEN envelope at the wider cohort
+///
+/// `cohort_scope` is NOT part of the user-signed envelope
+/// ([`build_owner_binding_envelope`]) — it is pure persisted-row metadata. So this
+/// re-persists the EXISTING binding's envelope and the owner's ORIGINAL hybrid
+/// signatures under `cohort_scope: federation`. The federation-tier ingest gate
+/// (`verify_federation_tier_ingest`) re-derives the canonical bytes from the
+/// (unchanged) envelope, cross-checks the (unchanged) `original_content_hash`, and
+/// Strict-re-verifies the owner's hybrid signature against the owner's REGISTERED
+/// pubkeys — so the SAME already-proven signature admits at the wider scope. No
+/// fresh signing, no user signer needed.
+///
+/// The substrate exposes no in-place cohort-widening or supersede primitive, and
+/// `Engine::attestation_promote` only flips the **tier** local → federation (our
+/// owner-binding is already federation-tier, so it would no-op), so re-persisting
+/// the proven envelope at the wider cohort via `put_attestation` (which re-verifies
+/// it) is the substrate-native promote. `promoted_at` cannot be set through
+/// `put_attestation` (its INSERT omits the column) and is not read by any
+/// owner-binding / cohort / announce gate, so it stays `None`; `cohort_scope:
+/// federation` is the observable promoted state.
+///
+/// Idempotent: a no-op (returns `attestation_id: None`) when a federation-cohort
+/// owner-binding for (owner → node) already exists. Errors if the node is not yet
+/// owner-bound (you cannot announce an ownership you do not hold).
+pub async fn promote_owner_binding_to_federation(
+    engine: &Engine,
+    node_key_id: &str,
+) -> Result<PromotedOwnerBinding, OwnershipError> {
+    // The node MUST already be owned — `is_steward_bound` resolves the responsible
+    // owner. (You cannot announce an ownership you do not hold.)
+    let owner = is_steward_bound(engine, node_key_id).await.ok_or_else(|| {
+        OwnershipError::Validation(
+            "node is not owner-bound — claim ownership before announcing it to the federation"
+                .into(),
+        )
+    })?;
+
+    // Read this node's inbound owner-binding edges (federation tier). The
+    // responsible-party binding is the live `delegates_to(owner → node)` with the
+    // owner-binding purpose.
+    let rows = engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+
+    let is_owner_binding = |a: &Attestation| -> bool {
+        a.attestation_type == attestation_type::DELEGATES_TO
+            && a.attesting_key_id == owner
+            && a.attestation_envelope
+                .get("delegation_purpose")
+                .and_then(|v| v.as_str())
+                == Some(OWNER_BINDING_PURPOSE)
+    };
+
+    // Idempotent: already federation-scoped ⇒ nothing to widen.
+    if rows
+        .iter()
+        .any(|a| is_owner_binding(a) && a.cohort_scope == cohort_scope::FEDERATION)
+    {
+        tracing::info!(
+            responsible_user = %owner,
+            node_key_id = %node_key_id,
+            "promote owner-binding: already federation-scoped (idempotent no-op)"
+        );
+        return Ok(PromotedOwnerBinding {
+            responsible_user_key_id: owner,
+            attestation_id: None,
+        });
+    }
+
+    // The existing (self/family-scoped) owner-binding to widen.
+    let existing = rows.iter().find(|a| is_owner_binding(a)).ok_or_else(|| {
+        OwnershipError::Validation(
+            "no responsible-party owner-binding found on this node to promote".into(),
+        )
+    })?;
+
+    // Re-persist the SAME envelope + the owner's ORIGINAL hybrid signatures at
+    // cohort_scope=federation. New id; tier stays federation (the `put_attestation`
+    // INSERT defaults it); promoted_at stays None (the INSERT omits the column — a
+    // substrate limitation, and the field is not load-bearing for ownership).
+    let now = chrono::Utc::now();
+    let attestation_id = crate::ids::new_id();
+    let promoted = Attestation {
+        attestation_id: attestation_id.clone(),
+        attesting_key_id: existing.attesting_key_id.clone(),
+        attested_key_id: existing.attested_key_id.clone(),
+        attestation_type: existing.attestation_type.clone(),
+        weight: existing.weight,
+        asserted_at: now,
+        expires_at: existing.expires_at,
+        attestation_envelope: existing.attestation_envelope.clone(),
+        // Unchanged hash over the unchanged canonical envelope — the federation-tier
+        // ingest gate re-derives + cross-checks it (and re-verifies the sigs below).
+        original_content_hash: existing.original_content_hash.clone(),
+        scrub_signature_classical: existing.scrub_signature_classical.clone(),
+        scrub_signature_pqc: existing.scrub_signature_pqc.clone(),
+        scrub_key_id: existing.scrub_key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: existing.pqc_completed_at,
+        persist_row_hash: String::new(),
+        subject_key_ids: existing.subject_key_ids.clone(),
+        withdraws_admission_rule: None,
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
+        tier: attestation_tier::FEDERATION.to_owned(),
+        promoted_at: None,
+    };
+
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation {
+            attestation: promoted,
+        })
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+
+    tracing::info!(
+        responsible_user = %owner,
+        node_key_id = %node_key_id,
+        attestation_id = %attestation_id,
+        "promoted owner-binding delegates_to(owner → node) self → FEDERATION \
+         (announce opt-in; same user signature re-verified at the wider cohort)"
+    );
+    Ok(PromotedOwnerBinding {
+        responsible_user_key_id: owner,
+        attestation_id: Some(attestation_id),
+    })
+}
+
 /// Errors [`emit_steward_binding`] can surface.
 #[derive(Debug)]
 pub enum OwnershipError {
