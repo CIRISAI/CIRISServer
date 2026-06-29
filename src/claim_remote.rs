@@ -485,8 +485,16 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
                 )
             }
         };
-    match ownership::apply_signed_owner_binding(&st.engine, &st.node_key_id, st.policy, &binding)
-        .await
+    // CIRISServer#125: upgrade-owner re-roots an existing node on a fed-ID — bind
+    // it self-scoped by default (no federation announce until the owner opts in).
+    match ownership::apply_signed_owner_binding(
+        &st.engine,
+        &st.node_key_id,
+        ciris_persist::federation::types::cohort_scope::SELF,
+        st.policy,
+        &binding,
+    )
+    .await
     {
         Ok(applied) => {
             tracing::info!(

@@ -301,12 +301,29 @@ pub fn canonicalize_owner_binding_envelope(
 /// `scrub_key_id` = the user, whose hybrid pubkeys phase 1 registers. So the
 /// user MUST be registered before this call (phase 1 registers them). Returns the
 /// persisted attestation id.
+///
+/// ## cohort_scope follows the CLAIM (CIRISServer#125 — self-balancing ownership)
+///
+/// The persisted `cohort_scope` is the cohort the node was CLAIMED under (the
+/// caller threads it from the validated claim; `self` by default). It is NOT in
+/// the user-signed envelope ([`build_owner_binding_envelope`] — see that fn's
+/// fields), so it is pure persisted-row metadata: setting it here cannot affect
+/// the signature the receiver re-verifies. A `self`-scoped binding self-replicates
+/// to the owner's other `identity_occurrences` (CEG §10.1.4) and is structurally
+/// invisible to the federation (cohort `self`/`family` ⇒ no `holds_bytes`), while
+/// the `tier` stays `federation` (the row is GENUINELY hybrid-signed, so it must
+/// pass — and benefit from — the federation-tier ingest re-verify gate; `local`
+/// tier would BOTH skip that re-verify AND mean "private to the producing
+/// occurrence", defeating the §10.1.4 self-replication this design needs).
+/// Promotion to community/federation participation is a later opt-in that widens
+/// `cohort_scope` only.
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_user_signed_owner_binding(
     engine: &Engine,
     envelope: serde_json::Value,
     responsible_user_key_id: &str,
     node_key_id: &str,
+    cohort_scope: &str,
     canonical: &[u8],
     user_ed25519_sig_b64: &str,
     user_ml_dsa_65_sig_b64: &str,
@@ -338,7 +355,10 @@ pub async fn persist_user_signed_owner_binding(
         persist_row_hash: String::new(),
         subject_key_ids: vec![node_key_id.to_owned()],
         withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
+        // CIRISServer#125: FOLLOW the claim's cohort (self by default), NOT a
+        // hardcoded FEDERATION. tier stays `federation` — the row is genuinely
+        // hybrid-signed and MUST keep passing the federation-tier ingest re-verify.
+        cohort_scope: cohort_scope.to_owned(),
         tier: attestation_tier::FEDERATION.to_owned(),
         promoted_at: None,
     };
@@ -353,6 +373,7 @@ pub async fn persist_user_signed_owner_binding(
         responsible_user = %responsible_user_key_id,
         node_key_id = %node_key_id,
         attestation_id = %attestation_id,
+        cohort_scope = %cohort_scope,
         "persisted USER-SIGNED owner-binding delegates_to(user → node, infra:*) — \
          responsible party asserts own ownership (CC 3.2 / CC 1.13.5)"
     );
@@ -503,9 +524,16 @@ pub struct AppliedOwnerBinding {
 /// as `identity_type "user"` BEFORE persisting the binding (so
 /// `put_attestation`'s attesting-key-exists FK is satisfied and
 /// [`is_steward_bound`]'s granter-is-user check resolves).
+///
+/// `cohort_scope` is the cohort the node is claimed under (CIRISServer#125 —
+/// `self` by default; the caller threads it from the validated claim). It is NOT
+/// part of the user-signed envelope, so it is stamped only on the persisted row
+/// (see [`persist_user_signed_owner_binding`]); changing it cannot affect the
+/// signature verified above.
 pub async fn apply_signed_owner_binding(
     engine: &Engine,
     this_node_key_id: &str,
+    cohort_scope: &str,
     policy: HybridPolicy,
     binding: &SignedOwnerBinding,
 ) -> Result<AppliedOwnerBinding, OwnershipError> {
@@ -572,6 +600,7 @@ pub async fn apply_signed_owner_binding(
         envelope.clone(),
         &binding.attesting_key_id,
         this_node_key_id,
+        cohort_scope,
         &canonical,
         &binding.ed25519_sig_b64,
         &binding.ml_dsa_65_sig_b64,

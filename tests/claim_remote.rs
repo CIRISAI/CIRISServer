@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{
-    algorithm, attestation_type, identity_type, KeyRecord, SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -174,9 +174,16 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
     assert_eq!(binding.attesting_key_id, L_USER_KEY_ID);
 
     // T applies it: verify + register user + persist the user-signed delegates_to.
-    let applied = apply_signed_owner_binding(&t, T_NODE_KEY_ID, HybridPolicy::Strict, &binding)
-        .await
-        .expect("T applies the owner-binding");
+    // CIRISServer#125: claimed self-scoped (the default, structurally-invisible).
+    let applied = apply_signed_owner_binding(
+        &t,
+        T_NODE_KEY_ID,
+        cohort_scope::SELF,
+        HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("T applies the owner-binding");
     assert_eq!(applied.responsible_user_key_id, L_USER_KEY_ID);
 
     // T now reads a user-signed owner edge.
@@ -205,6 +212,10 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
         .find(|e| e.attestation_type == attestation_type::DELEGATES_TO)
         .expect("a delegates_to exists");
     assert_eq!(row.scrub_key_id, L_USER_KEY_ID);
+    // CIRISServer#125: the binding is stamped with the CLAIMED cohort (self),
+    // not a hardcoded FEDERATION; tier stays federation (genuinely hybrid-signed).
+    assert_eq!(row.cohort_scope, cohort_scope::SELF);
+    assert_eq!(row.tier, ciris_persist::federation::types::attestation_tier::FEDERATION);
     let canonical = ceg_produce_canonicalize(&row.attestation_envelope).unwrap();
     assert!(ciris_persist::prelude::verify_hybrid(
         &canonical,
@@ -233,7 +244,11 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
         &user,
         &target_node_code(&base),
         TEST_CLAIM_PIN,
-        "family",
+        // CIRISServer#125: self-scoped claim (the default). A `family`/`community`
+        // owner-binding now (correctly) hits the substrate write-cohort membership
+        // gate at put_attestation — it needs a cohort_target_id the owner-binding
+        // flow does not yet supply — so the field-proven path is `self`.
+        "self",
         None, // no self-fallback: this test drives a real transport_hint target
         None, // no owner password (this test doesn't exercise the login path)
         None, // no owner username
@@ -242,7 +257,7 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
     .expect("L claims T over HTTP");
 
     assert_eq!(result["identity_key_id"], L_USER_KEY_ID);
-    assert_eq!(result["cohort_scope"], "family");
+    assert_eq!(result["cohort_scope"], "self");
     assert_eq!(result["role"], "SYSTEM_ADMIN");
 
     // T bound ROOT to the user.
@@ -272,18 +287,30 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     let mut agency = good.clone();
     agency.envelope["scope"] = serde_json::json!(["agency:reason"]);
     assert!(
-        apply_signed_owner_binding(&t, T_NODE_KEY_ID, HybridPolicy::Strict, &agency)
-            .await
-            .is_err()
+        apply_signed_owner_binding(
+            &t,
+            T_NODE_KEY_ID,
+            cohort_scope::SELF,
+            HybridPolicy::Strict,
+            &agency
+        )
+        .await
+        .is_err()
     );
 
     // (b) attested != T → rejected.
     let mut wrong_node = good.clone();
     wrong_node.envelope["node_key_id"] = "another-node".into();
     assert!(
-        apply_signed_owner_binding(&t, T_NODE_KEY_ID, HybridPolicy::Strict, &wrong_node)
-            .await
-            .is_err()
+        apply_signed_owner_binding(
+            &t,
+            T_NODE_KEY_ID,
+            cohort_scope::SELF,
+            HybridPolicy::Strict,
+            &wrong_node
+        )
+        .await
+        .is_err()
     );
 
     // (c) wrong signature (imposter sig over the same envelope) → rejected.
@@ -309,9 +336,15 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     wrong_sig.ed25519_sig_b64 = BASE64.encode(&bad.classical.signature);
     wrong_sig.ml_dsa_65_sig_b64 = BASE64.encode(&bad.pqc.signature);
     assert!(
-        apply_signed_owner_binding(&t, T_NODE_KEY_ID, HybridPolicy::Strict, &wrong_sig)
-            .await
-            .is_err()
+        apply_signed_owner_binding(
+            &t,
+            T_NODE_KEY_ID,
+            cohort_scope::SELF,
+            HybridPolicy::Strict,
+            &wrong_sig
+        )
+        .await
+        .is_err()
     );
 
     // No ROOT bound, node still unowned.

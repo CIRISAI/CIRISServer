@@ -457,7 +457,10 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
 
     // 1-phase POST /v1/setup/root: verify + persist the user-signed binding + bind
     // ROOT in ONE round-trip.
-    let body = one_phase_claim_body(node_key_id, &user, "family", binding).await;
+    // CIRISServer#125: claim SELF-scoped (the new default). A family/community
+    // owner-binding would now (correctly) require family/community membership at
+    // the substrate write-cohort gate; self is the field-proven default path.
+    let body = one_phase_claim_body(node_key_id, &user, "self", binding).await;
     let resp = client
         .post(format!("{base}/v1/setup/root"))
         .body(body)
@@ -467,7 +470,7 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     assert_eq!(resp.status(), 201, "1-phase claim must succeed");
     let fin: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(fin["identity_key_id"], user_key_id);
-    assert_eq!(fin["cohort_scope"], "family", "cohort scope echoed");
+    assert_eq!(fin["cohort_scope"], "self", "cohort scope echoed");
     assert_eq!(fin["role"], "SYSTEM_ADMIN");
     assert!(
         fin["owner_binding_attestation_id"].as_str().is_some(),
@@ -512,6 +515,18 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     assert_eq!(
         binding_row.scrub_key_id, user_key_id,
         "scrub_key_id is the USER (genuinely user-signed), not the node"
+    );
+    // CIRISServer#125: persisted self-scoped (no longer hardcoded FEDERATION),
+    // tier stays federation (the row is genuinely hybrid-signed).
+    assert_eq!(
+        binding_row.cohort_scope,
+        ciris_persist::federation::types::cohort_scope::SELF,
+        "owner-binding stamped with the CLAIMED cohort (self), not hardcoded FEDERATION"
+    );
+    assert_eq!(
+        binding_row.tier,
+        ciris_persist::federation::types::attestation_tier::FEDERATION,
+        "owner-binding stays federation-tier (genuinely hybrid-signed, ingest-re-verified)"
     );
     let canonical =
         ceg_produce_canonicalize(&binding_row.attestation_envelope).expect("re-canonicalize");
