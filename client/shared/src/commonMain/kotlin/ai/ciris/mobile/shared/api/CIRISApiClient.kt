@@ -1809,6 +1809,7 @@ class CIRISApiClient(
         mode: String, // "create" | "existing"
         existingKeyId: String? = null,
         scope: List<String> = listOf("owner:act-on-behalf"),
+        constraints: ai.ciris.mobile.shared.models.federation.DelegationConstraints? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.CreateDelegationResponse {
@@ -1819,8 +1820,10 @@ class CIRISApiClient(
             val scopeJson = scope.joinToString(",", "[", "]") { "\"$it\"" }
             val keyField = existingKeyId?.takeIf { it.isNotBlank() }
                 ?.let { ",\"existing_key_id\":\"${it.trim()}\"" } ?: ""
+            val constraintsField = constraints?.takeIf { !it.isUnconstrained() }
+                ?.let { ",\"constraints\":${encodeDelegationConstraints(it)}" } ?: ""
             val body = "{\"mode\":\"${mode.trim()}\",\"label\":\"${label.trim()}\"" +
-                "$keyField,\"scope\":$scopeJson}"
+                "$keyField,\"scope\":$scopeJson$constraintsField}"
             val response = client.post("$nodeUrl/v1/auth/device/delegate") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
@@ -1833,10 +1836,24 @@ class CIRISApiClient(
                 // detail lived past char 160). The node also logs it server-side.
                 throw RuntimeException("create delegation failed: ${response.status}: $raw")
             }
-            jsonConfig.decodeFromString(
+            val parsed = jsonConfig.decodeFromString(
                 ai.ciris.mobile.shared.models.federation.CreateDelegationResponse.serializer(),
                 raw,
             )
+            // Best-effort transparency: if the offer body didn't embed the grant's
+            // characteristics but the node sent the compact `x-ciris-delegation`
+            // response header, parse it so the owner can review what they granted.
+            if (parsed.delegation == null) {
+                response.headers["x-ciris-delegation"]?.let { hdr ->
+                    runCatching {
+                        jsonConfig.decodeFromString(
+                            ai.ciris.mobile.shared.models.federation.GrantCharacteristics.serializer(),
+                            hdr,
+                        )
+                    }.getOrNull()?.let { return parsed.copy(delegation = it) }
+                }
+            }
+            parsed
         } catch (e: Exception) {
             logException(method, e, "nodeUrl=$nodeUrl")
             throw e
@@ -1846,12 +1863,40 @@ class CIRISApiClient(
     }
 
     /**
+     * Hand-encode [DelegationConstraints] to compact JSON, matching this file's
+     * hand-built-body convention. The tri-state [actionsAllow] is preserved
+     * exactly: absent when `null`, `[]` when read-only, else the subset — so the
+     * node sees the owner's intent verbatim. [actionsDeny] is emitted only when
+     * non-empty; [goal] is JSON-string-escaped.
+     */
+    private fun encodeDelegationConstraints(
+        c: ai.ciris.mobile.shared.models.federation.DelegationConstraints,
+    ): String {
+        val parts = mutableListOf<String>()
+        c.actionsAllow?.let { list ->
+            parts += "\"actions_allow\":" + list.joinToString(",", "[", "]") { "\"$it\"" }
+        }
+        if (c.actionsDeny.isNotEmpty()) {
+            parts += "\"actions_deny\":" + c.actionsDeny.joinToString(",", "[", "]") { "\"$it\"" }
+        }
+        c.goal?.takeIf { it.isNotBlank() }?.let { goal ->
+            val escaped = goal.replace("\\", "\\\\").replace("\"", "\\\"")
+            parts += "\"goal\":\"$escaped\""
+        }
+        return "{" + parts.joinToString(",") + "}"
+    }
+
+    /**
      * Approve a pending device code — `POST {nodeUrl}/v1/auth/device/approve`.
      * The owner enters the `user_code` the agent showed them; approving mints the
      * delegated token. Owner-session-gated; this is the human-consent gate.
+     *
+     * Optional [constraints] TIGHTEN the grant on approval (the server can only
+     * narrow, never widen) — same shape as the issue path.
      */
     suspend fun approveDeviceCode(
         userCode: String,
+        constraints: ai.ciris.mobile.shared.models.federation.DelegationConstraints? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): String {
@@ -1859,10 +1904,12 @@ class CIRISApiClient(
         logInfo(method, "POST $nodeUrl/v1/auth/device/approve user_code=$userCode")
         val client = federationHttpClient()
         return try {
+            val constraintsField = constraints?.takeIf { !it.isUnconstrained() }
+                ?.let { ",\"constraints\":${encodeDelegationConstraints(it)}" } ?: ""
             val response = client.post("$nodeUrl/v1/auth/device/approve") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
-                setBody("{\"user_code\":\"${userCode.trim()}\"}")
+                setBody("{\"user_code\":\"${userCode.trim()}\"$constraintsField}")
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {

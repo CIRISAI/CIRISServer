@@ -164,6 +164,67 @@ pub struct SessionCaller {
     /// owner's AUTHORITY (`wa_id`/`role`/`permissions` are the owner's) but every
     /// action is attributable to this actor, NOT to the owner directly.
     pub actor: Option<String>,
+    /// The delegation's owner-set constraints (`Some` iff `actor.is_some()` — a
+    /// delegated caller). The [`crate::auth::gate::authorize_delegated`] guard reads
+    /// these to enforce the action allow/deny-list on every owner-gated op. `None`
+    /// for a normal owner session (unconstrained beyond its role).
+    pub constraints: Option<DelegationConstraints>,
+}
+
+/// Owner-set bounds on a delegation grant (the enforceable subset of the CC 2.4.1.2
+/// `delegated_scope[]` + `delegation_purpose` axes; see `FSD/DELEGATION_CONSTRAINTS.md`).
+/// Rides inside the signed `delegates_to` envelope AND is cached on the in-memory
+/// grant. Default = unconstrained (back-compat with today's coarse full grant).
+/// MVP axes: action allow/deny + goal (duration is carried by the edge `expires_at`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationConstraints {
+    /// Allow-list of capability-verb strings (e.g. `"announce"`, `"peer"`). `None`
+    /// = every verb permitted (subject to the server NEVER-list); `Some([])` =
+    /// read-only. A verb absent from a `Some(_)` list is denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions_allow: Option<Vec<String>>,
+    /// Deny-list of capability-verb strings — always wins over the allow-list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions_deny: Vec<String>,
+    /// CC 2.4.1.2 `delegation_purpose` — the human-readable goal the delegation is
+    /// scoped to. Surfaced to the consumer; not itself an enforcement gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+}
+
+impl DelegationConstraints {
+    /// `true` when no bound is set (the unconstrained legacy grant) — used to decide
+    /// whether to write a `constraints` member into the `delegates_to` envelope.
+    pub fn is_unconstrained(&self) -> bool {
+        self.actions_allow.is_none() && self.actions_deny.is_empty() && self.goal.is_none()
+    }
+
+    /// TIGHTEN-ONLY composition: fold an approver's constraints onto `self` (the
+    /// grant's existing bound) so the result is **never broader** than either input.
+    /// - allow-list: set-intersection (absent = "all verbs", so `∩` narrows toward
+    ///   whichever side restricts; two lists → their intersection).
+    /// - deny-list: union (every denial from either side sticks).
+    /// - goal: the approver's, falling back to the existing.
+    ///
+    /// An approver can only ever NARROW authority, never widen it.
+    pub fn tightened_with(&self, approver: &DelegationConstraints) -> DelegationConstraints {
+        let actions_allow = match (&self.actions_allow, &approver.actions_allow) {
+            (None, None) => None,
+            (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+            (Some(a), Some(b)) => Some(a.iter().filter(|x| b.contains(x)).cloned().collect()),
+        };
+        let mut actions_deny = self.actions_deny.clone();
+        for d in &approver.actions_deny {
+            if !actions_deny.contains(d) {
+                actions_deny.push(d.clone());
+            }
+        }
+        DelegationConstraints {
+            actions_allow,
+            actions_deny,
+            goal: approver.goal.clone().or_else(|| self.goal.clone()),
+        }
+    }
 }
 
 // ─── Delegated device-grant token registry (CIRISServer device-grant) ─────────
@@ -201,6 +262,94 @@ pub struct DelegatedGrant {
     pub scope: String,
     /// Unix-epoch seconds after which the delegated token is expired.
     pub expires_at: u64,
+    /// Unix-epoch seconds the grant was issued (the bearer minted). Part of the
+    /// characteristics surfaced to the consumer on every use.
+    pub issued_at: u64,
+    /// CC 2.4.1.2 `delegation_purpose` — the human-readable goal the delegation is
+    /// scoped to (owner-supplied). `None` for a bare act-on-behalf grant.
+    pub purpose: Option<String>,
+    /// The `attestation_id` of the durable `delegates_to(owner → actor)` edge that
+    /// backs this bearer (the revocation target / audit anchor), when known.
+    pub attestation_id: Option<String>,
+    /// The owner-set constraints on this delegation (default = unconstrained).
+    pub constraints: DelegationConstraints,
+}
+
+/// The FULL, consumer-visible characteristics of a delegation grant. Serialized
+/// into (a) the issuance response body (`/delegate`, `/claim`, `/token`) and (b)
+/// the `X-CIRIS-Delegation` response header on EVERY authenticated use, so a
+/// delegated caller can always see exactly what authority it is operating under
+/// (transparency-by-default; no silent scope). Future axes (resources, actions,
+/// tasks, deny-lists — see `FSD/DELEGATION_CONSTRAINTS.md`) extend this struct.
+#[derive(Debug, Clone, Serialize)]
+pub struct GrantCharacteristics {
+    /// The ACTOR the grant is attributed to (the client's federation key_id).
+    pub actor: String,
+    /// The PRINCIPAL whose authority the actor wields (owner's `wa_id`).
+    pub on_behalf_of: String,
+    /// The owner's federation key_id (the backing edge's `attesting_key_id`).
+    pub owner_key_id: String,
+    /// The authority level the actor wields (the owner's role).
+    pub role: String,
+    /// The granted scope(s) — `reachable_under_scope` re-checks these on every use.
+    pub scope: Vec<String>,
+    /// CC 2.4.1.2 `delegation_purpose` — the goal the delegation is scoped to.
+    pub purpose: Option<String>,
+    /// Whether the actor may RE-delegate (sub-delegation). Always `false` today.
+    pub sub_delegation: bool,
+    /// Unix-epoch seconds the grant was issued.
+    pub issued_at: u64,
+    /// CC 2.4.1.2 `delegation_valid_until` — unix-epoch expiry.
+    pub expires_at: u64,
+    /// Seconds until expiry at the moment this response was produced (≥ 0).
+    pub expires_in: u64,
+    /// The durable backing `delegates_to` attestation id (revocation/audit anchor).
+    pub attestation_id: Option<String>,
+    /// The owner-set action allow-list the delegate is bound to (`None` = all verbs
+    /// permitted, subject to the server never-list). Shown so the consumer knows
+    /// exactly which owner-ops it may perform.
+    pub actions_allow: Option<Vec<String>>,
+    /// The owner-set action deny-list (always overrides the allow-list).
+    pub actions_deny: Vec<String>,
+}
+
+impl DelegatedGrant {
+    /// Project this grant into its consumer-visible [`GrantCharacteristics`].
+    pub fn characteristics(&self) -> GrantCharacteristics {
+        let now = now_unix();
+        GrantCharacteristics {
+            actor: self.client_id.clone(),
+            on_behalf_of: self.owner_wa_id.clone(),
+            owner_key_id: self.owner_key_id.clone(),
+            role: self.owner_role.as_str().to_string(),
+            // Scope is a single edge scope today; presented as a list so the future
+            // multi-scope form (FSD delegated_scope[]) is wire-compatible.
+            scope: vec![self.scope.clone()],
+            // The goal is the constraint's `goal`, falling back to the grant purpose.
+            purpose: self
+                .constraints
+                .goal
+                .clone()
+                .or_else(|| self.purpose.clone()),
+            sub_delegation: false,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            expires_in: self.expires_at.saturating_sub(now),
+            attestation_id: self.attestation_id.clone(),
+            actions_allow: self.constraints.actions_allow.clone(),
+            actions_deny: self.constraints.actions_deny.clone(),
+        }
+    }
+}
+
+/// Resolve a `dgrant:` bearer token to its live grant's [`GrantCharacteristics`]
+/// (or `None` for a non-delegated / unknown / expired token). Backs the
+/// `X-CIRIS-Delegation` transparency header (see `crate::delegation_transparency`).
+pub fn characteristics_for_token(token: &str) -> Option<GrantCharacteristics> {
+    if !token.starts_with(DELEGATED_TOKEN_PREFIX) {
+        return None;
+    }
+    lookup_delegated_grant(token).map(|g| g.characteristics())
 }
 
 /// Max delegation-chain depth the bearer graph re-check walks. An act-on-behalf
@@ -337,7 +486,8 @@ pub async fn resolve_bearer(
             name: grant.client_id.clone(), // display = the acting client.
             role: grant.owner_role,        // AUTHORITY: the owner's role.
             permissions: permissions_for(grant.owner_role),
-            actor: Some(grant.client_id), // ATTRIBUTION: the distinct actor.
+            constraints: Some(grant.constraints), // enforced by `gate::authorize_delegated`.
+            actor: Some(grant.client_id),         // ATTRIBUTION: the distinct actor.
         }));
     }
 
@@ -356,7 +506,8 @@ pub async fn resolve_bearer(
         name: cert.name,
         role,
         permissions: permissions_for(role),
-        actor: None, // a normal session: the principal IS the actor.
+        constraints: None, // a normal owner session carries no delegation constraints.
+        actor: None,       // a normal session: the principal IS the actor.
     }))
 }
 

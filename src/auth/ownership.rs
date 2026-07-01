@@ -814,6 +814,12 @@ pub async fn emit_signed_attestation(
     attested_key_id: &str,
     envelope: serde_json::Value,
     subject_key_ids: Vec<String>,
+    // The edge's absolute expiry (CC 2.4.1.2 `delegation_valid_until`). `Some` makes
+    // the attestation self-expiring: `steward_bindings_of` folds edge expiry, so a
+    // lapsed delegation stops conferring authority WITHOUT a `withdraws` and survives
+    // restarts (unlike the in-memory grant TTL). `None` = never expires (the prior
+    // hardcoded behavior — correct for non-time-bounded rows like `scores`/`withdraws`).
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<String, OwnershipError> {
     let attester = signer.key_id().to_string();
     let now = chrono::Utc::now();
@@ -832,7 +838,7 @@ pub async fn emit_signed_attestation(
         attestation_type: attestation_type.to_owned(),
         weight: None,
         asserted_at: now,
-        expires_at: None,
+        expires_at,
         attestation_envelope: envelope,
         original_content_hash,
         scrub_signature_classical: B64.encode(&sig.classical.signature),

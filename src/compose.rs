@@ -667,6 +667,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 r.layer(axum::middleware::from_fn(
                     crate::http_log::log_error_responses,
                 ))
+                // TRANSPARENCY: stamp `X-CIRIS-Delegation` on every response to a
+                // `dgrant:` caller so a delegated actor always sees its live
+                // authority (scope/purpose/expiry/attestation) — no silent scope.
+                .layer(axum::middleware::from_fn(
+                    crate::delegation_transparency::attach_delegation_header,
+                ))
             },
         )
         .await

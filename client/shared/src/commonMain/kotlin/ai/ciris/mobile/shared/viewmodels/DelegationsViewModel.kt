@@ -2,6 +2,7 @@ package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.models.federation.CreateDelegationResponse
+import ai.ciris.mobile.shared.models.federation.DelegationConstraints
 import ai.ciris.mobile.shared.models.federation.DelegationDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
@@ -75,7 +76,12 @@ class DelegationsViewModel(
      * (bind `existingKeyId`). On success [lastCreated] carries the claim URL +
      * PIN the owner hands over, and the active list refreshes.
      */
-    fun createDelegation(label: String, mode: String, existingKeyId: String?) {
+    fun createDelegation(
+        label: String,
+        mode: String,
+        existingKeyId: String?,
+        constraints: DelegationConstraints? = null,
+    ) {
         val name = label.trim()
         if (name.isEmpty()) {
             _error.value = "Give the agent a label (e.g. my-laptop-agent)."
@@ -95,6 +101,7 @@ class DelegationsViewModel(
                     label = name,
                     mode = mode,
                     existingKeyId = existingKeyId?.trim(),
+                    constraints = constraints,
                 )
                 _lastCreated.value = result
                 _notice.value = "Delegation created — hand the URL + PIN to the agent."
@@ -121,7 +128,7 @@ class DelegationsViewModel(
      * Approve a pending device code the agent showed you. Requires the owner
      * session (sign in first). On success the agent receives its delegated token.
      */
-    fun approve(userCode: String) {
+    fun approve(userCode: String, constraints: DelegationConstraints? = null) {
         val code = userCode.trim()
         if (code.isEmpty()) {
             _error.value = "Enter the code the agent gave you (e.g. ABCD-1234)."
@@ -133,7 +140,7 @@ class DelegationsViewModel(
         _notice.value = null
         viewModelScope.launch {
             try {
-                apiClient.approveDeviceCode(code)
+                apiClient.approveDeviceCode(code, constraints = constraints)
                 _notice.value = "Approved — the agent is now authorized to act on your behalf."
                 refresh()
             } catch (e: Exception) {

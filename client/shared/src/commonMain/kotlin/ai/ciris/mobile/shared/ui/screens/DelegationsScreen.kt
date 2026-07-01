@@ -10,6 +10,8 @@ import ai.ciris.mobile.shared.ui.icons.ContentCopy
 import ai.ciris.mobile.shared.viewmodels.DelegationsViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -94,6 +98,24 @@ fun DelegationsScreen(
     // mode: "create" = mint a fresh agent fed-ID; "existing" = bind a known key_id.
     var delegateMode by remember { mutableStateOf("create") }
     var existingKeyId by remember { mutableStateOf("") }
+    // ── Constraints the owner attaches to the grant (all optional) ────────────
+    // goal = free-text intent; restrictActions toggles the allow-list (off = every
+    // owner verb permitted; on = only the selected verbs, none = read-only); deny
+    // always wins. Empty across the board = an unconstrained, full-authority grant.
+    var delegationGoal by remember { mutableStateOf("") }
+    var restrictActions by remember { mutableStateOf(false) }
+    var allowVerbs by remember { mutableStateOf(setOf<String>()) }
+    var denyVerbs by remember { mutableStateOf(setOf<String>()) }
+    // The constraints last submitted with an offer — drives the characteristics
+    // fallback display when the node doesn't echo a `delegation` object.
+    var lastConstraints by remember {
+        mutableStateOf<ai.ciris.mobile.shared.models.federation.DelegationConstraints?>(null)
+    }
+    // Approve-side constraints (TIGHTEN-ONLY — narrows the agent's requested grant).
+    var approveGoal by remember { mutableStateOf("") }
+    var approveRestrict by remember { mutableStateOf(false) }
+    var approveAllow by remember { mutableStateOf(setOf<String>()) }
+    var approveDeny by remember { mutableStateOf(setOf<String>()) }
     // The active pane: "offer" (outgoing) | "incoming" (approve) | "manage" (CRUD).
     var pane by remember { mutableStateOf("offer") }
 
@@ -256,19 +278,69 @@ fun DelegationsScreen(
                     existingKeyId = existingKeyId,
                     onExistingKeyIdChange = { existingKeyId = it },
                     onOpenContacts = onOpenContacts,
+                    goal = delegationGoal,
+                    onGoalChange = { delegationGoal = it },
+                    restrictActions = restrictActions,
+                    onRestrictActionsChange = { restrictActions = it },
+                    allowVerbs = allowVerbs,
+                    onToggleAllow = { verb ->
+                        allowVerbs = if (verb in allowVerbs) allowVerbs - verb else allowVerbs + verb
+                    },
+                    denyVerbs = denyVerbs,
+                    onToggleDeny = { verb ->
+                        denyVerbs = if (verb in denyVerbs) denyVerbs - verb else denyVerbs + verb
+                    },
                     lastCreated = lastCreated,
-                    onCreate = { viewModel.createDelegation(delegateLabel, delegateMode, existingKeyId) },
+                    lastConstraints = lastConstraints,
+                    onCreate = {
+                        val constraints = ai.ciris.mobile.shared.models.federation.DelegationConstraints(
+                            actionsAllow = if (restrictActions) allowVerbs.toList() else null,
+                            actionsDeny = denyVerbs.toList(),
+                            goal = delegationGoal.trim().ifBlank { null },
+                        )
+                        lastConstraints = constraints.takeIf { !it.isUnconstrained() }
+                        viewModel.createDelegation(delegateLabel, delegateMode, existingKeyId, constraints)
+                    },
                     onClearCreated = {
                         viewModel.clearLastCreated()
                         delegateLabel = ""
                         existingKeyId = ""
+                        delegationGoal = ""
+                        restrictActions = false
+                        allowVerbs = emptySet()
+                        denyVerbs = emptySet()
+                        lastConstraints = null
                     },
                 )
                 "incoming" -> IncomingPane(
                     busy = busy,
                     userCode = userCode,
                     onUserCodeChange = { userCode = it },
-                    onApprove = { viewModel.approve(userCode); userCode = "" },
+                    goal = approveGoal,
+                    onGoalChange = { approveGoal = it },
+                    restrictActions = approveRestrict,
+                    onRestrictActionsChange = { approveRestrict = it },
+                    allowVerbs = approveAllow,
+                    onToggleAllow = { verb ->
+                        approveAllow = if (verb in approveAllow) approveAllow - verb else approveAllow + verb
+                    },
+                    denyVerbs = approveDeny,
+                    onToggleDeny = { verb ->
+                        approveDeny = if (verb in approveDeny) approveDeny - verb else approveDeny + verb
+                    },
+                    onApprove = {
+                        val constraints = ai.ciris.mobile.shared.models.federation.DelegationConstraints(
+                            actionsAllow = if (approveRestrict) approveAllow.toList() else null,
+                            actionsDeny = approveDeny.toList(),
+                            goal = approveGoal.trim().ifBlank { null },
+                        )
+                        viewModel.approve(userCode, constraints.takeIf { !it.isUnconstrained() })
+                        userCode = ""
+                        approveGoal = ""
+                        approveRestrict = false
+                        approveAllow = emptySet()
+                        approveDeny = emptySet()
+                    },
                 )
                 else -> ManagePane(
                     loading = loading,
@@ -344,7 +416,16 @@ private fun OfferPane(
     existingKeyId: String,
     onExistingKeyIdChange: (String) -> Unit,
     onOpenContacts: (() -> Unit)?,
+    goal: String,
+    onGoalChange: (String) -> Unit,
+    restrictActions: Boolean,
+    onRestrictActionsChange: (Boolean) -> Unit,
+    allowVerbs: Set<String>,
+    onToggleAllow: (String) -> Unit,
+    denyVerbs: Set<String>,
+    onToggleDeny: (String) -> Unit,
     lastCreated: ai.ciris.mobile.shared.models.federation.CreateDelegationResponse?,
+    lastConstraints: ai.ciris.mobile.shared.models.federation.DelegationConstraints?,
     onCreate: () -> Unit,
     onClearCreated: () -> Unit,
 ) {
@@ -422,6 +503,19 @@ private fun OfferPane(
                 modifier = Modifier.fillMaxWidth().testable("input_delegation_key_id"),
             )
         }
+        Spacer(Modifier.height(12.dp))
+        ConstraintsEditor(
+            busy = busy,
+            goal = goal,
+            onGoalChange = onGoalChange,
+            restrictActions = restrictActions,
+            onRestrictActionsChange = onRestrictActionsChange,
+            allowVerbs = allowVerbs,
+            onToggleAllow = onToggleAllow,
+            denyVerbs = denyVerbs,
+            onToggleDeny = onToggleDeny,
+            testTagPrefix = "offer",
+        )
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onCreate,
@@ -481,6 +575,12 @@ private fun OfferPane(
                         "Hand this URL + PIN over; it expires in ${created.expiresIn / 60} minutes.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    // What this delegation permits — driven by the node-echoed
+                    // characteristics when present, else the constraints just set.
+                    GrantCharacteristicsDisplay(
+                        characteristics = created.delegation,
+                        fallback = lastConstraints,
                     )
                     Spacer(Modifier.height(10.dp))
                     Button(
@@ -552,12 +652,260 @@ private fun CopyableValue(
     }
 }
 
+/**
+ * Collapsible **Constraints** editor — lets the owner NARROW a delegation grant:
+ * a free-text goal, an optional allow-list (multi-select verb chips; empty =
+ * read-only), and an optional deny-list (always wins). Everything unset = an
+ * unconstrained, full-authority grant. Shared by the Offer (issue) and Approve
+ * (tighten-only) flows via [testTagPrefix].
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConstraintsEditor(
+    busy: Boolean,
+    goal: String,
+    onGoalChange: (String) -> Unit,
+    restrictActions: Boolean,
+    onRestrictActionsChange: (Boolean) -> Unit,
+    allowVerbs: Set<String>,
+    onToggleAllow: (String) -> Unit,
+    denyVerbs: Set<String>,
+    onToggleDeny: (String) -> Unit,
+    testTagPrefix: String,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val catalog = ai.ciris.mobile.shared.models.federation.CapabilityCatalog
+    val anySet = restrictActions || denyVerbs.isNotEmpty() || goal.isNotBlank()
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().testable("${testTagPrefix}_constraints_section"),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            // Header — tap to expand/collapse.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testableClickable("btn_${testTagPrefix}_constraints_toggle") { expanded = !expanded },
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        localizedString("mobile.delegations_constraints_title"),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        localizedString(
+                            if (anySet) "mobile.delegations_constraints_set"
+                            else "mobile.delegations_constraints_unset",
+                        ),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(if (expanded) "▾" else "▸", fontSize = 16.sp)
+            }
+
+            if (expanded) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    localizedString("mobile.delegations_constraints_desc"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = goal,
+                    onValueChange = onGoalChange,
+                    enabled = !busy,
+                    label = { Text(localizedString("mobile.delegations_goal_label")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_${testTagPrefix}_goal"),
+                )
+                Spacer(Modifier.height(12.dp))
+
+                // Allow-list toggle + chips.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            localizedString("mobile.delegations_restrict_actions"),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            localizedString("mobile.delegations_restrict_actions_desc"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = restrictActions,
+                        onCheckedChange = onRestrictActionsChange,
+                        enabled = !busy,
+                        modifier = Modifier.testableClickable("switch_${testTagPrefix}_restrict") {
+                            onRestrictActionsChange(!restrictActions)
+                        },
+                    )
+                }
+                if (restrictActions) {
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        catalog.selectable.forEach { v ->
+                            FilterChip(
+                                selected = v.verb in allowVerbs,
+                                onClick = { onToggleAllow(v.verb) },
+                                enabled = !busy,
+                                label = { Text(v.label, fontSize = 12.sp) },
+                                modifier = Modifier.testableClickable(
+                                    "chip_${testTagPrefix}_allow_${v.verb}",
+                                ) { onToggleAllow(v.verb) },
+                            )
+                        }
+                    }
+                    if (allowVerbs.isEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            localizedString("mobile.delegations_read_only_hint"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                // Deny-list chips (always override allow).
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    localizedString("mobile.delegations_deny_label"),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    catalog.selectable.forEach { v ->
+                        FilterChip(
+                            selected = v.verb in denyVerbs,
+                            onClick = { onToggleDeny(v.verb) },
+                            enabled = !busy,
+                            label = { Text(v.label, fontSize = 12.sp) },
+                            modifier = Modifier.testableClickable(
+                                "chip_${testTagPrefix}_deny_${v.verb}",
+                            ) { onToggleDeny(v.verb) },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    localizedString("mobile.delegations_never_delegated"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testable("${testTagPrefix}_never_delegated_note"),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * **What this delegation permits** — a read-only transparency block driven by the
+ * node-echoed [characteristics] (the `delegation` object / `x-ciris-delegation`
+ * header), falling back to the [fallback] constraints the owner just submitted
+ * when the node doesn't echo them. Sits inside the primaryContainer created-card.
+ */
+@Composable
+private fun GrantCharacteristicsDisplay(
+    characteristics: ai.ciris.mobile.shared.models.federation.GrantCharacteristics?,
+    fallback: ai.ciris.mobile.shared.models.federation.DelegationConstraints?,
+) {
+    val catalog = ai.ciris.mobile.shared.models.federation.CapabilityCatalog
+    val goal = characteristics?.purpose ?: fallback?.goal
+    val allow = characteristics?.actionsAllow ?: fallback?.actionsAllow
+    val deny = (characteristics?.actionsDeny?.takeIf { it.isNotEmpty() })
+        ?: fallback?.actionsDeny?.takeIf { it.isNotEmpty() }
+    val expiresIn = characteristics?.expiresIn
+
+    Spacer(Modifier.height(10.dp))
+    Text(
+        localizedString("mobile.delegations_permits_title"),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onPrimaryContainer,
+        modifier = Modifier.testable("delegation_permits_title"),
+    )
+    Spacer(Modifier.height(4.dp))
+    if (!goal.isNullOrBlank()) {
+        PermitRow(localizedString("mobile.delegations_permits_goal"), goal)
+    }
+    val allowedText = when {
+        allow == null -> localizedString("mobile.delegations_permits_all_actions")
+        allow.isEmpty() -> localizedString("mobile.delegations_permits_read_only")
+        else -> allow.joinToString(", ") { catalog.labelFor(it) }
+    }
+    PermitRow(localizedString("mobile.delegations_permits_allowed"), allowedText)
+    if (!deny.isNullOrEmpty()) {
+        PermitRow(
+            localizedString("mobile.delegations_permits_denied"),
+            deny.joinToString(", ") { catalog.labelFor(it) },
+        )
+    }
+    if (expiresIn != null && expiresIn > 0) {
+        PermitRow(localizedString("mobile.delegations_permits_expiry"), "${expiresIn / 60} min")
+    }
+    // The actor is copyable when the node echoes real characteristics.
+    characteristics?.actor?.takeIf { it.isNotBlank() }?.let { actor ->
+        Spacer(Modifier.height(6.dp))
+        CopyableValue(
+            label = localizedString("mobile.delegations_permits_actor"),
+            value = actor,
+            valueFontSize = 12.sp,
+            testTag = "delegation_permits_actor",
+            copyTestTag = "btn_copy_delegation_actor",
+        )
+    }
+}
+
+/** One label:value row tinted for the primaryContainer created-card. */
+@Composable
+private fun PermitRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+        Text(
+            "$label: ",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+        )
+        Text(
+            value,
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
 /** INCOMING — view + approve a request code someone gave you. */
 @Composable
 private fun IncomingPane(
     busy: Boolean,
     userCode: String,
     onUserCodeChange: (String) -> Unit,
+    goal: String,
+    onGoalChange: (String) -> Unit,
+    restrictActions: Boolean,
+    onRestrictActionsChange: (Boolean) -> Unit,
+    allowVerbs: Set<String>,
+    onToggleAllow: (String) -> Unit,
+    denyVerbs: Set<String>,
+    onToggleDeny: (String) -> Unit,
     onApprove: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -580,6 +928,26 @@ private fun IncomingPane(
             enabled = !busy,
             label = { Text(localizedString("mobile.delegations_code_label")) },
             modifier = Modifier.fillMaxWidth().testable("input_delegation_code"),
+        )
+        Spacer(Modifier.height(12.dp))
+        // Approving can only NARROW the agent's requested grant (tighten-only).
+        Text(
+            localizedString("mobile.delegations_tighten_note"),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        ConstraintsEditor(
+            busy = busy,
+            goal = goal,
+            onGoalChange = onGoalChange,
+            restrictActions = restrictActions,
+            onRestrictActionsChange = onRestrictActionsChange,
+            allowVerbs = allowVerbs,
+            onToggleAllow = onToggleAllow,
+            denyVerbs = denyVerbs,
+            onToggleDeny = onToggleDeny,
+            testTagPrefix = "approve",
         )
         Spacer(Modifier.height(8.dp))
         Button(

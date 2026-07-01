@@ -182,8 +182,15 @@ async fn peering(
              Claim ownership first via POST /v1/setup/root.",
         );
     }
-    if let Err(resp) = require_owner(&st, &headers).await {
-        return resp;
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) =
+                crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Peer)
+            {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
     }
     let req: PeeringRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,

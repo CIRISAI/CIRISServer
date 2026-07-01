@@ -12,3 +12,6 @@ Cargo.lock.bak
 __pycache__/
 *.pyc
 dist-wheel/
+
+# built wheels (release artifacts, not source)
+dist/

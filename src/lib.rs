@@ -86,6 +86,9 @@ pub mod config_api;
 /// touches the runtime — it writes CEG and nudges this loop. Public so the
 /// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
 pub mod config_reconcile;
+/// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
+/// characteristics onto every response (the "no silent authority" layer).
+pub mod delegation_transparency;
 /// Generic CEWP **family operations** over persist's family CEG DX
 /// (`federation_families` + membership revocations) — create / add / live-roster /
 /// swap, NOT accord-aware. The HUMANITY_ACCORD kill-switch is one specialization.
