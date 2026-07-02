@@ -27,9 +27,11 @@ use std::path::PathBuf;
 // 0.5.39: edge v7.0.0→v7.0.2 (CIRISEdge#199 — restores the `pub fn register` /
 // `init_edge_runtime` re-export hook that regressed out of the v7.x line; completes
 // the one-wheel re-export, CIRISServer#4).
+// 0.5.72: edge v7.4.4→v8.0.0 (CC 0.7 opaque wire vocabulary, CIRISServer#128) +
+// persist v11.5.0→v11.6.0 (coordinated substrate major); verify stays v8.3.0.
 pub const TARGET_VERIFY: &str = "v8.3.0";
-pub const TARGET_PERSIST: &str = "v11.5.0";
-pub const TARGET_EDGE: &str = "v7.4.4";
+pub const TARGET_PERSIST: &str = "v11.6.0";
+pub const TARGET_EDGE: &str = "v8.0.0";
 /// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
 pub const TARGET_PERSIST_V10: &str = "v10";
 
