@@ -3,8 +3,11 @@
 > ## ⚡ REFRESHED 2026-07-02 for the 0.5.74 mesh substrate — READ THIS FIRST
 >
 > **Substrate floor is now edge v8.3.0 · persist v11.9.1 · verify v8.3.0** (CC 0.7
-> opaque wire vocabulary). `pip install ciris-server==0.5.74` (or the CIRISStatus
-> image repinned to 0.5.74 for Node B). Every node on the mesh MUST be on the 0.5.74
+> opaque wire vocabulary). `pip install ciris-server==0.5.74` for Node A. **Node B /
+> CIRISStatus v0.3.14 is already substrate-compatible** — it pins ciris-server v0.5.73,
+> whose edge/persist/verify substrate is byte-identical to 0.5.74 (0.5.74 only adds the
+> `config` arm to the ciris-server *wheel*, which B doesn't run), so no B re-roll is
+> needed; repin to v0.5.74 is optional. Every node on the mesh MUST be on the v8.x
 > substrate — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
 >
 > **0.5.74 is the release that makes the WHEEL/image self-configurable.** The

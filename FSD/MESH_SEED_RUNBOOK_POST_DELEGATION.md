@@ -33,7 +33,7 @@ key_id and every probe times out.** So enabling the announce on A and B is a
 
 | # | Precondition | State |
 |---|---|---|
-| 0.1 | CIRISServer **0.5.74 on PyPI** + **CIRISStatus** image repinned to 0.5.74 | ⛔ cut |
+| 0.1 | CIRISServer **0.5.74 on PyPI** (Node A). **Node B / CIRISStatus v0.3.14 is already fine** — it pins ciris-server v0.5.73, whose substrate (edge/persist/verify) is byte-identical to 0.5.74; 0.5.74 only adds the `config` arm to the ciris-server WHEEL, which B doesn't use (its own binary already had `config`). Repin to v0.5.74 is optional/cosmetic. | ⛔ cut (A) |
 | 0.2 | Fleet on 0.5.74: mac + lapbuntu2 **upgraded in place**; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
 | 0.3 | RNS reachability wired: lapbuntu2→A/B (auto, via re-claim) **and A↔B** (set B→A bootstrap, §1) | ⛔ config |
 | 0.4 | **`net.announce_ownership=true` set on A AND B** via `config set` (the announce prereq) + restart | ⛔ config |
@@ -191,7 +191,7 @@ Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "..
 |---|---|
 | relay both legs · delegation constraints · TDD gate (0.5.72) | ✅ done |
 | claim-records-locally + `config set` CLI + copy-all card (0.5.73) | ✅ done |
-| **0.5.74** (`config` arm in the WHEEL/image entry) on PyPI + **CIRISStatus** image repinned | ⛔ cut |
+| **0.5.74** (`config` arm in the WHEEL/image entry) on PyPI — Node A. Node B (CIRISStatus v0.3.14) already substrate-compatible; no re-roll needed | ⛔ cut (A) |
 | mac + lapbuntu2 upgraded in place; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
 | A↔B bootstrap wired (B→A, §1.3); lapbuntu2→A/B auto (re-claim) | ⛔ config |
 | **`net.announce_ownership=true` on A + B** (§1.4) + restart — the relay-reachability prereq | ⛔ config |
