@@ -1,11 +1,19 @@
 # Bridge runbook — FRESH SEED the canonical mesh (wipe + reclaim clean)
 
-> ## ⚡ REFRESHED 2026-07-02 for the 0.5.73 mesh substrate — READ THIS FIRST
+> ## ⚡ REFRESHED 2026-07-02 for the 0.5.74 mesh substrate — READ THIS FIRST
 >
 > **Substrate floor is now edge v8.3.0 · persist v11.9.1 · verify v8.3.0** (CC 0.7
-> opaque wire vocabulary). `pip install ciris-server==0.5.73` (or the CIRISStatus
-> v0.3.13 image for Node B). Every node on the mesh MUST be on the 0.5.73 substrate
-> — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
+> opaque wire vocabulary). `pip install ciris-server==0.5.74` (or the CIRISStatus
+> image repinned to 0.5.74 for Node B). Every node on the mesh MUST be on the 0.5.74
+> substrate — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
+>
+> **0.5.74 is the release that makes the WHEEL/image self-configurable.** The
+> `ciris-server config set/get` CLI existed only in the standalone binary through
+> 0.5.73; the published wheel/image (which is what Node A runs) had no `config` arm,
+> so a headless wheel node couldn't set boot-structural knobs — in particular
+> `net.announce_ownership`, the knob the RNS relay's key_id-reachability depends on.
+> 0.5.74 adds `config` to the wheel entry, so **A can now enable its own announce
+> from the console** (§4.5 / §4b).
 >
 > **The announce + peering steps below (§4b onward — the direct `curl POST
 > /v1/federation/announce` / `/peering` on each remote) are SUPERSEDED.** Post-claim,
@@ -30,8 +38,8 @@ nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
 edge **v8.3.0** · persist **v11.9.1** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1
-(CC 0.7 opaque wire vocabulary; the 0.5.73 mesh floor).
-`pip install ciris-server==0.5.73` (the wheel carries the pinned substrate; persist auto-migrates
+(CC 0.7 opaque wire vocabulary; the 0.5.74 mesh floor).
+`pip install ciris-server==0.5.74` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
 
@@ -104,7 +112,7 @@ Repeat steps 2–4 on Node B with `--key-id ciris-status-1`. (The desktop/mobile
 first-run flow does the equivalent — mint fed-ID → self-claim — if you prefer a GUI; the
 0.5.61 custody ladder means no YubiKey is required.)
 
-**0.5.73 — the claim now records the node locally.** When you claim A/B *from lapbuntu2*
+**0.5.74 — the claim now records the node locally.** When you claim A/B *from lapbuntu2*
 (the seeding node), the claim persists the target's key record + owner-binding into
 lapbuntu2's own corpus (so `GET /v1/setup/owned-nodes` lists them) **and appends the
 target's RNS address (`host:4242`) to lapbuntu2's `net.bootstrap_peers`** — so lapbuntu2
@@ -112,33 +120,45 @@ can dial them. Restart lapbuntu2 once after the claims for the new bootstrap to 
 
 ### 4.5 RNS mesh bootstrap — every node must dial the seed (A)
 The mesh is: **A is the RNS origin (`0.0.0.0:4242`, no bootstrap of its own); every other
-node dials A.** lapbuntu2's entry is set automatically by the 0.5.73 claim (above).
+node dials A.** lapbuntu2's entry is set automatically by the 0.5.74 claim (above).
 
 > **`net.bootstrap_peers` is an IP:port list — NOT a hostname.** `parse_bootstrap_peers`
 > (`config.rs`) parses each entry as a `SocketAddr` and **silently skips** anything that
 > isn't `IP:port` (a warning is logged). So docker-DNS names like `ciris-server:4242` are
 > dropped — use A's **IP**.
 
-- **Node A** — already correct: `transport.node` **defaults to `true`** for every
-  server node (`config_reconcile.rs::DEFAULT_TRANSPORT_NODE`), and it listens on
-  `0.0.0.0:4242`. Nothing to set on A.
-- **Node B** — set its bootstrap to A's IP:port via **B's own console CLI** (v0.3.14 adds
-  `config set` to the `ciris-status` binary — B is headless, no app/session needed):
+- **Node A** — `transport.node` **defaults to `true`** for every server node
+  (`config_reconcile.rs::DEFAULT_TRANSPORT_NODE`), and it listens on `0.0.0.0:4242` as the
+  RNS origin — no bootstrap of its own. But A **does** need its identity announce enabled
+  (§4b) so lapbuntu2 can reach it by key_id over the relay. On the **0.5.74 wheel/image**,
+  A now has the `config` CLI to do this from its own console:
+  ```sh
+  ciris-server config set net.announce_ownership true --home /var/lib/ciris --key-id ciris-canonical-1
+  # then restart A   → A emits its Reticulum identity announce → the relay can root its key_id
+  ```
+- **Node B** — set its bootstrap to A's IP:port **and** enable its announce, via **B's own
+  console CLI** (the `ciris-status` binary carries the same `config set`; B is headless, no
+  app/session needed):
   ```sh
   # A's PUBLISHED RNS IP:port (same one lapbuntu2 uses; reachable from B's container via the host IP).
   ciris-status config set net.bootstrap_peers '["108.61.242.236:4242"]' --home /data
+  ciris-status config set net.announce_ownership true --home /data
   # then restart B
   ```
   If B's container can't hairpin to the host IP, use A's **docker-network container IP**
   (`docker inspect <A> | grep IPAddress`) — still an IP:port, never the DNS name.
-  (Pre-v0.3.14 fallback: run `ciris-server config set … --home <B-home>` against B's home
-  with a host-side ciris-server binary while B is stopped.)
 
-> **§4b ANNOUNCE and §5 PEERING below are SUPERSEDED** — do NOT curl them directly.
-> Once every node is on 0.5.73 + bootstrapped to A, the announce + A↔B peering are driven
-> from lapbuntu2 over the **RNS relay** with a delegation grant. Follow
-> `FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` §2–§4 for that. The steps below are kept only
-> as the historical direct-HTTP reference.
+> **The transport announce (`net.announce_ownership=true` + restart, above) is a
+> reachability PREREQUISITE for the relay**, done on each node's own console — NOT a step
+> reached *through* the relay. A self-scoped node with `announce_ownership: false` never
+> emits its identity announce, so lapbuntu2 can't root its key_id and every relay probe
+> **times out** (the first field run's failure). Do this on **both** A and B before §4b/§5.
+
+> **§4b's owner-binding PROMOTION and §5 PEERING below are driven over the relay, not by
+> direct curl.** Once every node is on 0.5.74, bootstrapped to A, **and announcing**, the
+> owner-binding promotion (self→federation) + A↔B peering are driven from lapbuntu2 over the
+> **RNS relay** with a delegation grant. Follow `FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md`
+> §2–§4. The direct-HTTP steps below are kept only as the historical reference.
 
 ### 4.6 (Node A only) Re-import the legacy trace corpus
 Node A is the **lens node** — it holds the historical trace corpus. A wipe starts that
