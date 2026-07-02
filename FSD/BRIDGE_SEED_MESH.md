@@ -112,17 +112,27 @@ can dial them. Restart lapbuntu2 once after the claims for the new bootstrap to 
 
 ### 4.5 RNS mesh bootstrap — every node must dial the seed (A)
 The mesh is: **A is the RNS origin (`0.0.0.0:4242`, no bootstrap of its own); every other
-node dials A.** lapbuntu2's entry is set automatically by the 0.5.73 claim (above). The two
-that still need it set by hand:
+node dials A.** lapbuntu2's entry is set automatically by the 0.5.73 claim (above).
 
-- **Node A** — confirm it listens on `0.0.0.0:4242` and is a **transport node**
-  (`transport.node=true`) so it forwards for the mesh.
-- **Node B** — set its bootstrap to A (co-located → localhost) via the **0.5.73 console CLI**
-  (B is headless — no app/session needed):
+> **`net.bootstrap_peers` is an IP:port list — NOT a hostname.** `parse_bootstrap_peers`
+> (`config.rs`) parses each entry as a `SocketAddr` and **silently skips** anything that
+> isn't `IP:port` (a warning is logged). So docker-DNS names like `ciris-server:4242` are
+> dropped — use A's **IP**.
+
+- **Node A** — already correct: `transport.node` **defaults to `true`** for every
+  server node (`config_reconcile.rs::DEFAULT_TRANSPORT_NODE`), and it listens on
+  `0.0.0.0:4242`. Nothing to set on A.
+- **Node B** — set its bootstrap to A's IP:port via **B's own console CLI** (v0.3.14 adds
+  `config set` to the `ciris-status` binary — B is headless, no app/session needed):
   ```sh
-  ciris-server config set net.bootstrap_peers '["127.0.0.1:4242"]' --home /var/lib/ciris
+  # A's PUBLISHED RNS IP:port (same one lapbuntu2 uses; reachable from B's container via the host IP).
+  ciris-status config set net.bootstrap_peers '["108.61.242.236:4242"]' --home /data
   # then restart B
   ```
+  If B's container can't hairpin to the host IP, use A's **docker-network container IP**
+  (`docker inspect <A> | grep IPAddress`) — still an IP:port, never the DNS name.
+  (Pre-v0.3.14 fallback: run `ciris-server config set … --home <B-home>` against B's home
+  with a host-side ciris-server binary while B is stopped.)
 
 > **§4b ANNOUNCE and §5 PEERING below are SUPERSEDED** — do NOT curl them directly.
 > Once every node is on 0.5.73 + bootstrapped to A, the announce + A↔B peering are driven
