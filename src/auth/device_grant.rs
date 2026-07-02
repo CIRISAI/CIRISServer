@@ -53,7 +53,8 @@ use serde::{Deserialize, Serialize};
 
 use super::roles::{Permission, UserRole};
 use super::session::{
-    now_unix, register_delegated_grant, resolve_bearer, DelegatedGrant, SessionCaller,
+    now_unix, register_delegated_grant, resolve_bearer, DelegatedGrant, DelegationConstraints,
+    SessionCaller,
 };
 
 /// Grant lifetime (RFC 8628 `expires_in`, default 600s like the manager).
@@ -101,6 +102,10 @@ struct DeviceGrant {
     scope: String,
     /// Unix-epoch seconds after which the grant is expired.
     expires_at: u64,
+    /// The owner-set constraints carried into the durable edge + the minted bearer
+    /// (default = unconstrained). Set at `/delegate` (owner-initiated) or, for the
+    /// agent-initiated flow, tightened at `/approve`.
+    constraints: DelegationConstraints,
     /// The approval state.
     status: GrantStatus,
 }
@@ -122,6 +127,23 @@ struct DeviceGrantState {
     /// Grant TTL in seconds. [`GRANT_TTL_SECS`] in production; overridable for
     /// tests (e.g. `0` to mint an already-expired grant for the 410 path).
     grant_ttl_secs: u64,
+}
+
+/// Inject the owner-set constraints into a `delegates_to` envelope as a
+/// `constraints` member, so they are DURABLE + auditable in the signed graph edge
+/// (CC 2.1.1 forward-compat extension — a reader that doesn't know the member
+/// preserves it). No-op for an unconstrained grant (keeps legacy envelopes byte-
+/// identical). The member is added BEFORE the envelope is canonicalized + signed.
+fn with_constraints(
+    mut envelope: serde_json::Value,
+    constraints: &DelegationConstraints,
+) -> serde_json::Value {
+    if !constraints.is_unconstrained() {
+        if let (Some(obj), Ok(v)) = (envelope.as_object_mut(), serde_json::to_value(constraints)) {
+            obj.insert("constraints".to_string(), v);
+        }
+    }
+    envelope
 }
 
 /// Resolve the LOCAL owner's federation signer (re-opening its hardware/software
@@ -262,6 +284,8 @@ async fn device_code(State(st): State<DeviceGrantState>, body: axum::body::Bytes
         client_id,
         scope,
         expires_at,
+        // Agent-initiated: constraints (if any) are set by the owner at /approve.
+        constraints: DelegationConstraints::default(),
         status: GrantStatus::Pending,
     };
     st.grants
@@ -319,6 +343,11 @@ struct DelegateRequest {
     /// The delegated scope(s); defaults to `[DEFAULT_SCOPE]`.
     #[serde(default)]
     scope: Option<Vec<String>>,
+    /// OPTIONAL owner-set constraints (action allow/deny-list + goal) bounding what
+    /// the delegate may do. Absent = unconstrained (back-compat with the coarse
+    /// grant); the server never-list applies regardless. See `DelegationConstraints`.
+    #[serde(default)]
+    constraints: Option<DelegationConstraints>,
 }
 
 /// Register a freshly-MINTED agent key into `federation_keys` so the device flow's
@@ -506,12 +535,16 @@ async fn delegate(
     let user_code = gen_user_code();
     let device_code = gen_device_code();
     let expires_at = now_unix() + st.grant_ttl_secs;
+    // Owner-initiated: the owner declares the constraints up front (carried onto
+    // the grant AND into the durable signed edge below).
+    let constraints = req.constraints.clone().unwrap_or_default();
     {
         let grant = DeviceGrant {
             user_code: user_code.clone(),
             client_id: client_id.clone(),
             scope: scope.clone(),
             expires_at,
+            constraints: constraints.clone(),
             status: GrantStatus::Pending,
         };
         st.grants
@@ -532,10 +565,13 @@ async fn delegate(
         Ok(s) => s,
         Err(resp) => return resp,
     };
-    let envelope = ciris_persist::federation::delegates_to_envelope(
-        &client_id,
-        std::slice::from_ref(&scope),
-        false,
+    let envelope = with_constraints(
+        ciris_persist::federation::delegates_to_envelope(
+            &client_id,
+            std::slice::from_ref(&scope),
+            false,
+        ),
+        &constraints,
     );
     let attestation_id = match crate::auth::ownership::emit_signed_attestation(
         &st.engine,
@@ -544,6 +580,9 @@ async fn delegate(
         &client_id,
         envelope,
         vec![client_id.clone()],
+        // The delegation's absolute expiry (CC 2.4.1.2 `delegation_valid_until`) —
+        // makes the graph edge self-expiring in lockstep with the in-memory grant TTL.
+        chrono::DateTime::from_timestamp(expires_at as i64, 0),
     )
     .await
     {
@@ -613,7 +652,7 @@ async fn claim(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
     // Drain the handshake state under the lock, dropping the (!Send) guard before
     // any await (the register_delegated_grant mint is sync, but the graph gate
     // below awaits). Terminal paths return from inside.
-    let (owner_wa_id, owner_role, owner_key_id, client_id, scope) = {
+    let (owner_wa_id, owner_role, owner_key_id, client_id, scope, constraints) = {
         let mut grants = st.grants.lock().expect("grants lock");
         let Some(grant) = grants.get(&device_code).cloned() else {
             return err(StatusCode::NOT_FOUND, "unknown pin");
@@ -649,6 +688,7 @@ async fn claim(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
                     owner_key_id,
                     grant.client_id,
                     grant.scope,
+                    grant.constraints,
                 )
             }
         }
@@ -673,7 +713,15 @@ async fn claim(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
         client_id: client_id.clone(),
         scope: scope.clone(),
         expires_at: now_unix() + DELEGATED_TTL_SECS,
+        issued_at: now_unix(),
+        purpose: constraints.goal.clone(),
+        attestation_id: None,
+        constraints,
     });
+    // TRANSPARENCY (first issuance): echo the FULL grant characteristics so the
+    // consumer sees exactly what it holds from the very first response — the same
+    // object the `X-CIRIS-Delegation` header carries on every subsequent use.
+    let characteristics = super::session::characteristics_for_token(&access_token);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -682,6 +730,7 @@ async fn claim(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
             "scope": scope,
             "expires_in": DELEGATED_TTL_SECS,
             "client_id": client_id,
+            "delegation": characteristics,
         })),
     )
         .into_response()
@@ -733,6 +782,12 @@ async fn require_owner(
 #[derive(Debug, Deserialize)]
 struct DecisionRequest {
     user_code: String,
+    /// OPTIONAL owner constraints applied at approval time (agent-initiated flow —
+    /// the owner sets the bound when consenting). TIGHTEN-ONLY: folded onto any
+    /// constraints already on the grant via [`DelegationConstraints::tightened_with`],
+    /// so the approver can only NARROW authority, never widen it. Ignored by `/deny`.
+    #[serde(default)]
+    constraints: Option<DelegationConstraints>,
 }
 
 /// Resolve a `user_code` to its `device_code` via the index.
@@ -762,8 +817,9 @@ async fn approve(
         return err(StatusCode::NOT_FOUND, "unknown user_code");
     };
     // Snapshot the pending grant's coordinates without holding the lock across the
-    // (hardware-blocking) signing await.
-    let (actor_key_id, scope) = {
+    // (hardware-blocking) signing await. Fold the approver's constraints onto the
+    // grant's existing bound — TIGHTEN-ONLY, so approval can only narrow authority.
+    let (actor_key_id, scope, grant_expires_at, effective_constraints) = {
         let grants = st.grants.lock().expect("grants lock");
         let Some(grant) = grants.get(&device_code) else {
             return err(StatusCode::NOT_FOUND, "unknown user_code");
@@ -774,7 +830,15 @@ async fn approve(
         if matches!(grant.status, GrantStatus::Approved { .. }) {
             return err(StatusCode::CONFLICT, "already approved");
         }
-        (grant.client_id.clone(), grant.scope.clone())
+        let effective = grant
+            .constraints
+            .tightened_with(&req.constraints.clone().unwrap_or_default());
+        (
+            grant.client_id.clone(),
+            grant.scope.clone(),
+            grant.expires_at,
+            effective,
+        )
     };
 
     // Resolve the owner's federation signer (hardware presence prompted on
@@ -789,10 +853,13 @@ async fn approve(
     // §11.10-admissible envelope helper + the working user-signed emit path
     // (attester == the owner's REGISTERED key_id; sub_delegation = false: the
     // actor may act, not re-delegate). The owner's hardware key is touched HERE.
-    let envelope = ciris_persist::federation::delegates_to_envelope(
-        &actor_key_id,
-        std::slice::from_ref(&scope),
-        false,
+    let envelope = with_constraints(
+        ciris_persist::federation::delegates_to_envelope(
+            &actor_key_id,
+            std::slice::from_ref(&scope),
+            false,
+        ),
+        &effective_constraints,
     );
     let attestation_id = match crate::auth::ownership::emit_signed_attestation(
         &st.engine,
@@ -801,6 +868,8 @@ async fn approve(
         &actor_key_id,
         envelope,
         vec![actor_key_id.clone()],
+        // CC 2.4.1.2 `delegation_valid_until` — edge expires with the grant TTL.
+        chrono::DateTime::from_timestamp(grant_expires_at as i64, 0),
     )
     .await
     {
@@ -819,6 +888,8 @@ async fn approve(
     let Some(grant) = grants.get_mut(&device_code) else {
         return err(StatusCode::NOT_FOUND, "unknown user_code");
     };
+    // Persist the tightened constraints so the /token mint reads the narrowed set.
+    grant.constraints = effective_constraints;
     grant.status = GrantStatus::Approved {
         owner_wa_id: owner.wa_id.clone(),
         owner_role: owner.role,
@@ -878,13 +949,6 @@ struct TokenRequest {
     client_id: String,
 }
 
-#[derive(Debug, Serialize)]
-struct TokenResponse {
-    access_token: String,
-    token_type: &'static str,
-    expires_in: u64,
-}
-
 async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> Response {
     let req: TokenRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -897,7 +961,7 @@ async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
     // region; a block scope does). Terminal paths (unknown/expired/pending/denied)
     // return from inside. On approval the handshake grant is consumed (single-use)
     // and the owner/actor coordinates fall out for the graph gate + mint.
-    let (owner_wa_id, owner_role, owner_key_id, client_id, scope) = {
+    let (owner_wa_id, owner_role, owner_key_id, client_id, scope, constraints) = {
         let mut grants = st.grants.lock().expect("grants lock");
         let Some(grant) = grants.get(&req.device_code).cloned() else {
             // Unknown device_code — RFC 8628 treats this as an invalid grant.
@@ -938,6 +1002,7 @@ async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
                     owner_key_id,
                     grant.client_id,
                     grant.scope,
+                    grant.constraints,
                 )
             }
         }
@@ -967,14 +1032,22 @@ async fn token(State(st): State<DeviceGrantState>, body: axum::body::Bytes) -> R
         client_id,
         scope,
         expires_at: now_unix() + DELEGATED_TTL_SECS,
+        issued_at: now_unix(),
+        purpose: constraints.goal.clone(),
+        attestation_id: None,
+        constraints,
     });
+    // TRANSPARENCY (first issuance): echo the full characteristics alongside the
+    // RFC-8628 token fields (same object as the `X-CIRIS-Delegation` header).
+    let characteristics = super::session::characteristics_for_token(&access_token);
     (
         StatusCode::OK,
-        Json(TokenResponse {
-            access_token,
-            token_type: "Bearer",
-            expires_in: DELEGATED_TTL_SECS,
-        }),
+        Json(serde_json::json!({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": DELEGATED_TTL_SECS,
+            "delegation": characteristics,
+        })),
     )
         .into_response()
 }
@@ -1109,6 +1182,7 @@ async fn revoke(
                 &client_id,
                 envelope,
                 vec![client_id.clone()],
+                None, // a revocation is permanent — never expires.
             )
             .await
             {

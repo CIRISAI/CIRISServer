@@ -341,8 +341,16 @@ async fn claim_remote_handler(
     // the agent's require_setup_mode.
     let first_run = crate::auth::bootstrap::is_first_run(&st.engine).await;
     if !first_run {
-        if let Err(resp) = require_owner(&st, &headers).await {
-            return resp;
+        match require_owner(&st, &headers).await {
+            Ok(caller) => {
+                if let Some(resp) = crate::auth::gate::require_verb(
+                    &caller,
+                    crate::auth::gate::CapabilityVerb::ClaimRemote,
+                ) {
+                    return resp;
+                }
+            }
+            Err(resp) => return resp,
         }
     } else {
         tracing::info!(
@@ -562,8 +570,15 @@ async fn set_age_self(
 ) -> Response {
     // Owner-session-gated: post-claim the node is owned → require_owner enforces a
     // session (the wizard logs in with the account password before this call).
-    if let Err(resp) = require_owner(&st, &headers).await {
-        return resp;
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) =
+                crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::SetAge)
+            {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
     }
     let req: SetAgeSelfRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -661,6 +676,12 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
         Ok(c) => c,
         Err(resp) => return resp,
     };
+    // A delegate may announce only if its grant permits the `announce` verb.
+    if let Some(resp) =
+        crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Announce)
+    {
+        return resp;
+    }
 
     // (1) Promote the owner-binding self → FEDERATION.
     let promoted = match crate::auth::ownership::promote_owner_binding_to_federation(
@@ -676,7 +697,10 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
                 ownership::OwnershipError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            return err(code, format!("announce (promote owner-binding) failed: {e}"));
+            return err(
+                code,
+                format!("announce (promote owner-binding) failed: {e}"),
+            );
         }
     };
 

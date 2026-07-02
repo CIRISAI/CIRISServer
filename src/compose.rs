@@ -327,9 +327,48 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // notify target is then `None`.
     let reconcile_notify = Arc::new(tokio::sync::Notify::new());
 
+    // ── Mesh control-plane relay, remote half (#128 Phase D — C3) ─────────────
+    // Register the RNS control RESPONDER on the shared Edge BEFORE `edge.run()`
+    // consumes it (registration is `&self`; the run loop's inbound dispatcher
+    // invokes the handler inline). Kind 0x0000_0001 — CIRISServer's CC 0.7
+    // Tier-2 allocation (WIRE_VOCABULARY_KINDS.md). The responder's v1 dispatch
+    // router does not exist yet at this point in boot, so it rides an
+    // Arc<OnceLock<Router>> the read-API block below fills; a relay arriving in
+    // the boot gap gets an honest 503 (never a drop). This makes every owned
+    // node ADMINISTRABLE over RNS by its owner's signature.
+    let mesh_dispatch_router: Arc<std::sync::OnceLock<axum::Router>> =
+        Arc::new(std::sync::OnceLock::new());
+    let mesh_responder = Arc::new(crate::mesh_relay::MeshControlResponder::new(
+        Arc::clone(&engine),
+        node_code.key_id.clone(),
+        Arc::clone(&mesh_dispatch_router),
+    ));
+    crate::mesh_relay::register_mesh_control_handler(&edge, Arc::clone(&mesh_responder));
+
+    // edge v8.2.0 (CIRISEdge#249) makes `Edge::run` take `self: Arc<Self>`, so
+    // the composition root can now retain a live `Arc<Edge>` ACROSS the run loop
+    // — the enabler for the C1 initiator leg. All the pre-run captures above
+    // (`local_transport_pubkey`, `setup_peer_replication`, the swarm runtime,
+    // the mesh responder registration) took `&edge` before this point and are
+    // done; from here `edge` is shared between the run task and the requester.
+    let edge = Arc::new(edge);
+
+    // The local SEND leg (C1's mesh hop) — the Phase E INITIATOR leg, now LIVE.
+    // `target == self` short-circuits into the in-process responder (edge does
+    // not loop a send back to its own destination); every OTHER owned target
+    // sends for real over RNS via `send_opaque_request` on the retained
+    // `Arc<Edge>` (FSD §6). This retires the v8.0.0 `local_only_requester` stub
+    // that 502'd cross-node sends while edge's `run(self)` consumed the Edge.
+    let mesh_requester = crate::mesh_relay::edge_mesh_requester_with_loopback(
+        Arc::clone(&edge),
+        node_code.key_id.clone(),
+        Arc::clone(&mesh_responder),
+    );
+
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
-    let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
+    let edge_run = Arc::clone(&edge);
+    let edge_join = tokio::spawn(async move { edge_run.run(edge_shutdown_rx).await });
 
     // ── The CEG-driven replication reconcile loop ─────────────────────────────
     // Converges the live ReplicationRuntime to the corpus's consent:replication
@@ -471,6 +510,21 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             crate::auth::loopback::require_loopback,
                         )),
                     )
+                    // MESH CONTROL RELAY (#128 Phase D — C1): POST /v1/mesh/relay.
+                    // The owner (or an `owner:act-on-behalf` dgrant whose
+                    // constraints permit `mesh_relay`) drives an allow-listed
+                    // owner-op on an owned REMOTE node addressed purely by
+                    // key_id: the endpoint hybrid-signs the control envelope
+                    // with the owner fed-ID (same request-time signer inputs as
+                    // claim-remote above) and ships it over the mesh seam as
+                    // opaque kind 0x0000_0001 (FSD/RNS_CONTROL_RELAY.md §6).
+                    .merge(crate::mesh_relay::router(
+                        Arc::clone(&engine),
+                        format!("{}-user", cfg.keystore_alias),
+                        crate::user_seed_dir(&cfg),
+                        Some(mesh_requester.clone()),
+                        crate::mesh_relay::RELAY_TIMEOUT_MS,
+                    ))
                     // provision/ensure the local node's USER federation identity
                     // (CIRISServer#21): POST /v1/self/identity — mints a hardware-
                     // rooted (YubiKey / TPM-SE / software) user identity + returns
@@ -664,9 +718,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // "Never guess" — log every 4xx/5xx (method + path + status + FULL
                 // body) to the node log file, so a failed request always leaves a
                 // complete server-side trace even when the client truncates it.
-                r.layer(axum::middleware::from_fn(
-                    crate::http_log::log_error_responses,
-                ))
+                let r = r
+                    .layer(axum::middleware::from_fn(
+                        crate::http_log::log_error_responses,
+                    ))
+                    // TRANSPARENCY: stamp `X-CIRIS-Delegation` on every response to a
+                    // `dgrant:` caller so a delegated actor always sees its live
+                    // authority (scope/purpose/expiry/attestation) — no silent scope.
+                    .layer(axum::middleware::from_fn(
+                        crate::delegation_transparency::attach_delegation_header,
+                    ));
+                // #128 Phase D (C3 dispatch): hand the mesh control responder the
+                // SAME merged v1 router HTTP serves — the RNS path and the HTTP
+                // path execute identical handler code (RNS_CONTROL_RELAY.md §5.4
+                // "reuse, do not fork"). The responder's closed allow-list is
+                // enforced BEFORE any dispatch, so mounting the full surface here
+                // widens nothing.
+                let _ = mesh_dispatch_router.set(r.clone());
+                r
             },
         )
         .await

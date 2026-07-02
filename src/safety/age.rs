@@ -286,6 +286,7 @@ pub async fn emit_age_assurance_signed(
         &subject,
         envelope,
         vec![subject.clone()],
+        None, // an age-assurance score is not time-bounded.
     )
     .await
     .map_err(|e| format!("emit signed age assurance: {e}"))

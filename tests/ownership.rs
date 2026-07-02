@@ -774,10 +774,13 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
     // Apply a SELF-scoped, genuinely user-signed owner-binding (substrate-native,
     // no HTTP) — registers the user key + persists delegates_to(user → node, self).
     let user = user_signer(user_key_id);
-    let binding =
-        ciris_server::auth::ownership::build_signed_owner_binding(&user, node_key_id, &infra_scopes())
-            .await
-            .expect("build signed owner-binding");
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        node_key_id,
+        &infra_scopes(),
+    )
+    .await
+    .expect("build signed owner-binding");
     ciris_server::auth::ownership::apply_signed_owner_binding(
         &engine,
         node_key_id,
@@ -807,12 +810,10 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
 
     // Promote → a FEDERATION-cohort owner-binding is persisted (new id), and the
     // node is still owner-bound to the same user.
-    let promoted = ciris_server::auth::ownership::promote_owner_binding_to_federation(
-        &engine,
-        node_key_id,
-    )
-    .await
-    .expect("promote owner-binding");
+    let promoted =
+        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
+            .await
+            .expect("promote owner-binding");
     assert_eq!(promoted.responsible_user_key_id, user_key_id);
     assert!(
         promoted.attestation_id.is_some(),
@@ -838,12 +839,10 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
     );
 
     // Idempotent: a second promote is a no-op (already federation-scoped).
-    let again = ciris_server::auth::ownership::promote_owner_binding_to_federation(
-        &engine,
-        node_key_id,
-    )
-    .await
-    .expect("idempotent re-promote");
+    let again =
+        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
+            .await
+            .expect("idempotent re-promote");
     assert!(
         again.attestation_id.is_none(),
         "re-promote is an idempotent no-op (already federation-scoped)"
@@ -857,8 +856,9 @@ async fn promote_unowned_node_is_refused() {
     let node_key_id = "ciris-promote-unowned";
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
-    let e = ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
-        .await
-        .expect_err("promote of an unowned node must fail");
+    let e =
+        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
+            .await
+            .expect_err("promote of an unowned node must fail");
     assert!(matches!(e, OwnershipError::Validation(_)));
 }

@@ -1,44 +1,60 @@
-//! `LensCoreHandler` — the Edge `Handler<AccordEventsBatch>` impl
-//! that backs relay mode.
+//! `LensCoreHandler` — the inbound **opaque-event subscriber** that
+//! backs relay mode (edge v8.0.0 / CC 0.7 opaque wire vocabulary).
 //!
-//! Edge's verify pipeline authenticates an inbound envelope, then
-//! dispatches the typed message to the registered handler. For
-//! `AccordEventsBatch` (a batch of trace events), lens-core's relay
-//! handler persists the batch to the host's shared persist `Engine`
-//! and returns the per-batch insert counts as the ACK response.
+//! Before edge 8.0 this was a typed `Handler<AccordEventsBatch>`. CC 0.7
+//! (`WIRE_VOCABULARY.md` v1.0.1 §4) retired the `AccordEventsBatch`
+//! Tier-1 variant and moved trace/telemetry batches to a **Tier-2 opaque
+//! event** in CIRISPersist's `0x0005_*` steward range: the edge carries
+//! the batch as opaque bytes and fans it out to per-`kind` subscribers,
+//! agnostic to its meaning ("reach, not meaning", MISSION §1.3). The
+//! payload IS the `BatchEnvelope` bytes the emitter published, so lens-core
+//! feeds them straight into the host's verify-before-persist pipeline.
+//!
+//! **Semantic change (sanctioned by §4):** an opaque *event* is
+//! fire-and-forget — there is no `AccordEventsResponse` ACK, so a mesh
+//! emitter no longer gets per-batch insert counts back (the HTTP ingest
+//! path in `ciris-server`'s `ingest_http` is unaffected and still reports
+//! counts). Counts are logged locally at `debug`.
 //!
 //! # Relay = pass-through scrubbing
 //!
-//! The handler calls `Engine::receive_and_persist` with
-//! [`NullScrubber`] — relay mode does **not** re-scrub. Scrubbing is
-//! the originating client node's egress-filter responsibility
-//! (capture-locally / filter-on-egress); inter-node federation
-//! traffic is post-egress-filter by contract. Re-scrubbing at a
-//! relay is actively harmful: it demands NER models relays aren't
-//! provisioned with, and divergent NER versions across relays would
-//! store the same trace differently — trace-content drift across the
-//! federation. A deployment that points agents *directly* at a relay
-//! (a first-hop sink) is itself a privacy boundary and would need a
-//! real scrubber; relay-from-federation does not. See CIRISPersist#89.
+//! The subscriber calls `Engine::receive_and_persist` with
+//! [`NullScrubber`] — relay mode does **not** re-scrub. Scrubbing is the
+//! originating client node's egress-filter responsibility; inter-node
+//! federation traffic is post-egress-filter by contract. Re-scrubbing at a
+//! relay is actively harmful (divergent NER → trace-content drift). See
+//! CIRISPersist#89.
 //!
 //! # Double-verify
 //!
-//! `receive_and_persist` re-runs persist's `IngestPipeline` verify
-//! step, but the batch already arrived Edge-verified
-//! ([`HandlerContext::verify_outcome`]). The redundant
-//! federation-directory lookup is tracked as CIRISPersist#91
-//! (skip-verify relay fast-path), deferred — correctness is
-//! unaffected, only a per-batch lookup is duplicated.
+//! `receive_and_persist` re-runs persist's `IngestPipeline` verify step,
+//! but the batch already arrived Edge-verified. The redundant lookup is
+//! CIRISPersist#91 (skip-verify relay fast-path), deferred — correctness
+//! is unaffected.
 
 use std::sync::Arc;
 
-use ciris_edge::{AccordEventsBatch, AccordEventsResponse, Handler, HandlerContext, HandlerError};
+use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::NullScrubber;
+use ciris_persist::TRACE_BATCH_KIND;
 
-/// Relay-mode inbound handler. Holds a shared handle to the host's
-/// persist `Engine`; persists every verified [`AccordEventsBatch`] it
-/// receives.
+/// The opaque-event `kind` for trace/telemetry batches (the successor of
+/// the retired `AccordEventsBatch`), in CIRISPersist's `0x0005_*` steward
+/// range (`WIRE_VOCABULARY.md` v1.0.1 §3.1).
+///
+/// **RATIFIED (CIRISPersist#337, shipped persist v11.9.0):** this is now the
+/// canonical `ciris_persist::TRACE_BATCH_KIND` constant (wire value
+/// `0x0005_0001`, unchanged from the provisional allocation), so the receiver
+/// and the CIRISPersist steward allocation can never drift. The payload is a
+/// `ciris_persist::schema::BatchEnvelope`, canonicalized via
+/// `ciris_persist::trace_batch_payload_bytes` / `BatchEnvelope::from_json`;
+/// the mesh-side emitter is CIRISAgent#904. `receive_and_persist` parses the
+/// `BatchEnvelope` internally, so the receive path just feeds it the raw bytes.
+pub const ACCORD_EVENTS_KIND: u32 = TRACE_BATCH_KIND; // ratified (was provisional 0x0005_0001)
+
+/// Relay-mode inbound subscriber. Holds a shared handle to the host's
+/// persist `Engine`; persists every verified trace batch it receives.
 pub struct LensCoreHandler {
     engine: Arc<Engine>,
 }
@@ -52,46 +68,52 @@ impl LensCoreHandler {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-#[async_trait::async_trait]
-impl Handler<AccordEventsBatch> for LensCoreHandler {
-    async fn handle(
-        &self,
-        msg: AccordEventsBatch,
-        ctx: HandlerContext,
-    ) -> Result<AccordEventsResponse, HandlerError> {
-        // `AccordEventsBatch` is `#[serde(transparent)]` over
-        // `BatchEnvelope`; `receive_and_persist` wants raw bytes.
-        // Re-serializing is safe — persist's IngestPipeline
-        // canonicalizes before the signature check, so a serde
-        // round-trip of the outer envelope is not byte-load-bearing.
-        let bytes = serde_json::to_vec(&msg.0).map_err(|e| {
-            HandlerError::SchemaInvalid(format!("re-serialize AccordEventsBatch: {e}"))
-        })?;
-
-        let summary = self
+    /// Persist one opaque trace-batch payload (the raw `BatchEnvelope`
+    /// bytes). Fire-and-forget: errors are logged, never returned to the
+    /// emitter (opaque events carry no response leg).
+    async fn persist_batch(&self, sender_key_id: &str, payload: &[u8]) {
+        match self
             .engine
-            .receive_and_persist(&bytes, &NullScrubber)
+            .receive_and_persist(payload, &NullScrubber)
             .await
-            .map_err(|e| HandlerError::Persist(e.to_string()))?;
+        {
+            Ok(summary) => tracing::debug!(
+                peer = %sender_key_id,
+                envelopes = summary.envelopes_processed,
+                trace_events = summary.trace_events_inserted,
+                llm_calls = summary.trace_llm_calls_inserted,
+                deduplicated = summary.trace_events_conflicted,
+                "relay persisted opaque trace batch (kind {:#010x})",
+                ACCORD_EVENTS_KIND,
+            ),
+            Err(e) => tracing::warn!(
+                peer = %sender_key_id,
+                error = %e,
+                "relay failed to persist opaque trace batch (kind {:#010x})",
+                ACCORD_EVENTS_KIND,
+            ),
+        }
+    }
 
-        tracing::debug!(
-            peer = %ctx.signing_key_id,
-            envelopes = summary.envelopes_processed,
-            trace_events = summary.trace_events_inserted,
-            llm_calls = summary.trace_llm_calls_inserted,
-            deduplicated = summary.trace_events_conflicted,
-            "relay persisted AccordEventsBatch",
-        );
-
-        // `BatchSummary` counts are `usize`; the wire response is
-        // `u32`. Batch sizes are bounded well under u32::MAX by
-        // persist's ingest limits — the cast is lossless in practice.
-        Ok(AccordEventsResponse {
-            trace_events_inserted: summary.trace_events_inserted as u32,
-            trace_llm_calls_inserted: summary.trace_llm_calls_inserted as u32,
-            deduplicated: summary.trace_events_conflicted as u32,
-        })
+    /// Register lens-core's trace-batch subscriber on `edge` and spawn the
+    /// drain task that persists each event. Returns the subscriber id (drop
+    /// it via `edge.unregister_opaque_subscriber` to stop, or let the task
+    /// end when the edge shuts down and the receiver closes).
+    ///
+    /// Replaces the pre-8.0 `edge.register_handler::<AccordEventsBatch,_>` —
+    /// `register_opaque_subscriber` is synchronous and infallible (it just
+    /// inserts an mpsc sender), so callers no longer `.await?`.
+    pub fn spawn_subscriber(engine: Arc<Engine>, edge: &Edge) -> u64 {
+        let (sub_id, mut rx) = edge.register_opaque_subscriber(ACCORD_EVENTS_KIND);
+        let handler = LensCoreHandler::new(engine);
+        tokio::spawn(async move {
+            // The receiver closes when the edge is dropped/shut down → the
+            // loop ends and the task exits cleanly.
+            while let Some((sender_key_id, _kind, payload)) = rx.recv().await {
+                handler.persist_batch(&sender_key_id, &payload).await;
+            }
+        });
+        sub_id
     }
 }

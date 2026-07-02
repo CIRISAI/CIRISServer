@@ -86,6 +86,9 @@ pub mod config_api;
 /// touches the runtime — it writes CEG and nudges this loop. Public so the
 /// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
 pub mod config_reconcile;
+/// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
+/// characteristics onto every response (the "no silent authority" layer).
+pub mod delegation_transparency;
 /// Generic CEWP **family operations** over persist's family CEG DX
 /// (`federation_families` + membership revocations) — create / add / live-roster /
 /// swap, NOT accord-aware. The HUMANITY_ACCORD kill-switch is one specialization.
@@ -153,6 +156,14 @@ pub mod ingest_http;
 /// `cirisgraph_nodes` / `cirisgraph_edges` SQLite tables onto the client's
 /// wire contract so both cards work in server mode.
 pub mod memory_api;
+/// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
+/// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
+/// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
+/// `0x0000_0001` (`WIRE_VOCABULARY_KINDS.md`). An owner administers an IP-less
+/// owned node by federation `key_id`, authorized by the owner fed-ID signature
+/// (`FSD/RNS_CONTROL_RELAY.md` + `FSD/EDGE_8_0_OPAQUE_MIGRATION.md` §6). Public
+/// so the mesh-seed TDD gate (`tests/mesh_seed_e2e.rs`) can drive both halves.
+pub mod mesh_relay;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the

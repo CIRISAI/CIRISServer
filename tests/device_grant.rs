@@ -205,7 +205,11 @@ async fn serve(
     seed_dir: PathBuf,
     ttl: u64,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let app = device_grant::router_with_ttl(engine, owner_key_id, seed_dir, ttl);
+    // Wrap with the SAME global transparency layer prod mounts in `compose.rs`, so
+    // the QA runner exercises the real `x-ciris-delegation` stamping path.
+    let app = device_grant::router_with_ttl(engine, owner_key_id, seed_dir, ttl).layer(
+        axum::middleware::from_fn(ciris_server::delegation_transparency::attach_delegation_header),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -386,6 +390,287 @@ async fn ceg_native_approve_emits_delegation_token_works_and_revoke_kills_it() {
         grants_after["grants"].as_array().unwrap().is_empty(),
         "no live delegations after revoke; got {grants_after}"
     );
+}
+
+/// TRANSPARENCY (CIRISServer delegation): the FULL grant characteristics are shown
+/// to the consumer (a) in the issuance response body AND (b) as the
+/// `x-ciris-delegation` response header on EVERY use — and are ABSENT for a
+/// non-delegated (owner-session) caller.
+#[tokio::test]
+async fn delegation_characteristics_shown_on_issuance_and_every_use() {
+    use ciris_server::delegation_transparency::DELEGATION_HEADER;
+
+    let home = ciris_home();
+    let engine = node().await;
+    let owner_key_id = "dg-owner-xparency";
+    let actor_key_id = "dg-actor-xparency";
+    let _owner_fed_id = setup_local_owner(&engine, owner_key_id, &home).await;
+    register_actor(&engine, actor_key_id).await;
+    let owner = mint_session(&engine, "wa-owner-x", WaRole::Root).await;
+    let ttl = 600u64;
+    let (base, _h) = serve(
+        Arc::clone(&engine),
+        owner_key_id.to_string(),
+        home.clone(),
+        ttl,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // code → approve → poll /token.
+    let (device_code, user_code) = request_code(&client, &base, actor_key_id).await;
+    let approve = client
+        .post(format!("{base}/v1/auth/device/approve"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "user_code": user_code }))
+        .send()
+        .await
+        .expect("owner approve");
+    assert_eq!(approve.status(), 200);
+
+    let token_resp = client
+        .post(format!("{base}/v1/auth/device/token"))
+        .json(&serde_json::json!({ "device_code": device_code, "client_id": actor_key_id }))
+        .send()
+        .await
+        .expect("poll approved");
+    assert_eq!(token_resp.status(), 200);
+    let tj: serde_json::Value = token_resp.json().await.unwrap();
+    let access_token = tj["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // (a) FIRST ISSUANCE — the body carries the full characteristics.
+    let d = &tj["delegation"];
+    assert!(d.is_object(), "issuance body embeds `delegation`; got {tj}");
+    assert_eq!(d["actor"], actor_key_id, "actor = the client");
+    assert_eq!(d["on_behalf_of"], "wa-owner-x", "principal = the owner");
+    assert_eq!(d["role"], "SYSTEM_ADMIN", "wields the owner's authority");
+    assert_eq!(d["scope"][0], SCOPE, "scope echoed as a list");
+    assert_eq!(d["sub_delegation"], false, "no re-delegation");
+    assert_eq!(
+        d["purpose"],
+        serde_json::Value::Null,
+        "no goal on a bare grant"
+    );
+    let expires_at = d["expires_at"].as_u64().expect("expires_at");
+    let issued_at = d["issued_at"].as_u64().expect("issued_at");
+    assert!(expires_at > issued_at, "expiry is after issuance");
+    // The delegated BEARER's TTL is a fixed 1h (`DELEGATED_TTL_SECS`), independent
+    // of the device-code grant TTL passed to `serve` — assert it's live + bounded.
+    let expires_in = d["expires_in"].as_u64().expect("expires_in");
+    assert!(
+        expires_in > 0 && expires_in <= 3600,
+        "expires_in within the bearer TTL; got {expires_in}"
+    );
+    let _ = ttl;
+
+    // (b) EVERY USE — a request bearing the dgrant gets the `x-ciris-delegation`
+    // header (status of the target route is irrelevant to the transparency stamp).
+    let used = client
+        .get(format!("{base}/v1/auth/device/grants"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("use dgrant");
+    let hdr = used
+        .headers()
+        .get(DELEGATION_HEADER)
+        .expect("delegated caller ALWAYS gets the transparency header")
+        .to_str()
+        .expect("header is valid UTF-8")
+        .to_string();
+    let hj: serde_json::Value = serde_json::from_str(&hdr).expect("header is JSON");
+    assert_eq!(hj["actor"], actor_key_id, "header actor matches");
+    assert_eq!(hj["scope"][0], SCOPE, "header scope matches");
+    assert_eq!(
+        hj["expires_at"].as_u64(),
+        Some(expires_at),
+        "header expiry matches issuance"
+    );
+
+    // (c) A NON-DELEGATED caller (owner session) gets NO transparency header.
+    let owner_use = client
+        .get(format!("{base}/v1/auth/device/grants"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("owner list");
+    assert!(
+        owner_use.headers().get(DELEGATION_HEADER).is_none(),
+        "an owner-session (non-delegated) response carries no delegation header"
+    );
+
+    // (d) After revoke, the token is dead → the lookup prunes it → no header.
+    let _ = client
+        .post(format!("{base}/v1/auth/device/revoke"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "client_id": actor_key_id }))
+        .send()
+        .await
+        .expect("revoke");
+    let after = client
+        .get(format!("{base}/v1/auth/device/grants"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("use after revoke");
+    assert!(
+        after.headers().get(DELEGATION_HEADER).is_none(),
+        "a revoked/expired dgrant no longer advertises characteristics"
+    );
+}
+
+/// CONSTRAINTS end-to-end: the owner-initiated `/delegate` carries an action
+/// allow-list + goal → they ride into the minted bearer → surface in the `/claim`
+/// issuance body AND the every-use `x-ciris-delegation` header (transparency of the
+/// bound, not just the grant). Pure-guard enforcement is unit-tested in `gate.rs`.
+#[tokio::test]
+async fn owner_set_constraints_flow_into_issuance_and_header() {
+    use ciris_server::delegation_transparency::DELEGATION_HEADER;
+
+    let home = ciris_home();
+    let engine = node().await;
+    let owner_key_id = "dg-owner-constraints";
+    let actor_key_id = "dg-actor-constraints";
+    let _owner_fed_id = setup_local_owner(&engine, owner_key_id, &home).await;
+    register_actor(&engine, actor_key_id).await;
+    let owner = mint_session(&engine, "wa-owner-c", WaRole::Root).await;
+    let (base, _h) = serve(
+        Arc::clone(&engine),
+        owner_key_id.to_string(),
+        home.clone(),
+        600,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Owner mints a CONSTRAINED delegation to the existing actor: announce-only,
+    // peering explicitly denied, with a stated goal.
+    let offer: serde_json::Value = client
+        .post(format!("{base}/v1/auth/device/delegate"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({
+            "mode": "existing",
+            "existing_key_id": actor_key_id,
+            "constraints": {
+                "actions_allow": ["announce"],
+                "actions_deny": ["peer"],
+                "goal": "seed the canonical mesh"
+            }
+        }))
+        .send()
+        .await
+        .expect("owner delegate")
+        .json()
+        .await
+        .unwrap();
+    let pin = offer["pin"].as_str().expect("offer pin").to_string();
+
+    // Claim the offer → the issuance body carries the bound constraints.
+    let claimed: serde_json::Value = client
+        .post(format!("{base}/v1/auth/device/claim"))
+        .json(&serde_json::json!({ "pin": pin }))
+        .send()
+        .await
+        .expect("claim")
+        .json()
+        .await
+        .unwrap();
+    let d = &claimed["delegation"];
+    assert_eq!(
+        d["actions_allow"][0], "announce",
+        "allow-list carried; got {claimed}"
+    );
+    assert_eq!(d["actions_deny"][0], "peer", "deny-list carried");
+    assert_eq!(
+        d["purpose"], "seed the canonical mesh",
+        "goal surfaces as purpose"
+    );
+    let access_token = claimed["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Every-use header reflects the same bound.
+    let used = client
+        .get(format!("{base}/v1/auth/device/grants"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("use dgrant");
+    let hj: serde_json::Value = serde_json::from_str(
+        used.headers()
+            .get(DELEGATION_HEADER)
+            .expect("transparency header")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        hj["actions_allow"][0], "announce",
+        "header carries the allow-list"
+    );
+    assert_eq!(
+        hj["actions_deny"][0], "peer",
+        "header carries the deny-list"
+    );
+}
+
+/// TIGHTEN-ONLY at approve (agent-initiated flow): the agent requests an
+/// unconstrained code; the OWNER attaches constraints when approving; the minted
+/// bearer carries the owner's narrowed bound (surfaced in the /token issuance body).
+#[tokio::test]
+async fn approve_time_constraints_narrow_the_minted_bearer() {
+    let home = ciris_home();
+    let engine = node().await;
+    let owner_key_id = "dg-owner-tighten";
+    let actor_key_id = "dg-actor-tighten";
+    let _owner_fed_id = setup_local_owner(&engine, owner_key_id, &home).await;
+    register_actor(&engine, actor_key_id).await;
+    let owner = mint_session(&engine, "wa-owner-t", WaRole::Root).await;
+    let (base, _h) = serve(
+        Arc::clone(&engine),
+        owner_key_id.to_string(),
+        home.clone(),
+        600,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Agent asks for a code (no constraints).
+    let (device_code, user_code) = request_code(&client, &base, actor_key_id).await;
+
+    // Owner approves WITH constraints (announce-only, goal set).
+    let approve = client
+        .post(format!("{base}/v1/auth/device/approve"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({
+            "user_code": user_code,
+            "constraints": { "actions_allow": ["announce"], "goal": "seed only" }
+        }))
+        .send()
+        .await
+        .expect("owner approve with constraints");
+    assert_eq!(approve.status(), 200);
+
+    // Poll → the minted bearer's characteristics carry the owner's narrowed bound.
+    let tj: serde_json::Value = client
+        .post(format!("{base}/v1/auth/device/token"))
+        .json(&serde_json::json!({ "device_code": device_code, "client_id": actor_key_id }))
+        .send()
+        .await
+        .expect("poll approved")
+        .json()
+        .await
+        .unwrap();
+    let d = &tj["delegation"];
+    assert_eq!(
+        d["actions_allow"][0], "announce",
+        "approve-set allow-list on the bearer; got {tj}"
+    );
+    assert_eq!(d["purpose"], "seed only", "approve-set goal on the bearer");
 }
 
 #[tokio::test]
