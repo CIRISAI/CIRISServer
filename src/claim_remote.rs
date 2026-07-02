@@ -493,19 +493,35 @@ fn rns_seed_from_target(url: &str) -> Option<String> {
 }
 
 /// Register a just-claimed TARGET node's key record into the LOCAL federation
-/// directory (so the local node KNOWS the target + a `delegates_to(owner → target)`
-/// can be persisted — `put_attestation`'s FK requires the attested key to exist).
+/// directory — as a FULL HYBRID row, never an Ed25519-only bookmark.
 ///
-/// We only hold the target's Ed25519 pubkey (from its NodeCode), NOT its ML-DSA-65
-/// half, so this uses the bypass
-/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
-/// (which does NOT re-verify a scrub signature) rather than the hybrid-proof
-/// `register_federation_key` gate. Idempotent: a row already present is a no-op.
-async fn register_target_key(engine: &Arc<Engine>, nc: &nodecode::NodeCode) -> Result<(), String> {
-    use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord};
+/// The NodeCode the target offered is Ed25519-only (a QR-compact handle; the
+/// ML-DSA-65 pubkey is ~2 KB and can't ride in a scannable code). But a node we
+/// just claimed is **by definition reachable** — so we "look back and ask for
+/// both": fetch the target's OWN self-signed hybrid `SignedKeyRecord` (Ed25519 +
+/// ML-DSA-65 + proof-of-possession) from its unauthenticated
+/// `GET /v1/federation/self-key-record`, verify it is the SAME identity that
+/// offered the NodeCode (key_id + the scanned Ed25519 must match — no
+/// substitution), and admit it through the STRICT
+/// [`register_federation_key`](ciris_persist::prelude::Engine::register_federation_key)
+/// gate, which re-verifies the hybrid PoP. The result is a hybrid-COMPLETE row.
+///
+/// This matters beyond hygiene: the RNS announce-rooting path runs under
+/// `HybridPolicy::Strict`, which REJECTS a hybrid-pending link — so a bookmark
+/// row can never root and the peer stays permanently unreachable over the mesh.
+/// A hybrid-pending row is therefore a bug; we refuse to write one (if the full
+/// record can't be fetched we return an error rather than leave a pending row).
+///
+/// Idempotent: a row already present (e.g. a prior peering) is a no-op — never
+/// clobber an existing richer row.
+async fn register_target_key(
+    engine: &Arc<Engine>,
+    http: &reqwest::Client,
+    nc: &nodecode::NodeCode,
+    base_url: Option<&str>,
+) -> Result<(), String> {
+    use ciris_persist::federation::types::identity_type;
     use ciris_persist::federation::SignedKeyRecord;
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
-    use sha2::{Digest, Sha256};
 
     // Idempotent: already-known target ⇒ nothing to do (never clobber a richer,
     // hybrid-complete row a prior peering may have admitted).
@@ -517,47 +533,63 @@ async fn register_target_key(engine: &Arc<Engine>, nc: &nodecode::NodeCode) -> R
         return Ok(());
     }
 
-    let now = chrono::Utc::now();
-    let reg_envelope = serde_json::json!({ "key_id": nc.key_id });
-    // put_public_key hex-decodes original_content_hash, so it MUST be valid hex.
-    let canonical = ceg_produce_canonicalize(&reg_envelope)
-        .map_err(|e| format!("canonicalize target registration envelope: {e}"))?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-
-    let record = KeyRecord {
-        key_id: nc.key_id.clone(),
-        pubkey_ed25519_base64: nc.pubkey_ed25519_base64.clone(),
-        // Unknown from the NodeCode (Ed25519-only). The row is a local directory
-        // bookmark; a later peering/self-key-record fetch can upgrade it to the
-        // full hybrid identity.
-        pubkey_ml_dsa_65_base64: None,
-        // put_public_key enforces algorithm == "hybrid" (the federation invariant).
-        algorithm: algorithm::HYBRID.into(),
-        // The target is a fabric NODE (infrastructure) — so the CC 4.4.3.4.3
-        // node-agency write gate applies (a delegates_to to it must be infra:*,
-        // which the owner-binding is).
-        identity_type: identity_type::NODE.into(),
-        identity_ref: nc.key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: reg_envelope,
-        original_content_hash,
-        // No scrub signature (we don't hold the target's private keys);
-        // put_public_key does not re-verify it.
-        scrub_signature_classical: String::new(),
-        scrub_signature_pqc: None,
-        scrub_key_id: nc.key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: None,
-        persist_row_hash: String::new(),
-        roles: Vec::new(),
-        attestation_evidence: None,
-    };
-    engine
-        .federation_directory()
-        .put_public_key(SignedKeyRecord { record })
+    // "They offered their Ed25519 (the NodeCode) — look back and ask for BOTH."
+    let base = base_url.ok_or_else(|| {
+        "no reachable target URL to fetch the full hybrid key record — refusing to write a \
+         hybrid-pending bookmark (it could never root over RNS)"
+            .to_string()
+    })?;
+    let url = format!(
+        "{}/v1/federation/self-key-record",
+        base.trim_end_matches('/')
+    );
+    let resp = http
+        .get(&url)
+        .send()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("fetch {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("fetch {url}: HTTP {}", resp.status()));
+    }
+    let signed: SignedKeyRecord = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse self-key-record from {url}: {e}"))?;
+
+    // SECURITY — the fetched record MUST be the SAME identity that offered the
+    // NodeCode: same key_id, and the operator-scanned Ed25519 must match the
+    // fetched one. Otherwise a substituted/MITM target could get ITS OWN key
+    // admitted under our claim. The Ed25519 is the anchor the operator scanned.
+    if signed.record.key_id != nc.key_id {
+        return Err(format!(
+            "self-key-record key_id {} != claimed NodeCode key_id {} (identity substitution?)",
+            signed.record.key_id, nc.key_id
+        ));
+    }
+    if signed.record.pubkey_ed25519_base64 != nc.pubkey_ed25519_base64 {
+        return Err(
+            "self-key-record Ed25519 does not match the offered NodeCode Ed25519 \
+             (identity substitution?)"
+                .to_string(),
+        );
+    }
+    // Safe-mesh floor (mirrors `peer::register_peer_key`): an `accord_holder`
+    // (kill-switch SEAT) may be admitted ONLY through the custody-gated
+    // `POST /v1/accord/holder` — never via a claim side door.
+    if signed.record.identity_type == identity_type::ACCORD_HOLDER {
+        return Err(
+            "refusing to admit an accord_holder key via claim — accord holders must go through \
+             the custody-gated POST /v1/accord/holder"
+                .to_string(),
+        );
+    }
+
+    // STRICT hybrid PoP gate — re-verifies the target's self-signature over BOTH
+    // halves; a forged or incomplete record is rejected here, not stored.
+    engine
+        .register_federation_key(signed)
+        .await
+        .map_err(|e| format!("register target hybrid key (strict gate): {e}"))
 }
 
 /// Append `addr` to the LOCAL node's `net.bootstrap_peers` config:* list (deduped),
@@ -646,9 +678,15 @@ async fn record_claimed_target_locally(
 
     let mut ok = true;
 
-    // (1) target key record.
-    if let Err(e) = register_target_key(&st.engine, &nc).await {
-        tracing::warn!(target = %nc.key_id, error = %e, "claim-remote: register target key locally FAILED (non-fatal)");
+    // The target's reachable base URL — the operator-supplied `target_url` wins
+    // (an explicit address), else the NodeCode's own `transport_hint`. Used both
+    // to fetch the full hybrid key record (1) and to seed `net.bootstrap_peers` (3).
+    let base_url = target_url.or(nc.transport_hint.as_deref());
+
+    // (1) target key record — fetched as a FULL HYBRID record from the target and
+    // admitted through the strict PoP gate (never a hybrid-pending bookmark).
+    if let Err(e) = register_target_key(&st.engine, &st.http, &nc, base_url).await {
+        tracing::warn!(target = %nc.key_id, error = %e, "claim-remote: register target hybrid key locally FAILED (non-fatal)");
         ok = false;
     }
 
@@ -674,10 +712,9 @@ async fn record_claimed_target_locally(
         }
     }
 
-    // (3) transport: append the target's RNS seed to net.bootstrap_peers (dedup).
-    // Prefer the operator-supplied target_url (an explicit reachable address);
-    // fall back to the NodeCode's own transport_hint.
-    if let Some(raw) = target_url.or(nc.transport_hint.as_deref()) {
+    // (3) transport: append the target's RNS seed to net.bootstrap_peers (dedup),
+    // using the same reachable base URL resolved above.
+    if let Some(raw) = base_url {
         if let Some(addr) = rns_seed_from_target(raw) {
             match append_bootstrap_peer(&st.engine, &st.node_key_id, &addr).await {
                 Ok(true) => {

@@ -142,17 +142,22 @@ impl LensCore {
             enable_transport: false,
         };
 
-        // Auth bundle — wire the federation signer into the
-        // authenticated cold-start path (AV-42 announce attestation).
-        // `rooting` + `resolver` are `None` for the initial cutover:
-        // announce-driven discovery is the only active resolution path
-        // until a `PeerResolver` adapter is wired in (tracked as the
-        // "directory-backed resolver" follow-on, CIRISEdge#53 §"Verify-via-persist
-        // contract"). `HybridPolicy::Strict` is the production posture.
+        // Auth bundle — wire the federation signer into the authenticated
+        // cold-start path (AV-42 announce attestation), AND wire the shared
+        // `SqliteBackend` directory as the edge's `RootingDirectory`
+        // (`ciris_edge::verify` blanket-implements it for any
+        // `FederationDirectory`). Without `rooting`, every inbound announce is
+        // DROPPED ("no rooting directory configured") and no peer is ever
+        // reachable by `key_id` over RNS — the same silent gap that broke the
+        // mesh relay on the node path (see `compose::build_edge`). `resolver`
+        // stays `None` by design: an out-of-band resolver needs the peer's
+        // 64-byte Reticulum transport identity, which only the authenticated
+        // announce (consumed by `rooting`) carries — it is not in
+        // `federation_keys`. `HybridPolicy::Strict` is the production posture.
         let ret_auth = ReticulumAuth {
             signer: Some(Arc::clone(&signer)),
-            rooting: None, // FUTURE: wire persist FederationDirectory as RootingDirectory
-            resolver: None, // FUTURE: wire persist FederationDirectory as PeerResolver
+            rooting: Some(backend.clone() as Arc<dyn ciris_edge::RootingDirectory>),
+            resolver: None,
             ..ReticulumAuth::default()
         };
 
