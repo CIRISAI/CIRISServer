@@ -6,15 +6,26 @@ peering A↔B — **entirely through the LOCAL node's API using a constrained
 delegation grant**, reaching the remotes **by fed key_id over RNS**, never by
 curling them directly.
 
-**Status (2026-07-02):** **0.5.73** is the mesh-seed *operability* release. 0.5.72
-shipped the relay but the seed hit two real gaps in the field: (a) `claim_remote`
-was fire-and-forget — the claiming node never recorded what it claimed, so
-lapbuntu2 had no local record of A/B and **no IP to dial them over RNS**; (b) a
-headless node (console-only, no app/session) had **no way to set
-`net.bootstrap_peers`**. 0.5.73 fixes both: **claiming a node now records it in your
-own fed directory + appends its RNS address to `net.bootstrap_peers`**, and a new
-**`ciris-server config set/get` CLI** lets headless nodes be configured from the
-console. The **relay is the path**; the old HTTP "Option A/B" is gone.
+**Status (2026-07-02):** **0.5.74** is the mesh-seed release the field run actually
+needs. The story so far: 0.5.72 shipped the relay; 0.5.73 made claiming record the
+node locally (+ appended its RNS address to `net.bootstrap_peers`) and added a
+`config set/get` CLI. But the live seed then stalled on a subtle gap: the
+`config set/get` CLI only existed in the **standalone binary** (`src/main.rs`),
+while the published **wheel/image** boots through `py_main`, which dispatched only
+`import-traces` + serve. So Node A — running the wheel — had **no `config`
+command**, and therefore no way to flip the one knob the relay depends on:
+**`net.announce_ownership`**. **0.5.74 adds the `config` arm to the wheel/image
+entry**, so a headless wheel node can self-configure from the console.
+
+**The relay dependency the field run surfaced (important):** the relay addresses a
+remote **by fed key_id over RNS**. A node is only reachable by key_id once it has
+emitted its **Reticulum identity announce**, which is gated on
+`net.announce_ownership = true`. A self-scoped node ships with
+`announce_ownership: false` → it never announces → **the relay cannot root its
+key_id and every probe times out.** So enabling the announce on A and B is a
+**bootstrap PREREQUISITE**, done on each node's own console with `config set`
+(deployment, not remote federation-state config) — NOT a post-seed step reached
+*through* the relay (that was the chicken-and-egg the first field run hit).
 
 ---
 
@@ -22,10 +33,11 @@ console. The **relay is the path**; the old HTTP "Option A/B" is gone.
 
 | # | Precondition | State |
 |---|---|---|
-| 0.1 | CIRISServer **0.5.73 on PyPI** + **CIRISStatus v0.3.13** image | ⛔ cut |
-| 0.2 | Fleet on 0.5.73: mac + lapbuntu2 **upgraded in place**; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
+| 0.1 | CIRISServer **0.5.74 on PyPI** + **CIRISStatus** image repinned to 0.5.74 | ⛔ cut |
+| 0.2 | Fleet on 0.5.74: mac + lapbuntu2 **upgraded in place**; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
 | 0.3 | RNS reachability wired: lapbuntu2→A/B (auto, via re-claim) **and A↔B** (set B→A bootstrap, §1) | ⛔ config |
-| 0.4 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
+| 0.4 | **`net.announce_ownership=true` set on A AND B** via `config set` (the announce prereq) + restart | ⛔ config |
+| 0.5 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
 
 ---
 
@@ -55,13 +67,27 @@ identity-preserving path (**your fedID is never wiped**):
 
 3. **Wire the A↔B link** (the claim only links lapbuntu2→A and lapbuntu2→B; A and B
    still need each other for the actual trace replication + peering). A and B are
-   **co-located on the same host**, so on B's console, with the new 0.5.73 CLI:
+   **co-located on the same host**, so on B's console, with the wheel's `config` CLI:
    ```
    ciris-server config set net.bootstrap_peers '["127.0.0.1:4242"]' --home <B-home>
    # then restart B   (A is the RNS origin on 0.0.0.0:4242 — no bootstrap of its own)
    ```
    Confirm A actually listens on `0.0.0.0:4242` and is a transport node
-   (`transport.node=true`) so it forwards for the mesh.
+   (`transport.node=true` — the default on server/proxy nodes) so it forwards for
+   the mesh.
+
+4. **Enable the identity announce on A AND B** — the relay reaches a node **by fed
+   key_id over RNS**, which only works once the node has emitted its Reticulum
+   identity announce. Self-scoped nodes ship `announce_ownership: false`, so on
+   **each** node's own console (this is deployment on a node you operate, not remote
+   config):
+   ```
+   ciris-server config set net.announce_ownership true --home <node-home>
+   # then restart the node   → it now announces its key_id → the relay can root it
+   ```
+   Verify with `ciris-server config get net.announce_ownership --home <node-home>`
+   (→ `true`). Without this, §3's relay probes to A/B **time out** (the first field
+   run's failure). **This is the 0.5.74 fix** — earlier wheels had no `config` arm.
 
 **"Deploy" ≠ "configure directly."** Rolling the binary/image + the console
 `config set` on a node you operate is deployment, not the federation-state
@@ -112,10 +138,17 @@ fed-ID signature *is* the auth. The relay only permits the closed set
 
 Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "...", "body": {...} }`.
 
-1. **Announce A** — `{target: A, POST /v1/federation/announce}` → A promotes its
-   owner-binding `self → federation` + sets `net.announce_ownership=true`
-   (Reticulum identity announce takes effect on A's **next boot**).
-2. **Announce B** — same, `{target: B}`.
+> **Prereq (NOT a relay step):** A and B must already have
+> `net.announce_ownership=true` + a restart (§1.4) so they're reachable by key_id.
+> The relay probes below will time out otherwise. The `POST /v1/federation/announce`
+> owner-binding **promotion** (self→federation cohort scope) below is a *separate*
+> concern from the *transport* announce — the transport announce is the boot-time
+> prereq; this relay step promotes the CEG owner-binding.
+
+1. **Promote A → federation** — `{target: A, POST /v1/federation/announce}` → A
+   promotes its owner-binding `self → federation` cohort scope. (A is already
+   reachable because §1.4 turned on the transport announce.)
+2. **Promote B → federation** — same, `{target: B}`.
 3. **Fetch key records** — `{target: A, GET /v1/federation/self-key-record}` and
    `{target: B, …}` (public; also fetchable directly). Needed for peering.
 4. **Peer A→B** — `{target: A, POST /v1/federation/peering, body: {peer_key_id: B,
@@ -157,10 +190,12 @@ Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "..
 | Gate | State |
 |---|---|
 | relay both legs · delegation constraints · TDD gate (0.5.72) | ✅ done |
-| **0.5.73** (claim-records-locally + `config set` CLI + copy-all card) on PyPI + **CIRISStatus v0.3.13** image | ⛔ cut |
+| claim-records-locally + `config set` CLI + copy-all card (0.5.73) | ✅ done |
+| **0.5.74** (`config` arm in the WHEEL/image entry) on PyPI + **CIRISStatus** image repinned | ⛔ cut |
 | mac + lapbuntu2 upgraded in place; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
 | A↔B bootstrap wired (B→A, §1.3); lapbuntu2→A/B auto (re-claim) | ⛔ config |
+| **`net.announce_ownership=true` on A + B** (§1.4) + restart — the relay-reachability prereq | ⛔ config |
 | Delegation grant issued (§2) | ⛔ your move |
 | Seed run (§3) + verify (§4) | ⛔ blocked on the above |
 
-**Ready to seed the moment the fleet is on 0.5.73, A/B re-claimed, A↔B wired, and you hand me a grant.**
+**Ready to seed the moment the fleet is on 0.5.74, A/B re-claimed + announcing, A↔B wired, and you hand me a grant.**
