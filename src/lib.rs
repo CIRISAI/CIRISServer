@@ -507,6 +507,110 @@ pub fn log_dir_from_args(args: &[String]) -> std::path::PathBuf {
         .join("logs")
 }
 
+// ── `config set/get` console subcommand (shared by the binary AND the wheel) ──
+// These live in the LIB (not `src/main.rs`) so the pip console-script — which
+// enters through `python::py_main`, NOT the binary's `main()` — has the exact
+// same `ciris-server config set/get` surface. Before this, `config` was only in
+// the binary, so the published WHEEL/image `ciris-server` had no way to set
+// boot-structural knobs (e.g. `net.announce_ownership`) on a headless node
+// (CIRISServer mesh-seed blocker: Node A runs the wheel, couldn't self-configure).
+
+/// `ciris-server config set <key> <json-value> [--home <path>] [--key-id <name>]
+/// [--reason <text>]` — write a node-signed `config:*` object from the console.
+/// JSON-first value parse (`'["a:1"]'`→List, `true`→Bool, `7`→I64), bare-string
+/// fallback. Used by the headless/no-session path.
+pub async fn run_config_set_cli(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut home: Option<String> = None;
+    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut reason = "console-cli".to_string();
+    let mut key: Option<String> = None;
+    let mut value_raw: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--reason" => reason = args.next().context("--reason needs a value")?,
+            other if other.starts_with("--") => {
+                return Err(anyhow::anyhow!("unknown config-set arg: {other}"))
+            }
+            positional => {
+                if key.is_none() {
+                    key = Some(positional.to_string());
+                } else if value_raw.is_none() {
+                    value_raw = Some(positional.to_string());
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "unexpected extra config-set arg: {positional}"
+                    ));
+                }
+            }
+        }
+    }
+    let key = key.context("config set requires <key> (e.g. net.announce_ownership)")?;
+    let value_raw = value_raw
+        .context("config set requires <json-value> (e.g. true or '[\"108.61.242.236:4242\"]')")?;
+    let value = parse_config_value(&value_raw);
+    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
+    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let entry = run_config_set(cfg, &key, value, &reason).await?;
+    println!(
+        "✅ config set {} (version {}, authored by {})",
+        entry.key, entry.version, entry.updated_by
+    );
+    println!("{}", serde_json::to_string_pretty(&entry.value)?);
+    Ok(())
+}
+
+/// `ciris-server config get <key> [--home <path>] [--key-id <name>]` — read the
+/// latest-wins `config:*` value from the console.
+pub async fn run_config_get_cli(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut home: Option<String> = None;
+    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut key: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            other if other.starts_with("--") => {
+                return Err(anyhow::anyhow!("unknown config-get arg: {other}"))
+            }
+            positional => {
+                if key.is_none() {
+                    key = Some(positional.to_string());
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "unexpected extra config-get arg: {positional}"
+                    ));
+                }
+            }
+        }
+    }
+    let key = key.context("config get requires <key> (e.g. net.announce_ownership)")?;
+    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
+    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    match run_config_get(cfg, &key).await? {
+        Some(entry) => println!("{}", serde_json::to_string_pretty(&entry.value)?),
+        None => eprintln!("(no config for key {key:?})"),
+    }
+    Ok(())
+}
+
+/// Parse a `config set` value: JSON-first (so `'["a:1"]'`→List, `true`→Bool,
+/// `7`→I64), with a bare-string fallback.
+pub fn parse_config_value(raw: &str) -> ConfigValue {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => serde_json::from_value::<ConfigValue>(v)
+            .unwrap_or_else(|_| ConfigValue::Str(raw.to_string())),
+        Err(_) => ConfigValue::Str(raw.to_string()),
+    }
+}
+
 // ── PyO3 abi3 wheel surface (the shape CIRISAgent consumes) ──────────────────
 // Gated behind the `python` feature so the binary never links libpython.
 #[cfg(feature = "python")]
@@ -551,6 +655,22 @@ mod python {
                     )
                 })?;
                 rt_block_on(crate::import_traces(&dir))
+            }
+            // `ciris-server config set/get <key> [value] …` — node-signed
+            // `config:*` write/read from the console. This arm MUST live here (not
+            // just in the binary's `main()`) so the pip WHEEL/image `ciris-server`
+            // can set boot-structural knobs (e.g. `net.announce_ownership`,
+            // `net.bootstrap_peers`) on a headless node with no app/owner session.
+            Some("config") => {
+                let sub = args.next();
+                match sub.as_deref() {
+                    Some("set") => rt_block_on(crate::run_config_set_cli(args)),
+                    Some("get") => rt_block_on(crate::run_config_get_cli(args)),
+                    other => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "usage: ciris-server config set <key> <json-value> [--home <path>] [--key-id <name>]\n\
+                         \x20      ciris-server config get <key> [--home <path>] [--key-id <name>] (got {other:?})"
+                    ))),
+                }
             }
             // Default-serve path. `first` is the already-consumed first token (a
             // leading flag like `--home`/`--key-id`, or `None` for a bare boot).
