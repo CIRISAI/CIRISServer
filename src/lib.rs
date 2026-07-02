@@ -519,9 +519,7 @@ pub fn log_dir_from_args(args: &[String]) -> std::path::PathBuf {
 /// [--reason <text>]` — write a node-signed `config:*` object from the console.
 /// JSON-first value parse (`'["a:1"]'`→List, `true`→Bool, `7`→I64), bare-string
 /// fallback. Used by the headless/no-session path.
-pub async fn run_config_set_cli(
-    mut args: impl Iterator<Item = String>,
-) -> anyhow::Result<()> {
+pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
     let mut key_id = config::DEFAULT_KEY_ID.to_string();
@@ -566,9 +564,7 @@ pub async fn run_config_set_cli(
 
 /// `ciris-server config get <key> [--home <path>] [--key-id <name>]` — read the
 /// latest-wins `config:*` value from the console.
-pub async fn run_config_get_cli(
-    mut args: impl Iterator<Item = String>,
-) -> anyhow::Result<()> {
+pub async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
     let mut key_id = config::DEFAULT_KEY_ID.to_string();
