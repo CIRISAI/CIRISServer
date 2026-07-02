@@ -6,26 +6,43 @@ peering A↔B — **entirely through the LOCAL node's API using a constrained
 delegation grant**, reaching the remotes **by fed key_id over RNS**, never by
 curling them directly.
 
-**Status (2026-07-02):** **0.5.74** is the mesh-seed release the field run actually
-needs. The story so far: 0.5.72 shipped the relay; 0.5.73 made claiming record the
-node locally (+ appended its RNS address to `net.bootstrap_peers`) and added a
-`config set/get` CLI. But the live seed then stalled on a subtle gap: the
-`config set/get` CLI only existed in the **standalone binary** (`src/main.rs`),
-while the published **wheel/image** boots through `py_main`, which dispatched only
-`import-traces` + serve. So Node A — running the wheel — had **no `config`
-command**, and therefore no way to flip the one knob the relay depends on:
-**`net.announce_ownership`**. **0.5.74 adds the `config` arm to the wheel/image
-entry**, so a headless wheel node can self-configure from the console.
+**Status (2026-07-02):** **0.5.75** is the release that makes the relay actually
+resolve a peer by key_id. The story: 0.5.72 shipped the relay; 0.5.73 made claiming
+record the node locally + a `config set/get` CLI; 0.5.74 put that CLI in the
+wheel/image entry so a headless node can set `net.announce_ownership=true`. But
+even with A announcing, the 0.5.74 relay STILL timed out — two deeper gaps that
+0.5.75 fixes:
 
-**The relay dependency the field run surfaced (important):** the relay addresses a
-remote **by fed key_id over RNS**. A node is only reachable by key_id once it has
-emitted its **Reticulum identity announce**, which is gated on
-`net.announce_ownership = true`. A self-scoped node ships with
-`announce_ownership: false` → it never announces → **the relay cannot root its
-key_id and every probe times out.** So enabling the announce on A and B is a
-**bootstrap PREREQUISITE**, done on each node's own console with `config set`
-(deployment, not remote federation-state config) — NOT a post-seed step reached
-*through* the relay (that was the chicken-and-egg the first field run hit).
+1. **The edge `rooting` hook was never wired.** `ReticulumAuth.rooting` was `None`,
+   so the edge **dropped every inbound announce** ("no rooting directory
+   configured") and no peer ever became addressable by key_id — the relay queued
+   the send (store-and-forward) and timed out at 30s. 0.5.75 wires the persist
+   `FederationDirectory` (which blanket-implements `RootingDirectory`) at both
+   edge sites. Rooting is announce-driven and **self-heals within one announce
+   interval (300 s)**, sooner on reconnect. It also wires the announce event bus to
+   the log, so rooting/rejections are finally visible in `ciris-server.log`.
+2. **Hybrid-complete keys.** The claim path wrote an Ed25519-only bookmark; a
+   **hybrid-pending row can never root under `HybridPolicy::Strict`**. 0.5.75's
+   claim "looks back and asks for both" — fetches the target's full self-signed
+   hybrid `SignedKeyRecord` from `GET /v1/federation/self-key-record`, verifies it
+   matches the scanned NodeCode, and admits it through the strict PoP gate → a
+   hybrid-COMPLETE row.
+
+**Still a bootstrap PREREQUISITE:** `net.announce_ownership=true` on A and B (via
+`config set` on each node's own console) — a node reachable by key_id over RNS
+must first emit its Reticulum identity announce. This is deployment, not a step
+over the relay.
+
+**A + B RESEED WITH NEW key_ids (do NOT preserve identity).** lapbuntu2 already
+holds **legacy hybrid-pending bookmark rows** for the old A/B key_ids
+(`ciris-canonical-1-nhhdky6csf`, `ciris-status-1-hz4kp5kpvi`), written by the
+pre-0.5.75 claim. Those rows can never root, and there is no in-place secure
+upgrade (by design — nothing creates pending rows post-0.5.75, so a repair
+primitive would be a one-time hack). The clean fix: **wipe + reseed A and B so
+they mint fresh key_ids**; lapbuntu2 then claims the NEW key_ids → no existing
+row → the strict gate writes hybrid-COMPLETE rows. A and B are fresh un-federated
+service nodes, so a new derived key_id costs nothing. The old pending rows sit
+orphaned and harmless.
 
 ---
 
@@ -33,37 +50,44 @@ key_id and every probe times out.** So enabling the announce on A and B is a
 
 | # | Precondition | State |
 |---|---|---|
-| 0.1 | CIRISServer **0.5.74 on PyPI** (Node A). **Node B / CIRISStatus v0.3.14 is already fine** — it pins ciris-server v0.5.73, whose substrate (edge/persist/verify) is byte-identical to 0.5.74; 0.5.74 only adds the `config` arm to the ciris-server WHEEL, which B doesn't use (its own binary already had `config`). Repin to v0.5.74 is optional/cosmetic. | ⛔ cut (A) |
-| 0.2 | Fleet on 0.5.74: mac + lapbuntu2 **upgraded in place**; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
+| 0.1 | CIRISServer **0.5.75 on PyPI** — the rooting + hybrid-key fixes. lapbuntu2 (relay sender) AND A/B (rooting receivers + response senders) all need it; CIRISStatus B repinned to 0.5.75. | ⛔ cut |
+| 0.2 | Fleet on 0.5.75: mac + lapbuntu2 **upgraded in place**; **A + B wiped + fresh-seeded with NEW key_ids** (§1), then re-claimed | ⛔ deploy |
 | 0.3 | RNS reachability wired: lapbuntu2→A/B (auto, via re-claim) **and A↔B** (set B→A bootstrap, §1) | ⛔ config |
-| 0.4 | **`net.announce_ownership=true` set on A AND B** via `config set` (the announce prereq) + restart | ⛔ config |
-| 0.5 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
+| 0.4 | **`net.announce_ownership=true` on A AND B** via `config set` + restart (the announce prereq) | ⛔ config |
+| 0.5 | **Claimer rows are hybrid-COMPLETE**: `pubkey_ml_dsa_65` present for A + B in lapbuntu2's `federation_keys` (auto, via the 0.5.75 claim fetch) | ⛔ verify |
+| 0.6 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
 
 ---
 
 ## 1. Fleet roll — keep your fedID, upgrade mac/lapbuntu2, wipe+re-claim A/B
 
 The relay is bilateral: lapbuntu2 hosts `POST /v1/mesh/relay` and *sends*; A and B
-must *receive* on opaque kind `0x0000_0001` — which needs edge v8.x + the
-`MeshControlHandler` (both in 0.5.7x). So every node must be on 0.5.73. The clean,
-identity-preserving path (**your fedID is never wiped**):
+must *receive* on opaque kind `0x0000_0001` (edge v8.x + `MeshControlHandler`) AND
+**root** each other's announces (the 0.5.75 `rooting` fix). So **every node must be
+on 0.5.75** — lapbuntu2, A, and B alike. Your owner fedID is never wiped; A/B mint
+fresh key_ids (see below).
 
 1. **mac + lapbuntu2 — upgrade in place** (identity-preserving; persist auto-migrates):
-   `pip install -U ciris-server==0.5.73` (or the standalone binary) + restart. Your
+   `pip install -U ciris-server==0.5.75` (or the standalone binary) + restart. Your
    owner fedID (`eric-moore-v2-portable-…`) lives here and is untouched.
 
-2. **A + B — wipe, fresh-install 0.5.73, re-claim.** A/B already have a ROOT, so a
-   re-claim would `409`; a fresh install clears that. Cost: A/B mint **new** derived
-   key_ids (fine for canonical/status service nodes) and lose their (re-seedable)
-   corpus. Then **re-claim each from lapbuntu2** (`ciris-server claim …` or the app).
-   Because 0.5.73's claim now **records the node locally**, this one step auto-fixes
-   the whole "lapbuntu2 forgot A/B" problem:
+2. **A + B — wipe, fresh-install 0.5.75, re-claim → NEW key_ids.** A/B already have a
+   ROOT (re-claim would `409`) AND lapbuntu2 holds legacy hybrid-pending bookmark rows
+   for their OLD key_ids (which can never root). A fresh wipe fixes both: A/B mint
+   **new** derived key_ids, so lapbuntu2 claims a clean identity with no pre-existing
+   row. Then **re-claim each from lapbuntu2** (`ciris-server claim …` or the app).
+   The 0.5.75 claim auto-fixes the whole "lapbuntu2 forgot A/B" problem AND writes a
+   hybrid-complete row:
    - A/B appear in lapbuntu2's `GET /v1/setup/owned-nodes`,
-   - their key records land in lapbuntu2's `federation_keys`,
+   - their key records land in lapbuntu2's `federation_keys` **hybrid-COMPLETE** —
+     the claim fetches each target's full self-key-record + admits it through the
+     strict PoP gate, so `pubkey_ml_dsa_65` is present (a pending row could never
+     root). Verify: `GET /v1/federation/peers` / a DB check shows ml_dsa non-null.
    - **their RNS address is appended to lapbuntu2's `net.bootstrap_peers`** → lapbuntu2
-     can now dial them (the "≥1 node with an IP" the mesh needs). Restart lapbuntu2
-     once after the re-claims so the new bootstrap takes effect.
-   - Node B = the **CIRISStatus v0.3.13** image (repinned to 0.5.73).
+     can now dial them. Restart lapbuntu2 once after the re-claims so the new bootstrap
+     takes effect.
+   - Node B = the **CIRISStatus image repinned to ciris-server v0.5.75** (required —
+     the rooting fix is in `build_edge`, which B runs via `serve_with_adapter`).
 
 3. **Wire the A↔B link** (the claim only links lapbuntu2→A and lapbuntu2→B; A and B
    still need each other for the actual trace replication + peering). A and B are
@@ -191,11 +215,13 @@ Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "..
 |---|---|
 | relay both legs · delegation constraints · TDD gate (0.5.72) | ✅ done |
 | claim-records-locally + `config set` CLI + copy-all card (0.5.73) | ✅ done |
-| **0.5.74** (`config` arm in the WHEEL/image entry) on PyPI — Node A. Node B (CIRISStatus v0.3.14) already substrate-compatible; no re-roll needed | ⛔ cut (A) |
-| mac + lapbuntu2 upgraded in place; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
+| wheel/image `config` arm (0.5.74) | ✅ done |
+| **0.5.75** — wire edge `rooting` (peers become reachable by key_id) + announce-log + claim writes hybrid-COMPLETE keys | ⛔ cut |
+| Fleet on 0.5.75 (lapbuntu2 + A + B); **A + B reseeded with NEW key_ids**, re-claimed | ⛔ deploy |
 | A↔B bootstrap wired (B→A, §1.3); lapbuntu2→A/B auto (re-claim) | ⛔ config |
-| **`net.announce_ownership=true` on A + B** (§1.4) + restart — the relay-reachability prereq | ⛔ config |
+| **`net.announce_ownership=true` on A + B** (§1.4) + restart | ⛔ config |
+| Claimer rows hybrid-complete (`pubkey_ml_dsa_65` present) | ⛔ verify |
 | Delegation grant issued (§2) | ⛔ your move |
 | Seed run (§3) + verify (§4) | ⛔ blocked on the above |
 
-**Ready to seed the moment the fleet is on 0.5.74, A/B re-claimed + announcing, A↔B wired, and you hand me a grant.**
+**Ready to seed the moment the fleet is on 0.5.75, A/B reseeded (new key_ids) + announcing + hybrid-complete in lapbuntu2's directory, A↔B wired, and you hand me a grant.**

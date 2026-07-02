@@ -1,22 +1,25 @@
 # Bridge runbook — FRESH SEED the canonical mesh (wipe + reclaim clean)
 
-> ## ⚡ REFRESHED 2026-07-02 for the 0.5.74 mesh substrate — READ THIS FIRST
+> ## ⚡ REFRESHED 2026-07-02 for the 0.5.75 mesh substrate — READ THIS FIRST
 >
 > **Substrate floor is now edge v8.3.0 · persist v11.9.1 · verify v8.3.0** (CC 0.7
-> opaque wire vocabulary). `pip install ciris-server==0.5.74` for Node A. **Node B /
-> CIRISStatus v0.3.14 is already substrate-compatible** — it pins ciris-server v0.5.73,
-> whose edge/persist/verify substrate is byte-identical to 0.5.74 (0.5.74 only adds the
-> `config` arm to the ciris-server *wheel*, which B doesn't run), so no B re-roll is
-> needed; repin to v0.5.74 is optional. Every node on the mesh MUST be on the v8.x
-> substrate — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
+> opaque wire vocabulary). **`pip install ciris-server==0.5.75` on EVERY node** —
+> lapbuntu2, A, AND B. **Node B / CIRISStatus MUST repin ciris-server → v0.5.75 and
+> redeploy** (unlike 0.5.74, this is NOT optional): 0.5.75's rooting fix lives in
+> `ciris_server::compose::build_edge`, which CIRISStatus runs via
+> `serve_with_adapter` — a B still on v0.5.73 would also drop every inbound announce
+> and never root A. Every node MUST be on the v8.x substrate — edge v8.0's
+> `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
 >
-> **0.5.74 is the release that makes the WHEEL/image self-configurable.** The
-> `ciris-server config set/get` CLI existed only in the standalone binary through
-> 0.5.73; the published wheel/image (which is what Node A runs) had no `config` arm,
-> so a headless wheel node couldn't set boot-structural knobs — in particular
-> `net.announce_ownership`, the knob the RNS relay's key_id-reachability depends on.
-> 0.5.74 adds `config` to the wheel entry, so **A can now enable its own announce
-> from the console** (§4.5 / §4b).
+> **0.5.75 is the release that makes the relay actually resolve a peer by key_id.**
+> Prior releases got the pieces in place (relay 0.5.72, claim-records-locally 0.5.73,
+> wheel `config` CLI 0.5.74 so a headless node can set `net.announce_ownership`), but
+> the relay STILL timed out. 0.5.75 fixes the two deeper gaps: (1) it wires the edge
+> **`rooting`** hook (the persist directory) — without it the edge dropped every
+> inbound announce and NO peer was reachable by key_id; and (2) it makes the claim
+> write **hybrid-COMPLETE** key rows (fetch the target's full self-key-record + strict
+> PoP gate) — a hybrid-pending row can never root under `HybridPolicy::Strict`. It
+> also logs announce rooting/rejections so the mesh is finally observable.
 >
 > **The announce + peering steps below (§4b onward — the direct `curl POST
 > /v1/federation/announce` / `/peering` on each remote) are SUPERSEDED.** Post-claim,
@@ -41,8 +44,8 @@ nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
 edge **v8.3.0** · persist **v11.9.1** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1
-(CC 0.7 opaque wire vocabulary; the 0.5.74 mesh floor).
-`pip install ciris-server==0.5.74` (the wheel carries the pinned substrate; persist auto-migrates
+(CC 0.7 opaque wire vocabulary; the 0.5.75 mesh floor).
+`pip install ciris-server==0.5.75` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
 
@@ -115,7 +118,7 @@ Repeat steps 2–4 on Node B with `--key-id ciris-status-1`. (The desktop/mobile
 first-run flow does the equivalent — mint fed-ID → self-claim — if you prefer a GUI; the
 0.5.61 custody ladder means no YubiKey is required.)
 
-**0.5.74 — the claim now records the node locally.** When you claim A/B *from lapbuntu2*
+**0.5.75 — the claim now records the node locally.** When you claim A/B *from lapbuntu2*
 (the seeding node), the claim persists the target's key record + owner-binding into
 lapbuntu2's own corpus (so `GET /v1/setup/owned-nodes` lists them) **and appends the
 target's RNS address (`host:4242`) to lapbuntu2's `net.bootstrap_peers`** — so lapbuntu2
@@ -123,7 +126,7 @@ can dial them. Restart lapbuntu2 once after the claims for the new bootstrap to 
 
 ### 4.5 RNS mesh bootstrap — every node must dial the seed (A)
 The mesh is: **A is the RNS origin (`0.0.0.0:4242`, no bootstrap of its own); every other
-node dials A.** lapbuntu2's entry is set automatically by the 0.5.74 claim (above).
+node dials A.** lapbuntu2's entry is set automatically by the 0.5.75 claim (above).
 
 > **`net.bootstrap_peers` is an IP:port list — NOT a hostname.** `parse_bootstrap_peers`
 > (`config.rs`) parses each entry as a `SocketAddr` and **silently skips** anything that
@@ -133,7 +136,7 @@ node dials A.** lapbuntu2's entry is set automatically by the 0.5.74 claim (abov
 - **Node A** — `transport.node` **defaults to `true`** for every server node
   (`config_reconcile.rs::DEFAULT_TRANSPORT_NODE`), and it listens on `0.0.0.0:4242` as the
   RNS origin — no bootstrap of its own. But A **does** need its identity announce enabled
-  (§4b) so lapbuntu2 can reach it by key_id over the relay. On the **0.5.74 wheel/image**,
+  (§4b) so lapbuntu2 can reach it by key_id over the relay. On the **0.5.75 wheel/image**,
   A now has the `config` CLI to do this from its own console:
   ```sh
   ciris-server config set net.announce_ownership true --home /var/lib/ciris --key-id ciris-canonical-1
@@ -158,7 +161,7 @@ node dials A.** lapbuntu2's entry is set automatically by the 0.5.74 claim (abov
 > **times out** (the first field run's failure). Do this on **both** A and B before §4b/§5.
 
 > **§4b's owner-binding PROMOTION and §5 PEERING below are driven over the relay, not by
-> direct curl.** Once every node is on 0.5.74, bootstrapped to A, **and announcing**, the
+> direct curl.** Once every node is on 0.5.75, bootstrapped to A, **and announcing**, the
 > owner-binding promotion (self→federation) + A↔B peering are driven from lapbuntu2 over the
 > **RNS relay** with a delegation grant. Follow `FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md`
 > §2–§4. The direct-HTTP steps below are kept only as the historical reference.
