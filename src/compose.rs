@@ -1393,6 +1393,45 @@ async fn setup_peer_replication(
 /// (directory + queue) and the node's transport-signing identity. The federation
 /// signer is wired into the authenticated-announce path (AV-42); the transport-
 /// tier RET dual-key identity load-or-generates at `ret_identity_path`.
+/// Bridge the edge's Reticulum **announce-event bus** to `tracing`. Every
+/// inbound announce the transport processes is logged — rooted (`Info`) with
+/// the peer `key_id`, or rejected/failed (`Warning`/`Error`) with the reason —
+/// so RNS rooting is observable in `ciris-server.log` instead of silent. This
+/// is the diagnosability half of the rooting fix: the original `rooting: None`
+/// gap was invisible precisely because announce processing logged nothing.
+///
+/// Runs for the process lifetime; the task exits when the bus is dropped
+/// (transport teardown) or on a closed channel. A lagged receiver logs the
+/// drop count rather than aborting — announces are periodic, so a missed batch
+/// is re-emitted on the next `ANNOUNCE_INTERVAL`.
+fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
+    use ciris_edge::events::EventSeverity;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = bus.subscribe_announces();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => match ev.severity {
+                    EventSeverity::Warning | EventSeverity::Error => tracing::warn!(
+                        peer = ?ev.peer_key_id,
+                        "RNS announce not rooted: {}",
+                        ev.message
+                    ),
+                    EventSeverity::Info => tracing::info!(
+                        peer = ?ev.peer_key_id,
+                        "RNS announce rooted (peer now reachable by key_id): {}",
+                        ev.message
+                    ),
+                },
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("announce-logger lagged; dropped {n} announce events");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -1485,10 +1524,44 @@ async fn build_edge(
              identity is not federation-visible. Promote via POST /v1/federation/announce."
         );
     }
+    // ── Announce rooting (the AV-42 authenticated cold-start) ──────────────
+    // The persist `federation_keys` directory IS the edge's `RootingDirectory`
+    // — `ciris_edge::verify` blanket-implements `RootingDirectory` for any
+    // `FederationDirectory`, so `backend` (the shared `SqliteBackend`) drops in
+    // directly. This is load-bearing: on every inbound announce the edge calls
+    // `root_binding(key_id, claimed_ed25519)` against this directory, verifies
+    // the AV-42 attestation, and records `key_id → transport-identity` so the
+    // peer becomes addressable by `key_id` over RNS. With `rooting: None` the
+    // edge DROPS every announce ("no rooting directory configured") and NO peer
+    // is EVER reachable by key_id — the mesh-relay times out even though the
+    // peer's key record is right there in the directory. That silent gap was
+    // the root cause of the mesh-seed relay timeouts; wiring it here is the fix.
+    // Rooting is announce-driven and self-heals: a peer re-roots within one
+    // ANNOUNCE_INTERVAL (300 s) — sooner on link reconnect — after any restart.
+    let rooting: Arc<dyn ciris_edge::RootingDirectory> = backend.clone();
+
+    // ── Observability: surface every announce root/reject in the node log ──
+    // The reason the rooting gap was invisible for so long is that announce
+    // processing emitted NOTHING to the log. Wire the edge announce-event bus
+    // and bridge it to `tracing`, so "did peer X root, or why was it rejected?"
+    // is answerable from `ciris-server.log` instead of a mystery. Subscribe
+    // BEFORE the transport starts so no early announce is missed.
+    let event_bus = Arc::new(ciris_edge::events::EventBus::default());
+    spawn_announce_logger(Arc::clone(&event_bus));
+
     let ret_auth = ReticulumAuth {
         signer: Some(Arc::clone(&signer)),
-        rooting: None,
+        rooting: Some(rooting),
+        // `resolver` stays `None` BY DESIGN, not oversight. An out-of-band
+        // `PeerResolver` must return the peer's 64-byte Reticulum transport
+        // identity (x25519‖ed25519); that is conveyed ONLY inside the
+        // authenticated announce that `rooting` above already consumes, and is
+        // NOT stored in `federation_keys` (which holds the fed *signing* key).
+        // So `rooting` covers 100% of key_id addressing; a standalone resolver
+        // would need edge to expose the rooted identity for persistence and
+        // would add a second, weaker (non-announce-verified) trust path.
         resolver: None,
+        event_bus: Some(Arc::clone(&event_bus)),
         transport_identity_keystore: Some(transport_keystore),
         ..ReticulumAuth::default()
     };
