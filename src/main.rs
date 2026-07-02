@@ -139,6 +139,22 @@ async fn main() -> Result<()> {
         // works against a remote node's public read-API). The "local client" that
         // claims a node with just its NodeCode + PIN.
         Some("claim") => run_claim(args).await,
+        // `ciris-server config set <key> <json-value> [--home <path>] [--key-id <alias>]
+        //  [--reason <text>]` / `ciris-server config get <key> [--home <path>]
+        //  [--key-id <alias>]` — read/write the node's signed `config:*` CEG objects
+        // from the CONSOLE (console = trusted; uses the node's own on-disk signer, no
+        // session). Lets a HEADLESS node set knobs (e.g. `net.bootstrap_peers`) that
+        // otherwise only the app/owner-session `/v1/config` surface could reach.
+        Some("config") => match args.next().as_deref() {
+            Some("set") => run_config_set_cli(args).await,
+            Some("get") => run_config_get_cli(args).await,
+            other => Err(anyhow::anyhow!(
+                "usage: ciris-server config set <key> <json-value> [--home <path>] \
+                 [--key-id <alias>] [--reason <text>]\n       ciris-server config get <key> \
+                 [--home <path>] [--key-id <alias>] (got {:?})",
+                other
+            )),
+        },
         // `ciris-server identity create ...` consumed the first arg already; the
         // default arm boots the fabric node. The default-serve path takes the ONLY
         // two bootstrap inputs (Server 0.5 zero-env): `--home <path>` (the data
@@ -396,6 +412,101 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
     println!("✅ claim accepted by {target_url}");
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// `ciris-server config set <key> <json-value> …` — write a signed `config:v1` CEG
+/// object from the console (node-signed; the SAME path the node + `/v1/config` use).
+async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> Result<()> {
+    use ciris_server::config::{DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
+
+    let mut home: Option<String> = None;
+    let mut key_id = DEFAULT_KEY_ID.to_string();
+    let mut reason = "console-cli".to_string();
+    let mut key: Option<String> = None;
+    let mut value_raw: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--reason" => reason = args.next().context("--reason needs a value")?,
+            other if other.starts_with("--") => {
+                return Err(anyhow::anyhow!("unknown config-set arg: {other}"));
+            }
+            positional => {
+                if key.is_none() {
+                    key = Some(positional.to_string());
+                } else if value_raw.is_none() {
+                    value_raw = Some(positional.to_string());
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "unexpected extra config-set arg: {positional}"
+                    ));
+                }
+            }
+        }
+    }
+    let key = key.context("config set requires <key> (e.g. net.bootstrap_peers)")?;
+    let value_raw =
+        value_raw.context("config set requires <json-value> (e.g. '[\"108.61.242.236:4242\"]')")?;
+    let value = parse_config_value(&value_raw);
+
+    let home = home.unwrap_or_else(|| DEFAULT_CIRIS_HOME.to_string());
+    let cfg = ciris_server::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let entry = ciris_server::run_config_set(cfg, &key, value, &reason).await?;
+    println!(
+        "✅ config set {} (version {}, authored by {})",
+        entry.key, entry.version, entry.updated_by
+    );
+    println!("{}", serde_json::to_string_pretty(&entry.value)?);
+    Ok(())
+}
+
+/// `ciris-server config get <key> …` — read the latest-wins value of a `config:*`
+/// key from the node's signed store (prints JSON; unset ⇒ a note on stderr).
+async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> Result<()> {
+    use ciris_server::config::{DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
+
+    let mut home: Option<String> = None;
+    let mut key_id = DEFAULT_KEY_ID.to_string();
+    let mut key: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            other if other.starts_with("--") => {
+                return Err(anyhow::anyhow!("unknown config-get arg: {other}"));
+            }
+            positional => {
+                if key.is_none() {
+                    key = Some(positional.to_string());
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "unexpected extra config-get arg: {positional}"
+                    ));
+                }
+            }
+        }
+    }
+    let key = key.context("config get requires <key> (e.g. net.bootstrap_peers)")?;
+    let home = home.unwrap_or_else(|| DEFAULT_CIRIS_HOME.to_string());
+    let cfg = ciris_server::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    match ciris_server::run_config_get(cfg, &key).await? {
+        Some(entry) => println!("{}", serde_json::to_string_pretty(&entry.value)?),
+        None => eprintln!("(config key {key:?} is unset)"),
+    }
+    Ok(())
+}
+
+/// Parse a `config set` value: **JSON first** (so `'["1.2.3.4:4242"]'` → list,
+/// `'true'` → bool, `'7'` → int, `'"foo"'` → string), falling back to a bare string
+/// for a non-JSON token (so `config set node.alias mynode` records the string
+/// `"mynode"` rather than erroring).
+fn parse_config_value(raw: &str) -> ciris_server::ConfigValue {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => serde_json::from_value::<ciris_server::ConfigValue>(v)
+            .unwrap_or_else(|_| ciris_server::ConfigValue::Str(raw.to_string())),
+        Err(_) => ciris_server::ConfigValue::Str(raw.to_string()),
+    }
 }
 
 /// Today's date in UTC as `YYYY-MM-DD` (the default `--date` for `bench-results`,

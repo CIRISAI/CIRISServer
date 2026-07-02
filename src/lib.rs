@@ -242,6 +242,11 @@ pub use config_reconcile::ResolvedConfig;
 pub use adapter::{Adapter, AdapterConfig, AdapterContext, AdapterStatus, NoopAdapter};
 pub use compose::{serve, serve_with_adapter};
 
+/// The console-trusted `config set`/`config get` CLI ops (Server 0.5.73) — open the
+/// node's Engine offline + read/write a signed `config:v1` CEG object, so a HEADLESS
+/// node can set `config:*` knobs (e.g. `net.bootstrap_peers`) with no app/session.
+pub use compose::{run_config_get, run_config_set};
+
 /// The shared persist `Engine` (re-exported so a downstream adapter crate gets
 /// the EXACT type [`AdapterContext::engine`] carries, without depending on
 /// `ciris-persist` directly or guessing its path).

@@ -6,13 +6,15 @@ peering A↔B — **entirely through the LOCAL node's API using a constrained
 delegation grant**, reaching the remotes **by fed key_id over RNS**, never by
 curling them directly.
 
-**Status (2026-07-02):** the *code* is shipped. **CIRISServer 0.5.72 is live on
-PyPI** (delegation constraints + edge v8.3.0 opaque wire + the two-leg RNS mesh
-control-plane relay + ratified `TRACE_BATCH_KIND`). **CIRISStatus v0.3.12** (Node
-B's image, repinned to 0.5.72) is tagged. The **relay is the path** — the old
-HTTP "Option A / Option B" proxy dance in prior revisions of this doc is
-**superseded** and removed. The remaining work is a **fleet deploy + the seed
-run**, below.
+**Status (2026-07-02):** **0.5.73** is the mesh-seed *operability* release. 0.5.72
+shipped the relay but the seed hit two real gaps in the field: (a) `claim_remote`
+was fire-and-forget — the claiming node never recorded what it claimed, so
+lapbuntu2 had no local record of A/B and **no IP to dial them over RNS**; (b) a
+headless node (console-only, no app/session) had **no way to set
+`net.bootstrap_peers`**. 0.5.73 fixes both: **claiming a node now records it in your
+own fed directory + appends its RNS address to `net.bootstrap_peers`**, and a new
+**`ciris-server config set/get` CLI** lets headless nodes be configured from the
+console. The **relay is the path**; the old HTTP "Option A/B" is gone.
 
 ---
 
@@ -20,44 +22,51 @@ run**, below.
 
 | # | Precondition | State |
 |---|---|---|
-| 0.1 | CIRISServer **0.5.72 live on PyPI** | ✅ done |
-| 0.2 | **A, B, and lapbuntu2 are all rolled to 0.5.72** (see §1 — the relay is bilateral) | ⛔ deploy |
-| 0.3 | A and B are already **owner-bound** to your fed-ID (`eric-moore-v2-portable-…`) at `cohort_scope: self` (the claim step, done earlier) | ✅ done |
-| 0.4 | You issue me a **constrained delegation grant** on lapbuntu2 (§2) | ⛔ pending |
-
-If 0.2 is not met, the relay **cannot** reach A/B — see §1.
+| 0.1 | CIRISServer **0.5.73 on PyPI** + **CIRISStatus v0.3.13** image | ⛔ cut |
+| 0.2 | Fleet on 0.5.73: mac + lapbuntu2 **upgraded in place**; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
+| 0.3 | RNS reachability wired: lapbuntu2→A/B (auto, via re-claim) **and A↔B** (set B→A bootstrap, §1) | ⛔ config |
+| 0.4 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
 
 ---
 
-## 1. THE hard precondition: the fleet must run 0.5.72 (the relay is bilateral)
+## 1. Fleet roll — keep your fedID, upgrade mac/lapbuntu2, wipe+re-claim A/B
 
-The relay is a two-sided protocol. lapbuntu2 hosts `POST /v1/mesh/relay` and
-*sends*; A and B must *receive* on opaque kind `0x0000_0001`, which requires **both**:
+The relay is bilateral: lapbuntu2 hosts `POST /v1/mesh/relay` and *sends*; A and B
+must *receive* on opaque kind `0x0000_0001` — which needs edge v8.x + the
+`MeshControlHandler` (both in 0.5.7x). So every node must be on 0.5.73. The clean,
+identity-preserving path (**your fedID is never wiped**):
 
-1. **Edge v8.0+ on A/B.** 0.5.70 nodes run edge v7.4.4 — which has **no**
-   `OpaqueRequest`/`OpaqueResponse` message types at all; an opaque envelope is an
-   unknown `MessageType` → dropped. No interop.
-2. **The `MeshControlHandler`** (new in 0.5.72) registered on their edge — else an
-   8.x node answers `501 unknown kind`.
+1. **mac + lapbuntu2 — upgrade in place** (identity-preserving; persist auto-migrates):
+   `pip install -U ciris-server==0.5.73` (or the standalone binary) + restart. Your
+   owner fedID (`eric-moore-v2-portable-…`) lives here and is untouched.
 
-So **A, B, and lapbuntu2 must all run 0.5.72** before a single announce/peer can
-cross the wire. Deploy targets:
+2. **A + B — wipe, fresh-install 0.5.73, re-claim.** A/B already have a ROOT, so a
+   re-claim would `409`; a fresh install clears that. Cost: A/B mint **new** derived
+   key_ids (fine for canonical/status service nodes) and lose their (re-seedable)
+   corpus. Then **re-claim each from lapbuntu2** (`ciris-server claim …` or the app).
+   Because 0.5.73's claim now **records the node locally**, this one step auto-fixes
+   the whole "lapbuntu2 forgot A/B" problem:
+   - A/B appear in lapbuntu2's `GET /v1/setup/owned-nodes`,
+   - their key records land in lapbuntu2's `federation_keys`,
+   - **their RNS address is appended to lapbuntu2's `net.bootstrap_peers`** → lapbuntu2
+     can now dial them (the "≥1 node with an IP" the mesh needs). Restart lapbuntu2
+     once after the re-claims so the new bootstrap takes effect.
+   - Node B = the **CIRISStatus v0.3.13** image (repinned to 0.5.73).
 
-- **lapbuntu2** (the local seeding node): `pip install -U ciris-server==0.5.72`
-  (or the standalone Rust binary), restart on `127.0.0.1:4243`.
-- **Node A** (`ciris-canonical-1`, `108.61.242.236:4243`): 0.5.72 (ciris-server).
-- **Node B** (`ciris-status-1`, `108.61.242.236:4253`): the **CIRISStatus v0.3.12**
-  image (repinned to ciris-server 0.5.72 / edge 8.3 / persist 11.9.1).
-- **mac**: 0.5.72 when convenient (not on the A↔B seed path, but part of the fleet).
+3. **Wire the A↔B link** (the claim only links lapbuntu2→A and lapbuntu2→B; A and B
+   still need each other for the actual trace replication + peering). A and B are
+   **co-located on the same host**, so on B's console, with the new 0.5.73 CLI:
+   ```
+   ciris-server config set net.bootstrap_peers '["127.0.0.1:4242"]' --home <B-home>
+   # then restart B   (A is the RNS origin on 0.0.0.0:4242 — no bootstrap of its own)
+   ```
+   Confirm A actually listens on `0.0.0.0:4242` and is a transport node
+   (`transport.node=true`) so it forwards for the mesh.
 
-**"Deploy" ≠ "configure directly."** Rolling the binary/image is a prerequisite,
-distinct from configuring federation state — which still flows only through the
-local grant over the relay (§3). Deploying software to a node is never the thing
-the "don't touch the remotes directly" rule forbids.
-
-Also note: edge v8.0's `SchemaVersion::V2` strict-flip means an 8.x and a 7.x node
-can't cleanly cohabit the mesh anyway — 0.5.72 is the coordinated substrate floor
-for every participant, not just a relay nicety.
+**"Deploy" ≠ "configure directly."** Rolling the binary/image + the console
+`config set` on a node you operate is deployment, not the federation-state
+configuration the "don't touch remotes directly" rule governs — that still flows
+only through the grant over the relay (§3).
 
 ---
 
@@ -147,10 +156,11 @@ Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "..
 
 | Gate | State |
 |---|---|
-| 0.5.72 on PyPI · relay both legs · constrained delegation · TDD gate | ✅ done |
-| CIRISStatus v0.3.12 (Node B image) tagged | ✅ done (image building) |
-| **Fleet rolled to 0.5.72** (lapbuntu2, A, B, mac) | ⛔ deploy |
-| **Constrained delegation grant issued** | ⛔ your move |
-| Seed run (§3) + verify (§4) | ⛔ blocked on the two above |
+| relay both legs · delegation constraints · TDD gate (0.5.72) | ✅ done |
+| **0.5.73** (claim-records-locally + `config set` CLI + copy-all card) on PyPI + **CIRISStatus v0.3.13** image | ⛔ cut |
+| mac + lapbuntu2 upgraded in place; **A + B wiped, fresh-installed, re-claimed** (§1) | ⛔ deploy |
+| A↔B bootstrap wired (B→A, §1.3); lapbuntu2→A/B auto (re-claim) | ⛔ config |
+| Delegation grant issued (§2) | ⛔ your move |
+| Seed run (§3) + verify (§4) | ⛔ blocked on the above |
 
-**We are ready to seed the moment the fleet is on 0.5.72 and you hand me a grant.**
+**Ready to seed the moment the fleet is on 0.5.73, A/B re-claimed, A↔B wired, and you hand me a grant.**
