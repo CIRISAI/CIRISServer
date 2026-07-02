@@ -101,8 +101,33 @@ ciris-server claim --home /var/lib/ciris --key-id ciris-canonical-1 \
 ```
 Repeat steps 2–4 on Node B with `--key-id ciris-status-1`. (The desktop/mobile wizard's
 first-run flow does the equivalent — mint fed-ID → self-claim — if you prefer a GUI; the
-0.5.61 custody ladder means no YubiKey is required. In the wizard, flip on
-**"Announce yourself to the federation"** to fold Step 4b into the claim.)
+0.5.61 custody ladder means no YubiKey is required.)
+
+**0.5.73 — the claim now records the node locally.** When you claim A/B *from lapbuntu2*
+(the seeding node), the claim persists the target's key record + owner-binding into
+lapbuntu2's own corpus (so `GET /v1/setup/owned-nodes` lists them) **and appends the
+target's RNS address (`host:4242`) to lapbuntu2's `net.bootstrap_peers`** — so lapbuntu2
+can dial them. Restart lapbuntu2 once after the claims for the new bootstrap to take effect.
+
+### 4.5 RNS mesh bootstrap — every node must dial the seed (A)
+The mesh is: **A is the RNS origin (`0.0.0.0:4242`, no bootstrap of its own); every other
+node dials A.** lapbuntu2's entry is set automatically by the 0.5.73 claim (above). The two
+that still need it set by hand:
+
+- **Node A** — confirm it listens on `0.0.0.0:4242` and is a **transport node**
+  (`transport.node=true`) so it forwards for the mesh.
+- **Node B** — set its bootstrap to A (co-located → localhost) via the **0.5.73 console CLI**
+  (B is headless — no app/session needed):
+  ```sh
+  ciris-server config set net.bootstrap_peers '["127.0.0.1:4242"]' --home /var/lib/ciris
+  # then restart B
+  ```
+
+> **§4b ANNOUNCE and §5 PEERING below are SUPERSEDED** — do NOT curl them directly.
+> Once every node is on 0.5.73 + bootstrapped to A, the announce + A↔B peering are driven
+> from lapbuntu2 over the **RNS relay** with a delegation grant. Follow
+> `FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` §2–§4 for that. The steps below are kept only
+> as the historical direct-HTTP reference.
 
 ### 4b. ANNOUNCE — promote ownership to FEDERATION (0.5.69; REQUIRED for the canonical mesh)
 A self-claim (Step 4) leaves the node **self-scoped/private** — it will not advertise its
