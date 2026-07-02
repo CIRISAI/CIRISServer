@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ciris_edge::transport::http::{HttpTransport, HttpTransportConfig};
-use ciris_edge::{AccordEventsBatch, Edge, EdgeError, LocalSigner, TransportError};
+use ciris_edge::{Edge, EdgeError, LocalSigner, TransportError};
 use ciris_persist::prelude::Engine;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -109,8 +109,7 @@ impl LensCore {
             .transport(transport)
             .build()?;
 
-        edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
-            .await?;
+        LensCoreHandler::spawn_subscriber(engine, &edge);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join = tokio::spawn(async move { edge.run(shutdown_rx).await });
@@ -128,7 +127,7 @@ impl LensCore {
     /// The host has already constructed the Edge (via the agent's
     /// `ciris_edge::ffi::pyo3::init_edge_runtime` in Python, or
     /// `EdgeBuilder` in pure Rust); lens-core attaches its
-    /// `Handler<AccordEventsBatch>` to that shared `Edge` rather than
+    /// trace-batch opaque subscriber to that shared `Edge` rather than
     /// building a second one. Cohabitation invariant: **one** Edge per
     /// process, owned by the host, shared by sibling consumers.
     ///
@@ -136,8 +135,8 @@ impl LensCore {
     /// [`relay`](Self::relay) instead — it builds its own Edge and
     /// returns a [`RelayHandle`] for orderly shutdown.
     pub async fn attach_handler(edge: &Edge, engine: Arc<Engine>) -> Result<(), EdgeError> {
-        edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
-            .await
+        LensCoreHandler::spawn_subscriber(engine, edge);
+        Ok(())
     }
 }
 

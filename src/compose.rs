@@ -327,6 +327,40 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // notify target is then `None`.
     let reconcile_notify = Arc::new(tokio::sync::Notify::new());
 
+    // ── Mesh control-plane relay, remote half (#128 Phase D — C3) ─────────────
+    // Register the RNS control RESPONDER on the shared Edge BEFORE `edge.run()`
+    // consumes it (registration is `&self`; the run loop's inbound dispatcher
+    // invokes the handler inline). Kind 0x0000_0001 — CIRISServer's CC 0.7
+    // Tier-2 allocation (WIRE_VOCABULARY_KINDS.md). The responder's v1 dispatch
+    // router does not exist yet at this point in boot, so it rides an
+    // Arc<OnceLock<Router>> the read-API block below fills; a relay arriving in
+    // the boot gap gets an honest 503 (never a drop). This makes every owned
+    // node ADMINISTRABLE over RNS by its owner's signature.
+    let mesh_dispatch_router: Arc<std::sync::OnceLock<axum::Router>> =
+        Arc::new(std::sync::OnceLock::new());
+    let mesh_responder = Arc::new(crate::mesh_relay::MeshControlResponder::new(
+        Arc::clone(&engine),
+        node_code.key_id.clone(),
+        Arc::clone(&mesh_dispatch_router),
+    ));
+    crate::mesh_relay::register_mesh_control_handler(&edge, Arc::clone(&mesh_responder));
+    // The local SEND leg (C1's mesh hop). edge v8.0.0's `Edge::run(self, …)`
+    // consumes the Edge, so this composition root cannot retain the live
+    // `Arc<Edge>` that `send_opaque_request` needs after boot (the edge opaque
+    // conformance suite drives request/response via `Arc<Edge> +
+    // spawn_background_listeners` instead — but swapping this node's lifecycle
+    // onto that path would lose `run()`'s CRPL replication pre-dispatch, a
+    // regression). Until edge exposes an Arc-receiver `run` (follow-up filed
+    // with the #128 report), the requester short-circuits `target == self` to
+    // the in-process responder (the FSD §6 step-2 short-circuit, full signed
+    // envelope + verify) and honestly 502s any other target; the Phase E
+    // two-node harness composes `mesh_relay::edge_mesh_requester` over its own
+    // Arc<Edge>.
+    let mesh_requester = crate::mesh_relay::local_only_requester(
+        node_code.key_id.clone(),
+        Arc::clone(&mesh_responder),
+    );
+
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
     let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
@@ -471,6 +505,21 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             crate::auth::loopback::require_loopback,
                         )),
                     )
+                    // MESH CONTROL RELAY (#128 Phase D — C1): POST /v1/mesh/relay.
+                    // The owner (or an `owner:act-on-behalf` dgrant whose
+                    // constraints permit `mesh_relay`) drives an allow-listed
+                    // owner-op on an owned REMOTE node addressed purely by
+                    // key_id: the endpoint hybrid-signs the control envelope
+                    // with the owner fed-ID (same request-time signer inputs as
+                    // claim-remote above) and ships it over the mesh seam as
+                    // opaque kind 0x0000_0001 (FSD/RNS_CONTROL_RELAY.md §6).
+                    .merge(crate::mesh_relay::router(
+                        Arc::clone(&engine),
+                        format!("{}-user", cfg.keystore_alias),
+                        crate::user_seed_dir(&cfg),
+                        Some(mesh_requester.clone()),
+                        crate::mesh_relay::RELAY_TIMEOUT_MS,
+                    ))
                     // provision/ensure the local node's USER federation identity
                     // (CIRISServer#21): POST /v1/self/identity — mints a hardware-
                     // rooted (YubiKey / TPM-SE / software) user identity + returns
@@ -664,15 +713,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // "Never guess" — log every 4xx/5xx (method + path + status + FULL
                 // body) to the node log file, so a failed request always leaves a
                 // complete server-side trace even when the client truncates it.
-                r.layer(axum::middleware::from_fn(
-                    crate::http_log::log_error_responses,
-                ))
-                // TRANSPARENCY: stamp `X-CIRIS-Delegation` on every response to a
-                // `dgrant:` caller so a delegated actor always sees its live
-                // authority (scope/purpose/expiry/attestation) — no silent scope.
-                .layer(axum::middleware::from_fn(
-                    crate::delegation_transparency::attach_delegation_header,
-                ))
+                let r = r
+                    .layer(axum::middleware::from_fn(
+                        crate::http_log::log_error_responses,
+                    ))
+                    // TRANSPARENCY: stamp `X-CIRIS-Delegation` on every response to a
+                    // `dgrant:` caller so a delegated actor always sees its live
+                    // authority (scope/purpose/expiry/attestation) — no silent scope.
+                    .layer(axum::middleware::from_fn(
+                        crate::delegation_transparency::attach_delegation_header,
+                    ));
+                // #128 Phase D (C3 dispatch): hand the mesh control responder the
+                // SAME merged v1 router HTTP serves — the RNS path and the HTTP
+                // path execute identical handler code (RNS_CONTROL_RELAY.md §5.4
+                // "reuse, do not fork"). The responder's closed allow-list is
+                // enforced BEFORE any dispatch, so mounting the full surface here
+                // widens nothing.
+                let _ = mesh_dispatch_router.set(r.clone());
+                r
             },
         )
         .await

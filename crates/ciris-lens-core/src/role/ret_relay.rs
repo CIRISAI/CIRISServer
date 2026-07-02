@@ -49,7 +49,7 @@ use std::time::Duration;
 use ciris_edge::transport::reticulum::{
     ReticulumAuth, ReticulumTransport, ReticulumTransportConfig,
 };
-use ciris_edge::{AccordEventsBatch, Edge, EdgeError, LocalSigner};
+use ciris_edge::{Edge, EdgeError, LocalSigner};
 use ciris_persist::prelude::Engine;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -189,8 +189,7 @@ impl LensCore {
             .reticulum_transport(ret_transport)
             .build()?;
 
-        edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
-            .await?;
+        LensCoreHandler::spawn_subscriber(engine, &edge);
 
         // Capture the announced RNS destination hash — the dialable
         // reticulum address peers resolve — BEFORE `edge` moves into the
