@@ -130,6 +130,23 @@ that still need it set by hand:
 > `FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` §2–§4 for that. The steps below are kept only
 > as the historical direct-HTTP reference.
 
+### 4.6 (Node A only) Re-import the legacy trace corpus
+Node A is the **lens node** — it holds the historical trace corpus. A wipe starts that
+corpus EMPTY, so re-import the pre-cutover CIRISLens traces so A's history survives the
+re-seed (CIRISServer#6). One-shot, **idempotent** (content-addressed dedup, so re-runs
+are safe):
+```sh
+ciris-server import-traces ~/0612_prod_traces      # the TimescaleDB dump dir
+```
+It reads the flat lens rows (`accord_traces.jsonl.gz`, schema 1.9.x, ~90 denormalized
+columns), reconstructs each as a CEG `CompleteTrace`/`BatchEnvelope` (the seven reasoning
+columns → `TraceComponent`s), preserves the original `trace_id` / `signature` /
+`signature_key_id` as **provenance**, and persists **pre-verified** — the legacy signature
+signed the 1.9.x bytes, not the reconstructed trace, so it is provenance, not
+re-verifiable (`receive_and_persist_pre_verified`). The reader is ragged-edge robust
+(streaming JSON, `#[serde(other)]` component fallbacks). **Node B (status) holds no lens
+corpus, so this step is A-only.**
+
 ### 4b. ANNOUNCE — promote ownership to FEDERATION (0.5.69; REQUIRED for the canonical mesh)
 A self-claim (Step 4) leaves the node **self-scoped/private** — it will not advertise its
 federation identity, so peering won't converge. Announce on **both A and B** to promote
