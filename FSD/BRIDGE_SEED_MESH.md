@@ -1,5 +1,23 @@
 # Bridge runbook — FRESH SEED the canonical mesh (wipe + reclaim clean)
 
+> ## ⚡ REFRESHED 2026-07-02 for the 0.5.72 mesh substrate — READ THIS FIRST
+>
+> **Substrate floor is now edge v8.3.0 · persist v11.9.1 · verify v8.3.0** (CC 0.7
+> opaque wire vocabulary). `pip install ciris-server==0.5.72` (or the CIRISStatus
+> v0.3.12 image for Node B). Every node on the mesh MUST be on the 0.5.72 substrate
+> — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
+>
+> **The announce + peering steps below (§4b onward — the direct `curl POST
+> /v1/federation/announce` / `/peering` on each remote) are SUPERSEDED.** Post-claim,
+> the seed is now driven **from the LOCAL node over the RNS mesh control-plane relay**
+> (`POST /v1/mesh/relay`) using a **constrained delegation grant** — reaching A/B by
+> fed key_id over RNS, owner-fed-ID-signed, **no password on the remotes**. Do NOT
+> curl the remotes directly. **`FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` is the
+> authoritative post-claim seed procedure** (announce → peer → verify over the relay).
+>
+> The CLAIM + wipe + wizard steps below (§0–§4a) remain valid; only the federation
+> ANNOUNCE/PEER mechanism moved from direct-HTTP to the relay.
+
 **This is NOT an in-place upgrade.** It wipes each bridge node's existing keys + data
 and re-seeds the canonical mesh from scratch under the canonical node names, so Node A
 and Node B come back CLEAN and owner-claimed. Use this when re-seeding the mesh (e.g.
@@ -10,8 +28,9 @@ version bump that PRESERVES identities, use the BRIDGE_UPGRADE_* runbooks instea
 nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
-edge **v7.4.4** · persist **v11.5.0** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1.
-`pip install ciris-server==0.5.69` (the wheel carries the pinned substrate; persist auto-migrates
+edge **v8.3.0** · persist **v11.9.1** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1
+(CC 0.7 opaque wire vocabulary; the 0.5.72 mesh floor).
+`pip install ciris-server==0.5.72` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
 

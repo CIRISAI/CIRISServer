@@ -1,132 +1,156 @@
-# Mesh-seed runbook — what I do after you issue the delegation grant
+# Mesh-seed runbook — seeding the canonical mesh over the RNS relay
 
 **Goal:** promote Node A (`ciris-canonical-1`) and Node B (`ciris-status-1`) from
 self-scoped to federation-scoped, and wire the bilateral `consent:replication:v1`
-peering A↔B — **entirely through the LOCAL node's API using the delegation grant**,
-never by curling the remote nodes directly.
+peering A↔B — **entirely through the LOCAL node's API using a constrained
+delegation grant**, reaching the remotes **by fed key_id over RNS**, never by
+curling them directly.
 
-Status going in: **A and B are already owner-bound** to your fed-ID
-(`eric-moore-v2-portable-…`) at `cohort_scope: self`. The claim step is DONE. What
-remains is the two OPT-IN federation acts: **announce** (promote) and **peer**.
-
----
-
-## 0. Preconditions (I verify these first, no side effects)
-
-1. Local node (lapbuntu2) is up on `http://127.0.0.1:4243` running the 0.5.71 binary.
-2. You have issued a fresh delegation offer; I claim it →
-   `dgrant:…` (`owner:act-on-behalf`, SYSTEM_ADMIN + FullAccess, ~1h TTL).
-3. Sanity: `GET /v1/auth/me` with the dgrant returns `role: SYSTEM_ADMIN`.
-4. `GET /v1/setup/owned-nodes` (dgrant) lists A and B under your owner fed-ID.
-
-I do **not** proceed if any of these fail; I report and stop.
+**Status (2026-07-02):** the *code* is shipped. **CIRISServer 0.5.72 is live on
+PyPI** (delegation constraints + edge v8.3.0 opaque wire + the two-leg RNS mesh
+control-plane relay + ratified `TRACE_BATCH_KIND`). **CIRISStatus v0.3.12** (Node
+B's image, repinned to 0.5.72) is tagged. The **relay is the path** — the old
+HTTP "Option A / Option B" proxy dance in prior revisions of this doc is
+**superseded** and removed. The remaining work is a **fleet deploy + the seed
+run**, below.
 
 ---
 
-## 1. The authority model (why this is the crux)
+## 0. Preconditions — ALL must hold before the seed can run
 
-Announce and peering are **not** self-only local ops the way lapbuntu2's own announce
-is. Per `src/federation_admin.rs:10‑13` the design is explicit:
+| # | Precondition | State |
+|---|---|---|
+| 0.1 | CIRISServer **0.5.72 live on PyPI** | ✅ done |
+| 0.2 | **A, B, and lapbuntu2 are all rolled to 0.5.72** (see §1 — the relay is bilateral) | ⛔ deploy |
+| 0.3 | A and B are already **owner-bound** to your fed-ID (`eric-moore-v2-portable-…`) at `cohort_scope: self` (the claim step, done earlier) | ✅ done |
+| 0.4 | You issue me a **constrained delegation grant** on lapbuntu2 (§2) | ⛔ pending |
 
-> the client orchestrates the bilateral A↔B setup by driving the pair of owner
-> operations — fetch A's + B's self-key-records, then **POST peering to A (peer = B)
-> and to B (peer = A)** — but the authority for each grant stays **local to the node
-> that signs it**.
-
-Concretely:
-
-| Op | Endpoint | Must run ON | Auth |
-|----|----------|-------------|------|
-| Fetch key record | `GET /v1/federation/self-key-record` | A and B | **none** (public, self-signed pubkey record) |
-| Promote / announce | `POST /v1/federation/announce` | A and B (each promotes *its own* binding) | **owner SYSTEM_ADMIN bearer** on that node |
-| Peer | `POST /v1/federation/peering` | A (peer=B) and B (peer=A) | **owner SYSTEM_ADMIN bearer** on that node |
-
-So each write **must be authored on the target node** and needs a **SYSTEM_ADMIN
-bearer session on that node**. The local dgrant is a session on **lapbuntu2 only** —
-it does not authenticate me to A or B.
-
-### The one real gap
-
-Today the local node exposes exactly one remote-proxy: `claim-remote`
-(`src/claim_remote.rs:181` — the local node signs with your fed-ID and POSTs to the
-target's `/v1/setup/root`). There is **no** equivalent `announce-remote` or
-`peer-remote` proxy. `announce_self_handler` (`src/claim_remote.rs:655`) promotes only
-`st.node_key_id` (lapbuntu2 itself); `/v1/federation/peering` is gated on a local
-bearer session (`federation_admin.rs require_owner`).
-
-Getting a bearer on A/B needs a `password_hash` on their ROOT cert
-(`src/auth/session.rs:381` — `login` refuses a cert with no password). `claim_remote`
-can set that via its `owner_password` field ("so the owner can get a SYSTEM_ADMIN
-session"), but A and B were claimed **without** a password, and they're already claimed
-(re-claim → 409).
-
-**⇒ There is no path today to announce/peer A and B purely through lapbuntu2's current
-API. One of the two options below has to close the gap first.**
+If 0.2 is not met, the relay **cannot** reach A/B — see §1.
 
 ---
 
-## 2. Two ways to close the gap — I recommend Option A
+## 1. THE hard precondition: the fleet must run 0.5.72 (the relay is bilateral)
 
-### Option A (recommended, architecture-consistent): build the local proxy endpoints
+The relay is a two-sided protocol. lapbuntu2 hosts `POST /v1/mesh/relay` and
+*sends*; A and B must *receive* on opaque kind `0x0000_0001`, which requires **both**:
 
-Mirror `claim-remote`. Add two owner-gated (dgrant-reachable) endpoints on the LOCAL
-node that sign with your fed-ID and forward to a named remote:
+1. **Edge v8.0+ on A/B.** 0.5.70 nodes run edge v7.4.4 — which has **no**
+   `OpaqueRequest`/`OpaqueResponse` message types at all; an opaque envelope is an
+   unknown `MessageType` → dropped. No interop.
+2. **The `MeshControlHandler`** (new in 0.5.72) registered on their edge — else an
+   8.x node answers `501 unknown kind`.
 
-- `POST /v1/federation/announce-remote  { node_code | target_url }`
-- `POST /v1/federation/peer-remote      { self_url, peer_url }` (drives both directions)
+So **A, B, and lapbuntu2 must all run 0.5.72** before a single announce/peer can
+cross the wire. Deploy targets:
 
-Each resolves your user signer (`compose::resolve_user_signer`, same as claim-remote),
-authenticates to the remote as the owner, and performs the remote's own announce /
-peering. This is the "you configure them via the local grant / client, not directly"
-model made real: **I only ever call `127.0.0.1:4243`; lapbuntu2 does the signed remote
-call.** It is a small, well-scoped increment (~claim-remote sized) and it also unblocks
-future owned-remote administration generally (ties into #8 mesh-addressing).
+- **lapbuntu2** (the local seeding node): `pip install -U ciris-server==0.5.72`
+  (or the standalone Rust binary), restart on `127.0.0.1:4243`.
+- **Node A** (`ciris-canonical-1`, `108.61.242.236:4243`): 0.5.72 (ciris-server).
+- **Node B** (`ciris-status-1`, `108.61.242.236:4253`): the **CIRISStatus v0.3.12**
+  image (repinned to ciris-server 0.5.72 / edge 8.3 / persist 11.9.1).
+- **mac**: 0.5.72 when convenient (not on the A↔B seed path, but part of the fleet).
 
-Sub-steps once built:
-1. `POST /v1/federation/announce-remote {target_url: A}` → A promotes self→federation, sets `net.announce_ownership=true` (effective next A boot).
-2. Same for B.
-3. `GET` A's and B's `/v1/federation/self-key-record` (public) via the proxy.
-4. `POST /v1/federation/peer-remote {self_url: A, peer_url: B}` → registers B's key on A + emits A's `consent:replication:v1` grant scoped to B; then the reverse on B.
-5. Verify: `GET /v1/federation/peers` on A shows B and vice-versa; reconciler converges.
+**"Deploy" ≠ "configure directly."** Rolling the binary/image is a prerequisite,
+distinct from configuring federation state — which still flows only through the
+local grant over the relay (§3). Deploying software to a node is never the thing
+the "don't touch the remotes directly" rule forbids.
 
-### Option B (pragmatic, works today, but bends the constraint): sessions on A and B
-
-The KMP client is designed to hold sessions on A and B directly and drive the exact
-same two POSTs. If you drive it from the app (or authorize me to obtain a bearer on
-each via a password you set through an `upgrade-owner`/re-provision), the flow is:
-
-1. Ensure A and B ROOT certs have a password (set one via a re-provision / upgrade-owner path — they currently have none).
-2. `POST A/v1/auth/login` and `POST B/v1/auth/login` → two bearers.
-3. `POST A/v1/federation/announce`, `POST B/v1/federation/announce`.
-4. `GET A/self-key-record`, `GET B/self-key-record`.
-5. `POST A/v1/federation/peering {peer = B record}`, `POST B/v1/federation/peering {peer = A record}`.
-6. Verify peers both directions.
-
-This is "directly" against A/B, which is what you asked me to avoid — so I'd only take
-this route on your explicit say-so, and preferably driven through the app UI rather
-than my curl.
+Also note: edge v8.0's `SchemaVersion::V2` strict-flip means an 8.x and a 7.x node
+can't cleanly cohabit the mesh anyway — 0.5.72 is the coordinated substrate floor
+for every participant, not just a relay nicety.
 
 ---
 
-## 3. Post-conditions I check either way
+## 2. The constrained delegation grant (the safety envelope)
 
-- A's owner-binding `delegates_to(owner→A)` now `cohort_scope: federation`; same for B.
-- A's and B's `net.announce_ownership = true` (takes effect on their next boot — I note that a restart of A and B is required for the Reticulum identity announce to actually carry the attestation).
-- `consent:replication:v1` grants exist both directions; `GET /v1/federation/peers` on each shows the other.
-- Nothing on lapbuntu2's own scope changed unless you also asked to announce lapbuntu2.
+On lapbuntu2, issue me a delegation grant **bounded to exactly the seed ops** — so
+the AI driving the seed is cryptographically limited and can't wipe, re-delegate,
+or act outside the seed:
 
-## 4. What I will NOT do
+```json
+POST /v1/auth/device/delegate      // owner session
+{
+  "mode": "existing",              // or "create"
+  "existing_key_id": "<my agent fed key_id>",
+  "constraints": {
+    "actions_allow": ["announce", "peer", "mesh_relay"],
+    "goal": "seed the canonical mesh"
+  }
+}
+```
 
-- Curl `108.61.242.236` directly with improvised requests.
+I claim the offer (`POST /v1/auth/device/claim {pin}`) → `dgrant:…`. Every use
+carries the `x-ciris-delegation` header, and the guard refuses anything outside
+`{announce, peer, mesh_relay}` (and the server never-list: no delegate/wipe/accord).
+`mesh_relay` is what gates `/v1/mesh/relay`; `announce`/`peer` gate what the relay
+is allowed to invoke on A/B.
+
+**Preflight I verify (no side effects):** `GET /v1/auth/me` → `SYSTEM_ADMIN` +
+the constraint shows in the delegation; `GET /v1/setup/owned-nodes` lists A and B
+under your owner fed-ID.
+
+---
+
+## 3. The seed — driven from `127.0.0.1:4243` over the relay
+
+Every step is a `POST http://127.0.0.1:4243/v1/mesh/relay` with the dgrant bearer.
+lapbuntu2 signs the inner request with **your fed-ID** and sends it as an
+`OpaqueRequest{kind:0x0000_0001}` over **RNS to the target by key_id**; the remote
+`MeshControlResponder` verifies the signature, sees the signer **is its owner**,
+and dispatches into the node's own v1 router. **No password/bearer on A/B** — the
+fed-ID signature *is* the auth. The relay only permits the closed set
+`{announce, peering, self-key-record, owned-nodes}`.
+
+Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "...", "body": {...} }`.
+
+1. **Announce A** — `{target: A, POST /v1/federation/announce}` → A promotes its
+   owner-binding `self → federation` + sets `net.announce_ownership=true`
+   (Reticulum identity announce takes effect on A's **next boot**).
+2. **Announce B** — same, `{target: B}`.
+3. **Fetch key records** — `{target: A, GET /v1/federation/self-key-record}` and
+   `{target: B, …}` (public; also fetchable directly). Needed for peering.
+4. **Peer A→B** — `{target: A, POST /v1/federation/peering, body: {peer_key_id: B,
+   attestation_prefixes: ["capacity:", "<trace prefix>"]}}`. The relay's gateway
+   enrichment injects B's fetched key record; A emits its directed
+   `consent:replication:v1` grant scoped to B, **covering the trace prefix** so the
+   `ReplicationRuntime` replicates traces (not just `capacity:` scores).
+5. **Peer B→A** — the reverse, `{target: B, peer_key_id: A}`.
+
+---
+
+## 4. Post-conditions I verify (the runbook is done when these hold)
+
+- A's owner-binding `delegates_to(owner→A)` is now `cohort_scope: federation`; same
+  for B. (I flag that A and B need a **restart** for the Reticulum identity announce
+  to actually carry the attestation on the wire.)
+- `consent:replication:v1` grants exist **both directions**; `GET
+  /v1/federation/peers` on each (over the relay) shows the other, and each grant's
+  `attestation_prefixes` covers traces.
+- **Trace RNS-sync A→B:** a trace ingested on A reaches B's corpus via the
+  `ReplicationRuntime` anti-entropy (the consent topology drives it). This is the
+  payoff the TDD gate (`tests/mesh_seed_e2e.rs`) asserts at the CEG level.
+
+---
+
+## 5. What I will NOT do
+
+- Curl `108.61.242.236` directly with improvised requests — everything goes through
+  `127.0.0.1:4243` and the relay.
 - Touch your key material / seed files to "inspect."
-- Announce anything you didn't ask to announce (announce is opt-in, default OFF).
-- Set a password on A/B without asking.
+- Announce/peer anything you didn't ask for (announce is opt-in; the grant is
+  bounded to announce/peer/mesh_relay).
+- Act outside the constrained grant — the guard enforces it, and I honor it.
 
 ---
 
-### My recommendation
+## 6. Readiness at a glance
 
-Approve **Option A**: I build `announce-remote` + `peer-remote` on the local node
-(one commit, mirrors claim-remote, ~its size), cut it into a 0.5.72, then run the seed
-end-to-end from `127.0.0.1:4243` with the dgrant. That is the only path that both
-completes the seed and honors "configure via the local grant, not directly."
+| Gate | State |
+|---|---|
+| 0.5.72 on PyPI · relay both legs · constrained delegation · TDD gate | ✅ done |
+| CIRISStatus v0.3.12 (Node B image) tagged | ✅ done (image building) |
+| **Fleet rolled to 0.5.72** (lapbuntu2, A, B, mac) | ⛔ deploy |
+| **Constrained delegation grant issued** | ⛔ your move |
+| Seed run (§3) + verify (§4) | ⛔ blocked on the two above |
+
+**We are ready to seed the moment the fleet is on 0.5.72 and you hand me a grant.**
