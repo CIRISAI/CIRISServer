@@ -21,8 +21,9 @@
 **This is NOT an in-place upgrade.** It wipes each bridge node's existing keys + data
 and re-seeds the canonical mesh from scratch under the canonical node names, so Node A
 and Node B come back CLEAN and owner-claimed. Use this when re-seeding the mesh (e.g.
-after key custody drift, or to re-home onto a current substrate). For an in-place
-version bump that PRESERVES identities, use the BRIDGE_UPGRADE_* runbooks instead.
+after key custody drift, or to re-home onto a current substrate). An in-place
+version bump that PRESERVES identities (your own clients — mac, lapbuntu2) needs no
+runbook: install the new version + restart; persist auto-migrates the DB on first open.
 
 ⚠️ **Destructive.** Wiping a node destroys its federation signing keys. Only do this on
 nodes you intend to re-seed; a node's old fed-ID does not survive.
