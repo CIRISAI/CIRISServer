@@ -37,20 +37,21 @@ use std::sync::Arc;
 use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::NullScrubber;
+use ciris_persist::TRACE_BATCH_KIND;
 
 /// The opaque-event `kind` for trace/telemetry batches (the successor of
 /// the retired `AccordEventsBatch`), in CIRISPersist's `0x0005_*` steward
 /// range (`WIRE_VOCABULARY.md` v1.0.1 §3.1).
 ///
-/// **PROVISIONAL (CIRISServer#128):** CIRISPersist has not yet published
-/// its `WIRE_VOCABULARY_KINDS.md` allocation for this batch, and the
-/// mesh-side emitter (CIRISAgent#904) has not yet migrated. This value must
-/// be reconciled with the CIRISPersist steward allocation + the emitter
-/// BEFORE any node emits trace batches over Reticulum. The **live**
-/// trace-ingest path is HTTP (`ciris-server`'s `ingest_http`), which does
-/// not use this `kind`, so this receiver has no live cross-node emitter to
-/// be wire-incompatible with today.
-pub const ACCORD_EVENTS_KIND: u32 = 0x0005_0001;
+/// **RATIFIED (CIRISPersist#337, shipped persist v11.9.0):** this is now the
+/// canonical `ciris_persist::TRACE_BATCH_KIND` constant (wire value
+/// `0x0005_0001`, unchanged from the provisional allocation), so the receiver
+/// and the CIRISPersist steward allocation can never drift. The payload is a
+/// `ciris_persist::schema::BatchEnvelope`, canonicalized via
+/// `ciris_persist::trace_batch_payload_bytes` / `BatchEnvelope::from_json`;
+/// the mesh-side emitter is CIRISAgent#904. `receive_and_persist` parses the
+/// `BatchEnvelope` internally, so the receive path just feeds it the raw bytes.
+pub const ACCORD_EVENTS_KIND: u32 = TRACE_BATCH_KIND; // ratified (was provisional 0x0005_0001)
 
 /// Relay-mode inbound subscriber. Holds a shared handle to the host's
 /// persist `Engine`; persists every verified trace batch it receives.

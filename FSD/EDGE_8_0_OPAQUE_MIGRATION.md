@@ -330,6 +330,14 @@ canonicalization, honoring the §3.3 normative rule.
 
 ### 6.3 C1 — local relay endpoint (`POST /v1/mesh/relay`)
 
+> **Status (0.5.72):** the C1 **initiator send leg is now WIRED**. edge#249
+> (edge v8.2.0) changed `Edge::run` to `run(self: Arc<Self>)`, so `compose.rs`
+> retains a live `Arc<Edge>` across `run()` and wires
+> `mesh_relay::edge_mesh_requester_with_loopback` — `target==self` short-circuits
+> to the in-process responder, every other owned target sends for real over RNS
+> via `Edge::send_opaque_request`. The interim `local_only_requester` stub
+> (which 502'd cross-node sends while `run(self)` consumed the Edge) is retired.
+
 `src/mesh_relay.rs`, mounted on the **loopback control listener** in `compose.rs`.
 Unchanged from `RNS_CONTROL_RELAY.md` §6 except the send call:
 

@@ -1,6 +1,16 @@
 # RNS Control Relay — administering an owned remote node by `key_id` over the mesh
 
 **Status:** DESIGN — implementation-ready (no production code in this doc).
+**Update (0.5.72):** SHIPPED. Both halves are live in `src/mesh_relay.rs`. The
+**initiator (C1 send) leg is now WIRED** for real over RNS — edge#249 (edge
+v8.2.0) changed `Edge::run` to `run(self: Arc<Self>)`, so `compose.rs` retains a
+live `Arc<Edge>` across `run()` and wires
+`mesh_relay::edge_mesh_requester_with_loopback` (`target==self` short-circuits to
+the in-process responder; every other owned target sends via
+`Edge::send_opaque_request`). The v8.0.0 `local_only_requester` stub (502'd
+cross-node) is retired. §4.2's `link_request`/`Edge::send::<M>` analysis below is
+superseded by the edge v8.0.0 generic opaque RPC (`send_opaque_request` /
+`register_opaque_handler`, kind `0x0000_0001`).
 **Author:** research + spec pass.
 **Substrate floor at time of writing:** ciris-server 0.5.71, **edge v7.4.4**
 (git checkout `aebb9e1`), persist v11.5.0, verify family v8.3.0.

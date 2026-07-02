@@ -344,26 +344,31 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&mesh_dispatch_router),
     ));
     crate::mesh_relay::register_mesh_control_handler(&edge, Arc::clone(&mesh_responder));
-    // The local SEND leg (C1's mesh hop). edge v8.0.0's `Edge::run(self, …)`
-    // consumes the Edge, so this composition root cannot retain the live
-    // `Arc<Edge>` that `send_opaque_request` needs after boot (the edge opaque
-    // conformance suite drives request/response via `Arc<Edge> +
-    // spawn_background_listeners` instead — but swapping this node's lifecycle
-    // onto that path would lose `run()`'s CRPL replication pre-dispatch, a
-    // regression). Until edge exposes an Arc-receiver `run` (follow-up filed
-    // with the #128 report), the requester short-circuits `target == self` to
-    // the in-process responder (the FSD §6 step-2 short-circuit, full signed
-    // envelope + verify) and honestly 502s any other target; the Phase E
-    // two-node harness composes `mesh_relay::edge_mesh_requester` over its own
-    // Arc<Edge>.
-    let mesh_requester = crate::mesh_relay::local_only_requester(
+
+    // edge v8.2.0 (CIRISEdge#249) makes `Edge::run` take `self: Arc<Self>`, so
+    // the composition root can now retain a live `Arc<Edge>` ACROSS the run loop
+    // — the enabler for the C1 initiator leg. All the pre-run captures above
+    // (`local_transport_pubkey`, `setup_peer_replication`, the swarm runtime,
+    // the mesh responder registration) took `&edge` before this point and are
+    // done; from here `edge` is shared between the run task and the requester.
+    let edge = Arc::new(edge);
+
+    // The local SEND leg (C1's mesh hop) — the Phase E INITIATOR leg, now LIVE.
+    // `target == self` short-circuits into the in-process responder (edge does
+    // not loop a send back to its own destination); every OTHER owned target
+    // sends for real over RNS via `send_opaque_request` on the retained
+    // `Arc<Edge>` (FSD §6). This retires the v8.0.0 `local_only_requester` stub
+    // that 502'd cross-node sends while edge's `run(self)` consumed the Edge.
+    let mesh_requester = crate::mesh_relay::edge_mesh_requester_with_loopback(
+        Arc::clone(&edge),
         node_code.key_id.clone(),
         Arc::clone(&mesh_responder),
     );
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
-    let edge_join = tokio::spawn(async move { edge.run(edge_shutdown_rx).await });
+    let edge_run = Arc::clone(&edge);
+    let edge_join = tokio::spawn(async move { edge_run.run(edge_shutdown_rx).await });
 
     // ── The CEG-driven replication reconcile loop ─────────────────────────────
     // Converges the live ReplicationRuntime to the corpus's consent:replication

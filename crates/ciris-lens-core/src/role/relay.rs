@@ -112,6 +112,8 @@ impl LensCore {
         LensCoreHandler::spawn_subscriber(engine, &edge);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // edge v8.2.0 (CIRISEdge#249): `run` takes `self: Arc<Self>`.
+        let edge = Arc::new(edge);
         let join = tokio::spawn(async move { edge.run(shutdown_rx).await });
 
         Ok(RelayHandle {

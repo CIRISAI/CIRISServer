@@ -289,6 +289,12 @@ pub fn edge_mesh_requester(edge: Arc<ciris_edge::Edge>) -> MeshRequester {
 /// `run(self: Arc<Self>)` receiver). The RESPONDER side is fully wired either
 /// way — every owned node is administrable over RNS; initiating from a
 /// `run()`-lifecycle node awaits the edge receiver change.
+///
+/// SUPERSEDED for the compose root by [`edge_mesh_requester_with_loopback`]
+/// now that edge v8.2.0 (CIRISEdge#249) ships `run(self: Arc<Self>)` — the
+/// composition root retains an `Arc<Edge>` across `run()`, so cross-node
+/// targets send for real over RNS. Kept for hosts that genuinely have no live
+/// `Arc<Edge>` send handle (self-only administration).
 pub fn local_only_requester(
     self_key_id: String,
     responder: Arc<MeshControlResponder>,
@@ -305,6 +311,34 @@ pub fn local_only_requester(
                  (edge v8.0.0 Edge::run(self) consumes it); target {target} is only \
                  reachable once the edge exposes an Arc-receiver run"
             )))
+        })
+    })
+}
+
+/// The Phase E composition-root requester (edge v8.2.0 / CIRISEdge#249 — the
+/// INITIATOR leg, now live): `target == self` short-circuits into the
+/// in-process responder (no self-RNS hop — edge does not loop a send back to
+/// its own destination), and **every other target sends for real over RNS**
+/// via [`edge_mesh_requester`] on the retained `Arc<Edge>`. This is the
+/// production requester compose wires now that `Edge::run(self: Arc<Self>)`
+/// lets the composition root keep a live `Arc<Edge>` after starting the run
+/// loop. Combines the self short-circuit of [`local_only_requester`] with the
+/// real cross-node send of [`edge_mesh_requester`].
+pub fn edge_mesh_requester_with_loopback(
+    edge: Arc<ciris_edge::Edge>,
+    self_key_id: String,
+    responder: Arc<MeshControlResponder>,
+) -> MeshRequester {
+    let edge_send = edge_mesh_requester(edge);
+    Arc::new(move |target, kind, payload, timeout_ms| {
+        let responder = Arc::clone(&responder);
+        let edge_send = Arc::clone(&edge_send);
+        let self_key_id = self_key_id.clone();
+        Box::pin(async move {
+            if target == self_key_id {
+                return Ok(responder.handle(&payload).await);
+            }
+            edge_send(target, kind, payload, timeout_ms).await
         })
     })
 }
