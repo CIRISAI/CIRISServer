@@ -50,6 +50,12 @@ class DelegationsViewModel(
     private val _lastCreated = MutableStateFlow<CreateDelegationResponse?>(null)
     val lastCreated: StateFlow<CreateDelegationResponse?> = _lastCreated.asStateFlow()
 
+    /**
+     * The local node's base URL (``http://host:port``) — surfaced so the offer card
+     * can show/copy the full ``host:port`` the agent dials (the claim URL is relative).
+     */
+    val nodeBaseUrl: String get() = apiClient.baseUrl
+
     init {
         refresh()
     }

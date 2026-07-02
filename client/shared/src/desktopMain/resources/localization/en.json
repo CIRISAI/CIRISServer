@@ -2077,6 +2077,8 @@
     "delegations_permits_all_actions": "All actions",
     "delegations_permits_read_only": "Read-only (no actions)",
     "delegations_permits_actor": "Acting agent",
+    "delegations_copy_all": "Copy all",
+    "delegations_copy_all_done": "Offer copied",
     "common_dismiss": "Dismiss",
     "identity_title": "My Identity",
     "identity_subtitle": "Manage your self fed-ID and the devices bound to it. Adding a second device makes your identity survive the loss of the first. The app holds no keys; the node signs.",

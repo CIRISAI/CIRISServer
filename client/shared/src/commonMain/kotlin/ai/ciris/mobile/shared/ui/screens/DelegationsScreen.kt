@@ -271,6 +271,7 @@ fun DelegationsScreen(
             when (pane) {
                 "offer" -> OfferPane(
                     busy = busy,
+                    nodeBaseUrl = viewModel.nodeBaseUrl,
                     delegateLabel = delegateLabel,
                     onLabelChange = { delegateLabel = it },
                     delegateMode = delegateMode,
@@ -409,6 +410,7 @@ private fun RowScope.PaneTab(
 @Composable
 private fun OfferPane(
     busy: Boolean,
+    nodeBaseUrl: String,
     delegateLabel: String,
     onLabelChange: (String) -> Unit,
     delegateMode: String,
@@ -532,6 +534,23 @@ private fun OfferPane(
         // ── Created result — the URL + PIN to hand over ──────────────────────
         lastCreated?.let { created ->
             Spacer(Modifier.height(12.dp))
+            val clipboard = LocalClipboardManager.current
+            val scope = rememberCoroutineScope()
+            var copiedAll by remember { mutableStateOf(false) }
+            // The host:port the agent dials — the claim URL the node returns is
+            // relative, so we surface the node's base URL (scheme stripped).
+            val host = nodeBaseUrl.substringAfter("://").trimEnd('/')
+            // The ONE formatted block "Copy all" hands over (labeled + newline-
+            // separated); the same text drivable by drag-select over [offer_block].
+            val offerText = buildDelegationOfferText(created, host, lastConstraints)
+            val onCopyAll = {
+                clipboard.setText(AnnotatedString(offerText))
+                copiedAll = true
+                scope.launch {
+                    delay(1500)
+                    copiedAll = false
+                }
+            }
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
@@ -545,43 +564,84 @@ private fun OfferPane(
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                     Spacer(Modifier.height(8.dp))
-                    // Every handed-over value is both SELECTABLE (SelectionContainer)
-                    // and one-tap COPYABLE — desktop has no easy text-grab otherwise.
-                    CopyableValue(
-                        label = "PIN",
-                        value = created.pin,
-                        valueFontSize = 32.sp,
-                        testTag = "delegation_created_pin",
-                        copyTestTag = "btn_copy_delegation_pin",
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    CopyableValue(
-                        label = "Claim URL",
-                        value = created.claimUrl,
-                        valueFontSize = 13.sp,
-                        testTag = "delegation_created_url",
-                        copyTestTag = "btn_copy_delegation_url",
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    CopyableValue(
-                        label = "Client",
-                        value = created.clientId,
-                        valueFontSize = 12.sp,
-                        testTag = "delegation_created_client_id",
-                        copyTestTag = "btn_copy_delegation_client_id",
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Hand this URL + PIN over; it expires in ${created.expiresIn / 60} minutes.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                    // What this delegation permits — driven by the node-echoed
-                    // characteristics when present, else the constraints just set.
-                    GrantCharacteristicsDisplay(
-                        characteristics = created.delegation,
-                        fallback = lastConstraints,
-                    )
+                    // The WHOLE offer is ONE selectable region — drag-select grabs
+                    // the entire block in a single gesture (no nested
+                    // SelectionContainers: CopyableValue renders text + a per-field
+                    // copy icon only, it does NOT wrap its own SelectionContainer).
+                    // Per-field copy icons + this block-level selection coexist.
+                    SelectionContainer(modifier = Modifier.testable("offer_block")) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            CopyableValue(
+                                label = "Host",
+                                value = host,
+                                valueFontSize = 13.sp,
+                                testTag = "delegation_created_host",
+                                copyTestTag = "btn_copy_delegation_host",
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            CopyableValue(
+                                label = "PIN",
+                                value = created.pin,
+                                valueFontSize = 32.sp,
+                                testTag = "delegation_created_pin",
+                                copyTestTag = "btn_copy_delegation_pin",
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            CopyableValue(
+                                label = "Claim URL",
+                                value = created.claimUrl,
+                                valueFontSize = 13.sp,
+                                testTag = "delegation_created_url",
+                                copyTestTag = "btn_copy_delegation_url",
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            CopyableValue(
+                                label = "Client",
+                                value = created.clientId,
+                                valueFontSize = 12.sp,
+                                testTag = "delegation_created_client_id",
+                                copyTestTag = "btn_copy_delegation_client_id",
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Hand this URL + PIN over; it expires in ${created.expiresIn / 60} minutes.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            // What this delegation permits — driven by the node-echoed
+                            // characteristics when present, else the constraints just set.
+                            GrantCharacteristicsDisplay(
+                                characteristics = created.delegation,
+                                fallback = lastConstraints,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    // Copy the ENTIRE offer as one formatted block — saves the user
+                    // copying the host + URL + PIN + client one field at a time.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FilledTonalButton(
+                            onClick = { onCopyAll() },
+                            modifier = Modifier.testableClickable("btn_offer_copy_all") { onCopyAll() },
+                        ) {
+                            Icon(
+                                imageVector = CIRISMaterialIcons.Filled.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(localizedString("mobile.delegations_copy_all"))
+                        }
+                        if (copiedAll) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                localizedString("mobile.delegations_copy_all_done"),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.testable("offer_copy_all_copied"),
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(10.dp))
                     Button(
                         onClick = onClearCreated,
@@ -596,9 +656,11 @@ private fun OfferPane(
 }
 
 /**
- * A labeled value the user must hand over — selectable (drag/⌘C) AND one-tap
- * copyable, with a brief "Copied" confirmation. Tinted for the primaryContainer
- * card it sits in (the created-offer surface).
+ * A labeled value the user must hand over — one-tap copyable with a brief "Copied"
+ * confirmation. Tinted for the primaryContainer card it sits in (the created-offer
+ * surface). The value Text is NOT wrapped in its own [SelectionContainer]: the
+ * caller wraps the whole offer block in ONE SelectionContainer (drag-select the
+ * entire offer), and nested SelectionContainers are illegal in Compose.
  */
 @Composable
 private fun CopyableValue(
@@ -621,15 +683,13 @@ private fun CopyableValue(
     }
     Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        SelectionContainer(modifier = Modifier.weight(1f)) {
-            Text(
-                value,
-                fontSize = valueFontSize,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.testable(testTag),
-            )
-        }
+        Text(
+            value,
+            fontSize = valueFontSize,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.weight(1f).testable(testTag),
+        )
         IconButton(
             onClick = { onCopy() },
             modifier = Modifier.testableClickable(copyTestTag) { onCopy() },
@@ -649,6 +709,45 @@ private fun CopyableValue(
             color = MaterialTheme.colorScheme.onPrimaryContainer,
             modifier = Modifier.testable("${testTag}_copied"),
         )
+    }
+}
+
+/**
+ * Format the whole delegation offer as ONE labeled, newline-separated block — the
+ * payload the "Copy all" button puts on the clipboard. [host] is host:port (scheme
+ * already stripped). The permits (goal / allowed / denied / expiry) mirror
+ * [GrantCharacteristicsDisplay]: the node-echoed characteristics when present, else
+ * the [fallback] constraints the owner just submitted.
+ */
+private fun buildDelegationOfferText(
+    created: ai.ciris.mobile.shared.models.federation.CreateDelegationResponse,
+    host: String,
+    fallback: ai.ciris.mobile.shared.models.federation.DelegationConstraints?,
+): String {
+    val catalog = ai.ciris.mobile.shared.models.federation.CapabilityCatalog
+    val ch = created.delegation
+    val goal = ch?.purpose ?: fallback?.goal
+    val allow = ch?.actionsAllow ?: fallback?.actionsAllow
+    val deny = (ch?.actionsDeny?.takeIf { it.isNotEmpty() })
+        ?: fallback?.actionsDeny?.takeIf { it.isNotEmpty() }
+    val expiresIn = ch?.expiresIn ?: created.expiresIn.takeIf { it > 0 }
+    return buildString {
+        appendLine("CIRIS delegation offer")
+        appendLine("Host:      $host")
+        appendLine("Claim URL: ${created.claimUrl}")
+        appendLine("PIN:       ${created.pin}")
+        append("Client:    ${created.clientId}")
+        if (!goal.isNullOrBlank()) append("\nGoal:      $goal")
+        val allowedText = when {
+            allow == null -> "all actions"
+            allow.isEmpty() -> "read-only (no actions)"
+            else -> allow.joinToString(", ") { catalog.labelFor(it) }
+        }
+        append("\nAllowed:   $allowedText")
+        if (!deny.isNullOrEmpty()) {
+            append("\nDenied:    ${deny.joinToString(", ") { catalog.labelFor(it) }}")
+        }
+        if (expiresIn != null && expiresIn > 0) append("\nExpires:   ${expiresIn / 60} min")
     }
 }
 

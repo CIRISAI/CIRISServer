@@ -240,12 +240,11 @@ pub async fn claim_remote(
 #[derive(Clone)]
 struct ClaimRemoteState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` — used to check the serve-only floor (the
-    /// local node must itself be owner-bound to author a remote claim) is NOT
-    /// applicable here: the LOCAL node drives the claim with the USER's signer,
-    /// so authority is the operator session, not an owner-binding. Retained for
-    /// logging/symmetry.
-    #[allow(dead_code)]
+    /// THIS node's federation `key_id`. Authority for the claim is the operator
+    /// session (not an owner-binding), but the key_id is also the CONFIG AUTHOR for
+    /// the local `net.bootstrap_peers` update after a successful claim (0.5.73:
+    /// record what we claimed so the claimer can reach it over RNS) and the
+    /// self-claim discriminator (target == self ⇒ setup/root already recorded it).
     node_key_id: String,
     /// Inputs to resolve the responsible USER's signer AT REQUEST TIME (NOT at
     /// boot). The fed-ID is minted DURING the first-run wizard — after this node
@@ -418,7 +417,23 @@ async fn claim_remote_handler(
     )
     .await
     {
-        Ok(target_result) => (StatusCode::OK, Json(target_result)).into_response(),
+        Ok(target_result) => {
+            // ── Best-effort LOCAL directory update (0.5.73) ───────────────────
+            // The claim above SUCCEEDED on the target; now record what we claimed
+            // in OUR OWN corpus so the claimer KNOWS it (owned-nodes lists the
+            // target) and can REACH it over RNS (its address joins bootstrap_peers).
+            // NEVER fail the claim over a local-persist hiccup — log + report a flag.
+            let local_directory_updated = record_claimed_target_locally(
+                &st,
+                &user_signer,
+                &req.node_code,
+                req.cohort_scope.trim(),
+                req.target_url.as_deref(),
+            )
+            .await;
+            let body = with_local_flag(target_result, local_directory_updated);
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(e) => {
             let code = match e {
                 ClaimRemoteError::BadNodeCode(_) | ClaimRemoteError::BadCohortScope(_) => {
@@ -435,6 +450,271 @@ async fn claim_remote_handler(
             };
             err(code, format!("claim-remote failed: {e}"))
         }
+    }
+}
+
+/// The Reticulum node port (`net.listen_addr` default `0.0.0.0:4242`). A target's
+/// read-API URL is HTTP (e.g. `http://1.2.3.4:4243`); the RNS SEED we dial is the
+/// same HOST at the node port — NOT the HTTP port. (Documented assumption: nodes
+/// run their RNS listener on 4242; if the target uses a different RNS port the
+/// operator can amend `net.bootstrap_peers` via `ciris-server config set`.)
+const RNS_DEFAULT_PORT: u16 = 4242;
+
+/// Derive the RNS mesh SEED address (`host:4242`) from a target's read-API URL or
+/// NodeCode `transport_hint`. Strips the scheme + path + any userinfo, keeps the
+/// HOST, and pins [`RNS_DEFAULT_PORT`] (the read-API/HTTP port is discarded — see
+/// its doc). Returns the input verbatim when no host can be extracted, so nothing
+/// is silently dropped (a malformed entry is skipped later by
+/// [`crate::config::parse_bootstrap_peers`], which only admits `host:port`).
+fn rns_seed_from_target(url: &str) -> Option<String> {
+    let s = url.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Drop the scheme (`http://` / `https://` / `ret://` …) if present.
+    let after_scheme = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    // Authority = up to the first '/', then drop any `user@` prefix.
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    if hostport.is_empty() {
+        return None;
+    }
+    // Extract the host, handling `[ipv6]:port`, `host:port`, and bare `host`.
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        rest.split(']').next().map(|h| format!("[{h}]"))
+    } else {
+        hostport.split(':').next().map(str::to_string)
+    };
+    match host {
+        Some(h) if !h.is_empty() => Some(format!("{h}:{RNS_DEFAULT_PORT}")),
+        // Couldn't parse a host — record the raw authority so nothing is lost.
+        _ => Some(hostport.to_string()),
+    }
+}
+
+/// Register a just-claimed TARGET node's key record into the LOCAL federation
+/// directory (so the local node KNOWS the target + a `delegates_to(owner → target)`
+/// can be persisted — `put_attestation`'s FK requires the attested key to exist).
+///
+/// We only hold the target's Ed25519 pubkey (from its NodeCode), NOT its ML-DSA-65
+/// half, so this uses the bypass
+/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
+/// (which does NOT re-verify a scrub signature) rather than the hybrid-proof
+/// `register_federation_key` gate. Idempotent: a row already present is a no-op.
+async fn register_target_key(engine: &Arc<Engine>, nc: &nodecode::NodeCode) -> Result<(), String> {
+    use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord};
+    use ciris_persist::federation::SignedKeyRecord;
+    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
+    use sha2::{Digest, Sha256};
+
+    // Idempotent: already-known target ⇒ nothing to do (never clobber a richer,
+    // hybrid-complete row a prior peering may have admitted).
+    if let Ok(Some(_)) = engine
+        .federation_directory()
+        .lookup_public_key(&nc.key_id)
+        .await
+    {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+    let reg_envelope = serde_json::json!({ "key_id": nc.key_id });
+    // put_public_key hex-decodes original_content_hash, so it MUST be valid hex.
+    let canonical = ceg_produce_canonicalize(&reg_envelope)
+        .map_err(|e| format!("canonicalize target registration envelope: {e}"))?;
+    let original_content_hash = hex::encode(Sha256::digest(&canonical));
+
+    let record = KeyRecord {
+        key_id: nc.key_id.clone(),
+        pubkey_ed25519_base64: nc.pubkey_ed25519_base64.clone(),
+        // Unknown from the NodeCode (Ed25519-only). The row is a local directory
+        // bookmark; a later peering/self-key-record fetch can upgrade it to the
+        // full hybrid identity.
+        pubkey_ml_dsa_65_base64: None,
+        // put_public_key enforces algorithm == "hybrid" (the federation invariant).
+        algorithm: algorithm::HYBRID.into(),
+        // The target is a fabric NODE (infrastructure) — so the CC 4.4.3.4.3
+        // node-agency write gate applies (a delegates_to to it must be infra:*,
+        // which the owner-binding is).
+        identity_type: identity_type::NODE.into(),
+        identity_ref: nc.key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: reg_envelope,
+        original_content_hash,
+        // No scrub signature (we don't hold the target's private keys);
+        // put_public_key does not re-verify it.
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
+        scrub_key_id: nc.key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: None,
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Append `addr` to the LOCAL node's `net.bootstrap_peers` config:* list (deduped),
+/// so the local node dials the claimed target on its NEXT boot (the "≥1 node with
+/// an IP" that makes the mesh reachable). Returns `Ok(true)` when a new entry was
+/// added, `Ok(false)` when `addr` was already present (idempotent). `net.listen_addr`
+/// is boot-structural, so this takes effect on restart.
+async fn append_bootstrap_peer(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    addr: &str,
+) -> Result<bool, String> {
+    use crate::graph_config::{get_config, set_config, ConfigScope, ConfigValue};
+
+    let mut list: Vec<serde_json::Value> = match get_config(
+        engine,
+        node_key_id,
+        crate::config_reconcile::KEY_BOOTSTRAP_PEERS,
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        Some(entry) => match entry.value {
+            ConfigValue::List(items) => items,
+            // Any non-list stored value: start a fresh list (don't clobber-panic).
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    if list.iter().any(|v| v.as_str() == Some(addr)) {
+        return Ok(false);
+    }
+    list.push(serde_json::Value::String(addr.to_string()));
+    set_config(
+        engine,
+        node_key_id,
+        crate::config_reconcile::KEY_BOOTSTRAP_PEERS,
+        ConfigValue::List(list),
+        "claim-remote",
+        ConfigScope::default(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// **Best-effort local directory update after a SUCCESSFUL remote claim (0.5.73).**
+/// Records the just-claimed target into THIS node's corpus so the claimer keeps a
+/// record of what it claimed AND can reach it over RNS:
+///
+///   1. the target's **key record** → `federation_keys` (so we KNOW the target);
+///   2. the **owner-binding** `delegates_to(owner → target)` → local corpus (so
+///      `GET /v1/setup/owned-nodes` / `nodes_stewarded_by(owner)` lists the target
+///      on the claimer); and
+///   3. the target's **RNS seed** → `net.bootstrap_peers` (so the local node can
+///      dial the target — the mesh-reachability fix).
+///
+/// Returns `true` iff every applicable step succeeded. A failure is logged and
+/// swallowed (the remote claim already succeeded — a local hiccup must not 500 it).
+/// A loopback SELF-claim (target == this node) is a no-op success: `setup/root`
+/// already persisted the binding on THIS same engine, and self-peering is pointless.
+async fn record_claimed_target_locally(
+    st: &ClaimRemoteState,
+    user_signer: &LocalSigner,
+    node_code: &str,
+    cohort_scope: &str,
+    target_url: Option<&str>,
+) -> bool {
+    // Re-derive the decoded NodeCode + a user-signed owner-binding for the target.
+    // (A fresh envelope — the LOCAL record need not be byte-identical to the one the
+    // target stored; it just has to be a valid user-signed delegates_to(owner→target).)
+    let (nc, owner_binding) = match build_claim_for_target(user_signer, node_code).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "claim-remote: could not rebuild target binding for the local directory record (non-fatal)");
+            return false;
+        }
+    };
+
+    // Loopback self-claim: the target IS this node, so setup/root already persisted
+    // the key + owner-binding on THIS engine. Skip (avoid duplicate rows + self-peer).
+    if nc.key_id == st.node_key_id {
+        tracing::debug!(target = %nc.key_id, "claim-remote: self-claim — local directory already updated by setup/root");
+        return true;
+    }
+
+    let mut ok = true;
+
+    // (1) target key record.
+    if let Err(e) = register_target_key(&st.engine, &nc).await {
+        tracing::warn!(target = %nc.key_id, error = %e, "claim-remote: register target key locally FAILED (non-fatal)");
+        ok = false;
+    }
+
+    // (2) owner-binding delegates_to(owner → target) into the LOCAL corpus.
+    match ownership::apply_signed_owner_binding(
+        &st.engine,
+        &nc.key_id,
+        cohort_scope,
+        st.policy,
+        &owner_binding,
+    )
+    .await
+    {
+        Ok(applied) => tracing::info!(
+            target = %nc.key_id,
+            owner = %applied.responsible_user_key_id,
+            attestation_id = %applied.attestation_id,
+            "claim-remote: recorded owner-binding locally (owned-nodes now lists the claimed target)"
+        ),
+        Err(e) => {
+            tracing::warn!(target = %nc.key_id, error = %e, "claim-remote: local owner-binding persist FAILED (non-fatal)");
+            ok = false;
+        }
+    }
+
+    // (3) transport: append the target's RNS seed to net.bootstrap_peers (dedup).
+    // Prefer the operator-supplied target_url (an explicit reachable address);
+    // fall back to the NodeCode's own transport_hint.
+    if let Some(raw) = target_url.or(nc.transport_hint.as_deref()) {
+        if let Some(addr) = rns_seed_from_target(raw) {
+            match append_bootstrap_peer(&st.engine, &st.node_key_id, &addr).await {
+                Ok(true) => {
+                    tracing::info!(addr = %addr, "claim-remote: added target RNS seed to net.bootstrap_peers (mesh-reachable next boot)")
+                }
+                Ok(false) => {
+                    tracing::debug!(addr = %addr, "claim-remote: target RNS seed already in net.bootstrap_peers")
+                }
+                Err(e) => {
+                    tracing::warn!(addr = %addr, error = %e, "claim-remote: net.bootstrap_peers update FAILED (non-fatal)");
+                    ok = false;
+                }
+            }
+        }
+    }
+
+    ok
+}
+
+/// Merge the `local_directory_updated` flag into the target's claim-result JSON so
+/// the operator sees whether the LOCAL record + mesh-reachability update succeeded
+/// (the remote claim itself already succeeded — this is the local side-effect flag).
+/// When the target result is a JSON object we add the field in place; otherwise we
+/// wrap it as `{ "target": <result>, "local_directory_updated": <bool> }`.
+fn with_local_flag(target_result: serde_json::Value, updated: bool) -> serde_json::Value {
+    match target_result {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "local_directory_updated".to_string(),
+                serde_json::Value::Bool(updated),
+            );
+            serde_json::Value::Object(map)
+        }
+        other => serde_json::json!({
+            "target": other,
+            "local_directory_updated": updated,
+        }),
     }
 }
 
@@ -784,4 +1064,55 @@ pub fn router(
             axum::routing::post(announce_self_handler),
         )
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rns_seed_from_target, with_local_flag};
+
+    #[test]
+    fn rns_seed_derives_host_at_node_port_from_read_api_url() {
+        // The read-API URL is HTTP on 4243; the RNS seed keeps the HOST + pins 4242.
+        assert_eq!(
+            rns_seed_from_target("http://108.61.242.236:4243").as_deref(),
+            Some("108.61.242.236:4242")
+        );
+        assert_eq!(
+            rns_seed_from_target("https://108.61.242.236:4243/").as_deref(),
+            Some("108.61.242.236:4242")
+        );
+        // Bare host:port (no scheme) and a trailing path both reduce to host:4242.
+        assert_eq!(
+            rns_seed_from_target("108.61.242.236:4243").as_deref(),
+            Some("108.61.242.236:4242")
+        );
+        assert_eq!(
+            rns_seed_from_target("http://node.example.org:8080/v1/x").as_deref(),
+            Some("node.example.org:4242")
+        );
+        // userinfo is stripped; the host is kept.
+        assert_eq!(
+            rns_seed_from_target("http://user@1.2.3.4:9000").as_deref(),
+            Some("1.2.3.4:4242")
+        );
+        // IPv6 literal keeps its brackets so the result parses as a SocketAddr.
+        assert_eq!(
+            rns_seed_from_target("http://[2001:db8::1]:4243").as_deref(),
+            Some("[2001:db8::1]:4242")
+        );
+        // Empty / whitespace ⇒ nothing to record.
+        assert_eq!(rns_seed_from_target("   "), None);
+    }
+
+    #[test]
+    fn with_local_flag_merges_into_object_or_wraps() {
+        // Object result: the flag is added in place.
+        let merged = with_local_flag(serde_json::json!({ "owner": "u1" }), true);
+        assert_eq!(merged["owner"], "u1");
+        assert_eq!(merged["local_directory_updated"], true);
+        // Non-object result: wrapped under `target`.
+        let wrapped = with_local_flag(serde_json::json!("ok"), false);
+        assert_eq!(wrapped["target"], "ok");
+        assert_eq!(wrapped["local_directory_updated"], false);
+    }
 }

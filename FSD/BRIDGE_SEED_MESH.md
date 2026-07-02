@@ -1,10 +1,10 @@
 # Bridge runbook — FRESH SEED the canonical mesh (wipe + reclaim clean)
 
-> ## ⚡ REFRESHED 2026-07-02 for the 0.5.72 mesh substrate — READ THIS FIRST
+> ## ⚡ REFRESHED 2026-07-02 for the 0.5.73 mesh substrate — READ THIS FIRST
 >
 > **Substrate floor is now edge v8.3.0 · persist v11.9.1 · verify v8.3.0** (CC 0.7
-> opaque wire vocabulary). `pip install ciris-server==0.5.72` (or the CIRISStatus
-> v0.3.12 image for Node B). Every node on the mesh MUST be on the 0.5.72 substrate
+> opaque wire vocabulary). `pip install ciris-server==0.5.73` (or the CIRISStatus
+> v0.3.13 image for Node B). Every node on the mesh MUST be on the 0.5.73 substrate
 > — edge v8.0's `SchemaVersion::V2` strict-flip means a 7.x node can't cohabit.
 >
 > **The announce + peering steps below (§4b onward — the direct `curl POST
@@ -29,8 +29,8 @@ nodes you intend to re-seed; a node's old fed-ID does not survive.
 
 ## Substrate floor
 edge **v8.3.0** · persist **v11.9.1** · verify family **v8.3.0** · Leviculum v0.8.1+ciris.1
-(CC 0.7 opaque wire vocabulary; the 0.5.72 mesh floor).
-`pip install ciris-server==0.5.72` (the wheel carries the pinned substrate; persist auto-migrates
+(CC 0.7 opaque wire vocabulary; the 0.5.73 mesh floor).
+`pip install ciris-server==0.5.73` (the wheel carries the pinned substrate; persist auto-migrates
 the fresh DB on first open). Boot model = zero-env: the ONE input is `--home`; the node
 identity label is `--key-id`; everything else is baked constants or `config:*` CEG.
 

@@ -1586,6 +1586,63 @@ async fn build_edge(
     Ok(edge)
 }
 
+/// Open the shared Engine for an OFFLINE, console-trusted CLI op (`config set/get`)
+/// WITHOUT starting the transport / read API. Mirrors the boot prelude in [`serve`]:
+/// open the hybrid federation signer, build the Engine, derive the FSD-003
+/// fingerprinted federation `key_id` (so the config rows are authored under — and
+/// read back at boot under — the SAME node `key_id`), and self-register the node key
+/// (so `put_attestation` admits the node-signed config row). Returns the Engine +
+/// the config with `key_id`/`occurrence_id` set to the derived wire identity.
+async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerConfig)> {
+    cfg.ensure_dirs()?;
+    let signer: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
+    let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
+    let engine = build_engine(cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
+    let ed_pub = signer
+        .public_key()
+        .await
+        .context("read node ed25519 pubkey for key_id derivation")?;
+    let mut cfg = cfg.clone();
+    cfg.key_id = ciris_verify_core::fedcode::derive_key_id(&cfg.keystore_alias, &ed_pub);
+    cfg.occurrence_id = cfg.key_id.clone();
+    // The node key MUST be a federation_keys row before it can author the config
+    // attestation (put_attestation FK). Idempotent (benign conflict on re-run).
+    register_self_key(&engine, &cfg).await?;
+    Ok((engine, cfg))
+}
+
+/// `ciris-server config set <key> <value>` (console-trusted, node-signed). Writes a
+/// signed `config:v1` CEG object — the SAME path the node itself + `POST /v1/config`
+/// use — so a HEADLESS node (console-only, no app/session) can set `config:*` knobs
+/// like `net.bootstrap_peers`. Returns the freshly-written entry.
+pub async fn run_config_set(
+    cfg: ServerConfig,
+    key: &str,
+    value: crate::graph_config::ConfigValue,
+    reason: &str,
+) -> Result<crate::graph_config::ConfigEntry> {
+    let (engine, cfg) = open_engine_for_cli(&cfg).await?;
+    crate::graph_config::set_config(
+        &engine,
+        &cfg.key_id,
+        key,
+        value,
+        reason,
+        crate::graph_config::ConfigScope::default(),
+    )
+    .await
+}
+
+/// `ciris-server config get <key>` (console). Reads the latest-wins value for `key`
+/// from the node's signed `config:v1` store (`None` if unset/tombstoned).
+pub async fn run_config_get(
+    cfg: ServerConfig,
+    key: &str,
+) -> Result<Option<crate::graph_config::ConfigEntry>> {
+    let (engine, cfg) = open_engine_for_cli(&cfg).await?;
+    crate::graph_config::get_config(&engine, &cfg.key_id, key).await
+}
+
 /// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76). Attaches to
 /// the shared Edge (the node's single identity) + serves the registry trust
 /// surface over the shared Engine. SCAFFOLD. (0.5 is config-as-CEG; registry is 0.6.)
