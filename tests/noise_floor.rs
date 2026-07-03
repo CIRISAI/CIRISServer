@@ -132,9 +132,11 @@ fn payload_runs(seed: u8) -> Vec<u8> {
     let nblocks = n / BLOCK_RUN;
     let mut out = Vec::with_capacity(n);
     for b in 0..nblocks {
-        let c = ((b.wrapping_mul(2_654_435_761).wrapping_add(usize::from(seed).wrapping_mul(40_503)))
+        let c = ((b
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(usize::from(seed).wrapping_mul(40_503)))
             >> 3) as u8;
-        out.extend(std::iter::repeat(c).take(BLOCK_RUN));
+        out.extend(std::iter::repeat_n(c, BLOCK_RUN));
     }
     out
 }
@@ -489,10 +491,7 @@ async fn revocation_purges_member_tiers_but_not_the_composite() {
 
     // Two source members; the composite (tier 1) is committed over BOTH, so the
     // collective survives when one member is revoked.
-    let member_ids = vec![
-        "nf-pyr-member-a".to_string(),
-        "nf-pyr-member-b".to_string(),
-    ];
+    let member_ids = vec!["nf-pyr-member-a".to_string(), "nf-pyr-member-b".to_string()];
     let member_payloads = vec![payload_for(30), payload_for(31)];
     for (mid, payload) in member_ids.iter().zip(&member_payloads) {
         let (m, p, _c) = encode_and_manifest(mid, source_corpus, payload).await;
@@ -572,8 +571,7 @@ async fn revocation_purges_member_tiers_but_not_the_composite() {
         "signed manifest survives revocation (never zero) as provenance"
     );
     assert!(
-        !after.manifest().signature.is_empty()
-            && !after.manifest().signature_ml_dsa_65.is_empty(),
+        !after.manifest().signature.is_empty() && !after.manifest().signature_ml_dsa_65.is_empty(),
         "the surviving manifest keeps its hybrid signature"
     );
 
@@ -873,7 +871,7 @@ async fn aggregation_collapse_erases_the_individual_pending_ciris_edge_266() {
     // residual fidelity ≤ max(ε, 1/N_eff) against a composite DERIVED from the
     // members) is unbuildable until CIRISEdge#266. We drive the codec on the
     // placeholder only to document the shape — this is NOT a proof of erasure.
-    let n_eff_uniform = n_eff(&vec![1.0; FAN_IN]); // == FAN_IN for a balanced fold
+    let n_eff_uniform = n_eff(&[1.0; FAN_IN]); // == FAN_IN for a balanced fold
     let would_assert_bound = FIDELITY_EPSILON.max(1.0 / n_eff_uniform);
     eprintln!(
         "[noise-floor] PENDING CIRISEdge#266: N={FAN_IN}→1 collapse scaffolding is real \

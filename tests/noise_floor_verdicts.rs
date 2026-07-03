@@ -20,9 +20,7 @@
 //!      onto a concrete persist eviction action (verify `holonomic/aggregation.rs`,
 //!      persist `src/fountain/aggregation.rs`).
 
-use ciris_persist::fountain::{
-    EjectionAction, FountainContent, FountainReadClass, FountainTier,
-};
+use ciris_persist::fountain::{EjectionAction, FountainContent, FountainReadClass, FountainTier};
 use ciris_verify_core::holonomic::{
     eject_aggregated_tier, ejection_verdict, ConsentState, EjectionVerdict,
 };
@@ -49,7 +47,11 @@ fn classify_boundary_table() {
 
     let cases: &[(u32, FountainReadClass, &str)] = &[
         // present < min_viable ⇒ EnvelopeOnly (manifest-only provenance).
-        (0, FountainReadClass::EnvelopeOnly, "present=0 ⇒ EnvelopeOnly"),
+        (
+            0,
+            FountainReadClass::EnvelopeOnly,
+            "present=0 ⇒ EnvelopeOnly",
+        ),
         (
             MIN_VIABLE - 1, // 2
             FountainReadClass::EnvelopeOnly,
