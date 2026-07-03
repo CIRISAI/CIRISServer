@@ -2407,6 +2407,77 @@ class CIRISApiClient(
     }
 
     /**
+     * **Admit a node to the trust root** — `POST {nodeUrl}/v1/accord/admit-node`
+     * (loopback, CIRISServer#140 / CIRISVerify#162). The accord holder (A1) RE-OPENS
+     * their YubiKey + USB-wrapped ML-DSA and **scrub-signs** the target node's
+     * registration (+ emits their own `steward,accord_holder` anchor). The node
+     * writes the resulting **genesis seed object** to a predictable outbox path and
+     * returns it. The app holds NO keys — the touch on the YubiKey IS consent.
+     * 1-of-N bootstrap: a single holder suffices (a trust EXTENSION, not the 2/3
+     * kill-switch). The target's pubkeys come from the node's self-key-record.
+     */
+    suspend fun admitNode(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        targetIdentityType: String = "node",
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AdmitNodeResponse {
+        val method = "admitNode"
+        logInfo(method, "POST $nodeUrl/v1/accord/admit-node holder=$holderKeyId target=$targetKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub + anchor signatures; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val target = buildJsonObject {
+                put("key_id", JsonPrimitive(targetKeyId.trim()))
+                put("pubkey_ed25519_base64", JsonPrimitive(targetEd25519Base64.trim()))
+                put("pubkey_ml_dsa_65_base64", JsonPrimitive(targetMlDsa65Base64.trim()))
+                put("identity_type", JsonPrimitive(targetIdentityType.trim().ifBlank { "node" }))
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                put("target", target)
+            }
+            val response = client.post("$nodeUrl/v1/accord/admit-node") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("admit node failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AdmitNodeResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "admitted target=$targetKeyId → saved seed to ${parsed.savedTo}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "admit node failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
      * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
      * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the

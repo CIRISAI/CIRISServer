@@ -27,15 +27,18 @@ use std::path::PathBuf;
 // 0.5.39: edge v7.0.0→v7.0.2 (CIRISEdge#199 — restores the `pub fn register` /
 // `init_edge_runtime` re-export hook that regressed out of the v7.x line; completes
 // the one-wheel re-export, CIRISServer#4).
-// 0.5.72: edge v7.4.4→v8.3.0 (CC 0.7 opaque wire vocabulary, CIRISServer#128;
-// edge#249 `run(self: Arc<Self>)` unlocks the mesh-relay INITIATOR leg) +
-// persist v11.5.0→v11.9.1 (coordinated substrate; persist#337 ratifies
-// TRACE_BATCH_KIND); verify stays v8.3.0.
-pub const TARGET_VERIFY: &str = "v8.3.0";
-pub const TARGET_PERSIST: &str = "v11.9.1";
-pub const TARGET_EDGE: &str = "v8.3.0";
-/// Stage 6/7: the persist tag that bakes Node A as the canonical seed.
-pub const TARGET_PERSIST_V10: &str = "v10";
+// 0.5.76: the v12.0 GENESIS-MESH ROOTING-ANCHOR co-bump — persist v11.9.1→v12.0.1
+// (root_binding anchors to the HUMANITY_ACCORD holder keyset, CIRISPersist#344/#345),
+// verify v8.3.0→v8.5.0 (CIRISVerify#162 produce_scrubbed_key_record, the accord
+// admit-node op), edge v8.3.0→v8.4.1 (anchor gate for free + verify/persist lockstep).
+pub const TARGET_VERIFY: &str = "v8.5.0";
+pub const TARGET_PERSIST: &str = "v12.0.1";
+pub const TARGET_EDGE: &str = "v8.4.1";
+/// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
+/// (Name is historical — the seed-bake family moved v10 → **v12** with the v12.0
+/// genesis-mesh rooting anchor: persist v12.0.1 enforces it, v12.0.2 bakes the
+/// signed accord-holder + A1-scrubbed canonical-node records.)
+pub const TARGET_PERSIST_V10: &str = "v12";
 
 /// The canonical-seed transport key id Node A must carry (Stage 5).
 pub const CANONICAL_TRANSPORT_KEY_ID: &str = "ciris-canonical-1";

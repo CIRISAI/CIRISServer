@@ -112,6 +112,60 @@ class AccordViewModel(
         }
     }
 
+    private val _admitSavedTo = MutableStateFlow<String?>(null)
+    val admitSavedTo: StateFlow<String?> = _admitSavedTo.asStateFlow()
+
+    /**
+     * **Admit a node to the trust root** (CIRISServer#140 / CIRISVerify#162). The
+     * local accord holder RE-OPENS their YubiKey + USB-wrapped ML-DSA and
+     * scrub-signs the target node's registration (+ emits their own
+     * `steward,accord_holder` anchor); the node writes the genesis **seed object**
+     * to a predictable outbox path (surfaced as [admitSavedTo]) the operator hands
+     * to CIRISPersist to bake. The app sends NO crypto — the YubiKey touch IS consent.
+     */
+    fun admitNode(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        userPin: String?,
+    ) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _admitSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.admitNode(
+                    holderKeyId = holderKeyId,
+                    mldsaUsbPath = mldsaUsbPath,
+                    targetKeyId = targetKeyId,
+                    targetEd25519Base64 = targetEd25519Base64,
+                    targetMlDsa65Base64 = targetMlDsa65Base64,
+                    userPin = userPin,
+                )
+                _admitSavedTo.value = res.savedTo
+                _notice.value =
+                    "Admitted $targetKeyId — seed saved to ${res.savedTo}. Hand it to persist to bake."
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[admitNode] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — admit-node needs the YubiKey signer."
+                    else -> "Couldn't admit the node: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
     fun clearMessages() {
         _error.value = null
         _notice.value = null
