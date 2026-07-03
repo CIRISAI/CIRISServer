@@ -1007,6 +1007,262 @@ fn probe_pkcs11_surfaces_slot9c() -> Option<bool> {
     Some(ed25519_representable)
 }
 
+// ─── POST /v1/accord/admit-node (CIRISServer#140 / CIRISVerify#162) ────────────
+
+/// `POST /v1/accord/admit-node` request — an accord holder scrub-signs a node's
+/// registration to admit it to the trust root.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct AdmitNodeRequest {
+    /// The accord holder's federation `key_id` (the seal alias the wrapped ML-DSA
+    /// + holder record were minted under) — the SCRUBBER (e.g. A1).
+    key_id: String,
+    /// The holder's USB dir holding the wrapped ML-DSA-65 half. RE-OPENED.
+    mldsa_usb_path: String,
+    /// PKCS#11 / PIV knobs for the holder's YubiKey.
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The node being admitted (e.g. `canonical-server-1`) — its full hybrid identity.
+    target: AdmitTarget,
+}
+
+/// The target node's public identity — the fields a holder scrub-signs (the holder
+/// never derives them; the operator supplies them from the node's self-key-record).
+#[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct AdmitTarget {
+    key_id: String,
+    pubkey_ed25519_base64: String,
+    pubkey_ml_dsa_65_base64: String,
+    #[serde(default = "default_admit_identity_type")]
+    identity_type: String,
+}
+fn default_admit_identity_type() -> String {
+    "node".to_string()
+}
+
+/// `POST /v1/accord/admit-node` — the accord holder (A1) admits a node to the trust
+/// root by scrub-signing its registration on their own YubiKey+USB, AND emits their
+/// own self-signed `steward,accord_holder` **anchor** record. Both are written as
+/// the genesis **seed object** to `ceg_outbox()/accord_admit_node/{target}.json`
+/// (the predictable, persist-ingestable path the operator hands to CIRISPersist
+/// v12.0.2 to bake) and returned. **1-of-N bootstrap:** a single holder suffices —
+/// this is a trust EXTENSION, not the 2/3 kill-switch. Loopback + `pkcs11`-gated.
+async fn admit_node(State(_st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: AdmitNodeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.key_id.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "key_id (the accord holder / scrubber) must not be empty",
+        );
+    }
+    if req.mldsa_usb_path.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "mldsa_usb_path must not be empty — insert your USB key and choose its folder",
+        );
+    }
+    let t = &req.target;
+    if t.key_id.trim().is_empty()
+        || t.pubkey_ed25519_base64.trim().is_empty()
+        || t.pubkey_ml_dsa_65_base64.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "target must carry key_id + both hybrid pubkeys (ed25519 + ml_dsa_65)",
+        );
+    }
+    // Defence: the target key_id is used as a filename — reject path metacharacters.
+    if t.key_id.contains(['/', '\\']) || t.key_id.contains("..") {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "target key_id contains path separators — refusing to write it",
+        );
+    }
+    admit_node_impl(req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn admit_node_impl(_req: AdmitNodeRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "admit-node needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn admit_node_impl(req: AdmitNodeRequest) -> Response {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer;
+    use ciris_keyring::PqcSigner;
+    use ciris_verify_core::federation_self_record::{
+        produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
+    };
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+
+    use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
+
+    let key_id = req.key_id.trim().to_string();
+    let usb_dir = PathBuf::from(req.mldsa_usb_path.trim());
+    if !usb_dir.is_dir() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "the ML-DSA USB path is not a directory: {} — insert the SAME USB key you \
+                 provisioned this holder with",
+                usb_dir.display()
+            ),
+        );
+    }
+    let piv_slot = req
+        .pkcs11
+        .piv_slot
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PIV_SLOT.to_string());
+
+    // Re-open the holder's YubiKey Ed25519 (slot-9c) + the USB-wrapped ML-DSA-65 —
+    // the SAME portable-holder custody path the accord ceremony cosign uses. The
+    // touch-required tap on `sign_bound` below IS the holder's consent.
+    let opts = Pkcs11Options {
+        module_path: req
+            .pkcs11
+            .module_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
+        user_pin: req.pkcs11.user_pin.clone(),
+        piv_slot: piv_slot.clone(),
+        provision: false,
+        ..Pkcs11Options::default()
+    };
+    let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
+        Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
+                     inserted and the PIN correct?"
+                ),
+            )
+        }
+    };
+    let mldsa =
+        match UsbWrappedMlDsa65Signer::open(yubikey_ed.as_ref(), &key_id, usb_dir.clone()).await {
+            Ok(m) => m,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                    "couldn't re-open the USB-wrapped ML-DSA key for '{key_id}' at {}: {e} — is \
+                     this the SAME USB + YubiKey pair you provisioned this holder with?",
+                    usb_dir.display()
+                ),
+                )
+            }
+        };
+    let identity = match HardwareRootedIdentity::new(
+        key_id.clone(),
+        yubikey_ed.clone(),
+        Arc::new(mldsa) as Arc<dyn PqcSigner>,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("build hardware-rooted identity: {e}"),
+            )
+        }
+    };
+
+    let valid_from = chrono::Utc::now().to_rfc3339();
+
+    // (1) The holder's OWN self-signed `steward,accord_holder` anchor record — the
+    //     rooting terminus persist bakes (its ed25519 pubkey IS a pinned anchor).
+    let anchor =
+        match produce_self_key_record(&identity, "steward,accord_holder", &valid_from).await {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("produce the holder's self-signed anchor record: {e}"),
+                )
+            }
+        };
+    // (2) The TARGET node, scrub-signed by the holder (scrub_key_id = this holder)
+    //     so `node → holder` chains to the anchor and roots.
+    let scrubbed = match produce_scrubbed_key_record(
+        &identity,
+        ScrubTarget {
+            key_id: req.target.key_id.trim().to_string(),
+            pubkey_ed25519_base64: req.target.pubkey_ed25519_base64.trim().to_string(),
+            pubkey_ml_dsa_65_base64: req.target.pubkey_ml_dsa_65_base64.trim().to_string(),
+            identity_type: req.target.identity_type.trim().to_string(),
+        },
+        &valid_from,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("scrub-sign the target node's registration: {e}"),
+            )
+        }
+    };
+
+    // The genesis seed object persist v12.0.2 bakes: the holder anchor + the
+    // scrubbed node, both signed by the holder on hardware.
+    let seed = serde_json::json!({
+        "holder_anchor": anchor,
+        "scrubbed_node": scrubbed,
+        "scrubber_key_id": key_id,
+        "target_key_id": req.target.key_id.trim(),
+        "produced_at": valid_from,
+    });
+
+    // Write to the predictable, persist-ingestable outbox path (same convention as
+    // provision-holder + genesis-assemble: `$CIRIS_HOME/ceg/outbox/...`).
+    let dir = ciris_verify_core::ceg_outbox::ceg_outbox().join("accord_admit_node");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("create outbox dir {}: {e}", dir.display()),
+        );
+    }
+    let out_path = dir.join(format!("{}.json", req.target.key_id.trim()));
+    let seed_pretty = match serde_json::to_string_pretty(&seed) {
+        Ok(s) => s,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("serialize seed object: {e}"),
+            )
+        }
+    };
+    if let Err(e) = std::fs::write(&out_path, &seed_pretty) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write seed to {}: {e}", out_path.display()),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "saved_to": out_path.display().to_string(),
+            "seed": seed,
+        })),
+    )
+        .into_response()
+}
+
 /// The accord-provision router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`).
 pub fn router(engine: Arc<Engine>) -> Router {
@@ -1020,6 +1276,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
             "/v1/accord/family/cosign",
             axum::routing::post(cosign_family),
         )
+        .route("/v1/accord/admit-node", axum::routing::post(admit_node))
         .route(
             "/v1/accord/yubikey-status",
             axum::routing::get(yubikey_status),

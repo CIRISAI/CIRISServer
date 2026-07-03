@@ -29,10 +29,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -307,6 +311,111 @@ fun AccordScreen(
                         }
                     }
                 }
+            }
+
+            // ── Admit a node to the trust root (CIRISServer#140 / CIRISVerify#162) ──
+            // An accord holder (A1) scrub-signs a node's registration on their own
+            // YubiKey + USB key, producing the genesis seed persist bakes. 1-of-N:
+            // a single holder suffices. The app holds NO keys — the touch is consent.
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Admit node to trust root",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_admit_node_title"),
+            )
+            Text(
+                "An accord holder scrub-signs a node's registration with their YubiKey + " +
+                    "USB key, producing the genesis seed. A single holder (1-of-N) is enough.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+            )
+            val admitBusy by viewModel.busy.collectAsState()
+            val admitSavedTo by viewModel.admitSavedTo.collectAsState()
+            var admitHolderKeyId by remember { mutableStateOf("") }
+            var admitUsbPath by remember { mutableStateOf("") }
+            var admitPin by remember { mutableStateOf("") }
+            var admitTargetKeyId by remember { mutableStateOf("") }
+            var admitTargetEd by remember { mutableStateOf("") }
+            var admitTargetMldsa by remember { mutableStateOf("") }
+            OutlinedTextField(
+                value = admitHolderKeyId,
+                onValueChange = { admitHolderKeyId = it },
+                singleLine = true,
+                label = { Text("Your accord holder key_id (e.g. A1)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_holder_key_id"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = admitUsbPath,
+                onValueChange = { admitUsbPath = it },
+                singleLine = true,
+                label = { Text("USB key folder (wrapped ML-DSA)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_usb_path"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = admitPin,
+                onValueChange = { admitPin = it },
+                singleLine = true,
+                label = { Text("YubiKey PIN (optional)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_pin"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = admitTargetKeyId,
+                onValueChange = { admitTargetKeyId = it },
+                singleLine = true,
+                label = { Text("Target node key_id (e.g. canonical-server-1)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_target_key_id"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = admitTargetEd,
+                onValueChange = { admitTargetEd = it },
+                singleLine = true,
+                label = { Text("Target Ed25519 pubkey (base64)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_target_ed"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = admitTargetMldsa,
+                onValueChange = { admitTargetMldsa = it },
+                singleLine = true,
+                label = { Text("Target ML-DSA-65 pubkey (base64)") },
+                modifier = Modifier.fillMaxWidth().testable("input_admit_target_mldsa"),
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    viewModel.admitNode(
+                        admitHolderKeyId,
+                        admitUsbPath,
+                        admitTargetKeyId,
+                        admitTargetEd,
+                        admitTargetMldsa,
+                        admitPin.ifBlank { null },
+                    )
+                },
+                enabled = !admitBusy &&
+                    admitHolderKeyId.isNotBlank() &&
+                    admitUsbPath.isNotBlank() &&
+                    admitTargetKeyId.isNotBlank() &&
+                    admitTargetEd.isNotBlank() &&
+                    admitTargetMldsa.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().testable("btn_admit_node"),
+            ) {
+                Text(if (admitBusy) "Admitting — touch your YubiKey…" else "Admit node — touch your YubiKey")
+            }
+            admitSavedTo?.let { path ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Seed saved to (hand it to persist to bake):\n$path",
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(6.dp).testable("accord_admit_saved_to"),
+                )
             }
 
             // ── Pending invocations ──────────────────────────────────────────

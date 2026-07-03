@@ -135,6 +135,21 @@ data class AccordProvisionResponse(
     val custodyAttestation: kotlinx.serialization.json.JsonElement? = null,
 )
 
+/**
+ * ``POST /v1/accord/admit-node`` response (CIRISServer#140 / CIRISVerify#162) — the
+ * accord holder (A1) scrub-signed a node's registration and emitted their own
+ * `steward,accord_holder` anchor. Both are the **genesis seed object**, saved to a
+ * predictable outbox path (`ceg_outbox()/accord_admit_node/{target}.json`) the
+ * operator hands to CIRISPersist v12.0.2 to bake. `savedTo` is that path; `seed`
+ * is the object verbatim (for display / copy).
+ */
+@Serializable
+data class AdmitNodeResponse(
+    @SerialName("saved_to")
+    val savedTo: String,
+    val seed: kotlinx.serialization.json.JsonElement? = null,
+)
+
 // ─── Genesis ceremony (CIRISServer #41) ──────────────────────────────────────
 //
 // The guided HUMANITY_ACCORD genesis ceremony stands up a NEW mesh's 2-of-3
