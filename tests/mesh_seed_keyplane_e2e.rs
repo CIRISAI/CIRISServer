@@ -111,7 +111,11 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
         .await
         .expect("A self record");
     let a_ed_b64 = a_self.record.pubkey_ed25519_base64.clone();
-    let a_mldsa_b64 = a_self.record.pubkey_ml_dsa_65_base64.clone().expect("A ml_dsa");
+    let a_mldsa_b64 = a_self
+        .record
+        .pubkey_ml_dsa_65_base64
+        .clone()
+        .expect("A ml_dsa");
     engine_a
         .register_federation_key(to_persist(&a_self))
         .await
@@ -121,7 +125,13 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
 
     // Precondition: B cannot root A (it has never seen A's record).
     assert!(
-        !roots(engine_b.sqlite_backend().unwrap().as_ref(), node_a_key, &a_ed_b64, &anchor_set).await,
+        !roots(
+            engine_b.sqlite_backend().unwrap().as_ref(),
+            node_a_key,
+            &a_ed_b64,
+            &anchor_set
+        )
+        .await,
         "precondition: B must NOT root A before receiving A's record"
     );
 
@@ -145,7 +155,13 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
 
     // A's own row roots LOCALLY now — the producer worked.
     assert!(
-        roots(engine_a.sqlite_backend().unwrap().as_ref(), node_a_key, &a_ed_b64, &anchor_set).await,
+        roots(
+            engine_a.sqlite_backend().unwrap().as_ref(),
+            node_a_key,
+            &a_ed_b64,
+            &anchor_set
+        )
+        .await,
         "A's own row must root locally after adopt"
     );
 
@@ -175,7 +191,9 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
         Arc::new(move || vec![node_a_key.to_string()]),
         BridgeConfig::default(),
     );
-    let admitted = b_bridge.apply_envelope_bytes(EnvelopeKind::Key, &bytes).await;
+    let admitted = b_bridge
+        .apply_envelope_bytes(EnvelopeKind::Key, &bytes)
+        .await;
     assert!(
         admitted,
         "B must admit A's anchored record (validates against seeded A1)"
@@ -183,13 +201,25 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
 
     // (5) ROOT — B now roots A at the accord anchor. THE SEED CLOSED.
     assert!(
-        roots(engine_b.sqlite_backend().unwrap().as_ref(), node_a_key, &a_ed_b64, &anchor_set).await,
+        roots(
+            engine_b.sqlite_backend().unwrap().as_ref(),
+            node_a_key,
+            &a_ed_b64,
+            &anchor_set
+        )
+        .await,
         "after receiving A's anchored record, B MUST root A — the mesh seed is complete"
     );
 
     // Negative: B still won't root A under a WRONG anchor set (the gate bites).
     assert!(
-        !roots(engine_b.sqlite_backend().unwrap().as_ref(), node_a_key, &a_ed_b64, &[[0x11u8; 32]]).await,
+        !roots(
+            engine_b.sqlite_backend().unwrap().as_ref(),
+            node_a_key,
+            &a_ed_b64,
+            &[[0x11u8; 32]]
+        )
+        .await,
         "B must NOT root A when A1 is not the pinned anchor"
     );
 }

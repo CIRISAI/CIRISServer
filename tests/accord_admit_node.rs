@@ -205,7 +205,13 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
     let anchor_set = [ed32(&a1_ed_b64)];
     assert!(
         !matches!(
-            root_binding_anchored(backend.as_ref(), "canonical-server-1-test", &target_ed_b64, &anchor_set).await,
+            root_binding_anchored(
+                backend.as_ref(),
+                "canonical-server-1-test",
+                &target_ed_b64,
+                &anchor_set
+            )
+            .await,
             RootingVerdict::Confirmed { .. }
         ),
         "precondition: the self-signed own row must NOT root yet"
@@ -237,7 +243,13 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
     // Now the SAME key_id ROOTS — the Key plane would publish an anchored record.
     assert!(
         matches!(
-            root_binding_anchored(backend.as_ref(), "canonical-server-1-test", &target_ed_b64, &anchor_set).await,
+            root_binding_anchored(
+                backend.as_ref(),
+                "canonical-server-1-test",
+                &target_ed_b64,
+                &anchor_set
+            )
+            .await,
             RootingVerdict::Confirmed { .. }
         ),
         "after adopt the own row must ROOT at the accord anchor"
