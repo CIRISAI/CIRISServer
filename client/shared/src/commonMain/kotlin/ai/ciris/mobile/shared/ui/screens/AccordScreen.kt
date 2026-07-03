@@ -2,9 +2,15 @@ package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.localization.localizedString
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import ai.ciris.mobile.shared.viewmodels.AccordViewModel
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -333,26 +339,96 @@ fun AccordScreen(
             )
             val admitBusy by viewModel.busy.collectAsState()
             val admitSavedTo by viewModel.admitSavedTo.collectAsState()
+            val admitRoster by viewModel.holders.collectAsState()
+            val admitOwnedNodes by viewModel.ownedNodes.collectAsState()
+            val admitTarget by viewModel.resolvedTarget.collectAsState()
             var admitHolderKeyId by remember { mutableStateOf("") }
             var admitUsbPath by remember { mutableStateOf("") }
             var admitPin by remember { mutableStateOf("") }
-            var admitTargetKeyId by remember { mutableStateOf("") }
-            var admitTargetEd by remember { mutableStateOf("") }
-            var admitTargetMldsa by remember { mutableStateOf("") }
-            OutlinedTextField(
-                value = admitHolderKeyId,
-                onValueChange = { admitHolderKeyId = it },
-                singleLine = true,
-                label = { Text("Your accord holder key_id (e.g. A1)") },
-                modifier = Modifier.fillMaxWidth().testable("input_admit_holder_key_id"),
-            )
+            var holderMenu by remember { mutableStateOf(false) }
+            var nodeMenu by remember { mutableStateOf(false) }
+            var showUsbPicker by remember { mutableStateOf(false) }
+
+            // (2) Holder — pick from the seeded roster instead of typing the key_id.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { holderMenu = true },
+                    modifier = Modifier.fillMaxWidth().testable("dd_admit_holder"),
+                ) {
+                    Text(admitHolderKeyId.ifBlank { "Select your accord holder key…" })
+                }
+                DropdownMenu(expanded = holderMenu, onDismissRequest = { holderMenu = false }) {
+                    if (admitRoster.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("no holders seeded yet (needs persist v12.0.2)") },
+                            onClick = { holderMenu = false },
+                        )
+                    }
+                    admitRoster.forEach { h ->
+                        DropdownMenuItem(
+                            text = { Text(h.keyId, fontFamily = FontFamily.Monospace) },
+                            onClick = { admitHolderKeyId = h.keyId; holderMenu = false },
+                            modifier = Modifier.testableClickable("mi_admit_holder_${h.keyId}") {
+                                admitHolderKeyId = h.keyId; holderMenu = false
+                            },
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(6.dp))
+
+            // (3) Target — pick from your owned nodes; the node's hybrid pubkeys are
+            //     auto-filled from the local directory (no manual paste).
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { nodeMenu = true },
+                    modifier = Modifier.fillMaxWidth().testable("dd_admit_target"),
+                ) {
+                    Text(admitTarget?.keyId ?: "Select the node to admit…")
+                }
+                DropdownMenu(expanded = nodeMenu, onDismissRequest = { nodeMenu = false }) {
+                    if (admitOwnedNodes.isEmpty()) {
+                        DropdownMenuItem(text = { Text("no owned nodes") }, onClick = { nodeMenu = false })
+                    }
+                    admitOwnedNodes.forEach { n ->
+                        DropdownMenuItem(
+                            text = { Text(n, fontFamily = FontFamily.Monospace) },
+                            onClick = { viewModel.resolveTargetNode(n); nodeMenu = false },
+                            modifier = Modifier.testableClickable("mi_admit_target_$n") {
+                                viewModel.resolveTargetNode(n); nodeMenu = false
+                            },
+                        )
+                    }
+                }
+            }
+            admitTarget?.let { t ->
+                Text(
+                    "✓ ${t.keyId} — both hybrid pubkeys loaded",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp).testable("accord_admit_target_resolved"),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+
+            // (4) USB PQC materials — browse instead of typing the path.
             OutlinedTextField(
                 value = admitUsbPath,
                 onValueChange = { admitUsbPath = it },
                 singleLine = true,
-                label = { Text("USB key folder (wrapped ML-DSA)") },
+                label = { Text("USB folder (PQC materials)") },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { showUsbPicker = true },
+                        modifier = Modifier.testableClickable("btn_admit_browse_usb") { showUsbPicker = true },
+                    ) { Text("Browse") }
+                },
                 modifier = Modifier.fillMaxWidth().testable("input_admit_usb_path"),
+            )
+            DirectoryPickerDialog(
+                show = showUsbPicker,
+                onDirectoryPicked = { admitUsbPath = it; showUsbPicker = false },
+                onDismiss = { showUsbPicker = false },
             )
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
@@ -362,48 +438,18 @@ fun AccordScreen(
                 label = { Text("YubiKey PIN (optional)") },
                 modifier = Modifier.fillMaxWidth().testable("input_admit_pin"),
             )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = admitTargetKeyId,
-                onValueChange = { admitTargetKeyId = it },
-                singleLine = true,
-                label = { Text("Target node key_id (e.g. canonical-server-1)") },
-                modifier = Modifier.fillMaxWidth().testable("input_admit_target_key_id"),
-            )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = admitTargetEd,
-                onValueChange = { admitTargetEd = it },
-                singleLine = true,
-                label = { Text("Target Ed25519 pubkey (base64)") },
-                modifier = Modifier.fillMaxWidth().testable("input_admit_target_ed"),
-            )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = admitTargetMldsa,
-                onValueChange = { admitTargetMldsa = it },
-                singleLine = true,
-                label = { Text("Target ML-DSA-65 pubkey (base64)") },
-                modifier = Modifier.fillMaxWidth().testable("input_admit_target_mldsa"),
-            )
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = {
-                    viewModel.admitNode(
-                        admitHolderKeyId,
-                        admitUsbPath,
-                        admitTargetKeyId,
-                        admitTargetEd,
-                        admitTargetMldsa,
-                        admitPin.ifBlank { null },
-                    )
+                    admitTarget?.let { t ->
+                        viewModel.admitNode(
+                            admitHolderKeyId, admitUsbPath, t.keyId, t.ed25519, t.mldsa,
+                            admitPin.ifBlank { null },
+                        )
+                    }
                 },
-                enabled = !admitBusy &&
-                    admitHolderKeyId.isNotBlank() &&
-                    admitUsbPath.isNotBlank() &&
-                    admitTargetKeyId.isNotBlank() &&
-                    admitTargetEd.isNotBlank() &&
-                    admitTargetMldsa.isNotBlank(),
+                enabled = !admitBusy && admitHolderKeyId.isNotBlank() &&
+                    admitUsbPath.isNotBlank() && admitTarget != null,
                 modifier = Modifier.fillMaxWidth().testable("btn_admit_node"),
             ) {
                 Text(if (admitBusy) "Admitting — touch your YubiKey…" else "Admit node — touch your YubiKey")

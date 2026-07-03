@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.76" # 0.5.76 = v12.0 GENESIS-MESH adoption + the accord ADMIT-NODE card. Substrate co-bump: verify v8.3.0->v8.5.0 (CIRISVerify#162 produce_scrubbed_key_record) / persist v11.9.1->v12.0.1 (root_binding anchors to the HUMANITY_ACCORD holder keyset, #344/#345) / edge v8.3.0->v8.4.1 (lockstep). NEW: POST /v1/accord/admit-node (src/accord_provision.rs) — an accord holder scrub-signs a node registration on their portable YubiKey+USB holder signer (reuses the ceremony cosign path) via produce_scrubbed_key_record + produce_self_key_record("steward,accord_holder"), saving the genesis SEED object to ceg_outbox()/accord_admit_node/{target}.json (predictable, persist-ingestable) for CIRISPersist v12.0.2 to bake. QA gate tests/accord_admit_node.rs (emulates the accord-genesis QA): the scrubbed record survives persist STRICT register_federation_key + ROOTS at the accord anchor (root_binding_anchored=Confirmed), wrong-anchor rejected. Matching CLIENT card: AdmitNodeResponse DTO + CIRISApiClient.admitNode() + AccordViewModel.admitNode() + AccordScreen "Admit node to trust root" section (testable tags). App holds no keys; the YubiKey touch is consent. NEXT (0.5.77): roster labels, rotation/lost-key wizard (server family/change+supersede exist), partial-consensus announce. 0.5.75 = RNS rooting + hybrid keys.
+version = "0.5.77" # 0.5.77 = persist v12.0.2 (the accord-holder anchor SEED — CIRISPersist#347, seeds A1/B1/C1 at first boot) + edge v8.4.2 adoption, + accord-card UX polish: (1) lists the holder roster, (2) SELECT the holder from the roster (dropdown) instead of typing, (3) SELECT the target from owned-nodes → auto-fills both hybrid pubkeys from the local directory (added pubkey_ml_dsa_65 to LocalPeerState / GET /v1/federation/peers), (4) BROWSE for the USB PQC folder (DirectoryPicker). Verify unchanged v8.5.0. 0.5.76 = the admit-node card + v12.0 adoption.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -123,8 +123,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v12.0.1", features = ["sqlite", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v8.4.1", features = ["transport-reticulum", "transport-http", "transport-packet-radio"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v12.0.2", features = ["sqlite", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v8.4.2", features = ["transport-reticulum", "transport-http", "transport-packet-radio"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -206,7 +206,7 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v12.0.1", features = ["postgres", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v12.0.2", features = ["postgres", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
@@ -259,7 +259,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.5.0"
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v8.4.1", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v8.4.2", features = ["codec-fountain"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
