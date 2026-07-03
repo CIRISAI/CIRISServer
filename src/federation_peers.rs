@@ -80,6 +80,11 @@ fn err(code: StatusCode, error: &str) -> Response {
 struct LocalPeerState {
     key_id: String,
     pubkey_ed25519_base64: String,
+    /// The ML-DSA-65 half (present on a hybrid-complete row; `None` on a legacy
+    /// bookmark). Projected so the accord admit-node card can auto-fill BOTH of a
+    /// selected owned node's pubkeys from the local directory — no manual paste.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pubkey_ml_dsa_65_base64: Option<String>,
     canonical: bool,
     /// One of "trusted"|"untrusted"|"blocked"|"unknown". A directory row is an
     /// admitted key ⇒ "trusted".
@@ -104,6 +109,7 @@ fn to_peer(rec: KeyRecord) -> LocalPeerState {
     LocalPeerState {
         key_id: rec.key_id,
         pubkey_ed25519_base64: rec.pubkey_ed25519_base64,
+        pubkey_ml_dsa_65_base64: rec.pubkey_ml_dsa_65_base64,
         canonical,
         trust: "trusted",
         first_seen: rec.valid_from.to_rfc3339(),

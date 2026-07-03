@@ -69,6 +69,13 @@ class AccordViewModel(
                 _holders.value = holders.holders
                 _holderThreshold.value = holders.threshold
                 _invocations.value = apiClient.getAccordInvocations()
+                // The owner's nodes — the admit-node target picker selects from these.
+                _ownedNodes.value = try {
+                    apiClient.getOwnedNodes().nodes.map { it.keyId }.filter { it.isNotBlank() }
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] owned-nodes: ${e.message}")
+                    emptyList()
+                }
                 _error.value = null
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[refresh] ${e.message}")
@@ -114,6 +121,43 @@ class AccordViewModel(
 
     private val _admitSavedTo = MutableStateFlow<String?>(null)
     val admitSavedTo: StateFlow<String?> = _admitSavedTo.asStateFlow()
+
+    /** The owner's nodes (key_ids) — the admit-node target picker's options. */
+    private val _ownedNodes = MutableStateFlow<List<String>>(emptyList())
+    val ownedNodes: StateFlow<List<String>> = _ownedNodes.asStateFlow()
+
+    /** The selected target node resolved to its hybrid pubkeys (from the local
+     *  directory) — so the card auto-fills both pubkeys instead of a manual paste. */
+    private val _resolvedTarget = MutableStateFlow<ResolvedTarget?>(null)
+    val resolvedTarget: StateFlow<ResolvedTarget?> = _resolvedTarget.asStateFlow()
+
+    data class ResolvedTarget(val keyId: String, val ed25519: String, val mldsa: String)
+
+    /**
+     * Resolve a selected owned node to its Ed25519 + ML-DSA-65 pubkeys via the LOCAL
+     * directory (`GET /v1/federation/peers/{key_id}`) — no manual paste. A node
+     * whose row is missing its ML-DSA half (a legacy bookmark) can't be admitted
+     * until re-claimed (0.5.75 writes hybrid-complete rows).
+     */
+    fun resolveTargetNode(keyId: String) {
+        _resolvedTarget.value = null
+        if (keyId.isBlank()) return
+        viewModelScope.launch {
+            try {
+                val peer = apiClient.getFederationPeer(keyId).peer
+                val ml = peer.pubkeyMlDsa65Base64
+                if (ml.isNullOrBlank()) {
+                    _error.value =
+                        "$keyId has no ML-DSA key in the directory yet — re-claim it first."
+                } else {
+                    _resolvedTarget.value = ResolvedTarget(keyId, peer.pubkeyEd25519Base64, ml)
+                }
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[resolveTargetNode] ${e.message}")
+                _error.value = "Couldn't load $keyId's keys: ${e.message}"
+            }
+        }
+    }
 
     /**
      * **Admit a node to the trust root** (CIRISServer#140 / CIRISVerify#162). The

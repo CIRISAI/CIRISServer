@@ -859,7 +859,11 @@ async fn genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder()
         "rejection must name the non-holder member; got {body}"
     );
 
-    // No family was entrenched.
+    // The rejected genesis must not entrench THIS test's family. (Every node now
+    // seeds + bakes the canonical HUMANITY_ACCORD genesis A1/B1/C1 — persist
+    // v12.0.2 / verify v8.5.0 — so `family_established` is baseline-true and the
+    // seats are the baked A1/B1/C1; that is orthogonal to this test. What must
+    // hold is that NONE of the proposed test members became a seat.)
     let roster: serde_json::Value = client
         .get(format!("{base}/v1/accord-holders"))
         .send()
@@ -868,10 +872,13 @@ async fn genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder()
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        roster["family_established"], false,
-        "a rejected genesis must not entrench a family"
-    );
+    let seats = roster["holders"].as_array().expect("holders array");
+    for member in ["seat-a", "seat-b", "outsider-not-a-holder"] {
+        assert!(
+            !seats.iter().any(|h| h["key_id"] == member),
+            "a rejected genesis must not entrench member {member}; got {roster}"
+        );
+    }
 }
 
 // ─── Operational halt (CC 4.2.1 / 4.2.3 / §9.2.1) — the enforceable kill-switch ─
@@ -1116,10 +1123,21 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
         .await
         .unwrap();
     assert_eq!(roster["seat_count"], 3, "exactly 3 seats; got {roster}");
-    assert_eq!(
-        roster["registered_total"], 4,
-        "3 seats + 1 spare registered"
-    );
+    // This test's 3 seats + 1 spare are ALL registered accord_holders. (Every node
+    // also seeds the baked A1/B1/C1 canonical genesis — persist v12.0.2 — so assert
+    // membership rather than an exact `registered_total`, which now baselines +3.)
+    let registered = roster["registered"].as_array().expect("registered array");
+    for kid in [
+        "accord-holder-a",
+        "accord-holder-b",
+        "accord-holder-c",
+        "accord-holder-a-spare",
+    ] {
+        assert!(
+            registered.iter().any(|h| h["key_id"] == kid),
+            "the 3 seats + spare must all be registered; missing {kid}; got {roster}"
+        );
+    }
     assert!(
         !roster["holders"]
             .as_array()
