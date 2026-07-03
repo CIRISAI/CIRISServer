@@ -159,3 +159,97 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
         "must NOT root when A1 is not a pinned anchor, got {verdict_wrong:?}"
     );
 }
+
+/// The PRODUCER path (CIRISServer#150 / CIRISPersist#351): a node that already
+/// holds its boot-time **self-signed** own-key row upgrades that row IN PLACE to
+/// the accord-holder-scrubbed record via `Engine::adopt_scrub_upgrade` (the old
+/// `register_federation_key` is `ON CONFLICT DO NOTHING` and would have left the
+/// self-signed row). After the upgrade the row ROOTS at the anchor, and a second
+/// apply is idempotent — exactly what admit-node relies on to publish an anchored
+/// record over the Key plane.
+#[tokio::test]
+async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
+    use ciris_persist::federation::register::AdoptScrubOutcome;
+
+    let engine = node().await;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now)
+        .await
+        .expect("A1 anchor");
+    let a1_ed_b64 = anchor.record.pubkey_ed25519_base64.clone();
+    engine
+        .register_federation_key(to_persist(&anchor))
+        .await
+        .expect("register A1 anchor");
+
+    // The node's boot-time state: its OWN row, SELF-signed.
+    let target = HybridSigningIdentity::generate("canonical-server-1-test").expect("gen target");
+    let target_self = produce_self_key_record(&target, "node", &now)
+        .await
+        .expect("target self record");
+    let target_ed_b64 = target_self.record.pubkey_ed25519_base64.clone();
+    let target_mldsa_b64 = target_self
+        .record
+        .pubkey_ml_dsa_65_base64
+        .clone()
+        .expect("target ml_dsa");
+    engine
+        .register_federation_key(to_persist(&target_self))
+        .await
+        .expect("register target SELF-signed own row");
+
+    // Precondition: a self-signed row does NOT root.
+    let backend = engine.sqlite_backend().expect("sqlite backend");
+    let anchor_set = [ed32(&a1_ed_b64)];
+    assert!(
+        !matches!(
+            root_binding_anchored(backend.as_ref(), "canonical-server-1-test", &target_ed_b64, &anchor_set).await,
+            RootingVerdict::Confirmed { .. }
+        ),
+        "precondition: the self-signed own row must NOT root yet"
+    );
+
+    // A1 scrub-signs the target, and the node ADOPTS the upgrade onto its own row.
+    let scrubbed = produce_scrubbed_key_record(
+        &a1,
+        ScrubTarget {
+            key_id: "canonical-server-1-test".to_string(),
+            pubkey_ed25519_base64: target_ed_b64.clone(),
+            pubkey_ml_dsa_65_base64: target_mldsa_b64,
+            identity_type: "node".to_string(),
+        },
+        &now,
+    )
+    .await
+    .expect("A1 scrub-signs target");
+
+    let outcome = engine
+        .adopt_scrub_upgrade(to_persist(&scrubbed))
+        .await
+        .expect("adopt_scrub_upgrade must succeed on a self-signed own row");
+    assert!(
+        matches!(outcome, AdoptScrubOutcome::Upgraded),
+        "first adopt upgrades the self-signed row, got {outcome:?}"
+    );
+
+    // Now the SAME key_id ROOTS — the Key plane would publish an anchored record.
+    assert!(
+        matches!(
+            root_binding_anchored(backend.as_ref(), "canonical-server-1-test", &target_ed_b64, &anchor_set).await,
+            RootingVerdict::Confirmed { .. }
+        ),
+        "after adopt the own row must ROOT at the accord anchor"
+    );
+
+    // Idempotent: re-applying the same outbox record is a no-op (second boot).
+    let again = engine
+        .adopt_scrub_upgrade(to_persist(&scrubbed))
+        .await
+        .expect("re-adopt must not error");
+    assert!(
+        matches!(again, AdoptScrubOutcome::AlreadyAdopted),
+        "second adopt is idempotent, got {again:?}"
+    );
+}

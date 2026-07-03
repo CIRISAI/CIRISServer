@@ -1048,7 +1048,7 @@ fn default_admit_identity_type() -> String {
 /// (the predictable, persist-ingestable path the operator hands to CIRISPersist
 /// v12.0.2 to bake) and returned. **1-of-N bootstrap:** a single holder suffices —
 /// this is a trust EXTENSION, not the 2/3 kill-switch. Loopback + `pkcs11`-gated.
-async fn admit_node(State(_st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+async fn admit_node(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
     let req: AdmitNodeRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
@@ -1082,11 +1082,11 @@ async fn admit_node(State(_st): State<ProvisionState>, body: axum::body::Bytes) 
             "target key_id contains path separators — refusing to write it",
         );
     }
-    admit_node_impl(req).await
+    admit_node_impl(st.engine, req).await
 }
 
 #[cfg(not(feature = "pkcs11"))]
-async fn admit_node_impl(_req: AdmitNodeRequest) -> Response {
+async fn admit_node_impl(_engine: Arc<Engine>, _req: AdmitNodeRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
         "admit-node needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
@@ -1094,7 +1094,7 @@ async fn admit_node_impl(_req: AdmitNodeRequest) -> Response {
 }
 
 #[cfg(feature = "pkcs11")]
-async fn admit_node_impl(req: AdmitNodeRequest) -> Response {
+async fn admit_node_impl(engine: Arc<Engine>, req: AdmitNodeRequest) -> Response {
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1253,10 +1253,48 @@ async fn admit_node_impl(req: AdmitNodeRequest) -> Response {
         );
     }
 
+    // #150 — PRODUCER: adopt the scrubbed record onto this node's OWN directory row
+    // (persist v12.2.0 `Engine::adopt_scrub_upgrade`, CIRISPersist#351). When the
+    // target IS this node, its boot-time self-signed own-key row is upgraded to the
+    // accord-holder-scrubbed record, so the Key plane (edge publish-own) advertises
+    // an ANCHORED, rootable record and consent peers root it. The primitive is
+    // self-gating (verifies the scrub sig + only upgrades a self-signed → scrubbed
+    // row for the SAME key_id/pubkey), so we call it unconditionally: a target whose
+    // row isn't a valid local upgrade returns Err and we report it without failing
+    // the outbox write (the JSON is still the transport for a remote target / bake).
+    let applied: serde_json::Value = match serde_json::to_value(&scrubbed)
+        .and_then(serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>)
+    {
+        Ok(persist_rec) => match engine.adopt_scrub_upgrade(persist_rec).await {
+            Ok(outcome) => {
+                tracing::info!(
+                    target_key_id = %req.target.key_id.trim(),
+                    ?outcome,
+                    "admit-node: adopted the scrubbed record onto the local directory row"
+                );
+                serde_json::json!({ "adopted": true, "outcome": format!("{outcome:?}") })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target_key_id = %req.target.key_id.trim(),
+                    error = %e,
+                    "admit-node: scrubbed record NOT adopted locally (not this node's own \
+                     self-signed row?) — seed JSON saved for transport/bake"
+                );
+                serde_json::json!({ "adopted": false, "reason": e.to_string() })
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "admit-node: scrubbed record convert for local adoption");
+            serde_json::json!({ "adopted": false, "reason": format!("record convert: {e}") })
+        }
+    };
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "saved_to": out_path.display().to_string(),
+            "applied": applied,
             "seed": seed,
         })),
     )
