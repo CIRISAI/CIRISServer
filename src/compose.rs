@@ -1352,18 +1352,42 @@ async fn setup_peer_replication(
     //    health:liveness in. v5.1.0 `start` installs the scheduler control channel
     //    unconditionally, so the runtime accepts `set_peers` mutation with no
     //    extra opt-in (CIRISEdge#173 resolved).
+    // Two coordinators per consent peer: Attestation (capacity:* / health:liveness)
+    // AND Key (#144, CIRISEdge#257 — the KERI publish-own key plane). The reconciler
+    // (replication_reconcile.rs) converges the same pair set at runtime.
     let peers: Vec<ReplicationPeer> = desired
         .iter()
-        .map(|p| ReplicationPeer {
-            peer_key_id: p.clone(),
-            kind: EnvelopeKind::Attestation,
+        .flat_map(|p| {
+            [
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::Attestation,
+                },
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::Key,
+                },
+            ]
         })
         .collect();
+
+    // Key-plane publish selector (CIRISEdge#257 / edge v8.6.0): the Key plane's
+    // `list_keys` advertises the key_ids THIS selector yields — the node's OWN
+    // record — instead of the cohort's-own-keys projection. `list_keys` re-reads
+    // the record live each tick, so once admit-node scrub-signs this node's own
+    // record (scrub_key_id = an accord holder), the NEXT anti-entropy round
+    // publishes the scrubbed, ANCHORED record to consent peers → they root it.
+    // (KERI publish-own: the controller publishes its own establishment record.)
+    let own_key_id = cfg.key_id.clone();
+    let key_selector: ciris_edge::replication::CohortProvider =
+        Arc::new(move || vec![own_key_id.clone()]);
+
     let runtime = ReplicationRuntime::start(
         directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
         peers,
         ReplicationRuntimeConfig::default(),
+        Some(key_selector),
     )
     .await;
 

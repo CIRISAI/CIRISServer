@@ -234,6 +234,7 @@ async fn runtime_for(engine: &Arc<Engine>, peers: Vec<&str>) -> Arc<ReplicationR
             transport,
             boot,
             ReplicationRuntimeConfig::default(),
+            None, // no Key-plane selector in this reconciler-topology test
         )
         .await,
     )
@@ -247,6 +248,21 @@ async fn attestation_keys(runtime: &ReplicationRuntime) -> Vec<String> {
         .await
         .into_iter()
         .filter(|(_, kind)| *kind == EnvelopeKind::Attestation)
+        .map(|(p, _)| p)
+        .collect();
+    v.sort();
+    v
+}
+
+/// The Key-kind keys currently registered on the runtime, sorted (#144 — the
+/// KERI publish-own key plane converges alongside Attestation).
+async fn key_keys(runtime: &ReplicationRuntime) -> Vec<String> {
+    let mut v: Vec<String> = runtime
+        .registry()
+        .registered_keys()
+        .await
+        .into_iter()
+        .filter(|(_, kind)| *kind == EnvelopeKind::Key)
         .map(|(p, _)| p)
         .collect();
     v.sort();
@@ -387,6 +403,13 @@ async fn reconcile_registers_new_and_deregisters_gone() {
         attestation_keys(&runtime).await,
         vec!["peer-new".to_string()],
         "after reconcile: peer-new is a live Initiator, peer-stale removed"
+    );
+    // #144: the Key plane converges to the SAME consent-peer set as Attestation —
+    // each admitted consent peer gets both an Attestation and a Key coordinator.
+    assert_eq!(
+        key_keys(&runtime).await,
+        vec!["peer-new".to_string()],
+        "after reconcile: the Key plane tracks peer-new too (KERI publish-own)"
     );
 
     // Idempotent: a second reconcile with no CEG change leaves the set unchanged.

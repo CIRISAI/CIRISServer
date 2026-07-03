@@ -68,13 +68,25 @@ pub async fn reconcile_once(
     // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
     // health:liveness in).
     let directory = engine.federation_directory();
-    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len());
+    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 2);
     for peer in consented {
         match directory.lookup_public_key(&peer).await {
-            Ok(Some(_)) => desired.push(ReplicationPeer {
-                peer_key_id: peer,
-                kind: EnvelopeKind::Attestation,
-            }),
+            Ok(Some(_)) => {
+                // BOTH planes per admitted peer:
+                //  - Attestation: capacity:* out, health:liveness in (as before).
+                //  - Key (#144, CIRISEdge#257): the KEY-PLANE anti-entropy. Paired
+                //    with the runtime's `key_selector` (publishes the node's OWN
+                //    record — KERI publish-own), this converges a node's scrub-signed
+                //    accord-anchored record to its consent peers so they can ROOT it.
+                desired.push(ReplicationPeer {
+                    peer_key_id: peer.clone(),
+                    kind: EnvelopeKind::Attestation,
+                });
+                desired.push(ReplicationPeer {
+                    peer_key_id: peer,
+                    kind: EnvelopeKind::Key,
+                });
+            }
             Ok(None) => tracing::warn!(
                 peer_key_id = %peer,
                 "consent:replication observed for an UNADMITTED peer key — skipping reconcile for \
@@ -91,7 +103,9 @@ pub async fn reconcile_once(
     // Diff-converge the live Initiator set to the desired consent peers. Adds
     // become active Initiators (scheduler-driven pull) at runtime; removals stop
     // their rounds + drop inbound routing — all without a restart.
-    let count = desired.len();
+    // `desired` holds TWO coordinators per peer (Attestation + Key); the reported
+    // count is distinct consent peers.
+    let count = desired.len() / 2;
     if let Err(e) = runtime.set_peers(desired).await {
         // The runtime's scheduler has stopped (shutdown) — surface so the caller
         // logs + skips; the controller never panics.

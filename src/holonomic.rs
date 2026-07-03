@@ -185,6 +185,8 @@ mod tests {
             min_viable_symbols: 6,
             symbol_size: 256,
             held_symbols: 5,
+            content_bytes: 1280,
+            cohort_scope: Some("federation".to_string()),
             recoverable: false,
             admitted_at: "2026-06-21T00:00:00Z".to_string(),
         };
@@ -207,6 +209,8 @@ mod tests {
             min_viable_symbols: 1,
             symbol_size: 1,
             held_symbols: 0,
+            content_bytes: 0,
+            cohort_scope: None,
             recoverable: false,
             admitted_at: "2026-06-21T00:00:00Z".to_string(),
         };
