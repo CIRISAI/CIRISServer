@@ -32,8 +32,8 @@ use std::path::PathBuf;
 // verify v8.3.0→v8.5.0 (CIRISVerify#162 produce_scrubbed_key_record, the accord
 // admit-node op), edge v8.3.0→v8.4.1 (anchor gate for free + verify/persist lockstep).
 pub const TARGET_VERIFY: &str = "v8.5.0";
-pub const TARGET_PERSIST: &str = "v12.0.2";
-pub const TARGET_EDGE: &str = "v8.4.2";
+pub const TARGET_PERSIST: &str = "v12.2.0";
+pub const TARGET_EDGE: &str = "v8.6.1";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → **v12** with the v12.0
 /// genesis-mesh rooting anchor: persist v12.0.1 enforces it, v12.0.2 bakes the
