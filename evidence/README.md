@@ -45,29 +45,36 @@ checkouts). For every non-`open` row it asserts:
 the pinned versions. The remaining **13** carry no substrate `impl` symbol — they are
 feedback to the Constitution (below), not gaps in this manifest.
 
-## Open findings → recommended Constitution retags
+## Open findings → close them (implement) or `normative-only`
 
 These 13 claims are tagged `impl:CIRISServer#155` but have no reference-implementation
-symbol in the four pinned substrate repos. Most are **`normative-only`** (a self-contained
-rule / documentation / conformance-language section — no runtime artifact is *expected*);
-a few are genuine, already-tracked **`open`** gaps; two belong to the **CIRISAgent** consumer
-tier, not the substrate.
+symbol yet. A claim the Constitution tags `impl:` asserts a reference implementation
+*should* exist — so where one is genuinely possible, the disposition is **implement it**
+(tracked below), not retag it away. Only claims with no realizable runtime artifact (a
+bibliography, a MUST/SHOULD glossary) stay `normative-only`.
 
-| decimal | claim | recommended tag | why |
-|---|---|---|---|
-| 2.2 | CLM-conformance | `normative-only` | conformance levels — definitional |
-| 2.6.1.4 | CLM-worked | `normative-only` | worked-attack illustration |
-| 2.6.4 | CLM-policy-versioning | `normative-only` | versioning policy (doc) |
-| 2.6.5 | CLM-references | `normative-only` | normative references (doc) |
-| 2.6.9 | CLM-conformance-language | `normative-only` | MUST/SHOULD language |
-| 4.4 | CLM-composition-policies | `normative-only` | composition-policy preamble |
-| 4.5.2.2 | CLM-compliance-vertical | `normative-only` | explicitly informational |
-| 4.5.10.4 | CLM-documents-what-2 | `normative-only` | meta "what this documents" |
-| 4.4.1 | CLM-frickerian | `impl:CIRISAgent#911` | consumer-policy norm (lives in the consumer) |
-| 4.5.8.3 | CLM-settled | `impl:CIRISAgent#911` | "settled in CIRISAgent, carried as-is" |
-| 3.4.9 | CLM-co-stewarded | `open` | `licensure:*` co-stewarded — not admission-gated (consumer-composition) |
-| 4.1.4 | CLM-withdraws-arbitrage | `open` | the arbitrage countermeasure is consumer-policy, un-implemented |
-| 4.2.2.1 | CLM-hardware-class-hardware | `open` | hardware-class self-assertion gap — already CC 8.3.1 R5 |
+**Implement (tracked):**
+
+| decimal | claim | disposition |
+|---|---|---|
+| 2.2 | CLM-conformance | implement — CIRISServer#159 (declared conformance level + gate) |
+| 2.6.4 | CLM-policy-versioning | implement — CIRISServer#159 (version-negotiation policy) |
+| 4.1.4 | CLM-withdraws-arbitrage | implement — CIRISServer#159 (arbitrage countermeasure) |
+| 4.2.2.1 | CLM-hardware-class-hardware | implement — CIRISServer#159 (attest hardware_class; closes CC 8.3.1 R5) |
+| 4.5.2.2 | CLM-compliance-vertical | implement — CIRISServer#159 (machine-readable vertical map) |
+| 3.4.9 | CLM-co-stewarded | implement — CIRISPersist#365 (`licensure:*` co-stewarded admission) |
+| 4.4.1 | CLM-frickerian | implement — CIRISAgent#911 (consumer tier) |
+| 4.5.8.3 | CLM-settled | implement — CIRISAgent#911 (consumer tier) |
+| 2.6.1.4 | CLM-worked | add a `test` vector — CIRISConformance#59 (the rule is impl'd via JCS) |
+
+**Genuinely `normative-only`** (no realizable impl artifact):
+
+| decimal | claim | why |
+|---|---|---|
+| 2.6.5 | CLM-references | normative references (bibliography) |
+| 2.6.9 | CLM-conformance-language | MUST/SHOULD/SHALL definitions |
+| 4.4 | CLM-composition-policies | policy preamble — the sub-policies A/I/J/L are already implemented |
+| 4.5.10.4 | CLM-documents-what-2 | meta "what this documents" |
 
 **Partial note (4.2.6, CLM-accord-livequorum):** resolved here to the live-quorum roster
 enforcer (`verify_membership_change_by_live_quorum`), but the specific *"post-W contest on
