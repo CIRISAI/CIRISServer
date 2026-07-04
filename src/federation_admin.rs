@@ -277,6 +277,90 @@ async fn peering(
 /// consent CEG is still written; there is just no runtime to converge. **The
 /// handler never touches the runtime** — this is the only coupling, and it is a
 /// one-way signal, not a runtime call.
+/// Body for `POST /v1/federation/adopt-scrubbed`: an accord-holder-scrubbed
+/// `SignedKeyRecord` for a key already registered on this node (typically THIS
+/// node's own row). The record is **self-authenticating** — `adopt_scrub_upgrade`
+/// verifies the scrub signature against the seeded accord anchor — so the node
+/// does no signing and need not trust the delivering operator.
+#[derive(Debug, Deserialize)]
+struct AdoptScrubbedRequest {
+    record: SignedKeyRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct AdoptScrubbedResponse {
+    key_id: String,
+    /// `"upgraded"` (the self-signed row was replaced by the anchor-scrubbed
+    /// record) or `"already_adopted"` (idempotent no-op).
+    outcome: String,
+}
+
+/// `POST /v1/federation/adopt-scrubbed` — owner-gated. **The seed PRODUCER's
+/// remote leg** (CIRISServer#150 / CIRISPersist#351): adopt an accord-holder
+/// (A1)-scrubbed record onto an existing `federation_keys` row (this node's own
+/// row) so the node roots at the accord anchor and its Key plane publishes an
+/// anchored, rootable record.
+///
+/// Why an endpoint (not just admit-node's local adopt): the holder keys live on
+/// the operator's crypto-ops machine, NOT on the canonical node. The operator
+/// runs `admit-node target=A` there to PRODUCE A's scrubbed record, then delivers
+/// it here so **A** adopts it onto **A's own** row (rooting is a receiver-side
+/// directory lookup — a peer roots its own stored copy). The scrub signature is
+/// verified against the seeded anchor by `adopt_scrub_upgrade`, so this is safe
+/// even though the record arrived over the wire; owner-gating is defence-in-depth.
+async fn adopt_scrubbed(
+    State(st): State<FederationAdminState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+        .await
+        .is_err()
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this node has no responsible party (owner-binding) — adopt-scrubbed refused. \
+             Claim ownership first via POST /v1/setup/root.",
+        );
+    }
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let req: AdoptScrubbedRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    let key_id = req.record.record.key_id.clone();
+    match st.engine.adopt_scrub_upgrade(req.record).await {
+        Ok(outcome) => {
+            use ciris_persist::federation::register::AdoptScrubOutcome;
+            let outcome = match outcome {
+                AdoptScrubOutcome::Upgraded => "upgraded",
+                AdoptScrubOutcome::AlreadyAdopted => "already_adopted",
+            };
+            tracing::info!(
+                key_id = %key_id,
+                outcome,
+                "adopt-scrubbed: adopted the accord-scrubbed record onto the local row"
+            );
+            (
+                StatusCode::OK,
+                Json(AdoptScrubbedResponse {
+                    key_id,
+                    outcome: outcome.to_string(),
+                }),
+            )
+                .into_response()
+        }
+        // Gated failure: the row isn't a valid self-signed→scrubbed upgrade, the
+        // scrub sig doesn't verify against the seeded anchor, or the pubkey drifts.
+        Err(e) => err(
+            StatusCode::BAD_REQUEST,
+            format!("adopt-scrubbed rejected for {key_id}: {e}"),
+        ),
+    }
+}
+
 pub fn router(
     engine: Arc<Engine>,
     node_key_id: String,
@@ -295,5 +379,9 @@ pub fn router(
             axum::routing::get(self_key_record),
         )
         .route("/v1/federation/peering", axum::routing::post(peering))
+        .route(
+            "/v1/federation/adopt-scrubbed",
+            axum::routing::post(adopt_scrubbed),
+        )
         .with_state(state)
 }
