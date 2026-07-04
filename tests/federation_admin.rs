@@ -679,7 +679,11 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         .await
         .expect("target self record");
     let t_ed = t_self.record.pubkey_ed25519_base64.clone();
-    let t_mldsa = t_self.record.pubkey_ml_dsa_65_base64.clone().expect("target ml_dsa");
+    let t_mldsa = t_self
+        .record
+        .pubkey_ml_dsa_65_base64
+        .clone()
+        .expect("target ml_dsa");
     engine
         .register_federation_key(to_persist(&t_self))
         .await
@@ -762,5 +766,8 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         .expect("POST adopt-scrubbed (re-apply)");
     assert_eq!(again.status(), 200);
     let j2: serde_json::Value = again.json().await.expect("re-adopt json");
-    assert_eq!(j2["outcome"], "already_adopted", "second adopt is idempotent");
+    assert_eq!(
+        j2["outcome"], "already_adopted",
+        "second adopt is idempotent"
+    );
 }
