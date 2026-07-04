@@ -118,6 +118,7 @@ async fn register_key(engine: &Engine, dev: &Device, identity_type: &str) {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .federation_directory()

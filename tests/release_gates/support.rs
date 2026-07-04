@@ -31,14 +31,17 @@ use std::path::PathBuf;
 // (root_binding anchors to the HUMANITY_ACCORD holder keyset, CIRISPersist#344/#345),
 // verify v8.3.0→v8.5.0 (CIRISVerify#162 produce_scrubbed_key_record, the accord
 // admit-node op), edge v8.3.0→v8.4.1 (anchor gate for free + verify/persist lockstep).
+// 0.5.80: the coordinated edge v9.0.0 + persist v13.0.0 lockstep (CC 1.0 RC1) —
+// KeyRecord.consent_role, the accord-conferred `canonical` identity_type role
+// (CIRISPersist#372), single-owner `owner_of` (#162), verify unchanged v8.7.0.
 pub const TARGET_VERIFY: &str = "v8.7.0";
-pub const TARGET_PERSIST: &str = "v12.5.0";
-pub const TARGET_EDGE: &str = "v8.7.2";
+pub const TARGET_PERSIST: &str = "v13.0.0";
+pub const TARGET_EDGE: &str = "v9.0.0";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
-/// (Name is historical — the seed-bake family moved v10 → **v12** with the v12.0
-/// genesis-mesh rooting anchor: persist v12.0.1 enforces it, v12.0.2 bakes the
-/// signed accord-holder + A1-scrubbed canonical-node records.)
-pub const TARGET_PERSIST_V10: &str = "v12";
+/// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
+/// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
+/// `canonical` role + single-owner admission gate for the mesh-seed release.)
+pub const TARGET_PERSIST_V10: &str = "v13";
 
 /// The canonical-seed transport key id Node A must carry (Stage 5).
 pub const CANONICAL_TRANSPORT_KEY_ID: &str = "ciris-canonical-1";

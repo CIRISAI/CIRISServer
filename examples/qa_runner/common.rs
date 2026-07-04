@@ -129,6 +129,7 @@ async fn register_node_self(engine: &Engine) {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -256,6 +257,7 @@ impl SoftId {
             persist_row_hash: String::new(),
             roles: Vec::new(),
             attestation_evidence: evidence,
+            consent_role: None,
         };
         SignedKeyRecord { record }
     }

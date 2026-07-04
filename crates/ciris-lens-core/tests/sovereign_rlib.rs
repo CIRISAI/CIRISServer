@@ -173,6 +173,7 @@ async fn register_key_in_directory(engine: &Engine, signer: &LocalSigner) {
         persist_row_hash: String::new(), // server-computed on write
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
 
     let sq = engine

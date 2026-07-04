@@ -109,6 +109,7 @@ async fn register_node_self(engine: &Engine) {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -185,6 +186,7 @@ async fn register_party(engine: &Engine, key_id: &str, identity_type_str: &str) 
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .federation_directory()
@@ -259,9 +261,62 @@ async fn emit_delegation(
 async fn make_owner_bound(engine: &Engine, member: &str) -> LocalSigner {
     let owner_key = format!("{member}-owner");
     let owner = register_party(engine, &owner_key, identity_type::USER).await;
-    // user → member, infra-only (the CC 3.2 owner-binding the predicate reads).
-    emit_delegation(engine, &owner, member, &["infra:membership"], false).await;
+    // user → member: a REAL owner-binding carrying the versioned owner-binding
+    // dimension (`ownership:responsible_party:node:v1`) that the substrate's
+    // single-owner `owner_of` (#162) keys on — NOT a generic capability
+    // delegation. Built via the server's own envelope builder so the test edge is
+    // byte-shaped exactly like a claim's owner-binding.
+    emit_owner_binding(engine, &owner, member).await;
     owner
+}
+
+/// Emit a genuine `delegates_to(owner → member)` owner-binding (the owner-binding
+/// dimension `owner_of` requires), reusing the real
+/// [`ownership::build_owner_binding_envelope`]. `make_owner_bound`'s predicate now
+/// resolves through `owner_of`, which is dimension-precise — a generic
+/// `delegation:*` edge (what [`emit_delegation`] emits) is NOT an owner-binding.
+async fn emit_owner_binding(engine: &Engine, owner: &LocalSigner, member: &str) {
+    let owner_key_id = owner.key_id().to_string();
+    let now = chrono::Utc::now();
+    let envelope = ciris_server::auth::ownership::build_owner_binding_envelope(
+        &owner_key_id,
+        member,
+        &["infra:membership".to_string()],
+        &now.to_rfc3339(),
+    )
+    .expect("build owner-binding envelope");
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner-binding");
+    let sig = owner
+        .sign_hybrid(&canonical)
+        .await
+        .expect("sign owner-binding");
+    let attestation = Attestation {
+        attestation_id: format!("ownbind-{owner_key_id}-{member}"),
+        attesting_key_id: owner_key_id.clone(),
+        attested_key_id: member.to_string(),
+        attestation_type: attestation_type::DELEGATES_TO.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: owner_key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![member.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put owner-binding");
 }
 
 /// Withdraw the owner-binding `owner → member` (the binding lapses → `member`
@@ -327,6 +382,8 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
             }),
             subject_key_ids: vec![member.to_string()],
             cohort_scope: "self".to_string(),
+            scrub_signature_classical: None,
+            scrub_signature_pqc: None,
         };
         let id = engine
             .federation_directory()
@@ -904,7 +961,7 @@ async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
             .expect("reachable_under_scope reachable"),
         "owner reaches node under infra:membership"
     );
-    // The server's collapsed reader (now steward_bindings_of-backed) agrees, and
+    // The server's collapsed reader (now `owner_of`-backed, #162) agrees, and
     // the inverse projection lists the node under the owner.
     assert_eq!(
         ciris_server::auth::ownership::is_steward_bound(&engine, node_key).await,

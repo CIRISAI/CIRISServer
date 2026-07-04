@@ -114,6 +114,12 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
         attestation_envelope: req.attestation_envelope,
         subject_key_ids: req.subject_key_ids,
         cohort_scope: cohort_scope::SELF.to_string(), // local-tier rows MUST be `self`
+        // Self-emitted producer-authority local row: signature deferred to
+        // promote (persist v13 #171). The scrub sigs are populated ONLY for a
+        // subject-side revocation transiting the local tier (LocalTierDisposition
+        // ::TransitRevocation); persist classifies + defers this here.
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
 
     let attestation_id = match directory.attestation_upsert_local(input).await {

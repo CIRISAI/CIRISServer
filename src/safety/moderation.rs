@@ -168,6 +168,10 @@ pub async fn emit_moderation_event(
         attestation_envelope: envelope,
         subject_key_ids: target_key_ids.to_vec(),
         cohort_scope: cohort_scope::SELF.to_owned(),
+        // Self-emitted producer-authority local row: sig deferred to promote
+        // (persist v13 #171); scrub sigs only for a transit revocation.
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
     let attestation_id = directory
         .attestation_upsert_local(input)

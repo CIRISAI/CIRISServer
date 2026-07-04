@@ -1,227 +1,223 @@
-# Mesh-seed runbook — seeding the canonical mesh over the RNS relay
+# Mesh-seed runbook — seeding the canonical mesh from the Trust Root card (0.5.80)
 
-**Goal:** promote Node A (`ciris-canonical-1`) and Node B (`ciris-status-1`) from
-self-scoped to federation-scoped, and wire the bilateral `consent:replication:v1`
-peering A↔B — **entirely through the LOCAL node's API using a constrained
-delegation grant**, reaching the remotes **by fed key_id over RNS**, never by
-curling them directly.
+> ## ⚡ MODEL CHANGE (2026-07-04) — the seed is now a Trust Root card action
+>
+> **This runbook was the 0.5.75 delegation-grant + RNS-relay procedure** (promote
+> A/B `self → federation` and wire bilateral `consent:replication:v1` over
+> `POST /v1/mesh/relay` with a constrained delegation grant). **That model is
+> superseded.** As of **0.5.80 (the mesh-seed release)** the canonical mesh is
+> seeded by a **single accord-holder action on the Trust Root card** — the
+> **add-canonical** op — not by a delegation grant, not over the relay, and not by
+> promoting a node to "federation cohort scope." The delegation/relay machinery
+> still exists (it is how an owner drives a *remote* node's own API), but it is no
+> longer how the mesh is seeded.
+>
+> **Why the change:** a node is canonical because **the trust root signed off**, not
+> because it announced itself into a federation cohort. The seed is therefore an
+> **accord-conferred** act: an accord holder (A1, 1 of 3) scrub-signs the node to the
+> baked `HUMANITY_ACCORD` anchor with a `canonical` role. persist v13's admission
+> gate **refuses** the `canonical` role on any record that is not anchor-scrubbed
+> (`CanonicalRoleNotAccordConferred`), so nobody can bootstrap themselves into the
+> founding set. See CIRISServer#164 (the op), #163/CIRISPersist#342 (Option-A
+> addressing), CIRISPersist#372 (the `canonical` role + its gate).
+>
+> The **legacy delegation/relay procedure is preserved verbatim in Appendix A** for
+> the historical record and for the *separate* concern of driving a remote node's own
+> API over RNS. The cross-references to "§2 Option A" / "the one real gap" in
+> `RNS_CONTROL_RELAY.md` / `EDGE_8_0_OPAQUE_MIGRATION.md` point at Appendix A.
 
-**Status (2026-07-02):** **0.5.75** is the release that makes the relay actually
-resolve a peer by key_id. The story: 0.5.72 shipped the relay; 0.5.73 made claiming
-record the node locally + a `config set/get` CLI; 0.5.74 put that CLI in the
-wheel/image entry so a headless node can set `net.announce_ownership=true`. But
-even with A announcing, the 0.5.74 relay STILL timed out — two deeper gaps that
-0.5.75 fixes:
+**Goal:** bring **`canonical-server-1`** (Node A) into the canonical trust root so it
+**roots to the `HUMANITY_ACCORD` anchor**, is **marked `canonical`**, and is
+**reachable by a pubkey-authenticated address** — entirely from the **Trust Root
+card** with the operator's **A1 accord keyset** (portable FIPS YubiKey + USB-wrapped
+ML-DSA cosign), no CLI, no relay.
 
-1. **The edge `rooting` hook was never wired.** `ReticulumAuth.rooting` was `None`,
-   so the edge **dropped every inbound announce** ("no rooting directory
-   configured") and no peer ever became addressable by key_id — the relay queued
-   the send (store-and-forward) and timed out at 30s. 0.5.75 wires the persist
-   `FederationDirectory` (which blanket-implements `RootingDirectory`) at both
-   edge sites. Rooting is announce-driven and **self-heals within one announce
-   interval (300 s)**, sooner on reconnect. It also wires the announce event bus to
-   the log, so rooting/rejections are finally visible in `ciris-server.log`.
-2. **Hybrid-complete keys.** The claim path wrote an Ed25519-only bookmark; a
-   **hybrid-pending row can never root under `HybridPolicy::Strict`**. 0.5.75's
-   claim "looks back and asks for both" — fetches the target's full self-signed
-   hybrid `SignedKeyRecord` from `GET /v1/federation/self-key-record`, verifies it
-   matches the scanned NodeCode, and admits it through the strict PoP gate → a
-   hybrid-COMPLETE row.
-
-**Still a bootstrap PREREQUISITE:** `net.announce_ownership=true` on A and B (via
-`config set` on each node's own console) — a node reachable by key_id over RNS
-must first emit its Reticulum identity announce. This is deployment, not a step
-over the relay.
-
-**A + B RESEED WITH NEW key_ids (do NOT preserve identity).** lapbuntu2 already
-holds **legacy hybrid-pending bookmark rows** for the old A/B key_ids
-(`ciris-canonical-1-nhhdky6csf`, `ciris-status-1-hz4kp5kpvi`), written by the
-pre-0.5.75 claim. Those rows can never root, and there is no in-place secure
-upgrade (by design — nothing creates pending rows post-0.5.75, so a repair
-primitive would be a one-time hack). The clean fix: **wipe + reseed A and B so
-they mint fresh key_ids**; lapbuntu2 then claims the NEW key_ids → no existing
-row → the strict gate writes hybrid-COMPLETE rows. A and B are fresh un-federated
-service nodes, so a new derived key_id costs nothing. The old pending rows sit
-orphaned and harmless.
+**Substrate floor (the 0.5.80 mesh-seed release):**
+edge **v9.0.0** · persist **v13.0.0** · verify family **v8.7.0** (CC 1.0-rc). The
+`canonical` identity_type role and its accord-conferred admission gate ship in persist
+v13.0.0.
 
 ---
 
-## 0. Preconditions — ALL must hold before the seed can run
+## 0. Who is who (and who is NOT in the trust root)
+
+| Actor | Role in the seed |
+|---|---|
+| **`canonical-server-1`** (Node A) | **the node being seeded.** A normal, operator-owned (self-claimed) node until the accord signs it in. The lens / mesh-entry node. |
+| **A1 accord holder** (you) | **1 of 3** `HUMANITY_ACCORD` holders. Signs the add-canonical invocation from the Trust Root card with the portable keyset. `add`/`update-address` are **1-of-N** today (see the ladder in §4). |
+| **lapbuntu2** | **where the A1 crypto ops run** (the app/card + the portable signer). **NOT canonical, NOT in the trust root** — it is the operator's workstation, nothing more. |
+| **Node B** (`ciris-status-1`) | **NOT a canonical server** and **not involved in the seed.** B is an out-of-group status node; its bilateral replication with A is a separate, optional concern (Appendix A). |
+
+The trust root is the **baked `HUMANITY_ACCORD` accord holders** (A1/B1/C1), seeded at
+persist first-boot. Canonical servers are the nodes those holders scrub-sign in. One
+scrub-signed record both **roots** the node and **marks it canonical** — there is no
+separate roster to maintain.
+
+---
+
+## 1. Preconditions
 
 | # | Precondition | State |
 |---|---|---|
-| 0.1 | CIRISServer **0.5.75 on PyPI** — the rooting + hybrid-key fixes. lapbuntu2 (relay sender) AND A/B (rooting receivers + response senders) all need it; CIRISStatus B repinned to 0.5.75. | ⛔ cut |
-| 0.2 | Fleet on 0.5.75: mac + lapbuntu2 **upgraded in place**; **A + B wiped + fresh-seeded with NEW key_ids** (§1), then re-claimed | ⛔ deploy |
-| 0.3 | RNS reachability wired: lapbuntu2→A/B (auto, via re-claim) **and A↔B** (set B→A bootstrap, §1) | ⛔ config |
-| 0.4 | **`net.announce_ownership=true` on A AND B** via `config set` + restart (the announce prereq) | ⛔ config |
-| 0.5 | **Claimer rows are hybrid-COMPLETE**: `pubkey_ml_dsa_65` present for A + B in lapbuntu2's `federation_keys` (auto, via the 0.5.75 claim fetch) | ⛔ verify |
-| 0.6 | You issue me a delegation grant on lapbuntu2 (goal "seed mesh"; §2) | ⛔ your move |
+| 1.1 | **CIRISServer 0.5.80 on PyPI / the node image** — carries edge v9.0.0 · persist v13.0.0 · verify v8.7.0 and the **add-canonical** op + Trust Root "Canonical servers" card section. | ⛔ cut |
+| 1.2 | **`canonical-server-1` deployed + operator-self-claimed** (owner-binding present) — the ordinary deploy+claim, unchanged from `FSD/BRIDGE_SEED_MESH.md` §0–§4a. The node need NOT be "announced to federation"; the accord scrub is what roots it. | ⛔ deploy |
+| 1.3 | **The A1 keyset is available on the signing workstation** (lapbuntu2): the portable FIPS YubiKey (Ed25519 slot) + the USB-wrapped ML-DSA-65 half — the same cosign path admit-node uses. | ✅ (you hold these) |
+| 1.4 | **The baked `HUMANITY_ACCORD` anchor is present** in the node's persist (first-boot seed, persist v13). `GET /v1/accord/family` projects it. | ✅ (v13 baked) |
+| 1.5 | **`net.bootstrap_peers` reachability** for any peer that will dial `canonical-server-1` — an `IP:port` config value (replaceable; NOT the trust anchor). Option-A addressing, §5. | ⛔ config |
 
 ---
 
-## 1. Fleet roll — keep your fedID, upgrade mac/lapbuntu2, wipe+re-claim A/B
+## 2. The Trust Root card
 
-The relay is bilateral: lapbuntu2 hosts `POST /v1/mesh/relay` and *sends*; A and B
-must *receive* on opaque kind `0x0000_0001` (edge v8.x + `MeshControlHandler`) AND
-**root** each other's announces (the 0.5.75 `rooting` fix). So **every node must be
-on 0.5.75** — lapbuntu2, A, and B alike. Your owner fedID is never wiped; A/B mint
-fresh key_ids (see below).
+The card (renamed from "Accord" in PR #165) is visible to **everyone** but only the
+**three accord holders** can act. It has two regions:
 
-1. **mac + lapbuntu2 — upgrade in place** (identity-preserving; persist auto-migrates):
-   `pip install -U ciris-server==0.5.75` (or the standalone binary) + restart. Your
-   owner fedID (`eric-moore-v2-portable-…`) lives here and is untouched.
+- **Trust root** — the `HUMANITY_ACCORD` family + its live roster (read-only projection
+  of `GET /v1/accord/family`), and the kill-switch invocation surface (2-of-3).
+- **Canonical servers** (the 0.5.80 addition) — the list of nodes carrying the
+  `canonical` role, each with its bound address, plus the holder-only actions:
+  **Add canonical server · Update address · Supersede · Withdraw**.
 
-2. **A + B — wipe, fresh-install 0.5.75, re-claim → NEW key_ids.** A/B already have a
-   ROOT (re-claim would `409`) AND lapbuntu2 holds legacy hybrid-pending bookmark rows
-   for their OLD key_ids (which can never root). A fresh wipe fixes both: A/B mint
-   **new** derived key_ids, so lapbuntu2 claims a clean identity with no pre-existing
-   row. Then **re-claim each from lapbuntu2** (`ciris-server claim …` or the app).
-   The 0.5.75 claim auto-fixes the whole "lapbuntu2 forgot A/B" problem AND writes a
-   hybrid-complete row:
-   - A/B appear in lapbuntu2's `GET /v1/setup/owned-nodes`,
-   - their key records land in lapbuntu2's `federation_keys` **hybrid-COMPLETE** —
-     the claim fetches each target's full self-key-record + admits it through the
-     strict PoP gate, so `pubkey_ml_dsa_65` is present (a pending row could never
-     root). Verify: `GET /v1/federation/peers` / a DB check shows ml_dsa non-null.
-   - **their RNS address is appended to lapbuntu2's `net.bootstrap_peers`** → lapbuntu2
-     can now dial them. Restart lapbuntu2 once after the re-claims so the new bootstrap
-     takes effect.
-   - Node B = the **CIRISStatus image repinned to ciris-server v0.5.75** (required —
-     the rooting fix is in `build_edge`, which B runs via `serve_with_adapter`).
-
-3. **Wire the A↔B link** (the claim only links lapbuntu2→A and lapbuntu2→B; A and B
-   still need each other for the actual trace replication + peering). A and B are
-   **co-located on the same host**, so on B's console, with the wheel's `config` CLI:
-   ```
-   ciris-server config set net.bootstrap_peers '["127.0.0.1:4242"]' --home <B-home>
-   # then restart B   (A is the RNS origin on 0.0.0.0:4242 — no bootstrap of its own)
-   ```
-   Confirm A actually listens on `0.0.0.0:4242` and is a transport node
-   (`transport.node=true` — the default on server/proxy nodes) so it forwards for
-   the mesh.
-
-4. **Enable the identity announce on A AND B** — the relay reaches a node **by fed
-   key_id over RNS**, which only works once the node has emitted its Reticulum
-   identity announce. Self-scoped nodes ship `announce_ownership: false`, so on
-   **each** node's own console (this is deployment on a node you operate, not remote
-   config):
-   ```
-   ciris-server config set net.announce_ownership true --home <node-home>
-   # then restart the node   → it now announces its key_id → the relay can root it
-   ```
-   Verify with `ciris-server config get net.announce_ownership --home <node-home>`
-   (→ `true`). Without this, §3's relay probes to A/B **time out** (the first field
-   run's failure). **This is the 0.5.74 fix** — earlier wheels had no `config` arm.
-
-**"Deploy" ≠ "configure directly."** Rolling the binary/image + the console
-`config set` on a node you operate is deployment, not the federation-state
-configuration the "don't touch remotes directly" rule governs — that still flows
-only through the grant over the relay (§3).
+The app holds **no keys**. Every action assembles an invocation, hands the JCS-canonical
+bytes to the **portable signer** (YubiKey Ed25519 + USB ML-DSA cosign), and posts the
+holder signature(s) to the node. The node verifies the accord quorum against its live
+`federation_keys` roster — the signature *is* the authority.
 
 ---
 
-## 2. The constrained delegation grant (the safety envelope)
+## 3. The seed — "Add canonical server" (the one action)
 
-On lapbuntu2, issue me a delegation grant **bounded to exactly the seed ops** — so
-the AI driving the seed is cryptographically limited and can't wipe, re-delegate,
-or act outside the seed:
+On the Trust Root card → **Canonical servers** → **Add canonical server**:
 
-```json
-POST /v1/auth/device/delegate      // owner session
-{
-  "mode": "existing",              // or "create"
-  "existing_key_id": "<my agent fed key_id>",
-  "constraints": {
-    "actions_allow": ["announce", "peer", "mesh_relay"],
-    "goal": "seed the canonical mesh"
-  }
-}
-```
+1. **Select the target** — `canonical-server-1` (its derived `key_id`,
+   `canonical-server-1-<fp>`), pulled from the operator's owned-nodes.
+2. **Touch the YubiKey** (+ the USB ML-DSA half) — the card signs the add-canonical
+   invocation with the A1 keyset.
+3. Done. The node is rooted, marked canonical, and its address is published.
 
-I claim the offer (`POST /v1/auth/device/claim {pin}`) → `dgrant:…`. Every use
-carries the `x-ciris-delegation` header, and the guard refuses anything outside
-`{announce, peer, mesh_relay}` (and the server never-list: no delegate/wipe/accord).
-`mesh_relay` is what gates `/v1/mesh/relay`; `announce`/`peer` gate what the relay
-is allowed to invoke on A/B.
+Behind that one tap, **add-canonical composes three effects**, each **accord-authorized
+1-of-N** via `canonical_op_quorum_m(CanonicalOpClass::Operational)` (so it auto-scales
+to m-of-n as the founder set grows — §4):
 
-**Preflight I verify (no side effects):** `GET /v1/auth/me` → `SYSTEM_ADMIN` +
-the constraint shows in the delegation; `GET /v1/setup/owned-nodes` lists A and B
-under your owner fed-ID.
+1. **Scrub-sign → root + mark canonical.** Reusing admit-node's scrub path
+   (`produce_scrubbed_key_record`, `src/accord_provision.rs`), the holder scrub-signs
+   the node's registration record and sets **`canonical`** in its `identity_type` set.
+   persist v13 admits it **only because** the scrub key is a `HUMANITY_ACCORD` anchor
+   holder — a self-signed or non-anchor record carrying `canonical` is **rejected**
+   (`CanonicalRoleNotAccordConferred`, fail-closed). This is the whole security
+   invariant: **canonical is conferred by the trust root, never self-claimed.**
+2. **Adopt onto the node's own row.** The scrubbed (anchored) record replaces the
+   node's self-signed own row via the DO-UPDATE upgrade path
+   (`Engine::adopt_scrub_upgrade`, local — shipped 0.5.78; or the remote
+   `POST /v1/federation/adopt-scrubbed`, shipped 0.5.79). The Key-plane then publishes
+   an **anchored, rootable** own-record. *(When CIRISEdge#277 ← CIRISPersist#375 land —
+   the upgrade-aware `apply_key` — replication itself can adopt a scrub-upgrade instead
+   of `DO NOTHING`-ing it; until then the adopt step above is the delivery path.)*
+3. **Publish the address.** Bind the node's `transport_destination` via the
+   **update-address** op (`POST /v1/accord/canonical/address`, shipped PR #165) — a
+   pubkey-authenticated, replaceable identity↔address record (Option-A, §5).
 
----
-
-## 3. The seed — driven from `127.0.0.1:4243` over the relay
-
-Every step is a `POST http://127.0.0.1:4243/v1/mesh/relay` with the dgrant bearer.
-lapbuntu2 signs the inner request with **your fed-ID** and sends it as an
-`OpaqueRequest{kind:0x0000_0001}` over **RNS to the target by key_id**; the remote
-`MeshControlResponder` verifies the signature, sees the signer **is its owner**,
-and dispatches into the node's own v1 router. **No password/bearer on A/B** — the
-fed-ID signature *is* the auth. The relay only permits the closed set
-`{announce, peering, self-key-record, owned-nodes}`.
-
-Relay envelope: `{ "target_key_id": "<A|B key_id>", "method": "...", "path": "...", "body": {...} }`.
-
-> **Prereq (NOT a relay step):** A and B must already have
-> `net.announce_ownership=true` + a restart (§1.4) so they're reachable by key_id.
-> The relay probes below will time out otherwise. The `POST /v1/federation/announce`
-> owner-binding **promotion** (self→federation cohort scope) below is a *separate*
-> concern from the *transport* announce — the transport announce is the boot-time
-> prereq; this relay step promotes the CEG owner-binding.
-
-1. **Promote A → federation** — `{target: A, POST /v1/federation/announce}` → A
-   promotes its owner-binding `self → federation` cohort scope. (A is already
-   reachable because §1.4 turned on the transport announce.)
-2. **Promote B → federation** — same, `{target: B}`.
-3. **Fetch key records** — `{target: A, GET /v1/federation/self-key-record}` and
-   `{target: B, …}` (public; also fetchable directly). Needed for peering.
-4. **Peer A→B** — `{target: A, POST /v1/federation/peering, body: {peer_key_id: B,
-   attestation_prefixes: ["capacity:", "<trace prefix>"]}}`. The relay's gateway
-   enrichment injects B's fetched key record; A emits its directed
-   `consent:replication:v1` grant scoped to B, **covering the trace prefix** so the
-   `ReplicationRuntime` replicates traces (not just `capacity:` scores).
-5. **Peer B→A** — the reverse, `{target: B, peer_key_id: A}`.
+**Rooting is receiver-side.** Any peer that pins the `HUMANITY_ACCORD` anchor roots
+`canonical-server-1`'s own record via `root_binding_anchored` (a directory lookup
+against the *receiver's* anchor) the moment it sees the published record. No push, no
+promotion, no relay.
 
 ---
 
-## 4. Post-conditions I verify (the runbook is done when these hold)
+## 4. The authority ladder (1-of-N now, m-of-n later)
 
-- A's owner-binding `delegates_to(owner→A)` is now `cohort_scope: federation`; same
-  for B. (I flag that A and B need a **restart** for the Reticulum identity announce
-  to actually carry the attestation on the wire.)
-- `consent:replication:v1` grants exist **both directions**; `GET
-  /v1/federation/peers` on each (over the relay) shows the other, and each grant's
-  `attestation_prefixes` covers traces.
-- **Trace RNS-sync A→B:** a trace ingested on A reaches B's corpus via the
-  `ReplicationRuntime` anti-entropy (the consent topology drives it). This is the
-  payoff the TDD gate (`tests/mesh_seed_e2e.rs`) asserts at the CEG level.
+Every canonical op resolves its quorum in **one place** — `canonical_op_quorum_m`
+(`src/accord.rs`) — so scaling is a one-line change, never a scatter of hard-coded
+`2`s.
 
----
+| Op | Class | Quorum today | Scales via |
+|---|---|---|---|
+| **Add canonical** (the seed) | `Operational` | **1-of-N** | change the `Operational` arm to read the family's entrenched `quorum:M/N` |
+| **Update address** | `Operational` | **1-of-N** | ″ |
+| **Supersede** (replace a canonical key) | `Structural` | **m-of-n** | `kill_switch_quorum_m` — the family's entrenched `quorum:M/N` (already m-of-n) |
+| **Withdraw** (remove from the trust root) | `Structural` | **m-of-n** | ″ |
 
-## 5. What I will NOT do
-
-- Curl `108.61.242.236` directly with improvised requests — everything goes through
-  `127.0.0.1:4243` and the relay.
-- Touch your key material / seed files to "inspect."
-- Announce/peer anything you didn't ask for (announce is opt-in; the grant is
-  bounded to announce/peer/mesh_relay).
-- Act outside the constrained grant — the guard enforces it, and I honor it.
+Additive/operational acts (bring a server in, move its address) are 1-of-N because a
+single holder can safely grow reach. Destructive acts (remove or replace a founding
+server) are m-of-n — they need the family. As the founder set scales past 3, flip the
+`Operational` arm to the entrenched `quorum:M/N` and **all** ops become m-of-n with no
+other change.
 
 ---
 
-## 6. Readiness at a glance
+## 5. Addressing — Option A (trust ≠ reachability; CIRISServer#163 / CIRISPersist#342)
 
-| Gate | State |
-|---|---|
-| relay both legs · delegation constraints · TDD gate (0.5.72) | ✅ done |
-| claim-records-locally + `config set` CLI + copy-all card (0.5.73) | ✅ done |
-| wheel/image `config` arm (0.5.74) | ✅ done |
-| **0.5.75** — wire edge `rooting` (peers become reachable by key_id) + announce-log + claim writes hybrid-COMPLETE keys | ⛔ cut |
-| Fleet on 0.5.75 (lapbuntu2 + A + B); **A + B reseeded with NEW key_ids**, re-claimed | ⛔ deploy |
-| A↔B bootstrap wired (B→A, §1.3); lapbuntu2→A/B auto (re-claim) | ⛔ config |
-| **`net.announce_ownership=true` on A + B** (§1.4) + restart | ⛔ config |
-| Claimer rows hybrid-complete (`pubkey_ml_dsa_65` present) | ⛔ verify |
-| Delegation grant issued (§2) | ⛔ your move |
-| Seed run (§3) + verify (§4) | ⛔ blocked on the above |
+The seed **never bakes an IP as the anchor.** Three distinct layers:
 
-**Ready to seed the moment the fleet is on 0.5.75, A/B reseeded (new key_ids) + announcing + hybrid-complete in lapbuntu2's directory, A↔B wired, and you hand me a grant.**
+- **Trust** = the **pinned accord pubkeys** (the baked `HUMANITY_ACCORD` anchor). This
+  is what roots a node. Immutable, cryptographic.
+- **Reachability** = the node's **pubkey-derived RNS destination hash** + the signed
+  **`transport_destination`** published by the update-address op (CC 3.3.6.2). Rebindable
+  by a 1-of-N accord signature when the server moves.
+- **Bootstrap hint** = `net.bootstrap_peers`, an ordinary `IP:port` **config** value
+  (owner-authored, replaceable). `CANONICAL_BOOTSTRAP_PEERS` stays **`[]`** for 0.5 by
+  design; **0.6 bakes the founder pubkeys + a replaceable address hint** (never IPs as
+  the anchor) — CIRISServer#163.
+
+So moving `canonical-server-1` to a new host is a **1-of-N Update-address** on the card
+plus a `net.bootstrap_peers` edit — the node's identity and rooted status are untouched.
+
+---
+
+## 6. Post-conditions — the seed is done when these hold
+
+- **`canonical-server-1`'s own row carries `canonical`** in its `identity_type` set and
+  its `scrub_key_id` is a `HUMANITY_ACCORD` holder (anchor-scrubbed, not self-signed).
+- The node **roots to the anchor** — `root_binding_anchored` = Confirmed against the
+  baked `HUMANITY_ACCORD` terminus.
+- Its **`transport_destination` is bound** (visible in the card's Canonical-servers list).
+- A **second node that pins the same anchor roots `canonical-server-1`** from its
+  published record — the field proof the mesh has a genesis trust root.
+
+---
+
+## 7. What this seed does NOT require (vs. the old model)
+
+- **No delegation grant, no `POST /v1/mesh/relay`.** The card posts an accord-signed
+  invocation to the node directly; the accord signature is the auth.
+- **No "promote to federation cohort scope."** Rooting is by accord scrub, not by an
+  owner-binding cohort flip.
+- **No A↔B bilateral peering to seed the root.** B is not canonical. (Optional A↔B
+  `consent:replication:v1` is a separate concern — Appendix A.)
+- **No wipe / reseed to fix pending rows.** The upgrade path (`adopt_scrub_upgrade`,
+  DO-UPDATE) heals a self-signed own row in place; no new key_id needed.
+
+---
+
+## Appendix A — Legacy delegation-grant + RNS-relay seed (0.5.75, SUPERSEDED)
+
+> Kept for the historical record and as the reference for the *separate* concern of
+> driving a **remote** node's own API over the RNS control-plane relay with a
+> constrained delegation grant (the "§2 Option A" / "one real gap" cross-refs in
+> `RNS_CONTROL_RELAY.md` and `EDGE_8_0_OPAQUE_MIGRATION.md` resolve here). This is NOT
+> how the canonical mesh is seeded as of 0.5.80 — see §3.
+
+The 0.5.75 procedure promoted Node A (`ciris-canonical-1`) and Node B (`ciris-status-1`)
+from self-scoped to federation-scoped and wired the bilateral `consent:replication:v1`
+peering A↔B **through the LOCAL node's API using a constrained delegation grant**,
+reaching the remotes **by fed key_id over RNS** (never curling them directly):
+
+1. **Fleet on 0.5.75**; A + B reseeded with new key_ids + re-claimed (hybrid-COMPLETE
+   rows); `net.announce_ownership=true` on A and B (the transport-announce prereq);
+   A↔B bootstrap wired.
+2. **A constrained delegation grant** (`POST /v1/auth/device/delegate`, constraints
+   `actions_allow: [announce, peer, mesh_relay]`, goal "seed the canonical mesh"),
+   claimed to a `dgrant:…` bearer.
+3. **The seed over the relay** — each step a `POST /v1/mesh/relay` with the dgrant
+   bearer: promote A→federation, promote B→federation, fetch key records, peer A→B,
+   peer B→A. lapbuntu2 signed each inner request with the owner fed-ID and sent it as an
+   `OpaqueRequest{kind:0x0000_0001}` over RNS to the target by key_id; the remote
+   `MeshControlResponder` verified the signature (signer *is* its owner) and dispatched
+   into the node's own v1 router. No password/bearer on A/B.
+4. **Verify:** A/B owner-bindings at `cohort_scope: federation`; `consent:replication:v1`
+   both directions; a trace ingested on A reaches B's corpus via the `ReplicationRuntime`
+   anti-entropy (`tests/mesh_seed_e2e.rs`).
+
+The bilateral A↔B replication topology from this appendix is still valid and useful as an
+**optional** post-seed step if you want A and B to exchange corpora — it is simply no
+longer part of establishing the canonical trust root.

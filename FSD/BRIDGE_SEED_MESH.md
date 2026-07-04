@@ -21,16 +21,21 @@
 > PoP gate) — a hybrid-pending row can never root under `HybridPolicy::Strict`. It
 > also logs announce rooting/rejections so the mesh is finally observable.
 >
-> **The announce + peering steps below (§4b onward — the direct `curl POST
-> /v1/federation/announce` / `/peering` on each remote) are SUPERSEDED.** Post-claim,
-> the seed is now driven **from the LOCAL node over the RNS mesh control-plane relay**
-> (`POST /v1/mesh/relay`) using a **constrained delegation grant** — reaching A/B by
-> fed key_id over RNS, owner-fed-ID-signed, **no password on the remotes**. Do NOT
-> curl the remotes directly. **`FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` is the
-> authoritative post-claim seed procedure** (announce → peer → verify over the relay).
+> **⚡ SEED MODEL CHANGED AGAIN for 0.5.80 (2026-07-04).** Both the direct-`curl`
+> announce/peer steps below **and** the 0.5.75 delegation-grant + RNS-relay seed are
+> **SUPERSEDED** for establishing the canonical trust root. As of **0.5.80** the mesh
+> is seeded by a **single accord-holder action on the Trust Root card** — the
+> **add-canonical** op — which scrub-signs `canonical-server-1` to the baked
+> `HUMANITY_ACCORD` anchor with a `canonical` role (accord-conferred; persist v13
+> refuses a self-claimed `canonical`). **`FSD/MESH_SEED_RUNBOOK_POST_DELEGATION.md` is
+> the authoritative post-claim seed procedure** (now the Trust Root UX model; the old
+> relay procedure is preserved there as Appendix A).
 >
-> The CLAIM + wipe + wizard steps below (§0–§4a) remain valid; only the federation
-> ANNOUNCE/PEER mechanism moved from direct-HTTP to the relay.
+> **The CLAIM + wipe + wizard steps below (§0–§4a) remain valid** — deploy +
+> operator-self-claim `canonical-server-1` first, then add it to the trust root from
+> the card. Only the trust-root establishment mechanism changed. **Node B is NOT a
+> canonical server** and is not part of the seed (its optional A↔B replication is
+> Appendix A of the runbook).
 
 **This is NOT an in-place upgrade.** It wipes each bridge node's existing keys + data
 and re-seeds the canonical mesh from scratch under the canonical node names, so Node A
