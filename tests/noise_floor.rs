@@ -326,12 +326,18 @@ async fn signed_agg_inputs(
     let commitment = member_commitment(member_ids);
     let commitment_hex = hex_lower(&commitment);
     let meta = ciris_verify_core::holonomic::AggregationMetaV1 {
-        version: 1,
+        // v8.7.0 §19.7.1.2 dominance gate (CIRISVerify#167): version-2 carries a
+        // SIGNED n_eff (in the preimage) so the composite passes the gate. A
+        // balanced fold of N equal members has n_eff == source_count == N, which
+        // clears `passes_dominance_gate` for any min_ratio ≤ 1; a version-1 tier
+        // has no dominance surface and fails closed (→ AggregationMetaRejected).
+        version: 2,
         content_id: composite_cid.to_owned(),
         corpus_kind: aggregate_corpus_kind(source_corpus),
         tier: 1,
         aggregation_algorithm_id: "raptorq-pyramid-v1".to_owned(),
         source_count: member_ids.len() as u32,
+        n_eff: member_ids.len() as u32, // balanced fold ⇒ n_eff == N (signed, v2)
         member_commitment: commitment,
         noise_floor_descriptor: "mean+stddev".to_owned(),
     };
@@ -347,6 +353,7 @@ async fn signed_agg_inputs(
         tier: meta.tier,
         aggregation_algorithm_id: meta.aggregation_algorithm_id.clone(),
         source_count: meta.source_count,
+        n_eff: meta.n_eff,
         member_commitment_hex: commitment_hex.clone(),
         noise_floor_descriptor: meta.noise_floor_descriptor.clone(),
         sig_ed25519_b64: BASE64.encode(ed_sig),
@@ -937,6 +944,7 @@ async fn dominance_undetectable_pending_ciris_verify_167() {
         tier: 1,
         aggregation_algorithm_id: "raptorq-pyramid-v1".to_owned(),
         source_count: src,
+        n_eff: src, // neutral placeholder (== source_count, #167)
         member_commitment: member_commitment(&member_ids),
         noise_floor_descriptor: "mean+stddev".to_owned(),
     };

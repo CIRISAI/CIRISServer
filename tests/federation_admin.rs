@@ -33,9 +33,22 @@ use ciris_persist::prelude::{Engine, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 
+use ciris_persist::federation::rooting::{root_binding_anchored, RootingVerdict};
+use ciris_verify_core::federation_self_record::{
+    produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
+    SignedKeyRecord as VerifySignedKeyRecord,
+};
+use ciris_verify_core::self_at_login::HybridSigningIdentity;
+
 use ciris_server::auth::store;
 use ciris_server::federation_admin;
 use ciris_server::peer::CONSENT_DIMENSION;
+
+/// verify's `SignedKeyRecord` → persist's admit shape (serde round-trip).
+fn to_persist(v: &VerifySignedKeyRecord) -> SignedKeyRecord {
+    serde_json::from_value(serde_json::to_value(v).expect("serialize verify record"))
+        .expect("deserialize into persist record")
+}
 
 const NODE_A_KEY_ID: &str = "ciris-server";
 const PEER_KEY_ID: &str = "ciris-status";
@@ -626,5 +639,135 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
         resp2.status(),
         200,
         "once a responsible party is bound, peering succeeds"
+    );
+}
+
+/// `POST /v1/federation/adopt-scrubbed` (CIRISServer#150) — the seed producer's
+/// REMOTE leg. An accord-holder (A1)-scrubbed record, produced off-node (on the
+/// operator's crypto-ops machine), is delivered here and adopted onto an existing
+/// self-signed row so it ROOTS at the seeded anchor. Owner-gated; idempotent.
+#[tokio::test]
+async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let observer = mint_session(&engine, "wa-observer", WaRole::Observer).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Seed the A1 accord anchor (persist v12.0.2 first-boot-seeds this in prod).
+    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now)
+        .await
+        .expect("A1 anchor");
+    let a1_ed: [u8; 32] = BASE64
+        .decode(&anchor.record.pubkey_ed25519_base64)
+        .expect("a1 ed b64")
+        .try_into()
+        .expect("32-byte a1 ed");
+    engine
+        .register_federation_key(to_persist(&anchor))
+        .await
+        .expect("seed A1 anchor");
+
+    // A target node's boot-time SELF-signed own row (the row to be upgraded).
+    let target = HybridSigningIdentity::generate("adopt-target-test").expect("gen target");
+    let t_self = produce_self_key_record(&target, "node", &now)
+        .await
+        .expect("target self record");
+    let t_ed = t_self.record.pubkey_ed25519_base64.clone();
+    let t_mldsa = t_self
+        .record
+        .pubkey_ml_dsa_65_base64
+        .clone()
+        .expect("target ml_dsa");
+    engine
+        .register_federation_key(to_persist(&t_self))
+        .await
+        .expect("register target self-signed row");
+
+    // A1 scrub-signs the target (produced off-node in the real flow).
+    let scrubbed = produce_scrubbed_key_record(
+        &a1,
+        ScrubTarget {
+            key_id: "adopt-target-test".to_string(),
+            pubkey_ed25519_base64: t_ed.clone(),
+            pubkey_ml_dsa_65_base64: t_mldsa,
+            identity_type: "node".to_string(),
+        },
+        &now,
+    )
+    .await
+    .expect("A1 scrub-signs target");
+    let body = serde_json::json!({ "record": scrubbed });
+
+    let backend = engine.sqlite_backend().expect("sqlite backend");
+    let anchor_set = [a1_ed];
+    // Precondition: the self-signed row does NOT root.
+    assert!(
+        !matches!(
+            root_binding_anchored(backend.as_ref(), "adopt-target-test", &t_ed, &anchor_set).await,
+            RootingVerdict::Confirmed { .. }
+        ),
+        "precondition: self-signed row must not root"
+    );
+
+    // No bearer → 401.
+    let no_auth = client
+        .post(format!("{base}/v1/federation/adopt-scrubbed"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST adopt-scrubbed (no auth)");
+    assert_eq!(no_auth.status(), 401, "missing session ⇒ 401");
+
+    // Non-owner (Observer) → 403.
+    let forbidden = client
+        .post(format!("{base}/v1/federation/adopt-scrubbed"))
+        .bearer_auth(&observer)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST adopt-scrubbed (observer)");
+    assert_eq!(forbidden.status(), 403, "non-owner role ⇒ 403");
+
+    // Owner → 200 upgraded.
+    let ok = client
+        .post(format!("{base}/v1/federation/adopt-scrubbed"))
+        .bearer_auth(&owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST adopt-scrubbed (owner)");
+    assert_eq!(ok.status(), 200, "owner adopt must succeed");
+    let j: serde_json::Value = ok.json().await.expect("adopt response json");
+    assert_eq!(j["key_id"], "adopt-target-test");
+    assert_eq!(j["outcome"], "upgraded", "first adopt upgrades the row");
+
+    // The target row now ROOTS at the accord anchor.
+    assert!(
+        matches!(
+            root_binding_anchored(backend.as_ref(), "adopt-target-test", &t_ed, &anchor_set).await,
+            RootingVerdict::Confirmed { .. }
+        ),
+        "after adopt-scrubbed the row must ROOT at the anchor"
+    );
+
+    // Idempotent: re-POST ⇒ already_adopted.
+    let again = client
+        .post(format!("{base}/v1/federation/adopt-scrubbed"))
+        .bearer_auth(&owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST adopt-scrubbed (re-apply)");
+    assert_eq!(again.status(), 200);
+    let j2: serde_json::Value = again.json().await.expect("re-adopt json");
+    assert_eq!(
+        j2["outcome"], "already_adopted",
+        "second adopt is idempotent"
     );
 }
