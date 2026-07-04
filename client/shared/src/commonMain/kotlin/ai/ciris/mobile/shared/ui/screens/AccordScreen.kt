@@ -464,6 +464,234 @@ fun AccordScreen(
                 )
             }
 
+            // ── Canonical servers (CIRISServer#164) ─────────────────────────────
+            // A canonical server is a mesh-seed anchor: a node an accord holder
+            // scrub-signed AND flagged `canonical`. Mirrors the admit-node section
+            // (same YubiKey + USB scrub) plus an OPTIONAL bootstrap transport address.
+            Spacer(Modifier.height(20.dp))
+            Text(
+                localizedString("mobile.accord_canonical_title"),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_canonical_title"),
+            )
+            Text(
+                localizedString("mobile.accord_canonical_desc"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+            )
+            val canonicalServers by viewModel.canonicalServers.collectAsState()
+            val canonicalSavedTo by viewModel.canonicalSavedTo.collectAsState()
+            val canonicalTarget by viewModel.canonicalResolvedTarget.collectAsState()
+            val canonicalOwnedNodes by viewModel.ownedNodes.collectAsState()
+            val canonicalRoster by viewModel.holders.collectAsState()
+            var canonicalHolderKeyId by remember { mutableStateOf("") }
+            var canonicalUsbPath by remember { mutableStateOf("") }
+            var canonicalPin by remember { mutableStateOf("") }
+            var canonicalTransportKind by remember { mutableStateOf("") }
+            var canonicalDestination by remember { mutableStateOf("") }
+            var canonicalHolderMenu by remember { mutableStateOf(false) }
+            var canonicalNodeMenu by remember { mutableStateOf(false) }
+            var canonicalUsbPicker by remember { mutableStateOf(false) }
+
+            // Current canonical servers roster.
+            if (canonicalServers.isEmpty()) {
+                Text(
+                    localizedString("mobile.accord_canonical_empty"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testable("accord_canonical_empty"),
+                )
+            } else {
+                canonicalServers.forEach { s ->
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                            .testable("row_canonical_server_${s.keyId}"),
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    s.keyId,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                ) {
+                                    Text(
+                                        localizedString("mobile.accord_canonical_badge"),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                            s.scrubKeyId?.takeIf { it.isNotBlank() }?.let { scrub ->
+                                Text(
+                                    localizedString("mobile.accord_canonical_scrubbed_by", "holder", scrub),
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                localizedString("mobile.accord_canonical_add_title"),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_add_canonical_title"),
+            )
+            Spacer(Modifier.height(6.dp))
+
+            // (1) Holder — pick from the seeded roster.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { canonicalHolderMenu = true },
+                    modifier = Modifier.fillMaxWidth().testable("dd_canonical_holder"),
+                ) {
+                    Text(canonicalHolderKeyId.ifBlank { localizedString("mobile.accord_canonical_holder_select") })
+                }
+                DropdownMenu(expanded = canonicalHolderMenu, onDismissRequest = { canonicalHolderMenu = false }) {
+                    if (canonicalRoster.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text(localizedString("mobile.accord_canonical_no_holders")) },
+                            onClick = { canonicalHolderMenu = false },
+                        )
+                    }
+                    canonicalRoster.forEach { h ->
+                        DropdownMenuItem(
+                            text = { Text(h.keyId, fontFamily = FontFamily.Monospace) },
+                            onClick = { canonicalHolderKeyId = h.keyId; canonicalHolderMenu = false },
+                            modifier = Modifier.testableClickable("mi_canonical_holder_${h.keyId}") {
+                                canonicalHolderKeyId = h.keyId; canonicalHolderMenu = false
+                            },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+
+            // (2) Target — pick from your owned nodes; hybrid pubkeys auto-fill.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { canonicalNodeMenu = true },
+                    modifier = Modifier.fillMaxWidth().testable("dd_canonical_target"),
+                ) {
+                    Text(canonicalTarget?.keyId ?: localizedString("mobile.accord_canonical_target_select"))
+                }
+                DropdownMenu(expanded = canonicalNodeMenu, onDismissRequest = { canonicalNodeMenu = false }) {
+                    if (canonicalOwnedNodes.isEmpty()) {
+                        DropdownMenuItem(text = { Text(localizedString("mobile.accord_canonical_no_owned")) }, onClick = { canonicalNodeMenu = false })
+                    }
+                    canonicalOwnedNodes.forEach { n ->
+                        DropdownMenuItem(
+                            text = { Text(n, fontFamily = FontFamily.Monospace) },
+                            onClick = { viewModel.resolveCanonicalTarget(n); canonicalNodeMenu = false },
+                            modifier = Modifier.testableClickable("mi_canonical_target_$n") {
+                                viewModel.resolveCanonicalTarget(n); canonicalNodeMenu = false
+                            },
+                        )
+                    }
+                }
+            }
+            canonicalTarget?.let { t ->
+                Text(
+                    localizedString("mobile.accord_canonical_target_resolved", "key", t.keyId),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp).testable("accord_canonical_target_resolved"),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+
+            // (3) USB PQC materials — browse instead of typing the path.
+            OutlinedTextField(
+                value = canonicalUsbPath,
+                onValueChange = { canonicalUsbPath = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_usb_label")) },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { canonicalUsbPicker = true },
+                        modifier = Modifier.testableClickable("btn_canonical_browse_usb") { canonicalUsbPicker = true },
+                    ) { Text(localizedString("mobile.accord_canonical_browse")) }
+                },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_usb_path"),
+            )
+            DirectoryPickerDialog(
+                show = canonicalUsbPicker,
+                onDirectoryPicked = { canonicalUsbPath = it; canonicalUsbPicker = false },
+                onDismiss = { canonicalUsbPicker = false },
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = canonicalPin,
+                onValueChange = { canonicalPin = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_pin_label")) },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_pin"),
+            )
+            Spacer(Modifier.height(6.dp))
+
+            // (4) OPTIONAL bootstrap transport — the address other nodes dial.
+            OutlinedTextField(
+                value = canonicalTransportKind,
+                onValueChange = { canonicalTransportKind = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_transport_label")) },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_transport_kind"),
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = canonicalDestination,
+                onValueChange = { canonicalDestination = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_destination_label")) },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_destination"),
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    canonicalTarget?.let { t ->
+                        viewModel.addCanonicalServer(
+                            canonicalHolderKeyId, canonicalUsbPath, t.keyId, t.ed25519, t.mldsa,
+                            canonicalPin.ifBlank { null },
+                            canonicalTransportKind.ifBlank { null },
+                            canonicalDestination.ifBlank { null },
+                        )
+                    }
+                },
+                enabled = !busy && canonicalHolderKeyId.isNotBlank() &&
+                    canonicalUsbPath.isNotBlank() && canonicalTarget != null,
+                modifier = Modifier.fillMaxWidth().testable("btn_add_canonical"),
+            ) {
+                Text(
+                    if (busy) localizedString("mobile.accord_canonical_add_btn_busy")
+                    else localizedString("mobile.accord_canonical_add_btn"),
+                )
+            }
+            canonicalSavedTo?.let { path ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    localizedString("mobile.accord_canonical_saved_to", "path", path),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(6.dp).testable("accord_canonical_saved_to"),
+                )
+            }
+
             // ── Pending invocations ──────────────────────────────────────────
             Spacer(Modifier.height(20.dp))
             Text(

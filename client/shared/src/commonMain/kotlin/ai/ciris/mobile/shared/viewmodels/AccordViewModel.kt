@@ -76,6 +76,12 @@ class AccordViewModel(
                     PlatformLogger.w(TAG, "[refresh] owned-nodes: ${e.message}")
                     emptyList()
                 }
+                _canonicalServers.value = try {
+                    apiClient.listCanonicalServers().servers
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] canonical-servers: ${e.message}")
+                    emptyList()
+                }
                 _error.value = null
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[refresh] ${e.message}")
@@ -203,6 +209,118 @@ class AccordViewModel(
                     msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
                         "This build lacks pkcs11 — admit-node needs the YubiKey signer."
                     else -> "Couldn't admit the node: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    // ── Canonical servers (CIRISServer#164) ─────────────────────────────────
+    // A canonical server is a mesh-seed anchor: a node an accord holder scrub-signed
+    // AND flagged `canonical`. Mirrors the admit-node section (same YubiKey + USB
+    // scrub) plus an OPTIONAL bootstrap transport address.
+
+    private val _canonicalServers =
+        MutableStateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalServerDto>>(emptyList())
+    val canonicalServers: StateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalServerDto>> =
+        _canonicalServers.asStateFlow()
+
+    private val _canonicalSavedTo = MutableStateFlow<String?>(null)
+    val canonicalSavedTo: StateFlow<String?> = _canonicalSavedTo.asStateFlow()
+
+    /** The selected canonical target resolved to its hybrid pubkeys (mirrors
+     *  [resolvedTarget]; separate so it doesn't collide with the admit-node picker). */
+    private val _canonicalResolvedTarget = MutableStateFlow<ResolvedTarget?>(null)
+    val canonicalResolvedTarget: StateFlow<ResolvedTarget?> = _canonicalResolvedTarget.asStateFlow()
+
+    /** Reload the canonical-servers roster (also refreshed on [refresh]). */
+    fun loadCanonicalServers() {
+        viewModelScope.launch {
+            try {
+                _canonicalServers.value = apiClient.listCanonicalServers().servers
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[loadCanonicalServers] ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Resolve a selected owned node to its Ed25519 + ML-DSA-65 pubkeys for the
+     * canonical-add picker (mirrors [resolveTargetNode]). A node whose row is
+     * missing its ML-DSA half can't be made canonical until re-claimed.
+     */
+    fun resolveCanonicalTarget(keyId: String) {
+        _canonicalResolvedTarget.value = null
+        if (keyId.isBlank()) return
+        viewModelScope.launch {
+            try {
+                val peer = apiClient.getFederationPeer(keyId).peer
+                val ml = peer.pubkeyMlDsa65Base64
+                if (ml.isNullOrBlank()) {
+                    _error.value =
+                        "$keyId has no ML-DSA key in the directory yet — re-claim it first."
+                } else {
+                    _canonicalResolvedTarget.value = ResolvedTarget(keyId, peer.pubkeyEd25519Base64, ml)
+                }
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[resolveCanonicalTarget] ${e.message}")
+                _error.value = "Couldn't load $keyId's keys: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * **Add a canonical server** (CIRISServer#164). The local accord holder RE-OPENS
+     * their YubiKey + USB-wrapped ML-DSA and scrub-signs the target node's
+     * registration, ALSO flagging it `canonical` so it becomes a mesh-seed anchor;
+     * the node writes the genesis **seed object** to a predictable outbox path
+     * (surfaced as [canonicalSavedTo]) the operator hands to CIRISPersist to bake.
+     * An OPTIONAL bootstrap transport ([transportKind] + [destination]) is recorded
+     * as the canonical server's address. The app sends NO crypto — the touch IS consent.
+     */
+    fun addCanonicalServer(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        userPin: String?,
+        transportKind: String? = null,
+        destination: String? = null,
+    ) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _canonicalSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.addCanonicalServer(
+                    holderKeyId = holderKeyId,
+                    mldsaUsbPath = mldsaUsbPath,
+                    targetKeyId = targetKeyId,
+                    targetEd25519Base64 = targetEd25519Base64,
+                    targetMlDsa65Base64 = targetMlDsa65Base64,
+                    userPin = userPin,
+                    transportKind = transportKind?.takeIf { it.isNotBlank() },
+                    destination = destination?.takeIf { it.isNotBlank() },
+                )
+                _canonicalSavedTo.value = res.seedSavedTo
+                _notice.value =
+                    "Added canonical server ${res.canonicalKeyId}" +
+                        (res.seedSavedTo?.let { " — seed saved to $it. Hand it to persist to bake." } ?: ".")
+                refresh()
+                loadCanonicalServers()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[addCanonicalServer] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — add-canonical needs the YubiKey signer."
+                    else -> "Couldn't add the canonical server: ${e.message}"
                 }
             } finally {
                 _busy.value = false

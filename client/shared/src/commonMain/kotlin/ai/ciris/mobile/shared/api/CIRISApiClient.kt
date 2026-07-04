@@ -2478,6 +2478,111 @@ class CIRISApiClient(
     }
 
     /**
+     * **List canonical servers** — `GET {nodeUrl}/v1/accord/canonical/servers`
+     * (CIRISServer#164). The rock-solid mesh-seed anchors: nodes whose registration
+     * an accord holder scrub-signed AND flagged `canonical`. Visible to everyone.
+     */
+    suspend fun listCanonicalServers(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalServersResponse {
+        val method = "listCanonicalServers"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/canonical/servers") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list canonical servers failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalServersResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.federation.CanonicalServersResponse()
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Add a canonical server** — `POST {nodeUrl}/v1/accord/canonical/add`
+     * (loopback, CIRISServer#164). The accord holder RE-OPENS their YubiKey +
+     * USB-wrapped ML-DSA and **scrub-signs** the target node's registration, ALSO
+     * flagging it `canonical` so it becomes a mesh-seed anchor. Same hardware inputs
+     * as [admitNode], plus the target's pubkeys and an OPTIONAL bootstrap transport
+     * ([transportKind] + [destination]) recorded as the canonical server's address.
+     * 1-of-N: a single holder suffices. The app holds NO keys — the touch IS consent.
+     */
+    suspend fun addCanonicalServer(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        targetIdentityType: String = "node",
+        userPin: String? = null,
+        pivSlot: String? = null,
+        transportKind: String? = null,
+        destination: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AddCanonicalServerResponse {
+        val method = "addCanonicalServer"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/add holder=$holderKeyId target=$targetKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val target = buildJsonObject {
+                put("key_id", JsonPrimitive(targetKeyId.trim()))
+                put("pubkey_ed25519_base64", JsonPrimitive(targetEd25519Base64.trim()))
+                put("pubkey_ml_dsa_65_base64", JsonPrimitive(targetMlDsa65Base64.trim()))
+                put("identity_type", JsonPrimitive(targetIdentityType.trim().ifBlank { "node" }))
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                put("target", target)
+                transportKind?.takeIf { it.isNotBlank() }?.let { put("transport_kind", JsonPrimitive(it.trim())) }
+                destination?.takeIf { it.isNotBlank() }?.let { put("destination", JsonPrimitive(it.trim())) }
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/add") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("add canonical server failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AddCanonicalServerResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "added canonical=${parsed.canonicalKeyId} → seed saved to ${parsed.seedSavedTo}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "add canonical server failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
      * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
      * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the

@@ -150,6 +150,53 @@ data class AdmitNodeResponse(
     val seed: kotlinx.serialization.json.JsonElement? = null,
 )
 
+/**
+ * One canonical server on the trust root — `GET /v1/accord/canonical/servers`
+ * (CIRISServer#164). A canonical server is a node whose registration an accord
+ * holder scrub-signed AND flagged `canonical` (its [identityType] is a comma-set
+ * that includes `canonical`), making it a rock-solid mesh-seed anchor other
+ * nodes may bootstrap-dial. [scrubKeyId] is the holder key_id that scrubbed it.
+ */
+@Serializable
+data class CanonicalServerDto(
+    @SerialName("key_id")
+    val keyId: String,
+    /** Comma-set identity types (e.g. ``node,canonical``). */
+    @SerialName("identity_type")
+    val identityType: String,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("scrub_key_id")
+    val scrubKeyId: String? = null,
+    @SerialName("valid_from")
+    val validFrom: String? = null,
+)
+
+/** ``GET /v1/accord/canonical/servers`` response. */
+@Serializable
+data class CanonicalServersResponse(
+    val servers: List<CanonicalServerDto> = emptyList(),
+)
+
+/**
+ * ``POST /v1/accord/canonical/add`` response (CIRISServer#164) — an accord holder
+ * scrub-signed a target node's registration AND flagged it `canonical`, producing
+ * the genesis **seed object** saved to a predictable outbox path ([seedSavedTo]).
+ * 1-of-N: one holder's YubiKey + USB scrub suffices. If the holder supplied a
+ * bootstrap transport the node also records the canonical server's [address].
+ */
+@Serializable
+data class AddCanonicalServerResponse(
+    @SerialName("canonical_key_id")
+    val canonicalKeyId: String,
+    @SerialName("is_canonical")
+    val isCanonical: Boolean = false,
+    /** Opaque address record (transport_kind + destination) or null. */
+    val address: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("seed_saved_to")
+    val seedSavedTo: String? = null,
+)
+
 // ─── Genesis ceremony (CIRISServer #41) ──────────────────────────────────────
 //
 // The guided HUMANITY_ACCORD genesis ceremony stands up a NEW mesh's 2-of-3
