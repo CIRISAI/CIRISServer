@@ -1643,6 +1643,187 @@ async fn family_history(State(st): State<AccordState>) -> Response {
     }
 }
 
+// ─── Trust Root — canonical-server ops (accord-authorized) ───────────────────
+//
+// A1/B1/C1 manage the canonical mesh from the Trust Root card. The quorum for
+// EVERY canonical op is resolved in ONE place ([`canonical_op_quorum_m`]) from the
+// LIVE roster + the op class — never hard-coded. So as the founder set grows the
+// same ops scale: structural ops already read the family's entrenched `quorum:M/N`
+// (via [`kill_switch_quorum_m`]); operational ops are a single-holder bootstrap
+// today, and moving them to m-of-n is a one-line change in that one function.
+
+/// The authority class of a canonical-server op → its required quorum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalOpClass {
+    /// Additive / operational (add a canonical server, update its address) — a
+    /// single accord holder suffices today (the address is pubkey-authenticated
+    /// regardless).
+    Operational,
+    /// Destructive / structural (supersede or withdraw a canonical server) — the
+    /// family's entrenched M-of-N; no single holder may remove/replace an anchor.
+    #[allow(dead_code)] // consumed by the supersede/withdraw ops (follow-ups)
+    Structural,
+}
+
+/// Required signature count **M** for a canonical op — resolved from the live
+/// roster + the op class. THE single quorum-policy chokepoint: to move the
+/// operational ops to m-of-n as we scale, change ONLY the `Operational` arm here.
+async fn canonical_op_quorum_m(
+    engine: &Engine,
+    roster: &[ThresholdMember],
+    class: CanonicalOpClass,
+) -> usize {
+    match class {
+        // Additive bootstrap — 1-of-N today (policy knob). Swap to
+        // `kill_switch_quorum_m(engine, roster).await` to make it m-of-n.
+        CanonicalOpClass::Operational => 1,
+        // Structural — the family's entrenched `quorum:M/N` (already m-of-n).
+        CanonicalOpClass::Structural => kill_switch_quorum_m(engine, roster).await,
+    }
+}
+
+const CANONICAL_ADDRESS_OP: &str = "canonical:address";
+
+/// The accord-signed **canonical address update** invocation (CC 3.3.6.2). Holders
+/// hybrid-sign the JCS-canonical bytes of this object; the endpoint verifies the
+/// quorum, then emits the `transport_destination` binding — so a canonical
+/// server's address is a pubkey-authenticated, replaceable record (the Option-A
+/// bootstrap, CIRISPersist#342), never a hard-coded IP.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CanonicalAddressUpdate {
+    /// Domain separator — MUST be `"canonical:address"` (anti cross-op replay).
+    op: String,
+    /// The canonical node whose address is being (re)bound.
+    canonical_key_id: String,
+    /// Transport kind (e.g. `"reticulum"`, `"ip"`).
+    transport_kind: String,
+    /// The new destination / address.
+    destination: String,
+    /// Anti-replay nonce.
+    invocation_id: String,
+    /// RFC3339 assertion time.
+    asserted_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressUpdateRequest {
+    invocation: CanonicalAddressUpdate,
+    signatures: Vec<ThresholdSignature>,
+}
+
+/// `POST /v1/accord/canonical/address` — accord-authorized (1-of-N operational)
+/// (re)binding of a canonical server's transport address.
+async fn update_canonical_address(
+    State(st): State<AccordState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: AddressUpdateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let inv = &req.invocation;
+    if inv.op != CANONICAL_ADDRESS_OP {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("op must be {CANONICAL_ADDRESS_OP:?}"),
+        );
+    }
+    if inv.canonical_key_id.trim().is_empty()
+        || inv.transport_kind.trim().is_empty()
+        || inv.destination.trim().is_empty()
+        || inv.invocation_id.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "canonical_key_id, transport_kind, destination, invocation_id are all required",
+        );
+    }
+    let asserted_at = match chrono::DateTime::parse_from_rfc3339(inv.asserted_at.trim()) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("asserted_at not RFC3339: {e}"),
+            )
+        }
+    };
+
+    // Live accord roster + one-key-one-seat (N2).
+    let roster = match accord_roster(&st.engine).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    if let Err(e) = assert_distinct_roster(&roster) {
+        return err(StatusCode::CONFLICT, &e);
+    }
+
+    // Quorum — resolved from the roster + op class, never hard-coded.
+    let m = canonical_op_quorum_m(&st.engine, &roster, CanonicalOpClass::Operational).await;
+
+    // Verify the hybrid cosignatures over the JCS-canonical invocation bytes.
+    let canonical = match ciris_verify_core::jcs::canonicalize(
+        &serde_json::to_value(inv).unwrap_or(serde_json::Value::Null),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("canonicalize: {e}"),
+            )
+        }
+    };
+    let valid = match verify_threshold_signatures(&canonical, &roster, &req.signatures, m) {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::FORBIDDEN,
+                &format!("accord quorum not met for canonical address update (need {m}): {e}"),
+            )
+        }
+    };
+
+    // Admit the (re)binding — the authenticated identity↔address record.
+    if let Err(e) = st
+        .engine
+        .federation_directory()
+        .put_transport_destination(&ciris_persist::federation::TransportDestination {
+            occurrence_key_id: inv.canonical_key_id.trim().to_string(),
+            transport_kind: inv.transport_kind.trim().to_string(),
+            destination: inv.destination.trim().to_string(),
+            asserted_at,
+            last_seen_at: None,
+        })
+        .await
+    {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("put_transport_destination: {e}"),
+        );
+    }
+
+    tracing::info!(
+        canonical_key_id = %inv.canonical_key_id.trim(),
+        transport_kind = %inv.transport_kind.trim(),
+        destination = %inv.destination.trim(),
+        quorum_m = m,
+        valid_signatures = valid,
+        "Trust Root: canonical server address (re)bound (accord-authorized)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "updated": true,
+            "canonical_key_id": inv.canonical_key_id.trim(),
+            "transport_kind": inv.transport_kind.trim(),
+            "destination": inv.destination.trim(),
+            "quorum_m": m,
+            "valid_signatures": valid,
+            "roster_size": roster.len(),
+        })),
+    )
+        .into_response()
+}
+
 /// The accord router — merge onto the read-API listener. [`router`] uses the inert
 /// [`AccordHalt::disabled`] (no disk latch / peers / exit); `compose.rs` wires the
 /// live halt config via [`router_with_halt`].
@@ -1684,6 +1865,12 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             axum::routing::post(genesis_assemble),
         )
         .route("/v1/accord/family", axum::routing::get(get_family))
+        // Trust Root — canonical-server ops (accord-authorized; quorum via
+        // canonical_op_quorum_m so they scale to m-of-n as the founder set grows).
+        .route(
+            "/v1/accord/canonical/address",
+            axum::routing::post(update_canonical_address),
+        )
         // family membership change — supersede / reconstitute (2/3-authorized)
         .route(
             "/v1/accord/family/change/envelope",

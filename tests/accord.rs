@@ -1274,3 +1274,138 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         "A was replaced: {seats:?}"
     );
 }
+
+/// Cosign arbitrary canonical bytes (Ed25519 over `bytes`, ML-DSA-65 over
+/// `bytes ‖ ed_sig`) — the `ThresholdSignature` shape `verify_threshold_signatures`
+/// checks. The Trust Root canonical-server ops sign `jcs::canonicalize(invocation)`.
+async fn cosign_bytes(h: &Holder, bytes: &[u8]) -> ThresholdSignature {
+    let ed_sig = h.ed.sign(bytes).to_bytes();
+    let mut bound = bytes.to_vec();
+    bound.extend_from_slice(&ed_sig);
+    let pqc_sig = h.mldsa.sign(&bound).await.expect("ml-dsa cosign bytes");
+    ThresholdSignature {
+        member_id: h.key_id.clone(),
+        ed25519_signature_base64: BASE64.encode(ed_sig),
+        mldsa65_signature_base64: Some(BASE64.encode(&pqc_sig)),
+    }
+}
+
+/// Trust Root — `POST /v1/accord/canonical/address` (CIRISServer#164): a canonical
+/// server's transport address is (re)bound under **1-of-N** accord authority
+/// (operational), resolved from the live roster via `canonical_op_quorum_m` — so it
+/// scales to m-of-n as the founder set grows. One holder suffices; zero / a
+/// non-holder is refused.
+#[tokio::test]
+async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    // Register the canonical server as a node key so its transport_destination FK
+    // is satisfied (the op binds the address of an existing directory key).
+    {
+        let cn = Holder::new("canonical-server-1", 0x77);
+        let now = chrono::Utc::now();
+        let envelope = serde_json::json!({ "key_id": "canonical-server-1" });
+        let canonical = ceg_produce_canonicalize(&envelope).expect("canon canonical-node");
+        let ed_sig = cn.ed.sign(&canonical).to_bytes();
+        let mut bound = canonical.clone();
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = cn.mldsa.sign(&bound).await.expect("pqc canonical-node");
+        let record = KeyRecord {
+            key_id: "canonical-server-1".into(),
+            pubkey_ed25519_base64: BASE64.encode(cn.ed.verifying_key().to_bytes()),
+            pubkey_ml_dsa_65_base64: Some(BASE64.encode(cn.mldsa.public_key().await.unwrap())),
+            algorithm: algorithm::HYBRID.into(),
+            identity_type: "node".into(),
+            identity_ref: "canonical-server-1".into(),
+            valid_from: now,
+            valid_until: None,
+            registration_envelope: envelope,
+            original_content_hash: hex::encode(Sha256::digest(&canonical)),
+            scrub_signature_classical: BASE64.encode(ed_sig),
+            scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
+            scrub_key_id: "canonical-server-1".into(),
+            scrub_timestamp: now,
+            pqc_completed_at: Some(now),
+            persist_row_hash: String::new(),
+            roles: Vec::new(),
+            attestation_evidence: None,
+        };
+        engine
+            .register_federation_key(SignedKeyRecord { record })
+            .await
+            .expect("register canonical node key");
+    }
+
+    let update = serde_json::json!({
+        "op": "canonical:address",
+        "canonical_key_id": "canonical-server-1",
+        "transport_kind": "reticulum",
+        "destination": "203.0.113.9:4242",
+        "invocation_id": "addr-upd-1",
+        "asserted_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let bytes = ciris_verify_core::jcs::canonicalize(&update).expect("jcs canonicalize");
+
+    // 1-of-N: ONE holder sig → accepted, address bound.
+    let sig = cosign_bytes(&holders[0], &bytes).await;
+    let resp = client
+        .post(format!("{base}/v1/accord/canonical/address"))
+        .json(&serde_json::json!({ "invocation": update, "signatures": [sig] }))
+        .send()
+        .await
+        .expect("POST address update");
+    assert_eq!(
+        resp.status(),
+        200,
+        "1-of-N holder signature must be accepted"
+    );
+    let j: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(j["quorum_m"], 1, "operational op resolves to 1-of-N");
+    assert_eq!(j["valid_signatures"], 1);
+    assert_eq!(j["destination"], "203.0.113.9:4242");
+
+    // The transport_destination is now bound in the directory.
+    let dests = engine
+        .federation_directory()
+        .list_transport_destinations_for("canonical-server-1")
+        .await
+        .expect("list transport destinations");
+    assert!(
+        dests.iter().any(|d| d.destination == "203.0.113.9:4242"),
+        "the canonical server's address must be bound after the op"
+    );
+
+    // Zero signatures → quorum not met (403).
+    let no_sig = client
+        .post(format!("{base}/v1/accord/canonical/address"))
+        .json(&serde_json::json!({ "invocation": update, "signatures": [] }))
+        .send()
+        .await
+        .expect("POST no-sig");
+    assert_eq!(no_sig.status(), 403, "0 signatures must fail the quorum");
+
+    // A non-holder signature → refused (not a seated key).
+    let outsider = Holder::new("not-a-holder", 0xEE);
+    let bad = cosign_bytes(&outsider, &bytes).await;
+    let refused = client
+        .post(format!("{base}/v1/accord/canonical/address"))
+        .json(&serde_json::json!({ "invocation": update, "signatures": [bad] }))
+        .send()
+        .await
+        .expect("POST outsider");
+    assert_eq!(
+        refused.status(),
+        403,
+        "a non-holder signature must not satisfy the quorum"
+    );
+}
