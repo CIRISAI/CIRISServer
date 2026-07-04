@@ -133,6 +133,14 @@ jobs:
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --features python -- -D warnings
+      # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
+      # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
+      # a moved/renamed symbol is a spec-regression failure. Runs here because the
+      # cargo git checkouts (needed to resolve the substrate symbols) are populated
+      # by the build above. Linux-only (one canonical run).
+      - name: Evidence manifest resolves (CC impl: tier)
+        if: runner.os == 'Linux'
+        run: python3 tools/check_evidence.py
       # NB: CI does NOT save a cache blob. It builds DEBUG (clippy+test); saving a
       # debug `target/` measured ~586s (10 min) on main to spare only the ~30s
       # debug ciris-server recompile next run — a net loss — and it collided with
