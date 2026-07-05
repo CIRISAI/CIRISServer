@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "धारक के रूप में हस्ताक्षर करें",
     "accord_sign_as_holder_usb_label": "USB फ़ोल्डर (PQC सामग्री)",
     "accord_start_drill": "ड्रिल शुरू करें",
-    "accord_trust_1of1": "1-में-से-1"
+    "accord_trust_1of1": "1-में-से-1",
+    "accord_canonical_propose_desc": "एक कैनोनिकल सर्वर अब m-of-n सह-स्क्रब द्वारा प्रदान किया जाता है। यह स्क्रब #1 है: स्थानीय accord धारक नोड पर स्क्रब-हस्ताक्षर करता है; आंशिक अन्य धारकों के डिवाइसों पर सह-हस्ताक्षर के लिए फैलता है। ऐप कोई कुंजी नहीं रखता — YubiKey का स्पर्श ही सहमति है।",
+    "accord_canonical_propose_btn": "कैनोनिकल सर्वर प्रस्तावित करें — अपनी YubiKey को स्पर्श करें",
+    "accord_canonical_propose_btn_busy": "प्रस्तावित किया जा रहा है — अपनी YubiKey को स्पर्श करें…",
+    "accord_new_cosign_paste": "पेस्ट किए गए सह-स्क्रब पर सह-हस्ताक्षर करें",
+    "accord_section_coscrub": "लंबित सह-हस्ताक्षर (कैनोनिकल)",
+    "accord_coscrub_empty": "कोई कैनोनिकल सह-स्क्रब सह-हस्ताक्षर की प्रतीक्षा में नहीं है।",
+    "accord_coscrub_badge": "{signed}/{needed} स्क्रब",
+    "accord_coscrub_scrubbers": "{scrubbers} द्वारा स्क्रब किया गया",
+    "accord_coscrub_unverified": "रोस्टर असत्यापित — एक स्क्रबर ज्ञात accord धारक नहीं है",
+    "accord_coscrub_target": "लक्ष्य {key}",
+    "accord_coscrub_cosign_title": "कैनोनिकल सह-स्क्रब पर सह-हस्ताक्षर करें",
+    "accord_coscrub_cosign_desc": "अपने accord धारक की YubiKey पर इस कैनोनिकल सह-स्क्रब में अपना स्क्रब जोड़ें। परिवार कोरम पर रिकॉर्ड प्रदान किया जाता है। ऐप कोई कुंजी नहीं रखता — स्पर्श ही सहमति है।",
+    "accord_coscrub_cosign_submit": "सह-स्क्रब पर सह-हस्ताक्षर करें — अपनी YubiKey को स्पर्श करें",
+    "accord_coscrub_cosign_submit_busy": "सह-हस्ताक्षर किया जा रहा है — अपनी YubiKey को स्पर्श करें…",
+    "accord_coscrub_paste_hint": "कोई लंबित प्रविष्टि नहीं? इसे सीधे सह-हस्ताक्षर करने के लिए सह-स्क्रब आंशिक JSON पेस्ट करें (गॉसिप के बिना काम करता है)।",
+    "accord_cosign_paste_label": "आंशिक (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "यह वैध JSON नहीं है — पूरा आंशिक (SignedKeyRecord) रिकॉर्ड पेस्ट करें।"
   },
   "prompts": {
     "dma": {

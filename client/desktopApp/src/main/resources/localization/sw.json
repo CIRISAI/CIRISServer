@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Tia saini kama mmiliki",
     "accord_sign_as_holder_usb_label": "Folda ya USB (nyenzo za PQC)",
     "accord_start_drill": "Anza zoezi",
-    "accord_trust_1of1": "1-kati-ya-1"
+    "accord_trust_1of1": "1-kati-ya-1",
+    "accord_canonical_propose_desc": "Seva ya kikanuni sasa hutolewa kwa uchakataji-shirikishi wa m-kati-ya-n. Huu ni uchakataji #1: mshiki-mkataba wa hapa hutia sahihi ya uchakataji kwenye nodi; sehemu husambaa kwa vifaa vya washiki wengine ili kutia sahihi ya pamoja. Programu haishiki funguo yoyote — mguso wa YubiKey ndiyo idhini.",
+    "accord_canonical_propose_btn": "Pendekeza seva ya kikanuni — gusa YubiKey yako",
+    "accord_canonical_propose_btn_busy": "Inapendekeza — gusa YubiKey yako…",
+    "accord_new_cosign_paste": "Tia sahihi ya pamoja kwenye uchakataji-shirikishi uliobandikwa",
+    "accord_section_coscrub": "Sahihi za pamoja zinazosubiri (kikanuni)",
+    "accord_coscrub_empty": "Hakuna uchakataji-shirikishi wa kikanuni unaosubiri sahihi ya pamoja.",
+    "accord_coscrub_badge": "Uchakataji {signed}/{needed}",
+    "accord_coscrub_scrubbers": "umechakatwa na {scrubbers}",
+    "accord_coscrub_unverified": "orodha haijathibitishwa — mchakataji si mshiki-mkataba anayejulikana",
+    "accord_coscrub_target": "lengwa {key}",
+    "accord_coscrub_cosign_title": "Tia sahihi ya pamoja kwenye uchakataji-shirikishi wa kikanuni",
+    "accord_coscrub_cosign_desc": "Ongeza uchakataji wako kwenye uchakataji-shirikishi huu wa kikanuni kwa kutumia YubiKey ya mshiki-mkataba wako. Kwenye akidi ya familia rekodi hutolewa. Programu haishiki funguo yoyote — mguso ndiyo idhini.",
+    "accord_coscrub_cosign_submit": "Tia sahihi ya pamoja kwenye uchakataji-shirikishi — gusa YubiKey yako",
+    "accord_coscrub_cosign_submit_busy": "Inatia sahihi ya pamoja — gusa YubiKey yako…",
+    "accord_coscrub_paste_hint": "Hakuna kiingizo kinachosubiri? Bandika JSON ya sehemu ya uchakataji-shirikishi ili kuutia sahihi ya pamoja moja kwa moja (hufanya kazi bila usambazaji).",
+    "accord_cosign_paste_label": "Sehemu (JSON ya SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Hiyo si JSON halali — bandika rekodi kamili ya sehemu (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

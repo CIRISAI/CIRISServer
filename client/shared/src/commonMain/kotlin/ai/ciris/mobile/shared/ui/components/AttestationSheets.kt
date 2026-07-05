@@ -2,6 +2,7 @@ package ai.ciris.mobile.shared.ui.components
 
 import ai.ciris.mobile.shared.localization.localizedString
 import ai.ciris.mobile.shared.models.federation.AccordHolderDto
+import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
 import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
@@ -42,6 +43,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 
 /**
  * The shared sign / confirm sub-flows for the Trust Root — defined ONCE, opened by
@@ -271,6 +274,103 @@ fun CosignSheet(
                 )
             }
         },
+    )
+}
+
+/**
+ * The **canonical co-scrub** cosign sheet (CIRISServer#174). Distinct from the
+ * invocation [CosignSheet]: it appends THIS holder's scrub to a `SignedKeyRecord`
+ * partial (verify's `append_scrub`, byte-identical envelope) toward the family
+ * m-of-n. Two ways in:
+ *   - [entry] non-null → a "Pending co-signs" row; its `partial` is submitted verbatim.
+ *   - [entry] null → the paste fallback (works without gossip): paste the partial JSON.
+ *
+ * The parse is guarded — malformed JSON calls [onError] and keeps the sheet open.
+ * Built on [HardwareScrubSheet] so the holder + USB + PIN inputs are identical.
+ */
+@Composable
+fun CanonicalCosignSheet(
+    entry: PendingCoscrubDto?,
+    holders: List<AccordHolderDto>,
+    busy: Boolean,
+    onSubmit: (holderKeyId: String, usbPath: String, pin: String?, partial: JsonElement) -> Unit,
+    onError: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pasted by remember { mutableStateOf("") }
+    val pasteMode = entry == null
+    // Resolve the error string in composable context — the submit lambda isn't @Composable.
+    val invalidJsonMsg = localizedString("mobile.accord_coscrub_paste_invalid")
+    HardwareScrubSheet(
+        title = localizedString("mobile.accord_coscrub_cosign_title"),
+        subtitle = localizedString("mobile.accord_coscrub_cosign_desc"),
+        holders = holders,
+        busy = busy,
+        submitLabel = localizedString("mobile.accord_coscrub_cosign_submit"),
+        submitBusyLabel = localizedString("mobile.accord_coscrub_cosign_submit_busy"),
+        tagPrefix = "coscrub_${entry?.targetKeyId ?: "paste"}",
+        extraReady = !pasteMode || pasted.isNotBlank(),
+        extras = {
+            if (entry != null) {
+                Text(
+                    localizedString("mobile.accord_coscrub_target", "key", entry.targetKeyId),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    localizedString("mobile.accord_coscrub_badge")
+                        .replace("{signed}", entry.distinctScrubCount.toString())
+                        .replace("{needed}", entry.quorumNeeded.toString()),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (entry.scrubbers.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        localizedString("mobile.accord_coscrub_scrubbers", "scrubbers", entry.scrubbers.joinToString(", ")),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text(
+                    localizedString("mobile.accord_coscrub_paste_hint"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = pasted,
+                    onValueChange = { pasted = it },
+                    singleLine = false,
+                    label = { Text(localizedString("mobile.accord_cosign_paste_label")) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 96.dp)
+                        .testable("input_coscrub_paste"),
+                )
+            }
+        },
+        onSubmit = { holderKeyId, usbPath, pin ->
+            val partial: JsonElement? = if (entry != null) {
+                entry.partial
+            } else {
+                try {
+                    Json.parseToJsonElement(pasted.trim())
+                } catch (e: Exception) {
+                    onError(invalidJsonMsg)
+                    null
+                }
+            }
+            if (partial != null) {
+                onSubmit(holderKeyId, usbPath, pin, partial)
+                onDismiss()
+            }
+        },
+        onDismiss = onDismiss,
     )
 }
 

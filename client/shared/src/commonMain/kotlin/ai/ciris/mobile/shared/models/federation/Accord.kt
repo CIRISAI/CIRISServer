@@ -332,6 +332,93 @@ data class AddCanonicalServerResponse(
     val seedSavedTo: String? = null,
 )
 
+// ─── Cross-device m-of-n co-scrub (CIRISServer #174 / CIRISPersist#383) ───────
+//
+// A canonical record is now conferred by ≥M *distinct* accord-holder scrubs across
+// DEVICES. A1 `propose`s the first scrub on box-1; the 1-scrub **partial** gossips
+// over the accord peer-plane to box-2 where it appears in the "Pending co-signs"
+// list; B1 `cosign`s; at the family m-of-n the record is adopted / conferred. The
+// signed envelope must round-trip BYTE-IDENTICAL between devices (verify's
+// `append_scrub` recanonicalizes the existing bytes), so every `partial` /
+// `advanced` payload rides as a raw [kotlinx.serialization.json.JsonElement] — the
+// app never re-encodes it.
+
+/**
+ * One canonical co-scrub awaiting more cosignatures — an entry of
+ * `GET /v1/accord/canonical/pending`. Display/UX only (the security gate stays at
+ * cosign→adopt). [partial] is the full verify `SignedKeyRecord` JSON, carried
+ * verbatim so [cosign] can submit it without re-encoding.
+ */
+@Serializable
+data class PendingCoscrubDto(
+    @SerialName("target_key_id")
+    val targetKeyId: String,
+    /** Distinct anchor scrubs on the partial so far. */
+    @SerialName("distinct_scrub_count")
+    val distinctScrubCount: Int = 0,
+    /** The family m-of-n threshold M (0 when the node can't resolve it). */
+    @SerialName("quorum_needed")
+    val quorumNeeded: Int = 0,
+    /** The `scrub_key_id`s present on the partial. */
+    val scrubbers: List<String> = emptyList(),
+    @SerialName("transport_hints")
+    val transportHints: List<TransportHintDto> = emptyList(),
+    /** True → every scrubber resolved to a known accord-holder roster member. */
+    @SerialName("roster_verified")
+    val rosterVerified: Boolean = true,
+    @SerialName("received_at")
+    val receivedAt: String? = null,
+    /** The full `SignedKeyRecord` JSON — round-tripped verbatim into `cosign`. */
+    val partial: kotlinx.serialization.json.JsonElement,
+)
+
+/** `GET /v1/accord/canonical/pending` response. */
+@Serializable
+data class PendingCoscrubsResponse(
+    val pending: List<PendingCoscrubDto> = emptyList(),
+)
+
+/**
+ * `POST /v1/accord/canonical/propose` response — the FIRST scrub of a co-scrub. A
+ * 1-scrub [partial] does NOT yet confer canonical (m-of-n); it is saved to the
+ * outbox and gossiped to accord peers. [partial] rides verbatim so the next holder
+ * cosigns the byte-identical envelope.
+ */
+@Serializable
+data class ProposeCanonicalResponse(
+    @SerialName("target_key_id")
+    val targetKeyId: String,
+    @SerialName("distinct_scrub_count")
+    val distinctScrubCount: Int = 0,
+    val partial: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("saved_to")
+    val savedTo: String? = null,
+    /** How many accord peers the partial was gossiped to (0 when none configured). */
+    @SerialName("gossiped_to")
+    val gossipedTo: Int = 0,
+)
+
+/**
+ * `POST /v1/accord/canonical/cosign` response — THIS holder's scrub was appended to
+ * the partial. [conferred] is true once the distinct-scrub set meets the family
+ * m-of-n (the record is adopted); otherwise [advanced] is the still-partial record
+ * to hand / gossip to the next holder. [advanced] rides verbatim.
+ */
+@Serializable
+data class CosignCanonicalResponse(
+    @SerialName("target_key_id")
+    val targetKeyId: String,
+    @SerialName("distinct_scrub_count")
+    val distinctScrubCount: Int = 0,
+    val conferred: Boolean = false,
+    val outcome: String? = null,
+    val advanced: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("saved_to")
+    val savedTo: String? = null,
+    @SerialName("gossiped_to")
+    val gossipedTo: Int = 0,
+)
+
 // ─── Genesis ceremony (CIRISServer #41) ──────────────────────────────────────
 //
 // The guided HUMANITY_ACCORD genesis ceremony stands up a NEW mesh's 2-of-3

@@ -7,6 +7,7 @@ import ai.ciris.mobile.shared.models.federation.AccordHolderDto
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.models.federation.CanonicalServerDto
 import ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto
+import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.AttKind
@@ -14,6 +15,7 @@ import ai.ciris.mobile.shared.ui.components.AttOp
 import ai.ciris.mobile.shared.ui.components.AttStatus
 import ai.ciris.mobile.shared.ui.components.Attestation
 import ai.ciris.mobile.shared.ui.components.AttestationCard
+import ai.ciris.mobile.shared.ui.components.CanonicalCosignSheet
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.components.ConfirmDestructive
 import ai.ciris.mobile.shared.ui.components.CosignSheet
@@ -88,6 +90,8 @@ private sealed interface AccordSheet {
     data object Drill : AccordSheet
     data object Announce : AccordSheet
     data class Cosign(val inv: AccordInvocationDto) : AccordSheet
+    /** Cosign a canonical co-scrub (CIRISServer#174); [entry] null → paste fallback. */
+    data class CoscrubCosign(val entry: PendingCoscrubDto?) : AccordSheet
     data class Withdraw(val server: CanonicalServerDto) : AccordSheet
     data class Details(val att: Attestation) : AccordSheet
 }
@@ -112,6 +116,7 @@ fun AccordScreen(
     val announcements by viewModel.announcements.collectAsState()
     val canonicalServers by viewModel.canonicalServers.collectAsState()
     val canonicalWithdrawals by viewModel.canonicalWithdrawals.collectAsState()
+    val pendingCoscrubs by viewModel.pendingCoscrubs.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val error by viewModel.error.collectAsState()
@@ -122,6 +127,13 @@ fun AccordScreen(
     var sheet by remember { mutableStateOf<AccordSheet?>(null) }
     var newMenu by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
+
+    // Screen entry: refresh the canonical roster + the gossiped pending co-scrubs so a
+    // partial that arrived over the accord peer-plane shows up without a manual refresh.
+    LaunchedEffect(Unit) {
+        viewModel.loadCanonicalServers()
+        viewModel.loadPendingCoscrubs()
+    }
 
     Scaffold(
         topBar = {
@@ -155,6 +167,11 @@ fun AccordScreen(
                                 add(
                                     NewAttestationAction("add_canonical", "mobile.accord_new_add_canonical") {
                                         sheet = AccordSheet.AddCanonical(replace = null)
+                                    },
+                                )
+                                add(
+                                    NewAttestationAction("cosign_paste", "mobile.accord_new_cosign_paste") {
+                                        sheet = AccordSheet.CoscrubCosign(entry = null)
                                     },
                                 )
                                 add(
@@ -289,6 +306,35 @@ fun AccordScreen(
                 }
             }
 
+            // ── §2b Pending co-signs (canonical co-scrubs, CIRISServer#174) ──
+            //    Partials still short of the family m-of-n — minted locally by
+            //    propose OR gossiped in from another holder's device. Cosign here.
+            SectionHeader(localizedString("mobile.accord_section_coscrub"), loading)
+            if (pendingCoscrubs.isEmpty() && !loading) {
+                Text(
+                    localizedString("mobile.accord_coscrub_empty"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testable("accord_coscrub_empty"),
+                )
+            } else {
+                pendingCoscrubs.forEach { entry ->
+                    val att = coscrubAttestation(entry)
+                    AttestationCard(
+                        att = att,
+                        viewer = viewer,
+                        onOp = { op ->
+                            when (op) {
+                                AttOp.Cosign -> sheet = AccordSheet.CoscrubCosign(entry)
+                                else -> handleOp(op, att) { sheet = it }
+                            }
+                        },
+                    ) {
+                        CoscrubSlot(entry)
+                    }
+                }
+            }
+
             // ── §3 Pending co-signs (invocations: halt / drill / notify) ─────
             SectionHeader(localizedString("mobile.accord_section_pending"), false)
             if (invocations.isEmpty() && !loading) {
@@ -374,6 +420,18 @@ fun AccordScreen(
                 onDismiss = { sheet = null },
             )
         }
+        is AccordSheet.CoscrubCosign -> {
+            CanonicalCosignSheet(
+                entry = s.entry,
+                holders = holders,
+                busy = busy,
+                onSubmit = { holderKeyId, usbPath, pin, partial ->
+                    viewModel.cosignCanonical(holderKeyId, usbPath, pin, partial)
+                },
+                onError = { msg -> viewModel.showError(msg) },
+                onDismiss = { sheet = null },
+            )
+        }
         is AccordSheet.Withdraw -> {
             val server = s.server
             ConfirmDestructive(
@@ -452,6 +510,23 @@ private fun canonicalAttestation(s: CanonicalServerDto): Attestation = Attestati
     dimension = s.identityType,
     attesterKeyId = s.scrubKeyId,
     timestamp = s.validFrom,
+)
+
+@Composable
+private fun coscrubAttestation(entry: PendingCoscrubDto): Attestation = Attestation(
+    id = entry.targetKeyId,
+    kind = AttKind.Coscrub,
+    status = AttStatus.Pending,
+    badge = localizedString("mobile.accord_canonical_badge").uppercase(),
+    signed = entry.distinctScrubCount,
+    // quorum_needed is best-effort (0 when the node can't resolve M) — fall back to 2.
+    threshold = entry.quorumNeeded.takeIf { it > 0 } ?: 2,
+    dimension = localizedString("mobile.accord_coscrub_badge")
+        .replace("{signed}", entry.distinctScrubCount.toString())
+        .replace("{needed}", (entry.quorumNeeded.takeIf { it > 0 } ?: 2).toString()),
+    timestamp = entry.receivedAt,
+    // These flooded in over the accord peer-plane (or were minted here by propose).
+    arrivedViaGossip = true,
 )
 
 @Composable
@@ -563,11 +638,20 @@ private fun AddCanonicalSheet(
         title = localizedString(
             if (replace != null) "mobile.accord_op_supersede" else "mobile.accord_new_add_canonical",
         ),
-        subtitle = localizedString("mobile.accord_canonical_desc"),
+        subtitle = localizedString(
+            if (replace != null) "mobile.accord_canonical_desc"
+            else "mobile.accord_canonical_propose_desc",
+        ),
         holders = holders,
         busy = busy,
-        submitLabel = localizedString("mobile.accord_canonical_add_btn"),
-        submitBusyLabel = localizedString("mobile.accord_canonical_add_btn_busy"),
+        submitLabel = localizedString(
+            if (replace != null) "mobile.accord_canonical_add_btn"
+            else "mobile.accord_canonical_propose_btn",
+        ),
+        submitBusyLabel = localizedString(
+            if (replace != null) "mobile.accord_canonical_add_btn_busy"
+            else "mobile.accord_canonical_propose_btn_busy",
+        ),
         tagPrefix = "canonical",
         extraReady = target != null,
         extras = {
@@ -607,10 +691,20 @@ private fun AddCanonicalSheet(
         },
         onSubmit = { holderKeyId, usbPath, pin ->
             target?.let { t ->
-                viewModel.addCanonicalServer(
-                    holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
-                    transport.ifBlank { null }, ip.ifBlank { null },
-                )
+                if (replace != null) {
+                    // Replace / update = the shipped 1-of-N re-mint of a live record.
+                    viewModel.addCanonicalServer(
+                        holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
+                        transport.ifBlank { null }, ip.ifBlank { null },
+                    )
+                } else {
+                    // A fresh canonical server is now m-of-n: propose is scrub #1; the
+                    // partial gossips to the next holder to cosign (CIRISServer#174).
+                    viewModel.proposeCanonical(
+                        holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
+                        transport.ifBlank { null }, ip.ifBlank { null },
+                    )
+                }
             }
             onDismiss()
         },
@@ -836,6 +930,28 @@ private fun ColumnScope.InvocationBindingNote(inv: AccordInvocationDto) {
         else -> localizedString("mobile.accord_binding_notify")
     }
     Text(text, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+/** The inline slot for a pending canonical co-scrub: its scrubbers + roster note. */
+@Composable
+private fun ColumnScope.CoscrubSlot(entry: PendingCoscrubDto) {
+    if (entry.scrubbers.isNotEmpty()) {
+        Text(
+            localizedString("mobile.accord_coscrub_scrubbers", "scrubbers", entry.scrubbers.joinToString(", ")),
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testable("coscrub_scrubbers_${entry.targetKeyId}"),
+        )
+    }
+    if (!entry.rosterVerified) {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            localizedString("mobile.accord_coscrub_unverified"),
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
 }
 
 /** The inline slot for a completed drill / announcement event. */

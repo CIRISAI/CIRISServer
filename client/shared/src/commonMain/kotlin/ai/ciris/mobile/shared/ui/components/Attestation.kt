@@ -60,6 +60,8 @@ enum class AttKind {
     Holder,
     Node,
     Canonical,
+    /** A canonical co-scrub still accumulating cosignatures (CIRISServer#174). */
+    Coscrub,
     Invocation,
     Message,
     Withdrawal,
@@ -161,6 +163,7 @@ fun attestationStyle(kind: AttKind, styleKey: String?, status: AttStatus): AttSt
         }
         AttKind.AccordFamily -> AttStyle(cs.primaryContainer, cs.onPrimaryContainer, cs.primary, false)
         AttKind.Canonical -> AttStyle(cs.surfaceVariant, cs.onSurfaceVariant, cs.primary, false)
+        AttKind.Coscrub -> AttStyle(cs.secondaryContainer, cs.onSecondaryContainer, cs.primary, false)
         AttKind.Message -> AttStyle(cs.secondaryContainer, cs.onSecondaryContainer, cs.secondary, false)
         else -> AttStyle(cs.surfaceVariant, cs.onSurfaceVariant, cs.outlineVariant, false)
     }
@@ -171,7 +174,9 @@ private fun AttOp.enabledFor(att: Attestation, viewer: ViewerAuthority): Boolean
     AttOp.ViewDetails, AttOp.History -> true
     AttOp.Evidence -> att.evidenceCount > 0
     // Cosign advances a pending m-of-n — only while pending (server 403s a non-holder).
-    AttOp.Cosign -> att.status == AttStatus.Pending && att.kind == AttKind.Invocation
+    // Both an invocation (halt/drill/notify) and a canonical co-scrub accumulate scrubs.
+    AttOp.Cosign -> att.status == AttStatus.Pending &&
+        (att.kind == AttKind.Invocation || att.kind == AttKind.Coscrub)
     // Supersede == "replace / update" a live canonical record (a 1-of-N re-mint).
     AttOp.Supersede -> att.kind == AttKind.Canonical && att.status == AttStatus.Active
     // Withdraw a live canonical record (2-of-3 destructive).

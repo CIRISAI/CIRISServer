@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "보유자로 서명",
     "accord_sign_as_holder_usb_label": "USB 폴더 (PQC 자료)",
     "accord_start_drill": "훈련 시작",
-    "accord_trust_1of1": "1분의 1"
+    "accord_trust_1of1": "1분의 1",
+    "accord_canonical_propose_desc": "이제 정식 서버는 m-of-n 공동 스크럽으로 부여됩니다. 이것은 스크럽 #1입니다. 로컬 협약 보유자가 노드에 스크럽 서명하고, 부분 서명이 다른 보유자들의 기기로 전파되어 공동 서명됩니다. 앱은 키를 보관하지 않으며, YubiKey 터치가 동의입니다.",
+    "accord_canonical_propose_btn": "정식 서버 제안 — YubiKey를 터치하세요",
+    "accord_canonical_propose_btn_busy": "제안 중 — YubiKey를 터치하세요…",
+    "accord_new_cosign_paste": "붙여넣은 공동 스크럽에 공동 서명",
+    "accord_section_coscrub": "대기 중인 공동 서명 (정식)",
+    "accord_coscrub_empty": "공동 서명을 기다리는 정식 공동 스크럽이 없습니다.",
+    "accord_coscrub_badge": "{signed}/{needed} 스크럽",
+    "accord_coscrub_scrubbers": "{scrubbers} 님이 스크럽함",
+    "accord_coscrub_unverified": "명단 미확인 — 스크럽한 사람이 알려진 협약 보유자가 아닙니다",
+    "accord_coscrub_target": "대상 {key}",
+    "accord_coscrub_cosign_title": "정식 공동 스크럽 공동 서명",
+    "accord_coscrub_cosign_desc": "협약 보유자의 YubiKey로 이 정식 공동 스크럽에 스크럽을 추가하세요. 가족 정족수에 도달하면 레코드가 부여됩니다. 앱은 키를 보관하지 않으며, 터치가 동의입니다.",
+    "accord_coscrub_cosign_submit": "공동 스크럽에 공동 서명 — YubiKey를 터치하세요",
+    "accord_coscrub_cosign_submit_busy": "공동 서명 중 — YubiKey를 터치하세요…",
+    "accord_coscrub_paste_hint": "대기 중인 항목이 없나요? 공동 스크럽 부분 JSON을 붙여넣어 직접 공동 서명하세요 (전파 없이 작동).",
+    "accord_cosign_paste_label": "부분 서명 (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "유효한 JSON이 아닙니다 — 전체 부분 서명 (SignedKeyRecord) 레코드를 붙여넣으세요."
   },
   "prompts": {
     "dma": {

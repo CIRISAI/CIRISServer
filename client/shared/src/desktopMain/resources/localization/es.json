@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Firmar como titular",
     "accord_sign_as_holder_usb_label": "Carpeta USB (materiales PQC)",
     "accord_start_drill": "Iniciar simulacro",
-    "accord_trust_1of1": "1 de 1"
+    "accord_trust_1of1": "1 de 1",
+    "accord_canonical_propose_desc": "Un servidor canónico ahora se confiere mediante un coborrado m-de-n. Este es el borrado n.º 1: el titular local del acuerdo firma el borrado del nodo; la parte parcial se propaga a los dispositivos de los demás titulares para que la cofirmen. La aplicación no guarda ninguna clave: el toque de tu YubiKey es el consentimiento.",
+    "accord_canonical_propose_btn": "Proponer servidor canónico: toca tu YubiKey",
+    "accord_canonical_propose_btn_busy": "Proponiendo: toca tu YubiKey…",
+    "accord_new_cosign_paste": "Cofirmar un coborrado pegado",
+    "accord_section_coscrub": "Cofirmas pendientes (canónico)",
+    "accord_coscrub_empty": "No hay coborrados canónicos a la espera de una cofirma.",
+    "accord_coscrub_badge": "{signed}/{needed} borrados",
+    "accord_coscrub_scrubbers": "borrado por {scrubbers}",
+    "accord_coscrub_unverified": "lista sin verificar: un firmante de borrado no es un titular del acuerdo conocido",
+    "accord_coscrub_target": "objetivo {key}",
+    "accord_coscrub_cosign_title": "Cofirmar coborrado canónico",
+    "accord_coscrub_cosign_desc": "Añade tu borrado a este coborrado canónico con la YubiKey del titular de tu acuerdo. Al alcanzar el cuórum familiar, el registro queda conferido. La aplicación no guarda ninguna clave: el toque es el consentimiento.",
+    "accord_coscrub_cosign_submit": "Cofirmar coborrado: toca tu YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Cofirmando: toca tu YubiKey…",
+    "accord_coscrub_paste_hint": "¿No hay ninguna entrada pendiente? Pega el JSON parcial del coborrado para cofirmarlo directamente (funciona sin propagación).",
+    "accord_cosign_paste_label": "Parcial (JSON de SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Eso no es JSON válido: pega el registro parcial completo (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

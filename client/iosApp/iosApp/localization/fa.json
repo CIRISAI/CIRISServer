@@ -2216,7 +2216,24 @@
     "accord_sign_as_holder_title": "امضا به‌عنوان دارنده",
     "accord_sign_as_holder_usb_label": "پوشهٔ USB (مواد PQC)",
     "accord_start_drill": "آغاز مانور",
-    "accord_trust_1of1": "۱ از ۱"
+    "accord_trust_1of1": "۱ از ۱",
+    "accord_canonical_propose_desc": "یک سرور متعارف اکنون از طریق یک هم‌اسکراب m-از-n اعطا می‌شود. این اسکراب #۱ است: دارنده accord محلی گره را با امضای اسکراب امضا می‌کند؛ بخش جزئی برای هم‌امضا به دستگاه‌های سایر دارندگان منتشر می‌شود. برنامه هیچ کلیدی نگه نمی‌دارد — لمس YubiKey همان رضایت است.",
+    "accord_canonical_propose_btn": "پیشنهاد سرور متعارف — YubiKey خود را لمس کنید",
+    "accord_canonical_propose_btn_busy": "در حال پیشنهاد — YubiKey خود را لمس کنید…",
+    "accord_new_cosign_paste": "هم‌امضای یک هم‌اسکراب چسبانده‌شده",
+    "accord_section_coscrub": "هم‌امضاهای در انتظار (متعارف)",
+    "accord_coscrub_empty": "هیچ هم‌اسکراب متعارفی در انتظار هم‌امضا نیست.",
+    "accord_coscrub_badge": "{signed}/{needed} اسکراب",
+    "accord_coscrub_scrubbers": "اسکراب‌شده توسط {scrubbers}",
+    "accord_coscrub_unverified": "فهرست تأییدنشده — یک اسکراب‌کننده یک دارنده accord شناخته‌شده نیست",
+    "accord_coscrub_target": "هدف {key}",
+    "accord_coscrub_cosign_title": "هم‌امضای هم‌اسکراب متعارف",
+    "accord_coscrub_cosign_desc": "اسکراب خود را روی YubiKey دارنده accord به این هم‌اسکراب متعارف بیفزایید. در حد نصاب خانواده، رکورد اعطا می‌شود. برنامه هیچ کلیدی نگه نمی‌دارد — لمس همان رضایت است.",
+    "accord_coscrub_cosign_submit": "هم‌امضای هم‌اسکراب — YubiKey خود را لمس کنید",
+    "accord_coscrub_cosign_submit_busy": "در حال هم‌امضا — YubiKey خود را لمس کنید…",
+    "accord_coscrub_paste_hint": "ورودی در انتظاری ندارید؟ JSON جزئی هم‌اسکراب را بچسبانید تا مستقیماً آن را هم‌امضا کنید (بدون انتشار کار می‌کند).",
+    "accord_cosign_paste_label": "جزئی (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "آن JSON معتبری نیست — رکورد کامل جزئی (SignedKeyRecord) را بچسبانید."
   },
   "prompts": {
     "dma": {

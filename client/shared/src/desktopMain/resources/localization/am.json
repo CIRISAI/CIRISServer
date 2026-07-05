@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "እንደ ያዥ ፈርም",
     "accord_sign_as_holder_usb_label": "USB አቃፊ (PQC ቁሳቁሶች)",
     "accord_start_drill": "ልምምድ ጀምር",
-    "accord_trust_1of1": "1-ከ-1"
+    "accord_trust_1of1": "1-ከ-1",
+    "accord_canonical_propose_desc": "የካኖኒካል አገልጋይ አሁን በm-of-n የጋራ ስክረብ ይሰጣል። ይህ ስክረብ #1 ነው፦ የአካባቢው accord ያዥ ኖዱን በስክረብ ይፈርማል፤ ከፊሉ ወደ ሌሎቹ ያዦች መሣሪያዎች ተጋርቶ ለተጓዳኝ ፊርማ ይላካል። መተግበሪያው ምንም ቁልፍ አይይዝም — የYubiKey ንክኪ ፍቃድ ነው።",
+    "accord_canonical_propose_btn": "የካኖኒካል አገልጋይ አቅርብ — YubiKey ንካ",
+    "accord_canonical_propose_btn_busy": "በማቅረብ ላይ — YubiKey ንካ…",
+    "accord_new_cosign_paste": "የተለጠፈ የጋራ ስክረብ በተጓዳኝ ፈርም",
+    "accord_section_coscrub": "በመጠባበቅ ላይ ያሉ ተጓዳኝ ፊርማዎች (ካኖኒካል)",
+    "accord_coscrub_empty": "ተጓዳኝ ፊርማ የሚጠብቁ ካኖኒካል የጋራ ስክረቦች የሉም።",
+    "accord_coscrub_badge": "{signed}/{needed} ስክረቦች",
+    "accord_coscrub_scrubbers": "በ{scrubbers} የተስክረበ",
+    "accord_coscrub_unverified": "ዝርዝሩ አልተረጋገጠም — ስክረብ አድራጊው የታወቀ accord ያዥ አይደለም",
+    "accord_coscrub_target": "ዒላማ {key}",
+    "accord_coscrub_cosign_title": "ካኖኒካል የጋራ ስክረብ በተጓዳኝ ፈርም",
+    "accord_coscrub_cosign_desc": "ስክረብህን በአካውንትህ accord ያዥ YubiKey ላይ ወደዚህ ካኖኒካል የጋራ ስክረብ ጨምር። በቤተሰብ ኮረም ላይ መዝገቡ ይሰጣል። መተግበሪያው ምንም ቁልፍ አይይዝም — ንክኪው ፍቃድ ነው።",
+    "accord_coscrub_cosign_submit": "የጋራ ስክረብ በተጓዳኝ ፈርም — YubiKey ንካ",
+    "accord_coscrub_cosign_submit_busy": "በተጓዳኝ በመፈረም ላይ — YubiKey ንካ…",
+    "accord_coscrub_paste_hint": "በመጠባበቅ ላይ ያለ ግቤት የለም? የጋራ ስክረቡን ከፊል JSON ለጥፈህ በቀጥታ በተጓዳኝ ፈርመው (ያለ ጎሲፕ ይሰራል)።",
+    "accord_cosign_paste_label": "ከፊል (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "ያ ትክክለኛ JSON አይደለም — ሙሉውን ከፊል (SignedKeyRecord) መዝገብ ለጥፍ።"
   },
   "prompts": {
     "dma": {

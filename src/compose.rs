@@ -445,6 +445,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // closure (the seam: fold the adapter's routers in below).
                 let adapter = Arc::clone(&adapter);
                 let adapter_ctx = adapter_ctx.clone();
+                // The accord peer base URLs (self excluded) — the shared gossip set for
+                // BOTH the kill-switch (accord::router_with_halt) and the co-scrub partial
+                // fan-out (accord_provision::build). Same discipline as the halt: never
+                // gossip back to self.
+                let accord_peers: Vec<String> = cfg
+                    .bootstrap_peers
+                    .iter()
+                    .filter(|a| **a != cfg.listen_addr)
+                    .map(|a| format!("http://{a}"))
+                    .collect();
+                let provision =
+                    crate::accord_provision::build(Arc::clone(&engine), accord_peers.clone());
                 let r = identity_router(identity_json)
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the
@@ -669,12 +681,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             // Replicate accord messages to known peers — EXCLUDING
                             // self (an operator who lists this node in bootstrap_peers
                             // must not make it gossip/halt-loop back to itself).
-                            peers: cfg
-                                .bootstrap_peers
-                                .iter()
-                                .filter(|a| **a != cfg.listen_addr)
-                                .map(|a| format!("http://{a}"))
-                                .collect(),
+                            peers: accord_peers.clone(),
                             exit_on_halt: true,
                         },
                     ))
@@ -687,9 +694,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // node's own host; the OWNER gate is downstream at POST
                     // /v1/accord/holder). pkcs11-feature-gated (NotSupported
                     // without it). Mirrors the other setup routers' loopback guard.
-                    .merge(crate::accord_provision::router(Arc::clone(&engine)).layer(
-                        axum::middleware::from_fn(crate::auth::loopback::require_loopback),
-                    ))
+                    .merge(provision.loopback.layer(axum::middleware::from_fn(
+                        crate::auth::loopback::require_loopback,
+                    )))
+                    // Co-scrub gossip receive — the OPEN counterpart. A remote accord
+                    // peer POSTs a gossiped co-scrub partial here (A1's box → B1's box),
+                    // so this ONE endpoint must NOT be loopback-gated. Shares the pending
+                    // store with the loopback `GET /pending` the client reads. Structural
+                    // validation + bounded; the security gate stays at persist's m-of-n.
+                    .merge(provision.gossip)
                     // FEDERATION PEERS (agent-compat Network card): GET
                     // /v1/federation/peers + GET /v1/federation/peers/{key_id}
                     // — projects the federation_directory `federation_keys`

@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Als Halter signieren",
     "accord_sign_as_holder_usb_label": "USB-Ordner (PQC-Material)",
     "accord_start_drill": "Probe starten",
-    "accord_trust_1of1": "1-von-1"
+    "accord_trust_1of1": "1-von-1",
+    "accord_canonical_propose_desc": "Ein kanonischer Server wird jetzt durch ein m-von-n-Co-Scrub verliehen. Dies ist Scrub #1: Der lokale Accord-Inhaber scrub-signiert den Knoten; der Teilscrub gelangt per Gossip auf die Geräte der anderen Inhaber zum Mitsignieren. Die App hält keine Schlüssel — die YubiKey-Berührung ist die Zustimmung.",
+    "accord_canonical_propose_btn": "Kanonischen Server vorschlagen — berühren Sie Ihren YubiKey",
+    "accord_canonical_propose_btn_busy": "Wird vorgeschlagen — berühren Sie Ihren YubiKey…",
+    "accord_new_cosign_paste": "Ein eingefügtes Co-Scrub mitsignieren",
+    "accord_section_coscrub": "Ausstehende Mitsignaturen (kanonisch)",
+    "accord_coscrub_empty": "Keine kanonischen Co-Scrubs, die auf eine Mitsignatur warten.",
+    "accord_coscrub_badge": "{signed}/{needed} Scrubs",
+    "accord_coscrub_scrubbers": "gescrubbt von {scrubbers}",
+    "accord_coscrub_unverified": "Liste nicht verifiziert — ein Scrubber ist kein bekannter Accord-Inhaber",
+    "accord_coscrub_target": "Ziel {key}",
+    "accord_coscrub_cosign_title": "Kanonisches Co-Scrub mitsignieren",
+    "accord_coscrub_cosign_desc": "Fügen Sie Ihr Scrub diesem kanonischen Co-Scrub auf dem YubiKey Ihres Accord-Inhabers hinzu. Beim Familienquorum wird der Datensatz verliehen. Die App hält keine Schlüssel — die Berührung ist die Zustimmung.",
+    "accord_coscrub_cosign_submit": "Co-Scrub mitsignieren — berühren Sie Ihren YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Wird mitsigniert — berühren Sie Ihren YubiKey…",
+    "accord_coscrub_paste_hint": "Kein ausstehender Eintrag? Fügen Sie das JSON des Co-Scrub-Teilscrubs ein, um es direkt mitzusignieren (funktioniert ohne Gossip).",
+    "accord_cosign_paste_label": "Teilscrub (SignedKeyRecord-JSON)",
+    "accord_coscrub_paste_invalid": "Das ist kein gültiges JSON — fügen Sie den vollständigen Teilscrub-Datensatz (SignedKeyRecord) ein."
   },
   "prompts": {
     "dma": {
