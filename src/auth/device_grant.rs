@@ -413,6 +413,7 @@ async fn register_minted_agent_key(
         // None ⇔ the stored `unregistered` default; excluded from the
         // registration hash, assigned later via set_consent_role.
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .federation_directory()

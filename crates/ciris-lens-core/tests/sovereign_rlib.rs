@@ -174,6 +174,7 @@ async fn register_key_in_directory(engine: &Engine, signer: &LocalSigner) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
 
     let sq = engine

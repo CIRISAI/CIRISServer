@@ -1282,6 +1282,7 @@ pub(crate) async fn build_self_key_record(
         // #365): None ⇔ the stored `unregistered` default; excluded from the
         // registration hash, assigned later via set_consent_role.
         consent_role: None,
+        additional_scrubs: Vec::new(),
     })
 }
 

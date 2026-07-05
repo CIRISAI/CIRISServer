@@ -1866,11 +1866,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_canonical_servers_returns_the_baked_genesis_on_a_fresh_node() {
-        // persist v13.1.0 (CIRISPersist#380) auto-seeds the A1-conferred canonical
-        // genesis anchor `ciris-canonical-1-d7bdeu223k` on first boot, so a fresh
-        // node already lists exactly it — the mesh-seed trust root, no out-of-band
-        // JSON required. (Was: asserted empty pre-#380.)
+    async fn list_canonical_servers_is_empty_on_a_fresh_node() {
+        // persist v13.2.0 makes canonical admission **m-of-n** (the family's
+        // entrenched `quorum:M/N`, via verify's `verify_quorum_policy`), so the old
+        // 1-of-N A1-only genesis is no longer auto-baked: a `canonical` role is
+        // conferred ONLY on a record whose scrub set meets the quorum. A fresh node
+        // therefore lists NO canonical servers until a proper m-of-n one is
+        // co-minted (CIRISPersist#383). (Was: asserted the 1-of-N #380 genesis.)
         let app = router_with_engine().await;
         let resp = app
             .oneshot(
@@ -1887,22 +1889,12 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let servers = v["servers"].as_array().expect("servers array");
-        assert!(
-            servers
-                .iter()
-                .any(|s| s["key_id"] == "ciris-canonical-1-d7bdeu223k"),
-            "the baked canonical genesis anchor is auto-seeded on a fresh node (persist#380): {v}"
+        assert_eq!(
+            v["servers"].as_array().map(|a| a.len()),
+            Some(0),
+            "a fresh node has no canonical servers — the 1-of-N genesis is gone; \
+             canonical is conferred only via the m-of-n co-scrub: {v}"
         );
-        // Every listed server carries the accord-conferred `canonical` role.
-        for s in servers {
-            let it = s["identity_type"].as_str().unwrap_or("");
-            assert!(
-                it.split(',').any(|r| r == "canonical"),
-                "listed server {} must carry the canonical role, got {it:?}",
-                s["key_id"]
-            );
-        }
     }
 
     #[tokio::test]

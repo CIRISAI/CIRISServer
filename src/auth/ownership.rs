@@ -690,6 +690,7 @@ async fn register_user_key(
         // None ⇔ the stored `unregistered` default; assigned later via
         // set_consent_role and excluded from the registration hash.
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     let signed = SignedKeyRecord { record };
     if via_gate.is_some() {

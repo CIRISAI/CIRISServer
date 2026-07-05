@@ -102,6 +102,7 @@ async fn register_key(
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .federation_directory()

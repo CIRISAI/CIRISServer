@@ -117,6 +117,7 @@ async fn register_self(engine: &Engine) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -175,6 +176,7 @@ async fn bind_owner(engine: &Engine) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .federation_directory()
@@ -248,6 +250,7 @@ async fn self_key_record_json(engine: &Engine) -> String {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     serde_json::to_string(&SignedKeyRecord { record }).expect("serialize self key record")
 }
@@ -293,6 +296,7 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     SignedKeyRecord { record }
 }

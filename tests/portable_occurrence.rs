@@ -97,6 +97,7 @@ async fn register_self_key(engine: &Engine, key_id: &str) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .federation_directory()
