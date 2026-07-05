@@ -151,11 +151,24 @@ data class AdmitNodeResponse(
 )
 
 /**
+ * One bootstrap transport address baked INTO a canonical server's signed record —
+ * an entry of its ``transport_hints`` (e.g. ``{kind:"ip", destination:"1.2.3.4:4242"}``).
+ * The IP now rides inside the scrubbed record envelope, so it is set at mint time.
+ */
+@Serializable
+data class TransportHintDto(
+    val kind: String,
+    val destination: String,
+)
+
+/**
  * One canonical server on the trust root — `GET /v1/accord/canonical/servers`
  * (CIRISServer#164). A canonical server is a node whose registration an accord
  * holder scrub-signed AND flagged `canonical` (its [identityType] is a comma-set
  * that includes `canonical`), making it a rock-solid mesh-seed anchor other
  * nodes may bootstrap-dial. [scrubKeyId] is the holder key_id that scrubbed it.
+ * [transportHints] carries the addresses (e.g. the ``ip`` host:port) baked into
+ * the signed record, or null when none were set.
  */
 @Serializable
 data class CanonicalServerDto(
@@ -166,16 +179,65 @@ data class CanonicalServerDto(
     val identityType: String,
     @SerialName("pubkey_ed25519_base64")
     val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
     @SerialName("scrub_key_id")
     val scrubKeyId: String? = null,
     @SerialName("valid_from")
     val validFrom: String? = null,
+    /** The addresses baked into the signed record (e.g. the ``ip`` entry), or null. */
+    @SerialName("transport_hints")
+    val transportHints: List<TransportHintDto>? = null,
 )
 
 /** ``GET /v1/accord/canonical/servers`` response. */
 @Serializable
 data class CanonicalServersResponse(
     val servers: List<CanonicalServerDto> = emptyList(),
+)
+
+/**
+ * ``POST /v1/accord/canonical/withdraw`` response (CIRISServer#164) — a DESTRUCTIVE
+ * op that needs a 2-of-3 accord proposal (a second/third holder must co-sign); a
+ * lone holder cannot complete it. [withdrawn] is true only once quorum is met.
+ */
+@Serializable
+data class CanonicalWithdrawResponse(
+    val withdrawn: Boolean = false,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/**
+ * ``POST /v1/accord/canonical/supersede`` response — replaces a canonical record
+ * with a fresh successor. Also a 2-of-3 destructive op. [successor] is the new
+ * canonical key_id once quorum settles.
+ */
+@Serializable
+data class CanonicalSupersedeResponse(
+    val superseded: Boolean = false,
+    val successor: String? = null,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/** One withdrawn / superseded canonical server — an entry of the withdrawals log. */
+@Serializable
+data class CanonicalWithdrawalDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("withdrawn_at")
+    val withdrawnAt: String? = null,
+    @SerialName("superseded_by")
+    val supersededBy: String? = null,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/** ``GET /v1/accord/canonical/withdrawals`` response. */
+@Serializable
+data class CanonicalWithdrawalsResponse(
+    val withdrawals: List<CanonicalWithdrawalDto> = emptyList(),
 )
 
 /**

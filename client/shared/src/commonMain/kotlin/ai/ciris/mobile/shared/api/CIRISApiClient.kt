@@ -2583,6 +2583,78 @@ class CIRISApiClient(
     }
 
     /**
+     * **Withdraw a canonical server** — `POST {nodeUrl}/v1/accord/canonical/withdraw`
+     * (CIRISServer#164). DESTRUCTIVE: needs a 2-of-3 accord proposal (a second/third
+     * holder must co-sign) — a lone holder cannot complete it. [proposalDigest] names
+     * the accord proposal this withdrawal is authorized under.
+     */
+    suspend fun withdrawCanonical(
+        keyId: String,
+        proposalDigest: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalWithdrawResponse {
+        val method = "withdrawCanonical"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/withdraw key_id=$keyId")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(keyId.trim()))
+                put("proposal_digest", JsonPrimitive(proposalDigest.trim()))
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/withdraw") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("withdraw canonical failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalWithdrawResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw RuntimeException(e.message ?: "withdraw canonical failed", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **List withdrawn / superseded canonical servers** —
+     * `GET {nodeUrl}/v1/accord/canonical/withdrawals` (CIRISServer#164). The audit
+     * log of canonical records that were withdrawn or superseded. Visible to everyone.
+     */
+    suspend fun listCanonicalWithdrawals(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse {
+        val method = "listCanonicalWithdrawals"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/canonical/withdrawals") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list canonical withdrawals failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse()
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
      * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
      * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the

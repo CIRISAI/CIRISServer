@@ -6,6 +6,9 @@ import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
+import ai.ciris.mobile.shared.ui.icons.CIRISMaterialIcons
+import ai.ciris.mobile.shared.ui.icons.Visibility
+import ai.ciris.mobile.shared.ui.icons.VisibilityOff
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -38,18 +41,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 /**
  * **Accord** — the HUMANITY_ACCORD constitutional surface (CIRISServer #41).
@@ -88,6 +98,14 @@ fun AccordScreen(
     val error by viewModel.error.collectAsState()
     val notice by viewModel.notice.collectAsState()
 
+    // Hoisted so the "Replace / update" action can scroll the add-canonical form
+    // into view (see the LaunchedEffect on the canonical replace seed below). The
+    // scroll target is derived from the form's on-screen position relative to the
+    // scroll viewport top, both captured in root coordinates.
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    var columnTopRootY by remember { mutableStateOf(0f) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -108,7 +126,8 @@ fun AccordScreen(
                 .fillMaxSize()
                 .padding(pad)
                 .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
+                .onGloballyPositioned { columnTopRootY = it.positionInRoot().y }
+                .verticalScroll(scrollState),
         ) {
             Spacer(Modifier.height(8.dp))
             Text(
@@ -345,6 +364,7 @@ fun AccordScreen(
             var admitHolderKeyId by remember { mutableStateOf("") }
             var admitUsbPath by remember { mutableStateOf("") }
             var admitPin by remember { mutableStateOf("") }
+            var showAdmitPin by remember { mutableStateOf(false) }
             var holderMenu by remember { mutableStateOf(false) }
             var nodeMenu by remember { mutableStateOf(false) }
             var showUsbPicker by remember { mutableStateOf(false) }
@@ -435,7 +455,24 @@ fun AccordScreen(
                 value = admitPin,
                 onValueChange = { admitPin = it },
                 singleLine = true,
-                label = { Text("YubiKey PIN (optional)") },
+                label = { Text("YubiKey PIN") },
+                visualTransformation =
+                    if (showAdmitPin) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showAdmitPin = !showAdmitPin },
+                        modifier = Modifier.testableClickable("btn_admit_pin_toggle") {
+                            showAdmitPin = !showAdmitPin
+                        },
+                    ) {
+                        Icon(
+                            if (showAdmitPin) CIRISMaterialIcons.Filled.VisibilityOff
+                            else CIRISMaterialIcons.Filled.Visibility,
+                            contentDescription = if (showAdmitPin) "Hide PIN" else "Show PIN",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().testable("input_admit_pin"),
             )
             Spacer(Modifier.height(8.dp))
@@ -449,7 +486,7 @@ fun AccordScreen(
                     }
                 },
                 enabled = !admitBusy && admitHolderKeyId.isNotBlank() &&
-                    admitUsbPath.isNotBlank() && admitTarget != null,
+                    admitUsbPath.isNotBlank() && admitPin.isNotBlank() && admitTarget != null,
                 modifier = Modifier.fillMaxWidth().testable("btn_admit_node"),
             ) {
                 Text(if (admitBusy) "Admitting — touch your YubiKey…" else "Admit node — touch your YubiKey")
@@ -486,14 +523,39 @@ fun AccordScreen(
             val canonicalTarget by viewModel.canonicalResolvedTarget.collectAsState()
             val canonicalOwnedNodes by viewModel.ownedNodes.collectAsState()
             val canonicalRoster by viewModel.holders.collectAsState()
+            val canonicalWithdrawals by viewModel.canonicalWithdrawals.collectAsState()
+            val canonicalReplaceSeed by viewModel.canonicalReplaceTarget.collectAsState()
             var canonicalHolderKeyId by remember { mutableStateOf("") }
             var canonicalUsbPath by remember { mutableStateOf("") }
             var canonicalPin by remember { mutableStateOf("") }
-            var canonicalTransportKind by remember { mutableStateOf("") }
+            var showCanonicalPin by remember { mutableStateOf(false) }
+            // The transport defaults to `ip` — the IP now rides INSIDE the signed
+            // record envelope, so it must be set at mint time.
+            var canonicalTransportKind by remember { mutableStateOf("ip") }
             var canonicalDestination by remember { mutableStateOf("") }
             var canonicalHolderMenu by remember { mutableStateOf(false) }
             var canonicalNodeMenu by remember { mutableStateOf(false) }
             var canonicalUsbPicker by remember { mutableStateOf(false) }
+            // Shared 2-of-3 proposal digest for the destructive canonical ops
+            // (withdraw / supersede); a lone holder cannot complete either.
+            var canonicalProposalDigest by remember { mutableStateOf("") }
+            var showSupersedeNote by remember { mutableStateOf(false) }
+            // The add-canonical form's on-screen Y (root coords), captured for the
+            // "Replace / update" scroll-into-view.
+            var addCanonicalFormRootY by remember { mutableStateOf(0f) }
+
+            // When a canonical row is picked to replace/update, seed the local form
+            // (IP + transport=ip) from the VM seed and scroll the add form into view.
+            LaunchedEffect(canonicalReplaceSeed) {
+                canonicalReplaceSeed?.let { seed ->
+                    canonicalTransportKind = "ip"
+                    canonicalDestination = seed.ip
+                    val target = (scrollState.value + (addCanonicalFormRootY - columnTopRootY))
+                        .toInt().coerceIn(0, scrollState.maxValue)
+                    scope.launch { scrollState.animateScrollTo(target) }
+                    viewModel.clearCanonicalReplaceSeed()
+                }
+            }
 
             // Current canonical servers roster.
             if (canonicalServers.isEmpty()) {
@@ -505,6 +567,7 @@ fun AccordScreen(
                 )
             } else {
                 canonicalServers.forEach { s ->
+                    val currentIp = s.transportHints?.firstOrNull { it.kind == "ip" }?.destination
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -533,6 +596,21 @@ fun AccordScreen(
                                     )
                                 }
                             }
+                            // Current IP (the transport_hints ip destination, baked
+                            // into the signed record) — or "no address".
+                            Text(
+                                localizedString(
+                                    "mobile.accord_canonical_current_ip",
+                                    "ip",
+                                    currentIp?.takeIf { it.isNotBlank() }
+                                        ?: localizedString("mobile.accord_canonical_ip_none"),
+                                ),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 3.dp)
+                                    .testable("canonical_server_ip_${s.keyId}"),
+                            )
                             s.scrubKeyId?.takeIf { it.isNotBlank() }?.let { scrub ->
                                 Text(
                                     localizedString("mobile.accord_canonical_scrubbed_by", "holder", scrub),
@@ -541,9 +619,75 @@ fun AccordScreen(
                                     modifier = Modifier.padding(top = 2.dp),
                                 )
                             }
+                            // Row ops: Replace/update (1-of-N re-mint), plus the
+                            // destructive 2-of-3 withdraw / supersede.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(
+                                    onClick = { viewModel.selectCanonicalForReplace(s) },
+                                    modifier = Modifier.testableClickable("btn_canonical_replace_${s.keyId}") {
+                                        viewModel.selectCanonicalForReplace(s)
+                                    },
+                                ) { Text(localizedString("mobile.accord_canonical_replace")) }
+                                TextButton(
+                                    onClick = {
+                                        viewModel.withdrawCanonical(s.keyId, canonicalProposalDigest)
+                                    },
+                                    enabled = !busy && canonicalProposalDigest.isNotBlank(),
+                                    modifier = Modifier.testableClickable("btn_canonical_withdraw_${s.keyId}") {
+                                        viewModel.withdrawCanonical(s.keyId, canonicalProposalDigest)
+                                    },
+                                ) {
+                                    Text(
+                                        localizedString("mobile.accord_canonical_withdraw"),
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { showSupersedeNote = true },
+                                    modifier = Modifier.testableClickable("btn_canonical_supersede_${s.keyId}") {
+                                        showSupersedeNote = true
+                                    },
+                                ) { Text(localizedString("mobile.accord_canonical_supersede")) }
+                            }
                         }
                     }
                 }
+            }
+
+            // ── Destructive ops (2-of-3) — shared proposal digest + note ─────────
+            Spacer(Modifier.height(8.dp))
+            Text(
+                localizedString("mobile.accord_canonical_destructive_title"),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_canonical_destructive_title"),
+            )
+            Text(
+                localizedString("mobile.accord_canonical_destructive_note"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
+                    .testable("accord_canonical_destructive_note"),
+            )
+            OutlinedTextField(
+                value = canonicalProposalDigest,
+                onValueChange = { canonicalProposalDigest = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_proposal_digest_label")) },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_proposal_digest"),
+            )
+            if (showSupersedeNote) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    localizedString("mobile.accord_canonical_supersede_todo"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testable("accord_canonical_supersede_todo"),
+                )
+                // TODO(#164): assemble the successor SignedKeyRecord for
+                //   POST /v1/accord/canonical/supersede { old_key_id, new_record,
+                //   proposal_digest } in-app — the new_record is a full re-scrubbed
+                //   record and is complex to build client-side; done out-of-band for now.
             }
             Spacer(Modifier.height(10.dp))
 
@@ -551,7 +695,9 @@ fun AccordScreen(
                 localizedString("mobile.accord_canonical_add_title"),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.testable("accord_add_canonical_title"),
+                modifier = Modifier
+                    .onGloballyPositioned { addCanonicalFormRootY = it.positionInRoot().y }
+                    .testable("accord_add_canonical_title"),
             )
             Spacer(Modifier.height(6.dp))
 
@@ -641,25 +787,43 @@ fun AccordScreen(
                 onValueChange = { canonicalPin = it },
                 singleLine = true,
                 label = { Text(localizedString("mobile.accord_canonical_pin_label")) },
+                visualTransformation =
+                    if (showCanonicalPin) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showCanonicalPin = !showCanonicalPin },
+                        modifier = Modifier.testableClickable("btn_canonical_pin_toggle") {
+                            showCanonicalPin = !showCanonicalPin
+                        },
+                    ) {
+                        Icon(
+                            if (showCanonicalPin) CIRISMaterialIcons.Filled.VisibilityOff
+                            else CIRISMaterialIcons.Filled.Visibility,
+                            contentDescription = if (showCanonicalPin) "Hide PIN" else "Show PIN",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().testable("input_canonical_pin"),
             )
             Spacer(Modifier.height(6.dp))
 
-            // (4) OPTIONAL bootstrap transport — the address other nodes dial.
+            // (4) Bootstrap transport — the IP now rides INSIDE the signed record
+            //     envelope, so it is set at mint time (defaults to `ip`).
+            OutlinedTextField(
+                value = canonicalDestination,
+                onValueChange = { canonicalDestination = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_canonical_ip_label")) },
+                modifier = Modifier.fillMaxWidth().testable("input_canonical_destination"),
+            )
+            Spacer(Modifier.height(6.dp))
             OutlinedTextField(
                 value = canonicalTransportKind,
                 onValueChange = { canonicalTransportKind = it },
                 singleLine = true,
                 label = { Text(localizedString("mobile.accord_canonical_transport_label")) },
                 modifier = Modifier.fillMaxWidth().testable("input_canonical_transport_kind"),
-            )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = canonicalDestination,
-                onValueChange = { canonicalDestination = it },
-                singleLine = true,
-                label = { Text(localizedString("mobile.accord_canonical_destination_label")) },
-                modifier = Modifier.fillMaxWidth().testable("input_canonical_destination"),
             )
             Spacer(Modifier.height(8.dp))
             Button(
@@ -674,7 +838,8 @@ fun AccordScreen(
                     }
                 },
                 enabled = !busy && canonicalHolderKeyId.isNotBlank() &&
-                    canonicalUsbPath.isNotBlank() && canonicalTarget != null,
+                    canonicalUsbPath.isNotBlank() && canonicalPin.isNotBlank() &&
+                    canonicalTarget != null,
                 modifier = Modifier.fillMaxWidth().testable("btn_add_canonical"),
             ) {
                 Text(
@@ -690,6 +855,58 @@ fun AccordScreen(
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(6.dp).testable("accord_canonical_saved_to"),
                 )
+            }
+
+            // ── Withdrawn / superseded history ──────────────────────────────────
+            Spacer(Modifier.height(16.dp))
+            Text(
+                localizedString("mobile.accord_canonical_withdrawals_title"),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_canonical_withdrawals_title"),
+            )
+            Spacer(Modifier.height(6.dp))
+            if (canonicalWithdrawals.isEmpty()) {
+                Text(
+                    localizedString("mobile.accord_canonical_withdrawals_empty"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testable("accord_canonical_withdrawals_empty"),
+                )
+            } else {
+                canonicalWithdrawals.forEach { w ->
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                            .testable("row_canonical_withdrawal_${w.keyId}"),
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                w.keyId,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            w.withdrawnAt?.takeIf { it.isNotBlank() }?.let { at ->
+                                Text(
+                                    localizedString("mobile.accord_canonical_withdrawn_at", "at", at),
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
+                            w.supersededBy?.takeIf { it.isNotBlank() }?.let { by ->
+                                Text(
+                                    localizedString("mobile.accord_canonical_superseded_by", "by", by),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Pending invocations ──────────────────────────────────────────

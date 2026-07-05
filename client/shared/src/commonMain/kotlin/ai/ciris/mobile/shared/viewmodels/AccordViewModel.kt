@@ -82,6 +82,12 @@ class AccordViewModel(
                     PlatformLogger.w(TAG, "[refresh] canonical-servers: ${e.message}")
                     emptyList()
                 }
+                _canonicalWithdrawals.value = try {
+                    apiClient.listCanonicalWithdrawals().withdrawals
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] canonical-withdrawals: ${e.message}")
+                    emptyList()
+                }
                 _error.value = null
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[refresh] ${e.message}")
@@ -234,6 +240,30 @@ class AccordViewModel(
     private val _canonicalResolvedTarget = MutableStateFlow<ResolvedTarget?>(null)
     val canonicalResolvedTarget: StateFlow<ResolvedTarget?> = _canonicalResolvedTarget.asStateFlow()
 
+    /** The withdrawn / superseded canonical servers audit log. */
+    private val _canonicalWithdrawals =
+        MutableStateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto>>(emptyList())
+    val canonicalWithdrawals:
+        StateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto>> =
+        _canonicalWithdrawals.asStateFlow()
+
+    /**
+     * A canonical row the operator picked to **replace / update**: the form is
+     * pre-filled with this record's key_id + both pubkeys + current IP so the
+     * operator edits the IP and re-submits [addCanonicalServer] (a 1-of-N re-mint
+     * that embeds the updated IP in a fresh scrubbed record). Consumed + cleared by
+     * the screen (which seeds its local form state + scrolls to the add form).
+     */
+    data class CanonicalReplaceSeed(
+        val keyId: String,
+        val ed25519: String,
+        val mldsa: String,
+        val ip: String,
+    )
+
+    private val _canonicalReplaceTarget = MutableStateFlow<CanonicalReplaceSeed?>(null)
+    val canonicalReplaceTarget: StateFlow<CanonicalReplaceSeed?> = _canonicalReplaceTarget.asStateFlow()
+
     /** Reload the canonical-servers roster (also refreshed on [refresh]). */
     fun loadCanonicalServers() {
         viewModelScope.launch {
@@ -241,6 +271,70 @@ class AccordViewModel(
                 _canonicalServers.value = apiClient.listCanonicalServers().servers
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[loadCanonicalServers] ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * **Select an existing canonical server to replace / update.** Seeds the
+     * add-canonical form with the row's key_id + both pubkeys (as the resolved
+     * target — no owned-node re-pick needed) and its current IP, so the operator
+     * only edits the IP and re-submits. A row missing its ML-DSA half can't be
+     * replaced in-app (re-mint it from the owned-nodes picker instead).
+     */
+    fun selectCanonicalForReplace(
+        server: ai.ciris.mobile.shared.models.federation.CanonicalServerDto,
+    ) {
+        val ml = server.pubkeyMlDsa65Base64
+        if (ml.isNullOrBlank()) {
+            _error.value =
+                "${server.keyId} has no ML-DSA key in its record — re-mint it from the owned-nodes picker instead."
+            return
+        }
+        val ip = server.transportHints?.firstOrNull { it.kind == "ip" }?.destination.orEmpty()
+        _canonicalResolvedTarget.value = ResolvedTarget(server.keyId, server.pubkeyEd25519Base64, ml)
+        _canonicalReplaceTarget.value = CanonicalReplaceSeed(server.keyId, server.pubkeyEd25519Base64, ml, ip)
+    }
+
+    /** Clear the replace seed once the screen has consumed it into its form. */
+    fun clearCanonicalReplaceSeed() {
+        _canonicalReplaceTarget.value = null
+    }
+
+    /**
+     * **Withdraw a canonical server** (CIRISServer#164). DESTRUCTIVE — needs a
+     * 2-of-3 accord proposal (a second/third holder must co-sign); a lone holder
+     * cannot complete it. [proposalDigest] names the authorizing accord proposal.
+     */
+    fun withdrawCanonical(keyId: String, proposalDigest: String) {
+        if (_busy.value) return
+        if (proposalDigest.isBlank()) {
+            _error.value = "Enter the 2-of-3 accord proposal digest first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.withdrawCanonical(keyId, proposalDigest)
+                _notice.value = if (res.withdrawn) {
+                    "Withdrew $keyId from the trust root."
+                } else {
+                    "Withdrawal recorded for $keyId — awaiting the 2-of-3 quorum."
+                }
+                refresh()
+                loadCanonicalServers()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[withdrawCanonical] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    else -> "Couldn't withdraw the canonical server: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
             }
         }
     }
