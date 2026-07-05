@@ -204,6 +204,7 @@ async fn register_key(
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .federation_directory()
@@ -401,6 +402,7 @@ async fn register_self(engine: &Engine) -> (String, String) {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     let signed = SignedKeyRecord { record };
     let record_json =
@@ -551,6 +553,7 @@ impl PeerNodeB {
             persist_row_hash: String::new(),
             roles: Vec::new(),
             attestation_evidence: None,
+            consent_role: None,
         };
         PeerB {
             key_id: NODE_B_KEY_LABEL.to_string(),
@@ -584,6 +587,7 @@ async fn cross_register_agent(engine: &Engine, key_id: &str, agent_sk: &SigningK
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .sqlite_backend()

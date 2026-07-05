@@ -192,6 +192,10 @@ pub async fn enable_watchlist(
         attestation_envelope: envelope,
         subject_key_ids: vec![enable.group_key_id.clone()],
         cohort_scope: cohort_scope::SELF.to_owned(),
+        // Self-emitted producer-authority local row: sig deferred to promote
+        // (persist v13 #171); scrub sigs only for a transit revocation.
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
     let attestation_id = directory
         .attestation_upsert_local(input)
@@ -235,6 +239,12 @@ pub async fn disable_watchlist(
         attestation_envelope: envelope,
         subject_key_ids: vec![group_key_id.to_owned()],
         cohort_scope: cohort_scope::SELF.to_owned(),
+        // Producer-authority withdrawal of the watchlist config the signer
+        // itself set — NOT a subject-side revocation (the attester is not a
+        // member of subject_key_ids), so persist v13 (#171) classifies it
+        // Durable with a deferred sig; the scrub sigs stay None.
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
     let attestation_id = directory
         .attestation_upsert_local(input)

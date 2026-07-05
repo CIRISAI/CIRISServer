@@ -115,6 +115,10 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         attestation_envelope: envelope,
         subject_key_ids: req.subject_key_ids,
         cohort_scope: cohort_scope::SELF.to_string(),
+        // Self-emitted producer-authority local row: sig deferred to promote
+        // (persist v13 #171); scrub sigs only for a transit revocation.
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
 
     let attestation_id = match directory.attestation_upsert_local(input).await {

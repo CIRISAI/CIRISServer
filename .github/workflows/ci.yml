@@ -138,7 +138,7 @@ jobs:
       # a moved/renamed symbol is a spec-regression failure. Runs here because the
       # cargo git checkouts (needed to resolve the substrate symbols) are populated
       # by the build above. Linux-only (one canonical run).
-      - name: Evidence manifest resolves (CC impl: tier)
+      - name: "Evidence manifest resolves (CC impl: tier)"
         if: runner.os == 'Linux'
         run: python3 tools/check_evidence.py
       # NB: CI does NOT save a cache blob. It builds DEBUG (clippy+test); saving a

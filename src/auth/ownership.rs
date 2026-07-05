@@ -686,6 +686,10 @@ async fn register_user_key(
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        // No Counter-RII consent role at registration (persist v13 #365):
+        // None ⇔ the stored `unregistered` default; assigned later via
+        // set_consent_role and excluded from the registration hash.
+        consent_role: None,
     };
     let signed = SignedKeyRecord { record };
     if via_gate.is_some() {
@@ -887,15 +891,35 @@ pub async fn emit_signed_attestation(
 /// (`put_attestation` rejects a non-`infra:*` `delegates_to` to a node-only
 /// key), so any `delegates_to(U → node)` that EXISTS already carried only
 /// `infra:*` scope. The write gate is the load-bearing one; re-deriving it on
-/// every read was duplicate work. (`steward_bindings_of` also omits the granter
+/// every read was duplicate work. (`owner_of` also omits the granter
 /// `valid_until` liveness check our walk did — edge expiry + retraction are the
 /// canonical liveness signals in the §11.10 model.)
+///
+/// ## Single-owner `self` boundary (CIRISServer#162 / CIRISConstitution#23, persist v13)
+///
+/// persist v13 exposes [`admission::owner_of`] — the dimension-precise ownership
+/// projection (owner-binding edges only, a subset of `steward_bindings_of`) that
+/// resolves *the* single responsible owner (CC 1.13.3.3 / CC 3.2). We use it
+/// instead of `steward_bindings_of(..).next()`: a node with **more than one**
+/// distinct live owner returns [`Error::AmbiguousNodeOwner`], which we treat as
+/// **fail-closed** (→ `None`, an unresolvable `self` boundary is not ownership)
+/// rather than silently picking one off a sorted set. The single-owner admission
+/// gate (`NodeAlreadyOwned`) makes the ambiguous state unreachable going forward;
+/// this read is the fail-closed backstop for any legacy multi-owner row.
 pub async fn is_steward_bound(engine: &Engine, node_key_id: &str) -> Option<String> {
-    engine
-        .steward_bindings_of(node_key_id)
-        .await
-        .ok()
-        .and_then(|owners| owners.into_iter().next())
+    use ciris_persist::federation::admission;
+    match admission::owner_of(engine.federation_directory().as_ref(), node_key_id).await {
+        Ok(owner) => owner, // Some(owner) if owned, None if unowned
+        Err(e) => {
+            // Ambiguous / unresolvable single owner ⇒ no `self` boundary. Fail closed.
+            tracing::warn!(
+                node = %node_key_id,
+                error = %e,
+                "owner_of: unresolvable single owner — treating node as unowned (fail closed)"
+            );
+            None
+        }
+    }
 }
 
 /// **CEG projection — "nodes owned by this fed ID".** The inverse of

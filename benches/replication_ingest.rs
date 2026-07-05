@@ -80,6 +80,7 @@ async fn engine_with_key(agent_sk: &SigningKey) -> Arc<Engine> {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .sqlite_backend()

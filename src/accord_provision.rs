@@ -1301,6 +1301,200 @@ async fn admit_node_impl(engine: Arc<Engine>, req: AdmitNodeRequest) -> Response
         .into_response()
 }
 
+// ─── POST /v1/accord/canonical/add — the mesh-SEED op (CIRISServer#164) ────────
+
+/// Force the `canonical` founding-server role into an `identity_type` **set**
+/// string (persist stores the set comma-joined, sorted, de-duped). Setting it
+/// here is safe: persist's `check_canonical_role_admission` gate CONFERS the role
+/// only when the record is accord-holder-scrubbed (`scrub_key_id` ∈ the
+/// `HUMANITY_ACCORD` anchor) — a non-anchor scrub is REJECTED at adopt
+/// (`CanonicalRoleNotAccordConferred`), never silently accepted. So the trust root
+/// is what makes a server canonical; this just names the intent.
+fn ensure_canonical_role(existing: &str) -> String {
+    use ciris_persist::federation::types::identity_type;
+    let mut parts: Vec<&str> = existing
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.push(identity_type::CANONICAL);
+    identity_type::join_set(parts)
+}
+
+/// `POST /v1/accord/canonical/add` request — an accord holder (A1) admits a node
+/// to the trust root **as a canonical / founding bootstrap server**. Same
+/// hardware-scrub shape as admit-node (the holder's YubiKey + USB ML-DSA), plus an
+/// optional Option-A transport binding published in the same op.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct AddCanonicalRequest {
+    #[serde(flatten)]
+    admit: AdmitNodeRequest,
+    /// Optional initial transport binding (CC 3.3.6.2, the Option-A address). If
+    /// both are present the canonical server's `transport_destination` is bound in
+    /// the same op — the "publish the address" leg of the seed.
+    #[serde(default)]
+    transport_kind: Option<String>,
+    #[serde(default)]
+    destination: Option<String>,
+}
+
+/// `POST /v1/accord/canonical/add` — the **mesh-seed op**. A single accord holder
+/// (1-of-N; the additive/operational class) scrub-signs the target with the
+/// `canonical` role, the scrubbed record is adopted onto its own directory row
+/// (the persist canonical gate confers the role iff the scrub is accord-anchored),
+/// and — if supplied — its transport address is published. Composes: root + mark
+/// canonical + publish address. Loopback + `pkcs11`-gated (the hardware scrub).
+///
+/// Scaling to m-of-n: the 1-of-N here is the single hardware scrub + the
+/// accord-conferred gate; a future co-scrub (the genesis-ceremony 2/3 cosign path)
+/// widens it. The *destructive* canonical ops (supersede/withdraw) are m-of-n via
+/// the family's entrenched quorum (see `accord::canonical_op_quorum_m`).
+async fn add_canonical(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: AddCanonicalRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.admit.key_id.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "key_id (the accord holder / scrubber) must not be empty",
+        );
+    }
+    if req.admit.mldsa_usb_path.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "mldsa_usb_path must not be empty — insert your USB key and choose its folder",
+        );
+    }
+    let t = &req.admit.target;
+    if t.key_id.trim().is_empty()
+        || t.pubkey_ed25519_base64.trim().is_empty()
+        || t.pubkey_ml_dsa_65_base64.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "target must carry key_id + both hybrid pubkeys (ed25519 + ml_dsa_65)",
+        );
+    }
+    if t.key_id.contains(['/', '\\']) || t.key_id.contains("..") {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "target key_id contains path separators — refusing to write it",
+        );
+    }
+    add_canonical_impl(st.engine, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn add_canonical_impl(_engine: Arc<Engine>, _req: AddCanonicalRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "add-canonical needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -> Response {
+    // Force the `canonical` role — the persist gate confers it iff anchor-scrubbed.
+    req.admit.target.identity_type = ensure_canonical_role(&req.admit.target.identity_type);
+    let target_key_id = req.admit.target.key_id.trim().to_string();
+    let transport = match (req.transport_kind.as_deref(), req.destination.as_deref()) {
+        (Some(k), Some(d)) if !k.trim().is_empty() && !d.trim().is_empty() => {
+            Some((k.trim().to_string(), d.trim().to_string()))
+        }
+        _ => None,
+    };
+
+    // (1) Hardware scrub + adopt via the shipped admit-node path. adopt_scrub_upgrade
+    //     runs check_canonical_role_admission, so a non-anchor scrubber is rejected
+    //     there (the role never lands). Surface any non-200 verbatim.
+    let resp = admit_node_impl(engine.clone(), req.admit).await;
+    if resp.status() != StatusCode::OK {
+        return resp;
+    }
+
+    // (2) Confirm the role took on the local row (adopt succeeded + gate admitted).
+    //     `false` for a remote target (its scrubbed record rides the seed JSON to be
+    //     adopted on the node itself) — not an error, just not locally confirmable.
+    let is_canonical = engine.is_canonical(&target_key_id).await.unwrap_or(false);
+
+    // (3) Publish the Option-A address binding, if supplied.
+    let mut address_json = serde_json::Value::Null;
+    if let Some((transport_kind, destination)) = transport {
+        if let Err(e) = engine
+            .federation_directory()
+            .put_transport_destination(&ciris_persist::federation::TransportDestination {
+                occurrence_key_id: target_key_id.clone(),
+                transport_kind: transport_kind.clone(),
+                destination: destination.clone(),
+                asserted_at: chrono::Utc::now(),
+                last_seen_at: None,
+            })
+            .await
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("bind transport_destination: {e}"),
+            );
+        }
+        address_json =
+            serde_json::json!({ "transport_kind": transport_kind, "destination": destination });
+    }
+
+    let seed_path = ciris_verify_core::ceg_outbox::ceg_outbox()
+        .join("accord_admit_node")
+        .join(format!("{target_key_id}.json"));
+    tracing::info!(
+        canonical_key_id = %target_key_id,
+        is_canonical,
+        address_bound = !address_json.is_null(),
+        "Trust Root: add-canonical — node admitted to the canonical set (accord-conferred)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "canonical_key_id": target_key_id,
+            "is_canonical": is_canonical,
+            "address": address_json,
+            "seed_saved_to": seed_path.display().to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/canonical/servers` — the canonical / founding bootstrap servers
+/// (the `federation_keys` rows carrying the accord-conferred `canonical` role).
+/// Backs the Trust Root card's "Canonical servers" list. Read-only; every row is
+/// (by the admission gate) anchor-scrub-conferred, never self-claimed.
+async fn list_canonical_servers(State(st): State<ProvisionState>) -> Response {
+    match st.engine.list_canonical_servers().await {
+        Ok(rows) => {
+            let servers: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "key_id": r.key_id,
+                        "identity_type": r.identity_type,
+                        "pubkey_ed25519_base64": r.pubkey_ed25519_base64,
+                        "scrub_key_id": r.scrub_key_id,
+                        "valid_from": r.valid_from,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "servers": servers })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("list_canonical_servers: {e}"),
+        ),
+    }
+}
+
 /// The accord-provision router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`).
 pub fn router(engine: Arc<Engine>) -> Router {
@@ -1315,6 +1509,15 @@ pub fn router(engine: Arc<Engine>) -> Router {
             axum::routing::post(cosign_family),
         )
         .route("/v1/accord/admit-node", axum::routing::post(admit_node))
+        // The mesh-seed op + its list — the Trust Root "Canonical servers" section.
+        .route(
+            "/v1/accord/canonical/add",
+            axum::routing::post(add_canonical),
+        )
+        .route(
+            "/v1/accord/canonical/servers",
+            axum::routing::get(list_canonical_servers),
+        )
         .route(
             "/v1/accord/yubikey-status",
             axum::routing::get(yubikey_status),
@@ -1454,6 +1657,84 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp","envelope":{"members":[]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    // ─── add-canonical (the mesh-seed op, #164) ──────────────────────────────
+
+    #[test]
+    fn ensure_canonical_role_adds_sorts_and_dedups() {
+        assert_eq!(ensure_canonical_role("node"), "canonical,node");
+        assert_eq!(ensure_canonical_role("canonical"), "canonical");
+        assert_eq!(ensure_canonical_role("node,canonical"), "canonical,node");
+        assert_eq!(ensure_canonical_role(""), "canonical");
+        assert_eq!(
+            ensure_canonical_role("  node ,  agent "),
+            "agent,canonical,node"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_canonical_servers_is_empty_on_a_fresh_node() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/accord/canonical/servers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["servers"].as_array().map(|a| a.len()),
+            Some(0),
+            "a fresh node has no accord-conferred canonical servers"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_canonical_rejects_a_target_missing_pubkeys() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/canonical/add")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp/usb","target":{"key_id":"canonical-server-1","pubkey_ed25519_base64":"","pubkey_ml_dsa_65_base64":""}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(not(feature = "pkcs11"))]
+    #[tokio::test]
+    async fn add_canonical_without_pkcs11_returns_not_implemented() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/canonical/add")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"accord-holder-1","mldsa_usb_path":"/tmp/usb","target":{"key_id":"canonical-server-1","pubkey_ed25519_base64":"AA","pubkey_ml_dsa_65_base64":"BB"}}"#,
                     ))
                     .unwrap(),
             )

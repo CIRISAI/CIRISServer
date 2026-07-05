@@ -101,6 +101,7 @@ async fn register_key(
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .federation_directory()

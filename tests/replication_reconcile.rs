@@ -110,6 +110,7 @@ async fn register_self(engine: &Engine) {
         persist_row_hash: String::new(),
         roles: Vec::new(),
         attestation_evidence: None,
+        consent_role: None,
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -166,6 +167,7 @@ impl Peer {
             persist_row_hash: String::new(),
             roles: Vec::new(),
             attestation_evidence: None,
+            consent_role: None,
         };
         SignedKeyRecord { record }
     }

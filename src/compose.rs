@@ -1260,6 +1260,10 @@ pub(crate) async fn build_self_key_record(
         persist_row_hash: String::new(), // server-computed on insert
         roles: Vec::new(),
         attestation_evidence: None,
+        // No Counter-RII consent role on the node's own identity (persist v13
+        // #365): None ⇔ the stored `unregistered` default; excluded from the
+        // registration hash, assigned later via set_consent_role.
+        consent_role: None,
     })
 }
 
