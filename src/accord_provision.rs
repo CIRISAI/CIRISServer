@@ -1099,53 +1099,48 @@ async fn admit_node_impl(
     )
 }
 
+/// Re-open a portable accord-holder's hardware identity: the YubiKey Ed25519
+/// (slot-9c) + the USB-wrapped ML-DSA-65, as a `HardwareRootedIdentity` (a verify
+/// `SelfSigner`). The single custody path shared by admit-node, add-canonical, and
+/// the co-scrub propose/cosign — the touch-required tap on the first `sign_bound`
+/// IS the holder's consent. Returns `(status, message)` on any open failure.
 #[cfg(feature = "pkcs11")]
-async fn admit_node_impl(
-    engine: Arc<Engine>,
-    req: AdmitNodeRequest,
-    transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
-) -> Response {
+async fn open_holder_identity(
+    key_id: &str,
+    usb_path: &str,
+    pkcs11: &ProvisionPkcs11,
+) -> Result<ciris_verify_core::self_at_login::HardwareRootedIdentity, (StatusCode, String)> {
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer;
     use ciris_keyring::PqcSigner;
-    use ciris_verify_core::federation_self_record::{
-        produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
-    };
     use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
     use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
 
-    let key_id = req.key_id.trim().to_string();
-    let usb_dir = PathBuf::from(req.mldsa_usb_path.trim());
+    let usb_dir = PathBuf::from(usb_path);
     if !usb_dir.is_dir() {
-        return err(
+        return Err((
             StatusCode::BAD_REQUEST,
-            &format!(
+            format!(
                 "the ML-DSA USB path is not a directory: {} — insert the SAME USB key you \
                  provisioned this holder with",
                 usb_dir.display()
             ),
-        );
+        ));
     }
-    let piv_slot = req
-        .pkcs11
+    let piv_slot = pkcs11
         .piv_slot
         .clone()
         .unwrap_or_else(|| DEFAULT_PIV_SLOT.to_string());
-
-    // Re-open the holder's YubiKey Ed25519 (slot-9c) + the USB-wrapped ML-DSA-65 —
-    // the SAME portable-holder custody path the accord ceremony cosign uses. The
-    // touch-required tap on `sign_bound` below IS the holder's consent.
     let opts = Pkcs11Options {
-        module_path: req
-            .pkcs11
+        module_path: pkcs11
             .module_path
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
-        user_pin: req.pkcs11.user_pin.clone(),
+        user_pin: pkcs11.user_pin.clone(),
         piv_slot: piv_slot.clone(),
         provision: false,
         ..Pkcs11Options::default()
@@ -1153,41 +1148,57 @@ async fn admit_node_impl(
     let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
         Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
         Err(e) => {
-            return err(
+            return Err((
                 StatusCode::BAD_REQUEST,
-                &format!(
+                format!(
                     "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
                      inserted and the PIN correct?"
                 ),
-            )
+            ))
         }
     };
     let mldsa =
-        match UsbWrappedMlDsa65Signer::open(yubikey_ed.as_ref(), &key_id, usb_dir.clone()).await {
+        match UsbWrappedMlDsa65Signer::open(yubikey_ed.as_ref(), key_id, usb_dir.clone()).await {
             Ok(m) => m,
             Err(e) => {
-                return err(
+                return Err((
                     StatusCode::BAD_REQUEST,
-                    &format!(
+                    format!(
                     "couldn't re-open the USB-wrapped ML-DSA key for '{key_id}' at {}: {e} — is \
                      this the SAME USB + YubiKey pair you provisioned this holder with?",
                     usb_dir.display()
                 ),
-                )
+                ))
             }
         };
-    let identity = match HardwareRootedIdentity::new(
-        key_id.clone(),
+    HardwareRootedIdentity::new(
+        key_id.to_string(),
         yubikey_ed.clone(),
         Arc::new(mldsa) as Arc<dyn PqcSigner>,
-    ) {
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("build hardware-rooted identity: {e}"),
+        )
+    })
+}
+
+#[cfg(feature = "pkcs11")]
+async fn admit_node_impl(
+    engine: Arc<Engine>,
+    req: AdmitNodeRequest,
+    transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
+) -> Response {
+    use ciris_verify_core::federation_self_record::{
+        produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
+    };
+
+    let key_id = req.key_id.trim().to_string();
+    let identity = match open_holder_identity(&key_id, req.mldsa_usb_path.trim(), &req.pkcs11).await
+    {
         Ok(i) => i,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("build hardware-rooted identity: {e}"),
-            )
-        }
+        Err((code, msg)) => return err(code, &msg),
     };
 
     let valid_from = chrono::Utc::now().to_rfc3339();
@@ -1468,6 +1479,249 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
         .into_response()
 }
 
+// ─── Cross-device m-of-n co-scrub (CIRISPersist#383) ──────────────────────────
+//
+// persist v13.2.0 makes canonical admission m-of-n (the family's entrenched
+// `quorum:M/N`, via verify's `verify_quorum_policy`), so a single scrub no longer
+// confers `canonical`. A canonical record now accumulates ≥M *distinct* anchor
+// scrubs — across DEVICES: A1 proposes on one box, the partial travels (accord
+// gossip, or the saved JSON), B1 cosigns on another. The scrub set lives in the
+// record itself (verify's `additional_scrubs`), so a completed record proves its
+// own m-of-n. All crypto is verify's: `produce_scrubbed_key_record` (scrub #1) and
+// `append_scrub` (each subsequent, over the byte-identical envelope; rejects a
+// duplicate `scrub_key_id`). Admission is persist's gate. The server adds no math.
+
+/// `POST /v1/accord/canonical/propose` — the FIRST scrub of a co-scrub. An accord
+/// holder (A1) scrub-signs the target with the `canonical` role + transport hint;
+/// the resulting 1-scrub **partial** does NOT yet confer canonical (m-of-n). It is
+/// returned + saved to the outbox — hand it to the next holder (it gossips as accord
+/// traffic, or transfer the JSON) to `cosign`.
+async fn propose_canonical(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: AddCanonicalRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let t = &req.admit.target;
+    if req.admit.key_id.trim().is_empty()
+        || req.admit.mldsa_usb_path.trim().is_empty()
+        || t.key_id.trim().is_empty()
+        || t.pubkey_ed25519_base64.trim().is_empty()
+        || t.pubkey_ml_dsa_65_base64.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "propose requires the holder key_id + USB path and the target key_id + both hybrid pubkeys",
+        );
+    }
+    if t.key_id.contains(['/', '\\']) || t.key_id.contains("..") {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "target key_id contains path separators",
+        );
+    }
+    propose_canonical_impl(st.engine, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn propose_canonical_impl(_engine: Arc<Engine>, _req: AddCanonicalRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "propose needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn propose_canonical_impl(_engine: Arc<Engine>, mut req: AddCanonicalRequest) -> Response {
+    use ciris_verify_core::federation_self_record::{
+        produce_scrubbed_key_record, ScrubTarget, TransportHint,
+    };
+    req.admit.target.identity_type = ensure_canonical_role(&req.admit.target.identity_type);
+    let target_key_id = req.admit.target.key_id.trim().to_string();
+    let hints: Vec<TransportHint> =
+        match (req.transport_kind.as_deref(), req.destination.as_deref()) {
+            (Some(k), Some(d)) if !k.trim().is_empty() && !d.trim().is_empty() => {
+                vec![TransportHint {
+                    kind: k.trim().to_string(),
+                    destination: d.trim().to_string(),
+                }]
+            }
+            _ => Vec::new(),
+        };
+    let identity = match open_holder_identity(
+        req.admit.key_id.trim(),
+        req.admit.mldsa_usb_path.trim(),
+        &req.admit.pkcs11,
+    )
+    .await
+    {
+        Ok(i) => i,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let partial = match produce_scrubbed_key_record(
+        &identity,
+        ScrubTarget {
+            key_id: target_key_id.clone(),
+            pubkey_ed25519_base64: req.admit.target.pubkey_ed25519_base64.trim().to_string(),
+            pubkey_ml_dsa_65_base64: req.admit.target.pubkey_ml_dsa_65_base64.trim().to_string(),
+            identity_type: req.admit.target.identity_type.clone(),
+        },
+        &valid_from,
+        &hints,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("scrub: {e}")),
+    };
+    let count = partial.record.distinct_scrub_count();
+    let saved_to = save_coscrub_partial(&target_key_id, &partial);
+    tracing::info!(
+        canonical_key_id = %target_key_id,
+        distinct_scrubs = count,
+        "Trust Root: co-scrub proposed (scrub #1) — hand the partial to the next holder to cosign"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "target_key_id": target_key_id,
+            "distinct_scrub_count": count,
+            "partial": partial,
+            "saved_to": saved_to,
+            "note": "1 scrub — not yet canonical. Gossip/transfer this partial to the next accord holder to cosign toward the family quorum.",
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct CosignCanonicalRequest {
+    /// The cosigning accord holder (e.g. B1) — the seal alias its YubiKey+USB opens.
+    key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The partial (verify `SignedKeyRecord`) from `propose` or a prior `cosign`.
+    partial: serde_json::Value,
+}
+
+/// `POST /v1/accord/canonical/cosign` — append THIS holder's scrub to a partial over
+/// the byte-identical envelope (verify's `append_scrub` — rejects a duplicate anchor),
+/// then try to adopt: persist's gate confers `canonical` iff the distinct-scrub set now
+/// meets the family's m-of-n. If not yet, the advanced partial is returned for the next
+/// cosign; if the target is a remote node, the completed record is the bake/relay artifact.
+async fn cosign_canonical(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CosignCanonicalRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.key_id.trim().is_empty() || req.mldsa_usb_path.trim().is_empty() || req.partial.is_null()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "cosign requires the holder key_id + USB path and the partial record",
+        );
+    }
+    cosign_canonical_impl(st.engine, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn cosign_canonical_impl(_engine: Arc<Engine>, _req: CosignCanonicalRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "cosign needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn cosign_canonical_impl(engine: Arc<Engine>, req: CosignCanonicalRequest) -> Response {
+    use ciris_verify_core::federation_self_record::{
+        append_scrub, SignedKeyRecord as VSignedKeyRecord,
+    };
+    let partial: VSignedKeyRecord = match serde_json::from_value(req.partial) {
+        Ok(p) => p,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("partial is not a SignedKeyRecord: {e}"),
+            )
+        }
+    };
+    let target_key_id = partial.record.key_id.clone();
+    let identity =
+        match open_holder_identity(req.key_id.trim(), req.mldsa_usb_path.trim(), &req.pkcs11).await
+        {
+            Ok(i) => i,
+            Err((code, msg)) => return err(code, &msg),
+        };
+    // append_scrub recanonicalizes the EXISTING envelope + rejects a duplicate anchor.
+    let advanced = match append_scrub(partial, &identity).await {
+        Ok(r) => r,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "append scrub failed (already signed by this holder, or a signer fault): {e}"
+                ),
+            )
+        }
+    };
+    let count = advanced.record.distinct_scrub_count();
+    let saved_to = save_coscrub_partial(&target_key_id, &advanced);
+
+    // Try to adopt — persist's m-of-n gate is the authority (verify_quorum_policy). A
+    // sub-quorum set is REJECTED (still a partial); a remote target may fail for a
+    // different reason (it's not this node's own row) but the record is still the
+    // completed artifact to bake/relay.
+    let (conferred, outcome) = match serde_json::to_value(&advanced)
+        .ok()
+        .and_then(|v| serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>(v).ok())
+    {
+        Some(pr) => match engine.adopt_scrub_upgrade(pr).await {
+            Ok(o) => (true, format!("{o:?}")),
+            Err(e) => (false, e.to_string()),
+        },
+        None => (false, "record convert failed".to_string()),
+    };
+    tracing::info!(
+        canonical_key_id = %target_key_id,
+        distinct_scrubs = count,
+        conferred,
+        "Trust Root: co-scrub cosigned (scrub appended)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "target_key_id": target_key_id,
+            "distinct_scrub_count": count,
+            "conferred": conferred,
+            "outcome": outcome,
+            "advanced": advanced,
+            "saved_to": saved_to,
+        })),
+    )
+        .into_response()
+}
+
+/// Persist a co-scrub partial/complete record to the predictable outbox (the artifact
+/// that gossips as accord traffic OR transfers device-to-device for the next cosign /
+/// the persist bake). Best-effort — a write failure is logged, not fatal.
+fn save_coscrub_partial<T: serde::Serialize>(target_key_id: &str, record: &T) -> String {
+    let dir = ciris_verify_core::ceg_outbox::ceg_outbox().join("canonical_coscrub");
+    let path = dir.join(format!("{target_key_id}.json"));
+    let _ = std::fs::create_dir_all(&dir);
+    match serde_json::to_string_pretty(record) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&path, s) {
+                tracing::warn!(path = %path.display(), error = %e, "co-scrub: partial not saved");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "co-scrub: partial serialize failed"),
+    }
+    path.display().to_string()
+}
+
 /// `GET /v1/accord/canonical/servers` — the canonical / founding bootstrap servers
 /// (the `federation_keys` rows carrying the accord-conferred `canonical` role).
 /// Backs the Trust Root card's "Canonical servers" list. Read-only; every row is
@@ -1690,6 +1944,16 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/canonical/servers",
             axum::routing::get(list_canonical_servers),
+        )
+        // Cross-device m-of-n co-scrub (CIRISPersist#383): propose (scrub #1) → the
+        // partial gossips/transfers → cosign (append a scrub) → adopt at quorum.
+        .route(
+            "/v1/accord/canonical/propose",
+            axum::routing::post(propose_canonical),
+        )
+        .route(
+            "/v1/accord/canonical/cosign",
+            axum::routing::post(cosign_canonical),
         )
         // Destructive canonical ops (CIRISPersist#377, 2-of-3) + the withdrawn-history.
         .route(
@@ -1939,6 +2203,64 @@ mod tests {
             Some(0),
             "no canonical withdrawals on a fresh node"
         );
+    }
+
+    #[tokio::test]
+    async fn propose_canonical_rejects_missing_target_pubkeys() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/canonical/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"A1","mldsa_usb_path":"/tmp/usb","target":{"key_id":"canonical-server-1","pubkey_ed25519_base64":"","pubkey_ml_dsa_65_base64":""}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn cosign_canonical_rejects_a_null_partial() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/canonical/cosign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"B1","mldsa_usb_path":"/tmp/usb","partial":null}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(not(feature = "pkcs11"))]
+    #[tokio::test]
+    async fn propose_canonical_without_pkcs11_returns_not_implemented() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accord/canonical/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_id":"A1","mldsa_usb_path":"/tmp/usb","target":{"key_id":"canonical-server-1","pubkey_ed25519_base64":"AA","pubkey_ml_dsa_65_base64":"BB"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[cfg(not(feature = "pkcs11"))]
