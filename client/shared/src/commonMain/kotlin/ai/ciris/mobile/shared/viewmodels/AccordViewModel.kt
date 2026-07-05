@@ -128,18 +128,29 @@ class AccordViewModel(
     }
 
     /**
-     * Concur on a pending invocation as the local holder. Requires the owner
-     * session (sign in first). The node signs with the resolved local holder
-     * signer; the app sends no crypto.
+     * Concur on a pending invocation as an accord holder. Requires the owner session
+     * (sign in first) AND the holder's hardware-scrub inputs ([holderKeyId] +
+     * [mldsaUsbPath] + [userPin]) — the node RE-OPENS the holder's YubiKey +
+     * USB-wrapped ML-DSA and produces the cosignature over the pending invocation's
+     * bytes; the app holds no keys. Touch-gated (a YubiKey touch is consent).
      */
-    fun concur(invocationKind: String, invocationId: String) {
+    fun concur(
+        invocationKind: String,
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
         if (_busy.value) return
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
         _busy.value = true
         _error.value = null
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.concurInvocation(invocationKind, invocationId)
+                val res = apiClient.concurInvocation(
+                    invocationKind, invocationId, holderKeyId, mldsaUsbPath, userPin,
+                )
                 _notice.value = if (res.quorumMet) {
                     "Concurred — quorum met (${res.validSigners.size} signers)."
                 } else {
@@ -148,15 +159,40 @@ class AccordViewModel(
                 refresh()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[concur] ${e.message}")
-                val msg = e.message.orEmpty()
-                _error.value = when {
-                    msg.contains("401") -> "Sign in as the owner first, then concur."
-                    msg.contains("403") -> "This node isn't a current accord holder."
-                    else -> "Couldn't concur: ${e.message}"
-                }
+                _error.value = holderActionError(e, "concur")
             } finally {
                 _busy.value = false
             }
+        }
+    }
+
+    /**
+     * The invocation write actions (concur / drill / announce) sign on the holder's
+     * YubiKey via the node — every one needs the holder key + USB folder + PIN. Guard
+     * up front with a clear message rather than letting the node 400/501.
+     */
+    private fun requireHolderInputs(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ): Boolean {
+        if (holderKeyId.isBlank() || mldsaUsbPath.isBlank() || userPin.isNullOrBlank()) {
+            _error.value =
+                "Choose your accord holder key, USB folder, and PIN in “Sign as holder” first."
+            return false
+        }
+        return true
+    }
+
+    /** Shared holder-action error mapping (owner-gate, missing pkcs11, YubiKey open). */
+    private fun holderActionError(e: Exception, verb: String): String {
+        val msg = e.message.orEmpty()
+        return when {
+            msg.contains("401") -> "Sign in as the owner first, then $verb."
+            msg.contains("403") -> "This node isn't a current accord holder."
+            msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                "This build lacks pkcs11 — signing needs the YubiKey."
+            else -> "Couldn't $verb: ${e.message}"
         }
     }
 
@@ -167,19 +203,25 @@ class AccordViewModel(
      * app sends no crypto. On reaching quorum it surfaces in the drills list; it
      * NEVER halts. [invocationId] uniquely names this drill.
      */
-    fun initiateDrill(invocationId: String) {
+    fun initiateDrill(
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
         if (_busy.value) return
         val id = invocationId.trim()
         if (id.isBlank()) {
             _error.value = "Enter a drill id first."
             return
         }
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
         _busy.value = true
         _error.value = null
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.initiateDrill(id)
+                val res = apiClient.initiateDrill(id, holderKeyId, mldsaUsbPath, userPin)
                 _notice.value = if (res.quorumMet) {
                     "Drill $id complete — quorum met (${res.validSigners.size} signers)."
                 } else {
@@ -188,12 +230,7 @@ class AccordViewModel(
                 refresh()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[initiateDrill] ${e.message}")
-                val msg = e.message.orEmpty()
-                _error.value = when {
-                    msg.contains("401") -> "Sign in as the owner first, then run a drill."
-                    msg.contains("403") -> "This node isn't a current accord holder."
-                    else -> "Couldn't start the drill: ${e.message}"
-                }
+                _error.value = holderActionError(e, "run a drill")
             } finally {
                 _busy.value = false
             }
@@ -206,19 +243,25 @@ class AccordViewModel(
      * payload hash) with its resolved local holder signer, gossips it, and surfaces
      * it in the announcements list. It NEVER halts.
      */
-    fun initiateAnnounce(message: String) {
+    fun initiateAnnounce(
+        message: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
         if (_busy.value) return
         val text = message.trim()
         if (text.isBlank()) {
             _error.value = "Enter an announcement message first."
             return
         }
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
         _busy.value = true
         _error.value = null
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.initiateAnnounce(text)
+                val res = apiClient.initiateAnnounce(text, holderKeyId, mldsaUsbPath, userPin)
                 _notice.value = if (res.posted) {
                     "Announcement posted to the mesh."
                 } else {
@@ -227,12 +270,7 @@ class AccordViewModel(
                 refresh()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[initiateAnnounce] ${e.message}")
-                val msg = e.message.orEmpty()
-                _error.value = when {
-                    msg.contains("401") -> "Sign in as the owner first, then announce."
-                    msg.contains("403") -> "This node isn't a current accord holder."
-                    else -> "Couldn't post the announcement: ${e.message}"
-                }
+                _error.value = holderActionError(e, "announce")
             } finally {
                 _busy.value = false
             }

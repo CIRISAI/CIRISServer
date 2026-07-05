@@ -2296,27 +2296,43 @@ class CIRISApiClient(
     }
 
     /**
-     * Concur on an invocation as the local holder —
+     * Concur on a pending invocation as an accord holder —
      * `POST {nodeUrl}/v1/accord/invocation/concur`. Owner-session-gated. The app
-     * sends NO crypto; the node signs with the resolved local holder signer.
+     * holds NO keys: it posts the holder's fed [holderKeyId] + [mldsaUsbPath] + PIN
+     * and the node RE-OPENS the holder's YubiKey + USB-wrapped ML-DSA and produces
+     * the cosignature over the pending invocation's canonical bytes (mirrors
+     * admit-node). Touch-gated — a touch-required slot 9c BLOCKS the call until tapped.
      */
     suspend fun concurInvocation(
         invocationKind: String,
         invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
         val method = "concurInvocation"
-        logInfo(method, "POST $nodeUrl/v1/accord/invocation/concur kind=$invocationKind id=$invocationId")
-        val client = federationHttpClient()
+        logInfo(method, "POST $nodeUrl/v1/accord/invocation/concur kind=$invocationKind id=$invocationId holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("invocation_kind", JsonPrimitive(invocationKind.trim()))
+                put("invocation_id", JsonPrimitive(invocationId.trim()))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
             val response = client.post("$nodeUrl/v1/accord/invocation/concur") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
-                setBody(
-                    "{\"invocation_kind\":\"${invocationKind.trim()}\"," +
-                        "\"invocation_id\":\"${invocationId.trim()}\"}",
-                )
+                setBody(bodyJson.toString())
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {
@@ -2406,17 +2422,35 @@ class CIRISApiClient(
      */
     suspend fun initiateDrill(
         invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
         val method = "initiateDrill"
-        logInfo(method, "POST $nodeUrl/v1/accord/drill id=$invocationId")
-        val client = federationHttpClient()
+        logInfo(method, "POST $nodeUrl/v1/accord/drill id=$invocationId holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            // The node synthesizes the (non-binding) drill invocation from the id and
+            // produces the initiating cosignature from the holder's YubiKey + USB — the
+            // app holds no keys and fabricates no signed envelope.
+            val bodyJson = buildJsonObject {
+                put("invocation_id", JsonPrimitive(invocationId.trim()))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
             val response = client.post("$nodeUrl/v1/accord/drill") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
-                setBody("{\"invocation_id\":\"${invocationId.trim()}\"}")
+                setBody(bodyJson.toString())
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {
@@ -2444,19 +2478,34 @@ class CIRISApiClient(
      */
     suspend fun initiateAnnounce(
         message: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse {
         val method = "initiateAnnounce"
-        logInfo(method, "POST $nodeUrl/v1/accord/announce len=${message.length}")
-        val client = federationHttpClient()
+        logInfo(method, "POST $nodeUrl/v1/accord/announce len=${message.length} holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            // The node synthesizes the `notify` invocation binding this message and
+            // produces the cosignature from the holder's YubiKey + USB (app holds no keys).
+            val bodyJson = buildJsonObject {
+                put("message", JsonPrimitive(message))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
             val response = client.post("$nodeUrl/v1/accord/announce") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
-                setBody(
-                    buildJsonObject { put("message", message) }.toString(),
-                )
+                setBody(bodyJson.toString())
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {

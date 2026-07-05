@@ -76,7 +76,7 @@ use ciris_persist::prelude::Engine;
 /// the values go unread — hence the conditional `allow(dead_code)`.
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
-struct ProvisionPkcs11 {
+pub(crate) struct ProvisionPkcs11 {
     /// The PIV user PIN. When omitted the token may prompt out of band (or the
     /// open fails with a plain-language "PIN required" error the UI surfaces).
     #[serde(default)]
@@ -1105,7 +1105,7 @@ async fn admit_node_impl(
 /// the co-scrub propose/cosign — the touch-required tap on the first `sign_bound`
 /// IS the holder's consent. Returns `(status, message)` on any open failure.
 #[cfg(feature = "pkcs11")]
-async fn open_holder_identity(
+pub(crate) async fn open_holder_identity(
     key_id: &str,
     usb_path: &str,
     pkcs11: &ProvisionPkcs11,

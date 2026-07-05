@@ -105,6 +105,18 @@ fun AccordScreen(
     var drillId by remember { mutableStateOf("") }
     var announceMessage by remember { mutableStateOf("") }
 
+    // Shared "sign as holder" inputs for the invocation write actions (concur / drill /
+    // announce). The node RE-OPENS the holder's YubiKey + USB-wrapped ML-DSA and
+    // produces the ThresholdSignature — the app holds no keys (mirrors admit-node).
+    var holderSignKeyId by remember { mutableStateOf("") }
+    var holderSignUsbPath by remember { mutableStateOf("") }
+    var holderSignPin by remember { mutableStateOf("") }
+    var showHolderSignPin by remember { mutableStateOf(false) }
+    var holderSignMenu by remember { mutableStateOf(false) }
+    var holderSignUsbPicker by remember { mutableStateOf(false) }
+    val holderSignReady =
+        holderSignKeyId.isNotBlank() && holderSignUsbPath.isNotBlank() && holderSignPin.isNotBlank()
+
     // Hoisted so the "Replace / update" action can scroll the add-canonical form
     // into view (see the LaunchedEffect on the canonical replace seed below). The
     // scroll target is derived from the form's on-screen position relative to the
@@ -983,6 +995,112 @@ fun AccordScreen(
                 }
             }
 
+            // ── Sign as holder ───────────────────────────────────────────────
+            // The invocation write actions (concur / drill / announce) are signed on
+            // the holder's YubiKey via the node — the app holds no keys. Pick the
+            // holder key, USB folder, and PIN once; all three actions below reuse them
+            // (mirrors the admit-node / add-canonical hardware-scrub inputs).
+            Spacer(Modifier.height(20.dp))
+            Text(
+                localizedString("mobile.accord_sign_as_holder_title"),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testable("accord_sign_as_holder_title"),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                localizedString("mobile.accord_sign_as_holder_desc"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { holderSignMenu = true },
+                    modifier = Modifier.fillMaxWidth().testable("dd_sign_holder"),
+                ) {
+                    Text(
+                        holderSignKeyId.ifBlank {
+                            localizedString("mobile.accord_sign_as_holder_select")
+                        },
+                    )
+                }
+                DropdownMenu(
+                    expanded = holderSignMenu,
+                    onDismissRequest = { holderSignMenu = false },
+                ) {
+                    if (holders.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text(localizedString("mobile.accord_sign_as_holder_no_holders")) },
+                            onClick = { holderSignMenu = false },
+                        )
+                    }
+                    holders.forEach { h ->
+                        DropdownMenuItem(
+                            text = { Text(h.keyId, fontFamily = FontFamily.Monospace) },
+                            onClick = { holderSignKeyId = h.keyId; holderSignMenu = false },
+                            modifier = Modifier.testableClickable("mi_sign_holder_${h.keyId}") {
+                                holderSignKeyId = h.keyId; holderSignMenu = false
+                            },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = holderSignUsbPath,
+                onValueChange = { holderSignUsbPath = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_sign_as_holder_usb_label")) },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { holderSignUsbPicker = true },
+                        modifier = Modifier.testableClickable("btn_sign_holder_browse_usb") {
+                            holderSignUsbPicker = true
+                        },
+                    ) { Text(localizedString("mobile.accord_sign_as_holder_browse")) }
+                },
+                modifier = Modifier.fillMaxWidth().testable("input_sign_holder_usb_path"),
+            )
+            DirectoryPickerDialog(
+                show = holderSignUsbPicker,
+                onDirectoryPicked = { holderSignUsbPath = it; holderSignUsbPicker = false },
+                onDismiss = { holderSignUsbPicker = false },
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = holderSignPin,
+                onValueChange = { holderSignPin = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_sign_as_holder_pin_label")) },
+                visualTransformation =
+                    if (showHolderSignPin) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showHolderSignPin = !showHolderSignPin },
+                        modifier = Modifier.testableClickable("btn_sign_holder_pin_toggle") {
+                            showHolderSignPin = !showHolderSignPin
+                        },
+                    ) {
+                        Icon(
+                            if (showHolderSignPin) CIRISMaterialIcons.Filled.VisibilityOff
+                            else CIRISMaterialIcons.Filled.Visibility,
+                            contentDescription = if (showHolderSignPin) "Hide PIN" else "Show PIN",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().testable("input_sign_holder_pin"),
+            )
+            if (!holderSignReady) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    localizedString("mobile.accord_sign_as_holder_needed"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             // ── Pending invocations ──────────────────────────────────────────
             Spacer(Modifier.height(20.dp))
             Text(
@@ -1003,7 +1121,18 @@ fun AccordScreen(
                     InvocationCard(
                         inv = inv,
                         busy = busy,
-                        onConcur = { viewModel.concur(inv.invocationKind, inv.invocationId) },
+                        // Concur signs on the holder's YubiKey via the node — gated on
+                        // the "Sign as holder" inputs above being filled in.
+                        canConcur = holderSignReady,
+                        onConcur = {
+                            viewModel.concur(
+                                inv.invocationKind,
+                                inv.invocationId,
+                                holderSignKeyId,
+                                holderSignUsbPath,
+                                holderSignPin.ifBlank { null },
+                            )
+                        },
                     )
                 }
             }
@@ -1036,14 +1165,19 @@ fun AccordScreen(
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
                 onClick = {
-                    viewModel.initiateDrill(drillId)
+                    viewModel.initiateDrill(
+                        drillId, holderSignKeyId, holderSignUsbPath, holderSignPin.ifBlank { null },
+                    )
                     drillId = ""
                 },
-                enabled = !busy && drillId.isNotBlank(),
+                enabled = !busy && drillId.isNotBlank() && holderSignReady,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testableClickable("btn_accord_start_drill") {
-                        viewModel.initiateDrill(drillId); drillId = ""
+                        viewModel.initiateDrill(
+                            drillId, holderSignKeyId, holderSignUsbPath, holderSignPin.ifBlank { null },
+                        )
+                        drillId = ""
                     },
             ) {
                 Text(localizedString("mobile.accord_start_drill"))
@@ -1059,14 +1193,21 @@ fun AccordScreen(
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
                 onClick = {
-                    viewModel.initiateAnnounce(announceMessage)
+                    viewModel.initiateAnnounce(
+                        announceMessage, holderSignKeyId, holderSignUsbPath,
+                        holderSignPin.ifBlank { null },
+                    )
                     announceMessage = ""
                 },
-                enabled = !busy && announceMessage.isNotBlank(),
+                enabled = !busy && announceMessage.isNotBlank() && holderSignReady,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testableClickable("btn_accord_post_announce") {
-                        viewModel.initiateAnnounce(announceMessage); announceMessage = ""
+                        viewModel.initiateAnnounce(
+                            announceMessage, holderSignKeyId, holderSignUsbPath,
+                            holderSignPin.ifBlank { null },
+                        )
+                        announceMessage = ""
                     },
             ) {
                 Text(localizedString("mobile.accord_post_announce"))
@@ -1227,6 +1368,7 @@ private fun invocationStyle(kind: String): InvocationStyle {
 private fun InvocationCard(
     inv: AccordInvocationDto,
     busy: Boolean,
+    canConcur: Boolean,
     onConcur: () -> Unit,
 ) {
     val style = invocationStyle(inv.invocationKind)
@@ -1291,10 +1433,12 @@ private fun InvocationCard(
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = onConcur,
-                    enabled = !busy,
+                    enabled = !busy && canConcur,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testableClickable("btn_accord_concur_${inv.invocationId}") { onConcur() },
+                        .testableClickable("btn_accord_concur_${inv.invocationId}") {
+                            if (canConcur) onConcur()
+                        },
                 ) {
                     if (busy) {
                         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
