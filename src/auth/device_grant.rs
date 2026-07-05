@@ -360,10 +360,10 @@ struct DelegateRequest {
 async fn register_minted_agent_key(
     engine: &Engine,
     minted: &crate::identity::MintedUserIdentity,
+    alias: &str,
+    seed_dir: &std::path::Path,
 ) -> Result<(), Response> {
-    use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
-    use sha2::{Digest, Sha256};
+    use ciris_persist::federation::types::identity_type;
 
     // Already admitted? (re-run delegate with the same minted key) → no-op.
     if let Ok(Some(_)) = engine
@@ -374,56 +374,57 @@ async fn register_minted_agent_key(
         return Ok(());
     }
 
-    let now = chrono::Utc::now();
-    let reg_envelope = serde_json::json!({ "key_id": minted.key_id });
-    let canonical = ceg_produce_canonicalize(&reg_envelope).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("canonicalize minted agent registration envelope: {e}"),
-        )
-    })?;
-    let record = KeyRecord {
-        key_id: minted.key_id.clone(),
-        pubkey_ed25519_base64: minted.pubkey_ed25519_base64.clone(),
-        pubkey_ml_dsa_65_base64: Some(minted.pubkey_ml_dsa_65_base64.clone()),
-        algorithm: algorithm::HYBRID.into(),
-        // The agent is an accountable AGENT-role fed identity (the actor an owner
-        // delegates act-on-behalf authority to), NOT a node and NOT a user. It
-        // MUST be agent-role: persist v11.5.0 (CC 3.2 / CC 1.15.6) refuses a
-        // `delegates_to` onto a USER-role target unless it is adult→minor
-        // guardianship (an adult user is un-stewardable — presumption of
-        // sovereignty). The on-behalf-of grant is a capability delegation, not
-        // stewardship, so the actor is an agent identity.
-        identity_type: identity_type::AGENT.into(),
-        identity_ref: minted.key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: reg_envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        // Self-attested: the minted genesis proves possession; scrub_key_id == key_id.
-        scrub_signature_classical: String::new(),
-        scrub_signature_pqc: None,
-        scrub_key_id: minted.key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        roles: Vec::new(),
-        attestation_evidence: None,
-        // No Counter-RII consent role assigned at mint (persist v13 #365):
-        // None ⇔ the stored `unregistered` default; excluded from the
-        // registration hash, assigned later via set_consent_role.
-        consent_role: None,
-    };
-    engine
-        .federation_directory()
-        .put_public_key(SignedKeyRecord { record })
-        .await
+    // Re-open the just-minted software signer and PRODUCE a genuinely self-signed
+    // record via verify's single-source `produce_self_key_record` — identity_type =
+    // AGENT (the actor an owner delegates act-on-behalf authority to; NOT a node and
+    // NOT a user — persist v11.5.0/CC 1.15.6 refuses a `delegates_to` onto a USER
+    // target save adult→minor guardianship, so the delegate MUST be agent-role). The
+    // record's JCS canonicalization + bound-hybrid PoP are byte-exact to what
+    // `register_federation_key` re-verifies, so it lands through the canonical
+    // fail-secure admission gate (replacing the prior unsigned `put_public_key`
+    // bypass with a genuinely signed, gate-verified row).
+    let identity = crate::identity::open_software_hybrid_identity(&minted.key_id, alias, seed_dir)
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("admit minted agent key into federation_keys: {e}"),
+                &format!("re-open minted agent signer for self-registration: {e}"),
             )
         })?;
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec = match ciris_verify_core::federation_self_record::produce_self_key_record(
+        &identity,
+        identity_type::AGENT,
+        &valid_from,
+        &[],
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("produce minted agent self key record: {e}"),
+            ))
+        }
+    };
+    // Bridge the verify `SignedKeyRecord` into persist's via the structurally
+    // identical JSON shape (the same bridge the portable-mint path uses).
+    let signed: ciris_persist::federation::SignedKeyRecord =
+        match serde_json::to_value(&v_rec).and_then(serde_json::from_value) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("bridge verify→persist agent SignedKeyRecord: {e}"),
+                ))
+            }
+        };
+    engine.register_federation_key(signed).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("admit minted agent key into federation_keys: {e}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -480,7 +481,7 @@ async fn delegate(
                     crate::identity::UserIdentityBackend::Software,
                     label,
                     Some(label),
-                    seed_dir,
+                    seed_dir.clone(),
                 )
                 .await
                 {
@@ -494,7 +495,11 @@ async fn delegate(
                 };
                 // Admit the minted key into the live directory (the outbox genesis is
                 // not auto-drained) so lookup_public_key + the delegates_to FK pass.
-                if let Err(resp) = register_minted_agent_key(&st.engine, &minted).await {
+                // Re-opens the just-minted software signer (keyed by `label` under
+                // `seed_dir`) to self-sign the agent record through the canonical gate.
+                if let Err(resp) =
+                    register_minted_agent_key(&st.engine, &minted, label, &seed_dir).await
+                {
                     return resp;
                 }
                 minted.key_id

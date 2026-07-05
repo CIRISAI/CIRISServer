@@ -89,6 +89,7 @@ async fn register_node(engine: &Engine, key_id: &str) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -144,6 +145,7 @@ async fn register_party_signed(
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .federation_directory()

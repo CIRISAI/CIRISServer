@@ -303,6 +303,35 @@ fn open_software_ed25519_signer(
     Ok(Box::new(signer))
 }
 
+/// Re-open a **software-minted** identity's own hybrid halves (the persisted
+/// Ed25519 seed + the platform-sealed ML-DSA-65 seed, both keyed by `alias`) and
+/// wrap them as a verify [`HardwareRootedIdentity`] (a `SelfSigner`) bound to
+/// `key_id` (the DERIVED federation id the record is registered under). The
+/// caller then produces a self-signed record via
+/// [`produce_self_key_record`](ciris_verify_core::federation_self_record::produce_self_key_record)
+/// — the single-source producer whose JCS canonicalization + bound-hybrid PoP are
+/// byte-exact to what persist's `register_federation_key` verifies. Used to admit
+/// a freshly-minted delegate agent as a GENUINELY self-signed row instead of an
+/// unsigned directory bypass.
+pub(crate) fn open_software_hybrid_identity(
+    key_id: &str,
+    alias: &str,
+    seed_dir: &std::path::Path,
+) -> Result<ciris_verify_core::self_at_login::HardwareRootedIdentity> {
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+
+    let ed: Arc<dyn HardwareSigner> = Arc::from(open_software_ed25519_signer(alias, seed_dir)?);
+    let pqc: Arc<dyn PqcSigner> = Arc::from(
+        ciris_keyring::get_platform_sealed_mldsa65_signer(
+            alias,
+            ciris_verify_core::ceg_outbox::keys_dir(),
+        )
+        .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for '{alias}': {e}"))?,
+    );
+    HardwareRootedIdentity::new(key_id.to_owned(), ed, pqc)
+        .map_err(|e| anyhow::anyhow!("build software-rooted self identity: {e}"))
+}
+
 /// **Mint a hardware-rooted USER federation identity.** Opens the Ed25519
 /// signing half for `backend`, then calls verify v6.0.0
 /// `create_federation_identity(FedKind::User)` which attaches the sealed
@@ -371,6 +400,8 @@ pub async fn mint_user_identity(
         // seal_alias = the keystore alias: seal/re-open the ML-DSA half (and the
         // software Ed25519 seed) under `<alias>` while the recorded id is derived.
         Some(key_id_alias),
+        // No transport hint on a self-minted user fed-ID (#172).
+        &[],
     )
     .await
     .map_err(|e| anyhow::anyhow!("create_federation_identity (user): {e}"))?;
@@ -562,10 +593,14 @@ pub async fn mint_portable_software_occurrence(
     // register gate recomputes). Bridged verify→persist by the structurally
     // identical JSON shape (the accord-holder path round-trips the same way).
     let now = chrono::Utc::now().to_rfc3339();
-    let v_rec =
-        ciris_verify_core::federation_self_record::produce_self_key_record(&identity, "user", &now)
-            .await
-            .map_err(|e| anyhow::anyhow!("produce portable self key record: {e}"))?;
+    let v_rec = ciris_verify_core::federation_self_record::produce_self_key_record(
+        &identity,
+        "user",
+        &now,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce portable self key record: {e}"))?;
     let key_record: ciris_persist::federation::SignedKeyRecord =
         serde_json::from_value(serde_json::to_value(&v_rec)?)
             .map_err(|e| anyhow::anyhow!("bridge verify→persist SignedKeyRecord: {e}"))?;

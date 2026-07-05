@@ -90,6 +90,7 @@ async fn cross_register(engine: &Engine, key_id: &str, agent_sk: &SigningKey) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .sqlite_backend()

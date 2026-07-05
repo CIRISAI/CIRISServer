@@ -168,8 +168,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             "config:* net.listen_addr is not a valid host:port — keeping the baked default"
         ),
     }
-    cfg.bootstrap_peers =
-        crate::config::parse_bootstrap_peers(initial_config.bootstrap_peers.iter().cloned());
+    // Reachability = the BAKED canonical servers' signed envelope transport hints
+    // (CIRISPersist#381), unioned with the optional `net.bootstrap_peers` override.
+    // The baked hints are the primary source (self-describing seed, no compiled-in
+    // IP); config is the break-glass. Returns empty until persist bakes the hints,
+    // so this is a no-op on a substrate without the field (forward-compatible).
+    {
+        let mut peers = canonical_bootstrap_addrs(&engine).await;
+        let n_canonical = peers.len();
+        peers.extend(crate::config::parse_bootstrap_peers(
+            initial_config.bootstrap_peers.iter().cloned(),
+        ));
+        peers.sort();
+        peers.dedup();
+        tracing::info!(
+            canonical_hints = n_canonical,
+            total = peers.len(),
+            "bootstrap dial set resolved (baked canonical envelope hints + net.bootstrap_peers override)"
+        );
+        cfg.bootstrap_peers = peers;
+    }
     let cfg = cfg;
 
     let (config_tx, config_rx) = watch::channel(initial_config.clone());
@@ -196,7 +214,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (stable for the node's lifetime), served verbatim by
     // GET /v1/federation/self-key-record and the public record a peer registers
     // to admit this node's replicated rows.
-    let self_key_record_json = self_key_record_json(&engine, &cfg).await?;
+    let self_key_record_json = self_key_record_json(&cfg).await?;
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -211,7 +229,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     } else {
         initial_config.node_alias.clone()
     };
-    let node_code = node_self_code(&engine, &cfg, Some(node_alias)).await?;
+    let node_code = node_self_code(&cfg, Some(node_alias)).await?;
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
 
@@ -1118,7 +1136,7 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
     use ciris_persist::federation::Error as FederationError;
     use ciris_persist::federation::SignedKeyRecord;
 
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
 
     // Export A's own signed record for the operator to hand to peer B (the
     // cross-repo peering contract: CIRIS_PEER_B_KEY_RECORD = the peer's
@@ -1171,9 +1189,9 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
 /// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
 /// uses, so the GET output round-trips byte-identically through a peer's
 /// `register_federation_key`.
-async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<String> {
+async fn self_key_record_json(cfg: &ServerConfig) -> Result<String> {
     use ciris_persist::federation::SignedKeyRecord;
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
     serde_json::to_string(&SignedKeyRecord { record })
         .context("serialize this node's self-signed SignedKeyRecord")
 }
@@ -1184,11 +1202,10 @@ async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<Str
 /// federation signing-key pubkey. The alias hint is the resolved config:*
 /// `node.alias` (Server 0.5 — no env). Built once at boot.
 async fn node_self_code(
-    engine: &Engine,
     cfg: &ServerConfig,
     alias_hint: Option<String>,
 ) -> Result<crate::nodecode::NodeCode> {
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
     Ok(crate::federation_nodecode::build_node_code(
         &record.key_id,
         &record.pubkey_ed25519_base64,
@@ -1201,70 +1218,56 @@ async fn node_self_code(
 }
 
 /// Build Node A's self-signed [`KeyRecord`](ciris_persist::federation::types::KeyRecord)
-/// — `scrub_key_id == key_id`, hybrid proof-of-possession over
-/// `ceg_produce_canonicalize(registration_envelope)`. This is the exact record
-/// the v8.8.0 admission gate verifies and that A exports for peer B to register.
+/// — `scrub_key_id == key_id`, a bound-hybrid proof-of-possession over the
+/// JCS-canonicalized registration envelope. This is the exact record the admission
+/// gate verifies and that A exports for peer B to register.
+///
+/// Produced by verify's single-source [`produce_self_key_record`] over this node's
+/// own hardware/sealed federation signers wrapped as a [`HardwareRootedIdentity`]
+/// (a verify `SelfSigner`) — the SAME producer identity.rs / accord.rs /
+/// accord_provision.rs use, whose JCS canonicalization + bound-hybrid signature are
+/// byte-exact to what persist's `register_federation_key` recanonicalizes and
+/// verifies. (verify's `ceg_produce_canonicalize` **is** its own JCS, so the row
+/// round-trips the gate by construction.) The signed envelope binds the pubkeys +
+/// identity_type + validity, not just `{key_id}` — a strictly richer, harder-to-
+/// replay PoP than the prior hand-rolled minimal envelope.
 pub(crate) async fn build_self_key_record(
-    engine: &Engine,
     cfg: &ServerConfig,
 ) -> Result<ciris_persist::federation::types::KeyRecord> {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
-    use ciris_persist::federation::types::{algorithm, KeyRecord};
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
-    use sha2::{Digest, Sha256};
+    use ciris_verify_core::federation_self_record::produce_self_key_record;
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
-    // Registration envelope (the proof-of-possession signing payload). Minimal +
-    // stable. Canonicalized via the CEG PRODUCE gate (V2/JCS) so it matches the
-    // form `verify_key_registration` re-derives and hash-cross-checks.
-    let envelope = serde_json::json!({ "key_id": cfg.key_id });
-    let canonical = ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow::anyhow!("ceg_produce_canonicalize self-registration envelope: {e}"))?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
+    // Wrap this node's OWN Ed25519 (hardware-sealed) + ML-DSA-65 signers — the same
+    // halves the Engine is composed from — as a verify `SelfSigner`. Re-opened here
+    // (boot-time, called ~3× while assembling the boot state); the software path is
+    // a cheap seal read, and the pkcs11 path mirrors accord_provision's admit-node
+    // ceremony which opens a fresh identity alongside the running engine.
+    let ed: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
+    let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
+    let identity = HardwareRootedIdentity::new(cfg.key_id.clone(), ed, pqc)
+        .map_err(|e| anyhow::anyhow!("build node self-signer identity: {e}"))?;
 
-    // Hybrid-sign the canonical bytes (Ed25519 hardware-sealed + ML-DSA-65; the
-    // PQC half is bound over canonical || classical_sig inside sign_hybrid). The
-    // signature carries both pubkeys, so the registered row is PQC-complete.
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .context("hybrid-sign self-registration envelope")?;
+    // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure, NO
+    // agency) — NOT a trust-root steward. No transport hints in the node's own
+    // self record (Edge discovers real transports); `&[]` keeps the pre-#172
+    // envelope shape.
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec = produce_self_key_record(
+        &identity,
+        ciris_persist::federation::types::identity_type::NODE,
+        &valid_from,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce node self-signed key record: {e}"))?;
 
-    let now = chrono::Utc::now();
-    Ok(KeyRecord {
-        key_id: cfg.key_id.clone(),
-        pubkey_ed25519_base64: B64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(B64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.to_owned(),
-        // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure,
-        // NO agency) — NOT a trust-root steward. The canonical-trust note still
-        // holds (this is the node's own self-signed federation identity, the
-        // admission anchor for rows it authors); the IDENTITY_TYPE is corrected
-        // from "steward" to "node" so the wire-checkable CC 4.4.3.5 invariant
-        // applies (a node-key delegation may carry only infra:* scopes).
-        // persist v9.0.0 (CIRISPersist#235 closed) now publishes the canonical
-        // role token `federation::types::identity_type::NODE` ("node"), so the
-        // node + the v9.0.0 node-agency admission gate agree byte-for-byte.
-        identity_type: ciris_persist::federation::types::identity_type::NODE.to_owned(),
-        identity_ref: cfg.key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        // Self-signed proof-of-possession: scrub_key_id == key_id.
-        scrub_key_id: cfg.key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(), // server-computed on insert
-        roles: Vec::new(),
-        attestation_evidence: None,
-        // No Counter-RII consent role on the node's own identity (persist v13
-        // #365): None ⇔ the stored `unregistered` default; excluded from the
-        // registration hash, assigned later via set_consent_role.
-        consent_role: None,
-    })
+    // Bridge the verify `SignedKeyRecord` into persist's `SignedKeyRecord` via the
+    // structurally-identical JSON shape (the exact bridge the portable-mint path in
+    // identity.rs uses), then hand back the inner persist `KeyRecord`.
+    let signed: ciris_persist::federation::SignedKeyRecord =
+        serde_json::from_value(serde_json::to_value(&v_rec)?)
+            .map_err(|e| anyhow::anyhow!("bridge verify→persist self SignedKeyRecord: {e}"))?;
+    Ok(signed.record)
 }
 
 /// Set up **CEG-driven** directed-consent replication. The corpus's
@@ -1712,6 +1715,52 @@ async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerC
     Ok((engine, cfg))
 }
 
+/// Bootstrap dial targets sourced from the BAKED canonical servers' signed envelope
+/// transport hints (CIRISPersist#381) — the reachability half of the mesh seed. Each
+/// canonical `KeyRecord` carries its transport hint inside the accord-scrubbed
+/// `registration_envelope`, so a fresh node learns WHERE to dial from the same object
+/// that establishes WHO it trusts — no hardcoded const, no config list to maintain.
+///
+/// Only `kind == "ip"` hints are dialable TCP entries; a `reticulum` hint is a
+/// pubkey-derived overlay address (not an internet bootstrap target) and is skipped.
+/// Returns empty on a substrate whose canonical records carry no `transport_hints`
+/// yet (forward-compatible: a pre-#381 record simply has no such envelope key).
+async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr> {
+    match engine.canonical_bootstrap_hints().await {
+        Ok(hints) => ip_addrs_from_hints(&hints),
+        Err(e) => {
+            tracing::warn!(error = %e, "canonical_bootstrap_hints failed — using config override only");
+            Vec::new()
+        }
+    }
+}
+
+/// Pure extraction of dialable `ip` bootstrap addresses from persist's
+/// `canonical_bootstrap_hints()` — the `(key_id, TransportHint)` pairs read from the
+/// canonical records' signed envelopes (CIRISPersist#381). Split out so the filter is
+/// unit-testable without an engine. Skips non-`ip` kinds (a `reticulum` hint is a
+/// pubkey-derived overlay address, not a TCP bootstrap target) + un-parseable dests.
+fn ip_addrs_from_hints(
+    hints: &[(String, ciris_persist::federation::types::TransportHint)],
+) -> Vec<std::net::SocketAddr> {
+    let mut out = Vec::new();
+    for (key_id, h) in hints {
+        if h.kind != "ip" {
+            continue;
+        }
+        match h.destination.parse::<std::net::SocketAddr>() {
+            Ok(addr) => out.push(addr),
+            Err(e) => tracing::warn!(
+                canonical = %key_id,
+                dest = %h.destination,
+                error = %e,
+                "canonical ip transport hint is not host:port — skipping"
+            ),
+        }
+    }
+    out
+}
+
 /// `ciris-server config set <key> <value>` (console-trusted, node-signed). Writes a
 /// signed `config:v1` CEG object — the SAME path the node itself + `POST /v1/config`
 /// use — so a HEADLESS node (console-only, no app/session) can set `config:*` knobs
@@ -1755,4 +1804,45 @@ async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConf
 /// on the shared Edge + the WBD `route_deferral` / Wise-Authority surface. SCAFFOLD.
 async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
     todo!("node slice (Server 1.0) — pin ciris-node-core (CIRISNodeCore#38) + install(&edge)")
+}
+
+#[cfg(test)]
+mod bootstrap_hint_tests {
+    use super::ip_addrs_from_hints;
+    use ciris_persist::federation::types::TransportHint;
+
+    fn hint(kind: &str, dest: &str) -> TransportHint {
+        TransportHint {
+            kind: kind.to_string(),
+            destination: dest.to_string(),
+        }
+    }
+
+    #[test]
+    fn extracts_ip_hints_skips_reticulum_and_unparseable() {
+        let hints = vec![
+            ("canonical-1".to_string(), hint("ip", "108.61.242.236:4242")),
+            // reticulum: pubkey-derived overlay, not a TCP bootstrap target → skipped
+            (
+                "canonical-1".to_string(),
+                hint("reticulum", "81cabcf78a6ee16f197ba7e530a2f6db"),
+            ),
+            // malformed ip → skipped (warned)
+            ("canonical-1".to_string(), hint("ip", "not-a-socket-addr")),
+            ("canonical-3".to_string(), hint("ip", "10.0.0.9:4242")),
+        ];
+        let addrs = ip_addrs_from_hints(&hints);
+        assert_eq!(
+            addrs.len(),
+            2,
+            "only the two well-formed ip hints (reticulum + bad skipped)"
+        );
+        assert!(addrs.contains(&"108.61.242.236:4242".parse().unwrap()));
+        assert!(addrs.contains(&"10.0.0.9:4242".parse().unwrap()));
+    }
+
+    #[test]
+    fn empty_without_canonical_hints() {
+        assert!(ip_addrs_from_hints(&[]).is_empty());
+    }
 }

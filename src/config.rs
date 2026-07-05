@@ -164,8 +164,11 @@ pub struct ServerConfig {
     /// The node's primary (Reticulum TCP) listen address. Baked default until
     /// overwritten from `config:* net.listen_addr` at boot.
     pub listen_addr: SocketAddr,
-    /// Reticulum mesh bootstrap peers. Baked default ([`CANONICAL_BOOTSTRAP_PEERS`])
-    /// until overwritten from `config:* net.bootstrap_peers` at boot.
+    /// Reticulum mesh bootstrap peers — the TCP entry addresses a cold node dials
+    /// to join the overlay. Empty by default: the primary source is the baked
+    /// canonical servers' signed envelope transport hints (CIRISPersist#381,
+    /// unioned in `compose`); `config:* net.bootstrap_peers` is an optional
+    /// break-glass override applied on top.
     pub bootstrap_peers: Vec<SocketAddr>,
     /// The **on-disk keystore alias** — the RAW `--key-id` label (e.g.
     /// `ciris-server`). Names the sealed seed / PQC / user / transport keystore
@@ -206,12 +209,10 @@ impl ServerConfig {
             .parse()
             .expect("baked DEFAULT_LISTEN_ADDR is a valid host:port");
 
-        // Baked default; overwritten from config:* net.bootstrap_peers at boot.
-        let bootstrap_peers = parse_bootstrap_peers(
-            crate::config_reconcile::CANONICAL_BOOTSTRAP_PEERS
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        // Empty at `from_home`: reachability is sourced at boot from the baked
+        // canonical records' envelope transport hints (CIRISPersist#381) + the
+        // optional `config:* net.bootstrap_peers` override. No compiled-in IPs.
+        let bootstrap_peers = Vec::new();
 
         // The keystore alias is the RAW `--key-id` label — it names the on-disk
         // sealed keystore blobs and MUST stay stable across boots (re-key risk).

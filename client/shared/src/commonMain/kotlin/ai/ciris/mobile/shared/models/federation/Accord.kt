@@ -101,6 +101,79 @@ data class AccordInvocationsResponse(
     val invocations: List<AccordInvocationDto> = emptyList(),
 )
 
+/**
+ * One surfaced NON-BINDING accord event (CIRISServer#41 §9.2.1) — a completed
+ * **drill** (a rehearsed exercise of the 2-of-3 kill-switch delivery path) or an
+ * **announce** (a single-holder ``notify``). Recorded the moment it is observed
+ * quorum-COMPLETE (locally OR via gossip); a sub-quorum invocation is never here.
+ * Neither ever halts. ``GET /v1/accord/events``.
+ */
+@Serializable
+data class AccordEventDto(
+    /** ``drill`` or ``announce``. */
+    @SerialName("event_type")
+    val eventType: String,
+    @SerialName("invocation_id")
+    val invocationId: String,
+    /** RFC-3339 instant this node recorded the completed event. */
+    @SerialName("recorded_at")
+    val recordedAt: String,
+    /** The holder key_ids counted — the quorum-meeting seats (drill) or the single
+     * signer (announce). */
+    val signers: List<String> = emptyList(),
+    @SerialName("quorum_threshold")
+    val quorumThreshold: Int = 2,
+    /** Announce ONLY — the free-text message (bound to the signed payload), or null. */
+    val message: String? = null,
+)
+
+/** ``GET /v1/accord/events`` response — completed drills + announcements, each
+ * most-recent-first. */
+@Serializable
+data class AccordEventsResponse(
+    val drills: List<AccordEventDto> = emptyList(),
+    val announcements: List<AccordEventDto> = emptyList(),
+)
+
+/** The disk halt-latch record, when the node is halted (who/when/which invocation). */
+@Serializable
+data class AccordHaltRecordDto(
+    @SerialName("invocation_kind")
+    val invocationKind: String? = null,
+    @SerialName("invocation_id")
+    val invocationId: String? = null,
+    @SerialName("valid_signers")
+    val validSigners: List<String> = emptyList(),
+    @SerialName("quorum_threshold")
+    val quorumThreshold: Int = 2,
+    @SerialName("latched_at")
+    val latchedAt: String? = null,
+)
+
+/**
+ * ``GET /v1/accord/halt-status`` — the read-only state of the enforceable
+ * kill-switch (the disk halt latch, CC 4.2.1 / 4.2.3). [halted] drives the
+ * unmissable ACTIVE-HALT banner on the Trust Root card; [record] names the halting
+ * invocation when present. Read-only — the app never writes or clears the latch.
+ */
+@Serializable
+data class AccordHaltStatusResponse(
+    val halted: Boolean = false,
+    @SerialName("latch_path")
+    val latchPath: String? = null,
+    val record: AccordHaltRecordDto? = null,
+)
+
+/** ``POST /v1/accord/announce`` response — a single-holder announce was posted. */
+@Serializable
+data class AccordAnnounceResponse(
+    val posted: Boolean = false,
+    @SerialName("invocation_id")
+    val invocationId: String? = null,
+    val from: List<String> = emptyList(),
+    val message: String? = null,
+)
+
 /** ``POST /v1/accord/invocation/concur`` response (the local holder concurred). */
 @Serializable
 data class AccordConcurResponse(
@@ -151,11 +224,24 @@ data class AdmitNodeResponse(
 )
 
 /**
+ * One bootstrap transport address baked INTO a canonical server's signed record —
+ * an entry of its ``transport_hints`` (e.g. ``{kind:"ip", destination:"1.2.3.4:4242"}``).
+ * The IP now rides inside the scrubbed record envelope, so it is set at mint time.
+ */
+@Serializable
+data class TransportHintDto(
+    val kind: String,
+    val destination: String,
+)
+
+/**
  * One canonical server on the trust root — `GET /v1/accord/canonical/servers`
  * (CIRISServer#164). A canonical server is a node whose registration an accord
  * holder scrub-signed AND flagged `canonical` (its [identityType] is a comma-set
  * that includes `canonical`), making it a rock-solid mesh-seed anchor other
  * nodes may bootstrap-dial. [scrubKeyId] is the holder key_id that scrubbed it.
+ * [transportHints] carries the addresses (e.g. the ``ip`` host:port) baked into
+ * the signed record, or null when none were set.
  */
 @Serializable
 data class CanonicalServerDto(
@@ -166,16 +252,65 @@ data class CanonicalServerDto(
     val identityType: String,
     @SerialName("pubkey_ed25519_base64")
     val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
     @SerialName("scrub_key_id")
     val scrubKeyId: String? = null,
     @SerialName("valid_from")
     val validFrom: String? = null,
+    /** The addresses baked into the signed record (e.g. the ``ip`` entry), or null. */
+    @SerialName("transport_hints")
+    val transportHints: List<TransportHintDto>? = null,
 )
 
 /** ``GET /v1/accord/canonical/servers`` response. */
 @Serializable
 data class CanonicalServersResponse(
     val servers: List<CanonicalServerDto> = emptyList(),
+)
+
+/**
+ * ``POST /v1/accord/canonical/withdraw`` response (CIRISServer#164) — a DESTRUCTIVE
+ * op that needs a 2-of-3 accord proposal (a second/third holder must co-sign); a
+ * lone holder cannot complete it. [withdrawn] is true only once quorum is met.
+ */
+@Serializable
+data class CanonicalWithdrawResponse(
+    val withdrawn: Boolean = false,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/**
+ * ``POST /v1/accord/canonical/supersede`` response — replaces a canonical record
+ * with a fresh successor. Also a 2-of-3 destructive op. [successor] is the new
+ * canonical key_id once quorum settles.
+ */
+@Serializable
+data class CanonicalSupersedeResponse(
+    val superseded: Boolean = false,
+    val successor: String? = null,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/** One withdrawn / superseded canonical server — an entry of the withdrawals log. */
+@Serializable
+data class CanonicalWithdrawalDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("withdrawn_at")
+    val withdrawnAt: String? = null,
+    @SerialName("superseded_by")
+    val supersededBy: String? = null,
+    @SerialName("authority_proposal_digest")
+    val authorityProposalDigest: String? = null,
+)
+
+/** ``GET /v1/accord/canonical/withdrawals`` response. */
+@Serializable
+data class CanonicalWithdrawalsResponse(
+    val withdrawals: List<CanonicalWithdrawalDto> = emptyList(),
 )
 
 /**

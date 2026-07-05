@@ -2296,27 +2296,43 @@ class CIRISApiClient(
     }
 
     /**
-     * Concur on an invocation as the local holder —
+     * Concur on a pending invocation as an accord holder —
      * `POST {nodeUrl}/v1/accord/invocation/concur`. Owner-session-gated. The app
-     * sends NO crypto; the node signs with the resolved local holder signer.
+     * holds NO keys: it posts the holder's fed [holderKeyId] + [mldsaUsbPath] + PIN
+     * and the node RE-OPENS the holder's YubiKey + USB-wrapped ML-DSA and produces
+     * the cosignature over the pending invocation's canonical bytes (mirrors
+     * admit-node). Touch-gated — a touch-required slot 9c BLOCKS the call until tapped.
      */
     suspend fun concurInvocation(
         invocationKind: String,
         invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
         val method = "concurInvocation"
-        logInfo(method, "POST $nodeUrl/v1/accord/invocation/concur kind=$invocationKind id=$invocationId")
-        val client = federationHttpClient()
+        logInfo(method, "POST $nodeUrl/v1/accord/invocation/concur kind=$invocationKind id=$invocationId holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
         return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("invocation_kind", JsonPrimitive(invocationKind.trim()))
+                put("invocation_id", JsonPrimitive(invocationId.trim()))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
             val response = client.post("$nodeUrl/v1/accord/invocation/concur") {
                 token?.let { header("Authorization", "Bearer $it") }
                 contentType(ContentType.Application.Json)
-                setBody(
-                    "{\"invocation_kind\":\"${invocationKind.trim()}\"," +
-                        "\"invocation_id\":\"${invocationId.trim()}\"}",
-                )
+                setBody(bodyJson.toString())
             }
             val raw = response.bodyAsText()
             if (!response.status.isSuccess()) {
@@ -2324,6 +2340,179 @@ class CIRISApiClient(
             }
             jsonConfig.decodeFromString(
                 ai.ciris.mobile.shared.models.federation.AccordConcurResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The surfaced NON-BINDING accord events (completed drills + announcements) —
+     * `GET {nodeUrl}/v1/accord/events` (CIRISServer#41). Public read.
+     */
+    suspend fun listAccordEvents(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordEventsResponse {
+        val method = "listAccordEvents"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/events") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list accord events failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordEventsResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The read-only halt-latch state (the enforceable kill-switch) —
+     * `GET {nodeUrl}/v1/accord/halt-status` (CIRISServer#41). Public read; drives
+     * the unmissable ACTIVE-HALT banner. Never writes or clears the latch.
+     */
+    suspend fun getAccordHaltStatus(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse {
+        val method = "getAccordHaltStatus"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/halt-status") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("get halt-status failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Initiate a drill** — `POST {nodeUrl}/v1/accord/drill` (owner-session-gated,
+     * holder action). A drill is a NON-BINDING rehearsal of the 2-of-3 kill-switch
+     * delivery path; it accumulates cosignatures toward quorum via
+     * `/v1/accord/invocation/concur` and, on reaching it, is surfaced in
+     * `/v1/accord/events` — it NEVER halts. Mirrors [concurInvocation]'s no-crypto
+     * posture: the node builds + signs the drill invocation with its resolved local
+     * holder signer; the app sends no crypto.
+     */
+    suspend fun initiateDrill(
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
+        val method = "initiateDrill"
+        logInfo(method, "POST $nodeUrl/v1/accord/drill id=$invocationId holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            // The node synthesizes the (non-binding) drill invocation from the id and
+            // produces the initiating cosignature from the holder's YubiKey + USB — the
+            // app holds no keys and fabricates no signed envelope.
+            val bodyJson = buildJsonObject {
+                put("invocation_id", JsonPrimitive(invocationId.trim()))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
+            val response = client.post("$nodeUrl/v1/accord/drill") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("initiate drill failed: ${response.status}: ${raw.take(200)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordConcurResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Post an announce** — `POST {nodeUrl}/v1/accord/announce` (owner-session-gated,
+     * holder action). An announce is a single-holder `notify` message (threshold 1 —
+     * complete on a valid signature); it is gossiped + surfaced in `/v1/accord/events`
+     * and NEVER halts. Mirrors [concurInvocation]'s no-crypto posture: the node builds
+     * + signs the notify (binding the [message] to the payload hash) with its resolved
+     * local holder signer; the app sends only the plaintext.
+     */
+    suspend fun initiateAnnounce(
+        message: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse {
+        val method = "initiateAnnounce"
+        logInfo(method, "POST $nodeUrl/v1/accord/announce len=${message.length} holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            // The node synthesizes the `notify` invocation binding this message and
+            // produces the cosignature from the holder's YubiKey + USB (app holds no keys).
+            val bodyJson = buildJsonObject {
+                put("message", JsonPrimitive(message))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
+            val response = client.post("$nodeUrl/v1/accord/announce") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("initiate announce failed: ${response.status}: ${raw.take(200)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse.serializer(),
                 raw,
             )
         } catch (e: Exception) {
@@ -2577,6 +2766,78 @@ class CIRISApiClient(
             }
             logException(method, e, "nodeUrl=$nodeUrl$hint")
             throw RuntimeException("${e.message ?: "add canonical server failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Withdraw a canonical server** — `POST {nodeUrl}/v1/accord/canonical/withdraw`
+     * (CIRISServer#164). DESTRUCTIVE: needs a 2-of-3 accord proposal (a second/third
+     * holder must co-sign) — a lone holder cannot complete it. [proposalDigest] names
+     * the accord proposal this withdrawal is authorized under.
+     */
+    suspend fun withdrawCanonical(
+        keyId: String,
+        proposalDigest: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalWithdrawResponse {
+        val method = "withdrawCanonical"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/withdraw key_id=$keyId")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(keyId.trim()))
+                put("proposal_digest", JsonPrimitive(proposalDigest.trim()))
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/withdraw") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("withdraw canonical failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalWithdrawResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw RuntimeException(e.message ?: "withdraw canonical failed", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **List withdrawn / superseded canonical servers** —
+     * `GET {nodeUrl}/v1/accord/canonical/withdrawals` (CIRISServer#164). The audit
+     * log of canonical records that were withdrawn or superseded. Visible to everyone.
+     */
+    suspend fun listCanonicalWithdrawals(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse {
+        val method = "listCanonicalWithdrawals"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/canonical/withdrawals") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list canonical withdrawals failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse()
         } finally {
             client.close()
         }

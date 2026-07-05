@@ -1,8 +1,10 @@
 package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.models.federation.AccordEventDto
 import ai.ciris.mobile.shared.models.federation.AccordFamilyDto
 import ai.ciris.mobile.shared.models.federation.AccordHolderDto
+import ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
@@ -43,6 +45,19 @@ class AccordViewModel(
     private val _invocations = MutableStateFlow<List<AccordInvocationDto>>(emptyList())
     val invocations: StateFlow<List<AccordInvocationDto>> = _invocations.asStateFlow()
 
+    /** The enforceable kill-switch state (disk halt latch). Drives the unmissable
+     *  ACTIVE-HALT banner — the most prominent thing on the card when halted. */
+    private val _haltStatus = MutableStateFlow<AccordHaltStatusResponse?>(null)
+    val haltStatus: StateFlow<AccordHaltStatusResponse?> = _haltStatus.asStateFlow()
+
+    /** Surfaced NON-BINDING completed drills (most-recent-first). */
+    private val _drills = MutableStateFlow<List<AccordEventDto>>(emptyList())
+    val drills: StateFlow<List<AccordEventDto>> = _drills.asStateFlow()
+
+    /** Surfaced single-holder announcements (most-recent-first). */
+    private val _announcements = MutableStateFlow<List<AccordEventDto>>(emptyList())
+    val announcements: StateFlow<List<AccordEventDto>> = _announcements.asStateFlow()
+
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
@@ -69,6 +84,20 @@ class AccordViewModel(
                 _holders.value = holders.holders
                 _holderThreshold.value = holders.threshold
                 _invocations.value = apiClient.getAccordInvocations()
+                // The enforceable kill-switch state + the surfaced non-binding events.
+                _haltStatus.value = try {
+                    apiClient.getAccordHaltStatus()
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] halt-status: ${e.message}")
+                    _haltStatus.value
+                }
+                try {
+                    val events = apiClient.listAccordEvents()
+                    _drills.value = events.drills
+                    _announcements.value = events.announcements
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] events: ${e.message}")
+                }
                 // The owner's nodes — the admit-node target picker selects from these.
                 _ownedNodes.value = try {
                     apiClient.getOwnedNodes().nodes.map { it.keyId }.filter { it.isNotBlank() }
@@ -82,6 +111,12 @@ class AccordViewModel(
                     PlatformLogger.w(TAG, "[refresh] canonical-servers: ${e.message}")
                     emptyList()
                 }
+                _canonicalWithdrawals.value = try {
+                    apiClient.listCanonicalWithdrawals().withdrawals
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] canonical-withdrawals: ${e.message}")
+                    emptyList()
+                }
                 _error.value = null
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[refresh] ${e.message}")
@@ -93,18 +128,29 @@ class AccordViewModel(
     }
 
     /**
-     * Concur on a pending invocation as the local holder. Requires the owner
-     * session (sign in first). The node signs with the resolved local holder
-     * signer; the app sends no crypto.
+     * Concur on a pending invocation as an accord holder. Requires the owner session
+     * (sign in first) AND the holder's hardware-scrub inputs ([holderKeyId] +
+     * [mldsaUsbPath] + [userPin]) — the node RE-OPENS the holder's YubiKey +
+     * USB-wrapped ML-DSA and produces the cosignature over the pending invocation's
+     * bytes; the app holds no keys. Touch-gated (a YubiKey touch is consent).
      */
-    fun concur(invocationKind: String, invocationId: String) {
+    fun concur(
+        invocationKind: String,
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
         if (_busy.value) return
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
         _busy.value = true
         _error.value = null
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.concurInvocation(invocationKind, invocationId)
+                val res = apiClient.concurInvocation(
+                    invocationKind, invocationId, holderKeyId, mldsaUsbPath, userPin,
+                )
                 _notice.value = if (res.quorumMet) {
                     "Concurred — quorum met (${res.validSigners.size} signers)."
                 } else {
@@ -113,12 +159,118 @@ class AccordViewModel(
                 refresh()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[concur] ${e.message}")
-                val msg = e.message.orEmpty()
-                _error.value = when {
-                    msg.contains("401") -> "Sign in as the owner first, then concur."
-                    msg.contains("403") -> "This node isn't a current accord holder."
-                    else -> "Couldn't concur: ${e.message}"
+                _error.value = holderActionError(e, "concur")
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * The invocation write actions (concur / drill / announce) sign on the holder's
+     * YubiKey via the node — every one needs the holder key + USB folder + PIN. Guard
+     * up front with a clear message rather than letting the node 400/501.
+     */
+    private fun requireHolderInputs(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ): Boolean {
+        if (holderKeyId.isBlank() || mldsaUsbPath.isBlank() || userPin.isNullOrBlank()) {
+            _error.value =
+                "Choose your accord holder key, USB folder, and PIN in “Sign as holder” first."
+            return false
+        }
+        return true
+    }
+
+    /** Shared holder-action error mapping (owner-gate, missing pkcs11, YubiKey open). */
+    private fun holderActionError(e: Exception, verb: String): String {
+        val msg = e.message.orEmpty()
+        return when {
+            msg.contains("401") -> "Sign in as the owner first, then $verb."
+            msg.contains("403") -> "This node isn't a current accord holder."
+            msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                "This build lacks pkcs11 — signing needs the YubiKey."
+            else -> "Couldn't $verb: ${e.message}"
+        }
+    }
+
+    /**
+     * **Initiate a drill** — a NON-BINDING rehearsal of the 2-of-3 kill-switch
+     * delivery path (holder action; requires the owner session). The node builds +
+     * signs the drill with its resolved local holder signer (mirrors [concur]); the
+     * app sends no crypto. On reaching quorum it surfaces in the drills list; it
+     * NEVER halts. [invocationId] uniquely names this drill.
+     */
+    fun initiateDrill(
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
+        if (_busy.value) return
+        val id = invocationId.trim()
+        if (id.isBlank()) {
+            _error.value = "Enter a drill id first."
+            return
+        }
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.initiateDrill(id, holderKeyId, mldsaUsbPath, userPin)
+                _notice.value = if (res.quorumMet) {
+                    "Drill $id complete — quorum met (${res.validSigners.size} signers)."
+                } else {
+                    "Drill $id opened — ${res.validSigners.size} signer(s) so far. Concur to reach quorum."
                 }
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[initiateDrill] ${e.message}")
+                _error.value = holderActionError(e, "run a drill")
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Post an announce** — a single-holder `notify` message (threshold 1; holder
+     * action, owner session). The node signs the notify (binding [message] to the
+     * payload hash) with its resolved local holder signer, gossips it, and surfaces
+     * it in the announcements list. It NEVER halts.
+     */
+    fun initiateAnnounce(
+        message: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+    ) {
+        if (_busy.value) return
+        val text = message.trim()
+        if (text.isBlank()) {
+            _error.value = "Enter an announcement message first."
+            return
+        }
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.initiateAnnounce(text, holderKeyId, mldsaUsbPath, userPin)
+                _notice.value = if (res.posted) {
+                    "Announcement posted to the mesh."
+                } else {
+                    "Announcement submitted."
+                }
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[initiateAnnounce] ${e.message}")
+                _error.value = holderActionError(e, "announce")
             } finally {
                 _busy.value = false
             }
@@ -234,6 +386,30 @@ class AccordViewModel(
     private val _canonicalResolvedTarget = MutableStateFlow<ResolvedTarget?>(null)
     val canonicalResolvedTarget: StateFlow<ResolvedTarget?> = _canonicalResolvedTarget.asStateFlow()
 
+    /** The withdrawn / superseded canonical servers audit log. */
+    private val _canonicalWithdrawals =
+        MutableStateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto>>(emptyList())
+    val canonicalWithdrawals:
+        StateFlow<List<ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto>> =
+        _canonicalWithdrawals.asStateFlow()
+
+    /**
+     * A canonical row the operator picked to **replace / update**: the form is
+     * pre-filled with this record's key_id + both pubkeys + current IP so the
+     * operator edits the IP and re-submits [addCanonicalServer] (a 1-of-N re-mint
+     * that embeds the updated IP in a fresh scrubbed record). Consumed + cleared by
+     * the screen (which seeds its local form state + scrolls to the add form).
+     */
+    data class CanonicalReplaceSeed(
+        val keyId: String,
+        val ed25519: String,
+        val mldsa: String,
+        val ip: String,
+    )
+
+    private val _canonicalReplaceTarget = MutableStateFlow<CanonicalReplaceSeed?>(null)
+    val canonicalReplaceTarget: StateFlow<CanonicalReplaceSeed?> = _canonicalReplaceTarget.asStateFlow()
+
     /** Reload the canonical-servers roster (also refreshed on [refresh]). */
     fun loadCanonicalServers() {
         viewModelScope.launch {
@@ -241,6 +417,70 @@ class AccordViewModel(
                 _canonicalServers.value = apiClient.listCanonicalServers().servers
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[loadCanonicalServers] ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * **Select an existing canonical server to replace / update.** Seeds the
+     * add-canonical form with the row's key_id + both pubkeys (as the resolved
+     * target — no owned-node re-pick needed) and its current IP, so the operator
+     * only edits the IP and re-submits. A row missing its ML-DSA half can't be
+     * replaced in-app (re-mint it from the owned-nodes picker instead).
+     */
+    fun selectCanonicalForReplace(
+        server: ai.ciris.mobile.shared.models.federation.CanonicalServerDto,
+    ) {
+        val ml = server.pubkeyMlDsa65Base64
+        if (ml.isNullOrBlank()) {
+            _error.value =
+                "${server.keyId} has no ML-DSA key in its record — re-mint it from the owned-nodes picker instead."
+            return
+        }
+        val ip = server.transportHints?.firstOrNull { it.kind == "ip" }?.destination.orEmpty()
+        _canonicalResolvedTarget.value = ResolvedTarget(server.keyId, server.pubkeyEd25519Base64, ml)
+        _canonicalReplaceTarget.value = CanonicalReplaceSeed(server.keyId, server.pubkeyEd25519Base64, ml, ip)
+    }
+
+    /** Clear the replace seed once the screen has consumed it into its form. */
+    fun clearCanonicalReplaceSeed() {
+        _canonicalReplaceTarget.value = null
+    }
+
+    /**
+     * **Withdraw a canonical server** (CIRISServer#164). DESTRUCTIVE — needs a
+     * 2-of-3 accord proposal (a second/third holder must co-sign); a lone holder
+     * cannot complete it. [proposalDigest] names the authorizing accord proposal.
+     */
+    fun withdrawCanonical(keyId: String, proposalDigest: String) {
+        if (_busy.value) return
+        if (proposalDigest.isBlank()) {
+            _error.value = "Enter the 2-of-3 accord proposal digest first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.withdrawCanonical(keyId, proposalDigest)
+                _notice.value = if (res.withdrawn) {
+                    "Withdrew $keyId from the trust root."
+                } else {
+                    "Withdrawal recorded for $keyId — awaiting the 2-of-3 quorum."
+                }
+                refresh()
+                loadCanonicalServers()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[withdrawCanonical] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    else -> "Couldn't withdraw the canonical server: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
             }
         }
     }

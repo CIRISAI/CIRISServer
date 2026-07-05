@@ -87,6 +87,7 @@ async fn register_node_self(engine: &Engine) {
         roles: Vec::new(),
         attestation_evidence: None,
         consent_role: None,
+        additional_scrubs: Vec::new(),
     };
     engine
         .register_federation_key(SignedKeyRecord { record })
@@ -202,6 +203,7 @@ impl Holder {
             roles: Vec::new(),
             attestation_evidence: Some(Self::android_attestation_evidence()),
             consent_role: None,
+            additional_scrubs: Vec::new(),
         };
         SignedKeyRecord { record }
     }
@@ -1342,6 +1344,7 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
             roles: Vec::new(),
             attestation_evidence: None,
             consent_role: None,
+            additional_scrubs: Vec::new(),
         };
         engine
             .register_federation_key(SignedKeyRecord { record })
@@ -1411,4 +1414,385 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
         403,
         "a non-holder signature must not satisfy the quorum"
     );
+}
+
+// ─── Drill / announce surfacing + halt-status (CIRISServer#41 §9.2.1) ─────────
+
+/// A notify (announce) invocation whose `payload_sha256` binds `message`.
+fn notify_invocation(id: &str, message: &str) -> Invocation {
+    Invocation {
+        invocation_kind: InvocationKind::Notify,
+        invocation_id: id.to_string(),
+        resumes_halt_id: None,
+        nonce: BASE64.encode([5u8; 32]),
+        asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
+        valid_until: "2030-01-01T00:00:00.000Z".to_string(),
+        payload_sha256: hex::encode(Sha256::digest(message.as_bytes())),
+    }
+}
+
+#[tokio::test]
+async fn complete_drill_via_message_is_recorded_in_events_and_never_latches() {
+    // A VALID, quorum-COMPLETE drill arriving via gossip (/v1/accord/message) is
+    // RECORDED as a surfaced non-binding event and NEVER latches a halt.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "drill-events").await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    let inv = drill_invocation("drill-rec-001");
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let sigs = vec![
+        cosign_typed(&holders[0], &inv).await,
+        cosign_typed(&holders[1], &inv).await,
+    ];
+    let obj = invocation_object(&roster, &inv, &sigs);
+
+    let body = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver drill")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(body["halted"], false, "a DRILL must NOT halt; got {body}");
+    assert!(
+        !home.join("HUMANITY_ACCORD_HALT").exists(),
+        "a drill must not write a halt latch"
+    );
+
+    // /v1/accord/events surfaces the completed drill with its signers.
+    let events = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let drills = events["drills"].as_array().expect("drills[]");
+    assert_eq!(
+        drills.len(),
+        1,
+        "the completed drill must be surfaced; got {events}"
+    );
+    assert_eq!(drills[0]["invocation_id"], "drill-rec-001");
+    assert_eq!(drills[0]["event_type"], "drill");
+    assert_eq!(drills[0]["quorum_threshold"], 2);
+    let signers = drills[0]["signers"].as_array().unwrap();
+    assert_eq!(
+        signers.len(),
+        2,
+        "both cosigning seats recorded; got {events}"
+    );
+    assert!(events["announcements"].as_array().unwrap().is_empty());
+
+    // Re-delivering the SAME drill is idempotent — still exactly one event.
+    let _ = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("re-deliver drill");
+    let events2 = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events 2")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        events2["drills"].as_array().unwrap().len(),
+        1,
+        "re-gossip of a drill must be idempotent; got {events2}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn announce_records_on_a_valid_single_holder_signature() {
+    // An announce (notify, threshold 1) is complete on arrival: one valid holder
+    // signature records a surfaced announcement carrying the bound message.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    let message = "mesh maintenance window 02:00-03:00 UTC";
+    let inv = notify_invocation("notify-001", message);
+    let sig = holders[0].cosign(&inv).await;
+    let posted = client
+        .post(format!("{base}/v1/accord/announce"))
+        .json(&serde_json::json!({ "invocation": inv, "signature": sig, "message": message }))
+        .send()
+        .await
+        .expect("announce");
+    assert_eq!(
+        posted.status(),
+        200,
+        "a valid single-holder announce must post: {}",
+        posted.text().await.unwrap_or_default()
+    );
+
+    let events = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let announcements = events["announcements"].as_array().expect("announcements[]");
+    assert_eq!(
+        announcements.len(),
+        1,
+        "the announce must be surfaced; got {events}"
+    );
+    assert_eq!(announcements[0]["invocation_id"], "notify-001");
+    assert_eq!(announcements[0]["event_type"], "announce");
+    assert_eq!(announcements[0]["quorum_threshold"], 1);
+    assert_eq!(announcements[0]["message"], message);
+    assert_eq!(
+        announcements[0]["signers"].as_array().unwrap().len(),
+        1,
+        "one signing holder recorded; got {events}"
+    );
+    assert!(events["drills"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn announce_with_unbound_message_is_rejected() {
+    // The message MUST bind to the signed payload_sha256 — a mismatched plaintext is
+    // a malformed announce (400), never recorded.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    let inv = notify_invocation("notify-bad", "the SIGNED text");
+    let sig = holders[0].cosign(&inv).await;
+    let resp = client
+        .post(format!("{base}/v1/accord/announce"))
+        .json(&serde_json::json!({
+            "invocation": inv,
+            "signature": sig,
+            "message": "a DIFFERENT, tampered text",
+        }))
+        .send()
+        .await
+        .expect("announce unbound");
+    assert_eq!(resp.status(), 400, "an unbound message must be rejected");
+    let events = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        events["announcements"].as_array().unwrap().is_empty(),
+        "a rejected announce must not be recorded; got {events}"
+    );
+}
+
+#[tokio::test]
+async fn sub_quorum_drill_is_not_recorded() {
+    // A drill opened with a single (sub-quorum) cosignature only ACCUMULATES — it is
+    // NOT surfaced as a completed event until it reaches the family quorum.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    let inv = drill_invocation("drill-sub-001");
+    let sig = holders[0].cosign(&inv).await;
+    let opened = client
+        .post(format!("{base}/v1/accord/drill"))
+        .json(&serde_json::json!({ "invocation": inv, "signature": sig }))
+        .send()
+        .await
+        .expect("open drill");
+    assert_eq!(opened.status(), 200, "a 1-of-3 drill opens (sub-quorum)");
+    let opened_body = opened.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(
+        opened_body["quorum_met"], false,
+        "1-of-3 is sub-quorum; got {opened_body}"
+    );
+
+    let events = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        events["drills"].as_array().unwrap().is_empty(),
+        "a sub-quorum drill must NOT be recorded; got {events}"
+    );
+
+    // A concurring second seat reaches quorum → NOW the drill is surfaced.
+    let sig2 = holders[1].cosign(&inv).await;
+    let concur = client
+        .post(format!("{base}/v1/accord/invocation/concur"))
+        .json(&serde_json::json!({
+            "invocation_kind": "drill",
+            "invocation_id": "drill-sub-001",
+            "signature": sig2,
+        }))
+        .send()
+        .await
+        .expect("concur drill");
+    assert_eq!(concur.status(), 200, "concur advances the drill");
+    let events2 = client
+        .get(format!("{base}/v1/accord/events"))
+        .send()
+        .await
+        .expect("list events 2")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        events2["drills"].as_array().unwrap().len(),
+        1,
+        "reaching quorum via concur surfaces the drill; got {events2}"
+    );
+}
+
+#[tokio::test]
+async fn drill_endpoint_rejects_a_non_drill_kind() {
+    // The drill endpoint pins the kind: a CONSTITUTIONAL invocation must be refused
+    // (a halt can never be opened through the non-binding drill surface).
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    let inv = constitutional_invocation("not-a-drill");
+    let sig = holders[0].cosign(&inv).await;
+    let resp = client
+        .post(format!("{base}/v1/accord/drill"))
+        .json(&serde_json::json!({ "invocation": inv, "signature": sig }))
+        .send()
+        .await
+        .expect("drill wrong-kind");
+    assert_eq!(
+        resp.status(),
+        400,
+        "the drill endpoint must reject a non-drill kind"
+    );
+}
+
+#[tokio::test]
+async fn halt_status_reflects_the_disk_latch() {
+    // GET /v1/accord/halt-status reads the disk latch: false before a halt, true
+    // (with the record) after a 2-of-3 CONSTITUTIONAL halt.
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "haltstatus").await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    // Before any halt: not halted.
+    let before = client
+        .get(format!("{base}/v1/accord/halt-status"))
+        .send()
+        .await
+        .expect("halt-status before")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(before["halted"], false, "not halted before; got {before}");
+    assert!(before["record"].is_null(), "no record before; got {before}");
+
+    // Latch a real 2-of-3 CONSTITUTIONAL halt.
+    let inv = constitutional_invocation("halt-status-001");
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let sigs = vec![
+        cosign_typed(&holders[0], &inv).await,
+        cosign_typed(&holders[1], &inv).await,
+    ];
+    let obj = invocation_object(&roster, &inv, &sigs);
+    let halted = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver halt")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        halted["halted"], true,
+        "2-of-3 CONSTITUTIONAL halts; got {halted}"
+    );
+
+    // After the halt: halt-status reflects the latch + its record.
+    let after = client
+        .get(format!("{base}/v1/accord/halt-status"))
+        .send()
+        .await
+        .expect("halt-status after")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(after["halted"], true, "halted after; got {after}");
+    assert_eq!(
+        after["record"]["invocation_id"], "halt-status-001",
+        "the halt record names the invocation; got {after}"
+    );
+    let _ = std::fs::remove_file(home.join("HUMANITY_ACCORD_HALT"));
+    let _ = std::fs::remove_dir_all(&home);
 }

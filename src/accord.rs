@@ -81,10 +81,11 @@
 //! — the holder selects the ML-DSA USB path on an already-FIPS-approved key) + the
 //! **operational genesis ceremony RUN** (mint the canonical holders on real
 //! YubiKeys, register them with their custody attestations, assemble the family).
-//! The canonical mesh stays on 0.5.X — 0.6 (+registry) bakes
-//! `CANONICAL_BOOTSTRAP_PEERS` and bootstraps the mesh, which MUST NOT happen
-//! before the kill-switch is enforceable AND the accord keys are under genuine
-//! 2-factor distributed-human custody (now gate-enforced).
+//! The canonical mesh grows by baking accord-scrubbed canonical records (the seed
+//! op) — each carrying its trust (the `canonical` role) AND its reachability (the
+//! signed envelope transport hint, CIRISPersist#381) — which MUST NOT happen before
+//! the kill-switch is enforceable AND the accord keys are under genuine 2-factor
+//! distributed-human custody (now gate-enforced).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -134,6 +135,12 @@ const ACCORD_THRESHOLD: usize = 2;
 /// overflows (re-gossip is idempotent — a duplicate halt just re-latches).
 const MAX_PENDING_INVOCATIONS: usize = 4096;
 const MAX_SEEN_INVOCATIONS: usize = 16_384;
+
+/// Backstop cap on the in-memory surfaced-events log (completed drills +
+/// announcements). Oldest entries are dropped on overflow — the log is an operator
+/// convenience surface, NOT a durable audit ledger (the durable artifact is each
+/// holder-cosigned invocation object, re-verifiable against `federation_keys`).
+const MAX_ACCORD_EVENTS: usize = 1024;
 
 /// Per-peer replication request budget — a hung/stalling peer MUST NOT be able to
 /// block the local halt from latching. With the concurrent fan-out the whole
@@ -205,6 +212,68 @@ struct AccordState {
     http: reqwest::Client,
     /// Disk-latch + peer + process-exit wiring for the operational halt.
     halt: AccordHalt,
+    /// Surfaced NON-BINDING events (completed drills + announcements), oldest-first.
+    /// A record is appended the moment a VALID, quorum-COMPLETE drill or a valid
+    /// single-holder announce is observed — whether initiated locally or received
+    /// via gossip. De-duplicated by `(event_type, invocation_id)` so re-gossip is
+    /// idempotent; bounded by [`MAX_ACCORD_EVENTS`] (oldest dropped). Ephemeral, like
+    /// [`AccordState::pending`] — a node restart drops it; the durable artifacts are
+    /// the holder-cosigned objects themselves.
+    events: Arc<Mutex<Vec<AccordEvent>>>,
+}
+
+/// A surfaced, NON-BINDING accord event (CC 4.2.1 / §9.2.1) — a completed **drill**
+/// (a rehearsed exercise of the 2-of-3 kill-switch delivery path) or an
+/// **announce** (a single-holder `notify`). Recorded the instant it is observed
+/// quorum-COMPLETE (a sub-quorum invocation is NEVER recorded here — it only
+/// accumulates cosignatures in [`AccordState::pending`]). Neither a drill nor an
+/// announce ever latches a halt (only a 2-of-3 `CONSTITUTIONAL` does).
+#[derive(Clone, Debug, Serialize)]
+struct AccordEvent {
+    /// `"drill"` or `"announce"`.
+    event_type: String,
+    /// The invocation id (`drill_id` / `notify_id`).
+    invocation_id: String,
+    /// RFC-3339 instant THIS node recorded the completed event.
+    recorded_at: String,
+    /// The registered holder `key_id`s whose cosignatures were counted — the
+    /// quorum-meeting seats for a drill, the single signer for an announce.
+    signers: Vec<String>,
+    /// The quorum threshold the event met (drill: the family M; announce: 1).
+    quorum_threshold: usize,
+    /// **Announce ONLY** — the free-text message, surfaced iff it BINDS to the
+    /// signed `payload_sha256` (`sha256(message) == payload_sha256`); an absent or
+    /// unbound message is `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl AccordState {
+    /// Record a completed non-binding event, **idempotently** (re-gossip of the same
+    /// `(event_type, invocation_id)` is a no-op) and **bounded** (oldest dropped on
+    /// overflow). Returns whether it was newly recorded (for logging).
+    fn record_event(&self, event: AccordEvent) -> bool {
+        let mut events = self.events.lock().expect("accord events lock");
+        if events
+            .iter()
+            .any(|e| e.event_type == event.event_type && e.invocation_id == event.invocation_id)
+        {
+            return false;
+        }
+        if events.len() >= MAX_ACCORD_EVENTS {
+            let overflow = events.len() + 1 - MAX_ACCORD_EVENTS;
+            events.drain(0..overflow);
+        }
+        events.push(event);
+        true
+    }
+}
+
+/// Lowercase-hex SHA-256 — the §0.6 payload-hash form an announce's `message` binds
+/// to (`payload_sha256`), so a tampered plaintext fails the binding and is dropped.
+fn payload_hash_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
@@ -735,7 +804,7 @@ async fn ensure_accord_family_anchor(
             rt.block_on(async move {
                 let anchor = HybridSigningIdentity::generate(HUMANITY_ACCORD_FAMILY_KEY_ID)
                     .map_err(|e| e.to_string())?;
-                let v_rec = produce_self_key_record(&anchor, "family", &now_s)
+                let v_rec = produce_self_key_record(&anchor, "family", &now_s, &[])
                     .await
                     .map_err(|e| e.to_string())?;
                 serde_json::to_value(&v_rec).map_err(|e| e.to_string())
@@ -1026,41 +1095,268 @@ async fn get_family(State(st): State<AccordState>) -> Response {
 // ─── Invocation concurrence (the multi-party path to the 2/3 kill-switch) ──────
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
 struct CreateInvocationRequest {
     invocation: Invocation,
-    /// The initiating holder's cosignature (produced on the holder's device).
-    signature: ThresholdSignature,
+    /// The initiating holder's cosignature — supplied by a holder app that already
+    /// holds a key. OPTIONAL: when absent, the hardware-scrub inputs below drive the
+    /// node to open the holder's YubiKey + USB-wrapped ML-DSA and PRODUCE it.
+    #[serde(default)]
+    signature: Option<ThresholdSignature>,
+    /// Hardware-sign path (mirrors admit-node): the holder's federation `key_id`.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
+    #[serde(default)]
+    mldsa_usb_path: Option<String>,
+    /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs (PIN, slot, …).
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+}
+
+/// Resolve the cosignature for an accord invocation op: use a client-submitted
+/// `signature` if present (a holder app that already holds a key), else HARDWARE-SIGN
+/// on the node from the holder's YubiKey + USB-wrapped ML-DSA (the same custody path
+/// admit-node / add-canonical use). The produced signature's `member_id` is the
+/// holder's federation `key_id` — exactly the roster `member_id` the family / registered
+/// -holder verification (`verify_threshold_signatures`) matches against.
+async fn resolve_holder_signature(
+    invocation: &Invocation,
+    submitted: Option<ThresholdSignature>,
+    holder_key_id: Option<&str>,
+    usb_path: Option<&str>,
+    pkcs11: &crate::accord_provision::ProvisionPkcs11,
+) -> Result<ThresholdSignature, Response> {
+    if let Some(sig) = submitted {
+        return Ok(sig);
+    }
+    let holder = holder_key_id.map(str::trim).filter(|s| !s.is_empty());
+    let usb = usb_path.map(str::trim).filter(|s| !s.is_empty());
+    let (Some(holder), Some(usb)) = (holder, usb) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "provide either a `signature` (from a holder app) or `key_id` + `mldsa_usb_path` to \
+             hardware-sign the invocation on this node",
+        ));
+    };
+    hardware_sign_invocation(holder, usb, pkcs11, invocation).await
+}
+
+/// Produce a holder [`ThresholdSignature`] over an invocation's §9.2.1 canonical
+/// bytes by opening the holder's YubiKey (slot-9c Ed25519) + the USB-wrapped
+/// ML-DSA-65 as a `HardwareRootedIdentity` and calling its bound signer. The
+/// `member_id` is the identity's federation `key_id` (see [`co_sign_accord_family`]
+/// for the same derivation). `pkcs11`-gated.
+#[cfg(feature = "pkcs11")]
+async fn hardware_sign_invocation(
+    holder_key_id: &str,
+    usb_path: &str,
+    pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    invocation: &Invocation,
+) -> Result<ThresholdSignature, Response> {
+    use ciris_verify_core::self_at_login::SelfSigner;
+    let identity = crate::accord_provision::open_holder_identity(holder_key_id, usb_path, pkcs11)
+        .await
+        .map_err(|(code, msg)| err(code, &msg))?;
+    // Ed25519 over canonical_bytes; ML-DSA-65 over canonical_bytes ‖ ed_sig — the same
+    // bound construction `sign_bound` produces for the family-cosign path.
+    let (ed_b64, pqc_b64) = identity
+        .sign_bound(&invocation.canonical_bytes())
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("hardware-sign the invocation: {e}"),
+            )
+        })?;
+    Ok(ThresholdSignature {
+        member_id: identity.key_id().to_string(),
+        ed25519_signature_base64: ed_b64,
+        mldsa65_signature_base64: Some(pqc_b64),
+    })
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn hardware_sign_invocation(
+    _holder_key_id: &str,
+    _usb_path: &str,
+    _pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    _invocation: &Invocation,
+) -> Result<ThresholdSignature, Response> {
+    Err(err(
+        StatusCode::NOT_IMPLEMENTED,
+        "hardware-signing an accord invocation needs the `pkcs11` feature (the holder's YubiKey + \
+         USB-wrapped ML-DSA signer). Supply a pre-produced `signature`, or rebuild with \
+         `--features pkcs11` on a host with the token attached.",
+    ))
+}
+
+/// Synthesize a fresh NON-BINDING invocation (a `drill` rehearsal or a `notify`
+/// announce) the node hardware-signs on the holder's behalf. The app supplies only
+/// the id / message — never a signed envelope (it holds no keys and fabricates no
+/// crypto), so the node mints the CSPRNG nonce, the §0.5 timestamps (a 1-hour
+/// validity window), and the §0.6 `payload_sha256` (binding the notify's `message`;
+/// the empty payload for a drill). Only ever used for the non-binding kinds — a
+/// `CONSTITUTIONAL` halt is never synthesized (its full invocation is caller-supplied).
+fn synth_invocation(kind: InvocationKind, invocation_id: &str, payload: &[u8]) -> Invocation {
+    use base64::Engine as _;
+    let mut nonce = [0u8; 32];
+    // Best-effort CSPRNG; a drill / notify is non-binding, so a fill fault (never
+    // observed on a supported target) degrades to a zero nonce rather than failing.
+    let _ = getrandom::fill(&mut nonce);
+    let now = chrono::Utc::now();
+    Invocation {
+        invocation_kind: kind,
+        invocation_id: invocation_id.to_string(),
+        resumes_halt_id: None,
+        nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce),
+        asserted_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        valid_until: (now + chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        payload_sha256: payload_hash_hex(payload),
+    }
 }
 
 /// `POST /v1/accord/invocation` — open a pending invocation with the initiating
 /// holder's cosignature. The roster is the registered accord-holder set. Returns
-/// the invocation object + its (sub-quorum) status.
+/// the invocation object + its (sub-quorum) status. The cosignature is client-
+/// submitted OR hardware-signed on the node (see [`resolve_holder_signature`]).
 async fn create_invocation(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
     let req: CreateInvocationRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
+    open_invocation(
+        &st,
+        req.invocation,
+        req.signature,
+        req.key_id,
+        req.mldsa_usb_path,
+        &req.pkcs11,
+    )
+    .await
+}
+
+/// `POST /v1/accord/drill` request. Supply EITHER a full `invocation` (holder-app
+/// path) OR just an `invocation_id` for the node to synthesize the non-binding drill.
+/// The cosignature is client-submitted OR hardware-signed on the node.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct DrillRequest {
+    #[serde(default)]
+    invocation: Option<Invocation>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+    #[serde(default)]
+    signature: Option<ThresholdSignature>,
+    /// Hardware-sign path (mirrors admit-node): the holder's federation `key_id`.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
+    #[serde(default)]
+    mldsa_usb_path: Option<String>,
+    /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+}
+
+/// `POST /v1/accord/drill` — open a **DRILL** invocation (a non-binding rehearsal of
+/// the 2-of-3 kill-switch delivery path). Identical to [`create_invocation`] but the
+/// kind is pinned to `drill`; it accumulates cosignatures toward the family quorum
+/// via `/v1/accord/invocation/concur` and, on reaching it (locally OR via inbound
+/// gossip), is RECORDED as a surfaced drill event ([`AccordEvent`]) — it NEVER
+/// latches a halt (that is exclusively the 2-of-3 `CONSTITUTIONAL` path).
+async fn initiate_drill(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: DrillRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    // A full drill invocation (holder-app path) takes precedence; otherwise the node
+    // synthesizes the non-binding drill from just the id (the app holds no keys).
+    let invocation = match req.invocation {
+        Some(inv) => {
+            if inv.invocation_kind != InvocationKind::Drill {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "the drill endpoint requires invocation_kind \"drill\"",
+                );
+            }
+            inv
+        }
+        None => {
+            let id = req
+                .invocation_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let Some(id) = id else {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "provide a full drill `invocation`, or an `invocation_id` to synthesize one",
+                );
+            };
+            synth_invocation(InvocationKind::Drill, id, b"")
+        }
+    };
+    open_invocation(
+        &st,
+        invocation,
+        req.signature,
+        req.key_id,
+        req.mldsa_usb_path,
+        &req.pkcs11,
+    )
+    .await
+}
+
+/// Shared opener for [`create_invocation`] / [`initiate_drill`]: resolve the
+/// initiating cosignature (client-submitted OR hardware-signed on the node), build the
+/// invocation object over the registered roster, replicate + maybe-halt (which
+/// authenticates the opener's signature AND surfaces a quorum-complete drill), then
+/// persist the pending object iff authentic. An unauthenticated opener cannot grow the
+/// pending table.
+async fn open_invocation(
+    st: &AccordState,
+    invocation: Invocation,
+    submitted: Option<ThresholdSignature>,
+    holder_key_id: Option<String>,
+    usb_path: Option<String>,
+    pkcs11: &crate::accord_provision::ProvisionPkcs11,
+) -> Response {
     let roster = match accord_roster(&st.engine).await {
         Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // The initiating cosignature: client-submitted OR hardware-signed on the node.
+    let signature = match resolve_holder_signature(
+        &invocation,
+        submitted,
+        holder_key_id.as_deref(),
+        usb_path.as_deref(),
+        pkcs11,
+    )
+    .await
+    {
+        Ok(s) => s,
         Err(resp) => return resp,
     };
     let now = chrono::Utc::now().to_rfc3339();
     let obj = build_accord_invocation_object(
         HUMANITY_ACCORD_FAMILY_KEY_ID,
         &roster,
-        &req.invocation,
-        &[req.signature],
+        &invocation,
+        &[signature],
         &now,
     );
     let key = (
-        req.invocation.invocation_kind.as_str().to_string(),
-        req.invocation.invocation_id.clone(),
+        invocation.invocation_kind.as_str().to_string(),
+        invocation.invocation_id.clone(),
     );
     // Replicate the new invocation to peers (concurrence-seeking gossip) + honor a
     // halt if it already meets 2/3. This ALSO tells us if the opener's signature is
     // an authentic registered-holder one — we only persist authentic invocations
     // (an unauthenticated opener cannot grow the pending table).
-    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+    let outcome = match replicate_and_maybe_halt(st, &obj).await {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -1084,12 +1380,231 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
     invocation_response(&obj)
 }
 
+// ─── Announce (single-holder notify) + halt-status + surfaced events ──────────
+
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct AnnounceRequest {
+    /// A full `notify`-kind invocation (threshold 1 — holder-app path). OPTIONAL:
+    /// absent it, the node synthesizes the notify from `message` (+ `invocation_id`).
+    #[serde(default)]
+    invocation: Option<Invocation>,
+    /// The synthesized notify's id (only when `invocation` is absent). Defaults to a
+    /// fresh `notify-<uuid>`.
+    #[serde(default)]
+    invocation_id: Option<String>,
+    /// The announcing holder's cosignature over the invocation's canonical bytes —
+    /// OPTIONAL: absent it, the hardware-scrub inputs below produce it on the node.
+    #[serde(default)]
+    signature: Option<ThresholdSignature>,
+    /// Hardware-sign path (mirrors admit-node): the holder's federation `key_id`.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
+    #[serde(default)]
+    mldsa_usb_path: Option<String>,
+    /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+    /// The free-text announcement, cryptographically BOUND: `sha256(message)` MUST
+    /// equal `invocation.payload_sha256`, so the holder's signature covers the text.
+    /// Optional — an announce may carry only the (hashed) payload commitment.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// `POST /v1/accord/announce` — post a single-holder **announce** (an
+/// `InvocationKind::Notify` message, CC 4.2.1 §9.2.1). Verifies the ONE holder
+/// signature (threshold 1 — a valid signed notify is complete on arrival), gossips
+/// it to every announced peer, and RECORDS it as a surfaced announcement. Never
+/// halts. The `message` (if present) is bound to the signed `payload_sha256` and
+/// rides the gossiped object so peers surface the same verbatim, re-bound, text.
+async fn initiate_announce(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: AnnounceRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    // A full notify invocation (holder-app path) takes precedence; otherwise the node
+    // synthesizes it from the message (the app holds no keys), so `payload_sha256`
+    // binds `sha256(message)` by construction.
+    let invocation = match req.invocation {
+        Some(inv) => {
+            if inv.invocation_kind != InvocationKind::Notify {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "the announce endpoint requires invocation_kind \"notify\"",
+                );
+            }
+            inv
+        }
+        None => {
+            let id = req
+                .invocation_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map_or_else(
+                    || format!("notify-{}", uuid::Uuid::new_v4()),
+                    str::to_string,
+                );
+            synth_invocation(
+                InvocationKind::Notify,
+                &id,
+                req.message.as_deref().unwrap_or("").as_bytes(),
+            )
+        }
+    };
+    // Bind the plaintext to the signed payload hash — a mismatched message is a
+    // malformed announce (the holder signed `payload_sha256`, not the plaintext). This
+    // is trivially satisfied on the synthesized path and validates the holder-app one.
+    if let Some(msg) = &req.message {
+        if payload_hash_hex(msg.as_bytes()) != invocation.payload_sha256 {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "message does not match invocation.payload_sha256 (unbound announcement text)",
+            );
+        }
+    }
+    let roster = match accord_roster(&st.engine).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // The announcing cosignature: client-submitted OR hardware-signed on the node.
+    let signature = match resolve_holder_signature(
+        &invocation,
+        req.signature,
+        req.key_id.as_deref(),
+        req.mldsa_usb_path.as_deref(),
+        &req.pkcs11,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut obj = build_accord_invocation_object(
+        HUMANITY_ACCORD_FAMILY_KEY_ID,
+        &roster,
+        &invocation,
+        &[signature],
+        &now,
+    );
+    // Carry the (bound) plaintext alongside the object so peers surface it verbatim;
+    // it rides the gossiped object and re-binds to payload_sha256 on every hop.
+    if let Some(msg) = &req.message {
+        if let Some(map) = obj.body.as_object_mut() {
+            map.insert(
+                "message".to_string(),
+                serde_json::Value::String(msg.clone()),
+            );
+        }
+    }
+    // replicate_and_maybe_halt authenticates the signature, gossips onward, AND (for
+    // a valid single-holder notify) records the surfaced announcement.
+    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    if !outcome.authentic {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "announcement carries no valid registered-holder signature — not posted",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "posted": true,
+            "invocation_id": invocation.invocation_id,
+            "from": outcome.valid_signers,
+            "message": req.message,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/halt-status` — read-only view of the disk halt latch (the
+/// enforceable kill-switch state, [`crate::accord_halt`]). `halted` is derived from
+/// the latch file's PRESENCE (fail-secure: a present-but-unreadable latch still reads
+/// `halted: true`, matching [`crate::accord_halt::check_halt_gate`]); `record` is the
+/// best-effort parsed [`HaltRecord`] (who/when/invocation_id) or `null`. Halt
+/// ENFORCEMENT is unchanged — this endpoint never writes or clears the latch.
+async fn halt_status(State(st): State<AccordState>) -> Response {
+    let Some(home) = &st.halt.home else {
+        // No disk-latch configured (test / no-home context) — never halted.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "halted": false, "record": null })),
+        )
+            .into_response();
+    };
+    let path = crate::accord_halt::halt_latch_path(home);
+    let halted = path.exists();
+    let record: Option<HaltRecord> = if halted {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "halted": halted,
+            "latch_path": path.display().to_string(),
+            "record": record,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/events` — the surfaced NON-BINDING accord events (completed
+/// drills + announcements), split by type and **most-recent-first**. Advisory
+/// operator surface; the authoritative kill-switch remains the 2-of-3 verify path.
+async fn list_events(State(st): State<AccordState>) -> Response {
+    let (drills, announcements) = {
+        let events = st.events.lock().expect("accord events lock");
+        let mut drills = Vec::new();
+        let mut announcements = Vec::new();
+        // Stored oldest-first; reverse for most-recent-first.
+        for e in events.iter().rev() {
+            match e.event_type.as_str() {
+                "drill" => drills.push(e.clone()),
+                "announce" => announcements.push(e.clone()),
+                _ => {}
+            }
+        }
+        (drills, announcements)
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "drills": drills,
+            "announcements": announcements,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
 struct ConcurRequest {
     invocation_kind: String,
     invocation_id: String,
-    /// A concurring holder's cosignature (produced on the holder's device).
-    signature: ThresholdSignature,
+    /// A concurring holder's cosignature — OPTIONAL: absent it, the hardware-scrub
+    /// inputs below produce it on the node over the pending invocation's bytes.
+    #[serde(default)]
+    signature: Option<ThresholdSignature>,
+    /// Hardware-sign path (mirrors admit-node): the holder's federation `key_id`.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
+    #[serde(default)]
+    mldsa_usb_path: Option<String>,
+    /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
 }
 
 /// `POST /v1/accord/invocation/concur` — append a concurring holder's cosignature
@@ -1113,8 +1628,22 @@ async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Byte
         Ok(p) => p,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("parse: {e}")),
     };
+    // The concurring cosignature: client-submitted OR hardware-signed on the node over
+    // THIS pending invocation's canonical bytes.
+    let signature = match resolve_holder_signature(
+        &parsed.invocation,
+        req.signature,
+        req.key_id.as_deref(),
+        req.mldsa_usb_path.as_deref(),
+        &req.pkcs11,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
     let mut signatures = parsed.signatures;
-    signatures.push(req.signature);
+    signatures.push(signature);
     let now = chrono::Utc::now().to_rfc3339();
     let rebuilt = build_accord_invocation_object(
         &parsed.family_key_id,
@@ -1292,6 +1821,59 @@ async fn replicate_and_maybe_halt(
     };
     if !outcome.authentic {
         return Ok(outcome);
+    }
+
+    // ── Surface COMPLETE, NON-BINDING events (drill / announce) — CC 4.2.1 §9.2.1.
+    // The operator's rule: a VALID, quorum-COMPLETE event triggers its surfacing the
+    // moment it is observed (locally-initiated OR inbound via gossip); a SUB-quorum
+    // event only accumulates in `pending` (recorded nowhere). A drill is complete at
+    // the family quorum M and NEVER halts; an announce (`notify`) has threshold 1 — a
+    // single valid holder signature is complete on arrival. Recording is idempotent
+    // ([`AccordState::record_event`] de-dups by id), so re-gossip re-surfaces nothing.
+    if status.invocation_kind == InvocationKind::Drill.as_str() && quorum_met {
+        let newly = st.record_event(AccordEvent {
+            event_type: "drill".to_string(),
+            invocation_id: status.invocation_id.clone(),
+            recorded_at: now.clone(),
+            signers: status.valid_signers.clone(),
+            quorum_threshold: m,
+            message: None,
+        });
+        if newly {
+            tracing::info!(
+                invocation_id = %status.invocation_id,
+                signers = ?status.valid_signers,
+                "accord DRILL surfaced (quorum-complete, NON-BINDING — never halts)"
+            );
+        }
+    } else if status.invocation_kind == InvocationKind::Notify.as_str()
+        && !status.valid_signers.is_empty()
+    {
+        // Threshold 1: a single valid holder cosignature completes an announce. The
+        // free-text message is surfaced ONLY when it BINDS to the signed payload hash
+        // (`sha256(message) == payload_sha256`) — a tampered/unbound plaintext is
+        // dropped to `None` while the (still-authentic) announce is recorded.
+        let message = obj
+            .body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .filter(|m| payload_hash_hex(m.as_bytes()) == parsed.invocation.payload_sha256)
+            .map(str::to_string);
+        let newly = st.record_event(AccordEvent {
+            event_type: "announce".to_string(),
+            invocation_id: status.invocation_id.clone(),
+            recorded_at: now.clone(),
+            signers: status.valid_signers.clone(),
+            quorum_threshold: 1,
+            message,
+        });
+        if newly {
+            tracing::info!(
+                invocation_id = %status.invocation_id,
+                from = ?status.valid_signers,
+                "accord ANNOUNCE surfaced (single-holder notify)"
+            );
+        }
     }
 
     let is_global_halt =
@@ -1846,6 +2428,7 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         halt,
+        events: Arc::new(Mutex::new(Vec::new())),
     };
     Router::new()
         .route("/v1/accord/holder", axum::routing::post(register_holder))
@@ -1855,6 +2438,15 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             axum::routing::post(verify_invocation_handler),
         )
         .route("/v1/accord/message", axum::routing::post(ingest_message))
+        // drill (non-binding rehearsal) + announce (single-holder notify) + the
+        // read-only halt-status + the surfaced non-binding events log
+        .route("/v1/accord/drill", axum::routing::post(initiate_drill))
+        .route(
+            "/v1/accord/announce",
+            axum::routing::post(initiate_announce),
+        )
+        .route("/v1/accord/halt-status", axum::routing::get(halt_status))
+        .route("/v1/accord/events", axum::routing::get(list_events))
         // genesis ceremony
         .route(
             "/v1/accord/genesis/envelope",
@@ -1898,4 +2490,119 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             axum::routing::get(list_invocations),
         )
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal `notify` invocation for the signature-resolver tests.
+    fn sample_invocation() -> Invocation {
+        Invocation {
+            invocation_kind: InvocationKind::Notify,
+            invocation_id: "notify-test-1".to_string(),
+            resumes_halt_id: None,
+            nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            asserted_at: "2026-07-05T00:00:00.000Z".to_string(),
+            valid_until: "2026-07-05T01:00:00.000Z".to_string(),
+            payload_sha256: "0".repeat(64),
+        }
+    }
+
+    fn sample_signature() -> ThresholdSignature {
+        ThresholdSignature {
+            member_id: "accord-holder-1".to_string(),
+            ed25519_signature_base64: "AA".to_string(),
+            mldsa65_signature_base64: Some("BB".to_string()),
+        }
+    }
+
+    /// A client-submitted signature is passed through verbatim (the holder-app
+    /// contract keeps working, feature-independent).
+    #[tokio::test]
+    async fn resolve_prefers_a_submitted_signature() {
+        let inv = sample_invocation();
+        let sig = sample_signature();
+        let out = resolve_holder_signature(
+            &inv,
+            Some(sig.clone()),
+            None,
+            None,
+            &crate::accord_provision::ProvisionPkcs11::default(),
+        )
+        .await
+        .expect("a submitted signature is returned verbatim");
+        assert_eq!(out.member_id, sig.member_id);
+        assert_eq!(out.ed25519_signature_base64, sig.ed25519_signature_base64);
+    }
+
+    /// Neither a signature NOR the hardware-scrub inputs → a plain 400 (before any
+    /// token open), so a caller that forgets both fails loudly.
+    #[tokio::test]
+    async fn resolve_rejects_when_no_signature_and_no_hardware_inputs() {
+        let inv = sample_invocation();
+        let resp = resolve_holder_signature(
+            &inv,
+            None,
+            None,
+            None,
+            &crate::accord_provision::ProvisionPkcs11::default(),
+        )
+        .await
+        .expect_err("no signature + no hardware inputs must be rejected");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Blank hardware inputs are treated as absent (trimmed-empty) → 400, not a
+    /// half-open hardware attempt.
+    #[tokio::test]
+    async fn resolve_rejects_blank_hardware_inputs() {
+        let inv = sample_invocation();
+        let resp = resolve_holder_signature(
+            &inv,
+            None,
+            Some("   "),
+            Some(""),
+            &crate::accord_provision::ProvisionPkcs11::default(),
+        )
+        .await
+        .expect_err("blank holder/usb inputs must be rejected");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A synthesized notify binds its `payload_sha256` to `sha256(message)` — the
+    /// exact equality `initiate_announce` re-checks, so the node-built envelope always
+    /// passes the message-binding gate. A drill synthesizes with the empty payload.
+    #[test]
+    fn synth_invocation_binds_the_notify_payload() {
+        let notify = synth_invocation(InvocationKind::Notify, "notify-x", b"hello mesh");
+        assert_eq!(notify.invocation_kind, InvocationKind::Notify);
+        assert_eq!(notify.payload_sha256, payload_hash_hex(b"hello mesh"));
+        assert!(notify.resumes_halt_id.is_none());
+        // The nonce is base64url(32 bytes) and the window is non-empty + parseable.
+        assert!(!notify.nonce.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&notify.valid_until).is_ok());
+
+        let drill = synth_invocation(InvocationKind::Drill, "drill-x", b"");
+        assert_eq!(drill.invocation_kind, InvocationKind::Drill);
+        assert_eq!(drill.payload_sha256, payload_hash_hex(b""));
+    }
+
+    /// Without the `pkcs11` feature the hardware-sign path is an honest 501 (mirrors
+    /// admit-node) — the node cannot open a token, so it says so rather than 400ing.
+    #[cfg(not(feature = "pkcs11"))]
+    #[tokio::test]
+    async fn resolve_hardware_path_without_pkcs11_is_not_implemented() {
+        let inv = sample_invocation();
+        let resp = resolve_holder_signature(
+            &inv,
+            None,
+            Some("accord-holder-1"),
+            Some("/tmp/usb"),
+            &crate::accord_provision::ProvisionPkcs11::default(),
+        )
+        .await
+        .expect_err("the hardware path needs pkcs11");
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
 }
