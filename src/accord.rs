@@ -136,6 +136,12 @@ const ACCORD_THRESHOLD: usize = 2;
 const MAX_PENDING_INVOCATIONS: usize = 4096;
 const MAX_SEEN_INVOCATIONS: usize = 16_384;
 
+/// Backstop cap on the in-memory surfaced-events log (completed drills +
+/// announcements). Oldest entries are dropped on overflow — the log is an operator
+/// convenience surface, NOT a durable audit ledger (the durable artifact is each
+/// holder-cosigned invocation object, re-verifiable against `federation_keys`).
+const MAX_ACCORD_EVENTS: usize = 1024;
+
 /// Per-peer replication request budget — a hung/stalling peer MUST NOT be able to
 /// block the local halt from latching. With the concurrent fan-out the whole
 /// round is bounded by this, not the sum across peers.
@@ -206,6 +212,68 @@ struct AccordState {
     http: reqwest::Client,
     /// Disk-latch + peer + process-exit wiring for the operational halt.
     halt: AccordHalt,
+    /// Surfaced NON-BINDING events (completed drills + announcements), oldest-first.
+    /// A record is appended the moment a VALID, quorum-COMPLETE drill or a valid
+    /// single-holder announce is observed — whether initiated locally or received
+    /// via gossip. De-duplicated by `(event_type, invocation_id)` so re-gossip is
+    /// idempotent; bounded by [`MAX_ACCORD_EVENTS`] (oldest dropped). Ephemeral, like
+    /// [`AccordState::pending`] — a node restart drops it; the durable artifacts are
+    /// the holder-cosigned objects themselves.
+    events: Arc<Mutex<Vec<AccordEvent>>>,
+}
+
+/// A surfaced, NON-BINDING accord event (CC 4.2.1 / §9.2.1) — a completed **drill**
+/// (a rehearsed exercise of the 2-of-3 kill-switch delivery path) or an
+/// **announce** (a single-holder `notify`). Recorded the instant it is observed
+/// quorum-COMPLETE (a sub-quorum invocation is NEVER recorded here — it only
+/// accumulates cosignatures in [`AccordState::pending`]). Neither a drill nor an
+/// announce ever latches a halt (only a 2-of-3 `CONSTITUTIONAL` does).
+#[derive(Clone, Debug, Serialize)]
+struct AccordEvent {
+    /// `"drill"` or `"announce"`.
+    event_type: String,
+    /// The invocation id (`drill_id` / `notify_id`).
+    invocation_id: String,
+    /// RFC-3339 instant THIS node recorded the completed event.
+    recorded_at: String,
+    /// The registered holder `key_id`s whose cosignatures were counted — the
+    /// quorum-meeting seats for a drill, the single signer for an announce.
+    signers: Vec<String>,
+    /// The quorum threshold the event met (drill: the family M; announce: 1).
+    quorum_threshold: usize,
+    /// **Announce ONLY** — the free-text message, surfaced iff it BINDS to the
+    /// signed `payload_sha256` (`sha256(message) == payload_sha256`); an absent or
+    /// unbound message is `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl AccordState {
+    /// Record a completed non-binding event, **idempotently** (re-gossip of the same
+    /// `(event_type, invocation_id)` is a no-op) and **bounded** (oldest dropped on
+    /// overflow). Returns whether it was newly recorded (for logging).
+    fn record_event(&self, event: AccordEvent) -> bool {
+        let mut events = self.events.lock().expect("accord events lock");
+        if events
+            .iter()
+            .any(|e| e.event_type == event.event_type && e.invocation_id == event.invocation_id)
+        {
+            return false;
+        }
+        if events.len() >= MAX_ACCORD_EVENTS {
+            let overflow = events.len() + 1 - MAX_ACCORD_EVENTS;
+            events.drain(0..overflow);
+        }
+        events.push(event);
+        true
+    }
+}
+
+/// Lowercase-hex SHA-256 — the §0.6 payload-hash form an announce's `message` binds
+/// to (`payload_sha256`), so a tampered plaintext fails the binding and is dropped.
+fn payload_hash_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
@@ -1041,6 +1109,34 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
     };
+    open_invocation(&st, req).await
+}
+
+/// `POST /v1/accord/drill` — open a **DRILL** invocation (a non-binding rehearsal of
+/// the 2-of-3 kill-switch delivery path). Identical to [`create_invocation`] but the
+/// kind is pinned to `drill`; it accumulates cosignatures toward the family quorum
+/// via `/v1/accord/invocation/concur` and, on reaching it (locally OR via inbound
+/// gossip), is RECORDED as a surfaced drill event ([`AccordEvent`]) — it NEVER
+/// latches a halt (that is exclusively the 2-of-3 `CONSTITUTIONAL` path).
+async fn initiate_drill(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: CreateInvocationRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.invocation.invocation_kind != InvocationKind::Drill {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "the drill endpoint requires invocation_kind \"drill\"",
+        );
+    }
+    open_invocation(&st, req).await
+}
+
+/// Shared opener for [`create_invocation`] / [`initiate_drill`]: build the invocation
+/// object over the registered roster, replicate + maybe-halt (which authenticates the
+/// opener's signature AND surfaces a quorum-complete drill), then persist the pending
+/// object iff authentic. An unauthenticated opener cannot grow the pending table.
+async fn open_invocation(st: &AccordState, req: CreateInvocationRequest) -> Response {
     let roster = match accord_roster(&st.engine).await {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -1061,7 +1157,7 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
     // halt if it already meets 2/3. This ALSO tells us if the opener's signature is
     // an authentic registered-holder one — we only persist authentic invocations
     // (an unauthenticated opener cannot grow the pending table).
-    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+    let outcome = match replicate_and_maybe_halt(st, &obj).await {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -1083,6 +1179,157 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         pending.insert(key, obj.clone());
     }
     invocation_response(&obj)
+}
+
+// ─── Announce (single-holder notify) + halt-status + surfaced events ──────────
+
+#[derive(Debug, Deserialize)]
+struct AnnounceRequest {
+    /// A `notify`-kind invocation (threshold 1 — complete on a single valid sig).
+    invocation: Invocation,
+    /// The announcing holder's cosignature over the invocation's canonical bytes.
+    signature: ThresholdSignature,
+    /// The free-text announcement, cryptographically BOUND: `sha256(message)` MUST
+    /// equal `invocation.payload_sha256`, so the holder's signature covers the text.
+    /// Optional — an announce may carry only the (hashed) payload commitment.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// `POST /v1/accord/announce` — post a single-holder **announce** (an
+/// `InvocationKind::Notify` message, CC 4.2.1 §9.2.1). Verifies the ONE holder
+/// signature (threshold 1 — a valid signed notify is complete on arrival), gossips
+/// it to every announced peer, and RECORDS it as a surfaced announcement. Never
+/// halts. The `message` (if present) is bound to the signed `payload_sha256` and
+/// rides the gossiped object so peers surface the same verbatim, re-bound, text.
+async fn initiate_announce(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: AnnounceRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.invocation.invocation_kind != InvocationKind::Notify {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "the announce endpoint requires invocation_kind \"notify\"",
+        );
+    }
+    // Bind the plaintext to the signed payload hash — a mismatched message is a
+    // malformed announce (the holder signed `payload_sha256`, not the plaintext).
+    if let Some(msg) = &req.message {
+        if payload_hash_hex(msg.as_bytes()) != req.invocation.payload_sha256 {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "message does not match invocation.payload_sha256 (unbound announcement text)",
+            );
+        }
+    }
+    let roster = match accord_roster(&st.engine).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut obj = build_accord_invocation_object(
+        HUMANITY_ACCORD_FAMILY_KEY_ID,
+        &roster,
+        &req.invocation,
+        &[req.signature],
+        &now,
+    );
+    // Carry the (bound) plaintext alongside the object so peers surface it verbatim;
+    // it rides the gossiped object and re-binds to payload_sha256 on every hop.
+    if let Some(msg) = &req.message {
+        if let Some(map) = obj.body.as_object_mut() {
+            map.insert(
+                "message".to_string(),
+                serde_json::Value::String(msg.clone()),
+            );
+        }
+    }
+    // replicate_and_maybe_halt authenticates the signature, gossips onward, AND (for
+    // a valid single-holder notify) records the surfaced announcement.
+    let outcome = match replicate_and_maybe_halt(&st, &obj).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    if !outcome.authentic {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "announcement carries no valid registered-holder signature — not posted",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "posted": true,
+            "invocation_id": req.invocation.invocation_id,
+            "from": outcome.valid_signers,
+            "message": req.message,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/halt-status` — read-only view of the disk halt latch (the
+/// enforceable kill-switch state, [`crate::accord_halt`]). `halted` is derived from
+/// the latch file's PRESENCE (fail-secure: a present-but-unreadable latch still reads
+/// `halted: true`, matching [`crate::accord_halt::check_halt_gate`]); `record` is the
+/// best-effort parsed [`HaltRecord`] (who/when/invocation_id) or `null`. Halt
+/// ENFORCEMENT is unchanged — this endpoint never writes or clears the latch.
+async fn halt_status(State(st): State<AccordState>) -> Response {
+    let Some(home) = &st.halt.home else {
+        // No disk-latch configured (test / no-home context) — never halted.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "halted": false, "record": null })),
+        )
+            .into_response();
+    };
+    let path = crate::accord_halt::halt_latch_path(home);
+    let halted = path.exists();
+    let record: Option<HaltRecord> = if halted {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "halted": halted,
+            "latch_path": path.display().to_string(),
+            "record": record,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/accord/events` — the surfaced NON-BINDING accord events (completed
+/// drills + announcements), split by type and **most-recent-first**. Advisory
+/// operator surface; the authoritative kill-switch remains the 2-of-3 verify path.
+async fn list_events(State(st): State<AccordState>) -> Response {
+    let (drills, announcements) = {
+        let events = st.events.lock().expect("accord events lock");
+        let mut drills = Vec::new();
+        let mut announcements = Vec::new();
+        // Stored oldest-first; reverse for most-recent-first.
+        for e in events.iter().rev() {
+            match e.event_type.as_str() {
+                "drill" => drills.push(e.clone()),
+                "announce" => announcements.push(e.clone()),
+                _ => {}
+            }
+        }
+        (drills, announcements)
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "drills": drills,
+            "announcements": announcements,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1293,6 +1540,59 @@ async fn replicate_and_maybe_halt(
     };
     if !outcome.authentic {
         return Ok(outcome);
+    }
+
+    // ── Surface COMPLETE, NON-BINDING events (drill / announce) — CC 4.2.1 §9.2.1.
+    // The operator's rule: a VALID, quorum-COMPLETE event triggers its surfacing the
+    // moment it is observed (locally-initiated OR inbound via gossip); a SUB-quorum
+    // event only accumulates in `pending` (recorded nowhere). A drill is complete at
+    // the family quorum M and NEVER halts; an announce (`notify`) has threshold 1 — a
+    // single valid holder signature is complete on arrival. Recording is idempotent
+    // ([`AccordState::record_event`] de-dups by id), so re-gossip re-surfaces nothing.
+    if status.invocation_kind == InvocationKind::Drill.as_str() && quorum_met {
+        let newly = st.record_event(AccordEvent {
+            event_type: "drill".to_string(),
+            invocation_id: status.invocation_id.clone(),
+            recorded_at: now.clone(),
+            signers: status.valid_signers.clone(),
+            quorum_threshold: m,
+            message: None,
+        });
+        if newly {
+            tracing::info!(
+                invocation_id = %status.invocation_id,
+                signers = ?status.valid_signers,
+                "accord DRILL surfaced (quorum-complete, NON-BINDING — never halts)"
+            );
+        }
+    } else if status.invocation_kind == InvocationKind::Notify.as_str()
+        && !status.valid_signers.is_empty()
+    {
+        // Threshold 1: a single valid holder cosignature completes an announce. The
+        // free-text message is surfaced ONLY when it BINDS to the signed payload hash
+        // (`sha256(message) == payload_sha256`) — a tampered/unbound plaintext is
+        // dropped to `None` while the (still-authentic) announce is recorded.
+        let message = obj
+            .body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .filter(|m| payload_hash_hex(m.as_bytes()) == parsed.invocation.payload_sha256)
+            .map(str::to_string);
+        let newly = st.record_event(AccordEvent {
+            event_type: "announce".to_string(),
+            invocation_id: status.invocation_id.clone(),
+            recorded_at: now.clone(),
+            signers: status.valid_signers.clone(),
+            quorum_threshold: 1,
+            message,
+        });
+        if newly {
+            tracing::info!(
+                invocation_id = %status.invocation_id,
+                from = ?status.valid_signers,
+                "accord ANNOUNCE surfaced (single-holder notify)"
+            );
+        }
     }
 
     let is_global_halt =
@@ -1847,6 +2147,7 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         halt,
+        events: Arc::new(Mutex::new(Vec::new())),
     };
     Router::new()
         .route("/v1/accord/holder", axum::routing::post(register_holder))
@@ -1856,6 +2157,15 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             axum::routing::post(verify_invocation_handler),
         )
         .route("/v1/accord/message", axum::routing::post(ingest_message))
+        // drill (non-binding rehearsal) + announce (single-holder notify) + the
+        // read-only halt-status + the surfaced non-binding events log
+        .route("/v1/accord/drill", axum::routing::post(initiate_drill))
+        .route(
+            "/v1/accord/announce",
+            axum::routing::post(initiate_announce),
+        )
+        .route("/v1/accord/halt-status", axum::routing::get(halt_status))
+        .route("/v1/accord/events", axum::routing::get(list_events))
         // genesis ceremony
         .route(
             "/v1/accord/genesis/envelope",

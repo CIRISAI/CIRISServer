@@ -2335,6 +2335,146 @@ class CIRISApiClient(
     }
 
     /**
+     * The surfaced NON-BINDING accord events (completed drills + announcements) —
+     * `GET {nodeUrl}/v1/accord/events` (CIRISServer#41). Public read.
+     */
+    suspend fun listAccordEvents(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordEventsResponse {
+        val method = "listAccordEvents"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/events") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list accord events failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordEventsResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The read-only halt-latch state (the enforceable kill-switch) —
+     * `GET {nodeUrl}/v1/accord/halt-status` (CIRISServer#41). Public read; drives
+     * the unmissable ACTIVE-HALT banner. Never writes or clears the latch.
+     */
+    suspend fun getAccordHaltStatus(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse {
+        val method = "getAccordHaltStatus"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/halt-status") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("get halt-status failed: ${response.status}: ${raw.take(160)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Initiate a drill** — `POST {nodeUrl}/v1/accord/drill` (owner-session-gated,
+     * holder action). A drill is a NON-BINDING rehearsal of the 2-of-3 kill-switch
+     * delivery path; it accumulates cosignatures toward quorum via
+     * `/v1/accord/invocation/concur` and, on reaching it, is surfaced in
+     * `/v1/accord/events` — it NEVER halts. Mirrors [concurInvocation]'s no-crypto
+     * posture: the node builds + signs the drill invocation with its resolved local
+     * holder signer; the app sends no crypto.
+     */
+    suspend fun initiateDrill(
+        invocationId: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
+        val method = "initiateDrill"
+        logInfo(method, "POST $nodeUrl/v1/accord/drill id=$invocationId")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$nodeUrl/v1/accord/drill") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody("{\"invocation_id\":\"${invocationId.trim()}\"}")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("initiate drill failed: ${response.status}: ${raw.take(200)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordConcurResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Post an announce** — `POST {nodeUrl}/v1/accord/announce` (owner-session-gated,
+     * holder action). An announce is a single-holder `notify` message (threshold 1 —
+     * complete on a valid signature); it is gossiped + surfaced in `/v1/accord/events`
+     * and NEVER halts. Mirrors [concurInvocation]'s no-crypto posture: the node builds
+     * + signs the notify (binding the [message] to the payload hash) with its resolved
+     * local holder signer; the app sends only the plaintext.
+     */
+    suspend fun initiateAnnounce(
+        message: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse {
+        val method = "initiateAnnounce"
+        logInfo(method, "POST $nodeUrl/v1/accord/announce len=${message.length}")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$nodeUrl/v1/accord/announce") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject { put("message", message) }.toString(),
+                )
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("initiate announce failed: ${response.status}: ${raw.take(200)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **Provision a portable accord holder** —
      * `POST {nodeUrl}/v1/accord/provision-holder`. The loopback-only setup route
      * behind the guided "Provision Accord Holder" flow (CIRISServer#41).

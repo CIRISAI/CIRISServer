@@ -93,10 +93,17 @@ fun AccordScreen(
     val holders by viewModel.holders.collectAsState()
     val holderThreshold by viewModel.holderThreshold.collectAsState()
     val invocations by viewModel.invocations.collectAsState()
+    val haltStatus by viewModel.haltStatus.collectAsState()
+    val drills by viewModel.drills.collectAsState()
+    val announcements by viewModel.announcements.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val error by viewModel.error.collectAsState()
     val notice by viewModel.notice.collectAsState()
+
+    // Local, uncommitted inputs for the holder actions (drill id + announce text).
+    var drillId by remember { mutableStateOf("") }
+    var announceMessage by remember { mutableStateOf("") }
 
     // Hoisted so the "Replace / update" action can scroll the add-canonical form
     // into view (see the LaunchedEffect on the canonical replace seed below). The
@@ -165,6 +172,73 @@ fun AccordScreen(
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.padding(10.dp).testable("accord_error"),
                     )
+                }
+            }
+
+            // ── ACTIVE-HALT banner (CC 4.2.1 / 4.2.3) ────────────────────────
+            // The most prominent thing on the card when the kill-switch is engaged:
+            // a 2-of-3 CONSTITUTIONAL halt has latched this node down (not a
+            // recoverable pause). Read-only — the app never clears the latch.
+            if (haltStatus?.halted == true) {
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    border = BorderStroke(2.dp, MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth().testable("accord_halt_banner"),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                CIRISIcons.shield,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                localizedString("mobile.accord_halt_active_title"),
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            localizedString("mobile.accord_halt_active_desc"),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        haltStatus?.record?.let { rec ->
+                            Spacer(Modifier.height(8.dp))
+                            rec.invocationId?.let { id ->
+                                Text(
+                                    localizedString("mobile.accord_halt_invocation")
+                                        .replace("{id}", id),
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                            rec.latchedAt?.let { at ->
+                                Text(
+                                    localizedString("mobile.accord_halt_latched_at")
+                                        .replace("{when}", at),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                            if (rec.validSigners.isNotEmpty()) {
+                                Text(
+                                    localizedString("mobile.accord_halt_signers")
+                                        .replace("{signers}", rec.validSigners.joinToString(", ")),
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -933,7 +1007,179 @@ fun AccordScreen(
                     )
                 }
             }
+
+            // ── Holder actions: start a drill / post an announce ─────────────
+            // Holder-gated server-side (401/403 surface as an error). A drill is a
+            // NON-BINDING rehearsal of the kill-switch delivery path; an announce is
+            // a single-holder notify. Neither ever halts.
+            Spacer(Modifier.height(20.dp))
+            Text(
+                localizedString("mobile.accord_actions_title"),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                localizedString("mobile.accord_actions_desc"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = drillId,
+                onValueChange = { drillId = it },
+                singleLine = true,
+                label = { Text(localizedString("mobile.accord_drill_id_label")) },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testable("input_accord_drill_id"),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    viewModel.initiateDrill(drillId)
+                    drillId = ""
+                },
+                enabled = !busy && drillId.isNotBlank(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testableClickable("btn_accord_start_drill") {
+                        viewModel.initiateDrill(drillId); drillId = ""
+                    },
+            ) {
+                Text(localizedString("mobile.accord_start_drill"))
+            }
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                value = announceMessage,
+                onValueChange = { announceMessage = it },
+                label = { Text(localizedString("mobile.accord_announce_label")) },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testable("input_accord_announce"),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    viewModel.initiateAnnounce(announceMessage)
+                    announceMessage = ""
+                },
+                enabled = !busy && announceMessage.isNotBlank(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testableClickable("btn_accord_post_announce") {
+                        viewModel.initiateAnnounce(announceMessage); announceMessage = ""
+                    },
+            ) {
+                Text(localizedString("mobile.accord_post_announce"))
+            }
+
+            // ── Received drills ──────────────────────────────────────────────
+            Spacer(Modifier.height(20.dp))
+            Text(
+                localizedString("mobile.accord_drills_title"),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (drills.isEmpty() && !loading) {
+                Text(
+                    localizedString("mobile.accord_drills_empty"),
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                drills.forEach { ev -> AccordEventCard(ev = ev, isAnnounce = false) }
+            }
+
+            // ── Announcements ────────────────────────────────────────────────
+            Spacer(Modifier.height(20.dp))
+            Text(
+                localizedString("mobile.accord_announcements_title"),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (announcements.isEmpty() && !loading) {
+                Text(
+                    localizedString("mobile.accord_announcements_empty"),
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                announcements.forEach { ev -> AccordEventCard(ev = ev, isAnnounce = true) }
+            }
+
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * One surfaced NON-BINDING accord event — a completed drill or an announcement.
+ * Muted styling (neither is an emergency): the drill is a rehearsal, the announce a
+ * single-holder notify. Shows the id, when it was recorded, the signer(s), and (for
+ * an announce) the bound message.
+ */
+@Composable
+private fun AccordEventCard(
+    ev: ai.ciris.mobile.shared.models.federation.AccordEventDto,
+    isAnnounce: Boolean,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .testable("row_accord_event_${ev.eventType}_${ev.invocationId}"),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                ) {
+                    Text(
+                        localizedString(
+                            if (isAnnounce) "mobile.accord_kind_notify" else "mobile.accord_kind_drill",
+                        ),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    ev.invocationId,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (isAnnounce) {
+                ev.message?.let { msg ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(msg, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                localizedString("mobile.accord_event_recorded_at").replace("{when}", ev.recordedAt),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (ev.signers.isNotEmpty()) {
+                Text(
+                    localizedString(
+                        if (isAnnounce) "mobile.accord_event_from" else "mobile.accord_event_signers",
+                    ).replace("{signers}", ev.signers.joinToString(", ")),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

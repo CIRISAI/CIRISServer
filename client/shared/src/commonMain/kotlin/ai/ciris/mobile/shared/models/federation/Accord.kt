@@ -101,6 +101,79 @@ data class AccordInvocationsResponse(
     val invocations: List<AccordInvocationDto> = emptyList(),
 )
 
+/**
+ * One surfaced NON-BINDING accord event (CIRISServer#41 §9.2.1) — a completed
+ * **drill** (a rehearsed exercise of the 2-of-3 kill-switch delivery path) or an
+ * **announce** (a single-holder ``notify``). Recorded the moment it is observed
+ * quorum-COMPLETE (locally OR via gossip); a sub-quorum invocation is never here.
+ * Neither ever halts. ``GET /v1/accord/events``.
+ */
+@Serializable
+data class AccordEventDto(
+    /** ``drill`` or ``announce``. */
+    @SerialName("event_type")
+    val eventType: String,
+    @SerialName("invocation_id")
+    val invocationId: String,
+    /** RFC-3339 instant this node recorded the completed event. */
+    @SerialName("recorded_at")
+    val recordedAt: String,
+    /** The holder key_ids counted — the quorum-meeting seats (drill) or the single
+     * signer (announce). */
+    val signers: List<String> = emptyList(),
+    @SerialName("quorum_threshold")
+    val quorumThreshold: Int = 2,
+    /** Announce ONLY — the free-text message (bound to the signed payload), or null. */
+    val message: String? = null,
+)
+
+/** ``GET /v1/accord/events`` response — completed drills + announcements, each
+ * most-recent-first. */
+@Serializable
+data class AccordEventsResponse(
+    val drills: List<AccordEventDto> = emptyList(),
+    val announcements: List<AccordEventDto> = emptyList(),
+)
+
+/** The disk halt-latch record, when the node is halted (who/when/which invocation). */
+@Serializable
+data class AccordHaltRecordDto(
+    @SerialName("invocation_kind")
+    val invocationKind: String? = null,
+    @SerialName("invocation_id")
+    val invocationId: String? = null,
+    @SerialName("valid_signers")
+    val validSigners: List<String> = emptyList(),
+    @SerialName("quorum_threshold")
+    val quorumThreshold: Int = 2,
+    @SerialName("latched_at")
+    val latchedAt: String? = null,
+)
+
+/**
+ * ``GET /v1/accord/halt-status`` — the read-only state of the enforceable
+ * kill-switch (the disk halt latch, CC 4.2.1 / 4.2.3). [halted] drives the
+ * unmissable ACTIVE-HALT banner on the Trust Root card; [record] names the halting
+ * invocation when present. Read-only — the app never writes or clears the latch.
+ */
+@Serializable
+data class AccordHaltStatusResponse(
+    val halted: Boolean = false,
+    @SerialName("latch_path")
+    val latchPath: String? = null,
+    val record: AccordHaltRecordDto? = null,
+)
+
+/** ``POST /v1/accord/announce`` response — a single-holder announce was posted. */
+@Serializable
+data class AccordAnnounceResponse(
+    val posted: Boolean = false,
+    @SerialName("invocation_id")
+    val invocationId: String? = null,
+    val from: List<String> = emptyList(),
+    val message: String? = null,
+)
+
 /** ``POST /v1/accord/invocation/concur`` response (the local holder concurred). */
 @Serializable
 data class AccordConcurResponse(

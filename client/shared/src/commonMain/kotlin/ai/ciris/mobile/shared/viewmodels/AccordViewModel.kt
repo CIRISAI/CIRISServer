@@ -1,8 +1,10 @@
 package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.models.federation.AccordEventDto
 import ai.ciris.mobile.shared.models.federation.AccordFamilyDto
 import ai.ciris.mobile.shared.models.federation.AccordHolderDto
+import ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
@@ -43,6 +45,19 @@ class AccordViewModel(
     private val _invocations = MutableStateFlow<List<AccordInvocationDto>>(emptyList())
     val invocations: StateFlow<List<AccordInvocationDto>> = _invocations.asStateFlow()
 
+    /** The enforceable kill-switch state (disk halt latch). Drives the unmissable
+     *  ACTIVE-HALT banner — the most prominent thing on the card when halted. */
+    private val _haltStatus = MutableStateFlow<AccordHaltStatusResponse?>(null)
+    val haltStatus: StateFlow<AccordHaltStatusResponse?> = _haltStatus.asStateFlow()
+
+    /** Surfaced NON-BINDING completed drills (most-recent-first). */
+    private val _drills = MutableStateFlow<List<AccordEventDto>>(emptyList())
+    val drills: StateFlow<List<AccordEventDto>> = _drills.asStateFlow()
+
+    /** Surfaced single-holder announcements (most-recent-first). */
+    private val _announcements = MutableStateFlow<List<AccordEventDto>>(emptyList())
+    val announcements: StateFlow<List<AccordEventDto>> = _announcements.asStateFlow()
+
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
@@ -69,6 +84,20 @@ class AccordViewModel(
                 _holders.value = holders.holders
                 _holderThreshold.value = holders.threshold
                 _invocations.value = apiClient.getAccordInvocations()
+                // The enforceable kill-switch state + the surfaced non-binding events.
+                _haltStatus.value = try {
+                    apiClient.getAccordHaltStatus()
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] halt-status: ${e.message}")
+                    _haltStatus.value
+                }
+                try {
+                    val events = apiClient.listAccordEvents()
+                    _drills.value = events.drills
+                    _announcements.value = events.announcements
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] events: ${e.message}")
+                }
                 // The owner's nodes — the admit-node target picker selects from these.
                 _ownedNodes.value = try {
                     apiClient.getOwnedNodes().nodes.map { it.keyId }.filter { it.isNotBlank() }
@@ -124,6 +153,85 @@ class AccordViewModel(
                     msg.contains("401") -> "Sign in as the owner first, then concur."
                     msg.contains("403") -> "This node isn't a current accord holder."
                     else -> "Couldn't concur: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Initiate a drill** — a NON-BINDING rehearsal of the 2-of-3 kill-switch
+     * delivery path (holder action; requires the owner session). The node builds +
+     * signs the drill with its resolved local holder signer (mirrors [concur]); the
+     * app sends no crypto. On reaching quorum it surfaces in the drills list; it
+     * NEVER halts. [invocationId] uniquely names this drill.
+     */
+    fun initiateDrill(invocationId: String) {
+        if (_busy.value) return
+        val id = invocationId.trim()
+        if (id.isBlank()) {
+            _error.value = "Enter a drill id first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.initiateDrill(id)
+                _notice.value = if (res.quorumMet) {
+                    "Drill $id complete — quorum met (${res.validSigners.size} signers)."
+                } else {
+                    "Drill $id opened — ${res.validSigners.size} signer(s) so far. Concur to reach quorum."
+                }
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[initiateDrill] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") -> "Sign in as the owner first, then run a drill."
+                    msg.contains("403") -> "This node isn't a current accord holder."
+                    else -> "Couldn't start the drill: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Post an announce** — a single-holder `notify` message (threshold 1; holder
+     * action, owner session). The node signs the notify (binding [message] to the
+     * payload hash) with its resolved local holder signer, gossips it, and surfaces
+     * it in the announcements list. It NEVER halts.
+     */
+    fun initiateAnnounce(message: String) {
+        if (_busy.value) return
+        val text = message.trim()
+        if (text.isBlank()) {
+            _error.value = "Enter an announcement message first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.initiateAnnounce(text)
+                _notice.value = if (res.posted) {
+                    "Announcement posted to the mesh."
+                } else {
+                    "Announcement submitted."
+                }
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[initiateAnnounce] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") -> "Sign in as the owner first, then announce."
+                    msg.contains("403") -> "This node isn't a current accord holder."
+                    else -> "Couldn't post the announcement: ${e.message}"
                 }
             } finally {
                 _busy.value = false
