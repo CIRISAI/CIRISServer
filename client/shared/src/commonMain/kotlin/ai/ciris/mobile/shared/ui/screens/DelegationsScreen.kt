@@ -119,6 +119,13 @@ fun DelegationsScreen(
     // The active pane: "offer" (outgoing) | "incoming" (approve) | "manage" (CRUD).
     var pane by remember { mutableStateOf("offer") }
 
+    // Load the active delegations when the screen is shown — by now the owner is logged in
+    // and the bearer is set (the VM intentionally does NOT fetch at init, which runs
+    // pre-login → 401). This is the page's load + the post-login retry. (#117.)
+    LaunchedEffect(Unit) {
+        viewModel.refresh()
+    }
+
     // Test automation: let the UI-automation server's /input drive this screen's
     // text fields (they're `testable()` = position-only, so without this collector
     // /input silently no-ops and createDelegation bails on an empty label). Mirrors
@@ -148,6 +155,11 @@ fun DelegationsScreen(
     LaunchedEffect(pickedIdentityKeyId) {
         if (!pickedIdentityKeyId.isNullOrBlank()) {
             existingKeyId = pickedIdentityKeyId
+            // Auto-populate the label from the chosen identity — derive the human label
+            // from its key_id (strip the trailing `-<fp>`, e.g. `lapbuntu2-claude-mrqmyy…`
+            // → `lapbuntu2-claude`). In existing mode the label is a display echo, not a
+            // mint input, so reflecting the picked identity beats forcing a re-type. (#134.)
+            delegateLabel = pickedIdentityKeyId.substringBeforeLast('-').ifBlank { pickedIdentityKeyId }
             delegateMode = "existing"
             pane = "offer"
             onPickedIdentityConsumed?.invoke()
@@ -521,7 +533,13 @@ private fun OfferPane(
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onCreate,
-            enabled = !busy && delegateLabel.isNotBlank(),
+            // Gate on the input the active mode actually needs: an existing key is a
+            // complete identity on its own (the label is a redundant echo there), so
+            // requiring a typed label was needless friction. (#134.)
+            enabled = !busy && when (delegateMode) {
+                "existing" -> existingKeyId.isNotBlank()
+                else -> delegateLabel.isNotBlank()
+            },
             modifier = Modifier.fillMaxWidth().testableClickable("btn_delegation_create") { onCreate() },
         ) {
             if (busy) {
