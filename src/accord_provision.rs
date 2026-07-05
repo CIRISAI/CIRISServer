@@ -1955,7 +1955,11 @@ async fn ingest_partial(
         partial: partial.clone(),
     };
     let fresh = upsert_pending(st, entry);
-    let gossiped = if fresh { gossip_partial(st, partial) } else { 0 };
+    let gossiped = if fresh {
+        gossip_partial(st, partial)
+    } else {
+        0
+    };
     Ok((target_key_id, distinct_scrub_count, gossiped, fresh))
 }
 
