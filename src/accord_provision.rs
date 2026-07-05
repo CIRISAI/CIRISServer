@@ -58,7 +58,8 @@
 //! produced together from the one re-opened identity so the operator never hand-
 //! assembles a member set. Same `pkcs11` gating + loopback guard as provisioning.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -145,8 +146,44 @@ struct CosignFamilyRequest {
 
 #[derive(Clone)]
 struct ProvisionState {
-    #[allow(dead_code)] // held for symmetry with the other setup routers + future use.
     engine: Arc<Engine>,
+    /// Accord peer base URLs (`http://host:port`, self excluded) a co-scrub partial
+    /// gossips to — the SAME set the accord kill-switch replicates over. Empty on a
+    /// lone node (the ceremony still closes via the returned/saved partial + the paste
+    /// fallback).
+    peers: Vec<String>,
+    /// Shared HTTP client for the best-effort peer fan-out.
+    http: reqwest::Client,
+    /// In-flight co-scrub partials — the display store behind `GET /pending`. DISPLAY
+    /// only: the cryptographic authority is persist's m-of-n gate at `cosign`→adopt.
+    /// Ephemeral (not persisted; the gossip re-floods on the next hop).
+    pending: Arc<Mutex<Vec<PendingCoscrub>>>,
+    /// Re-gossip loop-stop: `(target_key_id, distinct_scrub_count)` already ingested.
+    seen: Arc<Mutex<HashSet<(String, usize)>>>,
+}
+
+/// The receive-side cap on in-flight co-scrub partials, so a gossip flood into the OPEN
+/// `/gossip-partial` endpoint can never grow memory without bound (mirrors the accord
+/// event log's `MAX_ACCORD_EVENTS`).
+const MAX_PENDING_COSCRUBS: usize = 256;
+
+/// One in-flight co-scrub partial, surfaced in the client's "Pending co-signs" list. This
+/// is DISPLAY state only — the security gate is persist's m-of-n at `cosign`→
+/// `adopt_scrub_upgrade`, never this store. `roster_verified` is a best-effort hint (are
+/// all scrubbers on the accord family roster?), not an admission decision.
+#[derive(Clone, serde::Serialize)]
+struct PendingCoscrub {
+    target_key_id: String,
+    distinct_scrub_count: usize,
+    /// The family m-of-n `M` (0 when the family/quorum can't be resolved locally).
+    quorum_needed: usize,
+    scrubbers: Vec<String>,
+    transport_hints: Vec<serde_json::Value>,
+    roster_verified: bool,
+    received_at: String,
+    /// The verbatim verify `SignedKeyRecord` JSON — so `cosign` submits it byte-identical
+    /// (append_scrub recanonicalizes the SAME envelope; a re-encode would break the anchor).
+    partial: serde_json::Value,
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
@@ -1519,11 +1556,11 @@ async fn propose_canonical(State(st): State<ProvisionState>, body: axum::body::B
             "target key_id contains path separators",
         );
     }
-    propose_canonical_impl(st.engine, req).await
+    propose_canonical_impl(st, req).await
 }
 
 #[cfg(not(feature = "pkcs11"))]
-async fn propose_canonical_impl(_engine: Arc<Engine>, _req: AddCanonicalRequest) -> Response {
+async fn propose_canonical_impl(_st: ProvisionState, _req: AddCanonicalRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
         "propose needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
@@ -1531,7 +1568,7 @@ async fn propose_canonical_impl(_engine: Arc<Engine>, _req: AddCanonicalRequest)
 }
 
 #[cfg(feature = "pkcs11")]
-async fn propose_canonical_impl(_engine: Arc<Engine>, mut req: AddCanonicalRequest) -> Response {
+async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest) -> Response {
     use ciris_verify_core::federation_self_record::{
         produce_scrubbed_key_record, ScrubTarget, TransportHint,
     };
@@ -1576,10 +1613,18 @@ async fn propose_canonical_impl(_engine: Arc<Engine>, mut req: AddCanonicalReque
     };
     let count = partial.record.distinct_scrub_count();
     let saved_to = save_coscrub_partial(&target_key_id, &partial);
+    // Ingest into this node's display store + gossip to accord peers so the NEXT holder's
+    // box surfaces the partial in "Pending co-signs" without a manual transfer.
+    let partial_json = serde_json::to_value(&partial).unwrap_or(serde_json::Value::Null);
+    let gossiped = ingest_partial(&st, partial_json)
+        .await
+        .map(|(_, _, g, _)| g)
+        .unwrap_or(0);
     tracing::info!(
         canonical_key_id = %target_key_id,
         distinct_scrubs = count,
-        "Trust Root: co-scrub proposed (scrub #1) — hand the partial to the next holder to cosign"
+        gossiped_to = gossiped,
+        "Trust Root: co-scrub proposed (scrub #1) — gossiped to peers; the next holder cosigns"
     );
     (
         StatusCode::OK,
@@ -1588,7 +1633,8 @@ async fn propose_canonical_impl(_engine: Arc<Engine>, mut req: AddCanonicalReque
             "distinct_scrub_count": count,
             "partial": partial,
             "saved_to": saved_to,
-            "note": "1 scrub — not yet canonical. Gossip/transfer this partial to the next accord holder to cosign toward the family quorum.",
+            "gossiped_to": gossiped,
+            "note": "1 scrub — not yet canonical. It has gossiped to accord peers; the next holder cosigns from their 'Pending co-signs' (or paste the partial).",
         })),
     )
         .into_response()
@@ -1623,11 +1669,11 @@ async fn cosign_canonical(State(st): State<ProvisionState>, body: axum::body::By
             "cosign requires the holder key_id + USB path and the partial record",
         );
     }
-    cosign_canonical_impl(st.engine, req).await
+    cosign_canonical_impl(st, req).await
 }
 
 #[cfg(not(feature = "pkcs11"))]
-async fn cosign_canonical_impl(_engine: Arc<Engine>, _req: CosignCanonicalRequest) -> Response {
+async fn cosign_canonical_impl(_st: ProvisionState, _req: CosignCanonicalRequest) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
         "cosign needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
@@ -1635,7 +1681,7 @@ async fn cosign_canonical_impl(_engine: Arc<Engine>, _req: CosignCanonicalReques
 }
 
 #[cfg(feature = "pkcs11")]
-async fn cosign_canonical_impl(engine: Arc<Engine>, req: CosignCanonicalRequest) -> Response {
+async fn cosign_canonical_impl(st: ProvisionState, req: CosignCanonicalRequest) -> Response {
     use ciris_verify_core::federation_self_record::{
         append_scrub, SignedKeyRecord as VSignedKeyRecord,
     };
@@ -1678,16 +1724,28 @@ async fn cosign_canonical_impl(engine: Arc<Engine>, req: CosignCanonicalRequest)
         .ok()
         .and_then(|v| serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>(v).ok())
     {
-        Some(pr) => match engine.adopt_scrub_upgrade(pr).await {
+        Some(pr) => match st.engine.adopt_scrub_upgrade(pr).await {
             Ok(o) => (true, format!("{o:?}")),
             Err(e) => (false, e.to_string()),
         },
         None => (false, "record convert failed".to_string()),
     };
+    // Converge every holder's view: ingest + gossip the advanced record (it floods the
+    // mesh, loop-stopped by (target, count); the list filters out ≥-quorum records). On a
+    // local confer, drop this node's pending entry — the ceremony for this target is done.
+    let advanced_json = serde_json::to_value(&advanced).unwrap_or(serde_json::Value::Null);
+    let gossiped = ingest_partial(&st, advanced_json)
+        .await
+        .map(|(_, _, g, _)| g)
+        .unwrap_or(0);
+    if conferred {
+        clear_pending(&st, &target_key_id);
+    }
     tracing::info!(
         canonical_key_id = %target_key_id,
         distinct_scrubs = count,
         conferred,
+        gossiped_to = gossiped,
         "Trust Root: co-scrub cosigned (scrub appended)"
     );
     (
@@ -1699,6 +1757,7 @@ async fn cosign_canonical_impl(engine: Arc<Engine>, req: CosignCanonicalRequest)
             "outcome": outcome,
             "advanced": advanced,
             "saved_to": saved_to,
+            "gossiped_to": gossiped,
         })),
     )
         .into_response()
@@ -1720,6 +1779,242 @@ fn save_coscrub_partial<T: serde::Serialize>(target_key_id: &str, record: &T) ->
         Err(e) => tracing::warn!(error = %e, "co-scrub: partial serialize failed"),
     }
     path.display().to_string()
+}
+
+// ─── Co-scrub gossip + the "Pending co-signs" display store ───────────────────
+//
+// The partial produced by `propose`/`cosign` is (a) saved to the outbox, (b) ingested
+// into THIS node's display store, and (c) gossiped to accord peers over the SAME HTTP
+// peer set the kill-switch uses. A peer receives it at the OPEN `/gossip-partial`
+// endpoint, stores it, and re-gossips (loop-stopped) so the partial floods the mesh —
+// which is how B1's box surfaces A1's proposal in "Pending co-signs" without a manual
+// transfer. All of this is DISPLAY/transport plumbing; the crypto stays in verify
+// (`append_scrub`) and the admission gate stays in persist (`adopt_scrub_upgrade`).
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// The accord family's live m-of-n `M` (0 when the family/quorum isn't locally resolvable).
+async fn family_quorum_m(engine: &Engine) -> usize {
+    use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
+    use ciris_verify_core::threshold::QuorumPolicy;
+    match crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(Some(fam)) => QuorumPolicy::parse(&fam.consensus_protocol)
+            .map(|p| p.m)
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// The accord family roster's member `key_id`s (None when it can't be resolved — e.g. no
+/// genesis yet). Used only to set the best-effort `roster_verified` display hint.
+async fn roster_key_ids(engine: &Engine) -> Option<HashSet<String>> {
+    use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
+    crate::family::active_threshold_roster(engine, HUMANITY_ACCORD_FAMILY_KEY_ID)
+        .await
+        .ok()
+        .map(|members| members.into_iter().map(|m| m.member_id).collect())
+}
+
+/// Extract the scrubber `key_id`s + transport hints from a verify `SignedKeyRecord` JSON,
+/// shape-tolerantly (the primary `scrub_key_id` plus any `additional_scrubs[].scrub_key_id`).
+fn coscrub_scrubbers_and_hints(
+    partial: &serde_json::Value,
+) -> (Vec<String>, Vec<serde_json::Value>) {
+    let rec = partial.get("record").unwrap_or(partial);
+    let mut scrubbers = Vec::new();
+    if let Some(s) = rec.get("scrub_key_id").and_then(|v| v.as_str()) {
+        scrubbers.push(s.to_string());
+    }
+    if let Some(arr) = rec.get("additional_scrubs").and_then(|v| v.as_array()) {
+        for s in arr {
+            if let Some(k) = s.get("scrub_key_id").and_then(|v| v.as_str()) {
+                scrubbers.push(k.to_string());
+            }
+        }
+    }
+    scrubbers.sort();
+    scrubbers.dedup();
+    let hints = rec
+        .get("transport_hints")
+        .or_else(|| {
+            rec.get("registration_envelope")
+                .and_then(|e| e.get("transport_hints"))
+        })
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    (scrubbers, hints)
+}
+
+/// Upsert a partial into the pending store (keyed by target; a higher scrub count
+/// supersedes a lower one for the same target). Returns `false` when this exact
+/// `(target, count)` was already ingested (the re-gossip loop-stop).
+fn upsert_pending(st: &ProvisionState, entry: PendingCoscrub) -> bool {
+    {
+        let mut seen = st.seen.lock().unwrap();
+        if !seen.insert((entry.target_key_id.clone(), entry.distinct_scrub_count)) {
+            return false;
+        }
+    }
+    let mut pending = st.pending.lock().unwrap();
+    pending.retain(|p| {
+        !(p.target_key_id == entry.target_key_id
+            && p.distinct_scrub_count <= entry.distinct_scrub_count)
+    });
+    pending.push(entry);
+    if pending.len() > MAX_PENDING_COSCRUBS {
+        let overflow = pending.len() - MAX_PENDING_COSCRUBS;
+        pending.drain(0..overflow);
+    }
+    true
+}
+
+/// Drop every pending entry for a target (the co-scrub completed / conferred).
+fn clear_pending(st: &ProvisionState, target_key_id: &str) {
+    st.pending
+        .lock()
+        .unwrap()
+        .retain(|p| p.target_key_id != target_key_id);
+}
+
+/// Best-effort fan-out of a co-scrub partial to accord peers. Spawned + per-peer
+/// time-bounded so a stalling peer never blocks the holder's request. Returns the peer
+/// count attempted.
+fn gossip_partial(st: &ProvisionState, partial: serde_json::Value) -> usize {
+    let peers = st.peers.clone();
+    let http = st.http.clone();
+    let n = peers.len();
+    if n == 0 {
+        return 0;
+    }
+    tokio::spawn(async move {
+        let body = serde_json::json!({ "partial": partial });
+        for peer in peers {
+            let url = format!("{peer}/v1/accord/canonical/gossip-partial");
+            match http
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(4))
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    tracing::debug!(peer = %url, status = %r.status(), "co-scrub gossip sent")
+                }
+                Err(e) => {
+                    tracing::debug!(peer = %url, error = %e, "co-scrub gossip failed (best-effort)")
+                }
+            }
+        }
+    });
+    n
+}
+
+/// Validate a partial STRUCTURALLY (a well-formed `SignedKeyRecord` with ≥1 scrub + a
+/// target), store it in the display store, and (if first-seen) gossip it onward. Returns
+/// `(target_key_id, distinct_scrub_count, peers_gossiped_to)`. The security decision is
+/// NOT here — it is persist's m-of-n gate at cosign→adopt.
+async fn ingest_partial(
+    st: &ProvisionState,
+    partial: serde_json::Value,
+) -> Result<(String, usize, usize, bool), (StatusCode, String)> {
+    use ciris_verify_core::federation_self_record::SignedKeyRecord as VSignedKeyRecord;
+    let (target_key_id, distinct_scrub_count) = {
+        let p: VSignedKeyRecord = serde_json::from_value(partial.clone()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("partial is not a SignedKeyRecord: {e}"),
+            )
+        })?;
+        let c = p.record.distinct_scrub_count();
+        let t = p.record.key_id.clone();
+        if c == 0 || t.trim().is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "partial carries no scrubs / no target key_id".to_string(),
+            ));
+        }
+        (t, c)
+    };
+    let (scrubbers, transport_hints) = coscrub_scrubbers_and_hints(&partial);
+    let roster_verified = match roster_key_ids(&st.engine).await {
+        Some(set) => !scrubbers.is_empty() && scrubbers.iter().all(|s| set.contains(s)),
+        None => false,
+    };
+    let quorum_needed = family_quorum_m(&st.engine).await;
+    let entry = PendingCoscrub {
+        target_key_id: target_key_id.clone(),
+        distinct_scrub_count,
+        quorum_needed,
+        scrubbers,
+        transport_hints,
+        roster_verified,
+        received_at: now_rfc3339(),
+        partial: partial.clone(),
+    };
+    let fresh = upsert_pending(st, entry);
+    let gossiped = if fresh { gossip_partial(st, partial) } else { 0 };
+    Ok((target_key_id, distinct_scrub_count, gossiped, fresh))
+}
+
+#[derive(Debug, Deserialize)]
+struct GossipPartialRequest {
+    /// The gossiped verify `SignedKeyRecord` (a co-scrub partial or a completed record).
+    partial: serde_json::Value,
+}
+
+/// `POST /v1/accord/canonical/gossip-partial` — the OPEN (non-loopback) peer-receive for a
+/// gossiped co-scrub partial. Validates it structurally for the display store (the crypto
+/// gate stays at cosign→adopt), stores it, and re-gossips a first-seen partial so it floods
+/// the mesh. Loop-stopped by `(target, scrub-count)`; the store is bounded.
+async fn receive_gossip_partial(
+    State(st): State<ProvisionState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: GossipPartialRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    match ingest_partial(&st, req.partial).await {
+        Ok((target, count, gossiped, fresh)) => {
+            let status = if fresh { "stored" } else { "duplicate" };
+            tracing::info!(
+                canonical_key_id = %target,
+                distinct_scrubs = count,
+                regossiped_to = gossiped,
+                fresh,
+                "co-scrub: received gossiped partial"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": status,
+                    "target_key_id": target,
+                    "distinct_scrub_count": count,
+                    "regossiped_to": gossiped,
+                })),
+            )
+                .into_response()
+        }
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+/// `GET /v1/accord/canonical/pending` — the "Pending co-signs" list: co-scrub partials that
+/// have NOT yet reached the family m-of-n (when the quorum is unknown locally, all are
+/// shown). Newest first. Each entry carries the verbatim `partial` so a cosign submits it
+/// byte-identical.
+async fn list_pending_coscrubs(State(st): State<ProvisionState>) -> Response {
+    let mut items: Vec<PendingCoscrub> = st.pending.lock().unwrap().clone();
+    items.retain(|p| p.quorum_needed == 0 || p.distinct_scrub_count < p.quorum_needed);
+    items.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "pending": items })),
+    )
+        .into_response()
 }
 
 /// `GET /v1/accord/canonical/servers` — the canonical / founding bootstrap servers
@@ -1922,11 +2217,35 @@ async fn list_canonical_withdrawals(State(st): State<ProvisionState>) -> Respons
     }
 }
 
-/// The accord-provision router — merge onto the read-API listener behind the
-/// loopback guard (see `compose.rs`).
-pub fn router(engine: Arc<Engine>) -> Router {
-    let state = ProvisionState { engine };
-    Router::new()
+/// The accord-provision routers.
+///
+/// - [`ProvisionRouters::loopback`] carries the holder-device ops + read surfaces and MUST
+///   be merged behind the `require_loopback` guard (the client talks to its OWN node).
+/// - [`ProvisionRouters::gossip`] is the co-scrub peer-receive — it MUST accept REMOTE
+///   peers (that is the whole point: A1's box POSTs the partial to B1's box), so it is
+///   deliberately NOT loopback-gated. It validates structurally + is bounded, and the
+///   security decision stays at persist's m-of-n admission gate.
+///
+/// Both share one [`ProvisionState`] so the pending store a peer writes via `gossip` is the
+/// one the client reads via `loopback`'s `GET /pending`.
+pub struct ProvisionRouters {
+    pub loopback: Router,
+    pub gossip: Router,
+}
+
+/// Build the accord-provision routers over a shared state. `peers` is the accord peer base
+/// URL set (`http://host:port`, self excluded) co-scrub partials gossip to — pass the SAME
+/// set the accord kill-switch uses (empty is fine: the ceremony still closes via the
+/// returned/saved partial + the client's paste fallback).
+pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
+    let state = ProvisionState {
+        engine,
+        peers,
+        http: reqwest::Client::new(),
+        pending: Arc::new(Mutex::new(Vec::new())),
+        seen: Arc::new(Mutex::new(HashSet::new())),
+    };
+    let loopback = Router::new()
         .route(
             "/v1/accord/provision-holder",
             axum::routing::post(provision_holder),
@@ -1945,8 +2264,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
             "/v1/accord/canonical/servers",
             axum::routing::get(list_canonical_servers),
         )
-        // Cross-device m-of-n co-scrub (CIRISPersist#383): propose (scrub #1) → the
-        // partial gossips/transfers → cosign (append a scrub) → adopt at quorum.
+        // Cross-device m-of-n co-scrub (CIRISPersist#383): propose (scrub #1) → the partial
+        // gossips (open `/gossip-partial`) → cosign (append a scrub) → adopt at quorum.
         .route(
             "/v1/accord/canonical/propose",
             axum::routing::post(propose_canonical),
@@ -1954,6 +2273,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/canonical/cosign",
             axum::routing::post(cosign_canonical),
+        )
+        // The "Pending co-signs" list (partials below the family quorum), read by the client.
+        .route(
+            "/v1/accord/canonical/pending",
+            axum::routing::get(list_pending_coscrubs),
         )
         // Destructive canonical ops (CIRISPersist#377, 2-of-3) + the withdrawn-history.
         .route(
@@ -1972,7 +2296,20 @@ pub fn router(engine: Arc<Engine>) -> Router {
             "/v1/accord/yubikey-status",
             axum::routing::get(yubikey_status),
         )
-        .with_state(state)
+        .with_state(state.clone());
+    let gossip = Router::new()
+        .route(
+            "/v1/accord/canonical/gossip-partial",
+            axum::routing::post(receive_gossip_partial),
+        )
+        .with_state(state);
+    ProvisionRouters { loopback, gossip }
+}
+
+/// Back-compat convenience: just the loopback router with no gossip peers (used by tests
+/// that exercise the holder-device ops). Prefer [`build`] to also mount `/gossip-partial`.
+pub fn router(engine: Arc<Engine>) -> Router {
+    build(engine, Vec::new()).loopback
 }
 
 #[cfg(test)]
@@ -1999,6 +2336,140 @@ mod tests {
             .await
             .expect("Engine::with_signer (sqlite::memory:) for provision tests");
         super::router(Arc::new(engine))
+    }
+
+    /// The full provision surface (loopback ops + the OPEN `/gossip-partial`) merged, for
+    /// exercising the co-scrub display store end to end.
+    async fn coscrub_app() -> Router {
+        let signing_key = SigningKey::from_bytes(&[0x5C; 32]);
+        let signer = Arc::new(LocalSigner::from_parts(
+            signing_key,
+            "coscrub-test".to_string(),
+            None,
+            None,
+        ));
+        let engine = Engine::with_signer(signer, "sqlite::memory:")
+            .await
+            .expect("Engine::with_signer for co-scrub tests");
+        let r = super::build(Arc::new(engine), Vec::new());
+        r.loopback.merge(r.gossip)
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// A self-signed (1-scrub) verify record JSON — the shape a `propose` partial has.
+    async fn self_signed_partial(key_id: &str) -> serde_json::Value {
+        use ciris_verify_core::federation_self_record::produce_self_key_record;
+        use ciris_verify_core::self_at_login::HybridSigningIdentity;
+        let id = HybridSigningIdentity::generate(key_id).expect("gen identity");
+        let rec = produce_self_key_record(&id, "canonical,node", "2026-07-05T00:00:00Z", &[])
+            .await
+            .expect("produce self key record");
+        serde_json::to_value(&rec).expect("record to json")
+    }
+
+    #[tokio::test]
+    async fn pending_is_empty_on_a_fresh_node() {
+        let app = coscrub_app().await;
+        let (status, body) = get_json(&app, "/v1/accord/canonical/pending").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["pending"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn gossip_partial_rejects_a_non_record() {
+        let app = coscrub_app().await;
+        let (status, _) = post_json(
+            &app,
+            "/v1/accord/canonical/gossip-partial",
+            serde_json::json!({ "partial": { "not": "a record" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn gossip_partial_stores_lists_and_dedups() {
+        let app = coscrub_app().await;
+        let partial = self_signed_partial("canonical-server-gossip-test").await;
+        let target = partial["record"]["key_id"].as_str().unwrap().to_string();
+
+        // First gossip → stored + echoed.
+        let (s1, b1) = post_json(
+            &app,
+            "/v1/accord/canonical/gossip-partial",
+            serde_json::json!({ "partial": partial.clone() }),
+        )
+        .await;
+        assert_eq!(s1, StatusCode::OK);
+        assert_eq!(b1["status"], "stored");
+        assert_eq!(b1["target_key_id"], target);
+
+        // It appears in the pending list (quorum unknown on a fresh node ⇒ shown).
+        let (_, pend) = get_json(&app, "/v1/accord/canonical/pending").await;
+        let items = pend["pending"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["target_key_id"], target);
+        assert_eq!(items[0]["distinct_scrub_count"], 1);
+
+        // Re-gossip of the SAME (target, count) is a no-op duplicate (loop-stop).
+        let (s2, b2) = post_json(
+            &app,
+            "/v1/accord/canonical/gossip-partial",
+            serde_json::json!({ "partial": partial }),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK);
+        assert_eq!(b2["status"], "duplicate");
+        let (_, pend2) = get_json(&app, "/v1/accord/canonical/pending").await;
+        assert_eq!(pend2["pending"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
