@@ -141,11 +141,17 @@ const LEGACY_AGENCY_KINDS: &[&str] = &[
 
 /// `delegation_purpose` recorded on an owner-binding `delegates_to` — "this user
 /// is the responsible party for this node" (the CC 3.2 owner-binding intent).
-pub const OWNER_BINDING_PURPOSE: &str = "responsible_for";
+/// Sourced from the substrate so the wire contract can never drift: persist keys
+/// its single-owner gate + `owner_of` on this exact pair (its docs pin these to
+/// be byte-identical to ours).
+pub const OWNER_BINDING_PURPOSE: &str = ciris_persist::federation::types::owner_binding::PURPOSE;
 
 /// `dimension` for the owner-binding `delegates_to` envelope. Versioned (`:v1`)
-/// to satisfy the substrate's `require_version_segment` dimension gate.
-pub const DIMENSION_OWNER_BINDING: &str = "ownership:responsible_party:node:v1";
+/// to satisfy the substrate's `require_version_segment` dimension gate. Sourced
+/// from the substrate ([`owner_binding::DIMENSION`](ciris_persist::federation::types::owner_binding::DIMENSION))
+/// — the exact string persist's `owner_of` / single-owner gate key on.
+pub const DIMENSION_OWNER_BINDING: &str =
+    ciris_persist::federation::types::owner_binding::DIMENSION;
 
 // ─── The CC 1.13.5 verifier — infra-only scope gate ─────────────────────────
 
@@ -754,6 +760,17 @@ pub async fn emit_steward_binding(
     // Hybrid-sign over the canonical bytes with the USER's signer — attester ==
     // signer == scrub_key_id (the v9.0.0 federation-tier ingest gate verifies the
     // row against `attesting_key_id`'s registered pubkeys).
+    //
+    // NOTE (DRY audit): persist v13.2.0 exposes `Engine::emit_attestation(signer,
+    // input)`, but it is NOT a drop-in here. It attributes the row to
+    // `signer.derived_key_id()` (= `derive_key_id(signer.key_id(), pubkey)`),
+    // whereas this owner-binding flow passes a USER signer whose `key_id()` is
+    // ALREADY the registered (derived) federation id — so `emit_attestation` would
+    // DOUBLE-derive it (`<id>-<fp>-<fp>`) and the `attesting_key_id` FK to
+    // `federation_keys` would fail. `register_user_key` / `build_signed_owner_binding`
+    // / `is_steward_bound` all key on `signer.key_id()` end-to-end; adopting the
+    // substrate primitive would require re-keying that whole owner-binding wire
+    // contract onto derived ids. Kept hand-rolled (attester == `signer.key_id()`).
     let sig = user_signer
         .sign_hybrid(&canonical)
         .await
@@ -799,19 +816,19 @@ pub async fn emit_steward_binding(
     Ok(attestation_id)
 }
 
-/// **Emit a signed, federation-tier CEG attestation.** The ciris-server local
-/// stand-in for [CIRISPersist#248] (until persist exposes a first-class
-/// `Engine::emit_attestation`): canonicalize the envelope
+/// **Emit a signed, federation-tier CEG attestation.** Canonicalize the envelope
 /// (`ceg_produce_canonicalize`) → hybrid-sign with `signer` → build the
 /// federation-tier [`Attestation`] row (attester == signer == `scrub_key_id`, the
 /// shape the v9.0.0 ingest gate verifies against the signer's REGISTERED key) →
 /// `put_attestation`. Returns the `attestation_id`.
 ///
-/// This is the WORKING federation-emit path (the one `emit_steward_binding` uses and
-/// that reads back) — it deliberately does NOT go through `attestation_promote`,
-/// which is currently broken on real nodes ([CIRISPersist#247]: promote writes
-/// `scrub_key_id = signer.current_alias()`, not the derived federation key_id → FK
-/// violation). `signer.key_id()` MUST be the signer's registered (derived) key_id.
+/// NOTE (DRY audit): persist v13.2.0 exposes `Engine::emit_attestation(signer,
+/// input)`, but it is NOT a drop-in here. It attributes the row to
+/// `signer.derived_key_id()` (= `derive_key_id(signer.key_id(), pubkey)`); this
+/// emit path is called with signers whose `key_id()` is ALREADY the registered
+/// (derived) federation id, so the substrate primitive would DOUBLE-derive it and
+/// the `attesting_key_id` FK would fail. `signer.key_id()` MUST be the signer's
+/// registered (derived) key_id; the attester is bound to it verbatim.
 pub async fn emit_signed_attestation(
     engine: &Engine,
     signer: &LocalSigner,

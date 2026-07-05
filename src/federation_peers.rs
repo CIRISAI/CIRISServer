@@ -32,8 +32,9 @@
 //! [`ciris_persist::federation::types::KeyRecord`] maps to a `LocalPeerState`:
 //!
 //!   - `key_id` / `pubkey_ed25519_base64`  ← record fields verbatim.
-//!   - `canonical`  ← `identity_type == "node"` OR `key_id` begins
-//!     `ciris-canonical` (a known canonical-mesh identity).
+//!   - `canonical`  ← the `identity_type` set contains `canonical` (the
+//!     authoritative `admission::is_canonical` predicate — earned via
+//!     anchor-scrub, not guessed from role/key_id).
 //!   - `trust`  ← `"trusted"` (a directory row is an admitted key).
 //!   - `first_seen`  ← record `valid_from` (RFC3339).
 //!   - `appearance`/`alias_override`/`notes`/`last_seen`  ← null.
@@ -98,10 +99,15 @@ struct LocalPeerState {
     last_seen: Option<String>,
 }
 
-/// `true` if the key is a known canonical-mesh identity (a node row, or a
-/// `ciris-canonical*` key_id). Heuristic — sufficient for the card's badge.
+/// `true` if the key is a canonical / founding bootstrap server — the
+/// AUTHORITATIVE predicate `ciris_persist::federation::admission::is_canonical`
+/// uses: its `identity_type` set contains `identity_type::CANONICAL` (a row can
+/// carry `canonical` only by earning it via anchor-scrub, since the write gate is
+/// the enforcement point). We already hold the row, so we apply the substrate's
+/// set-membership predicate directly instead of the old node-role/key_id-prefix
+/// heuristic (which false-positived every peer node).
 fn is_canonical(rec: &KeyRecord) -> bool {
-    rec.identity_type == identity_type::NODE || rec.key_id.starts_with("ciris-canonical")
+    identity_type::set_contains(&rec.identity_type, identity_type::CANONICAL)
 }
 
 fn to_peer(rec: KeyRecord) -> LocalPeerState {

@@ -214,7 +214,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (stable for the node's lifetime), served verbatim by
     // GET /v1/federation/self-key-record and the public record a peer registers
     // to admit this node's replicated rows.
-    let self_key_record_json = self_key_record_json(&engine, &cfg).await?;
+    let self_key_record_json = self_key_record_json(&cfg).await?;
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -229,7 +229,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     } else {
         initial_config.node_alias.clone()
     };
-    let node_code = node_self_code(&engine, &cfg, Some(node_alias)).await?;
+    let node_code = node_self_code(&cfg, Some(node_alias)).await?;
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
 
@@ -1136,7 +1136,7 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
     use ciris_persist::federation::Error as FederationError;
     use ciris_persist::federation::SignedKeyRecord;
 
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
 
     // Export A's own signed record for the operator to hand to peer B (the
     // cross-repo peering contract: CIRIS_PEER_B_KEY_RECORD = the peer's
@@ -1189,9 +1189,9 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
 /// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
 /// uses, so the GET output round-trips byte-identically through a peer's
 /// `register_federation_key`.
-async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<String> {
+async fn self_key_record_json(cfg: &ServerConfig) -> Result<String> {
     use ciris_persist::federation::SignedKeyRecord;
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
     serde_json::to_string(&SignedKeyRecord { record })
         .context("serialize this node's self-signed SignedKeyRecord")
 }
@@ -1202,11 +1202,10 @@ async fn self_key_record_json(engine: &Engine, cfg: &ServerConfig) -> Result<Str
 /// federation signing-key pubkey. The alias hint is the resolved config:*
 /// `node.alias` (Server 0.5 — no env). Built once at boot.
 async fn node_self_code(
-    engine: &Engine,
     cfg: &ServerConfig,
     alias_hint: Option<String>,
 ) -> Result<crate::nodecode::NodeCode> {
-    let record = build_self_key_record(engine, cfg).await?;
+    let record = build_self_key_record(cfg).await?;
     Ok(crate::federation_nodecode::build_node_code(
         &record.key_id,
         &record.pubkey_ed25519_base64,
@@ -1219,71 +1218,56 @@ async fn node_self_code(
 }
 
 /// Build Node A's self-signed [`KeyRecord`](ciris_persist::federation::types::KeyRecord)
-/// — `scrub_key_id == key_id`, hybrid proof-of-possession over
-/// `ceg_produce_canonicalize(registration_envelope)`. This is the exact record
-/// the v8.8.0 admission gate verifies and that A exports for peer B to register.
+/// — `scrub_key_id == key_id`, a bound-hybrid proof-of-possession over the
+/// JCS-canonicalized registration envelope. This is the exact record the admission
+/// gate verifies and that A exports for peer B to register.
+///
+/// Produced by verify's single-source [`produce_self_key_record`] over this node's
+/// own hardware/sealed federation signers wrapped as a [`HardwareRootedIdentity`]
+/// (a verify `SelfSigner`) — the SAME producer identity.rs / accord.rs /
+/// accord_provision.rs use, whose JCS canonicalization + bound-hybrid signature are
+/// byte-exact to what persist's `register_federation_key` recanonicalizes and
+/// verifies. (verify's `ceg_produce_canonicalize` **is** its own JCS, so the row
+/// round-trips the gate by construction.) The signed envelope binds the pubkeys +
+/// identity_type + validity, not just `{key_id}` — a strictly richer, harder-to-
+/// replay PoP than the prior hand-rolled minimal envelope.
 pub(crate) async fn build_self_key_record(
-    engine: &Engine,
     cfg: &ServerConfig,
 ) -> Result<ciris_persist::federation::types::KeyRecord> {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
-    use ciris_persist::federation::types::{algorithm, KeyRecord};
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
-    use sha2::{Digest, Sha256};
+    use ciris_verify_core::federation_self_record::produce_self_key_record;
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
-    // Registration envelope (the proof-of-possession signing payload). Minimal +
-    // stable. Canonicalized via the CEG PRODUCE gate (V2/JCS) so it matches the
-    // form `verify_key_registration` re-derives and hash-cross-checks.
-    let envelope = serde_json::json!({ "key_id": cfg.key_id });
-    let canonical = ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow::anyhow!("ceg_produce_canonicalize self-registration envelope: {e}"))?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
+    // Wrap this node's OWN Ed25519 (hardware-sealed) + ML-DSA-65 signers — the same
+    // halves the Engine is composed from — as a verify `SelfSigner`. Re-opened here
+    // (boot-time, called ~3× while assembling the boot state); the software path is
+    // a cheap seal read, and the pkcs11 path mirrors accord_provision's admit-node
+    // ceremony which opens a fresh identity alongside the running engine.
+    let ed: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
+    let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
+    let identity = HardwareRootedIdentity::new(cfg.key_id.clone(), ed, pqc)
+        .map_err(|e| anyhow::anyhow!("build node self-signer identity: {e}"))?;
 
-    // Hybrid-sign the canonical bytes (Ed25519 hardware-sealed + ML-DSA-65; the
-    // PQC half is bound over canonical || classical_sig inside sign_hybrid). The
-    // signature carries both pubkeys, so the registered row is PQC-complete.
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .context("hybrid-sign self-registration envelope")?;
+    // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure, NO
+    // agency) — NOT a trust-root steward. No transport hints in the node's own
+    // self record (Edge discovers real transports); `&[]` keeps the pre-#172
+    // envelope shape.
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec = produce_self_key_record(
+        &identity,
+        ciris_persist::federation::types::identity_type::NODE,
+        &valid_from,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce node self-signed key record: {e}"))?;
 
-    let now = chrono::Utc::now();
-    Ok(KeyRecord {
-        key_id: cfg.key_id.clone(),
-        pubkey_ed25519_base64: B64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(B64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.to_owned(),
-        // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure,
-        // NO agency) — NOT a trust-root steward. The canonical-trust note still
-        // holds (this is the node's own self-signed federation identity, the
-        // admission anchor for rows it authors); the IDENTITY_TYPE is corrected
-        // from "steward" to "node" so the wire-checkable CC 4.4.3.5 invariant
-        // applies (a node-key delegation may carry only infra:* scopes).
-        // persist v9.0.0 (CIRISPersist#235 closed) now publishes the canonical
-        // role token `federation::types::identity_type::NODE` ("node"), so the
-        // node + the v9.0.0 node-agency admission gate agree byte-for-byte.
-        identity_type: ciris_persist::federation::types::identity_type::NODE.to_owned(),
-        identity_ref: cfg.key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        // Self-signed proof-of-possession: scrub_key_id == key_id.
-        scrub_key_id: cfg.key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(), // server-computed on insert
-        roles: Vec::new(),
-        attestation_evidence: None,
-        // No Counter-RII consent role on the node's own identity (persist v13
-        // #365): None ⇔ the stored `unregistered` default; excluded from the
-        // registration hash, assigned later via set_consent_role.
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    })
+    // Bridge the verify `SignedKeyRecord` into persist's `SignedKeyRecord` via the
+    // structurally-identical JSON shape (the exact bridge the portable-mint path in
+    // identity.rs uses), then hand back the inner persist `KeyRecord`.
+    let signed: ciris_persist::federation::SignedKeyRecord =
+        serde_json::from_value(serde_json::to_value(&v_rec)?)
+            .map_err(|e| anyhow::anyhow!("bridge verify→persist self SignedKeyRecord: {e}"))?;
+    Ok(signed.record)
 }
 
 /// Set up **CEG-driven** directed-consent replication. The corpus's
