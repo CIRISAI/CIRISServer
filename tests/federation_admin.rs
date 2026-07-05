@@ -664,7 +664,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
 
     // Seed the A1 accord anchor (persist v12.0.2 first-boot-seeds this in prod).
     let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
-    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now)
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, &[])
         .await
         .expect("A1 anchor");
     let a1_ed: [u8; 32] = BASE64
@@ -679,7 +679,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
 
     // A target node's boot-time SELF-signed own row (the row to be upgraded).
     let target = HybridSigningIdentity::generate("adopt-target-test").expect("gen target");
-    let t_self = produce_self_key_record(&target, "node", &now)
+    let t_self = produce_self_key_record(&target, "node", &now, &[])
         .await
         .expect("target self record");
     let t_ed = t_self.record.pubkey_ed25519_base64.clone();
@@ -703,6 +703,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
             identity_type: "node".to_string(),
         },
         &now,
+        &[],
     )
     .await
     .expect("A1 scrub-signs target");

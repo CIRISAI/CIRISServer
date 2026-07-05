@@ -1082,11 +1082,17 @@ async fn admit_node(State(st): State<ProvisionState>, body: axum::body::Bytes) -
             "target key_id contains path separators — refusing to write it",
         );
     }
-    admit_node_impl(st.engine, req).await
+    // admit-node embeds no transport hint (it's a plain trust-root admission); the
+    // reachability-carrying variant is add-canonical, which passes its ip hint.
+    admit_node_impl(st.engine, req, &[]).await
 }
 
 #[cfg(not(feature = "pkcs11"))]
-async fn admit_node_impl(_engine: Arc<Engine>, _req: AdmitNodeRequest) -> Response {
+async fn admit_node_impl(
+    _engine: Arc<Engine>,
+    _req: AdmitNodeRequest,
+    _transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
+) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
         "admit-node needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
@@ -1094,7 +1100,11 @@ async fn admit_node_impl(_engine: Arc<Engine>, _req: AdmitNodeRequest) -> Respon
 }
 
 #[cfg(feature = "pkcs11")]
-async fn admit_node_impl(engine: Arc<Engine>, req: AdmitNodeRequest) -> Response {
+async fn admit_node_impl(
+    engine: Arc<Engine>,
+    req: AdmitNodeRequest,
+    transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
+) -> Response {
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1185,7 +1195,7 @@ async fn admit_node_impl(engine: Arc<Engine>, req: AdmitNodeRequest) -> Response
     // (1) The holder's OWN self-signed `steward,accord_holder` anchor record — the
     //     rooting terminus persist bakes (its ed25519 pubkey IS a pinned anchor).
     let anchor =
-        match produce_self_key_record(&identity, "steward,accord_holder", &valid_from).await {
+        match produce_self_key_record(&identity, "steward,accord_holder", &valid_from, &[]).await {
             Ok(r) => r,
             Err(e) => {
                 return err(
@@ -1205,6 +1215,10 @@ async fn admit_node_impl(engine: Arc<Engine>, req: AdmitNodeRequest) -> Response
             identity_type: req.target.identity_type.trim().to_string(),
         },
         &valid_from,
+        // #172: transport hints ride INSIDE this scrub-signed envelope, so the accord
+        // holder attests the node's reachability along with its identity (empty for a
+        // plain admit-node; the add-canonical ceremony passes the node's ip hint).
+        transport_hints,
     )
     .await
     {
@@ -1396,20 +1410,33 @@ async fn add_canonical_impl(_engine: Arc<Engine>, _req: AddCanonicalRequest) -> 
 
 #[cfg(feature = "pkcs11")]
 async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -> Response {
+    use ciris_verify_core::federation_self_record::TransportHint;
     // Force the `canonical` role — the persist gate confers it iff anchor-scrubbed.
     req.admit.target.identity_type = ensure_canonical_role(&req.admit.target.identity_type);
     let target_key_id = req.admit.target.key_id.trim().to_string();
-    let transport = match (req.transport_kind.as_deref(), req.destination.as_deref()) {
-        (Some(k), Some(d)) if !k.trim().is_empty() && !d.trim().is_empty() => {
-            Some((k.trim().to_string(), d.trim().to_string()))
-        }
-        _ => None,
-    };
 
-    // (1) Hardware scrub + adopt via the shipped admit-node path. adopt_scrub_upgrade
-    //     runs check_canonical_role_admission, so a non-anchor scrubber is rejected
-    //     there (the role never lands). Surface any non-200 verbatim.
-    let resp = admit_node_impl(engine.clone(), req.admit).await;
+    // The transport hint rides INSIDE the scrub-signed envelope (CIRISVerify#172 /
+    // CIRISPersist#381), so the accord holder attests the node's reachability along
+    // with its identity in ONE signature — a baked/replicated canonical record is then
+    // self-describing (who + where) and can't be spoofed post-hoc. `kind=ip` is the
+    // internet-dialable TCP bootstrap entry; a `reticulum` dest is pubkey-derivable
+    // overlay and optional. (Runtime address moves still flow through the separate
+    // update-address op + transport_destination overlay — this is the genesis default.)
+    let hints: Vec<TransportHint> =
+        match (req.transport_kind.as_deref(), req.destination.as_deref()) {
+            (Some(k), Some(d)) if !k.trim().is_empty() && !d.trim().is_empty() => {
+                vec![TransportHint {
+                    kind: k.trim().to_string(),
+                    destination: d.trim().to_string(),
+                }]
+            }
+            _ => Vec::new(),
+        };
+
+    // (1) Hardware scrub (embedding the hint) + adopt via the shipped admit-node path.
+    //     adopt_scrub_upgrade runs check_canonical_role_admission, so a non-anchor
+    //     scrubber is rejected there (the role never lands). Surface non-200 verbatim.
+    let resp = admit_node_impl(engine.clone(), req.admit, &hints).await;
     if resp.status() != StatusCode::OK {
         return resp;
     }
@@ -1419,44 +1446,22 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
     //     adopted on the node itself) — not an error, just not locally confirmable.
     let is_canonical = engine.is_canonical(&target_key_id).await.unwrap_or(false);
 
-    // (3) Publish the Option-A address binding, if supplied.
-    let mut address_json = serde_json::Value::Null;
-    if let Some((transport_kind, destination)) = transport {
-        if let Err(e) = engine
-            .federation_directory()
-            .put_transport_destination(&ciris_persist::federation::TransportDestination {
-                occurrence_key_id: target_key_id.clone(),
-                transport_kind: transport_kind.clone(),
-                destination: destination.clone(),
-                asserted_at: chrono::Utc::now(),
-                last_seen_at: None,
-            })
-            .await
-        {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("bind transport_destination: {e}"),
-            );
-        }
-        address_json =
-            serde_json::json!({ "transport_kind": transport_kind, "destination": destination });
-    }
-
     let seed_path = ciris_verify_core::ceg_outbox::ceg_outbox()
         .join("accord_admit_node")
         .join(format!("{target_key_id}.json"));
     tracing::info!(
         canonical_key_id = %target_key_id,
         is_canonical,
-        address_bound = !address_json.is_null(),
-        "Trust Root: add-canonical — node admitted to the canonical set (accord-conferred)"
+        transport_hints = hints.len(),
+        "Trust Root: add-canonical — node admitted to the canonical set (accord-conferred; hint in envelope)"
     );
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "canonical_key_id": target_key_id,
             "is_canonical": is_canonical,
-            "address": address_json,
+            // The hint(s) now embedded in the signed envelope (the bake artifact).
+            "address": serde_json::to_value(&hints).unwrap_or(serde_json::Value::Null),
             "seed_saved_to": seed_path.display().to_string(),
         })),
     )
@@ -1680,7 +1685,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_canonical_servers_is_empty_on_a_fresh_node() {
+    async fn list_canonical_servers_returns_the_baked_genesis_on_a_fresh_node() {
+        // persist v13.1.0 (CIRISPersist#380) auto-seeds the A1-conferred canonical
+        // genesis anchor `ciris-canonical-1-d7bdeu223k` on first boot, so a fresh
+        // node already lists exactly it — the mesh-seed trust root, no out-of-band
+        // JSON required. (Was: asserted empty pre-#380.)
         let app = router_with_engine().await;
         let resp = app
             .oneshot(
@@ -1697,11 +1706,22 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            v["servers"].as_array().map(|a| a.len()),
-            Some(0),
-            "a fresh node has no accord-conferred canonical servers"
+        let servers = v["servers"].as_array().expect("servers array");
+        assert!(
+            servers
+                .iter()
+                .any(|s| s["key_id"] == "ciris-canonical-1-d7bdeu223k"),
+            "the baked canonical genesis anchor is auto-seeded on a fresh node (persist#380): {v}"
         );
+        // Every listed server carries the accord-conferred `canonical` role.
+        for s in servers {
+            let it = s["identity_type"].as_str().unwrap_or("");
+            assert!(
+                it.split(',').any(|r| r == "canonical"),
+                "listed server {} must carry the canonical role, got {it:?}",
+                s["key_id"]
+            );
+        }
     }
 
     #[tokio::test]

@@ -371,6 +371,8 @@ pub async fn mint_user_identity(
         // seal_alias = the keystore alias: seal/re-open the ML-DSA half (and the
         // software Ed25519 seed) under `<alias>` while the recorded id is derived.
         Some(key_id_alias),
+        // No transport hint on a self-minted user fed-ID (#172).
+        &[],
     )
     .await
     .map_err(|e| anyhow::anyhow!("create_federation_identity (user): {e}"))?;
@@ -562,10 +564,14 @@ pub async fn mint_portable_software_occurrence(
     // register gate recomputes). Bridged verify→persist by the structurally
     // identical JSON shape (the accord-holder path round-trips the same way).
     let now = chrono::Utc::now().to_rfc3339();
-    let v_rec =
-        ciris_verify_core::federation_self_record::produce_self_key_record(&identity, "user", &now)
-            .await
-            .map_err(|e| anyhow::anyhow!("produce portable self key record: {e}"))?;
+    let v_rec = ciris_verify_core::federation_self_record::produce_self_key_record(
+        &identity,
+        "user",
+        &now,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce portable self key record: {e}"))?;
     let key_record: ciris_persist::federation::SignedKeyRecord =
         serde_json::from_value(serde_json::to_value(&v_rec)?)
             .map_err(|e| anyhow::anyhow!("bridge verify→persist SignedKeyRecord: {e}"))?;

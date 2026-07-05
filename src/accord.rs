@@ -736,7 +736,7 @@ async fn ensure_accord_family_anchor(
             rt.block_on(async move {
                 let anchor = HybridSigningIdentity::generate(HUMANITY_ACCORD_FAMILY_KEY_ID)
                     .map_err(|e| e.to_string())?;
-                let v_rec = produce_self_key_record(&anchor, "family", &now_s)
+                let v_rec = produce_self_key_record(&anchor, "family", &now_s, &[])
                     .await
                     .map_err(|e| e.to_string())?;
                 serde_json::to_value(&v_rec).map_err(|e| e.to_string())

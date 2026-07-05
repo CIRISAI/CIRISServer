@@ -1741,48 +1741,36 @@ async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerC
 /// Returns empty on a substrate whose canonical records carry no `transport_hints`
 /// yet (forward-compatible: a pre-#381 record simply has no such envelope key).
 async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr> {
-    match engine.list_canonical_servers().await {
-        Ok(rows) => ip_hints_from_records(&rows),
+    match engine.canonical_bootstrap_hints().await {
+        Ok(hints) => ip_addrs_from_hints(&hints),
         Err(e) => {
-            tracing::warn!(error = %e, "list_canonical_servers for bootstrap hints failed — using config override only");
+            tracing::warn!(error = %e, "canonical_bootstrap_hints failed — using config override only");
             Vec::new()
         }
     }
 }
 
-/// Pure extraction of dialable `ip` bootstrap addresses from canonical records'
-/// signed envelope `transport_hints` (CIRISPersist#381). Split out from
-/// [`canonical_bootstrap_addrs`] so the parse is unit-testable without an engine.
-/// Skips non-`ip` kinds (a `reticulum` hint is a pubkey-derived overlay address,
-/// not a TCP bootstrap target) and un-parseable destinations.
-fn ip_hints_from_records(
-    rows: &[ciris_persist::federation::KeyRecord],
+/// Pure extraction of dialable `ip` bootstrap addresses from persist's
+/// `canonical_bootstrap_hints()` — the `(key_id, TransportHint)` pairs read from the
+/// canonical records' signed envelopes (CIRISPersist#381). Split out so the filter is
+/// unit-testable without an engine. Skips non-`ip` kinds (a `reticulum` hint is a
+/// pubkey-derived overlay address, not a TCP bootstrap target) + un-parseable dests.
+fn ip_addrs_from_hints(
+    hints: &[(String, ciris_persist::federation::types::TransportHint)],
 ) -> Vec<std::net::SocketAddr> {
     let mut out = Vec::new();
-    for rec in rows {
-        let Some(hints) = rec
-            .registration_envelope
-            .get("transport_hints")
-            .and_then(|v| v.as_array())
-        else {
+    for (key_id, h) in hints {
+        if h.kind != "ip" {
             continue;
-        };
-        for h in hints {
-            if h.get("kind").and_then(|k| k.as_str()) != Some("ip") {
-                continue;
-            }
-            let Some(dest) = h.get("destination").and_then(|d| d.as_str()) else {
-                continue;
-            };
-            match dest.parse::<std::net::SocketAddr>() {
-                Ok(addr) => out.push(addr),
-                Err(e) => tracing::warn!(
-                    canonical = %rec.key_id,
-                    dest = %dest,
-                    error = %e,
-                    "canonical ip transport hint is not host:port — skipping"
-                ),
-            }
+        }
+        match h.destination.parse::<std::net::SocketAddr>() {
+            Ok(addr) => out.push(addr),
+            Err(e) => tracing::warn!(
+                canonical = %key_id,
+                dest = %h.destination,
+                error = %e,
+                "canonical ip transport hint is not host:port — skipping"
+            ),
         }
     }
     out
@@ -1835,57 +1823,30 @@ async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) 
 
 #[cfg(test)]
 mod bootstrap_hint_tests {
-    use super::ip_hints_from_records;
-    use ciris_persist::federation::KeyRecord;
+    use super::ip_addrs_from_hints;
+    use ciris_persist::federation::types::TransportHint;
 
-    // Build a KeyRecord via deserialization so the test needn't spell every field.
-    fn rec(key_id: &str, envelope: serde_json::Value) -> KeyRecord {
-        serde_json::from_value(serde_json::json!({
-            "key_id": key_id,
-            "pubkey_ed25519_base64": "AA",
-            "pubkey_ml_dsa_65_base64": "BB",
-            "algorithm": "hybrid",
-            "identity_type": "canonical,node",
-            "identity_ref": key_id,
-            "valid_from": "2026-07-05T00:00:00Z",
-            "valid_until": null,
-            "registration_envelope": envelope,
-            "original_content_hash": "00",
-            "scrub_signature_classical": "cc",
-            "scrub_signature_pqc": "pp",
-            "scrub_key_id": "A1",
-            "scrub_timestamp": "2026-07-05T00:00:00Z",
-            "pqc_completed_at": null,
-            "persist_row_hash": "",
-            "roles": [],
-            "attestation_evidence": null,
-            "consent_role": null,
-        }))
-        .expect("KeyRecord deserializes")
+    fn hint(kind: &str, dest: &str) -> TransportHint {
+        TransportHint {
+            kind: kind.to_string(),
+            destination: dest.to_string(),
+        }
     }
 
     #[test]
     fn extracts_ip_hints_skips_reticulum_and_unparseable() {
-        let rows = vec![
-            rec(
-                "canonical-1",
-                serde_json::json!({"transport_hints": [
-                    {"kind":"ip","destination":"108.61.242.236:4242"},
-                    {"kind":"reticulum","destination":"81cabcf78a6ee16f197ba7e530a2f6db"},
-                    {"kind":"ip","destination":"not-a-socket-addr"}
-                ]}),
+        let hints = vec![
+            ("canonical-1".to_string(), hint("ip", "108.61.242.236:4242")),
+            // reticulum: pubkey-derived overlay, not a TCP bootstrap target → skipped
+            (
+                "canonical-1".to_string(),
+                hint("reticulum", "81cabcf78a6ee16f197ba7e530a2f6db"),
             ),
-            // pre-#381 record (no transport_hints key) contributes nothing
-            rec(
-                "canonical-2",
-                serde_json::json!({"purpose":"federation-peering"}),
-            ),
-            rec(
-                "canonical-3",
-                serde_json::json!({"transport_hints": [{"kind":"ip","destination":"10.0.0.9:4242"}]}),
-            ),
+            // malformed ip → skipped (warned)
+            ("canonical-1".to_string(), hint("ip", "not-a-socket-addr")),
+            ("canonical-3".to_string(), hint("ip", "10.0.0.9:4242")),
         ];
-        let addrs = ip_hints_from_records(&rows);
+        let addrs = ip_addrs_from_hints(&hints);
         assert_eq!(
             addrs.len(),
             2,
@@ -1896,7 +1857,7 @@ mod bootstrap_hint_tests {
     }
 
     #[test]
-    fn empty_without_canonical_records() {
-        assert!(ip_hints_from_records(&[]).is_empty());
+    fn empty_without_canonical_hints() {
+        assert!(ip_addrs_from_hints(&[]).is_empty());
     }
 }
