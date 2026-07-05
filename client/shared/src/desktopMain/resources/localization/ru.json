@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Подписать как держатель",
     "accord_sign_as_holder_usb_label": "Папка USB (материалы PQC)",
     "accord_start_drill": "Начать учения",
-    "accord_trust_1of1": "1 из 1"
+    "accord_trust_1of1": "1 из 1",
+    "accord_canonical_propose_desc": "Канонический сервер теперь присваивается совместной очисткой m-из-n. Это очистка №1: локальный держатель соглашения подписывает узел очисткой; частичная запись рассылается на устройства других держателей для соподписи. Приложение не хранит ключей — касание YubiKey является согласием.",
+    "accord_canonical_propose_btn": "Предложить канонический сервер — коснитесь YubiKey",
+    "accord_canonical_propose_btn_busy": "Предложение — коснитесь YubiKey…",
+    "accord_new_cosign_paste": "Соподписать вставленную совместную очистку",
+    "accord_section_coscrub": "Ожидающие соподписи (канонические)",
+    "accord_coscrub_empty": "Нет канонических совместных очисток, ожидающих соподписи.",
+    "accord_coscrub_badge": "{signed}/{needed} очисток",
+    "accord_coscrub_scrubbers": "очищено: {scrubbers}",
+    "accord_coscrub_unverified": "список не проверен — очищающий не является известным держателем соглашения",
+    "accord_coscrub_target": "цель {key}",
+    "accord_coscrub_cosign_title": "Соподписать каноническую совместную очистку",
+    "accord_coscrub_cosign_desc": "Добавьте свою очистку к этой канонической совместной очистке на YubiKey вашего держателя соглашения. При достижении семейного кворума запись присваивается. Приложение не хранит ключей — касание является согласием.",
+    "accord_coscrub_cosign_submit": "Соподписать очистку — коснитесь YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Соподписание — коснитесь YubiKey…",
+    "accord_coscrub_paste_hint": "Нет ожидающей записи? Вставьте JSON частичной совместной очистки, чтобы соподписать её напрямую (работает без рассылки).",
+    "accord_cosign_paste_label": "Частичная запись (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "Это недопустимый JSON — вставьте полную частичную запись (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

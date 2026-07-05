@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Assinar como detentor",
     "accord_sign_as_holder_usb_label": "Pasta USB (materiais PQC)",
     "accord_start_drill": "Iniciar simulação",
-    "accord_trust_1of1": "1-de-1"
+    "accord_trust_1of1": "1-de-1",
+    "accord_canonical_propose_desc": "Um servidor canônico agora é conferido por um co-scrub m-de-n. Este é o scrub #1: o detentor local do accord scrub-assina o nó; o parcial circula para os dispositivos dos outros detentores cofirmarem. O app não guarda chaves — o toque na YubiKey é o consentimento.",
+    "accord_canonical_propose_btn": "Propor servidor canônico — toque na sua YubiKey",
+    "accord_canonical_propose_btn_busy": "Propondo — toque na sua YubiKey…",
+    "accord_new_cosign_paste": "Cofirmar um co-scrub colado",
+    "accord_section_coscrub": "Cofirmações pendentes (canônico)",
+    "accord_coscrub_empty": "Nenhum co-scrub canônico aguardando cofirmação.",
+    "accord_coscrub_badge": "{signed}/{needed} scrubs",
+    "accord_coscrub_scrubbers": "scrub-assinado por {scrubbers}",
+    "accord_coscrub_unverified": "lista não verificada — um scrubber não é um detentor de accord conhecido",
+    "accord_coscrub_target": "alvo {key}",
+    "accord_coscrub_cosign_title": "Cofirmar co-scrub canônico",
+    "accord_coscrub_cosign_desc": "Acrescente o seu scrub a este co-scrub canônico na YubiKey do seu detentor do accord. Ao atingir o quórum da família, o registro é conferido. O app não guarda chaves — o toque é o consentimento.",
+    "accord_coscrub_cosign_submit": "Cofirmar co-scrub — toque na sua YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Cofirmando — toque na sua YubiKey…",
+    "accord_coscrub_paste_hint": "Nenhuma entrada pendente? Cole o JSON parcial do co-scrub para cofirmá-lo diretamente (funciona sem gossip).",
+    "accord_cosign_paste_label": "Parcial (JSON SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Isso não é um JSON válido — cole o registro parcial completo (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

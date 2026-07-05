@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Firma come detentore",
     "accord_sign_as_holder_usb_label": "Cartella USB (materiali PQC)",
     "accord_start_drill": "Avvia prova",
-    "accord_trust_1of1": "1 su 1"
+    "accord_trust_1of1": "1 su 1",
+    "accord_canonical_propose_desc": "Un server canonico viene ora conferito tramite un co-scrub m-di-n. Questo è lo scrub #1: il titolare dell'accordo locale firma-scrub il nodo; il parziale viene diffuso ai dispositivi degli altri titolari per la cofirma. L'app non conserva chiavi — il tocco della YubiKey è il consenso.",
+    "accord_canonical_propose_btn": "Proponi server canonico — tocca la tua YubiKey",
+    "accord_canonical_propose_btn_busy": "Proposta in corso — tocca la tua YubiKey…",
+    "accord_new_cosign_paste": "Cofirma un co-scrub incollato",
+    "accord_section_coscrub": "Cofirme in sospeso (canoniche)",
+    "accord_coscrub_empty": "Nessun co-scrub canonico in attesa di cofirma.",
+    "accord_coscrub_badge": "{signed}/{needed} scrub",
+    "accord_coscrub_scrubbers": "scrub eseguito da {scrubbers}",
+    "accord_coscrub_unverified": "elenco non verificato — un firmatario scrub non è un titolare dell'accordo noto",
+    "accord_coscrub_target": "destinazione {key}",
+    "accord_coscrub_cosign_title": "Cofirma co-scrub canonico",
+    "accord_coscrub_cosign_desc": "Aggiungi il tuo scrub a questo co-scrub canonico sulla YubiKey del titolare del tuo accordo. Al quorum della famiglia il record viene conferito. L'app non conserva chiavi — il tocco è il consenso.",
+    "accord_coscrub_cosign_submit": "Cofirma co-scrub — tocca la tua YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Cofirma in corso — tocca la tua YubiKey…",
+    "accord_coscrub_paste_hint": "Nessuna voce in sospeso? Incolla il JSON parziale del co-scrub per cofirmarlo direttamente (funziona senza diffusione).",
+    "accord_cosign_paste_label": "Parziale (JSON SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Questo non è un JSON valido — incolla il record parziale completo (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

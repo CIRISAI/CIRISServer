@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Sahip olarak imzala",
     "accord_sign_as_holder_usb_label": "USB klasörü (PQC materyalleri)",
     "accord_start_drill": "Tatbikatı başlat",
-    "accord_trust_1of1": "1/1"
+    "accord_trust_1of1": "1/1",
+    "accord_canonical_propose_desc": "Kanonik bir sunucu artık m-of-n ortak temizleme (co-scrub) ile atanır. Bu, 1. temizlemedir: yerel accord sahibi düğümü temizleyip imzalar; kısmi kayıt, diğer sahiplerin cihazlarına birlikte imzalamaları için yayılır. Uygulama hiçbir anahtar tutmaz — YubiKey dokunuşu onaydır.",
+    "accord_canonical_propose_btn": "Kanonik sunucu öner — YubiKey'inize dokunun",
+    "accord_canonical_propose_btn_busy": "Öneriliyor — YubiKey'inize dokunun…",
+    "accord_new_cosign_paste": "Yapıştırılan bir ortak temizlemeyi birlikte imzala",
+    "accord_section_coscrub": "Bekleyen ortak imzalar (kanonik)",
+    "accord_coscrub_empty": "Ortak imza bekleyen kanonik ortak temizleme yok.",
+    "accord_coscrub_badge": "{signed}/{needed} temizleme",
+    "accord_coscrub_scrubbers": "{scrubbers} tarafından temizlendi",
+    "accord_coscrub_unverified": "kadro doğrulanmadı — bir temizleyici bilinen bir accord sahibi değil",
+    "accord_coscrub_target": "hedef {key}",
+    "accord_coscrub_cosign_title": "Kanonik ortak temizlemeyi birlikte imzala",
+    "accord_coscrub_cosign_desc": "Bu kanonik ortak temizlemeye kendi temizlemenizi accord sahibinizin YubiKey'i üzerinde ekleyin. Aile çoğunluğuna ulaşıldığında kayıt atanır. Uygulama hiçbir anahtar tutmaz — dokunuş onaydır.",
+    "accord_coscrub_cosign_submit": "Ortak temizlemeyi birlikte imzala — YubiKey'inize dokunun",
+    "accord_coscrub_cosign_submit_busy": "Birlikte imzalanıyor — YubiKey'inize dokunun…",
+    "accord_coscrub_paste_hint": "Bekleyen bir kayıt yok mu? Doğrudan birlikte imzalamak için ortak temizleme kısmi JSON'unu yapıştırın (yayılma olmadan çalışır).",
+    "accord_cosign_paste_label": "Kısmi (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "Bu geçerli bir JSON değil — tam kısmi kaydı (SignedKeyRecord) yapıştırın."
   },
   "prompts": {
     "dma": {

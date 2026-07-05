@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "Підписати як власник",
     "accord_sign_as_holder_usb_label": "Тека USB (матеріали PQC)",
     "accord_start_drill": "Почати навчання",
-    "accord_trust_1of1": "1 з 1"
+    "accord_trust_1of1": "1 з 1",
+    "accord_canonical_propose_desc": "Канонічний сервер тепер надається шляхом спільного скрабування m-із-n. Це скраб №1: локальний тримач акорду скраб-підписує вузол; частковий підпис розсилається на пристрої інших тримачів для співпідпису. Застосунок не зберігає ключів — дотик до YubiKey є згодою.",
+    "accord_canonical_propose_btn": "Запропонувати канонічний сервер — торкніться YubiKey",
+    "accord_canonical_propose_btn_busy": "Пропонування — торкніться YubiKey…",
+    "accord_new_cosign_paste": "Співпідписати вставлений спільний скраб",
+    "accord_section_coscrub": "Очікувані співпідписи (канонічні)",
+    "accord_coscrub_empty": "Немає канонічних спільних скрабів, що очікують співпідпису.",
+    "accord_coscrub_badge": "{signed}/{needed} скрабів",
+    "accord_coscrub_scrubbers": "скрабовано ({scrubbers})",
+    "accord_coscrub_unverified": "реєстр не перевірено — скрабер не є відомим тримачем акорду",
+    "accord_coscrub_target": "ціль {key}",
+    "accord_coscrub_cosign_title": "Співпідписати канонічний спільний скраб",
+    "accord_coscrub_cosign_desc": "Додайте свій скраб до цього канонічного спільного скрабу на YubiKey вашого тримача акорду. За кворумом родини запис надається. Застосунок не зберігає ключів — дотик є згодою.",
+    "accord_coscrub_cosign_submit": "Співпідписати спільний скраб — торкніться YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Співпідписування — торкніться YubiKey…",
+    "accord_coscrub_paste_hint": "Немає очікуваного запису? Вставте JSON часткового спільного скрабу, щоб співпідписати його напряму (працює без розсилки).",
+    "accord_cosign_paste_label": "Частковий підпис (JSON SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Це недійсний JSON — вставте повний частковий запис (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

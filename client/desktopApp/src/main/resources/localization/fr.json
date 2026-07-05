@@ -2210,7 +2210,24 @@
     "accord_new": "Nouveau",
     "accord_new_add_canonical": "Ajouter un serveur canonique",
     "accord_new_admit_node": "Admettre un nœud",
-    "accord_post_announce": "Publier l'annonce"
+    "accord_post_announce": "Publier l'annonce",
+    "accord_canonical_propose_desc": "Un serveur canonique est désormais conféré par un co-scrub m-parmi-n. Ceci est le scrub n°1 : le détenteur d'accord local scrub-signe le nœud ; la partie est diffusée aux appareils des autres détenteurs pour cosignature. L'application ne détient aucune clé — le contact YubiKey vaut consentement.",
+    "accord_canonical_propose_btn": "Proposer un serveur canonique — touchez votre YubiKey",
+    "accord_canonical_propose_btn_busy": "Proposition en cours — touchez votre YubiKey…",
+    "accord_new_cosign_paste": "Cosigner un co-scrub collé",
+    "accord_section_coscrub": "Cosignatures en attente (canonique)",
+    "accord_coscrub_empty": "Aucun co-scrub canonique en attente de cosignature.",
+    "accord_coscrub_badge": "{signed}/{needed} scrubs",
+    "accord_coscrub_scrubbers": "scrubé par {scrubbers}",
+    "accord_coscrub_unverified": "liste non vérifiée — un scrubber n'est pas un détenteur d'accord connu",
+    "accord_coscrub_target": "cible {key}",
+    "accord_coscrub_cosign_title": "Cosigner le co-scrub canonique",
+    "accord_coscrub_cosign_desc": "Ajoutez votre scrub à ce co-scrub canonique sur la YubiKey de votre détenteur d'accord. Au quorum de la famille, l'enregistrement est conféré. L'application ne détient aucune clé — le contact vaut consentement.",
+    "accord_coscrub_cosign_submit": "Cosigner le co-scrub — touchez votre YubiKey",
+    "accord_coscrub_cosign_submit_busy": "Cosignature en cours — touchez votre YubiKey…",
+    "accord_coscrub_paste_hint": "Aucune entrée en attente ? Collez le JSON partiel du co-scrub pour le cosigner directement (fonctionne sans diffusion).",
+    "accord_cosign_paste_label": "Partiel (JSON SignedKeyRecord)",
+    "accord_coscrub_paste_invalid": "Ce n'est pas un JSON valide — collez l'enregistrement partiel complet (SignedKeyRecord)."
   },
   "prompts": {
     "dma": {

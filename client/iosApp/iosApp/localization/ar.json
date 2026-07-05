@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "التوقيع كحامل",
     "accord_sign_as_holder_usb_label": "مجلد USB (مواد PQC)",
     "accord_start_drill": "بدء التمرين",
-    "accord_trust_1of1": "1 من 1"
+    "accord_trust_1of1": "1 من 1",
+    "accord_canonical_propose_btn": "اقترح خادمًا قانونيًا — المس YubiKey",
+    "accord_canonical_propose_btn_busy": "جارٍ الاقتراح — المس YubiKey…",
+    "accord_canonical_propose_desc": "يُمنح الخادم القانوني الآن عبر تنقية مشتركة m-of-n. هذه هي التنقية رقم 1: حامل الاتفاق المحلي يوقّع بالتنقية على العقدة؛ ويُنشر الجزء إلى أجهزة الحاملين الآخرين للتوقيع المشترك. التطبيق لا يحمل أي مفاتيح — لمسة YubiKey هي الموافقة.",
+    "accord_coscrub_badge": "{signed}/{needed} تنقية",
+    "accord_coscrub_cosign_desc": "أضف تنقيتك إلى هذه التنقية القانونية المشتركة على YubiKey الخاص بحامل اتفاقك. عند اكتمال نصاب العائلة يُمنح السجل. التطبيق لا يحمل أي مفاتيح — اللمسة هي الموافقة.",
+    "accord_coscrub_cosign_submit": "وقّع مشتركًا على التنقية — المس YubiKey",
+    "accord_coscrub_cosign_submit_busy": "جارٍ التوقيع المشترك — المس YubiKey…",
+    "accord_coscrub_cosign_title": "التوقيع المشترك على تنقية قانونية مشتركة",
+    "accord_coscrub_empty": "لا توجد تنقيات قانونية مشتركة بانتظار توقيع مشترك.",
+    "accord_coscrub_paste_hint": "لا يوجد إدخال معلّق؟ الصق ملف JSON الخاص بالجزء المشترك للتنقية لتوقيعه مباشرة (يعمل دون نشر).",
+    "accord_coscrub_paste_invalid": "هذا ليس JSON صالحًا — الصق السجل الجزئي الكامل (SignedKeyRecord).",
+    "accord_coscrub_scrubbers": "نُقّيت بواسطة {scrubbers}",
+    "accord_coscrub_target": "الهدف {key}",
+    "accord_coscrub_unverified": "القائمة غير مُتحقَّق منها — أحد المنقّين ليس حامل اتفاق معروفًا",
+    "accord_cosign_paste_label": "الجزء (SignedKeyRecord JSON)",
+    "accord_new_cosign_paste": "التوقيع المشترك على تنقية ملصقة",
+    "accord_section_coscrub": "التوقيعات المشتركة المعلّقة (قانونية)"
   },
   "prompts": {
     "dma": {

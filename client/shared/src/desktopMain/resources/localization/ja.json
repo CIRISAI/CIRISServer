@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "保有者として署名",
     "accord_sign_as_holder_usb_label": "USB フォルダ（PQC 資材）",
     "accord_start_drill": "ドリルを開始",
-    "accord_trust_1of1": "1-of-1"
+    "accord_trust_1of1": "1-of-1",
+    "accord_canonical_propose_desc": "正規サーバーは、m-of-n の共同スクラブによって承認されるようになりました。これはスクラブ #1 です。ローカルのアコード保持者がノードにスクラブ署名し、その部分署名が他の保持者のデバイスへ伝播して連署されます。アプリは鍵を保持しません。YubiKey のタッチが同意です。",
+    "accord_canonical_propose_btn": "正規サーバーを提案 — YubiKey にタッチ",
+    "accord_canonical_propose_btn_busy": "提案中 — YubiKey にタッチ…",
+    "accord_new_cosign_paste": "貼り付けた共同スクラブに連署",
+    "accord_section_coscrub": "保留中の連署（正規）",
+    "accord_coscrub_empty": "連署待ちの正規共同スクラブはありません。",
+    "accord_coscrub_badge": "{signed}/{needed} スクラブ",
+    "accord_coscrub_scrubbers": "{scrubbers} によるスクラブ",
+    "accord_coscrub_unverified": "名簿が未検証です — スクラブ者が既知のアコード保持者ではありません",
+    "accord_coscrub_target": "対象 {key}",
+    "accord_coscrub_cosign_title": "正規共同スクラブに連署",
+    "accord_coscrub_cosign_desc": "アコード保持者の YubiKey で、この正規共同スクラブにあなたのスクラブを追加します。ファミリー定足数に達するとレコードが承認されます。アプリは鍵を保持しません。タッチが同意です。",
+    "accord_coscrub_cosign_submit": "共同スクラブに連署 — YubiKey にタッチ",
+    "accord_coscrub_cosign_submit_busy": "連署中 — YubiKey にタッチ…",
+    "accord_coscrub_paste_hint": "保留中のエントリがありませんか？共同スクラブの部分 JSON を貼り付けて直接連署できます（伝播なしで動作します）。",
+    "accord_cosign_paste_label": "部分署名（SignedKeyRecord JSON）",
+    "accord_coscrub_paste_invalid": "有効な JSON ではありません — 完全な部分（SignedKeyRecord）レコードを貼り付けてください。"
   },
   "prompts": {
     "dma": {

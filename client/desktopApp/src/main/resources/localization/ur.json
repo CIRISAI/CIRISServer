@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "بطور ہولڈر دستخط کریں",
     "accord_sign_as_holder_usb_label": "USB فولڈر (PQC مواد)",
     "accord_start_drill": "ڈرل شروع کریں",
-    "accord_trust_1of1": "1 از 1"
+    "accord_trust_1of1": "1 از 1",
+    "accord_canonical_propose_desc": "ایک کینونیکل سرور اب m-of-n مشترکہ اسکرب کے ذریعے عطا کیا جاتا ہے۔ یہ اسکرب #1 ہے: مقامی اکارڈ ہولڈر نوڈ پر اسکرب-سائن کرتا ہے؛ جزوی دستخط دوسرے ہولڈرز کے آلات پر کو-سائن کے لیے پھیلتا ہے۔ ایپ کوئی کیز نہیں رکھتی — YubiKey کا لمس ہی رضامندی ہے۔",
+    "accord_canonical_propose_btn": "کینونیکل سرور تجویز کریں — اپنی YubiKey کو چھوئیں",
+    "accord_canonical_propose_btn_busy": "تجویز کیا جا رہا ہے — اپنی YubiKey کو چھوئیں…",
+    "accord_new_cosign_paste": "پیسٹ کیے گئے مشترکہ اسکرب پر کو-سائن کریں",
+    "accord_section_coscrub": "زیر التوا کو-سائنز (کینونیکل)",
+    "accord_coscrub_empty": "کوئی کینونیکل کو-اسکرب کو-سائن کا منتظر نہیں۔",
+    "accord_coscrub_badge": "{signed}/{needed} اسکربز",
+    "accord_coscrub_scrubbers": "{scrubbers} کے ذریعے اسکرب کیا گیا",
+    "accord_coscrub_unverified": "روسٹر غیر تصدیق شدہ — ایک اسکربر معروف اکارڈ ہولڈر نہیں ہے",
+    "accord_coscrub_target": "ہدف {key}",
+    "accord_coscrub_cosign_title": "کینونیکل کو-اسکرب کو-سائن کریں",
+    "accord_coscrub_cosign_desc": "اپنے اکارڈ ہولڈر کی YubiKey پر اس کینونیکل کو-اسکرب میں اپنا اسکرب شامل کریں۔ فیملی کورم پر ریکارڈ عطا کر دیا جاتا ہے۔ ایپ کوئی کیز نہیں رکھتی — لمس ہی رضامندی ہے۔",
+    "accord_coscrub_cosign_submit": "کو-اسکرب پر کو-سائن کریں — اپنی YubiKey کو چھوئیں",
+    "accord_coscrub_cosign_submit_busy": "کو-سائن کیا جا رہا ہے — اپنی YubiKey کو چھوئیں…",
+    "accord_coscrub_paste_hint": "کوئی زیر التوا اندراج نہیں؟ اسے براہ راست کو-سائن کرنے کے لیے کو-اسکرب جزوی JSON پیسٹ کریں (گاسپ کے بغیر کام کرتا ہے)۔",
+    "accord_cosign_paste_label": "جزوی (SignedKeyRecord JSON)",
+    "accord_coscrub_paste_invalid": "یہ درست JSON نہیں ہے — مکمل جزوی (SignedKeyRecord) ریکارڈ پیسٹ کریں۔"
   },
   "prompts": {
     "dma": {

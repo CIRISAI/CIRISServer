@@ -2210,7 +2210,24 @@
     "accord_sign_as_holder_title": "以持有人身份签名",
     "accord_sign_as_holder_usb_label": "USB 文件夹（PQC 材料）",
     "accord_start_drill": "开始演练",
-    "accord_trust_1of1": "1/1"
+    "accord_trust_1of1": "1/1",
+    "accord_canonical_propose_desc": "规范服务器现在通过 m-of-n 联合擦洗签名授予。这是第 1 次擦洗：本地协议持有者对该节点进行擦洗签名；部分签名会向其他持有者的设备扩散以便联署。应用不持有任何密钥——触碰 YubiKey 即为同意。",
+    "accord_canonical_propose_btn": "提议规范服务器——触碰你的 YubiKey",
+    "accord_canonical_propose_btn_busy": "正在提议——触碰你的 YubiKey…",
+    "accord_new_cosign_paste": "联署已粘贴的联合擦洗",
+    "accord_section_coscrub": "待处理的联署（规范）",
+    "accord_coscrub_empty": "没有等待联署的规范联合擦洗。",
+    "accord_coscrub_badge": "{signed}/{needed} 次擦洗",
+    "accord_coscrub_scrubbers": "由 {scrubbers} 擦洗",
+    "accord_coscrub_unverified": "名册未经验证——某擦洗者不是已知的协议持有者",
+    "accord_coscrub_target": "目标 {key}",
+    "accord_coscrub_cosign_title": "联署规范联合擦洗",
+    "accord_coscrub_cosign_desc": "用你的协议持有者 YubiKey 将你的擦洗附加到此规范联合擦洗上。达到家族法定人数时，该记录即被授予。应用不持有任何密钥——触碰即为同意。",
+    "accord_coscrub_cosign_submit": "联署联合擦洗——触碰你的 YubiKey",
+    "accord_coscrub_cosign_submit_busy": "正在联署——触碰你的 YubiKey…",
+    "accord_coscrub_paste_hint": "没有待处理的条目？粘贴联合擦洗的部分签名 JSON 以直接联署（无需扩散即可完成）。",
+    "accord_cosign_paste_label": "部分签名（SignedKeyRecord JSON）",
+    "accord_coscrub_paste_invalid": "那不是有效的 JSON——请粘贴完整的部分签名（SignedKeyRecord）记录。"
   },
   "prompts": {
     "dma": {
