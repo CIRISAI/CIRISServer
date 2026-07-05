@@ -81,10 +81,11 @@
 //! — the holder selects the ML-DSA USB path on an already-FIPS-approved key) + the
 //! **operational genesis ceremony RUN** (mint the canonical holders on real
 //! YubiKeys, register them with their custody attestations, assemble the family).
-//! The canonical mesh stays on 0.5.X — 0.6 (+registry) bakes
-//! `CANONICAL_BOOTSTRAP_PEERS` and bootstraps the mesh, which MUST NOT happen
-//! before the kill-switch is enforceable AND the accord keys are under genuine
-//! 2-factor distributed-human custody (now gate-enforced).
+//! The canonical mesh grows by baking accord-scrubbed canonical records (the seed
+//! op) — each carrying its trust (the `canonical` role) AND its reachability (the
+//! signed envelope transport hint, CIRISPersist#381) — which MUST NOT happen before
+//! the kill-switch is enforceable AND the accord keys are under genuine 2-factor
+//! distributed-human custody (now gate-enforced).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

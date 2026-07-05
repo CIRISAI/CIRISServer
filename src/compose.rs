@@ -168,8 +168,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             "config:* net.listen_addr is not a valid host:port — keeping the baked default"
         ),
     }
-    cfg.bootstrap_peers =
-        crate::config::parse_bootstrap_peers(initial_config.bootstrap_peers.iter().cloned());
+    // Reachability = the BAKED canonical servers' signed envelope transport hints
+    // (CIRISPersist#381), unioned with the optional `net.bootstrap_peers` override.
+    // The baked hints are the primary source (self-describing seed, no compiled-in
+    // IP); config is the break-glass. Returns empty until persist bakes the hints,
+    // so this is a no-op on a substrate without the field (forward-compatible).
+    {
+        let mut peers = canonical_bootstrap_addrs(&engine).await;
+        let n_canonical = peers.len();
+        peers.extend(crate::config::parse_bootstrap_peers(
+            initial_config.bootstrap_peers.iter().cloned(),
+        ));
+        peers.sort();
+        peers.dedup();
+        tracing::info!(
+            canonical_hints = n_canonical,
+            total = peers.len(),
+            "bootstrap dial set resolved (baked canonical envelope hints + net.bootstrap_peers override)"
+        );
+        cfg.bootstrap_peers = peers;
+    }
     let cfg = cfg;
 
     let (config_tx, config_rx) = watch::channel(initial_config.clone());
@@ -1712,6 +1730,64 @@ async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerC
     Ok((engine, cfg))
 }
 
+/// Bootstrap dial targets sourced from the BAKED canonical servers' signed envelope
+/// transport hints (CIRISPersist#381) — the reachability half of the mesh seed. Each
+/// canonical `KeyRecord` carries its transport hint inside the accord-scrubbed
+/// `registration_envelope`, so a fresh node learns WHERE to dial from the same object
+/// that establishes WHO it trusts — no hardcoded const, no config list to maintain.
+///
+/// Only `kind == "ip"` hints are dialable TCP entries; a `reticulum` hint is a
+/// pubkey-derived overlay address (not an internet bootstrap target) and is skipped.
+/// Returns empty on a substrate whose canonical records carry no `transport_hints`
+/// yet (forward-compatible: a pre-#381 record simply has no such envelope key).
+async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr> {
+    match engine.list_canonical_servers().await {
+        Ok(rows) => ip_hints_from_records(&rows),
+        Err(e) => {
+            tracing::warn!(error = %e, "list_canonical_servers for bootstrap hints failed — using config override only");
+            Vec::new()
+        }
+    }
+}
+
+/// Pure extraction of dialable `ip` bootstrap addresses from canonical records'
+/// signed envelope `transport_hints` (CIRISPersist#381). Split out from
+/// [`canonical_bootstrap_addrs`] so the parse is unit-testable without an engine.
+/// Skips non-`ip` kinds (a `reticulum` hint is a pubkey-derived overlay address,
+/// not a TCP bootstrap target) and un-parseable destinations.
+fn ip_hints_from_records(
+    rows: &[ciris_persist::federation::KeyRecord],
+) -> Vec<std::net::SocketAddr> {
+    let mut out = Vec::new();
+    for rec in rows {
+        let Some(hints) = rec
+            .registration_envelope
+            .get("transport_hints")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for h in hints {
+            if h.get("kind").and_then(|k| k.as_str()) != Some("ip") {
+                continue;
+            }
+            let Some(dest) = h.get("destination").and_then(|d| d.as_str()) else {
+                continue;
+            };
+            match dest.parse::<std::net::SocketAddr>() {
+                Ok(addr) => out.push(addr),
+                Err(e) => tracing::warn!(
+                    canonical = %rec.key_id,
+                    dest = %dest,
+                    error = %e,
+                    "canonical ip transport hint is not host:port — skipping"
+                ),
+            }
+        }
+    }
+    out
+}
+
 /// `ciris-server config set <key> <value>` (console-trusted, node-signed). Writes a
 /// signed `config:v1` CEG object — the SAME path the node itself + `POST /v1/config`
 /// use — so a HEADLESS node (console-only, no app/session) can set `config:*` knobs
@@ -1755,4 +1831,72 @@ async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConf
 /// on the shared Edge + the WBD `route_deferral` / Wise-Authority surface. SCAFFOLD.
 async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
     todo!("node slice (Server 1.0) — pin ciris-node-core (CIRISNodeCore#38) + install(&edge)")
+}
+
+#[cfg(test)]
+mod bootstrap_hint_tests {
+    use super::ip_hints_from_records;
+    use ciris_persist::federation::KeyRecord;
+
+    // Build a KeyRecord via deserialization so the test needn't spell every field.
+    fn rec(key_id: &str, envelope: serde_json::Value) -> KeyRecord {
+        serde_json::from_value(serde_json::json!({
+            "key_id": key_id,
+            "pubkey_ed25519_base64": "AA",
+            "pubkey_ml_dsa_65_base64": "BB",
+            "algorithm": "hybrid",
+            "identity_type": "canonical,node",
+            "identity_ref": key_id,
+            "valid_from": "2026-07-05T00:00:00Z",
+            "valid_until": null,
+            "registration_envelope": envelope,
+            "original_content_hash": "00",
+            "scrub_signature_classical": "cc",
+            "scrub_signature_pqc": "pp",
+            "scrub_key_id": "A1",
+            "scrub_timestamp": "2026-07-05T00:00:00Z",
+            "pqc_completed_at": null,
+            "persist_row_hash": "",
+            "roles": [],
+            "attestation_evidence": null,
+            "consent_role": null,
+        }))
+        .expect("KeyRecord deserializes")
+    }
+
+    #[test]
+    fn extracts_ip_hints_skips_reticulum_and_unparseable() {
+        let rows = vec![
+            rec(
+                "canonical-1",
+                serde_json::json!({"transport_hints": [
+                    {"kind":"ip","destination":"108.61.242.236:4242"},
+                    {"kind":"reticulum","destination":"81cabcf78a6ee16f197ba7e530a2f6db"},
+                    {"kind":"ip","destination":"not-a-socket-addr"}
+                ]}),
+            ),
+            // pre-#381 record (no transport_hints key) contributes nothing
+            rec(
+                "canonical-2",
+                serde_json::json!({"purpose":"federation-peering"}),
+            ),
+            rec(
+                "canonical-3",
+                serde_json::json!({"transport_hints": [{"kind":"ip","destination":"10.0.0.9:4242"}]}),
+            ),
+        ];
+        let addrs = ip_hints_from_records(&rows);
+        assert_eq!(
+            addrs.len(),
+            2,
+            "only the two well-formed ip hints (reticulum + bad skipped)"
+        );
+        assert!(addrs.contains(&"108.61.242.236:4242".parse().unwrap()));
+        assert!(addrs.contains(&"10.0.0.9:4242".parse().unwrap()));
+    }
+
+    #[test]
+    fn empty_without_canonical_records() {
+        assert!(ip_hints_from_records(&[]).is_empty());
+    }
 }

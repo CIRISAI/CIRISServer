@@ -75,27 +75,15 @@ pub const DEFAULT_MODE: &str = "server";
 /// `CIRIS_SERVER_LISTEN_ADDR`. Boot-structural (binds the edge).
 pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:4242";
 
-/// Default for `net.bootstrap_peers` — the canonical CIRIS Reticulum mesh entry
-/// addresses a fresh node dials at boot. Was `CIRIS_SERVER_BOOTSTRAP_PEERS`.
-///
-/// **EMPTY BY DESIGN — populated as the canonical anchors come online.** The
-/// canonical mesh grows in a fixed order.
-///
-/// FIRST — **Node A (the lens node)** is the FIRST canonical peer / seed. It is the
-/// origin: it needs no bootstrap entry itself; every other node discovers the mesh
-/// by dialing A. A's address is established when A deploys (the bridge runbook), so
-/// until 0.6 a node reaches A operationally via a `net.bootstrap_peers` config:*
-/// object (the runbook authors it) rather than a compiled-in IP — no invented
-/// address ships in the binary.
-///
-/// THEN — **the two registry nodes (Server 0.6)** become the stable, well-known
-/// canonical anchors. That is when this const is baked to
-/// `["<A>:4242", "<registry1>:4242", "<registry2>:4242"]` — addresses worth
-/// compiling in because they are long-lived and operator-independent.
-///
-/// So: empty here is correct for 0.5 (the runbook discovers the first canonical
-/// peer, A); fill this const at 0.6 once the registry anchors exist.
-pub const CANONICAL_BOOTSTRAP_PEERS: &[&str] = &[];
+// NOTE (0.5.81): the hardcoded `CANONICAL_BOOTSTRAP_PEERS` const is RETIRED. A
+// fresh node no longer learns the mesh entry addresses from a compiled-in list —
+// it reads them from the BAKED canonical servers' **signed envelope transport
+// hints** (CIRISPersist#381): each canonical `KeyRecord` carries its `ip` transport
+// hint inside the same accord-scrubbed `registration_envelope` that establishes its
+// trust, so who + where arrive together, self-describing, with no invented IP in
+// the binary. `compose::canonical_bootstrap_addrs` unions those into the dial set at
+// boot; `net.bootstrap_peers` config stays as an optional break-glass override
+// (empty default). See `net.bootstrap_peers` in `config.rs`.
 
 /// The config reconciler's own tick cadence (seconds). Config resolution is cheap
 /// and decoupled from the replication topology cadence, so it runs on a fixed
@@ -230,10 +218,10 @@ impl Default for ResolvedConfig {
             replication_reconcile_secs: DEFAULT_REPLICATION_RECONCILE_SECS,
             mode: DEFAULT_MODE.to_owned(),
             listen_addr: DEFAULT_LISTEN_ADDR.to_owned(),
-            bootstrap_peers: CANONICAL_BOOTSTRAP_PEERS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            // No baked default — reachability is sourced from the baked canonical
+            // records' envelope transport hints (CIRISPersist#381) + optional
+            // `net.bootstrap_peers` override. The retired const shipped no IPs anyway.
+            bootstrap_peers: Vec::new(),
             announce_ownership: false,
             node_alias: String::new(),
             admin_key_ids: Vec::new(),
