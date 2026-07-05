@@ -83,6 +83,7 @@ import kotlinx.datetime.Instant
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -2838,6 +2839,222 @@ class CIRISApiClient(
         } catch (e: Exception) {
             logException(method, e, "nodeUrl=$nodeUrl")
             ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalsResponse()
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Propose a canonical server (co-scrub scrub #1)** —
+     * `POST {nodeUrl}/v1/accord/canonical/propose` (CIRISServer#174). The local accord
+     * holder (A1) RE-OPENS their YubiKey + USB-wrapped ML-DSA and scrub-signs the
+     * target as `canonical`, producing a 1-scrub **partial** that does NOT yet confer
+     * canonical (m-of-n). The node saves + gossips it to accord peers; hand / gossip it
+     * to the next holder to [cosignCanonicalServer]. Same hardware + body shape as
+     * [addCanonicalServer]. The app holds NO keys — the YubiKey touch is consent.
+     */
+    suspend fun proposeCanonicalServer(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        targetIdentityType: String = "node",
+        userPin: String? = null,
+        pivSlot: String? = null,
+        transportKind: String? = null,
+        destination: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.ProposeCanonicalResponse {
+        val method = "proposeCanonicalServer"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/propose holder=$holderKeyId target=$targetKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val target = buildJsonObject {
+                put("key_id", JsonPrimitive(targetKeyId.trim()))
+                put("pubkey_ed25519_base64", JsonPrimitive(targetEd25519Base64.trim()))
+                put("pubkey_ml_dsa_65_base64", JsonPrimitive(targetMlDsa65Base64.trim()))
+                put("identity_type", JsonPrimitive(targetIdentityType.trim().ifBlank { "node" }))
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                put("target", target)
+                transportKind?.takeIf { it.isNotBlank() }?.let { put("transport_kind", JsonPrimitive(it.trim())) }
+                destination?.takeIf { it.isNotBlank() }?.let { put("destination", JsonPrimitive(it.trim())) }
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/propose") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("propose canonical failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.ProposeCanonicalResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "proposed ${parsed.targetKeyId} scrubs=${parsed.distinctScrubCount} gossiped_to=${parsed.gossipedTo}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "propose canonical failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Cosign a canonical co-scrub** — `POST {nodeUrl}/v1/accord/canonical/cosign`
+     * (CIRISServer#174). THIS holder (e.g. B1) RE-OPENS their YubiKey + USB ML-DSA and
+     * appends their scrub to the [partial] over the BYTE-IDENTICAL envelope (verify's
+     * `append_scrub`). [partial] MUST be the verbatim `SignedKeyRecord` JSON from a
+     * [proposeCanonicalServer] / prior cosign (a pending entry's `partial`, or a pasted
+     * one) — it is submitted UNCHANGED so the canonical bytes match. At the family
+     * m-of-n the record is adopted (`conferred`); else the advanced partial is returned.
+     */
+    suspend fun cosignCanonicalServer(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        partial: JsonElement,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CosignCanonicalResponse {
+        val method = "cosignCanonicalServer"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/cosign holder=$holderKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                // Submit the partial VERBATIM — never re-encode the signed envelope.
+                put("partial", partial)
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/cosign") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("cosign canonical failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CosignCanonicalResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "cosigned ${parsed.targetKeyId} scrubs=${parsed.distinctScrubCount} conferred=${parsed.conferred} gossiped_to=${parsed.gossipedTo}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "cosign canonical failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **List pending canonical co-scrubs** —
+     * `GET {nodeUrl}/v1/accord/canonical/pending` (CIRISServer#174). The co-scrub
+     * partials this node holds that are still short of the family m-of-n (arrived via
+     * accord gossip or a local propose). Backs the Trust Root's "Pending co-signs"
+     * section. Read-only; never throws (returns empty on any error).
+     */
+    suspend fun listPendingCoscrubs(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): List<ai.ciris.mobile.shared.models.federation.PendingCoscrubDto> {
+        val method = "listPendingCoscrubs"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/canonical/pending") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("list pending co-scrubs failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.PendingCoscrubsResponse.serializer(),
+                raw,
+            ).pending
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            emptyList()
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Supersede a canonical server** — `POST {nodeUrl}/v1/accord/canonical/supersede`
+     * (CIRISServer#174). DESTRUCTIVE / 2-of-3: admits the successor [newRecord] (a full
+     * A1-scrubbed `SignedKeyRecord`, assembled by the add-canonical / co-scrub ceremony)
+     * BEFORE tombstoning [oldKeyId] with `superseded_by`, so the canonical set is never
+     * momentarily empty. [proposalDigest] names the authorizing accord proposal; persist
+     * re-tallies it. [newRecord] rides verbatim (never re-encoded). Mirrors
+     * [withdrawCanonical].
+     */
+    suspend fun supersedeCanonical(
+        oldKeyId: String,
+        newRecord: JsonElement,
+        proposalDigest: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CanonicalSupersedeResponse {
+        val method = "supersedeCanonical"
+        logInfo(method, "POST $nodeUrl/v1/accord/canonical/supersede old_key_id=$oldKeyId")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                put("old_key_id", JsonPrimitive(oldKeyId.trim()))
+                // The successor record VERBATIM — never re-encode the signed envelope.
+                put("new_record", newRecord)
+                put("proposal_digest", JsonPrimitive(proposalDigest.trim()))
+            }
+            val response = client.post("$nodeUrl/v1/accord/canonical/supersede") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("supersede canonical failed: ${response.status}: ${raw.take(220)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CanonicalSupersedeResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw RuntimeException(e.message ?: "supersede canonical failed", e)
         } finally {
             client.close()
         }

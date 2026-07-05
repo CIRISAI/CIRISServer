@@ -6,6 +6,7 @@ import ai.ciris.mobile.shared.models.federation.AccordFamilyDto
 import ai.ciris.mobile.shared.models.federation.AccordHolderDto
 import ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
+import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -115,6 +116,12 @@ class AccordViewModel(
                     apiClient.listCanonicalWithdrawals().withdrawals
                 } catch (e: Exception) {
                     PlatformLogger.w(TAG, "[refresh] canonical-withdrawals: ${e.message}")
+                    emptyList()
+                }
+                _pendingCoscrubs.value = try {
+                    apiClient.listPendingCoscrubs()
+                } catch (e: Exception) {
+                    PlatformLogger.w(TAG, "[refresh] pending-coscrubs: ${e.message}")
                     emptyList()
                 }
                 _error.value = null
@@ -381,6 +388,15 @@ class AccordViewModel(
     private val _canonicalSavedTo = MutableStateFlow<String?>(null)
     val canonicalSavedTo: StateFlow<String?> = _canonicalSavedTo.asStateFlow()
 
+    /**
+     * The canonical co-scrubs (CIRISServer#174) this node holds that are still short
+     * of the family m-of-n — arrived via accord gossip OR minted here by [proposeCanonical].
+     * Each carries the full partial (`SignedKeyRecord` JSON) so [cosignCanonical] can
+     * submit it verbatim. Refreshed on screen entry ([loadPendingCoscrubs]) + after ops.
+     */
+    private val _pendingCoscrubs = MutableStateFlow<List<PendingCoscrubDto>>(emptyList())
+    val pendingCoscrubs: StateFlow<List<PendingCoscrubDto>> = _pendingCoscrubs.asStateFlow()
+
     /** The selected canonical target resolved to its hybrid pubkeys (mirrors
      *  [resolvedTarget]; separate so it doesn't collide with the admit-node picker). */
     private val _canonicalResolvedTarget = MutableStateFlow<ResolvedTarget?>(null)
@@ -566,6 +582,176 @@ class AccordViewModel(
                 _busy.value = false
             }
         }
+    }
+
+    /** Reload the pending canonical co-scrubs (also refreshed on [refresh]). */
+    fun loadPendingCoscrubs() {
+        viewModelScope.launch {
+            try {
+                _pendingCoscrubs.value = apiClient.listPendingCoscrubs()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[loadPendingCoscrubs] ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * **Propose a canonical server (co-scrub scrub #1)** (CIRISServer#174). The local
+     * accord holder RE-OPENS their YubiKey + USB-wrapped ML-DSA and scrub-signs the
+     * target as `canonical`; the resulting 1-scrub partial does NOT yet confer canonical
+     * (m-of-n). The node saves + gossips it to accord peers — hand / gossip it to the next
+     * holder to [cosignCanonical]. Refreshes the canonical roster + pending list after.
+     */
+    fun proposeCanonical(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        targetKeyId: String,
+        targetEd25519Base64: String,
+        targetMlDsa65Base64: String,
+        userPin: String?,
+        transportKind: String? = null,
+        destination: String? = null,
+    ) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _canonicalSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.proposeCanonicalServer(
+                    holderKeyId = holderKeyId,
+                    mldsaUsbPath = mldsaUsbPath,
+                    targetKeyId = targetKeyId,
+                    targetEd25519Base64 = targetEd25519Base64,
+                    targetMlDsa65Base64 = targetMlDsa65Base64,
+                    userPin = userPin,
+                    transportKind = transportKind?.takeIf { it.isNotBlank() },
+                    destination = destination?.takeIf { it.isNotBlank() },
+                )
+                _canonicalSavedTo.value = res.savedTo
+                _notice.value =
+                    "Proposed a co-scrub for ${res.targetKeyId} (${res.distinctScrubCount} scrub) — " +
+                        "gossiped to ${res.gossipedTo} peer(s). Hand / gossip it to the next holder to cosign."
+                loadCanonicalServers()
+                loadPendingCoscrubs()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[proposeCanonical] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — propose needs the YubiKey signer."
+                    else -> "Couldn't propose the canonical server: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Cosign a canonical co-scrub** (CIRISServer#174). THIS holder (e.g. B1) RE-OPENS
+     * their YubiKey + USB ML-DSA and appends their scrub to [partial] over the
+     * BYTE-IDENTICAL envelope. [partial] MUST be the verbatim `SignedKeyRecord` from a
+     * pending entry OR a pasted partial — it is submitted UNCHANGED so the canonical
+     * bytes match. At the family m-of-n the record is conferred; else it stays partial
+     * (surfaced) for the next holder. Refreshes the canonical roster + pending list.
+     */
+    fun cosignCanonical(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        partial: kotlinx.serialization.json.JsonElement,
+    ) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _canonicalSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.cosignCanonicalServer(
+                    holderKeyId = holderKeyId,
+                    mldsaUsbPath = mldsaUsbPath,
+                    partial = partial,
+                    userPin = userPin,
+                )
+                _canonicalSavedTo.value = res.savedTo
+                _notice.value = if (res.conferred) {
+                    "Cosigned — canonical CONFERRED for ${res.targetKeyId} at the family quorum (${res.distinctScrubCount} scrubs)."
+                } else {
+                    "Cosigned ${res.targetKeyId} (${res.distinctScrubCount} scrubs) — still short of the family quorum. " +
+                        "Gossiped to ${res.gossipedTo} peer(s); hand / gossip it to the next holder."
+                }
+                loadCanonicalServers()
+                loadPendingCoscrubs()
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[cosignCanonical] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — cosign needs the YubiKey signer."
+                    msg.contains("already signed", ignoreCase = true) ->
+                        "This holder has already scrubbed this record — a distinct holder must cosign."
+                    else -> "Couldn't cosign the co-scrub: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Supersede a canonical server** (CIRISServer#174). DESTRUCTIVE / 2-of-3: admits
+     * the successor [newRecord] (a full A1-scrubbed `SignedKeyRecord`) BEFORE tombstoning
+     * [oldKeyId], so the canonical set is never momentarily empty. [proposalDigest] names
+     * the authorizing accord proposal (persist re-tallies it). [newRecord] rides verbatim.
+     */
+    fun supersedeCanonical(
+        oldKeyId: String,
+        newRecord: kotlinx.serialization.json.JsonElement,
+        proposalDigest: String,
+    ) {
+        if (_busy.value) return
+        if (proposalDigest.isBlank()) {
+            _error.value = "Enter the 2-of-3 accord proposal digest first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.supersedeCanonical(oldKeyId, newRecord, proposalDigest)
+                _notice.value = if (res.superseded) {
+                    "Superseded $oldKeyId${res.successor?.let { " → $it" } ?: ""}."
+                } else {
+                    "Supersede recorded for $oldKeyId — awaiting the 2-of-3 quorum."
+                }
+                refresh()
+                loadCanonicalServers()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[supersedeCanonical] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    else -> "Couldn't supersede the canonical server: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** Surface a client-side error (e.g. a malformed pasted co-scrub partial). */
+    fun showError(message: String) {
+        _error.value = message
     }
 
     fun clearMessages() {
