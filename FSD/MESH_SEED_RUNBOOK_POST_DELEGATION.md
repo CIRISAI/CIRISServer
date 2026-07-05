@@ -176,6 +176,41 @@ plus a `net.bootstrap_peers` edit — the node's identity and rooted status are 
 
 ---
 
+## 6.5 Collecting the seed object (what to hand to the persist bake)
+
+The `add-canonical` op emits a **signed seed object** — the artifact CIRISPersist bakes
+as the canonical genesis record. It lives in three places; the JSON on disk is authoritative.
+
+1. **The card, immediately after "Add canonical server"** — surfaces
+   *"Seed saved to (hand it to persist to bake): `<path>`"* plus the Canonical-servers
+   list (the row + `canonical` badge + scrubbed-by A1 + address).
+2. **On disk (authoritative)** —
+   `$CIRIS_HOME/ceg/outbox/accord_admit_node/<target_key_id>.json`
+   (`$CIRIS_HOME` = the node's `--home`; env `CIRIS_HOME`, else `~/ciris`). Contents:
+   `{ holder_anchor, scrubbed_node, scrubber_key_id, target_key_id, produced_at }` —
+   the A1 self-signed anchor + the A1-scrubbed `canonical-server-1` record. **This JSON
+   is the bake artifact.**
+3. **DB + logs** — the record is a `federation_keys` row (read via
+   `GET /v1/accord/canonical/servers`); `$CIRIS_HOME/logs/ciris-server.log` logs
+   *"Trust Root: add-canonical — node admitted to the canonical set (accord-conferred)"*
+   + the adopt outcome.
+
+> **Which host writes it (custody matters).** The hardware scrub runs **where the A1
+> YubiKey + USB ML-DSA are** — i.e. the signing workstation the card talks to (e.g.
+> `lapbuntu2`), NOT necessarily the canonical node itself. When the scrub host is not
+> the target node: the seed JSON lands on the **scrub host**, `is_canonical` reads
+> **`false`** locally, and the adopt step reports **`adopted: false`** — this is
+> EXPECTED (the workstation isn't in the trust root). The record becomes canonical +
+> roots once the seed object is **baked into persist** (the follow-up issue) or applied
+> on the target node via `POST /v1/federation/adopt-scrubbed`. When the scrub host IS
+> the canonical node (YubiKey attached to it), the adopt succeeds in place and
+> `is_canonical` reads `true`.
+
+**To hand off:** the seed JSON contents (item 2) + the `target_key_id`
+(`canonical-server-1-<fp>`) — enough to bake it and wire the adoption.
+
+---
+
 ## 7. What this seed does NOT require (vs. the old model)
 
 - **No delegation grant, no `POST /v1/mesh/relay`.** The card posts an accord-signed
