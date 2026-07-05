@@ -1481,9 +1481,16 @@ async fn list_canonical_servers(State(st): State<ProvisionState>) -> Response {
                     serde_json::json!({
                         "key_id": r.key_id,
                         "identity_type": r.identity_type,
+                        // Both hybrid pubkeys so the client can PRE-FILL a re-mint /
+                        // replace of this record without re-deriving them.
                         "pubkey_ed25519_base64": r.pubkey_ed25519_base64,
+                        "pubkey_ml_dsa_65_base64": r.pubkey_ml_dsa_65_base64,
                         "scrub_key_id": r.scrub_key_id,
                         "valid_from": r.valid_from,
+                        // The record's current signed transport hints (the IP, if any)
+                        // — so the UI shows where it's reachable + seeds the edit form.
+                        "transport_hints": r.registration_envelope.get("transport_hints")
+                            .cloned().unwrap_or(serde_json::Value::Null),
                     })
                 })
                 .collect();
@@ -1496,6 +1503,167 @@ async fn list_canonical_servers(State(st): State<ProvisionState>) -> Response {
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("list_canonical_servers: {e}"),
+        ),
+    }
+}
+
+// ─── Destructive canonical ops (CIRISPersist#377) — 2-of-3, quorum-authorized ──
+//
+// Additive add-canonical is 1-of-N (a single accord holder's scrub). REMOVING or
+// ROTATING a founding server is the destructive class: **2-of-3**. The authority is a
+// STORED accord proposal (V091/#302) whose `payload_sha256` commits to the op and
+// whose ≥2 verified holder participations persist re-tallies at write time — the
+// server passes only the `proposal_digest`; persist is the authority. (The proposal
+// ceremony itself — build the committing proposal + collect the 2nd/3rd holder
+// participations — is the multi-holder step; a lone holder cannot complete it.)
+
+/// Map a persist `federation::Error` from a destructive canonical op to an HTTP code:
+/// an authority/quorum failure is the caller's problem (403); anything else is 500.
+fn canonical_destructive_status(e: &ciris_persist::federation::Error) -> StatusCode {
+    let kind = e.to_string().to_lowercase();
+    if kind.contains("authority") || kind.contains("quorum") || kind.contains("proposal") {
+        StatusCode::FORBIDDEN
+    } else if kind.contains("withdrawn") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalWithdrawRequest {
+    /// The canonical node whose `canonical` role is being tombstoned.
+    key_id: String,
+    /// The accord proposal digest (V091/#302) whose stored, 2-of-3-verified
+    /// participations authorize this withdrawal. Persist re-tallies it.
+    proposal_digest: String,
+}
+
+/// `POST /v1/accord/canonical/withdraw` — remove a canonical server from the trust
+/// root (2-of-3). Durable tombstone: defeats anti-entropy re-add (revocation-wins).
+async fn withdraw_canonical(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CanonicalWithdrawRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.key_id.trim().is_empty() || req.proposal_digest.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "key_id and proposal_digest are both required",
+        );
+    }
+    match st
+        .engine
+        .withdraw_canonical_role(req.key_id.trim(), req.proposal_digest.trim())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(key_id = %req.key_id.trim(), "Trust Root: canonical server withdrawn (2-of-3)");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "withdrawn": req.key_id.trim(),
+                    "authority_proposal_digest": req.proposal_digest.trim(),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            canonical_destructive_status(&e),
+            &format!("withdraw_canonical_role: {e}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalSupersedeRequest {
+    /// The canonical node being retired.
+    old_key_id: String,
+    /// The successor's full A1-scrubbed `SignedKeyRecord` (produced by the same
+    /// add-canonical ceremony — anchor-scrubbed, `canonical` role, carrying the
+    /// updated transport hint). Persist admits it BEFORE tombstoning the old, so
+    /// the canonical set is never momentarily empty.
+    new_record: ciris_persist::federation::SignedKeyRecord,
+    /// The authorizing accord proposal digest (2-of-3).
+    proposal_digest: String,
+}
+
+/// `POST /v1/accord/canonical/supersede` — rotate a canonical server: admit the
+/// successor + tombstone the predecessor with `superseded_by` (the old→new link).
+/// 2-of-3.
+async fn supersede_canonical(
+    State(st): State<ProvisionState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: CanonicalSupersedeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.old_key_id.trim().is_empty() || req.proposal_digest.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "old_key_id and proposal_digest are both required",
+        );
+    }
+    let new_key_id = req.new_record.record.key_id.clone();
+    match st
+        .engine
+        .supersede_canonical(
+            req.old_key_id.trim(),
+            req.new_record,
+            req.proposal_digest.trim(),
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                old_key_id = %req.old_key_id.trim(),
+                new_key_id = %new_key_id,
+                "Trust Root: canonical server superseded (2-of-3)"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "superseded": req.old_key_id.trim(),
+                    "successor": new_key_id,
+                    "authority_proposal_digest": req.proposal_digest.trim(),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            canonical_destructive_status(&e),
+            &format!("supersede_canonical: {e}"),
+        ),
+    }
+}
+
+/// `GET /v1/accord/canonical/withdrawals` — the canonical-role withdrawal tombstones
+/// (the withdrawn-history view alongside the live `canonical/servers` list). A
+/// `superseded_by` marks a rotation; `None` a plain withdrawal.
+async fn list_canonical_withdrawals(State(st): State<ProvisionState>) -> Response {
+    match st.engine.list_canonical_withdrawals().await {
+        Ok(rows) => {
+            let withdrawals: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|w| {
+                    serde_json::json!({
+                        "key_id": w.key_id,
+                        "withdrawn_at": w.withdrawn_at,
+                        "superseded_by": w.superseded_by,
+                        "authority_proposal_digest": w.authority_decision_digest,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "withdrawals": withdrawals })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("list_canonical_withdrawals: {e}"),
         ),
     }
 }
@@ -1522,6 +1690,19 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/accord/canonical/servers",
             axum::routing::get(list_canonical_servers),
+        )
+        // Destructive canonical ops (CIRISPersist#377, 2-of-3) + the withdrawn-history.
+        .route(
+            "/v1/accord/canonical/withdraw",
+            axum::routing::post(withdraw_canonical),
+        )
+        .route(
+            "/v1/accord/canonical/supersede",
+            axum::routing::post(supersede_canonical),
+        )
+        .route(
+            "/v1/accord/canonical/withdrawals",
+            axum::routing::get(list_canonical_withdrawals),
         )
         .route(
             "/v1/accord/yubikey-status",
@@ -1741,6 +1922,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_canonical_withdrawals_is_empty_on_a_fresh_node() {
+        let app = router_with_engine().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/accord/canonical/withdrawals")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["withdrawals"].as_array().map(|a| a.len()),
+            Some(0),
+            "no canonical withdrawals on a fresh node"
+        );
     }
 
     #[cfg(not(feature = "pkcs11"))]
