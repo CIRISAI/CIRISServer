@@ -2311,6 +2311,7 @@ class CIRISApiClient(
         mldsaUsbPath: String,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
@@ -2322,6 +2323,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val bodyJson = buildJsonObject {
                 put("invocation_kind", JsonPrimitive(invocationKind.trim()))
@@ -2427,6 +2429,7 @@ class CIRISApiClient(
         mldsaUsbPath: String,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
@@ -2438,6 +2441,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             // The node synthesizes the (non-binding) drill invocation from the id and
             // produces the initiating cosignature from the holder's YubiKey + USB — the
@@ -2484,6 +2488,7 @@ class CIRISApiClient(
         mldsaUsbPath: String,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
@@ -2495,6 +2500,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val bodyJson = buildJsonObject {
                 put("invocation_id", JsonPrimitive(invocationId.trim()))
@@ -2537,6 +2543,7 @@ class CIRISApiClient(
         mldsaUsbPath: String,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordAnnounceResponse {
@@ -2548,6 +2555,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             // The node synthesizes the `notify` invocation binding this message and
             // produces the cosignature from the holder's YubiKey + USB (app holds no keys).
@@ -2601,6 +2609,7 @@ class CIRISApiClient(
         mldsaUsbPath: String,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AccordProvisionResponse {
@@ -2616,6 +2625,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val bodyJson = buildJsonObject {
                 put("key_id", JsonPrimitive(keyId.trim()))
@@ -2669,6 +2679,7 @@ class CIRISApiClient(
         targetIdentityType: String = "node",
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.AdmitNodeResponse {
@@ -2680,6 +2691,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val target = buildJsonObject {
                 put("key_id", JsonPrimitive(targetKeyId.trim()))
@@ -2770,6 +2782,7 @@ class CIRISApiClient(
         targetIdentityType: String = "node",
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         transportKind: String? = null,
         destination: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
@@ -2783,6 +2796,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val target = buildJsonObject {
                 put("key_id", JsonPrimitive(targetKeyId.trim()))
@@ -2916,6 +2930,7 @@ class CIRISApiClient(
         targetIdentityType: String = "node",
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         transportKind: String? = null,
         destination: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
@@ -2929,6 +2944,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val target = buildJsonObject {
                 put("key_id", JsonPrimitive(targetKeyId.trim()))
@@ -2987,6 +3003,7 @@ class CIRISApiClient(
         partial: JsonElement,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.CosignCanonicalResponse {
@@ -2998,6 +3015,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val bodyJson = buildJsonObject {
                 put("key_id", JsonPrimitive(holderKeyId.trim()))
@@ -3268,6 +3286,7 @@ class CIRISApiClient(
         envelope: kotlinx.serialization.json.JsonElement,
         userPin: String? = null,
         pivSlot: String? = null,
+        modulePath: String? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): ai.ciris.mobile.shared.models.federation.CosignFamilyResponse {
@@ -3281,6 +3300,7 @@ class CIRISApiClient(
             val pkcs11 = buildJsonObject {
                 userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
                 pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
             }
             val bodyJson = buildJsonObject {
                 put("key_id", JsonPrimitive(keyId.trim()))

@@ -218,7 +218,7 @@ sealed class NavSurface(
      * (with the CC 4.2.1 per-kind visual treatment) the local holder may concur
      * on. Read view + owner-gated concur; the app holds no keys. Live (no gate).
      */
-    object Accord : NavSurface("accord", "Accord", CIRISIcons.shield,
+    object Accord : NavSurface("accord", "Trust Root", CIRISIcons.shield,
         labelKey = "nav.surface.accord",)
 
     /**

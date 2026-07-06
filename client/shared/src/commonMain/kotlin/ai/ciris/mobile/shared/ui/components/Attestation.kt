@@ -85,6 +85,7 @@ enum class AttOp {
     ViewDetails,
     History,
     Evidence,
+    Copy,
     Cosign,
     Delegate,
     Supersede,
@@ -173,6 +174,9 @@ fun attestationStyle(kind: AttKind, styleKey: String?, status: AttStatus): AttSt
 private fun AttOp.enabledFor(att: Attestation, viewer: ViewerAuthority): Boolean = when (this) {
     AttOp.ViewDetails, AttOp.History -> true
     AttOp.Evidence -> att.evidenceCount > 0
+    // Copy the co-scrub partial JSON to the clipboard so a holder can hand it to the
+    // next holder without touching the filesystem. Only co-scrubs carry a partial.
+    AttOp.Copy -> att.kind == AttKind.Coscrub
     // Cosign advances a pending m-of-n — only while pending (server 403s a non-holder).
     // Both an invocation (halt/drill/notify) and a canonical co-scrub accumulate scrubs.
     AttOp.Cosign -> att.status == AttStatus.Pending &&
@@ -190,6 +194,7 @@ private fun AttOp.labelKey(): String = when (this) {
     AttOp.ViewDetails -> "mobile.accord_op_view_details"
     AttOp.History -> "mobile.accord_op_history"
     AttOp.Evidence -> "mobile.accord_op_evidence"
+    AttOp.Copy -> "mobile.accord_op_copy"
     AttOp.Cosign -> "mobile.accord_op_cosign"
     AttOp.Delegate -> "mobile.accord_op_delegate"
     AttOp.Supersede -> "mobile.accord_op_supersede"
@@ -201,6 +206,7 @@ private fun AttOp.verb(): String = when (this) {
     AttOp.ViewDetails -> "view"
     AttOp.History -> "history"
     AttOp.Evidence -> "evidence"
+    AttOp.Copy -> "copy"
     AttOp.Cosign -> "cosign"
     AttOp.Delegate -> "delegate"
     AttOp.Supersede -> "supersede"

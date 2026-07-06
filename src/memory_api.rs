@@ -134,6 +134,624 @@ pub async fn seed_identity_graph(engine: &Engine, node_key_id: &str, identity_ty
     }
 }
 
+// ── Boot-time CEG projection (CIRISServer#127++) ──────────────────────────────
+//
+// `seed_identity_graph` seeds ONE node (`node/identity`). This projection turns
+// persist's rich CEG state into a **contextual graph** the client's Graph page
+// renders as a mesh of AttestationCards: the owner, owned nodes, the humanity
+// accord family + its holders, the canonical servers, every `config:*` value, and
+// the node's authored attestations (owner-bindings, delegations, consent grants,
+// structural supersede/withdraw/recant) — wired with CEG-native, typed edges.
+//
+// ## Node attribute schema (so the client can render each node AS an attestation
+//    card with a working ⋮ op menu)
+//
+// EVERY projected node carries a stable CEG-object identity in its `attributes`:
+//   - `kind`    — CEG-object token: `owner` | `owned_node` | `family` | `holder`
+//                 | `canonical_server` | `config` | `delegation` | `consent`
+//                 | `attestation` | `agent` | `peer`. Drives the op set + card style.
+//   - `subject` — the object's canonical id (what Supersede/Withdraw/Cosign target);
+//                 `key_id` is a duplicate for key-shaped objects.
+//   - `status`  — `live` | `pending` | `superseded` | `withdrawn` | `recanted`
+//                 (drives which hamburger ops are enabled).
+//   - `record`  — the object's canonical JSON (Copy/Export yields the real CEG object;
+//                 View/Evidence resolve). Absent only for pure projection nodes with
+//                 no single backing record (owner/agent/peer identity stubs).
+//   - `name` / `description` — display.
+//
+// Edges carry the CEG relationship as `relationship` so History/Evidence walk them:
+//   `delegates_to` (owner-binding + delegation), `has_member` (family seat),
+//   `scrub_conferral` (holder → canonical), `has_config` (node → config),
+//   `replicates_to` (consent:replication), `authored` (node → attestation
+//   provenance), and `supersedes`/`withdraws`/`recants` (structural composers).
+//
+// Idempotent + version-safe (mirrors `seed_identity_graph`) and fail-secure: a
+// per-source read error logs a warning and is skipped — never blocks boot.
+
+const CEG_SCOPE: GraphScope = GraphScope::Identity;
+
+/// "eric-moore-v1-2iplir3g6f" → "eric-moore-v1": strip a trailing short fingerprint
+/// segment (the `-<fp>` suffix an FSD-003 derived key_id carries). Best-effort — a
+/// key_id with no such suffix returns unchanged.
+fn derive_display_name(key_id: &str) -> String {
+    if let Some(idx) = key_id.rfind('-') {
+        let (prefix, suffix) = key_id.split_at(idx);
+        let suffix = &suffix[1..];
+        if !prefix.is_empty()
+            && (6..=12).contains(&suffix.len())
+            && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return prefix.to_string();
+        }
+    }
+    key_id.to_string()
+}
+
+/// Get-then-upsert one CEG node with optimistic-concurrency safety (mirrors
+/// `seed_identity_graph`). Refreshes `updated_at` each boot so re-seeds stay inside
+/// the timeline window. Returns `true` on a successful write.
+async fn upsert_ceg_node(
+    graph: &SqliteGraphBackend,
+    node_id: &str,
+    node_type: &str,
+    updated_by: &str,
+    attributes: serde_json::Value,
+) -> bool {
+    let now = chrono::Utc::now();
+    let (version, expected_version, created_at) = match graph.get_node(node_id, CEG_SCOPE).await {
+        Ok(Some(existing)) => (existing.version, existing.version, existing.created_at),
+        _ => (1, 0, now),
+    };
+    let node = ciris_persist::graph::types::GraphNode {
+        node_id: node_id.to_string(),
+        scope: CEG_SCOPE,
+        node_type: node_type.to_string(),
+        attributes,
+        version,
+        updated_by: updated_by.to_string(),
+        updated_at: now,
+        created_at,
+        signature: None,
+        signing_key_id: None,
+        signature_verified: false,
+    };
+    match graph.upsert_node(node, expected_version, false).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(node_id, error = %e, "seed_ceg_graph: node upsert skipped");
+            false
+        }
+    }
+}
+
+/// Insert one directed CEG edge with a STABLE, deterministic `edge_id` so re-seeds
+/// are idempotent (persist's `upsert_edge` is `ON CONFLICT DO NOTHING`). Returns
+/// `true` on a successful write.
+async fn upsert_ceg_edge(
+    graph: &SqliteGraphBackend,
+    source: &str,
+    target: &str,
+    relationship: &str,
+    attributes: serde_json::Value,
+) -> bool {
+    let edge = ciris_persist::graph::types::GraphEdge {
+        edge_id: format!("ceg:{relationship}:{source}->{target}"),
+        source_node_id: source.to_string(),
+        target_node_id: target.to_string(),
+        scope: CEG_SCOPE,
+        relationship: relationship.to_string(),
+        weight: None,
+        attributes,
+        created_at: chrono::Utc::now(),
+    };
+    match graph.upsert_edge(edge, false).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(source, target, relationship, error = %e, "seed_ceg_graph: edge upsert skipped");
+            false
+        }
+    }
+}
+
+/// Project persist's CEG state into `cirisgraph_nodes` / `cirisgraph_edges` at boot,
+/// right after [`seed_identity_graph`]. Idempotent, version-safe, fail-secure
+/// (SQLite-only; a Postgres-only node is a no-op). See the module-level schema note.
+pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>, node_key_id: &str) {
+    use ciris_persist::federation::types::attestation_type;
+    use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
+
+    let Some(sq) = engine.sqlite_backend() else {
+        return;
+    };
+    let graph = SqliteGraphBackend::new(sq.conn_handle());
+    let self_node = "node/identity";
+    let mut n_nodes: usize = 0;
+    let mut n_edges: usize = 0;
+
+    // ── Owner + owner-binding ─────────────────────────────────────────────────
+    let owner = crate::auth::ownership::is_steward_bound(engine, node_key_id).await;
+    let owner_node = owner.as_ref().map(|o| format!("owner/{o}"));
+    if let (Some(owner_key_id), Some(owner_node)) = (owner.as_ref(), owner_node.as_ref()) {
+        if upsert_ceg_node(
+            &graph,
+            owner_node,
+            "identity",
+            node_key_id,
+            serde_json::json!({
+                "kind": "owner",
+                "subject": owner_key_id,
+                "key_id": owner_key_id,
+                "status": "live",
+                "role": "owner",
+                "name": derive_display_name(owner_key_id),
+                "description": "The federation identity that owns (steward-binds) this node.",
+            }),
+        )
+        .await
+        {
+            n_nodes += 1;
+        }
+        // owner --delegates_to (owner_binding)--> this node
+        if upsert_ceg_edge(
+            &graph,
+            owner_node,
+            self_node,
+            attestation_type::DELEGATES_TO,
+            serde_json::json!({ "purpose": "owner_binding" }),
+        )
+        .await
+        {
+            n_edges += 1;
+        }
+    }
+
+    // ── Owned nodes (owner-binding projection) ────────────────────────────────
+    if let (Some(owner_key_id), Some(owner_node)) = (owner.as_ref(), owner_node.as_ref()) {
+        for nk in crate::auth::ownership::nodes_stewarded_by(engine, owner_key_id).await {
+            let is_self = nk == *node_key_id;
+            let nid = if is_self {
+                self_node.to_string()
+            } else {
+                format!("owned/{nk}")
+            };
+            if !is_self
+                && upsert_ceg_node(
+                    &graph,
+                    &nid,
+                    "identity",
+                    node_key_id,
+                    serde_json::json!({
+                        "kind": "owned_node",
+                        "subject": nk,
+                        "key_id": nk,
+                        "status": "live",
+                        "role": "node",
+                        "name": derive_display_name(&nk),
+                        "description": "A node owned by this node's owner (owner-binding projection).",
+                    }),
+                )
+                .await
+            {
+                n_nodes += 1;
+            }
+            if upsert_ceg_edge(
+                &graph,
+                owner_node,
+                &nid,
+                attestation_type::DELEGATES_TO,
+                serde_json::json!({ "purpose": "owner_binding" }),
+            )
+            .await
+            {
+                n_edges += 1;
+            }
+        }
+    }
+
+    // ── HUMANITY_ACCORD family + holders (seats) ──────────────────────────────
+    let family_node = format!("family/{HUMANITY_ACCORD_FAMILY_KEY_ID}");
+    let mut family_present = false;
+    match crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(Some(family)) => {
+            family_present = true;
+            if upsert_ceg_node(
+                &graph,
+                &family_node,
+                "family",
+                node_key_id,
+                serde_json::json!({
+                    "kind": "family",
+                    "subject": HUMANITY_ACCORD_FAMILY_KEY_ID,
+                    "key_id": HUMANITY_ACCORD_FAMILY_KEY_ID,
+                    "status": "live",
+                    "name": "HUMANITY_ACCORD",
+                    "description": "The humanity accord family — the mesh's M-of-N kill-switch quorum.",
+                    "record": serde_json::to_value(&family).unwrap_or(serde_json::Value::Null),
+                }),
+            )
+            .await
+            {
+                n_nodes += 1;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "seed_ceg_graph: family lookup skipped"),
+    }
+    // Holder seats (LIVE roster → pinned hybrid pubkeys). Collect their key_ids so
+    // canonical scrub-conferral edges can source from the holder node when known.
+    let mut holder_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    match crate::family::active_threshold_roster(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(members) => {
+            for m in members {
+                holder_keys.insert(m.member_id.clone());
+                let hid = format!("holder/{}", m.member_id);
+                if upsert_ceg_node(
+                    &graph,
+                    &hid,
+                    "identity",
+                    node_key_id,
+                    serde_json::json!({
+                        "kind": "holder",
+                        "subject": m.member_id,
+                        "key_id": m.member_id,
+                        "status": "live",
+                        "role": "accord_holder",
+                        "name": derive_display_name(&m.member_id),
+                        "description": "An accord holder — a seat in the kill-switch quorum.",
+                        "pubkey_ed25519_base64": m.ed25519_public_key_base64,
+                        "pubkey_ml_dsa_65_base64": m.mldsa65_public_key_base64,
+                    }),
+                )
+                .await
+                {
+                    n_nodes += 1;
+                }
+                if family_present
+                    && upsert_ceg_edge(
+                        &graph,
+                        &family_node,
+                        &hid,
+                        "has_member",
+                        serde_json::json!({ "seat": "accord_holder" }),
+                    )
+                    .await
+                {
+                    n_edges += 1;
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "seed_ceg_graph: accord roster skipped"),
+    }
+
+    // ── Canonical servers + scrub conferral ───────────────────────────────────
+    match engine.list_canonical_servers().await {
+        Ok(servers) => {
+            for r in servers {
+                let cid = format!("canonical/{}", r.key_id);
+                let genesis = r.scrub_key_id == r.key_id; // self-signed bootstrap row
+                if upsert_ceg_node(
+                    &graph,
+                    &cid,
+                    "identity",
+                    node_key_id,
+                    serde_json::json!({
+                        "kind": "canonical_server",
+                        "subject": r.key_id,
+                        "key_id": r.key_id,
+                        "status": "live",
+                        "role": "canonical",
+                        "name": derive_display_name(&r.key_id),
+                        "description": "A canonical / founding bootstrap server (accord-scrub conferred).",
+                        "scrub_key_id": r.scrub_key_id,
+                        "genesis": genesis,
+                        "transport_hints": r.registration_envelope.get("transport_hints")
+                            .cloned().unwrap_or(serde_json::Value::Null),
+                        "record": serde_json::to_value(&r).unwrap_or(serde_json::Value::Null),
+                    }),
+                )
+                .await
+                {
+                    n_nodes += 1;
+                }
+                // Scrub conferral: each scrubbing holder → the canonical server. The
+                // genesis self-scrub is not a conferral (skip). Source the edge from
+                // the holder node when the scrub key is a known accord holder,
+                // otherwise from a generic identity node.
+                let scrubs = std::iter::once((r.scrub_key_id.as_str(), "primary_scrub")).chain(
+                    r.additional_scrubs
+                        .iter()
+                        .map(|s| (s.scrub_key_id.as_str(), "co_scrub")),
+                );
+                for (scrub_key, role) in scrubs {
+                    if scrub_key == r.key_id {
+                        continue; // genesis self-scrub, not a conferral
+                    }
+                    let src = if holder_keys.contains(scrub_key) {
+                        format!("holder/{scrub_key}")
+                    } else {
+                        format!("identity/{scrub_key}")
+                    };
+                    if upsert_ceg_edge(
+                        &graph,
+                        &src,
+                        &cid,
+                        "scrub_conferral",
+                        serde_json::json!({ "role": role }),
+                    )
+                    .await
+                    {
+                        n_edges += 1;
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "seed_ceg_graph: canonical servers skipped"),
+    }
+
+    // ── config:* values (config-as-CEG) ───────────────────────────────────────
+    match crate::graph_config::list_configs(engine, node_key_id, None).await {
+        Ok(configs) => {
+            for (key, entry) in configs {
+                let cid = format!("config/{key}");
+                if upsert_ceg_node(
+                    &graph,
+                    &cid,
+                    "config",
+                    node_key_id,
+                    serde_json::json!({
+                        "kind": "config",
+                        "subject": key,
+                        "key": key,
+                        "status": "live",
+                        "name": key,
+                        "description": format!("Signed config:* value `{key}` (v{}).", entry.version),
+                        "value": serde_json::to_value(&entry.value).unwrap_or(serde_json::Value::Null),
+                        "version": entry.version,
+                        "config_scope": format!("{:?}", entry.scope),
+                        "updated_by": entry.updated_by,
+                        "record": serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null),
+                    }),
+                )
+                .await
+                {
+                    n_nodes += 1;
+                }
+                if upsert_ceg_edge(
+                    &graph,
+                    self_node,
+                    &cid,
+                    "has_config",
+                    serde_json::json!({ "key": key }),
+                )
+                .await
+                {
+                    n_edges += 1;
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "seed_ceg_graph: config list skipped"),
+    }
+
+    // ── Authored attestations (delegations, consent, structural, scores) ──────
+    match engine
+        .federation_directory()
+        .list_attestations_by(node_key_id)
+        .await
+    {
+        Ok(atts) => {
+            // Pass 1 — derive revocation status from structural rows. A structural row
+            // targets its subject via `attested_key_id` and/or an envelope target field.
+            let mut status_of: std::collections::HashMap<String, &'static str> =
+                std::collections::HashMap::new();
+            let targets_of = |a: &ciris_persist::federation::types::Attestation| -> Vec<String> {
+                let mut out = vec![a.attested_key_id.clone()];
+                for k in [
+                    "target_attestation_id",
+                    "target",
+                    "supersedes",
+                    "withdraws",
+                    "recants",
+                ] {
+                    if let Some(s) = a.attestation_envelope.get(k).and_then(|v| v.as_str()) {
+                        out.push(s.to_string());
+                    }
+                }
+                out
+            };
+            for a in &atts {
+                let st = match a.attestation_type.as_str() {
+                    attestation_type::SUPERSEDES => "superseded",
+                    attestation_type::WITHDRAWS => "withdrawn",
+                    attestation_type::RECANTS => "recanted",
+                    _ => continue,
+                };
+                for t in targets_of(a) {
+                    status_of.insert(t, st);
+                }
+            }
+
+            // Pass 2 — project nodes (bounded: all delegations/consent/structural,
+            // plus a representative cap on other scores).
+            let mut other_scores = 0usize;
+            const OTHER_SCORE_CAP: usize = 25;
+            for a in atts {
+                let dim = a
+                    .attestation_envelope
+                    .get("dimension")
+                    .and_then(|v| v.as_str());
+                // config:* rows are already projected as richer config nodes.
+                if a.attestation_type == attestation_type::SCORES
+                    && dim == Some(crate::graph_config::CONFIG_DIMENSION)
+                {
+                    continue;
+                }
+                let is_consent = a.attestation_type == attestation_type::SCORES
+                    && dim == Some(crate::peer::CONSENT_DIMENSION);
+                let (kind, struct_rel): (&str, Option<&str>) = match a.attestation_type.as_str() {
+                    attestation_type::DELEGATES_TO => ("delegation", None),
+                    attestation_type::SUPERSEDES => {
+                        ("attestation", Some(attestation_type::SUPERSEDES))
+                    }
+                    attestation_type::WITHDRAWS => {
+                        ("attestation", Some(attestation_type::WITHDRAWS))
+                    }
+                    attestation_type::RECANTS => ("attestation", Some(attestation_type::RECANTS)),
+                    attestation_type::SCORES if is_consent => ("consent", None),
+                    _ => {
+                        other_scores += 1;
+                        if other_scores > OTHER_SCORE_CAP {
+                            continue;
+                        }
+                        ("attestation", None)
+                    }
+                };
+                let status = status_of.get(&a.attestation_id).copied().unwrap_or("live");
+                let aid = format!("attestation/{}", a.attestation_id);
+                let desc = match kind {
+                    "delegation" => "A delegates_to attestation (capability / owner-binding).",
+                    "consent" => {
+                        "A consent:replication grant — this node replicates to the subject."
+                    }
+                    _ => "A signed CEG attestation authored by this node.",
+                };
+                if upsert_ceg_node(
+                    &graph,
+                    &aid,
+                    "attestation",
+                    node_key_id,
+                    serde_json::json!({
+                        "kind": kind,
+                        "subject": a.attestation_id,
+                        "attestation_id": a.attestation_id,
+                        "attestation_type": a.attestation_type,
+                        "dimension": dim,
+                        "status": status,
+                        "name": format!("{}:{}", a.attestation_type, &a.attestation_id[..a.attestation_id.len().min(8)]),
+                        "description": desc,
+                        "attesting_key_id": a.attesting_key_id,
+                        "attested_key_id": a.attested_key_id,
+                        "subject_key_ids": a.subject_key_ids,
+                        "weight": a.weight,
+                        "asserted_at": a.asserted_at.to_rfc3339(),
+                        "record": serde_json::to_value(&a).unwrap_or(serde_json::Value::Null),
+                    }),
+                )
+                .await
+                {
+                    n_nodes += 1;
+                }
+                // Provenance: node --authored--> attestation.
+                if upsert_ceg_edge(&graph, self_node, &aid, "authored", serde_json::json!({})).await
+                {
+                    n_edges += 1;
+                }
+                // Structural composer edge → the attestation it acts on.
+                if let Some(rel) = struct_rel {
+                    for t in targets_of(&a) {
+                        if t == a.attestation_id {
+                            continue;
+                        }
+                        if upsert_ceg_edge(
+                            &graph,
+                            &aid,
+                            &format!("attestation/{t}"),
+                            rel,
+                            serde_json::json!({}),
+                        )
+                        .await
+                        {
+                            n_edges += 1;
+                        }
+                    }
+                }
+                // Delegation edge: delegator → delegatee (agent).
+                if a.attestation_type == attestation_type::DELEGATES_TO {
+                    let delegator = [
+                        "delegator_key_id",
+                        "owner_key_id",
+                        "responsible_user_key_id",
+                        "from",
+                    ]
+                    .iter()
+                    .find_map(|k| a.attestation_envelope.get(*k).and_then(|v| v.as_str()))
+                    .map(|s| s.to_string());
+                    let src = match &delegator {
+                        Some(d) if Some(d) == owner.as_ref() => owner_node.clone().unwrap(),
+                        Some(d) if *d == *node_key_id => self_node.to_string(),
+                        Some(d) => format!("identity/{d}"),
+                        None => self_node.to_string(),
+                    };
+                    let tgt = if a.attested_key_id == *node_key_id {
+                        self_node.to_string()
+                    } else {
+                        format!("agent/{}", a.attested_key_id)
+                    };
+                    let purpose = a
+                        .attestation_envelope
+                        .get("purpose")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("delegation");
+                    if upsert_ceg_edge(
+                        &graph,
+                        &src,
+                        &tgt,
+                        attestation_type::DELEGATES_TO,
+                        serde_json::json!({ "purpose": purpose }),
+                    )
+                    .await
+                    {
+                        n_edges += 1;
+                    }
+                }
+                // Consent:replication edge: node → each peer subject.
+                if is_consent {
+                    for peer in &a.subject_key_ids {
+                        let pid = format!("peer/{peer}");
+                        if upsert_ceg_node(
+                            &graph,
+                            &pid,
+                            "identity",
+                            node_key_id,
+                            serde_json::json!({
+                                "kind": "peer",
+                                "subject": peer,
+                                "key_id": peer,
+                                "status": "live",
+                                "role": "peer",
+                                "name": derive_display_name(peer),
+                                "description": "A federation peer this node consents to replicate to.",
+                            }),
+                        )
+                        .await
+                        {
+                            n_nodes += 1;
+                        }
+                        if upsert_ceg_edge(
+                            &graph,
+                            self_node,
+                            &pid,
+                            "replicates_to",
+                            serde_json::json!({ "grant": a.attestation_id }),
+                        )
+                        .await
+                        {
+                            n_edges += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "seed_ceg_graph: attestation list skipped"),
+    }
+
+    tracing::info!(
+        node_key_id,
+        projected_nodes = n_nodes,
+        projected_edges = n_edges,
+        "seed_ceg_graph: projected persist CEG state into the memory graph"
+    );
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

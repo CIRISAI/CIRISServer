@@ -45,7 +45,7 @@
 //! signs the `delegates_to(user → node, infra:*)` owner-binding with the user's
 //! YubiKey-custodied key.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -59,8 +59,51 @@ use ciris_verify_core::federation_identity::create_federation_identity;
 /// Signature". Matches the `ciris-verify` CLI default.
 pub const DEFAULT_PIV_SLOT: &str = "9c";
 
-/// The default ykcs11 module path (Yubico PIV) used when none is supplied.
-pub const DEFAULT_YKCS11_MODULE: &str = "/usr/lib/x86_64-linux-gnu/libykcs11.so";
+/// The OS-appropriate ykcs11 module path (Yubico PIV) used when none is supplied.
+///
+/// A holder's YubiKey cosign opens the token through Yubico's `libykcs11` shared
+/// object, whose install location differs per OS (and, on macOS, per CPU). The
+/// node used to hardcode the Debian/Ubuntu Linux path, so a macOS or Windows
+/// holder's cosign failed at `dlopen` with a Linux `.so` path that doesn't exist
+/// on their box. This resolver returns the **first existing** known path for the
+/// target OS; if none exist it returns the canonical per-OS default so the eventual
+/// error message still names a real, expected path (not a Linux path on macOS).
+///
+/// A caller-supplied `module_path` (request field) always takes precedence — this
+/// is only the no-field-set default.
+pub fn default_ykcs11_module() -> PathBuf {
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        // Apple Silicon Homebrew first, then Intel Homebrew.
+        &[
+            "/opt/homebrew/lib/libykcs11.dylib",
+            "/usr/local/lib/libykcs11.dylib",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\Yubico\Yubico PIV Tool\bin\libykcs11.dll",
+            // Bare name → resolved via the DLL search path (PATH).
+            "libykcs11.dll",
+        ]
+    } else {
+        // Linux / other Unix: Debian/Ubuntu multiarch first, then common prefixes.
+        &[
+            "/usr/lib/x86_64-linux-gnu/libykcs11.so",
+            "/usr/lib/libykcs11.so",
+            "/usr/local/lib/libykcs11.so",
+        ]
+    };
+
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        if path.exists() {
+            return path.to_path_buf();
+        }
+    }
+
+    // No install found — fall back to the canonical per-OS default (first entry)
+    // so the downstream `dlopen` error names a real, expected path for this OS.
+    PathBuf::from(candidates[0])
+}
 
 /// Which custody backend the user-identity signing key is minted from. The
 /// operator-facing selector behind `--backend` / the endpoint's `backend` field.
@@ -132,7 +175,7 @@ pub struct Pkcs11Options {
 impl Default for Pkcs11Options {
     fn default() -> Self {
         Self {
-            module_path: PathBuf::from(DEFAULT_YKCS11_MODULE),
+            module_path: default_ykcs11_module(),
             user_pin: None,
             key_label: None,
             slot_index: 0,
@@ -1214,6 +1257,23 @@ pub fn fedcode_is_user(code: &str, key_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_ykcs11_module_is_os_appropriate() {
+        let module = default_ykcs11_module();
+        let s = module.to_string_lossy();
+        // The resolver must never hand back the WRONG-OS extension: a macOS box must
+        // not fall back to a Linux `.so`, nor Linux to a `.dylib`/`.dll`. When no
+        // install exists it returns the canonical per-OS default (a real, expected
+        // path for THIS OS), which is exactly what the dlopen error should name.
+        if cfg!(target_os = "macos") {
+            assert!(s.ends_with(".dylib"), "macOS default must be a .dylib: {s}");
+        } else if cfg!(target_os = "windows") {
+            assert!(s.ends_with(".dll"), "Windows default must be a .dll: {s}");
+        } else {
+            assert!(s.ends_with(".so"), "Linux default must be a .so: {s}");
+        }
+    }
 
     /// Serialize tests that set the process-global CIRIS_HOME / CIRIS_DATA_DIR
     /// env (the verify outbox + seal root, and the software key dir).

@@ -8,8 +8,10 @@ import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.models.federation.CanonicalServerDto
 import ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto
 import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
+import ai.ciris.mobile.shared.platform.writeTextFile
 import ai.ciris.mobile.shared.ui.components.AttKind
 import ai.ciris.mobile.shared.ui.components.AttOp
 import ai.ciris.mobile.shared.ui.components.AttStatus
@@ -60,13 +62,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 /**
  * **Trust Root** — the HUMANITY_ACCORD constitutional surface (CIRISServer #41),
@@ -122,11 +128,15 @@ fun AccordScreen(
     val busy by viewModel.busy.collectAsState()
     val error by viewModel.error.collectAsState()
     val notice by viewModel.notice.collectAsState()
+    val lastCoscrubJson by viewModel.lastCoscrubJson.collectAsState()
 
     val viewer = ViewerAuthority(isHolder = holders.isNotEmpty())
 
+    val clipboard = LocalClipboardManager.current
+    val exportScope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<AccordSheet?>(null) }
     var newMenu by remember { mutableStateOf(false) }
+    var saveDir by remember { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
 
     // Screen entry: refresh the canonical roster + the gossiped pending co-scrubs so a
@@ -226,6 +236,37 @@ fun AccordScreen(
             // ── Messages ─────────────────────────────────────────────────────
             notice?.let { msg -> Banner(msg, error = false, tag = "accord_notice") }
             error?.let { msg -> Banner(msg, error = true, tag = "accord_error") }
+
+            // ── Co-scrub export (after Propose / Cosign) ─────────────────────
+            //    Surface the returned partial so the operator can hand it to the next
+            //    holder without pulling it off disk: Copy to clipboard, or Save to a
+            //    chosen folder (desktop). Dismiss when done.
+            lastCoscrubJson?.let { json ->
+                CoscrubExportRow(
+                    onCopy = { clipboard.setText(AnnotatedString(json)) },
+                    onSave = { saveDir = "" },
+                    onDismiss = { viewModel.clearLastCoscrubJson() },
+                )
+            }
+            // Save flow: pick a folder, then write the partial JSON into it.
+            DirectoryPickerDialog(
+                show = saveDir == "",
+                onDirectoryPicked = { dir ->
+                    saveDir = null
+                    val json = lastCoscrubJson
+                    if (json != null) {
+                        exportScope.launch {
+                            val ok = writeTextFile(dir, "canonical-coscrub-partial.json", json)
+                            viewModel.setExternalNotice(
+                                if (ok) "Saved the co-scrub partial to $dir."
+                                else "Couldn't save to $dir (this platform may not support file writes).",
+                                error = !ok,
+                            )
+                        }
+                    }
+                },
+                onDismiss = { saveDir = null },
+            )
 
             // ── ACTIVE-HALT banner (§3.5). NOTE: kept screen-local (top of the
             //    Trust Root), not truly app-global — wiring a sticky banner above the
@@ -327,6 +368,12 @@ fun AccordScreen(
                         onOp = { op ->
                             when (op) {
                                 AttOp.Cosign -> sheet = AccordSheet.CoscrubCosign(entry)
+                                AttOp.Copy -> {
+                                    clipboard.setText(AnnotatedString(viewModel.exportPartial(entry.partial)))
+                                    viewModel.setExternalNotice(
+                                        "Copied the co-scrub partial for ${entry.targetKeyId} to the clipboard.",
+                                    )
+                                }
                                 else -> handleOp(op, att) { sheet = it }
                             }
                         },
@@ -415,8 +462,8 @@ fun AccordScreen(
                 binding = inv.invocationKind.uppercase() == "CONSTITUTIONAL",
                 holders = holders,
                 busy = busy,
-                onSubmit = { holderKeyId, usbPath, pin ->
-                    viewModel.concur(inv.invocationKind, inv.invocationId, holderKeyId, usbPath, pin)
+                onSubmit = { holderKeyId, usbPath, pin, modulePath ->
+                    viewModel.concur(inv.invocationKind, inv.invocationId, holderKeyId, usbPath, pin, modulePath)
                     sheet = null
                 },
                 onDismiss = { sheet = null },
@@ -427,8 +474,8 @@ fun AccordScreen(
                 entry = s.entry,
                 holders = holders,
                 busy = busy,
-                onSubmit = { holderKeyId, usbPath, pin, partial ->
-                    viewModel.cosignCanonical(holderKeyId, usbPath, pin, partial)
+                onSubmit = { holderKeyId, usbPath, pin, modulePath, partial ->
+                    viewModel.cosignCanonical(holderKeyId, usbPath, pin, partial, modulePath)
                 },
                 onError = { msg -> viewModel.showError(msg) },
                 onDismiss = { sheet = null },
@@ -603,9 +650,9 @@ private fun AdmitNodeSheet(
                 tagPrefix = "admit",
             )
         },
-        onSubmit = { holderKeyId, usbPath, pin ->
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
             target?.let { t ->
-                viewModel.admitNode(holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin)
+                viewModel.admitNode(holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin, modulePath)
             }
             onDismiss()
         },
@@ -691,20 +738,20 @@ private fun AddCanonicalSheet(
                 modifier = Modifier.fillMaxWidth().testable("input_canonical_transport_kind"),
             )
         },
-        onSubmit = { holderKeyId, usbPath, pin ->
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
             target?.let { t ->
                 if (replace != null) {
                     // Replace / update = the shipped 1-of-N re-mint of a live record.
                     viewModel.addCanonicalServer(
                         holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
-                        transport.ifBlank { null }, ip.ifBlank { null },
+                        transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
                     )
                 } else {
                     // A fresh canonical server is now m-of-n: propose is scrub #1; the
                     // partial gossips to the next holder to cosign (CIRISServer#174).
                     viewModel.proposeCanonical(
                         holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
-                        transport.ifBlank { null }, ip.ifBlank { null },
+                        transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
                     )
                 }
             }
@@ -740,8 +787,8 @@ private fun DrillSheet(
                 modifier = Modifier.fillMaxWidth().testable("input_accord_drill_id"),
             )
         },
-        onSubmit = { holderKeyId, usbPath, pin ->
-            viewModel.initiateDrill(drillId, holderKeyId, usbPath, pin)
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
+            viewModel.initiateDrill(drillId, holderKeyId, usbPath, pin, modulePath)
             onDismiss()
         },
         onDismiss = onDismiss,
@@ -765,8 +812,8 @@ private fun HaltSheet(
         submitLabel = localizedString("mobile.accord_raise_halt"),
         submitBusyLabel = localizedString("mobile.accord_raise_halt"),
         tagPrefix = "halt",
-        onSubmit = { holderKeyId, usbPath, pin ->
-            viewModel.initiateHalt(holderKeyId, usbPath, pin)
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
+            viewModel.initiateHalt(holderKeyId, usbPath, pin, modulePath)
             onDismiss()
         },
         onDismiss = onDismiss,
@@ -798,8 +845,8 @@ private fun AnnounceSheet(
                 modifier = Modifier.fillMaxWidth().testable("input_accord_announce"),
             )
         },
-        onSubmit = { holderKeyId, usbPath, pin ->
-            viewModel.initiateAnnounce(message, holderKeyId, usbPath, pin)
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
+            viewModel.initiateAnnounce(message, holderKeyId, usbPath, pin, modulePath)
             onDismiss()
         },
         onDismiss = onDismiss,
@@ -881,6 +928,48 @@ private fun ColumnScope.Banner(msg: String, error: Boolean, tag: String) {
             else MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier.padding(10.dp).testable(tag),
         )
+    }
+}
+
+/**
+ * The Copy / Save row surfaced after a Propose or Cosign returns a still-partial
+ * co-scrub — hand the partial to the next holder without touching the filesystem.
+ */
+@Composable
+private fun ColumnScope.CoscrubExportRow(
+    onCopy: () -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Spacer(Modifier.height(8.dp))
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth().testable("accord_coscrub_export"),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+        ) {
+            Text(
+                localizedString("mobile.accord_coscrub_export_hint"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onCopy,
+                modifier = Modifier.testableClickable("btn_coscrub_export_copy") { onCopy() },
+            ) { Text(localizedString("mobile.accord_op_copy")) }
+            TextButton(
+                onClick = onSave,
+                modifier = Modifier.testableClickable("btn_coscrub_export_save") { onSave() },
+            ) { Text(localizedString("mobile.accord_coscrub_export_save")) }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testableClickable("btn_coscrub_export_dismiss") { onDismiss() },
+            ) { Text(localizedString("mobile.accord_scrub_cancel")) }
+        }
     }
 }
 

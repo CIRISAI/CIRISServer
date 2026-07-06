@@ -162,12 +162,16 @@ fun HardwareScrubSheet(
     tagPrefix: String,
     extraReady: Boolean = true,
     extras: (@Composable ColumnScope.() -> Unit)? = null,
-    onSubmit: (holderKeyId: String, usbPath: String, pin: String?) -> Unit,
+    onSubmit: (holderKeyId: String, usbPath: String, pin: String?, modulePath: String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var holderKeyId by remember { mutableStateOf("") }
     var usbPath by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
+    // Advanced, blank by default — a macOS/Windows holder whose ykcs11 lives off the
+    // node's OS default path can override it here without a rebuild. Blank → omitted →
+    // the node resolves the OS-appropriate default.
+    var modulePath by remember { mutableStateOf("") }
     val ready = holderKeyId.isNotBlank() && usbPath.isNotBlank() && pin.isNotBlank() &&
         extraReady && !busy
 
@@ -201,14 +205,27 @@ fun HardwareScrubSheet(
                     onPin = { pin = it },
                     tagPrefix = tagPrefix,
                 )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = modulePath,
+                    onValueChange = { modulePath = it },
+                    singleLine = true,
+                    label = { Text(localizedString("mobile.accord_scrub_module_label")) },
+                    placeholder = { Text(localizedString("mobile.accord_scrub_module_hint")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_scrub_module_$tagPrefix"),
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSubmit(holderKeyId, usbPath, pin.ifBlank { null }) },
+                onClick = {
+                    onSubmit(holderKeyId, usbPath, pin.ifBlank { null }, modulePath.ifBlank { null })
+                },
                 enabled = ready,
                 modifier = Modifier.testableClickable("btn_scrub_submit_$tagPrefix") {
-                    if (ready) onSubmit(holderKeyId, usbPath, pin.ifBlank { null })
+                    if (ready) {
+                        onSubmit(holderKeyId, usbPath, pin.ifBlank { null }, modulePath.ifBlank { null })
+                    }
                 },
             ) {
                 Text(if (busy) submitBusyLabel else submitLabel)
@@ -237,7 +254,7 @@ fun CosignSheet(
     binding: Boolean,
     holders: List<AccordHolderDto>,
     busy: Boolean,
-    onSubmit: (holderKeyId: String, usbPath: String, pin: String?) -> Unit,
+    onSubmit: (holderKeyId: String, usbPath: String, pin: String?, modulePath: String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
     HardwareScrubSheet(
@@ -293,7 +310,7 @@ fun CanonicalCosignSheet(
     entry: PendingCoscrubDto?,
     holders: List<AccordHolderDto>,
     busy: Boolean,
-    onSubmit: (holderKeyId: String, usbPath: String, pin: String?, partial: JsonElement) -> Unit,
+    onSubmit: (holderKeyId: String, usbPath: String, pin: String?, modulePath: String?, partial: JsonElement) -> Unit,
     onError: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -354,7 +371,7 @@ fun CanonicalCosignSheet(
                 )
             }
         },
-        onSubmit = { holderKeyId, usbPath, pin ->
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
             val partial: JsonElement? = if (entry != null) {
                 entry.partial
             } else {
@@ -366,7 +383,7 @@ fun CanonicalCosignSheet(
                 }
             }
             if (partial != null) {
-                onSubmit(holderKeyId, usbPath, pin, partial)
+                onSubmit(holderKeyId, usbPath, pin, modulePath, partial)
                 onDismiss()
             }
         },

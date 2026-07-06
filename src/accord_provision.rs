@@ -256,7 +256,7 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
 
     use base64::Engine as _;
 
-    use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
+    use crate::identity::{default_ykcs11_module, Pkcs11Options, DEFAULT_PIV_SLOT};
 
     let b64 = base64::engine::general_purpose::STANDARD;
     let usb_dir = PathBuf::from(req.mldsa_usb_path.trim());
@@ -296,7 +296,7 @@ async fn provision_holder_impl(req: ProvisionHolderRequest) -> Response {
             .module_path
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
+            .unwrap_or_else(default_ykcs11_module),
         user_pin: req.pkcs11.user_pin.clone(),
         piv_slot: piv_slot.clone(),
         provision: false,
@@ -512,7 +512,7 @@ async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
     use ciris_verify_core::accord_genesis::{co_sign_accord_family, founder_member};
     use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
-    use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
+    use crate::identity::{default_ykcs11_module, Pkcs11Options, DEFAULT_PIV_SLOT};
 
     let key_id = req.key_id.trim().to_string();
     let usb_dir = PathBuf::from(req.mldsa_usb_path.trim());
@@ -542,7 +542,7 @@ async fn cosign_family_impl(req: CosignFamilyRequest) -> Response {
             .module_path
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
+            .unwrap_or_else(default_ykcs11_module),
         user_pin: req.pkcs11.user_pin.clone(),
         piv_slot: piv_slot.clone(),
         provision: false,
@@ -1023,9 +1023,10 @@ fn probe_yubikey_status() -> serde_json::Value {
 /// object presence) and look for a Private Key Object. Returns `None` if we can't
 /// check (pkcs11-tool not installed) — callers must NOT treat unknown as failure.
 fn probe_pkcs11_surfaces_slot9c() -> Option<bool> {
-    let module = crate::identity::DEFAULT_YKCS11_MODULE;
+    let module = crate::identity::default_ykcs11_module();
+    let module = module.to_string_lossy();
     let out = std::process::Command::new("pkcs11-tool")
-        .args(["--module", module, "-O"])
+        .args(["--module", &module, "-O"])
         .output()
         .ok()?;
     // pkcs11-tool emits warnings on stderr for the Ed25519 key it can't parse; the
@@ -1154,7 +1155,7 @@ pub(crate) async fn open_holder_identity(
     use ciris_keyring::PqcSigner;
     use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
-    use crate::identity::{Pkcs11Options, DEFAULT_PIV_SLOT, DEFAULT_YKCS11_MODULE};
+    use crate::identity::{default_ykcs11_module, Pkcs11Options, DEFAULT_PIV_SLOT};
 
     let usb_dir = PathBuf::from(usb_path);
     if !usb_dir.is_dir() {
@@ -1176,7 +1177,7 @@ pub(crate) async fn open_holder_identity(
             .module_path
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_YKCS11_MODULE)),
+            .unwrap_or_else(default_ykcs11_module),
         user_pin: pkcs11.user_pin.clone(),
         piv_slot: piv_slot.clone(),
         provision: false,

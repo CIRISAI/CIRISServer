@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 
 /**
  * Drives the **Accord** screen — the HUMANITY_ACCORD constitutional surface
@@ -147,6 +149,7 @@ class AccordViewModel(
         holderKeyId: String,
         mldsaUsbPath: String,
         userPin: String?,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
@@ -157,6 +160,7 @@ class AccordViewModel(
             try {
                 val res = apiClient.concurInvocation(
                     invocationKind, invocationId, holderKeyId, mldsaUsbPath, userPin,
+                    modulePath = modulePath,
                 )
                 _notice.value = if (res.quorumMet) {
                     "Concurred — quorum met (${res.validSigners.size} signers)."
@@ -215,6 +219,7 @@ class AccordViewModel(
         holderKeyId: String,
         mldsaUsbPath: String,
         userPin: String?,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         val id = invocationId.trim()
@@ -228,7 +233,7 @@ class AccordViewModel(
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.initiateDrill(id, holderKeyId, mldsaUsbPath, userPin)
+                val res = apiClient.initiateDrill(id, holderKeyId, mldsaUsbPath, userPin, modulePath = modulePath)
                 _notice.value = if (res.quorumMet) {
                     "Drill $id complete — quorum met (${res.validSigners.size} signers)."
                 } else {
@@ -255,6 +260,7 @@ class AccordViewModel(
         holderKeyId: String,
         mldsaUsbPath: String,
         userPin: String?,
+        modulePath: String? = null,
         invocationId: String = "",
     ) {
         if (_busy.value) return
@@ -265,7 +271,7 @@ class AccordViewModel(
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.initiateHalt(id, holderKeyId, mldsaUsbPath, userPin)
+                val res = apiClient.initiateHalt(id, holderKeyId, mldsaUsbPath, userPin, modulePath = modulePath)
                 _notice.value = if (res.quorumMet) {
                     "HALT $id LATCHED — quorum met (${res.validSigners.size} signers). The mesh is halting."
                 } else {
@@ -292,6 +298,7 @@ class AccordViewModel(
         holderKeyId: String,
         mldsaUsbPath: String,
         userPin: String?,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         val text = message.trim()
@@ -305,7 +312,7 @@ class AccordViewModel(
         _notice.value = null
         viewModelScope.launch {
             try {
-                val res = apiClient.initiateAnnounce(text, holderKeyId, mldsaUsbPath, userPin)
+                val res = apiClient.initiateAnnounce(text, holderKeyId, mldsaUsbPath, userPin, modulePath = modulePath)
                 _notice.value = if (res.posted) {
                     "Announcement posted to the mesh."
                 } else {
@@ -376,6 +383,7 @@ class AccordViewModel(
         targetEd25519Base64: String,
         targetMlDsa65Base64: String,
         userPin: String?,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         _busy.value = true
@@ -391,6 +399,7 @@ class AccordViewModel(
                     targetEd25519Base64 = targetEd25519Base64,
                     targetMlDsa65Base64 = targetMlDsa65Base64,
                     userPin = userPin,
+                    modulePath = modulePath,
                 )
                 _admitSavedTo.value = res.savedTo
                 _notice.value =
@@ -424,6 +433,29 @@ class AccordViewModel(
 
     private val _canonicalSavedTo = MutableStateFlow<String?>(null)
     val canonicalSavedTo: StateFlow<String?> = _canonicalSavedTo.asStateFlow()
+
+    /**
+     * The pretty-printed co-scrub JSON from the LAST propose (`partial`) or cosign
+     * (`advanced`, when still short of quorum) — surfaced with Copy / Save-to-file so
+     * the operator can hand the partial to the next holder without pulling it off disk.
+     * Null when there's nothing to export (fresh screen, or a cosign that conferred).
+     */
+    private val _lastCoscrubJson = MutableStateFlow<String?>(null)
+    val lastCoscrubJson: StateFlow<String?> = _lastCoscrubJson.asStateFlow()
+
+    /** Dismiss the export affordance (Copy / Save) after the operator is done with it. */
+    fun clearLastCoscrubJson() {
+        _lastCoscrubJson.value = null
+    }
+
+    private val coscrubJson = Json { prettyPrint = true }
+
+    /** Pretty-print a raw co-scrub payload for the clipboard / a saved file. */
+    private fun prettyCoscrub(el: JsonElement?): String? =
+        el?.let { runCatching { coscrubJson.encodeToString(JsonElement.serializer(), it) }.getOrNull() }
+
+    /** Public pretty-printer for a pending co-scrub's `partial` (Copy op on the card). */
+    fun exportPartial(el: JsonElement): String = prettyCoscrub(el) ?: el.toString()
 
     /**
      * The canonical co-scrubs (CIRISServer#174) this node holds that are still short
@@ -581,6 +613,7 @@ class AccordViewModel(
         userPin: String?,
         transportKind: String? = null,
         destination: String? = null,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         _busy.value = true
@@ -598,6 +631,7 @@ class AccordViewModel(
                     userPin = userPin,
                     transportKind = transportKind?.takeIf { it.isNotBlank() },
                     destination = destination?.takeIf { it.isNotBlank() },
+                    modulePath = modulePath,
                 )
                 _canonicalSavedTo.value = res.seedSavedTo
                 _notice.value =
@@ -648,6 +682,7 @@ class AccordViewModel(
         userPin: String?,
         transportKind: String? = null,
         destination: String? = null,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         _busy.value = true
@@ -665,8 +700,10 @@ class AccordViewModel(
                     userPin = userPin,
                     transportKind = transportKind?.takeIf { it.isNotBlank() },
                     destination = destination?.takeIf { it.isNotBlank() },
+                    modulePath = modulePath,
                 )
                 _canonicalSavedTo.value = res.savedTo
+                _lastCoscrubJson.value = prettyCoscrub(res.partial)
                 _notice.value =
                     "Proposed a co-scrub for ${res.targetKeyId} (${res.distinctScrubCount} scrub) — " +
                         "gossiped to ${res.gossipedTo} peer(s). Hand / gossip it to the next holder to cosign."
@@ -701,6 +738,7 @@ class AccordViewModel(
         mldsaUsbPath: String,
         userPin: String?,
         partial: kotlinx.serialization.json.JsonElement,
+        modulePath: String? = null,
     ) {
         if (_busy.value) return
         _busy.value = true
@@ -714,8 +752,11 @@ class AccordViewModel(
                     mldsaUsbPath = mldsaUsbPath,
                     partial = partial,
                     userPin = userPin,
+                    modulePath = modulePath,
                 )
                 _canonicalSavedTo.value = res.savedTo
+                // Conferred → nothing left to hand on; still short → export the advanced partial.
+                _lastCoscrubJson.value = if (res.conferred) null else prettyCoscrub(res.advanced)
                 _notice.value = if (res.conferred) {
                     "Cosigned — canonical CONFERRED for ${res.targetKeyId} at the family quorum (${res.distinctScrubCount} scrubs)."
                 } else {
@@ -789,6 +830,15 @@ class AccordViewModel(
     /** Surface a client-side error (e.g. a malformed pasted co-scrub partial). */
     fun showError(message: String) {
         _error.value = message
+    }
+
+    /** Surface a client-side notice / error from the UI (e.g. a copy / save result). */
+    fun setExternalNotice(message: String, error: Boolean = false) {
+        if (error) {
+            _error.value = message
+        } else {
+            _notice.value = message
+        }
     }
 
     fun clearMessages() {
