@@ -53,10 +53,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use ciris_persist::federation::FederationDirectory;
-use ciris_persist::prelude::{Engine, HybridPolicy};
+use ciris_persist::federation::types::{attestation_type, cohort_scope};
+use ciris_persist::federation::{EmitAttestationInput, FederationDirectory};
+use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use serde::{Deserialize, Serialize};
 
+use super::moderation::{admit_moderation_action, Duty};
 use crate::auth::verify::{self, VerifyError};
 
 /// The substrate-reserved `content_class:infohazard` flag prefix (a producer /
@@ -241,12 +243,22 @@ fn flag_row_is_live(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
 }
 
 /// **Resolve the flag on the subject.** Reads the subject's inbound
-/// `content_class:*` attestations; ANY live `content_class:infohazard` /
+/// `content_class:*` attestations; a live `content_class:infohazard` /
 /// `content_class:reported` row ⇒ flagged. When `requested` is `Some`, only that
 /// class counts (the caller disambiguating). Otherwise the more severe
 /// [`ContentFlag::Infohazard`] wins over [`ContentFlag::Reported`].
 ///
-/// Returns `Ok(None)` when the subject carries no live flag.
+/// **The clear fold (latest-wins per class).** A moderator can CLEAR a flag
+/// (retain→unflag, CC 4.5.13) — [`emit_content_flag`] with `withdrawn = true`
+/// emits a superseding `content_class:{class}:v1` row (still substrate-signed,
+/// so the reserved-prefix rule stays satisfied) carrying `"withdrawn": true`.
+/// Per class, the row with the newest `asserted_at` decides: a live flag row
+/// ⇒ flagged; a newer withdrawal ⇒ cleared; a still-newer re-flag ⇒ flagged
+/// again. This mirrors the latest-wins revocation fold [`resolve_view_consent`]
+/// already uses for consent, so a producer→gate flag and its later clear compose
+/// without a separate `withdraws`-discovery read.
+///
+/// Returns `Ok(None)` when the subject carries no live, un-withdrawn flag.
 pub async fn subject_flag(
     engine: &Engine,
     subject_key_id: &str,
@@ -260,8 +272,9 @@ pub async fn subject_flag(
         .await
         .map_err(|e| format!("list flags for subject: {e}"))?;
     let now = Utc::now();
-    let mut infohazard = false;
-    let mut reported = false;
+    // Per class: the newest live `content_class:*` row's `(asserted_at, withdrawn)`.
+    let mut infohazard: Option<(DateTime<Utc>, bool)> = None;
+    let mut reported: Option<(DateTime<Utc>, bool)> = None;
     for row in rows {
         if !flag_row_is_live(row.expires_at, now) {
             continue;
@@ -273,22 +286,39 @@ pub async fn subject_flag(
         else {
             continue;
         };
-        if dimension.starts_with(CONTENT_CLASS_INFOHAZARD_PREFIX) {
-            infohazard = true;
+        let slot = if dimension.starts_with(CONTENT_CLASS_INFOHAZARD_PREFIX) {
+            &mut infohazard
         } else if dimension.starts_with(CONTENT_CLASS_REPORTED_PREFIX) {
-            reported = true;
+            &mut reported
+        } else {
+            continue;
+        };
+        let withdrawn = row
+            .attestation_envelope
+            .get("withdrawn")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        // Latest-wins: keep only the newest row for this class.
+        if slot.is_none_or(|(ts, _)| row.asserted_at >= ts) {
+            *slot = Some((row.asserted_at, withdrawn));
         }
     }
-    let present = |f: ContentFlag| match f {
-        ContentFlag::Infohazard => infohazard,
-        ContentFlag::Reported => reported,
+    // Present iff the newest row for the class is a (non-withdrawn) flag.
+    let present = |f: ContentFlag| {
+        matches!(
+            match f {
+                ContentFlag::Infohazard => infohazard,
+                ContentFlag::Reported => reported,
+            },
+            Some((_, false))
+        )
     };
     Ok(match requested {
         // Caller disambiguated: only that class counts.
         Some(f) => present(f).then_some(f),
         // Undisambiguated: the more severe class wins.
-        None if infohazard => Some(ContentFlag::Infohazard),
-        None if reported => Some(ContentFlag::Reported),
+        None if present(ContentFlag::Infohazard) => Some(ContentFlag::Infohazard),
+        None if present(ContentFlag::Reported) => Some(ContentFlag::Reported),
         None => None,
     })
 }
@@ -380,6 +410,63 @@ pub async fn reveal_decision(
     Ok(infohazard_reveal_decision(flag, has_consent))
 }
 
+// ─── The producer (CIRISServer#181) — substrate-signed flag emit ─────────────
+
+/// **Emit the substrate-reserved `content_class:{class}:v1` flag on `subject`**
+/// (CC 4.5.13 producer hook). This is the row [`subject_flag`] reads and the
+/// `/v1/safety/reveal` gate keys off — WITHOUT it the gate is inert (every read
+/// `allow`s).
+///
+/// ## Why a `substrate_persist` signer, not the node / duty-holder
+///
+/// `content_class:` is a **substrate-reserved** prefix: persist's
+/// `default_reserved_prefix_rules` admit a `content_class:*` `scores` row ONLY
+/// from an emitter whose `federation_keys` row is `identity_type =
+/// substrate_persist` (CEG 0.3 §5.6.8.3). The node's OWN key is `identity_type =
+/// node` (an infrastructure identity, CC 1.13.5) — emitting the flag with it (or
+/// with the duty-holder's key) is refused `federation_reserved_prefix_emitter_mismatch`.
+/// So the duty-HOLDER authorizes (the §11.10 gate at the HTTP layer) but the
+/// SUBSTRATE signs: `substrate_signer` is the node-scoped `substrate_persist`
+/// identity minted + registered at boot (`compose::substrate_persist_signer` /
+/// `compose::register_substrate_key`). [`Engine::emit_attestation`] derives the
+/// attester/scrub key_id from that signer, so the row's `attesting_key_id` is
+/// the substrate identity — never the node or the moderator.
+///
+/// `withdrawn = false` FLAGS; `withdrawn = true` CLEARS (retain→unflag) — a
+/// superseding row [`subject_flag`]'s latest-wins fold reads as "no live flag".
+/// Returns the emitted attestation id.
+pub async fn emit_content_flag(
+    engine: &Engine,
+    substrate_signer: &LocalSigner,
+    subject_key_id: &str,
+    flag: ContentFlag,
+    withdrawn: bool,
+) -> Result<String, String> {
+    let class = flag.as_str();
+    // The exact shape `subject_flag` reads + the test harness emits: a `scores`
+    // row on `content_class:{class}:v1`, envelope `{dimension, content_class}`
+    // (plus `withdrawn: true` on a clear). SCORES is required — the reserved-
+    // prefix gate only fires for `scores` rows.
+    let dimension = format!("content_class:{class}:v1");
+    let mut envelope = serde_json::json!({ "dimension": dimension, "content_class": class });
+    if withdrawn {
+        envelope["withdrawn"] = serde_json::Value::Bool(true);
+    }
+    let input = EmitAttestationInput {
+        attestation_type: attestation_type::SCORES.to_owned(),
+        attested_key_id: Some(subject_key_id.to_owned()),
+        attestation_envelope: envelope,
+        subject_key_ids: vec![subject_key_id.to_owned()],
+        cohort_scope: cohort_scope::FEDERATION.to_owned(),
+        expires_at: None,
+        weight: None,
+    };
+    engine
+        .emit_attestation(substrate_signer, input)
+        .await
+        .map_err(|e| format!("emit content_class:{class} flag (substrate-signed): {e}"))
+}
+
 // ─── HTTP surface ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -455,11 +542,172 @@ async fn reveal(State(st): State<RevealState>, headers: HeaderMap, body: Bytes) 
     }
 }
 
-/// The infohazard reveal-gate router. Default [`HybridPolicy::Strict`].
-pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> Router {
+// ─── The producer endpoint (CIRISServer#181) — POST /v1/safety/flag ──────────
+
+#[derive(Clone)]
+struct FlagState {
+    engine: Arc<Engine>,
+    policy: HybridPolicy,
+    /// The node-scoped `substrate_persist` signer that authors the reserved
+    /// `content_class:*` flag. `None` on a node with no substrate identity
+    /// wired (the flag endpoint then 503s — the gate stays honestly inert
+    /// rather than emitting with the wrong identity).
+    substrate_signer: Option<Arc<LocalSigner>>,
+}
+
+/// Flag vs. clear (retain→unflag). Defaults to [`FlagAction::Flag`].
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FlagAction {
+    /// Emit the `content_class:{class}` flag on the subject.
+    #[default]
+    Flag,
+    /// Clear a prior flag (emit a superseding withdrawal — the latest-wins fold).
+    Clear,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlagRequest {
+    /// The acting key (the moderator delegate or the duty-holder itself).
+    signer_key_id: String,
+    /// The community the moderation action is scoped to (the §11.10 duty gate).
+    community_key_id: String,
+    /// The CEG subject to flag / clear.
+    subject_key_id: String,
+    /// Which class (`infohazard` / `reported`).
+    content_class: ContentFlag,
+    /// `flag` (default) or `clear`.
+    #[serde(default)]
+    action: FlagAction,
+}
+
+#[derive(Debug, Serialize)]
+struct FlagResponse {
+    /// The emitted `content_class` attestation id.
+    attestation_id: String,
+    /// The class flagged / cleared.
+    content_class: &'static str,
+    /// `flag` or `clear`.
+    action: &'static str,
+    /// The `substrate_persist` identity that SIGNED the reserved flag (never the
+    /// duty-holder). The reserved-prefix rule is satisfied by this key, not the
+    /// authorizing moderator.
+    emitter_key_id: String,
+}
+
+/// `POST /v1/safety/flag` — a **duty-gated producer** (CC 4.5.13): a moderator
+/// flags a subject and the NODE's `substrate_persist` identity emits the
+/// substrate-reserved `content_class:{class}` flag, which makes
+/// `/v1/safety/reveal` withhold the subject from non-consented viewers.
+///
+/// Auth mirrors [`super::moderation`] exactly: `verify_request` → caller;
+/// `signer_acts_for`; then the §11.10 `Duty::Moderate` admit-iff gate is the
+/// authority (a held/delegated `moderate` duty stands in for "a live-majority
+/// favors moderation" in today's model — the FSD-004 live-quorum vote is a
+/// future upgrade). A non-duty caller is REFUSED (403).
+///
+/// The duty-HOLDER authorizes; the SUBSTRATE signs (see [`emit_content_flag`]).
+async fn flag(State(st): State<FlagState>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
+        Ok(c) => c,
+        Err(VerifyError::MissingHeader(h)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+        }
+        Err(VerifyError::NoDirectory) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
+        }
+        Err(VerifyError::SignatureInvalid(e)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("signature: {e}"))
+        }
+    };
+    let req: FlagRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    // The HTTP signer must act for the declared acting key (self or an admitted
+    // occurrence) — then the §11.10 duty gate decides authority.
+    if !verify::signer_acts_for(&st.engine, &caller.key_id, &req.signer_key_id).await {
+        return err(
+            StatusCode::FORBIDDEN,
+            "signer is neither the acting key nor an admitted occurrence of it",
+        );
+    }
+    // COMPOSE the §11.10 admit-iff gate — a `moderate` duty is required.
+    match admit_moderation_action(
+        &st.engine,
+        &req.signer_key_id,
+        &req.community_key_id,
+        Duty::Moderate,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return err(
+                StatusCode::FORBIDDEN,
+                "not authorized to flag: the moderate duty is held or delegated, never assumed \
+                 (CEG §11.10 — no named-moderator authority and no live delegated chain)",
+            )
+        }
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+    // The duty-holder authorized; the SUBSTRATE identity signs the reserved flag.
+    let Some(substrate_signer) = st.substrate_signer.as_ref() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no substrate_persist signer wired on this node — cannot author the reserved \
+             content_class flag (compose::substrate_persist_signer)",
+        );
+    };
+    let withdrawn = req.action == FlagAction::Clear;
+    match emit_content_flag(
+        &st.engine,
+        substrate_signer,
+        &req.subject_key_id,
+        req.content_class,
+        withdrawn,
+    )
+    .await
+    {
+        Ok(attestation_id) => (
+            StatusCode::OK,
+            Json(FlagResponse {
+                attestation_id,
+                content_class: req.content_class.as_str(),
+                action: if withdrawn { "clear" } else { "flag" },
+                emitter_key_id: substrate_signer.derived_key_id(),
+            }),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The infohazard reveal-gate + producer router. Default [`HybridPolicy::Strict`].
+///
+/// `substrate_signer` is the node-scoped `substrate_persist` identity that
+/// authors the reserved `content_class:*` flag; pass `None` where no producer
+/// endpoint is needed (the reveal gate + `/v1/safety/flag` then 503s the flag).
+pub fn router(
+    engine: Arc<Engine>,
+    policy: HybridPolicy,
+    substrate_signer: Option<Arc<LocalSigner>>,
+) -> Router {
     Router::new()
         .route("/v1/safety/reveal", axum::routing::post(reveal))
-        .with_state(RevealState { engine, policy })
+        .with_state(RevealState {
+            engine: Arc::clone(&engine),
+            policy,
+        })
+        .merge(
+            Router::new()
+                .route("/v1/safety/flag", axum::routing::post(flag))
+                .with_state(FlagState {
+                    engine,
+                    policy,
+                    substrate_signer,
+                }),
+        )
 }
 
 #[cfg(test)]
@@ -637,7 +885,7 @@ mod tests {
                 .await
                 .expect("engine"),
         );
-        let app = router(engine, HybridPolicy::Strict);
+        let app = router(engine, HybridPolicy::Strict, None);
         let resp = app
             .oneshot(
                 Request::builder()
