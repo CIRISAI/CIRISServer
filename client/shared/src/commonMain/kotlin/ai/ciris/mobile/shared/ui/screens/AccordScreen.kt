@@ -88,6 +88,7 @@ private sealed interface AccordSheet {
     data object AdmitNode : AccordSheet
     data class AddCanonical(val replace: CanonicalServerDto?) : AccordSheet
     data object Drill : AccordSheet
+    data object Halt : AccordSheet
     data object Announce : AccordSheet
     data class Cosign(val inv: AccordInvocationDto) : AccordSheet
     /** Cosign a canonical co-scrub (CIRISServer#174); [entry] null → paste fallback. */
@@ -191,15 +192,15 @@ fun AccordScreen(
                                         sheet = AccordSheet.Announce
                                     },
                                 )
-                                // Halt is initiated out-of-band (grave; it arrives as a
-                                // CONSTITUTIONAL invocation you cosign) — surfaced but disabled.
+                                // RAISE a halt: the initiating holder hardware-signs ONE
+                                // (sub-quorum) signature — it does NOT latch; 2-of-3 concur
+                                // does. Grave, so styled destructive, but safe to raise.
                                 add(
                                     NewAttestationAction(
                                         "halt",
                                         "mobile.accord_new_halt",
-                                        enabled = false,
                                         destructive = true,
-                                    ) {},
+                                    ) { sheet = AccordSheet.Halt },
                                 )
                             },
                         )
@@ -402,6 +403,7 @@ fun AccordScreen(
         is AccordSheet.AddCanonical ->
             AddCanonicalSheet(viewModel, holders, busy, s.replace) { sheet = null }
         is AccordSheet.Drill -> DrillSheet(viewModel, holders, busy) { sheet = null }
+        is AccordSheet.Halt -> HaltSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Announce -> AnnounceSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Cosign -> {
             val inv = s.inv
@@ -740,6 +742,31 @@ private fun DrillSheet(
         },
         onSubmit = { holderKeyId, usbPath, pin ->
             viewModel.initiateDrill(drillId, holderKeyId, usbPath, pin)
+            onDismiss()
+        },
+        onDismiss = onDismiss,
+    )
+}
+
+@Composable
+private fun HaltSheet(
+    viewModel: AccordViewModel,
+    holders: List<AccordHolderDto>,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+) {
+    // RAISE a 2-of-3 CONSTITUTIONAL halt. This holder's single signature is SUB-QUORUM —
+    // it does NOT latch; it gossips and the other holders concur to 2-of-3, which latches.
+    HardwareScrubSheet(
+        title = localizedString("mobile.accord_new_halt"),
+        subtitle = localizedString("mobile.accord_halt_raise_desc"),
+        holders = holders,
+        busy = busy,
+        submitLabel = localizedString("mobile.accord_raise_halt"),
+        submitBusyLabel = localizedString("mobile.accord_raise_halt"),
+        tagPrefix = "halt",
+        onSubmit = { holderKeyId, usbPath, pin ->
+            viewModel.initiateHalt(holderKeyId, usbPath, pin)
             onDismiss()
         },
         onDismiss = onDismiss,

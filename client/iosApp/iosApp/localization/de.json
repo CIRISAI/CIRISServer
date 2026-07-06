@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Wird mitsigniert — berühren Sie Ihren YubiKey…",
     "accord_coscrub_paste_hint": "Kein ausstehender Eintrag? Fügen Sie das JSON des Co-Scrub-Teilscrubs ein, um es direkt mitzusignieren (funktioniert ohne Gossip).",
     "accord_cosign_paste_label": "Teilscrub (SignedKeyRecord-JSON)",
-    "accord_coscrub_paste_invalid": "Das ist kein gültiges JSON — fügen Sie den vollständigen Teilscrub-Datensatz (SignedKeyRecord) ein."
+    "accord_coscrub_paste_invalid": "Das ist kein gültiges JSON — fügen Sie den vollständigen Teilscrub-Datensatz (SignedKeyRecord) ein.",
+    "accord_halt_raise_desc": "LÖSEN Sie einen konstitutionellen 2-von-3-Not-Aus aus. Ihre einzelne Signatur tritt NICHT in Kraft — sie wird an die anderen Accord-Inhaber weitergegeben, die auf 2-von-3 zustimmen müssen, damit der Halt einrastet. Die App hält keine Schlüssel; die YubiKey-Berührung ist Ihre Zustimmung.",
+    "accord_raise_halt": "Halt auslösen"
   },
   "prompts": {
     "dma": {

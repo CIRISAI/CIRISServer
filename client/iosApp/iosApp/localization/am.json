@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "በተጓዳኝ በመፈረም ላይ — YubiKey ንካ…",
     "accord_coscrub_paste_hint": "በመጠባበቅ ላይ ያለ ግቤት የለም? የጋራ ስክረቡን ከፊል JSON ለጥፈህ በቀጥታ በተጓዳኝ ፈርመው (ያለ ጎሲፕ ይሰራል)።",
     "accord_cosign_paste_label": "ከፊል (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "ያ ትክክለኛ JSON አይደለም — ሙሉውን ከፊል (SignedKeyRecord) መዝገብ ለጥፍ።"
+    "accord_coscrub_paste_invalid": "ያ ትክክለኛ JSON አይደለም — ሙሉውን ከፊል (SignedKeyRecord) መዝገብ ለጥፍ።",
+    "accord_halt_raise_desc": "2-ከ-3 ሕገ-መንግስታዊ የማጥፊያ ማብሪያ አንሳ። የአንተ ነጠላ ፊርማ ብቻ ተግባራዊ አይሆንም — ወደ ሌሎቹ የአኮርድ ያዢዎች ይሰራጫል፣ እነሱም ማቆሚያው እንዲቆለፍ ወደ 2-ከ-3 መስማማት አለባቸው። መተግበሪያው ምንም ቁልፍ አይይዝም፤ የYubiKey ንክኪ የአንተ ፈቃድ ነው።",
+    "accord_raise_halt": "ማቆሚያ አንሳ"
   },
   "prompts": {
     "dma": {

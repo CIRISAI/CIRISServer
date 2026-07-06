@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "Ana haɗa sa hannu — taɓa YubiKey ɗinka…",
     "accord_coscrub_paste_hint": "Babu shigarwa mai jira? Liƙa JSON na sashen co-scrub don haɗa sa hannu kai tsaye (yana aiki ba tare da yaɗuwa ba).",
     "accord_cosign_paste_label": "Sashe (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "Wannan ba ingantaccen JSON ba ne — liƙa cikakken rikodin sashe (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Wannan ba ingantaccen JSON ba ne — liƙa cikakken rikodin sashe (SignedKeyRecord).",
+    "accord_halt_raise_desc": "Ɗaga maɓallin dakatarwa na tsarin mulki na 2-daga-3. Sa hannunka ɗaya BAI fara aiki ba — ana yaɗa shi ga sauran masu riƙe da yarjejeniyar accord, waɗanda dole ne su yarda zuwa 2-daga-3 don dakatarwar ta kulle. App ɗin ba ta riƙe wani maɓalli; taɓa YubiKey shi ne yardarka.",
+    "accord_raise_halt": "Ɗaga dakatarwa"
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",

@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "กำลังร่วมลงนาม — แตะ YubiKey ของคุณ…",
     "accord_coscrub_paste_hint": "ไม่มีรายการที่รอดำเนินการใช่ไหม? วาง JSON ส่วนบางส่วนของการร่วมสครับเพื่อร่วมลงนามโดยตรง (ใช้ได้โดยไม่ต้องกระจายข้อมูล)",
     "accord_cosign_paste_label": "ส่วนบางส่วน (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "นั่นไม่ใช่ JSON ที่ถูกต้อง — วางบันทึกส่วนบางส่วน (SignedKeyRecord) แบบเต็ม"
+    "accord_coscrub_paste_invalid": "นั่นไม่ใช่ JSON ที่ถูกต้อง — วางบันทึกส่วนบางส่วน (SignedKeyRecord) แบบเต็ม",
+    "accord_halt_raise_desc": "ยก 2-of-3 คีย์สวิตช์หยุดฉุกเฉินตามรัฐธรรมนูญ ลายเซ็นเดียวของคุณยังไม่มีผลบังคับ — จะถูกส่งต่อไปยังผู้ถือ accord รายอื่น ซึ่งต้องเห็นพ้องกันให้ครบ 2-of-3 การหยุดจึงจะล็อก แอปนี้ไม่ได้เก็บคีย์ใด ๆ การแตะ YubiKey คือความยินยอมของคุณ",
+    "accord_raise_halt": "ยกการหยุด"
   },
   "conscience": {
     "ponder_attempted": "ฉันได้พยายามที่จะ {action}",

@@ -245,6 +245,43 @@ class AccordViewModel(
     }
 
     /**
+     * **Raise a halt** — RAISE a 2-of-3 CONSTITUTIONAL kill-switch (holder action, owner
+     * session). The node synthesizes the constitutional invocation and signs THIS holder's
+     * initiating cosignature with the resolved local holder signer (mirrors [initiateDrill]);
+     * the app sends no crypto. That single signature is **sub-quorum** — the halt does NOT
+     * take effect until the other holders concur to 2-of-3. The binding twin of a drill.
+     */
+    fun initiateHalt(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        invocationId: String = "",
+    ) {
+        if (_busy.value) return
+        if (!requireHolderInputs(holderKeyId, mldsaUsbPath, userPin)) return
+        val id = invocationId.trim().ifBlank { "halt-${kotlin.random.Random.nextInt(100000, 1000000)}" }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.initiateHalt(id, holderKeyId, mldsaUsbPath, userPin)
+                _notice.value = if (res.quorumMet) {
+                    "HALT $id LATCHED — quorum met (${res.validSigners.size} signers). The mesh is halting."
+                } else {
+                    "Halt $id RAISED — ${res.validSigners.size} signer(s). It does NOT take effect until 2-of-3 holders concur."
+                }
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[initiateHalt] ${e.message}")
+                _error.value = holderActionError(e, "raise a halt")
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
      * **Post an announce** — a single-holder `notify` message (threshold 1; holder
      * action, owner session). The node signs the notify (binding [message] to the
      * payload hash) with its resolved local holder signer, gossips it, and surfaces

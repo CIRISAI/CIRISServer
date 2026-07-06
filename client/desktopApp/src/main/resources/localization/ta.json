@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "கூட்டுக்கையொப்பமிடுகிறது — உங்கள் YubiKey-ஐ தொடவும்…",
     "accord_coscrub_paste_hint": "நிலுவை உள்ளீடு இல்லையா? நேரடியாக கூட்டுக்கையொப்பமிட கூட்டு-ஸ்க்ரப் பகுதி JSON-ஐ ஒட்டவும் (பரவல் இல்லாமல் வேலை செய்யும்).",
     "accord_cosign_paste_label": "பகுதி (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "அது செல்லுபடியான JSON அல்ல — முழு பகுதியையும் (SignedKeyRecord) பதிவை ஒட்டவும்."
+    "accord_coscrub_paste_invalid": "அது செல்லுபடியான JSON அல்ல — முழு பகுதியையும் (SignedKeyRecord) பதிவை ஒட்டவும்.",
+    "accord_halt_raise_desc": "2-இல்-3 அரசியலமைப்பு கொல்-சுவிட்சை உயர்த்துங்கள். உங்கள் தனி கையொப்பம் நடைமுறைக்கு வராது — அது மற்ற accord வைத்திருப்போருக்கு பரவலாக்கப்படுகிறது, நிறுத்தம் பூட்டப்பட 2-இல்-3 என ஒப்புக்கொள்ள வேண்டும். ஆப் எந்த சாவிகளையும் வைத்திருக்கவில்லை; YubiKey தொடுதலே உங்கள் சம்மதம்.",
+    "accord_raise_halt": "நிறுத்தத்தை உயர்த்து"
   },
   "conscience": {
     "ponder_attempted": "நான் {action} செய்ய முயற்சித்தேன்",

@@ -2233,7 +2233,9 @@
     "accord_coscrub_cosign_submit_busy": "در حال هم‌امضا — YubiKey خود را لمس کنید…",
     "accord_coscrub_paste_hint": "ورودی در انتظاری ندارید؟ JSON جزئی هم‌اسکراب را بچسبانید تا مستقیماً آن را هم‌امضا کنید (بدون انتشار کار می‌کند).",
     "accord_cosign_paste_label": "جزئی (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "آن JSON معتبری نیست — رکورد کامل جزئی (SignedKeyRecord) را بچسبانید."
+    "accord_coscrub_paste_invalid": "آن JSON معتبری نیست — رکورد کامل جزئی (SignedKeyRecord) را بچسبانید.",
+    "accord_halt_raise_desc": "یک کلید توقف اضطراری قانون‌اساسی ۲ از ۳ را فعال کنید. امضای تنها شما به تنهایی اعمال نمی‌شود — این امضا برای سایر دارندگان اکورد بازگو می‌شود که باید برای رسیدن به ۲ از ۳ موافقت کنند تا توقف قفل شود. برنامه هیچ کلیدی نگه نمی‌دارد؛ لمس YubiKey رضایت شماست.",
+    "accord_raise_halt": "فعال‌سازی توقف"
   },
   "prompts": {
     "dma": {

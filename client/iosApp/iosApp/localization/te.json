@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "కోసైన్ చేస్తోంది — మీ YubiKey ను తాకండి…",
     "accord_coscrub_paste_hint": "పెండింగ్ ఎంట్రీ లేదా? దాన్ని నేరుగా కోసైన్ చేయడానికి కో-స్క్రబ్ పాక్షిక JSON ను అతికించండి (గాసిప్ లేకుండా పనిచేస్తుంది).",
     "accord_cosign_paste_label": "పాక్షికం (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "అది చెల్లుబాటు అయ్యే JSON కాదు — పూర్తి పాక్షిక (SignedKeyRecord) రికార్డును అతికించండి."
+    "accord_coscrub_paste_invalid": "అది చెల్లుబాటు అయ్యే JSON కాదు — పూర్తి పాక్షిక (SignedKeyRecord) రికార్డును అతికించండి.",
+    "accord_halt_raise_desc": "2-లో-3 రాజ్యాంగ కిల్-స్విచ్‌ను లేవనెత్తండి. మీ ఒక్క సంతకం అమలులోకి రాదు — అది ఇతర accord holders కు గాసిప్ చేయబడుతుంది, హాల్ట్ లాచ్ కావడానికి వారు 2-లో-3 కు అంగీకరించాలి. యాప్ ఎలాంటి కీలను కలిగి ఉండదు; YubiKey టచ్ మీ సమ్మతి.",
+    "accord_raise_halt": "హాల్ట్ లేవనెత్తండి"
   },
   "conscience": {
     "ponder_attempted": "నేను {action} చేయడానికి ప్రయత్నించాను",

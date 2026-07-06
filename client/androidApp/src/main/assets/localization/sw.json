@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Inatia sahihi ya pamoja — gusa YubiKey yako…",
     "accord_coscrub_paste_hint": "Hakuna kiingizo kinachosubiri? Bandika JSON ya sehemu ya uchakataji-shirikishi ili kuutia sahihi ya pamoja moja kwa moja (hufanya kazi bila usambazaji).",
     "accord_cosign_paste_label": "Sehemu (JSON ya SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Hiyo si JSON halali — bandika rekodi kamili ya sehemu (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Hiyo si JSON halali — bandika rekodi kamili ya sehemu (SignedKeyRecord).",
+    "accord_halt_raise_desc": "PANDISHA swichi ya kuzima ya kikatiba ya 2-kati-ya-3. Saini yako moja HAIANZI kutumika — inasambazwa kwa washikaji wengine wa mkataba, ambao lazima wakubaliane hadi 2-kati-ya-3 ili kuzima kushikamane. Programu haishiki funguo yoyote; kugusa YubiKey ndiyo ridhaa yako.",
+    "accord_raise_halt": "Pandisha kuzima"
   },
   "prompts": {
     "dma": {

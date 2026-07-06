@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "کو-سائن کیا جا رہا ہے — اپنی YubiKey کو چھوئیں…",
     "accord_coscrub_paste_hint": "کوئی زیر التوا اندراج نہیں؟ اسے براہ راست کو-سائن کرنے کے لیے کو-اسکرب جزوی JSON پیسٹ کریں (گاسپ کے بغیر کام کرتا ہے)۔",
     "accord_cosign_paste_label": "جزوی (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "یہ درست JSON نہیں ہے — مکمل جزوی (SignedKeyRecord) ریکارڈ پیسٹ کریں۔"
+    "accord_coscrub_paste_invalid": "یہ درست JSON نہیں ہے — مکمل جزوی (SignedKeyRecord) ریکارڈ پیسٹ کریں۔",
+    "accord_halt_raise_desc": "دو میں سے تین (2-of-3) آئینی کِل سوئچ اٹھائیں۔ آپ کا اکیلا دستخط مؤثر نہیں ہوتا — اسے دیگر accord ہولڈرز تک پہنچایا جاتا ہے، جنہیں ہالٹ کے قائم ہونے کے لیے 2-of-3 پر متفق ہونا ضروری ہے۔ ایپ کوئی کلید نہیں رکھتی؛ YubiKey کا لمس آپ کی رضامندی ہے۔",
+    "accord_raise_halt": "ہالٹ اٹھائیں"
   },
   "prompts": {
     "dma": {

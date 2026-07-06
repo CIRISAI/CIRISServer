@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Cofirmando — toque na sua YubiKey…",
     "accord_coscrub_paste_hint": "Nenhuma entrada pendente? Cole o JSON parcial do co-scrub para cofirmá-lo diretamente (funciona sem gossip).",
     "accord_cosign_paste_label": "Parcial (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Isso não é um JSON válido — cole o registro parcial completo (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Isso não é um JSON válido — cole o registro parcial completo (SignedKeyRecord).",
+    "accord_halt_raise_desc": "ACIONE um interruptor de emergência constitucional de 2 de 3. A sua assinatura isolada NÃO entra em vigor — ela é propagada aos outros detentores do accord, que devem concordar para 2 de 3 a fim de que a interrupção seja travada. O app não guarda chaves; o toque no YubiKey é o seu consentimento.",
+    "accord_raise_halt": "Acionar interrupção"
   },
   "prompts": {
     "dma": {

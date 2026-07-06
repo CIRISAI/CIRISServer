@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "cosign လုပ်နေသည် — သင်၏ YubiKey ကို ထိပါ…",
     "accord_coscrub_paste_hint": "စောင့်ဆိုင်းနေသော entry မရှိဘူးလား? co-scrub တစ်စိတ်တစ်ပိုင်း JSON ကို တိုက်ရိုက် cosign လုပ်ရန် ကူးထည့်ပါ (gossip မပါဘဲ အလုပ်လုပ်သည်)။",
     "accord_cosign_paste_label": "တစ်စိတ်တစ်ပိုင်း (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "ဤသည်မှာ တရားဝင် JSON မဟုတ်ပါ — တစ်စိတ်တစ်ပိုင်း (SignedKeyRecord) မှတ်တမ်း အပြည့်အစုံကို ကူးထည့်ပါ။"
+    "accord_coscrub_paste_invalid": "ဤသည်မှာ တရားဝင် JSON မဟုတ်ပါ — တစ်စိတ်တစ်ပိုင်း (SignedKeyRecord) မှတ်တမ်း အပြည့်အစုံကို ကူးထည့်ပါ။",
+    "accord_halt_raise_desc": "ဖွဲ့စည်းပုံအခြေခံဥပဒေဆိုင်ရာ 2-of-3 kill-switch ကို RAISE လုပ်ပါ။ သင်၏ လက်မှတ်တစ်ခုတည်းက အာဏာမသက်ရောက်ပါ — ၎င်းကို အခြား accord holder များထံ gossip ပြုလုပ်ပေးပြီး၊ ရပ်တန့်မှု latch ဖြစ်ရန် ၎င်းတို့သည် 2-of-3 သဘောတူညီရမည်ဖြစ်သည်။ အက်ပ်တွင် သော့များ မထားရှိပါ၊ YubiKey ထိတွေ့မှုသည် သင်၏ သဘောတူညီချက်ဖြစ်သည်။",
+    "accord_raise_halt": "ရပ်တန့်မှု ဖော်ဆောင်ရန်"
   },
   "conscience": {
     "ponder_attempted": "ကျွန်ုပ် {action} ကို ကြိုးစားခဲ့သည်",

@@ -1062,14 +1062,58 @@ async fn genesis_assemble(
         .into_response()
 }
 
+/// Project the family from the BAKED verify genesis (`humanity_accord_genesis`) — the
+/// recognized-but-not-yet-entrenched form used when no persist `federation_families` row
+/// exists. The genesis body's `family` block already carries `family_name`,
+/// `consensus_protocol` (`quorum:2/3`), and the `members` list ({key_id, role}) verbatim —
+/// exactly the `GET /v1/accord/family` shape. `entrenched:false` + `recognized_via` tell the
+/// client this is the baked recognition, not an entrenched row. 404 only if the genesis is
+/// somehow unbaked (never, in a shipped build).
+fn recognized_family_from_baked_genesis() -> Response {
+    let Some(genesis) = humanity_accord_genesis() else {
+        return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet");
+    };
+    let fam = genesis.body.get("family");
+    let family_name = fam
+        .and_then(|f| f.get("family_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("HUMANITY_ACCORD");
+    let consensus_protocol = fam
+        .and_then(|f| f.get("consensus_protocol"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("quorum:2/3");
+    let members = fam
+        .and_then(|f| f.get("members"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "family_key_id": HUMANITY_ACCORD_FAMILY_KEY_ID,
+            "family_name": family_name,
+            "consensus_protocol": consensus_protocol,
+            "entrenched": false,
+            "recognized_via": "baked-genesis",
+            "members": members,
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family, read from the
 /// persist `federation_families` row via the generic family layer
 /// ([`crate::family::lookup`]) + its LIVE roster ([`crate::family::active_members`],
-/// revocation-folded). 404 until genesis is assembled.
+/// revocation-folded). Falls back to the BAKED genesis recognition
+/// ([`recognized_family_from_baked_genesis`]) when no row is entrenched yet.
 async fn get_family(State(st): State<AccordState>) -> Response {
     let family = match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         Ok(Some(f)) => f,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet"),
+        // No entrenched `federation_families` row — but the family is still RECOGNIZED from
+        // the BAKED genesis (verify's `humanity_accord_genesis`), the same recognition the
+        // kill-switch roster uses. Project the baked 2/3 family (entrenched=false) so the
+        // Trust Root card + the co-scrub quorum resolve on a fresh node, BEFORE persist bakes
+        // the row (CIRISPersist#386 — the durable fix that makes this fallback redundant).
+        Ok(None) => return recognized_family_from_baked_genesis(),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
     // The live seats (admitted MINUS revoked) — what a swap reflects immediately.
@@ -1196,8 +1240,9 @@ async fn hardware_sign_invocation(
 /// the id / message — never a signed envelope (it holds no keys and fabricates no
 /// crypto), so the node mints the CSPRNG nonce, the §0.5 timestamps (a 1-hour
 /// validity window), and the §0.6 `payload_sha256` (binding the notify's `message`;
-/// the empty payload for a drill). Only ever used for the non-binding kinds — a
-/// `CONSTITUTIONAL` halt is never synthesized (its full invocation is caller-supplied).
+/// the empty payload for a drill). Used for the non-binding kinds AND for RAISING a
+/// `CONSTITUTIONAL` halt ([`initiate_halt`]) — the synthesized halt carries ONE opener
+/// signature, which is sub-quorum and cannot latch; only the family M-of-N does.
 fn synth_invocation(kind: InvocationKind, invocation_id: &str, payload: &[u8]) -> Invocation {
     use base64::Engine as _;
     let mut nonce = [0u8; 32];
@@ -1296,6 +1341,82 @@ async fn initiate_drill(State(st): State<AccordState>, body: axum::body::Bytes) 
                 );
             };
             synth_invocation(InvocationKind::Drill, id, b"")
+        }
+    };
+    open_invocation(
+        &st,
+        invocation,
+        req.signature,
+        req.key_id,
+        req.mldsa_usb_path,
+        &req.pkcs11,
+    )
+    .await
+}
+
+/// `POST /v1/accord/halt` request. Mirror of [`DrillRequest`] — supply a full
+/// `constitutional` `invocation` (holder-app path) OR just an `invocation_id` (or nothing,
+/// for a fresh `halt-<uuid>`) for the node to synthesize it. The cosignature is client-
+/// submitted OR hardware-signed on the node.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct HaltRequest {
+    #[serde(default)]
+    invocation: Option<Invocation>,
+    #[serde(default)]
+    invocation_id: Option<String>,
+    #[serde(default)]
+    signature: Option<ThresholdSignature>,
+    /// Hardware-sign path (mirrors admit-node): the holder's federation `key_id`.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
+    #[serde(default)]
+    mldsa_usb_path: Option<String>,
+    /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+}
+
+/// `POST /v1/accord/halt` — **RAISE** a 2-of-3 `CONSTITUTIONAL` kill-switch invocation.
+///
+/// The initiating holder hardware-signs ONE signature — which is **sub-quorum**, so this
+/// does **NOT** latch anything: a halt latches ONLY when the family M-of-N is met
+/// ([`replicate_and_maybe_halt`]'s `is_global_halt` requires `quorum_met`). Raising is thus
+/// safe to expose from the app; the gravity is protected by the QUORUM, not by making the
+/// switch un-raisable. The raised invocation gossips to peers and surfaces in their pending
+/// set; the other holders cosign via `/v1/accord/invocation/concur`, and the quorum-
+/// completing signature is what replicates-first-then-latches the disk halt.
+///
+/// This is the binding twin of [`initiate_drill`] (identical opener; the kind is
+/// `constitutional` instead of `drill`). Unlike a drill, a synthesized halt is a REAL
+/// kill-switch once it reaches quorum — the sub-quorum raise is the deliberately safe part.
+async fn initiate_halt(State(st): State<AccordState>, body: axum::body::Bytes) -> Response {
+    let req: HaltRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    // A full constitutional invocation (holder-app path) takes precedence; otherwise the
+    // node synthesizes it from the id (the app holds no keys). The single opener signature
+    // is sub-quorum — it gossips but cannot latch.
+    let invocation = match req.invocation {
+        Some(inv) => {
+            if inv.invocation_kind != InvocationKind::Constitutional {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "the halt endpoint requires invocation_kind \"constitutional\"",
+                );
+            }
+            inv
+        }
+        None => {
+            let id = req
+                .invocation_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| format!("halt-{}", uuid::Uuid::new_v4()), str::to_string);
+            synth_invocation(InvocationKind::Constitutional, &id, b"")
         }
     };
     open_invocation(
@@ -2445,6 +2566,9 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             "/v1/accord/announce",
             axum::routing::post(initiate_announce),
         )
+        // RAISE a 2-of-3 CONSTITUTIONAL halt (one opener signature — sub-quorum, cannot
+        // latch; the family M-of-N cosign latches). The binding twin of /drill.
+        .route("/v1/accord/halt", axum::routing::post(initiate_halt))
         .route("/v1/accord/halt-status", axum::routing::get(halt_status))
         .route("/v1/accord/events", axum::routing::get(list_events))
         // genesis ceremony
@@ -2515,6 +2639,25 @@ mod tests {
             ed25519_signature_base64: "AA".to_string(),
             mldsa65_signature_base64: Some("BB".to_string()),
         }
+    }
+
+    /// With no entrenched `federation_families` row, `GET /v1/accord/family` projects the
+    /// BAKED genesis — the 2/3 HUMANITY_ACCORD family with its 3 seats — so a fresh node's
+    /// Trust Root card + co-scrub quorum resolve before persist bakes the row (#386).
+    #[tokio::test]
+    async fn get_family_falls_back_to_the_baked_genesis() {
+        let resp = recognized_family_from_baked_genesis();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["family_key_id"], HUMANITY_ACCORD_FAMILY_KEY_ID);
+        assert_eq!(v["family_name"], "HUMANITY_ACCORD");
+        assert_eq!(v["consensus_protocol"], "quorum:2/3");
+        assert_eq!(v["entrenched"], false);
+        assert_eq!(v["recognized_via"], "baked-genesis");
+        assert_eq!(v["members"].as_array().map(|a| a.len()), Some(3));
     }
 
     /// A client-submitted signature is passed through verbatim (the holder-app

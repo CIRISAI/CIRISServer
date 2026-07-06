@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Cofirma in corso — tocca la tua YubiKey…",
     "accord_coscrub_paste_hint": "Nessuna voce in sospeso? Incolla il JSON parziale del co-scrub per cofirmarlo direttamente (funziona senza diffusione).",
     "accord_cosign_paste_label": "Parziale (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Questo non è un JSON valido — incolla il record parziale completo (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Questo non è un JSON valido — incolla il record parziale completo (SignedKeyRecord).",
+    "accord_halt_raise_desc": "ATTIVA un kill-switch costituzionale a 2 su 3. La tua singola firma NON ha effetto: viene comunicata agli altri titolari dell'accord, che devono concordare a 2 su 3 affinché il blocco venga applicato. L'app non conserva alcuna chiave; il tocco della YubiKey è il tuo consenso.",
+    "accord_raise_halt": "Attiva blocco"
   },
   "prompts": {
     "dma": {

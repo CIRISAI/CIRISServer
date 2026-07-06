@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "공동 서명 중 — YubiKey를 터치하세요…",
     "accord_coscrub_paste_hint": "대기 중인 항목이 없나요? 공동 스크럽 부분 JSON을 붙여넣어 직접 공동 서명하세요 (전파 없이 작동).",
     "accord_cosign_paste_label": "부분 서명 (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "유효한 JSON이 아닙니다 — 전체 부분 서명 (SignedKeyRecord) 레코드를 붙여넣으세요."
+    "accord_coscrub_paste_invalid": "유효한 JSON이 아닙니다 — 전체 부분 서명 (SignedKeyRecord) 레코드를 붙여넣으세요.",
+    "accord_halt_raise_desc": "2/3 헌법적 킬 스위치를 발동(RAISE)합니다. 당신의 단일 서명만으로는 효력이 발생하지 않습니다 — 이는 다른 accord 보유자들에게 전파되며, 정지가 걸리려면 그들이 2/3로 동의해야 합니다. 앱은 어떠한 키도 보유하지 않으며, YubiKey 터치가 당신의 동의입니다.",
+    "accord_raise_halt": "정지 발동"
   },
   "prompts": {
     "dma": {

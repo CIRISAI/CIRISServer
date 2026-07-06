@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Cofirmando: toca tu YubiKey…",
     "accord_coscrub_paste_hint": "¿No hay ninguna entrada pendiente? Pega el JSON parcial del coborrado para cofirmarlo directamente (funciona sin propagación).",
     "accord_cosign_paste_label": "Parcial (JSON de SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Eso no es JSON válido: pega el registro parcial completo (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Eso no es JSON válido: pega el registro parcial completo (SignedKeyRecord).",
+    "accord_halt_raise_desc": "ACTIVA un interruptor de emergencia constitucional 2-de-3. Tu firma individual NO surte efecto: se difunde a los demás titulares del acuerdo, que deben coincidir para alcanzar 2-de-3 y que la parada quede fijada. La app no guarda ninguna clave; el toque en la YubiKey es tu consentimiento.",
+    "accord_raise_halt": "Activar parada"
   },
   "prompts": {
     "dma": {

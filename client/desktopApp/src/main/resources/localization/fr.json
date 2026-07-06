@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Cosignature en cours — touchez votre YubiKey…",
     "accord_coscrub_paste_hint": "Aucune entrée en attente ? Collez le JSON partiel du co-scrub pour le cosigner directement (fonctionne sans diffusion).",
     "accord_cosign_paste_label": "Partiel (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Ce n'est pas un JSON valide — collez l'enregistrement partiel complet (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Ce n'est pas un JSON valide — collez l'enregistrement partiel complet (SignedKeyRecord).",
+    "accord_halt_raise_desc": "DÉCLENCHER un coupe-circuit constitutionnel 2-sur-3. Votre seule signature ne prend PAS effet — elle est diffusée aux autres détenteurs de l'accord, qui doivent l'approuver à 2-sur-3 pour que l'arrêt se verrouille. L'application ne détient aucune clé ; le contact YubiKey est votre consentement.",
+    "accord_raise_halt": "Déclencher l'arrêt"
   },
   "prompts": {
     "dma": {

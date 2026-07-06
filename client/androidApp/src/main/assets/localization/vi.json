@@ -2553,7 +2553,9 @@
     "accord_coscrub_cosign_submit_busy": "Đang đồng ký — chạm YubiKey của bạn…",
     "accord_coscrub_paste_hint": "Không có mục đang chờ? Dán JSON bản một phần của đồng chà để đồng ký trực tiếp (hoạt động không cần lan truyền).",
     "accord_cosign_paste_label": "Bản một phần (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Đó không phải JSON hợp lệ — hãy dán toàn bộ bản ghi một phần (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Đó không phải JSON hợp lệ — hãy dán toàn bộ bản ghi một phần (SignedKeyRecord).",
+    "accord_halt_raise_desc": "PHÁT ĐỘNG công tắc ngắt khẩn cấp theo hiến pháp dạng 2-trên-3. Chữ ký đơn lẻ của bạn KHÔNG có hiệu lực — nó được lan truyền tới những người nắm giữ accord khác, và họ phải đồng thuận đủ 2-trên-3 thì lệnh ngắt mới được kích hoạt. Ứng dụng không giữ khóa nào; thao tác chạm YubiKey chính là sự đồng ý của bạn.",
+    "accord_raise_halt": "Phát động lệnh ngắt"
   },
   "network": {
     "title": "Mạng",

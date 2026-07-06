@@ -2319,7 +2319,9 @@
     "accord_coscrub_unverified": "roster kò tíì jẹ́ ìmúdájú — scrubber kan kì í ṣe olùdìmú accord tí a mọ̀",
     "accord_cosign_paste_label": "Apá kan (SignedKeyRecord JSON)",
     "accord_new_cosign_paste": "Fọwọ́sí àjọ-scrub tí a lẹ mọ́",
-    "accord_section_coscrub": "Àwọn àjọ-fọwọ́sí tó ń dúró (olóye)"
+    "accord_section_coscrub": "Àwọn àjọ-fọwọ́sí tó ń dúró (olóye)",
+    "accord_halt_raise_desc": "GBE dígí-ìdádúró t'ábẹ́tẹ́lẹ̀ 2-nínú-3 sókè. Ìbúwọ́lù rẹ kan ṣoṣo KÒ ní ipa — a máa sọ ọ́ fún àwọn tó ń mú accord yòókù, tí wọ́n gbọ́dọ̀ fara mọ́ 2-nínú-3 kí ìdádúró náà tó lè dìmú. Ohun èlò yìí kò ní kọ́kọ́rọ́ kankan; ìfọwọ́kàn YubiKey ni ìfọwọ́sí rẹ.",
+    "accord_raise_halt": "Gbé ìdádúró sókè"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
