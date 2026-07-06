@@ -86,6 +86,7 @@ use std::sync::Arc;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 
 pub mod age;
+pub mod infohazard;
 pub mod moderation;
 pub mod named;
 pub mod watchlist;
@@ -104,9 +105,13 @@ pub mod watchlist;
 ///   existence-invariant status of a community (operating / quiesced).
 /// - `POST /v1/safety/watchlist` — enable/disable a per-group watchlist
 ///   (`moderate`-gated; CSAM additionally `takedown`-gated).
+/// - `POST /v1/safety/reveal` — the CC 4.5.13 infohazard consent-gate decision:
+///   a flagged subject is WITHHELD (403 interstitial) until the signed viewer's
+///   `consent:state:granted {scope:view}` is on the graph (then 200 allow).
 pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> axum::Router {
     age::router(Arc::clone(&engine), policy)
         .merge(moderation::router(Arc::clone(&engine), policy))
         .merge(named::router(Arc::clone(&engine)))
         .merge(watchlist::router(Arc::clone(&engine), policy))
+        .merge(infohazard::router(Arc::clone(&engine), policy))
 }

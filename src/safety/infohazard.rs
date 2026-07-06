@@ -1,0 +1,656 @@
+//! Infohazard consent-gate — the protective **reveal gate** (CC 4.5.13; the
+//! CC 4.5.5 `content_class` gate × the CC 3.3.1 consent primitive).
+//!
+//! ## The gap this closes (CIRISServer#161)
+//!
+//! persist already ADMITS the two halves and REFUSES to let a viewer forge
+//! either one:
+//!
+//! - `content_class:infohazard` / `content_class:reported` is a
+//!   **substrate-reserved** prefix (persist `default_reserved_prefix_rules` —
+//!   `content_class:` requires `identity_type = substrate_persist`; CEG 0.3
+//!   §5.6.8.3 / §11.5.3). A viewer/agent that tries to self-clear the flag is
+//!   refused (`federation_reserved_prefix_emitter_mismatch`).
+//! - `consent:state:granted` + `consent:scope:view` emit cleanly from the
+//!   viewer's own key — a real, admittable wire shape.
+//!
+//! The ONLY missing piece was the *decision*: "may viewer V reveal flagged
+//! subject S?" persist is correct to have no engine byte-gate — the enforcement
+//! is a **composition** (the consumer / policy tier, CC 4.4), which is exactly
+//! what CIRISServer (the absorbed LensCore) is for. This module is that
+//! composition; NO persist change, NO new wire shape.
+//!
+//! ## What ships
+//!
+//! 1. **the pure gate** — [`infohazard_reveal_decision`] decides visibility from
+//!    `(flag, has_consent)`. The default is PROTECTIVE: a flagged subject with
+//!    absent/unknown consent ⇒ [`RevealDecision::Interstitial`], never a passive
+//!    `Allow`. Mirrors [`super::age::gate_content_for`].
+//! 2. **flag resolution** — [`subject_flag`] reads the `content_class:*` flag on
+//!    the subject (any live row ⇒ flagged).
+//! 3. **consent resolution** — [`resolve_view_consent`] resolves the viewer's
+//!    live view-consent for the flagged class, **folding `consent:state:revoked`**
+//!    (a later revoke supersedes a grant — latest-wins, the same model persist's
+//!    `resolve_consent_state` uses in `federation/mod.rs`).
+//! 4. **the decision endpoint** — `POST /v1/safety/reveal` (decision-only; it
+//!    NEVER emits the consent — the app emits it via the existing attestation
+//!    surface, then re-calls).
+//!
+//! ## The loop (no new emit path)
+//!
+//! app calls `/reveal` → `403 interstitial` → user clicks "I consent" → app emits
+//! `consent:state:granted {scope:"view", content_class:"infohazard"}` via the
+//! **existing** attestation surface (the viewer's own signed act) → app re-calls
+//! `/reveal` → `200 allow` → renders. Passive exposure is structurally
+//! impossible: the fabric never returns `allow` for a flagged item until the
+//! viewer's signed consent is on the graph.
+
+use std::sync::Arc;
+
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use ciris_persist::federation::FederationDirectory;
+use ciris_persist::prelude::{Engine, HybridPolicy};
+use serde::{Deserialize, Serialize};
+
+use crate::auth::verify::{self, VerifyError};
+
+/// The substrate-reserved `content_class:infohazard` flag prefix (a producer /
+/// `substrate_persist` emits it; a viewer cannot). CEG 0.3 §5.6.8.3.
+pub const CONTENT_CLASS_INFOHAZARD_PREFIX: &str = "content_class:infohazard";
+/// The substrate-reserved `content_class:reported` flag prefix.
+pub const CONTENT_CLASS_REPORTED_PREFIX: &str = "content_class:reported";
+/// The `consent:state:granted` dimension the viewer's consent-to-view carries.
+pub const CONSENT_STATE_GRANTED: &str = "consent:state:granted";
+/// The `consent:state:revoked` dimension a revocation carries (folded — a
+/// revoked consent does NOT satisfy the gate).
+pub const CONSENT_STATE_REVOKED: &str = "consent:state:revoked";
+/// The `consent:scope:view` scope the interstitial requires.
+pub const CONSENT_SCOPE_VIEW: &str = "consent:scope:view";
+/// The reserved `consent:state:` family prefix.
+const CONSENT_STATE_PREFIX: &str = "consent:state:";
+
+/// The producer-declared content flag (CC 3.3.12), substrate-reserved. Ordered
+/// by protective precedence: [`ContentFlag::Infohazard`] outranks
+/// [`ContentFlag::Reported`] when both are present and the caller did not
+/// disambiguate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentFlag {
+    /// Flagged as a potential infohazard (the more severe class).
+    Infohazard,
+    /// Flagged as reported.
+    Reported,
+}
+
+impl ContentFlag {
+    /// The `content_class` token tail (`"infohazard"` / `"reported"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContentFlag::Infohazard => "infohazard",
+            ContentFlag::Reported => "reported",
+        }
+    }
+
+    /// Parse from a `content_class` token (`"infohazard"` / `"reported"`).
+    pub fn from_token(s: &str) -> Option<ContentFlag> {
+        match s {
+            "infohazard" => Some(ContentFlag::Infohazard),
+            "reported" => Some(ContentFlag::Reported),
+            _ => None,
+        }
+    }
+
+    /// The substrate-reserved `content_class:*` dimension prefix for this flag.
+    pub fn dimension_prefix(self) -> &'static str {
+        match self {
+            ContentFlag::Infohazard => CONTENT_CLASS_INFOHAZARD_PREFIX,
+            ContentFlag::Reported => CONTENT_CLASS_REPORTED_PREFIX,
+        }
+    }
+
+    /// The interstitial prompt the viewer affirms to unlock a reveal.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            ContentFlag::Infohazard => {
+                "I consent to view this material reported as a potential infohazard."
+            }
+            ContentFlag::Reported => "I consent to view this material that has been reported.",
+        }
+    }
+}
+
+/// The consent an interstitial requires the viewer to emit — the wire shape the
+/// app publishes via the *existing* attestation surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequiredConsent {
+    /// `consent:state:granted`.
+    pub state: &'static str,
+    /// `consent:scope:view`.
+    pub scope: &'static str,
+    /// The flagged class the consent must name (`"infohazard"` / `"reported"`).
+    pub content_class: String,
+}
+
+/// The reveal decision — the whole gate output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevealDecision {
+    /// Not flagged, or flagged-AND-consented — the app may render the content.
+    Allow,
+    /// Flagged, no matching live consent — the app MUST show the interstitial and
+    /// WITHHOLD the content until a consent-to-view is emitted.
+    Interstitial {
+        /// Which class the subject is flagged as.
+        flag: ContentFlag,
+        /// The consent the viewer must emit to unlock the reveal.
+        required: RequiredConsent,
+    },
+}
+
+/// **The pure reveal gate** — CC 4.5.5 `content_class` × CC 3.3.1 consent. No
+/// I/O; unit-testable. Mirrors the protective default of
+/// [`super::age::gate_content_for`]:
+///
+/// - `flag == None` → `Allow` (unflagged content is universally visible).
+/// - `flag == Some(_) && has_consent` → `Allow` (the viewer consented).
+/// - `flag == Some(f) && !has_consent` → `Interstitial { .. }` — the PROTECTIVE
+///   default: absent/unknown consent NEVER passively allows.
+pub fn infohazard_reveal_decision(flag: Option<ContentFlag>, has_consent: bool) -> RevealDecision {
+    match flag {
+        None => RevealDecision::Allow,
+        Some(_) if has_consent => RevealDecision::Allow,
+        Some(flag) => RevealDecision::Interstitial {
+            flag,
+            required: RequiredConsent {
+                state: CONSENT_STATE_GRANTED,
+                scope: CONSENT_SCOPE_VIEW,
+                content_class: flag.as_str().to_owned(),
+            },
+        },
+    }
+}
+
+// ─── Resolution helpers (I/O-free cores, wired to the substrate above) ───────
+
+/// A lightweight view of one of the viewer's `consent:state:*` attestations
+/// against the subject — the pure input to [`resolve_view_consent`], factored so
+/// the revocation-fold logic is unit-testable without constructing a full signed
+/// `Attestation` row.
+#[derive(Debug, Clone)]
+pub struct ConsentRow {
+    /// The envelope `dimension` (`consent:state:granted` / `:revoked` / …).
+    pub dimension: String,
+    /// The declared scope (`"view"`), read off the envelope `scope` field OR the
+    /// dimension's `consent:scope:view` limb. `None` = unscoped (a blanket
+    /// revoke may omit it).
+    pub scope: Option<String>,
+    /// The declared `content_class` the consent names (`"infohazard"` /
+    /// `"reported"`). `None` = unqualified (a blanket revoke may omit it).
+    pub content_class: Option<String>,
+    /// When the consent act was asserted (latest-wins tiebreak).
+    pub asserted_at: DateTime<Utc>,
+}
+
+/// **The consent resolver — with the revocation fold.** Does the viewer hold a
+/// LIVE view-consent for `class`?
+///
+/// Latest-wins over the viewer's `consent:state:*` rows relevant to viewing
+/// `class` (the same model persist's `resolve_consent_state` uses): the newest
+/// relevant row decides. A `consent:state:granted` counts ONLY if it explicitly
+/// names `scope:view` AND `content_class == class`; a later `consent:state:revoked`
+/// — whether it re-names the same class/scope or is a blanket revoke — SUPERSEDES
+/// the grant, so the gate re-closes. The protective default (no relevant grant)
+/// is `false`.
+pub fn resolve_view_consent(rows: &[ConsentRow], class: &str) -> bool {
+    let latest = rows
+        .iter()
+        .filter(|r| consent_row_relevant(r, class))
+        .max_by(|a, b| a.asserted_at.cmp(&b.asserted_at));
+    matches!(latest, Some(r) if r.dimension.starts_with(CONSENT_STATE_GRANTED))
+}
+
+/// Is this consent row relevant to deciding view-consent for `class`? A GRANT
+/// must precisely name the view scope AND the class (a viewer cannot back into a
+/// grant with a bare `consent:state:granted`). A REVOKE (or any non-grant state)
+/// is relevant if it names the same class/scope OR is a blanket revoke (`None`
+/// scope/class) — so a blanket revoke re-closes the gate (protective fold).
+fn consent_row_relevant(r: &ConsentRow, class: &str) -> bool {
+    if !r.dimension.starts_with(CONSENT_STATE_PREFIX) {
+        return false;
+    }
+    let granted = r.dimension.starts_with(CONSENT_STATE_GRANTED);
+    let scope_ok = match r.scope.as_deref() {
+        Some(s) => s == "view",
+        None => !granted, // a grant MUST name the view scope; a revoke may be blanket.
+    };
+    let class_ok = match r.content_class.as_deref() {
+        Some(c) => c == class,
+        None => !granted, // a grant MUST name the class; a revoke may be blanket.
+    };
+    scope_ok && class_ok
+}
+
+/// True if `dimension`/`expires_at` describe a LIVE `content_class:*` flag at
+/// `now` (not expired). Pure — the liveness rule, factored for testing.
+fn flag_row_is_live(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    expires_at.is_none_or(|exp| exp > now)
+}
+
+/// **Resolve the flag on the subject.** Reads the subject's inbound
+/// `content_class:*` attestations; ANY live `content_class:infohazard` /
+/// `content_class:reported` row ⇒ flagged. When `requested` is `Some`, only that
+/// class counts (the caller disambiguating). Otherwise the more severe
+/// [`ContentFlag::Infohazard`] wins over [`ContentFlag::Reported`].
+///
+/// Returns `Ok(None)` when the subject carries no live flag.
+pub async fn subject_flag(
+    engine: &Engine,
+    subject_key_id: &str,
+    requested: Option<ContentFlag>,
+) -> Result<Option<ContentFlag>, String> {
+    let directory = engine
+        .sqlite_backend()
+        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let rows = directory
+        .list_attestations_for(subject_key_id)
+        .await
+        .map_err(|e| format!("list flags for subject: {e}"))?;
+    let now = Utc::now();
+    let mut infohazard = false;
+    let mut reported = false;
+    for row in rows {
+        if !flag_row_is_live(row.expires_at, now) {
+            continue;
+        }
+        let Some(dimension) = row
+            .attestation_envelope
+            .get("dimension")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if dimension.starts_with(CONTENT_CLASS_INFOHAZARD_PREFIX) {
+            infohazard = true;
+        } else if dimension.starts_with(CONTENT_CLASS_REPORTED_PREFIX) {
+            reported = true;
+        }
+    }
+    let present = |f: ContentFlag| match f {
+        ContentFlag::Infohazard => infohazard,
+        ContentFlag::Reported => reported,
+    };
+    Ok(match requested {
+        // Caller disambiguated: only that class counts.
+        Some(f) => present(f).then_some(f),
+        // Undisambiguated: the more severe class wins.
+        None if infohazard => Some(ContentFlag::Infohazard),
+        None if reported => Some(ContentFlag::Reported),
+        None => None,
+    })
+}
+
+/// Collect the viewer's `consent:state:*` rows against the subject as
+/// [`ConsentRow`]s (the input to [`resolve_view_consent`]). Reads the subject's
+/// inbound attestations and keeps those the viewer authored.
+async fn viewer_consent_rows(
+    engine: &Engine,
+    viewer_key_id: &str,
+    subject_key_id: &str,
+) -> Result<Vec<ConsentRow>, String> {
+    let directory = engine
+        .sqlite_backend()
+        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let rows = directory
+        .list_attestations_for(subject_key_id)
+        .await
+        .map_err(|e| format!("list consent for subject: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        if row.attesting_key_id != viewer_key_id {
+            continue;
+        }
+        let Some(dimension) = row
+            .attestation_envelope
+            .get("dimension")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if !dimension.starts_with(CONSENT_STATE_PREFIX) {
+            continue;
+        }
+        // Scope: prefer the envelope `scope` field; else detect the
+        // `consent:scope:view` limb carried anywhere in the envelope.
+        let scope = row
+            .attestation_envelope
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                envelope_mentions(&row.attestation_envelope, CONSENT_SCOPE_VIEW)
+                    .then(|| "view".to_owned())
+            });
+        let content_class = row
+            .attestation_envelope
+            .get("content_class")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        out.push(ConsentRow {
+            dimension: dimension.to_owned(),
+            scope,
+            content_class,
+            asserted_at: row.asserted_at,
+        });
+    }
+    Ok(out)
+}
+
+/// True if any string value anywhere in the envelope equals or contains `needle`
+/// (used to detect a `consent:scope:view` limb carried outside the top-level
+/// `scope` field).
+fn envelope_mentions(envelope: &serde_json::Value, needle: &str) -> bool {
+    match envelope {
+        serde_json::Value::String(s) => s == needle || s.contains(needle),
+        serde_json::Value::Array(a) => a.iter().any(|v| envelope_mentions(v, needle)),
+        serde_json::Value::Object(o) => o.values().any(|v| envelope_mentions(v, needle)),
+        _ => false,
+    }
+}
+
+/// **Resolve the whole gate against the substrate.** Reads the subject's flag +
+/// the viewer's live consent, then applies [`infohazard_reveal_decision`].
+pub async fn reveal_decision(
+    engine: &Engine,
+    viewer_key_id: &str,
+    subject_key_id: &str,
+    requested: Option<ContentFlag>,
+) -> Result<RevealDecision, String> {
+    let flag = subject_flag(engine, subject_key_id, requested).await?;
+    let has_consent = match flag {
+        None => false, // unflagged: consent is moot (Allow regardless).
+        Some(f) => {
+            let rows = viewer_consent_rows(engine, viewer_key_id, subject_key_id).await?;
+            resolve_view_consent(&rows, f.as_str())
+        }
+    };
+    Ok(infohazard_reveal_decision(flag, has_consent))
+}
+
+// ─── HTTP surface ───────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct RevealState {
+    engine: Arc<Engine>,
+    policy: HybridPolicy,
+}
+
+fn err(code: StatusCode, msg: impl Into<String>) -> Response {
+    (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RevealRequest {
+    /// The CEG subject a detection / moderation flow may have flagged.
+    subject_key_id: String,
+    /// Optional disambiguation when both classes are present.
+    #[serde(default)]
+    content_class: Option<ContentFlag>,
+}
+
+/// `POST /v1/safety/reveal` — decide whether the (signed) viewer may reveal a
+/// flagged subject. Decision-only: it NEVER emits the consent (the app does, via
+/// the existing attestation surface, then re-calls). Every view is attributable —
+/// the viewer's signature is required (missing/invalid ⇒ 401).
+///
+/// - `200 { "decision": "allow" }` — unflagged, or flagged-and-consented.
+/// - `403 { "decision": "interstitial", "flag": .., "prompt": .., "required": .. }`
+///   — flagged, no live consent (the enforcement).
+async fn reveal(State(st): State<RevealState>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
+        Ok(c) => c,
+        Err(VerifyError::MissingHeader(h)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+        }
+        Err(VerifyError::NoDirectory) => {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
+        }
+        Err(VerifyError::SignatureInvalid(e)) => {
+            return err(StatusCode::UNAUTHORIZED, format!("signature: {e}"))
+        }
+    };
+    let req: RevealRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    match reveal_decision(
+        &st.engine,
+        &caller.key_id,
+        &req.subject_key_id,
+        req.content_class,
+    )
+    .await
+    {
+        Ok(RevealDecision::Allow) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "decision": "allow" })),
+        )
+            .into_response(),
+        Ok(RevealDecision::Interstitial { flag, required }) => (
+            // 403: the enforcement. The content is WITHHELD until the viewer's
+            // consent lands and the app re-calls.
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "decision": "interstitial",
+                "flag": flag.as_str(),
+                "prompt": flag.prompt(),
+                "required": required,
+            })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The infohazard reveal-gate router. Default [`HybridPolicy::Strict`].
+pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> Router {
+    Router::new()
+        .route("/v1/safety/reveal", axum::routing::post(reveal))
+        .with_state(RevealState { engine, policy })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(dimension: &str, scope: Option<&str>, class: Option<&str>, secs: i64) -> ConsentRow {
+        ConsentRow {
+            dimension: dimension.to_owned(),
+            scope: scope.map(str::to_owned),
+            content_class: class.map(str::to_owned),
+            asserted_at: DateTime::<Utc>::from_timestamp(secs, 0).unwrap(),
+        }
+    }
+
+    // ─── the pure gate: every arm ────────────────────────────────────────────
+
+    #[test]
+    fn unflagged_always_allows() {
+        assert_eq!(
+            infohazard_reveal_decision(None, false),
+            RevealDecision::Allow
+        );
+        assert_eq!(
+            infohazard_reveal_decision(None, true),
+            RevealDecision::Allow
+        );
+    }
+
+    #[test]
+    fn flagged_with_consent_allows() {
+        assert_eq!(
+            infohazard_reveal_decision(Some(ContentFlag::Infohazard), true),
+            RevealDecision::Allow
+        );
+        assert_eq!(
+            infohazard_reveal_decision(Some(ContentFlag::Reported), true),
+            RevealDecision::Allow
+        );
+    }
+
+    #[test]
+    fn flagged_without_consent_interstitials_protectively() {
+        match infohazard_reveal_decision(Some(ContentFlag::Infohazard), false) {
+            RevealDecision::Interstitial { flag, required } => {
+                assert_eq!(flag, ContentFlag::Infohazard);
+                assert_eq!(required.state, CONSENT_STATE_GRANTED);
+                assert_eq!(required.scope, CONSENT_SCOPE_VIEW);
+                assert_eq!(required.content_class, "infohazard");
+            }
+            other => panic!("expected interstitial, got {other:?}"),
+        }
+        // Reported class too.
+        match infohazard_reveal_decision(Some(ContentFlag::Reported), false) {
+            RevealDecision::Interstitial { flag, required } => {
+                assert_eq!(flag, ContentFlag::Reported);
+                assert_eq!(required.content_class, "reported");
+            }
+            other => panic!("expected interstitial, got {other:?}"),
+        }
+    }
+
+    // ─── consent resolution: the revocation fold ─────────────────────────────
+
+    #[test]
+    fn no_consent_rows_is_no_consent() {
+        assert!(!resolve_view_consent(&[], "infohazard"));
+    }
+
+    #[test]
+    fn matching_grant_satisfies() {
+        let rows = [row(
+            CONSENT_STATE_GRANTED,
+            Some("view"),
+            Some("infohazard"),
+            100,
+        )];
+        assert!(resolve_view_consent(&rows, "infohazard"));
+    }
+
+    #[test]
+    fn grant_for_a_different_class_does_not_satisfy() {
+        let rows = [row(
+            CONSENT_STATE_GRANTED,
+            Some("view"),
+            Some("reported"),
+            100,
+        )];
+        assert!(!resolve_view_consent(&rows, "infohazard"));
+    }
+
+    #[test]
+    fn grant_without_the_view_scope_does_not_satisfy() {
+        // A bare consent:state:granted (no scope) cannot back into a view-consent.
+        let rows = [row(CONSENT_STATE_GRANTED, None, Some("infohazard"), 100)];
+        assert!(!resolve_view_consent(&rows, "infohazard"));
+    }
+
+    #[test]
+    fn revoked_consent_does_not_satisfy_the_gate() {
+        // Grant then a LATER revoke naming the same class/scope → re-closed.
+        let rows = [
+            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
+            row(CONSENT_STATE_REVOKED, Some("view"), Some("infohazard"), 200),
+        ];
+        assert!(
+            !resolve_view_consent(&rows, "infohazard"),
+            "a revoked consent must NOT satisfy the gate"
+        );
+    }
+
+    #[test]
+    fn a_blanket_revoke_after_a_grant_re_closes_the_gate() {
+        // A blanket consent:state:revoked (no scope/class) still supersedes.
+        let rows = [
+            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
+            row(CONSENT_STATE_REVOKED, None, None, 300),
+        ];
+        assert!(!resolve_view_consent(&rows, "infohazard"));
+    }
+
+    #[test]
+    fn a_re_grant_after_a_revoke_re_opens_the_gate() {
+        // Latest-wins: grant, revoke, then a fresh grant → consented again.
+        let rows = [
+            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
+            row(CONSENT_STATE_REVOKED, Some("view"), Some("infohazard"), 200),
+            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 300),
+        ];
+        assert!(resolve_view_consent(&rows, "infohazard"));
+    }
+
+    // ─── flag liveness ───────────────────────────────────────────────────────
+
+    #[test]
+    fn flag_liveness_folds_expiry() {
+        let now = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        assert!(flag_row_is_live(None, now), "no expiry ⇒ live");
+        assert!(
+            flag_row_is_live(DateTime::<Utc>::from_timestamp(2_000, 0), now),
+            "future expiry ⇒ live"
+        );
+        assert!(
+            !flag_row_is_live(DateTime::<Utc>::from_timestamp(500, 0), now),
+            "past expiry ⇒ not live"
+        );
+    }
+
+    #[test]
+    fn content_flag_token_roundtrip() {
+        for f in [ContentFlag::Infohazard, ContentFlag::Reported] {
+            assert_eq!(ContentFlag::from_token(f.as_str()), Some(f));
+        }
+        assert_eq!(ContentFlag::from_token("bogus"), None);
+    }
+
+    // ─── HTTP: 401 without a signed request (returns before engine use) ───────
+
+    #[tokio::test]
+    async fn reveal_requires_a_signature() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use ciris_persist::prelude::LocalSigner;
+        use ed25519_dalek::SigningKey;
+        use tower::ServiceExt;
+
+        let signer = Arc::new(LocalSigner::from_parts(
+            SigningKey::from_bytes(&[0x11; 32]),
+            "reveal-test-node".to_string(),
+            None,
+            None,
+        ));
+        let engine = Arc::new(
+            Engine::with_signer(signer, "sqlite::memory:")
+                .await
+                .expect("engine"),
+        );
+        let app = router(engine, HybridPolicy::Strict);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/safety/reveal")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "subject_key_id": "some-subject" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
