@@ -113,9 +113,7 @@ use ciris_verify_core::accord_genesis::{
     ACCORD_FAMILY_GENESIS_KIND, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
-use ciris_verify_core::federation_self_record::produce_self_key_record;
 use ciris_verify_core::humanity_accord::{Invocation, InvocationDedup, InvocationKind};
-use ciris_verify_core::self_at_login::HybridSigningIdentity;
 use ciris_verify_core::threshold::{
     verify_threshold_signatures, QuorumPolicy, ThresholdMember, ThresholdSignature,
 };
@@ -769,84 +767,6 @@ async fn verify_invocation_handler(
 
 // ─── Genesis ceremony (CC 4.2 / §9 — build envelope → assemble 2/3 → entrench) ─
 
-/// Ensure the HUMANITY_ACCORD family's **ceremonial anchor key** exists in
-/// `federation_keys` (the FK `federation_families` requires). Idempotent: a no-op
-/// if already registered. Mints a fresh hybrid keypair, self-signs the `family`
-/// registration record, registers it, and **discards the private half** — the
-/// family key never signs anything (founders sign genesis; holders sign
-/// invocations), it is purely the §5.6.8.9 family identity anchor.
-async fn ensure_accord_family_anchor(
-    engine: &Engine,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<(), Response> {
-    let exists = engine
-        .federation_directory()
-        .lookup_public_key(HUMANITY_ACCORD_FAMILY_KEY_ID)
-        .await
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
-    if exists.is_some() {
-        return Ok(());
-    }
-    // Mint on a dedicated LARGE-STACK thread: ML-DSA-65 keygen + sign hold big
-    // buffers across `.await`s that overflow a default (~2 MiB) async worker stack —
-    // this would crash the genesis handler in prod, not just tests. The private half
-    // never leaves this thread; only the self-signed PUBLIC record is returned (as
-    // JSON), and the keypair is dropped when the thread ends — the ceremonial anchor
-    // has no retained signer anywhere.
-    let now_s = now.to_rfc3339();
-    let minted: serde_json::Value = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .name("accord-family-anchor-mint".into())
-        .spawn(move || -> Result<serde_json::Value, String> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .map_err(|e| e.to_string())?;
-            rt.block_on(async move {
-                let anchor = HybridSigningIdentity::generate(HUMANITY_ACCORD_FAMILY_KEY_ID)
-                    .map_err(|e| e.to_string())?;
-                let v_rec = produce_self_key_record(&anchor, "family", &now_s, &[])
-                    .await
-                    .map_err(|e| e.to_string())?;
-                serde_json::to_value(&v_rec).map_err(|e| e.to_string())
-            })
-        })
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("spawn anchor mint: {e}"),
-            )
-        })?
-        .join()
-        .map_err(|_| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "anchor mint thread panicked",
-            )
-        })?
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("mint family anchor: {e}"),
-            )
-        })?;
-
-    // verify's SignedKeyRecord → persist's (structurally identical JSON; the wire
-    // shape the holder-registration path round-trips too).
-    let p_rec: SignedKeyRecord = serde_json::from_value(minted).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("anchor record conversion: {e}"),
-        )
-    })?;
-    engine.register_federation_key(p_rec).await.map_err(|e| {
-        err(
-            StatusCode::BAD_REQUEST,
-            &format!("register family anchor: {e}"),
-        )
-    })?;
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 struct GenesisEnvelopeRequest {
     #[serde(default)]
@@ -1017,33 +937,40 @@ async fn genesis_assemble(
         );
     }
 
-    // (2) Entrench the HUMANITY_ACCORD family as a FIRST-CLASS persist family (via
-    // the generic family layer): register its CEREMONIAL anchor key (private half
-    // discarded — it never signs; founders signed genesis, holders sign invocations)
-    // so the `federation_families` FK holds, then `put_family` with the founders as
-    // members + entrenched `quorum:2/3`. From here the kill-switch roster IS
-    // `active_family_members` (see [`accord_roster`]) — generic + swap-capable.
-    if let Err(resp) = ensure_accord_family_anchor(&st.engine, &now).await {
-        return resp;
-    }
-    let family_name = req.envelope["family_name"]
-        .as_str()
-        .unwrap_or("HUMANITY_ACCORD")
-        .to_string();
-    let family = Family {
-        family_key_id: HUMANITY_ACCORD_FAMILY_KEY_ID.to_string(),
-        family_name,
-        members,
-        founded_at: now,
-        consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
-        consensus_protocol_entrenched: true,
-        persist_row_hash: String::new(),
-    };
-    if let Err(e) = crate::family::create_family(&st.engine, family).await {
-        return err(
-            StatusCode::CONFLICT,
-            &format!("entrench accord family: {e}"),
-        );
+    // (2) Entrench the HUMANITY_ACCORD family as a FIRST-CLASS persist family.
+    //
+    // persist v13.3.0 (CIRISPersist#386) SEEDS this keyless 2/3 row (A1/B1/C1) at boot on
+    // every node, and V097 drops the old `family_key_id -> federation_keys` FK — so the
+    // ceremonial anchor-key mint is gone, and assemble is now IDEMPOTENT: on a seeded node
+    // it records the founder-signed genesis proof (above) and CONFIRMS the entrenched row,
+    // it does NOT insert. That is deliberate — an insert-or-replace here would let an owner
+    // who admits their own 3 holders OVERWRITE the constitutional trust root. We only create
+    // the row defensively when none exists (a pre-v13.3.0 store); the seed makes that rare.
+    let already_entrenched =
+        match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+            Ok(f) => f.is_some(),
+            Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+        };
+    if !already_entrenched {
+        let family_name = req.envelope["family_name"]
+            .as_str()
+            .unwrap_or("HUMANITY_ACCORD")
+            .to_string();
+        let family = Family {
+            family_key_id: HUMANITY_ACCORD_FAMILY_KEY_ID.to_string(),
+            family_name,
+            members,
+            founded_at: now,
+            consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
+            consensus_protocol_entrenched: true,
+            persist_row_hash: String::new(),
+        };
+        if let Err(e) = crate::family::create_family(&st.engine, family).await {
+            return err(
+                StatusCode::CONFLICT,
+                &format!("entrench accord family: {e}"),
+            );
+        }
     }
     tracing::info!(
         family = %HUMANITY_ACCORD_FAMILY_KEY_ID,
