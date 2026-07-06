@@ -2320,7 +2320,9 @@
     "accord_coscrub_cosign_submit_busy": "কোসাইন করা হচ্ছে — আপনার YubiKey স্পর্শ করুন…",
     "accord_coscrub_paste_hint": "কোনো মুলতুবি এন্ট্রি নেই? সরাসরি কোসাইন করতে সহ-স্ক্রাব আংশিক JSON পেস্ট করুন (গসিপ ছাড়াই কাজ করে)।",
     "accord_cosign_paste_label": "আংশিক (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "এটি বৈধ JSON নয় — সম্পূর্ণ আংশিক (SignedKeyRecord) রেকর্ড পেস্ট করুন।"
+    "accord_coscrub_paste_invalid": "এটি বৈধ JSON নয় — সম্পূর্ণ আংশিক (SignedKeyRecord) রেকর্ড পেস্ট করুন।",
+    "accord_halt_raise_desc": "একটি 2-এর-মধ্যে-3 সাংবিধানিক কিল-সুইচ RAISE করুন। আপনার একক স্বাক্ষর কার্যকর হয় না — এটি অন্যান্য accord ধারকদের কাছে ছড়িয়ে দেওয়া হয়, যাদের halt লক হওয়ার জন্য 2-এর-মধ্যে-3-তে সম্মত হতে হবে। অ্যাপটি কোনো কী রাখে না; YubiKey স্পর্শই আপনার সম্মতি।",
+    "accord_raise_halt": "Halt উত্থাপন করুন"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",

@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Співпідписування — торкніться YubiKey…",
     "accord_coscrub_paste_hint": "Немає очікуваного запису? Вставте JSON часткового спільного скрабу, щоб співпідписати його напряму (працює без розсилки).",
     "accord_cosign_paste_label": "Частковий підпис (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Це недійсний JSON — вставте повний частковий запис (SignedKeyRecord)."
+    "accord_coscrub_paste_invalid": "Це недійсний JSON — вставте повний частковий запис (SignedKeyRecord).",
+    "accord_halt_raise_desc": "ПІДНІМІТЬ конституційний аварійний вимикач 2-з-3. Ваш єдиний підпис НЕ набуває чинності — він розсилається іншим утримувачам згоди, які мають дійти згоди 2-з-3, щоб зупинка зафіксувалася. Застосунок не зберігає ключів; дотик до YubiKey — це ваша згода.",
+    "accord_raise_halt": "Підняти зупинку"
   },
   "prompts": {
     "dma": {

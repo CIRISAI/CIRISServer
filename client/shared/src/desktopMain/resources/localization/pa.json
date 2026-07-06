@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "ਸਹਿ-ਸਾਈਨ ਕੀਤਾ ਜਾ ਰਿਹਾ ਹੈ — ਆਪਣੀ YubiKey ਨੂੰ ਟੱਚ ਕਰੋ…",
     "accord_coscrub_paste_hint": "ਕੋਈ ਬਕਾਇਆ ਐਂਟਰੀ ਨਹੀਂ? ਇਸਨੂੰ ਸਿੱਧਾ ਸਹਿ-ਸਾਈਨ ਕਰਨ ਲਈ ਸਹਿ-ਸਕ੍ਰੱਬ ਅੰਸ਼ਿਕ JSON ਪੇਸਟ ਕਰੋ (ਗੌਸਿਪ ਤੋਂ ਬਿਨਾਂ ਕੰਮ ਕਰਦਾ ਹੈ)।",
     "accord_cosign_paste_label": "ਅੰਸ਼ਿਕ (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "ਇਹ ਵੈਧ JSON ਨਹੀਂ ਹੈ — ਪੂਰਾ ਅੰਸ਼ਿਕ (SignedKeyRecord) ਰਿਕਾਰਡ ਪੇਸਟ ਕਰੋ।"
+    "accord_coscrub_paste_invalid": "ਇਹ ਵੈਧ JSON ਨਹੀਂ ਹੈ — ਪੂਰਾ ਅੰਸ਼ਿਕ (SignedKeyRecord) ਰਿਕਾਰਡ ਪੇਸਟ ਕਰੋ।",
+    "accord_halt_raise_desc": "ਇੱਕ 2-of-3 ਸੰਵਿਧਾਨਕ ਕਿੱਲ-ਸਵਿੱਚ ਖੜ੍ਹੀ ਕਰੋ। ਤੁਹਾਡੇ ਇਕੱਲੇ ਦਸਤਖਤ ਲਾਗੂ ਨਹੀਂ ਹੁੰਦੇ — ਇਹ ਦੂਜੇ accord ਧਾਰਕਾਂ ਨੂੰ ਭੇਜਿਆ ਜਾਂਦਾ ਹੈ, ਜਿਨ੍ਹਾਂ ਨੂੰ ਹਾਲਟ ਲੈਚ ਹੋਣ ਲਈ 2-of-3 ਨਾਲ ਸਹਿਮਤ ਹੋਣਾ ਜ਼ਰੂਰੀ ਹੈ। ਐਪ ਕੋਲ ਕੋਈ ਕੁੰਜੀਆਂ ਨਹੀਂ ਹਨ; YubiKey ਟੱਚ ਤੁਹਾਡੀ ਸਹਿਮਤੀ ਹੈ।",
+    "accord_raise_halt": "ਹਾਲਟ ਖੜ੍ਹੀ ਕਰੋ"
   },
   "conscience": {
     "ponder_attempted": "ਮੈਂ {action} ਕਰਨ ਦੀ ਕੋਸ਼ਿਸ਼ ਕੀਤੀ",

@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "सह-हस्ताक्षर किया जा रहा है — अपनी YubiKey को स्पर्श करें…",
     "accord_coscrub_paste_hint": "कोई लंबित प्रविष्टि नहीं? इसे सीधे सह-हस्ताक्षर करने के लिए सह-स्क्रब आंशिक JSON पेस्ट करें (गॉसिप के बिना काम करता है)।",
     "accord_cosign_paste_label": "आंशिक (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "यह वैध JSON नहीं है — पूरा आंशिक (SignedKeyRecord) रिकॉर्ड पेस्ट करें।"
+    "accord_coscrub_paste_invalid": "यह वैध JSON नहीं है — पूरा आंशिक (SignedKeyRecord) रिकॉर्ड पेस्ट करें।",
+    "accord_halt_raise_desc": "2-में-से-3 संवैधानिक किल-स्विच को RAISE करें। आपका अकेला हस्ताक्षर प्रभावी नहीं होता — इसे अन्य accord धारकों तक gossip किया जाता है, जिन्हें halt के latch होने के लिए 2-में-से-3 पर सहमत होना होगा। ऐप कोई कुंजी नहीं रखता; YubiKey टच ही आपकी सहमति है।",
+    "accord_raise_halt": "Halt बढ़ाएँ"
   },
   "prompts": {
     "dma": {

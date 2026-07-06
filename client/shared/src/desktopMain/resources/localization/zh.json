@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "正在联署——触碰你的 YubiKey…",
     "accord_coscrub_paste_hint": "没有待处理的条目？粘贴联合擦洗的部分签名 JSON 以直接联署（无需扩散即可完成）。",
     "accord_cosign_paste_label": "部分签名（SignedKeyRecord JSON）",
-    "accord_coscrub_paste_invalid": "那不是有效的 JSON——请粘贴完整的部分签名（SignedKeyRecord）记录。"
+    "accord_coscrub_paste_invalid": "那不是有效的 JSON——请粘贴完整的部分签名（SignedKeyRecord）记录。",
+    "accord_halt_raise_desc": "发起一个 2/3 宪法性紧急停止开关。您的单个签名不会立即生效——它会被传播给其他协定持有人，必须达到 2/3 一致同意，停止才会锁定。本应用不持有任何密钥；YubiKey 触碰即为您的同意。",
+    "accord_raise_halt": "发起停止"
   },
   "prompts": {
     "dma": {

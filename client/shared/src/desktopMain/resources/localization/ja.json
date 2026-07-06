@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "連署中 — YubiKey にタッチ…",
     "accord_coscrub_paste_hint": "保留中のエントリがありませんか？共同スクラブの部分 JSON を貼り付けて直接連署できます（伝播なしで動作します）。",
     "accord_cosign_paste_label": "部分署名（SignedKeyRecord JSON）",
-    "accord_coscrub_paste_invalid": "有効な JSON ではありません — 完全な部分（SignedKeyRecord）レコードを貼り付けてください。"
+    "accord_coscrub_paste_invalid": "有効な JSON ではありません — 完全な部分（SignedKeyRecord）レコードを貼り付けてください。",
+    "accord_halt_raise_desc": "2/3 の憲法的キルスイッチを発動します。あなた一人の署名では有効になりません。他のアコード保持者に伝播され、停止をラッチするには 2/3 の同意が必要です。アプリは鍵を保持しません。YubiKey のタッチがあなたの同意です。",
+    "accord_raise_halt": "停止を発動"
   },
   "prompts": {
     "dma": {

@@ -2319,7 +2319,9 @@
     "accord_coscrub_cosign_submit_busy": "Menandatangani bersama — sentuh YubiKey Anda…",
     "accord_coscrub_paste_hint": "Tidak ada entri tertunda? Tempel JSON parsial co-scrub untuk menandatanganinya langsung (bekerja tanpa gossip).",
     "accord_cosign_paste_label": "Parsial (JSON SignedKeyRecord)",
-    "accord_coscrub_paste_invalid": "Itu bukan JSON yang valid — tempel catatan parsial (SignedKeyRecord) lengkap."
+    "accord_coscrub_paste_invalid": "Itu bukan JSON yang valid — tempel catatan parsial (SignedKeyRecord) lengkap.",
+    "accord_halt_raise_desc": "AKTIFKAN sakelar pemutus konstitusional 2-dari-3. Tanda tangan tunggal Anda TIDAK langsung berlaku — tanda tangan itu disebarkan kepada pemegang accord lainnya, yang harus menyetujui hingga 2-dari-3 agar penghentian dapat terkunci. Aplikasi tidak menyimpan kunci apa pun; sentuhan YubiKey adalah persetujuan Anda.",
+    "accord_raise_halt": "Aktifkan penghentian"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",

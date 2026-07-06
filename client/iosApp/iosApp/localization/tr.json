@@ -2227,7 +2227,9 @@
     "accord_coscrub_cosign_submit_busy": "Birlikte imzalanıyor — YubiKey'inize dokunun…",
     "accord_coscrub_paste_hint": "Bekleyen bir kayıt yok mu? Doğrudan birlikte imzalamak için ortak temizleme kısmi JSON'unu yapıştırın (yayılma olmadan çalışır).",
     "accord_cosign_paste_label": "Kısmi (SignedKeyRecord JSON)",
-    "accord_coscrub_paste_invalid": "Bu geçerli bir JSON değil — tam kısmi kaydı (SignedKeyRecord) yapıştırın."
+    "accord_coscrub_paste_invalid": "Bu geçerli bir JSON değil — tam kısmi kaydı (SignedKeyRecord) yapıştırın.",
+    "accord_halt_raise_desc": "2/3'lük anayasal bir acil durdurma anahtarını DEVREYE ALIN. Tek imzanız yürürlüğe GİRMEZ — diğer accord sahiplerine iletilir; durdurmanın kilitlenmesi için onların da 2/3'e ulaşacak şekilde onaylaması gerekir. Uygulama hiçbir anahtar tutmaz; YubiKey dokunuşu sizin rızanızdır.",
+    "accord_raise_halt": "Durdurmayı başlat"
   },
   "prompts": {
     "dma": {
