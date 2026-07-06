@@ -224,6 +224,20 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v8.9.0"
 [target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", target_env = "gnu", any(target_arch = "x86_64", target_arch = "aarch64"))))'.dependencies]
 serialport = "4"
 
+# libsqlite3-sys (pulled by persist's `sqlite` feature) links the SYSTEM libsqlite3
+# by default — which the musl / armv7 CROSS sysroots don't provide, so the release
+# legs failed at LINK: `unable to find dynamic system library 'sqlite3'`. Compile
+# sqlite FROM SOURCE (`bundled`) for exactly those two cross triples — `zig cc`
+# builds the C in, statically, no dynamic dependency. Scoped per-triple so every
+# mainstream target keeps linking its system sqlite (smaller; matches persist's
+# non-mobile default). SAME libsqlite3-sys 0.28 the `sqlite` feature already locks,
+# so it UNIFIES to one crate (one `links = "sqlite3"`, no collision).
+[target.aarch64-unknown-linux-musl.dependencies]
+libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+
+[target.armv7-unknown-linux-gnueabihf.dependencies]
+libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+
 # Test-only — the two-node replication integration test (tests/replication.rs)
 # builds + signs CEG batches with the same primitives persist verifies against.
 # ed25519-dalek MUST match persist's locked 2.x (the SigningKey type crosses the
