@@ -156,6 +156,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // is never empty on a fresh install (mirrors the agent's agent/identity seed).
     crate::memory_api::seed_identity_graph(&engine, &cfg.key_id, "node").await;
 
+    // Project persist's rich CEG state (owner-binding, owned nodes, the humanity
+    // accord family + holders, canonical servers, every config:* value, and the
+    // node's authored attestations) into the memory graph as typed, CEG-native
+    // nodes + edges — so the client's Graph page is a contextual mesh of
+    // AttestationCards, not a single lonely identity node (CIRISServer#127++).
+    // Idempotent, version-safe, fail-secure (a projection error only logs).
+    crate::memory_api::seed_ceg_graph(&engine, &cfg.key_id).await;
+
     // ── CONFIG-AS-CEG resolution (Server 0.5 Phase 2) ─────────────────────────
     // Resolve the migrated runtime-tunable knobs from the corpus's signed
     // `config:*` objects (baked default per absent key) into the initial snapshot,
