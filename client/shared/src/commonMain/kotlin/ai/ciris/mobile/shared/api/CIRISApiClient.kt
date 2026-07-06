@@ -2470,6 +2470,60 @@ class CIRISApiClient(
     }
 
     /**
+     * **Raise a halt** — `POST {nodeUrl}/v1/accord/halt` (owner-session-gated, holder
+     * action). RAISES a 2-of-3 CONSTITUTIONAL kill-switch invocation: the node synthesizes
+     * the constitutional invocation from [invocationId] and produces THIS holder's initiating
+     * cosignature from their YubiKey + USB. That single signature is **sub-quorum** — it does
+     * NOT latch anything; it gossips and the other holders cosign via
+     * `/v1/accord/invocation/concur`, and the 2-of-3-completing signature is what latches the
+     * halt. The binding twin of [initiateDrill]; the app holds no keys.
+     */
+    suspend fun initiateHalt(
+        invocationId: String,
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.AccordConcurResponse {
+        val method = "initiateHalt"
+        logInfo(method, "POST $nodeUrl/v1/accord/halt id=$invocationId holder=$holderKeyId usb=$mldsaUsbPath")
+        // Touch-gated (slot 9c is touch-ALWAYS) — long timeout + the caller prompts.
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("invocation_id", JsonPrimitive(invocationId.trim()))
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+            }
+            val response = client.post("$nodeUrl/v1/accord/halt") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("raise halt failed: ${response.status}: ${raw.take(200)}")
+            }
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.AccordConcurResponse.serializer(),
+                raw,
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **Post an announce** — `POST {nodeUrl}/v1/accord/announce` (owner-session-gated,
      * holder action). An announce is a single-holder `notify` message (threshold 1 —
      * complete on a valid signature); it is gossiped + surfaced in `/v1/accord/events`
