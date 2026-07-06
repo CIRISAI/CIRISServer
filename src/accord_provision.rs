@@ -1800,7 +1800,9 @@ fn now_rfc3339() -> String {
 /// kill-switch roster + `GET /v1/accord/family` use) so a fresh node reports `2` rather than
 /// `0` before persist entrenches the row (CIRISPersist#386). `0` only if unresolvable.
 async fn family_quorum_m(engine: &Engine) -> usize {
-    use ciris_verify_core::accord_genesis::{humanity_accord_genesis, HUMANITY_ACCORD_FAMILY_KEY_ID};
+    use ciris_verify_core::accord_genesis::{
+        humanity_accord_genesis, HUMANITY_ACCORD_FAMILY_KEY_ID,
+    };
     use ciris_verify_core::threshold::QuorumPolicy;
     if let Ok(Some(fam)) = crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         return QuorumPolicy::parse(&fam.consensus_protocol)
