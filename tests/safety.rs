@@ -30,7 +30,7 @@ use ciris_persist::federation::types::{
     CommunityMember, KeyRecord, SignedAttestation, SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::FederationDirectory;
-use ciris_persist::prelude::{Engine, LocalSigner};
+use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use ciris_server::safety::age::{
@@ -1034,4 +1034,262 @@ async fn ceg_dx_active_roster_readers_reachable() {
             .is_err(),
         "active_family_members reachable + fail-closed on an unknown family"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// (7) INFOHAZARD CONSENT-GATE (CC 4.5.13, CIRISServer#161) — the reveal gate:
+//     a substrate-flagged subject is WITHHELD (403 interstitial) until the
+//     signed viewer's consent-to-view is on the graph (then 200 allow); a
+//     revoked consent re-closes the gate. End-to-end over the real substrate +
+//     the `/v1/safety/reveal` HTTP surface.
+// ════════════════════════════════════════════════════════════════════════════
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ciris_server::safety::infohazard;
+use tower::ServiceExt as _;
+
+/// Emit a substrate-reserved `content_class:{class}` flag on `subject`, signed by
+/// a `substrate_persist`-typed flagger — the ONLY identity_type persist's
+/// reserved-prefix rule admits for `content_class:` (a viewer/agent is refused).
+async fn flag_subject(engine: &Engine, flagger: &LocalSigner, subject: &str, class: &str) {
+    let flagger_key = flagger.key_id().to_string();
+    let now = chrono::Utc::now();
+    let dimension = format!("content_class:{class}:v1");
+    let envelope = serde_json::json!({ "dimension": dimension, "content_class": class });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize flag");
+    let sig = flagger.sign_hybrid(&canonical).await.expect("sign flag");
+    let attestation = Attestation {
+        attestation_id: format!("flag-{flagger_key}-{subject}-{class}"),
+        attesting_key_id: flagger_key.clone(),
+        attested_key_id: subject.to_string(),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: flagger_key.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![subject.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put content_class flag");
+}
+
+/// Emit the viewer's `consent:state:{state}` (`granted`/`revoked`) act naming
+/// `{scope:"view", content_class}` against `subject` — the viewer's own signed
+/// act, via the existing attestation surface. `secs` offsets `asserted_at` so a
+/// later revoke supersedes an earlier grant (the latest-wins fold).
+async fn emit_view_consent(
+    engine: &Engine,
+    viewer: &LocalSigner,
+    subject: &str,
+    state: &str,
+    class: &str,
+    secs: i64,
+) {
+    let viewer_key = viewer.key_id().to_string();
+    let now = chrono::Utc::now() + chrono::Duration::seconds(secs);
+    let dimension = format!("consent:state:{state}:v1");
+    let envelope = serde_json::json!({
+        "dimension": dimension,
+        "scope": "view",
+        "content_class": class,
+    });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize consent");
+    let sig = viewer.sign_hybrid(&canonical).await.expect("sign consent");
+    let attestation = Attestation {
+        attestation_id: format!("consent-{viewer_key}-{subject}-{state}-{secs}"),
+        attesting_key_id: viewer_key.clone(),
+        attested_key_id: subject.to_string(),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: viewer_key.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![subject.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put view consent");
+}
+
+/// `POST /v1/safety/reveal` with a hybrid-signed request from `viewer`.
+async fn post_reveal(
+    app: &axum::Router,
+    viewer: &LocalSigner,
+    subject: &str,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({ "subject_key_id": subject }).to_string();
+    let sig = viewer
+        .sign_hybrid(body.as_bytes())
+        .await
+        .expect("sign body");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safety/reveal")
+                .header("content-type", "application/json")
+                .header("x-ciris-signing-key-id", viewer.key_id())
+                .header(
+                    "x-ciris-signature-ed25519",
+                    BASE64.encode(&sig.classical.signature),
+                )
+                .header(
+                    "x-ciris-signature-ml-dsa-65",
+                    BASE64.encode(&sig.pqc.signature),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn reveal_unflagged_subject_allows() {
+    let engine = node().await;
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+    let viewer = register_party(&engine, "reveal-viewer", identity_type::USER).await;
+    let subject = "reveal-clean-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+
+    // No flag on the subject ⇒ 200 allow (unflagged is universally visible).
+    let (status, body) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(status, StatusCode::OK, "unflagged ⇒ allow; got {body:?}");
+    assert_eq!(body["decision"], "allow");
+}
+
+#[tokio::test]
+async fn reveal_requires_a_signature_401() {
+    let engine = node().await;
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+    // No x-ciris-* signature headers ⇒ 401 (every view must be attributable).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safety/reveal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "subject_key_id": "x" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reveal_flagged_subject_gates_then_allows_after_consent_and_recloses_on_revoke() {
+    let engine = node().await;
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+
+    // The viewer, the flagged subject, and the substrate_persist flagger.
+    let viewer = register_party(&engine, "hazard-viewer", identity_type::USER).await;
+    let subject = "hazard-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let flagger = register_party(
+        &engine,
+        "hazard-flagger",
+        ciris_persist::federation::types::identity_type::SUBSTRATE_PERSIST,
+    )
+    .await;
+
+    // Substrate-flag the subject as a potential infohazard.
+    flag_subject(&engine, &flagger, subject, "infohazard").await;
+
+    // (a) Flagged, no consent yet ⇒ 403 INTERSTITIAL (the enforcement).
+    let (status, body) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "flagged+no-consent ⇒ 403; {body:?}"
+    );
+    assert_eq!(body["decision"], "interstitial");
+    assert_eq!(body["flag"], "infohazard");
+    assert_eq!(body["required"]["state"], "consent:state:granted");
+    assert_eq!(body["required"]["scope"], "consent:scope:view");
+    assert_eq!(body["required"]["content_class"], "infohazard");
+    assert!(
+        body["prompt"].as_str().is_some(),
+        "an interstitial carries a prompt"
+    );
+
+    // (b) The viewer emits consent-to-view via the existing attestation surface.
+    emit_view_consent(&engine, &viewer, subject, "granted", "infohazard", 10).await;
+
+    // Re-call ⇒ 200 ALLOW (the loop closes; no server-side emit).
+    let (status, body) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "flagged+consented ⇒ allow; {body:?}"
+    );
+    assert_eq!(body["decision"], "allow");
+
+    // (c) A LATER revoke supersedes the grant ⇒ the gate RE-CLOSES (403).
+    emit_view_consent(&engine, &viewer, subject, "revoked", "infohazard", 20).await;
+    let (status, body) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a revoked consent must re-close the gate; {body:?}"
+    );
+    assert_eq!(body["decision"], "interstitial");
+
+    // Cross-viewer isolation: a DIFFERENT viewer's read is still gated (the
+    // consent is the first viewer's own signed act, not a global unlock).
+    let other = register_party(&engine, "hazard-viewer-2", identity_type::USER).await;
+    emit_view_consent(&engine, &viewer, subject, "granted", "infohazard", 30).await; // re-grant for viewer 1
+    let (s1, _) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(s1, StatusCode::OK, "viewer 1 re-granted ⇒ allow");
+    let (s2, _) = post_reveal(&app, &other, subject).await;
+    assert_eq!(
+        s2,
+        StatusCode::FORBIDDEN,
+        "viewer 2 never consented ⇒ still gated (consent is per-viewer)"
+    );
+
+    // sanity: the pure decision fn agrees with the substrate resolution.
+    let d = infohazard::reveal_decision(&engine, other.key_id(), subject, None)
+        .await
+        .unwrap();
+    assert!(matches!(d, infohazard::RevealDecision::Interstitial { .. }));
 }
