@@ -2608,13 +2608,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_canonical_servers_is_empty_on_a_fresh_node() {
-        // persist v13.2.0 makes canonical admission **m-of-n** (the family's
-        // entrenched `quorum:M/N`, via verify's `verify_quorum_policy`), so the old
-        // 1-of-N A1-only genesis is no longer auto-baked: a `canonical` role is
-        // conferred ONLY on a record whose scrub set meets the quorum. A fresh node
-        // therefore lists NO canonical servers until a proper m-of-n one is
-        // co-minted (CIRISPersist#383). (Was: asserted the 1-of-N #380 genesis.)
+    async fn list_canonical_servers_returns_the_baked_genesis_on_a_fresh_node() {
+        // persist v13.4.0 (CIRISPersist#390/#391) BAKES the 2-of-3 canonical genesis
+        // server `ciris-canonical-1-d7bdeu223k` — the operator's accord-co-scrubbed
+        // record (A1 + B1), seeded at boot via `seed_canonical_servers`. So a fresh
+        // node now ships trusting exactly that one canonical server, conferred via the
+        // baked 2-of-3 genesis (NOT self-claimed — canonical admission stays m-of-n).
+        // (Was: `..._is_empty_on_a_fresh_node`, the post-#383 gap before the 2-of-3
+        // replacement existed — see #390.)
         let app = router_with_engine().await;
         let resp = app
             .oneshot(
@@ -2631,11 +2632,22 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let servers = v["servers"].as_array().expect("servers array");
         assert_eq!(
-            v["servers"].as_array().map(|a| a.len()),
-            Some(0),
-            "a fresh node has no canonical servers — the 1-of-N genesis is gone; \
-             canonical is conferred only via the m-of-n co-scrub: {v}"
+            servers.len(),
+            1,
+            "a fresh node ships exactly the baked genesis canonical server: {v}"
+        );
+        assert_eq!(
+            servers[0]["key_id"].as_str(),
+            Some("ciris-canonical-1-d7bdeu223k"),
+            "the baked genesis canonical server is ciris-canonical-1: {v}"
+        );
+        assert!(
+            servers[0]["identity_type"]
+                .as_str()
+                .is_some_and(|t| t.contains("canonical")),
+            "the baked row carries the accord-conferred canonical role: {v}"
         );
     }
 
