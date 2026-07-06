@@ -39,10 +39,12 @@
 //! - `POST /v1/accord/genesis/envelope` → `assemble` (`accord_genesis`, 2-of-3
 //!   distinct-founder quorum, fail-closed) → on success the node (1) records the
 //!   2/3-founder-signed genesis as a node-authored `accord_family_genesis` CEG
-//!   attestation (the signed AUTHORIZATION proof) AND (2) entrenches the family in
-//!   `federation_families` via the generic layer — registering a CEREMONIAL anchor
-//!   key for the FK (private half discarded; the family never signs) + `put_family`.
-//!   `GET /v1/accord/family` projects the entrenched family + its live roster.
+//!   attestation (the signed AUTHORIZATION proof) AND (2) CONFIRMS the entrenched
+//!   `federation_families` row. persist v13.3.0 (CIRISPersist#386) SEEDS that keyless
+//!   2/3 row at boot on every node and V097 drops the old `family_key_id` FK, so
+//!   assemble is IDEMPOTENT — no ceremonial anchor key, and it never re-inserts (an
+//!   insert-or-replace would let an owner overwrite the baked constitutional family).
+//!   `GET /v1/accord/family` reads the entrenched row + its live roster.
 //! - `POST /v1/accord/invocation` (open) / `…/concur` (advance) + `GET
 //!   /v1/accord/invocations` — the multi-party path that accumulates holder
 //!   cosignatures toward the 2-of-3 (advisory status; `verify-invocation` is
@@ -871,10 +873,10 @@ async fn genesis_assemble(
     }
 
     // The verified genesis is durably recorded as a node-authored CEG attestation
-    // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`.
-    // (We do NOT use the federation_families table: its family_key_id FKs to
-    // federation_keys, but the accord family is FOUNDER-signed — it has no family
-    // keypair to register. The signed genesis object IS the durable record.)
+    // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`
+    // — the signed AUTHORIZATION proof the `federation_families` row itself does not hold.
+    // The entrenched row is KEYLESS (V097 drops the family_key_id FK): a constitutional
+    // family is constituted by its founder quorum, not by owning a keypair.
     // The full member set (with founder roles) from the verified envelope.
     let members: Vec<FamilyMember> = req.envelope["members"]
         .as_array()
