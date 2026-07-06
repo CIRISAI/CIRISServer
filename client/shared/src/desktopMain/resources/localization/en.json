@@ -2222,6 +2222,7 @@
     "accord_op_history": "History / audit trail",
     "accord_op_evidence": "Evidence",
     "accord_op_cosign": "Cosign",
+    "accord_op_copy": "Copy",
     "accord_op_delegate": "Delegate…",
     "accord_op_supersede": "Replace / update…",
     "accord_op_withdraw": "Withdraw…",
@@ -2239,6 +2240,10 @@
     "accord_scrub_holder_select": "Select your accord holder key…",
     "accord_scrub_no_holders": "No accord holders on this node yet.",
     "accord_scrub_usb_label": "USB folder (PQC materials)",
+    "accord_scrub_module_label": "PKCS#11 module path (advanced)",
+    "accord_scrub_module_hint": "Leave blank — the node picks the OS default (libykcs11)",
+    "accord_coscrub_export_hint": "Hand this partial to the next holder:",
+    "accord_coscrub_export_save": "Save to file",
     "accord_scrub_browse": "Browse",
     "accord_scrub_pin_label": "YubiKey PIN",
     "accord_scrub_cancel": "Cancel",
@@ -2930,7 +2935,8 @@
       "manage": "Manage",
       "commons_layers": "Commons",
       "federation": "Federation",
-      "client": "Client"
+      "client": "Client",
+      "node": "Node"
     },
     "surface": {
       "sessions": "Sessions",
@@ -2971,7 +2977,8 @@
       "child_safety": "Child Safety",
       "delegations": "Delegations",
       "identity_management": "My Identity",
-      "accord": "Accord",
+      "accord": "Trust Root",
+      "contacts": "Contacts",
       "provision_accord_holder": "Provision Holder",
       "accord_ceremony": "Genesis Ceremony",
       "transport": "Transport"
