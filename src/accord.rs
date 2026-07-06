@@ -39,10 +39,12 @@
 //! - `POST /v1/accord/genesis/envelope` → `assemble` (`accord_genesis`, 2-of-3
 //!   distinct-founder quorum, fail-closed) → on success the node (1) records the
 //!   2/3-founder-signed genesis as a node-authored `accord_family_genesis` CEG
-//!   attestation (the signed AUTHORIZATION proof) AND (2) entrenches the family in
-//!   `federation_families` via the generic layer — registering a CEREMONIAL anchor
-//!   key for the FK (private half discarded; the family never signs) + `put_family`.
-//!   `GET /v1/accord/family` projects the entrenched family + its live roster.
+//!   attestation (the signed AUTHORIZATION proof) AND (2) CONFIRMS the entrenched
+//!   `federation_families` row. persist v13.3.0 (CIRISPersist#386) SEEDS that keyless
+//!   2/3 row at boot on every node and V097 drops the old `family_key_id` FK, so
+//!   assemble is IDEMPOTENT — no ceremonial anchor key, and it never re-inserts (an
+//!   insert-or-replace would let an owner overwrite the baked constitutional family).
+//!   `GET /v1/accord/family` reads the entrenched row + its live roster.
 //! - `POST /v1/accord/invocation` (open) / `…/concur` (advance) + `GET
 //!   /v1/accord/invocations` — the multi-party path that accumulates holder
 //!   cosignatures toward the 2-of-3 (advisory status; `verify-invocation` is
@@ -113,9 +115,7 @@ use ciris_verify_core::accord_genesis::{
     ACCORD_FAMILY_GENESIS_KIND, HUMANITY_ACCORD_FAMILY_KEY_ID,
 };
 use ciris_verify_core::ceg_outbox::SignedCegObject;
-use ciris_verify_core::federation_self_record::produce_self_key_record;
 use ciris_verify_core::humanity_accord::{Invocation, InvocationDedup, InvocationKind};
-use ciris_verify_core::self_at_login::HybridSigningIdentity;
 use ciris_verify_core::threshold::{
     verify_threshold_signatures, QuorumPolicy, ThresholdMember, ThresholdSignature,
 };
@@ -769,84 +769,6 @@ async fn verify_invocation_handler(
 
 // ─── Genesis ceremony (CC 4.2 / §9 — build envelope → assemble 2/3 → entrench) ─
 
-/// Ensure the HUMANITY_ACCORD family's **ceremonial anchor key** exists in
-/// `federation_keys` (the FK `federation_families` requires). Idempotent: a no-op
-/// if already registered. Mints a fresh hybrid keypair, self-signs the `family`
-/// registration record, registers it, and **discards the private half** — the
-/// family key never signs anything (founders sign genesis; holders sign
-/// invocations), it is purely the §5.6.8.9 family identity anchor.
-async fn ensure_accord_family_anchor(
-    engine: &Engine,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<(), Response> {
-    let exists = engine
-        .federation_directory()
-        .lookup_public_key(HUMANITY_ACCORD_FAMILY_KEY_ID)
-        .await
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
-    if exists.is_some() {
-        return Ok(());
-    }
-    // Mint on a dedicated LARGE-STACK thread: ML-DSA-65 keygen + sign hold big
-    // buffers across `.await`s that overflow a default (~2 MiB) async worker stack —
-    // this would crash the genesis handler in prod, not just tests. The private half
-    // never leaves this thread; only the self-signed PUBLIC record is returned (as
-    // JSON), and the keypair is dropped when the thread ends — the ceremonial anchor
-    // has no retained signer anywhere.
-    let now_s = now.to_rfc3339();
-    let minted: serde_json::Value = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .name("accord-family-anchor-mint".into())
-        .spawn(move || -> Result<serde_json::Value, String> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .map_err(|e| e.to_string())?;
-            rt.block_on(async move {
-                let anchor = HybridSigningIdentity::generate(HUMANITY_ACCORD_FAMILY_KEY_ID)
-                    .map_err(|e| e.to_string())?;
-                let v_rec = produce_self_key_record(&anchor, "family", &now_s, &[])
-                    .await
-                    .map_err(|e| e.to_string())?;
-                serde_json::to_value(&v_rec).map_err(|e| e.to_string())
-            })
-        })
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("spawn anchor mint: {e}"),
-            )
-        })?
-        .join()
-        .map_err(|_| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "anchor mint thread panicked",
-            )
-        })?
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("mint family anchor: {e}"),
-            )
-        })?;
-
-    // verify's SignedKeyRecord → persist's (structurally identical JSON; the wire
-    // shape the holder-registration path round-trips too).
-    let p_rec: SignedKeyRecord = serde_json::from_value(minted).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("anchor record conversion: {e}"),
-        )
-    })?;
-    engine.register_federation_key(p_rec).await.map_err(|e| {
-        err(
-            StatusCode::BAD_REQUEST,
-            &format!("register family anchor: {e}"),
-        )
-    })?;
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 struct GenesisEnvelopeRequest {
     #[serde(default)]
@@ -951,10 +873,10 @@ async fn genesis_assemble(
     }
 
     // The verified genesis is durably recorded as a node-authored CEG attestation
-    // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`.
-    // (We do NOT use the federation_families table: its family_key_id FKs to
-    // federation_keys, but the accord family is FOUNDER-signed — it has no family
-    // keypair to register. The signed genesis object IS the durable record.)
+    // (`accord_family_genesis`) carrying `genesis.body` = `{ family, founder_signatures }`
+    // — the signed AUTHORIZATION proof the `federation_families` row itself does not hold.
+    // The entrenched row is KEYLESS (V097 drops the family_key_id FK): a constitutional
+    // family is constituted by its founder quorum, not by owning a keypair.
     // The full member set (with founder roles) from the verified envelope.
     let members: Vec<FamilyMember> = req.envelope["members"]
         .as_array()
@@ -1017,33 +939,40 @@ async fn genesis_assemble(
         );
     }
 
-    // (2) Entrench the HUMANITY_ACCORD family as a FIRST-CLASS persist family (via
-    // the generic family layer): register its CEREMONIAL anchor key (private half
-    // discarded — it never signs; founders signed genesis, holders sign invocations)
-    // so the `federation_families` FK holds, then `put_family` with the founders as
-    // members + entrenched `quorum:2/3`. From here the kill-switch roster IS
-    // `active_family_members` (see [`accord_roster`]) — generic + swap-capable.
-    if let Err(resp) = ensure_accord_family_anchor(&st.engine, &now).await {
-        return resp;
-    }
-    let family_name = req.envelope["family_name"]
-        .as_str()
-        .unwrap_or("HUMANITY_ACCORD")
-        .to_string();
-    let family = Family {
-        family_key_id: HUMANITY_ACCORD_FAMILY_KEY_ID.to_string(),
-        family_name,
-        members,
-        founded_at: now,
-        consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
-        consensus_protocol_entrenched: true,
-        persist_row_hash: String::new(),
-    };
-    if let Err(e) = crate::family::create_family(&st.engine, family).await {
-        return err(
-            StatusCode::CONFLICT,
-            &format!("entrench accord family: {e}"),
-        );
+    // (2) Entrench the HUMANITY_ACCORD family as a FIRST-CLASS persist family.
+    //
+    // persist v13.3.0 (CIRISPersist#386) SEEDS this keyless 2/3 row (A1/B1/C1) at boot on
+    // every node, and V097 drops the old `family_key_id -> federation_keys` FK — so the
+    // ceremonial anchor-key mint is gone, and assemble is now IDEMPOTENT: on a seeded node
+    // it records the founder-signed genesis proof (above) and CONFIRMS the entrenched row,
+    // it does NOT insert. That is deliberate — an insert-or-replace here would let an owner
+    // who admits their own 3 holders OVERWRITE the constitutional trust root. We only create
+    // the row defensively when none exists (a pre-v13.3.0 store); the seed makes that rare.
+    let already_entrenched =
+        match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+            Ok(f) => f.is_some(),
+            Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+        };
+    if !already_entrenched {
+        let family_name = req.envelope["family_name"]
+            .as_str()
+            .unwrap_or("HUMANITY_ACCORD")
+            .to_string();
+        let family = Family {
+            family_key_id: HUMANITY_ACCORD_FAMILY_KEY_ID.to_string(),
+            family_name,
+            members,
+            founded_at: now,
+            consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
+            consensus_protocol_entrenched: true,
+            persist_row_hash: String::new(),
+        };
+        if let Err(e) = crate::family::create_family(&st.engine, family).await {
+            return err(
+                StatusCode::CONFLICT,
+                &format!("entrench accord family: {e}"),
+            );
+        }
     }
     tracing::info!(
         family = %HUMANITY_ACCORD_FAMILY_KEY_ID,
@@ -1062,58 +991,17 @@ async fn genesis_assemble(
         .into_response()
 }
 
-/// Project the family from the BAKED verify genesis (`humanity_accord_genesis`) — the
-/// recognized-but-not-yet-entrenched form used when no persist `federation_families` row
-/// exists. The genesis body's `family` block already carries `family_name`,
-/// `consensus_protocol` (`quorum:2/3`), and the `members` list ({key_id, role}) verbatim —
-/// exactly the `GET /v1/accord/family` shape. `entrenched:false` + `recognized_via` tell the
-/// client this is the baked recognition, not an entrenched row. 404 only if the genesis is
-/// somehow unbaked (never, in a shipped build).
-fn recognized_family_from_baked_genesis() -> Response {
-    let Some(genesis) = humanity_accord_genesis() else {
-        return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet");
-    };
-    let fam = genesis.body.get("family");
-    let family_name = fam
-        .and_then(|f| f.get("family_name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("HUMANITY_ACCORD");
-    let consensus_protocol = fam
-        .and_then(|f| f.get("consensus_protocol"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("quorum:2/3");
-    let members = fam
-        .and_then(|f| f.get("members"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "family_key_id": HUMANITY_ACCORD_FAMILY_KEY_ID,
-            "family_name": family_name,
-            "consensus_protocol": consensus_protocol,
-            "entrenched": false,
-            "recognized_via": "baked-genesis",
-            "members": members,
-        })),
-    )
-        .into_response()
-}
-
 /// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family, read from the
 /// persist `federation_families` row via the generic family layer
 /// ([`crate::family::lookup`]) + its LIVE roster ([`crate::family::active_members`],
-/// revocation-folded). Falls back to the BAKED genesis recognition
-/// ([`recognized_family_from_baked_genesis`]) when no row is entrenched yet.
+/// revocation-folded). persist v13.3.0 (CIRISPersist#386) seeds this row at boot on every
+/// node (idempotent), so the read resolves with zero ceremony; `404` only on a genuinely
+/// family-less store. (The 0.5.83 baked-genesis projection is retired — the durable row
+/// supersedes it.)
 async fn get_family(State(st): State<AccordState>) -> Response {
     let family = match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         Ok(Some(f)) => f,
-        // No entrenched `federation_families` row — but the family is still RECOGNIZED from
-        // the BAKED genesis (verify's `humanity_accord_genesis`), the same recognition the
-        // kill-switch roster uses. Project the baked 2/3 family (entrenched=false) so the
-        // Trust Root card + the co-scrub quorum resolve on a fresh node, BEFORE persist bakes
-        // the row (CIRISPersist#386 — the durable fix that makes this fallback redundant).
-        Ok(None) => return recognized_family_from_baked_genesis(),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet"),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
     // The live seats (admitted MINUS revoked) — what a swap reflects immediately.
@@ -2639,25 +2527,6 @@ mod tests {
             ed25519_signature_base64: "AA".to_string(),
             mldsa65_signature_base64: Some("BB".to_string()),
         }
-    }
-
-    /// With no entrenched `federation_families` row, `GET /v1/accord/family` projects the
-    /// BAKED genesis — the 2/3 HUMANITY_ACCORD family with its 3 seats — so a fresh node's
-    /// Trust Root card + co-scrub quorum resolve before persist bakes the row (#386).
-    #[tokio::test]
-    async fn get_family_falls_back_to_the_baked_genesis() {
-        let resp = recognized_family_from_baked_genesis();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["family_key_id"], HUMANITY_ACCORD_FAMILY_KEY_ID);
-        assert_eq!(v["family_name"], "HUMANITY_ACCORD");
-        assert_eq!(v["consensus_protocol"], "quorum:2/3");
-        assert_eq!(v["entrenched"], false);
-        assert_eq!(v["recognized_via"], "baked-genesis");
-        assert_eq!(v["members"].as_array().map(|a| a.len()), Some(3));
     }
 
     /// A client-submitted signature is passed through verbatim (the holder-app

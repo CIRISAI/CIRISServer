@@ -1795,30 +1795,18 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// The accord family's live m-of-n `M`. Reads the entrenched persist family row when
-/// present, else falls back to the BAKED verify genesis quorum (the same recognition the
-/// kill-switch roster + `GET /v1/accord/family` use) so a fresh node reports `2` rather than
-/// `0` before persist entrenches the row (CIRISPersist#386). `0` only if unresolvable.
+/// The accord family's live m-of-n `M`, read from the entrenched persist family row
+/// (persist v13.3.0 seeds it at boot on every node — CIRISPersist#386). `0` when the
+/// family/quorum isn't resolvable. (The 0.5.83 baked-genesis fallback is retired.)
 async fn family_quorum_m(engine: &Engine) -> usize {
-    use ciris_verify_core::accord_genesis::{
-        humanity_accord_genesis, HUMANITY_ACCORD_FAMILY_KEY_ID,
-    };
+    use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
     use ciris_verify_core::threshold::QuorumPolicy;
-    if let Ok(Some(fam)) = crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
-        return QuorumPolicy::parse(&fam.consensus_protocol)
+    match crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
+        Ok(Some(fam)) => QuorumPolicy::parse(&fam.consensus_protocol)
             .map(|p| p.m)
-            .unwrap_or(0);
+            .unwrap_or(0),
+        _ => 0,
     }
-    humanity_accord_genesis()
-        .and_then(|g| {
-            g.body
-                .get("family")
-                .and_then(|f| f.get("consensus_protocol"))
-                .and_then(|v| v.as_str())
-        })
-        .and_then(QuorumPolicy::parse)
-        .map(|p| p.m)
-        .unwrap_or(0)
 }
 
 /// The accord family roster's member `key_id`s (None when it can't be resolved — e.g. no

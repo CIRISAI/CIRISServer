@@ -134,6 +134,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
 
+    // ── The node-scoped `substrate_persist` producer identity (CIRISServer#181) ─
+    // A SEPARATE hybrid key (identity_type = substrate_persist) the node uses to
+    // author substrate-RESERVED rows — today the CC 4.5.13 `content_class:*`
+    // infohazard flag (POST /v1/safety/flag). The node's OWN key is `node`-typed
+    // (infrastructure, CC 1.13.5) and CANNOT emit a reserved prefix
+    // (`federation_reserved_prefix_emitter_mismatch`); a federation_keys row is
+    // one identity_type per key_id, so the reserved-flag authority lives in this
+    // second, dedicated key. Minted+sealed at boot, registered through the same
+    // canonical admission gate as the node key. The duty-HOLDER authorizes the
+    // flag at the HTTP layer; THIS key SIGNS it.
+    let (substrate_signer, substrate_identity) = substrate_persist_signer(&cfg).await?;
+    let substrate_key_id = register_substrate_key(&engine, &substrate_identity).await?;
+    tracing::info!(
+        substrate_key_id = %substrate_key_id,
+        "registered node substrate_persist identity (content_class flag producer; \
+         CIRISServer#181)"
+    );
+
     // Seed the node's federation identity into the graph so the client's Graph page
     // is never empty on a fresh install (mirrors the agent's agent/identity seed).
     crate::memory_api::seed_identity_graph(&engine, &cfg.key_id, "node").await;
@@ -664,7 +682,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // (fail-secure + merit auto-promotion), and the opt-in
                     // per-group watchlist config (the matcher defers to the
                     // NodeCore content seam). Built AHEAD of media/social content.
-                    .merge(crate::safety::router(Arc::clone(&engine), strict))
+                    .merge(crate::safety::router(
+                        Arc::clone(&engine),
+                        strict,
+                        // The node's substrate_persist producer identity — authors
+                        // the reserved content_class flag POST /v1/safety/flag emits.
+                        Some(Arc::clone(&substrate_signer)),
+                    ))
                     // HUMANITY_ACCORD surface (CIRISServer#41): accord-holder
                     // registry (owner-gated register + cold-start GET
                     // /v1/accord-holders) + the server-canonical 2-of-3 invocation
@@ -1086,6 +1110,123 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         )
         .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
         .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
+    }
+}
+
+/// The node-scoped **`substrate_persist`** signing identity (CIRISServer#181) — a
+/// SEPARATE hybrid keypair from the node's own federation key, minted + sealed at
+/// boot under the `<keystore_alias>-substrate` alias.
+///
+/// ## Why a distinct key
+///
+/// `content_class:*` (the CC 4.5.13 infohazard flag), `system:*`, `audit_chain:*`
+/// are **substrate-reserved** prefixes: persist's `default_reserved_prefix_rules`
+/// admit them ONLY from an emitter whose `federation_keys` row is `identity_type =
+/// substrate_persist`. The node's own key is `identity_type = node`
+/// (infrastructure, CC 1.13.5) — it CANNOT author a reserved flag
+/// (`federation_reserved_prefix_emitter_mismatch`), and a federation_keys row is
+/// keyed by key_id (one identity_type per key). So the node holds this second,
+/// dedicated identity purely to author the reserved rows the fabric attributes to
+/// "the substrate": the duty-holder authorizes at the HTTP layer; THIS key signs.
+///
+/// The Ed25519 half is hardware-sealed (open-or-mint under the keystore — stable
+/// across restarts, so a later CLEAR by the same key resolves); the ML-DSA-65 half
+/// is a software seed at `substrate_ml_dsa_65.seed` (no sealed-ML-DSA backend
+/// exists), mirroring [`federation_pqc_signer`]. `from_hardware_parts` receives the
+/// ALIAS as its key_id (the `derive_key_id` input), so the signer's
+/// `derived_key_id()` — the value [`Engine::emit_attestation`] FKs against — is
+/// `derive_key_id(alias, ed_pub)`, exactly what [`register_substrate_key`] registers.
+pub(crate) async fn substrate_persist_signer(
+    cfg: &ServerConfig,
+) -> Result<(
+    Arc<ciris_persist::prelude::LocalSigner>,
+    ciris_verify_core::self_at_login::HardwareRootedIdentity,
+)> {
+    let alias = format!("{}-substrate", cfg.keystore_alias);
+    // Ed25519 half — sealed keystore, open-or-mint (stable seed across restarts).
+    let ed: Arc<dyn HardwareSigner> = Arc::from(
+        SealedEd25519Signer::open_or_create(alias.clone(), cfg.identity_dir.clone(), None)
+            .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+            .map_err(|e| anyhow::anyhow!("open-or-mint substrate Ed25519 signer: {e}"))?,
+    );
+    // ML-DSA-65 half — software seed at substrate_ml_dsa_65.seed (mint-if-absent).
+    let pqc_alias = format!("{alias}-pqc");
+    let pqc_path = cfg.identity_dir.join("substrate_ml_dsa_65.seed");
+    let pqc = if pqc_path.exists() {
+        MlDsa65SoftwareSigner::from_seed_file(&pqc_path, pqc_alias.clone())
+            .map_err(|e| anyhow::anyhow!("adopt substrate ML-DSA-65 seed: {e}"))?
+    } else {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed)
+            .map_err(|e| anyhow::anyhow!("mint substrate ML-DSA-65 seed: {e}"))?;
+        std::fs::write(&pqc_path, seed).with_context(|| format!("write {}", pqc_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&pqc_path, std::fs::Permissions::from_mode(0o600));
+        }
+        MlDsa65SoftwareSigner::from_seed_bytes(&seed, pqc_alias.clone())
+            .map_err(|e| anyhow::anyhow!("load minted substrate ML-DSA-65 seed: {e}"))?
+    };
+    let pqc: Arc<dyn PqcSigner> = Arc::new(pqc);
+    // Compose the persist emit-signer AND a verify `HardwareRootedIdentity` (a
+    // `SelfSigner`) from the SAME hybrid halves — the latter feeds
+    // `produce_self_key_record` so the registration envelope is the RICH,
+    // replay-resistant shape (binds pubkeys + identity_type), identical to the node
+    // key's `build_self_key_record` path (DRY audit H1 — no hand-rolled minimal
+    // `{key_id}` envelope on the highest-trust key).
+    let signer = Arc::new(
+        ciris_persist::prelude::LocalSigner::from_hardware_parts(
+            ed.clone(),
+            alias.clone(),
+            Some(pqc.clone()),
+            Some(pqc_alias),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("compose substrate_persist LocalSigner: {e}"))?,
+    );
+    let identity = ciris_verify_core::self_at_login::HardwareRootedIdentity::new(
+        signer.derived_key_id(),
+        ed,
+        pqc,
+    )
+    .map_err(|e| anyhow::anyhow!("build substrate_persist self-signer identity: {e}"))?;
+    Ok((signer, identity))
+}
+
+/// Register the node's `substrate_persist` identity ([`substrate_persist_signer`])
+/// in the federation directory as `identity_type = substrate_persist`, so the
+/// reserved-prefix admission rule admits the `content_class:*` flags it authors.
+///
+/// Self-signed proof-of-possession through the canonical `register_federation_key`
+/// gate (the same fail-secure hybrid-verify path [`register_self_key`] uses — the
+/// signer proves possession of its OWN keys, `scrub_key_id == key_id`). Idempotent:
+/// a matching row → `Ok`; a benign `Conflict` (row already present) → `Ok`.
+/// Returns the registered (derived) key_id.
+async fn register_substrate_key(
+    engine: &Engine,
+    identity: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+) -> Result<String> {
+    use ciris_persist::federation::types::identity_type;
+    use ciris_persist::federation::{Error as FederationError, SignedKeyRecord};
+    use ciris_verify_core::federation_self_record::produce_self_key_record;
+
+    // The RICH self-signed record (verify's canonical producer) — the envelope binds
+    // key_id + BOTH pubkeys + identity_type, so a captured record can't be replayed
+    // with those fields flipped (the minimal `{key_id}` envelope did not). Same path
+    // the node key uses (`build_self_key_record`), bridged verify→persist by the
+    // structurally-identical JSON shape.
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec =
+        produce_self_key_record(identity, identity_type::SUBSTRATE_PERSIST, &valid_from, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
+    let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
+        .map_err(|e| anyhow::anyhow!("bridge verify→persist substrate SignedKeyRecord: {e}"))?;
+    let key_id = signed.record.key_id.clone();
+    match engine.register_federation_key(signed).await {
+        Ok(()) | Err(FederationError::Conflict(_)) => Ok(key_id),
+        Err(e) => Err(anyhow::anyhow!("register substrate_persist key: {e}")),
     }
 }
 

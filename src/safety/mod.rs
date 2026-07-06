@@ -83,7 +83,7 @@
 
 use std::sync::Arc;
 
-use ciris_persist::prelude::{Engine, HybridPolicy};
+use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 
 pub mod age;
 pub mod infohazard;
@@ -108,10 +108,23 @@ pub mod watchlist;
 /// - `POST /v1/safety/reveal` — the CC 4.5.13 infohazard consent-gate decision:
 ///   a flagged subject is WITHHELD (403 interstitial) until the signed viewer's
 ///   `consent:state:granted {scope:view}` is on the graph (then 200 allow).
-pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> axum::Router {
+/// - `POST /v1/safety/flag` — the CC 4.5.13 PRODUCER hook (CIRISServer#181): a
+///   `moderate`-duty holder flags a subject and the node's `substrate_persist`
+///   identity emits the reserved `content_class:{class}` flag that makes
+///   `/v1/safety/reveal` fire. `substrate_signer` is that node-scoped identity
+///   (minted + registered at boot); `None` leaves the flag endpoint 503-inert.
+pub fn router(
+    engine: Arc<Engine>,
+    policy: HybridPolicy,
+    substrate_signer: Option<Arc<LocalSigner>>,
+) -> axum::Router {
     age::router(Arc::clone(&engine), policy)
         .merge(moderation::router(Arc::clone(&engine), policy))
         .merge(named::router(Arc::clone(&engine)))
         .merge(watchlist::router(Arc::clone(&engine), policy))
-        .merge(infohazard::router(Arc::clone(&engine), policy))
+        .merge(infohazard::router(
+            Arc::clone(&engine),
+            policy,
+            substrate_signer,
+        ))
 }

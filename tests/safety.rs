@@ -1184,7 +1184,7 @@ async fn post_reveal(
 #[tokio::test]
 async fn reveal_unflagged_subject_allows() {
     let engine = node().await;
-    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict, None);
     let viewer = register_party(&engine, "reveal-viewer", identity_type::USER).await;
     let subject = "reveal-clean-subject";
     register_party(&engine, subject, identity_type::USER).await;
@@ -1198,7 +1198,7 @@ async fn reveal_unflagged_subject_allows() {
 #[tokio::test]
 async fn reveal_requires_a_signature_401() {
     let engine = node().await;
-    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict, None);
     // No x-ciris-* signature headers ⇒ 401 (every view must be attributable).
     let resp = app
         .oneshot(
@@ -1219,7 +1219,7 @@ async fn reveal_requires_a_signature_401() {
 #[tokio::test]
 async fn reveal_flagged_subject_gates_then_allows_after_consent_and_recloses_on_revoke() {
     let engine = node().await;
-    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict);
+    let app = ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict, None);
 
     // The viewer, the flagged subject, and the substrate_persist flagger.
     let viewer = register_party(&engine, "hazard-viewer", identity_type::USER).await;
@@ -1292,4 +1292,305 @@ async fn reveal_flagged_subject_gates_then_allows_after_consent_and_recloses_on_
         .await
         .unwrap();
     assert!(matches!(d, infohazard::RevealDecision::Interstitial { .. }));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// (8) PRODUCER HOOK (CC 4.5.13, CIRISServer#181) — POST /v1/safety/flag: a
+//     `moderate`-duty holder flags a subject and the NODE's substrate_persist
+//     identity emits the reserved `content_class` flag → the #161 reveal gate
+//     fires. The producer→gate link, over the REAL /v1/safety/flag endpoint.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Build + register a node-scoped `substrate_persist` signer under its DERIVED
+/// federation key_id (what `Engine::emit_attestation` FKs against) — the
+/// production shape `compose::register_substrate_key` uses. Returns the signer
+/// the flag router holds to author the reserved `content_class:*` flag.
+async fn substrate_signer(engine: &Engine, alias: &str) -> Arc<LocalSigner> {
+    let signer = party_signer(alias);
+    let key_id = signer.derived_key_id();
+    let now = chrono::Utc::now();
+    let envelope = serde_json::json!({ "key_id": key_id });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize substrate envelope");
+    let sig = signer
+        .sign_hybrid(&canonical)
+        .await
+        .expect("sign substrate registration");
+    let record = KeyRecord {
+        key_id: key_id.clone(),
+        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
+        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: identity_type::SUBSTRATE_PERSIST.into(),
+        identity_ref: key_id.clone(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: key_id.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        roles: Vec::new(),
+        attestation_evidence: None,
+        consent_role: None,
+        additional_scrubs: Vec::new(),
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .expect("register substrate_persist signer");
+    Arc::new(signer)
+}
+
+/// `POST /v1/safety/flag` with a hybrid-signed request from `signer` acting for
+/// `signer_key_id` (the moderator). Returns `(status, body)`.
+#[allow(clippy::too_many_arguments)]
+async fn post_flag(
+    app: &axum::Router,
+    signer: &LocalSigner,
+    signer_key_id: &str,
+    community_key_id: &str,
+    subject_key_id: &str,
+    content_class: &str,
+    action: &str,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "signer_key_id": signer_key_id,
+        "community_key_id": community_key_id,
+        "subject_key_id": subject_key_id,
+        "content_class": content_class,
+        "action": action,
+    })
+    .to_string();
+    let sig = signer
+        .sign_hybrid(body.as_bytes())
+        .await
+        .expect("sign body");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safety/flag")
+                .header("content-type", "application/json")
+                .header("x-ciris-signing-key-id", signer.key_id())
+                .header(
+                    "x-ciris-signature-ed25519",
+                    BASE64.encode(&sig.classical.signature),
+                )
+                .header(
+                    "x-ciris-signature-ml-dsa-65",
+                    BASE64.encode(&sig.pqc.signature),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// THE HEADLINE: a Moderate-duty holder flags a subject via the REAL
+/// `/v1/safety/flag` endpoint → the substrate emits the reserved `content_class`
+/// flag → `subject_flag` now returns `Some(class)` → `/v1/safety/reveal` returns
+/// the 403 interstitial for a non-consented viewer. The producer→gate link.
+#[tokio::test]
+async fn flag_endpoint_makes_the_reveal_gate_fire() {
+    let engine = node().await;
+    let community = "community:producer";
+    let founder = "flag-founder"; // the named moderator (owner-bound)
+    register_party(&engine, founder, identity_type::AGENT).await;
+    make_owner_bound(&engine, founder).await;
+    put_community(&engine, community, &[(founder, "founder")]).await;
+
+    // The node's substrate_persist producer identity (what the router holds).
+    let substrate = substrate_signer(&engine, "producer-substrate").await;
+    let app = ciris_server::safety::router(
+        Arc::clone(&engine),
+        HybridPolicy::Strict,
+        Some(Arc::clone(&substrate)),
+    );
+
+    // The subject to flag + a non-consented viewer.
+    let subject = "producer-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let viewer = register_party(&engine, "producer-viewer", identity_type::USER).await;
+
+    // BEFORE the flag: the subject is unflagged ⇒ reveal ALLOWS (the gate is inert).
+    assert!(
+        infohazard::subject_flag(&engine, subject, None)
+            .await
+            .unwrap()
+            .is_none(),
+        "no flag emitted yet"
+    );
+    let (pre, _) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(pre, StatusCode::OK, "unflagged subject ⇒ reveal allows");
+
+    // The duty-holder flags the subject through the REAL producer endpoint.
+    let founder_signer = party_signer(founder);
+    let (status, body) = post_flag(
+        &app,
+        &founder_signer,
+        founder,
+        community,
+        subject,
+        "infohazard",
+        "flag",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "duty-holder flag admitted; {body:?}"
+    );
+    assert_eq!(body["content_class"], "infohazard");
+    assert_eq!(body["action"], "flag");
+    let flag_id = body["attestation_id"]
+        .as_str()
+        .expect("attestation id")
+        .to_string();
+
+    // THE SUBSTRATE signed it — the emitted row's attesting key is the
+    // substrate_persist identity, NEVER the duty-holder.
+    let emitter = body["emitter_key_id"].as_str().expect("emitter key id");
+    assert_eq!(
+        emitter,
+        substrate.derived_key_id(),
+        "the reserved flag is authored by the substrate_persist identity"
+    );
+    assert_ne!(
+        emitter, founder,
+        "the duty-holder does NOT sign the reserved flag"
+    );
+    let rows = engine
+        .federation_directory()
+        .list_attestations_for(subject)
+        .await
+        .unwrap();
+    let flag_row = rows
+        .iter()
+        .find(|r| r.attestation_id == flag_id)
+        .expect("the flag row is on the subject");
+    assert_eq!(
+        flag_row.attesting_key_id,
+        substrate.derived_key_id(),
+        "attesting_key_id is the substrate emitter"
+    );
+    let substrate_id_type = engine
+        .federation_directory()
+        .lookup_public_key(&substrate.derived_key_id())
+        .await
+        .unwrap()
+        .expect("substrate key registered")
+        .identity_type;
+    assert_eq!(
+        substrate_id_type,
+        identity_type::SUBSTRATE_PERSIST,
+        "the emitter is identity_type = substrate_persist (the reserved-prefix rule)"
+    );
+
+    // THE LINK: subject_flag now resolves + the reveal gate FIRES (403).
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "the producer made the flag resolvable"
+    );
+    let (status, body) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "flagged+no-consent ⇒ 403 interstitial (the gate now fires); {body:?}"
+    );
+    assert_eq!(body["decision"], "interstitial");
+    assert_eq!(body["flag"], "infohazard");
+
+    // CLEAR (retain→unflag): the same duty-holder clears the flag → the gate
+    // re-opens (the substrate emits a superseding withdrawal; latest-wins fold).
+    let (status, body) = post_flag(
+        &app,
+        &founder_signer,
+        founder,
+        community,
+        subject,
+        "infohazard",
+        "clear",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "duty-holder clear admitted; {body:?}"
+    );
+    assert_eq!(body["action"], "clear");
+    assert!(
+        infohazard::subject_flag(&engine, subject, None)
+            .await
+            .unwrap()
+            .is_none(),
+        "a cleared flag no longer resolves (latest-wins withdrawal fold)"
+    );
+    let (status, _) = post_reveal(&app, &viewer, subject).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "cleared subject ⇒ reveal allows again"
+    );
+}
+
+/// A non-duty caller is REFUSED at `/v1/safety/flag` (403) — the flag is a
+/// duty-gated act, never assumed (mirrors `moderation`'s fail-secure gate).
+#[tokio::test]
+async fn flag_endpoint_rejects_a_non_duty_caller() {
+    let engine = node().await;
+    let community = "community:producer-2";
+    let founder = "flag-founder-2";
+    register_party(&engine, founder, identity_type::AGENT).await;
+    make_owner_bound(&engine, founder).await;
+    put_community(&engine, community, &[(founder, "founder")]).await;
+
+    let substrate = substrate_signer(&engine, "producer-substrate-2").await;
+    let app =
+        ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict, Some(substrate));
+
+    // A stranger who holds no duty and no delegated chain.
+    let stranger = register_party(&engine, "flag-stranger", identity_type::AGENT).await;
+    let subject = "producer-subject-2";
+    register_party(&engine, subject, identity_type::USER).await;
+
+    let (status, body) = post_flag(
+        &app,
+        &stranger,
+        "flag-stranger",
+        community,
+        subject,
+        "infohazard",
+        "flag",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a non-duty caller cannot flag; {body:?}"
+    );
+    // No flag landed on the subject (fail-secure — the gate stays inert).
+    assert!(
+        infohazard::subject_flag(&engine, subject, None)
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected flag emits nothing"
+    );
 }

@@ -102,6 +102,12 @@ v6.11.0**, single-version across both the lens node (ciris-server) and the statu
 
 ## 4. Threat model — what the safe mesh defends against
 
+> **This section is framed at v0.5.30 and is SUPERSEDED for the current state by
+> [`FSD/THREAT_MODEL.md`](THREAT_MODEL.md) §5** (the 0.5.84 server-tier + cross-tier
+> model — baked trust root, raiseable kill-switch, m-of-n co-scrub, enforced
+> single-owner; all §8 red-team findings resolved). This section remains the
+> reference for the safe-mesh-floor *invariants* (I1–I8).
+
 In scope (the floor must hold against these):
 - **A captured operator / host.** Root on a node, or the whole deploy, must NOT be able
   to keep a halted node running, nor halt the mesh alone (no software key, no single seat).
