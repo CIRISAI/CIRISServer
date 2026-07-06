@@ -45,9 +45,15 @@ async fn node() -> Arc<Engine> {
         Some(pqc),
         Some(format!("{NODE_KEY_ID}-pqc")),
     ));
-    let engine = Engine::with_signer(signer, "sqlite::memory:")
+    // The TEST-ONLY seam (persist v13.3.1 / CIRISPersist#387): a clean engine with the
+    // genesis seed SKIPPED. Production seeds the keyless HUMANITY_ACCORD family (2/3,
+    // A1/B1/C1) at boot — but these tests stand up their OWN custom-holder family via the
+    // assemble ceremony (holders they can sign with), which the baked family would
+    // UNIQUE-conflict + can't be signed for. Skipping the seed lets the ceremony run as the
+    // real trust-root founding it exercises.
+    let engine = Engine::with_signer_no_genesis_seed(signer, "sqlite::memory:")
         .await
-        .expect("Engine::with_signer (sqlite::memory:) must succeed");
+        .expect("Engine::with_signer_no_genesis_seed (sqlite::memory:) must succeed");
     let engine = Arc::new(engine);
     // Register the node's OWN key (under its DERIVED id) so genesis recording via
     // emit_attestation_self (attester = the node) satisfies the FK. Mirrors prod
