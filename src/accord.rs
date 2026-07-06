@@ -1062,58 +1062,17 @@ async fn genesis_assemble(
         .into_response()
 }
 
-/// Project the family from the BAKED verify genesis (`humanity_accord_genesis`) — the
-/// recognized-but-not-yet-entrenched form used when no persist `federation_families` row
-/// exists. The genesis body's `family` block already carries `family_name`,
-/// `consensus_protocol` (`quorum:2/3`), and the `members` list ({key_id, role}) verbatim —
-/// exactly the `GET /v1/accord/family` shape. `entrenched:false` + `recognized_via` tell the
-/// client this is the baked recognition, not an entrenched row. 404 only if the genesis is
-/// somehow unbaked (never, in a shipped build).
-fn recognized_family_from_baked_genesis() -> Response {
-    let Some(genesis) = humanity_accord_genesis() else {
-        return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet");
-    };
-    let fam = genesis.body.get("family");
-    let family_name = fam
-        .and_then(|f| f.get("family_name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("HUMANITY_ACCORD");
-    let consensus_protocol = fam
-        .and_then(|f| f.get("consensus_protocol"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("quorum:2/3");
-    let members = fam
-        .and_then(|f| f.get("members"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "family_key_id": HUMANITY_ACCORD_FAMILY_KEY_ID,
-            "family_name": family_name,
-            "consensus_protocol": consensus_protocol,
-            "entrenched": false,
-            "recognized_via": "baked-genesis",
-            "members": members,
-        })),
-    )
-        .into_response()
-}
-
 /// `GET /v1/accord/family` — the entrenched HUMANITY_ACCORD family, read from the
 /// persist `federation_families` row via the generic family layer
 /// ([`crate::family::lookup`]) + its LIVE roster ([`crate::family::active_members`],
-/// revocation-folded). Falls back to the BAKED genesis recognition
-/// ([`recognized_family_from_baked_genesis`]) when no row is entrenched yet.
+/// revocation-folded). persist v13.3.0 (CIRISPersist#386) seeds this row at boot on every
+/// node (idempotent), so the read resolves with zero ceremony; `404` only on a genuinely
+/// family-less store. (The 0.5.83 baked-genesis projection is retired — the durable row
+/// supersedes it.)
 async fn get_family(State(st): State<AccordState>) -> Response {
     let family = match crate::family::lookup(&st.engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         Ok(Some(f)) => f,
-        // No entrenched `federation_families` row — but the family is still RECOGNIZED from
-        // the BAKED genesis (verify's `humanity_accord_genesis`), the same recognition the
-        // kill-switch roster uses. Project the baked 2/3 family (entrenched=false) so the
-        // Trust Root card + the co-scrub quorum resolve on a fresh node, BEFORE persist bakes
-        // the row (CIRISPersist#386 — the durable fix that makes this fallback redundant).
-        Ok(None) => return recognized_family_from_baked_genesis(),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no HUMANITY_ACCORD family yet"),
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
     };
     // The live seats (admitted MINUS revoked) — what a swap reflects immediately.
@@ -2639,25 +2598,6 @@ mod tests {
             ed25519_signature_base64: "AA".to_string(),
             mldsa65_signature_base64: Some("BB".to_string()),
         }
-    }
-
-    /// With no entrenched `federation_families` row, `GET /v1/accord/family` projects the
-    /// BAKED genesis — the 2/3 HUMANITY_ACCORD family with its 3 seats — so a fresh node's
-    /// Trust Root card + co-scrub quorum resolve before persist bakes the row (#386).
-    #[tokio::test]
-    async fn get_family_falls_back_to_the_baked_genesis() {
-        let resp = recognized_family_from_baked_genesis();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["family_key_id"], HUMANITY_ACCORD_FAMILY_KEY_ID);
-        assert_eq!(v["family_name"], "HUMANITY_ACCORD");
-        assert_eq!(v["consensus_protocol"], "quorum:2/3");
-        assert_eq!(v["entrenched"], false);
-        assert_eq!(v["recognized_via"], "baked-genesis");
-        assert_eq!(v["members"].as_array().map(|a| a.len()), Some(3));
     }
 
     /// A client-submitted signature is passed through verbatim (the holder-app
