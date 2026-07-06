@@ -144,8 +144,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // second, dedicated key. Minted+sealed at boot, registered through the same
     // canonical admission gate as the node key. The duty-HOLDER authorizes the
     // flag at the HTTP layer; THIS key SIGNS it.
-    let substrate_signer = substrate_persist_signer(&cfg).await?;
-    let substrate_key_id = register_substrate_key(&engine, &substrate_signer).await?;
+    let (substrate_signer, substrate_identity) = substrate_persist_signer(&cfg).await?;
+    let substrate_key_id = register_substrate_key(&engine, &substrate_identity).await?;
     tracing::info!(
         substrate_key_id = %substrate_key_id,
         "registered node substrate_persist identity (content_class flag producer; \
@@ -1138,7 +1138,10 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
 /// `derive_key_id(alias, ed_pub)`, exactly what [`register_substrate_key`] registers.
 pub(crate) async fn substrate_persist_signer(
     cfg: &ServerConfig,
-) -> Result<Arc<ciris_persist::prelude::LocalSigner>> {
+) -> Result<(
+    Arc<ciris_persist::prelude::LocalSigner>,
+    ciris_verify_core::self_at_login::HardwareRootedIdentity,
+)> {
     let alias = format!("{}-substrate", cfg.keystore_alias);
     // Ed25519 half — sealed keystore, open-or-mint (stable seed across restarts).
     let ed: Arc<dyn HardwareSigner> = Arc::from(
@@ -1166,15 +1169,29 @@ pub(crate) async fn substrate_persist_signer(
             .map_err(|e| anyhow::anyhow!("load minted substrate ML-DSA-65 seed: {e}"))?
     };
     let pqc: Arc<dyn PqcSigner> = Arc::new(pqc);
-    let signer = ciris_persist::prelude::LocalSigner::from_hardware_parts(
+    // Compose the persist emit-signer AND a verify `HardwareRootedIdentity` (a
+    // `SelfSigner`) from the SAME hybrid halves — the latter feeds
+    // `produce_self_key_record` so the registration envelope is the RICH,
+    // replay-resistant shape (binds pubkeys + identity_type), identical to the node
+    // key's `build_self_key_record` path (DRY audit H1 — no hand-rolled minimal
+    // `{key_id}` envelope on the highest-trust key).
+    let signer = Arc::new(
+        ciris_persist::prelude::LocalSigner::from_hardware_parts(
+            ed.clone(),
+            alias.clone(),
+            Some(pqc.clone()),
+            Some(pqc_alias),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("compose substrate_persist LocalSigner: {e}"))?,
+    );
+    let identity = ciris_verify_core::self_at_login::HardwareRootedIdentity::new(
+        signer.derived_key_id(),
         ed,
-        alias,
-        Some(pqc),
-        Some(pqc_alias),
+        pqc,
     )
-    .await
-    .map_err(|e| anyhow::anyhow!("compose substrate_persist LocalSigner: {e}"))?;
-    Ok(Arc::new(signer))
+    .map_err(|e| anyhow::anyhow!("build substrate_persist self-signer identity: {e}"))?;
+    Ok((signer, identity))
 }
 
 /// Register the node's `substrate_persist` identity ([`substrate_persist_signer`])
@@ -1188,49 +1205,26 @@ pub(crate) async fn substrate_persist_signer(
 /// Returns the registered (derived) key_id.
 async fn register_substrate_key(
     engine: &Engine,
-    signer: &ciris_persist::prelude::LocalSigner,
+    identity: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
 ) -> Result<String> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    use ciris_persist::federation::types::{algorithm, identity_type};
-    use ciris_persist::federation::{Error as FederationError, KeyRecord, SignedKeyRecord};
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
-    use sha2::{Digest, Sha256};
+    use ciris_persist::federation::types::identity_type;
+    use ciris_persist::federation::{Error as FederationError, SignedKeyRecord};
+    use ciris_verify_core::federation_self_record::produce_self_key_record;
 
-    let key_id = signer.derived_key_id();
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow::anyhow!("canonicalize substrate registration envelope: {e}"))?;
-    let sig = signer
-        .sign_hybrid(&canonical)
-        .await
-        .map_err(|e| anyhow::anyhow!("hybrid-sign substrate registration: {e}"))?;
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: B64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(B64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::SUBSTRATE_PERSIST.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    match engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-    {
+    // The RICH self-signed record (verify's canonical producer) — the envelope binds
+    // key_id + BOTH pubkeys + identity_type, so a captured record can't be replayed
+    // with those fields flipped (the minimal `{key_id}` envelope did not). Same path
+    // the node key uses (`build_self_key_record`), bridged verify→persist by the
+    // structurally-identical JSON shape.
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec =
+        produce_self_key_record(identity, identity_type::SUBSTRATE_PERSIST, &valid_from, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
+    let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
+        .map_err(|e| anyhow::anyhow!("bridge verify→persist substrate SignedKeyRecord: {e}"))?;
+    let key_id = signed.record.key_id.clone();
+    match engine.register_federation_key(signed).await {
         Ok(()) | Err(FederationError::Conflict(_)) => Ok(key_id),
         Err(e) => Err(anyhow::anyhow!("register substrate_persist key: {e}")),
     }
