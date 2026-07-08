@@ -78,22 +78,46 @@ impl Report {
     }
 }
 
-/// Build an in-memory ciris-server [`Engine`] with a SOFTWARE hybrid signer (the
-/// node's own key registered under its derived id, mirroring prod compose).
-pub async fn node() -> Arc<Engine> {
+/// The node's own SOFTWARE hybrid signer (Ed25519 + ML-DSA-65), keyed under
+/// [`NODE_KEY_ID`].
+fn node_signer() -> Arc<LocalSigner> {
     let signing_key = SigningKey::from_bytes(&[0xA1; 32]);
     let pqc = Arc::new(
         MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_KEY_ID}-pqc"))
             .expect("node ML-DSA-65 seed"),
     );
-    let signer = Arc::new(LocalSigner::from_parts(
+    Arc::new(LocalSigner::from_parts(
         signing_key,
         NODE_KEY_ID.to_string(),
         Some(pqc),
         Some(format!("{NODE_KEY_ID}-pqc")),
-    ));
+    ))
+}
+
+/// Build an in-memory ciris-server [`Engine`] on the **test-genesis-seam** — NO baked
+/// genesis (persist `with_signer_no_genesis_seed`, CIRISPersist#387). The accord /
+/// family / membership / ceremony QA establishes its OWN HUMANITY_ACCORD family + holder
+/// roster from scratch; the prod bake (A1/B1/C1 seats, entrenched family, the 2-of-3
+/// canonical server — persist v13.3.0/#386 + v13.4.0/#390) would otherwise collide with
+/// that self-run ceremony (extra registered rows, a pre-entrenched family whose seats the
+/// QA's own signatures don't match). Only the node's own key is registered.
+pub async fn node() -> Arc<Engine> {
     let engine = Arc::new(
-        Engine::with_signer(signer, "sqlite::memory:")
+        Engine::with_signer_no_genesis_seed(node_signer(), "sqlite::memory:")
+            .await
+            .expect("Engine::with_signer_no_genesis_seed (sqlite::memory:)"),
+    );
+    register_node_self(&engine).await;
+    engine
+}
+
+/// Build a **fully-seeded** in-memory Engine — the prod ctor WITH the baked genesis
+/// (holders + entrenched HUMANITY_ACCORD family + the 2-of-3 canonical server). Used by
+/// the `canonical` QA to assert the directed-trace-flow target (`ciris-canonical-1`) is
+/// present + addressable — the surface CIRISPersist#392 left empty on the wheel ctor.
+pub async fn node_seeded() -> Arc<Engine> {
+    let engine = Arc::new(
+        Engine::with_signer(node_signer(), "sqlite::memory:")
             .await
             .expect("Engine::with_signer (sqlite::memory:)"),
     );
