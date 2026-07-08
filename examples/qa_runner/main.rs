@@ -10,6 +10,7 @@
 //! Exit: 0 if every step is green, 1 otherwise.
 
 mod accord;
+mod canonical;
 mod common;
 mod family;
 mod verify;
@@ -25,6 +26,7 @@ async fn main() {
     accord::run(&mut report).await;
     accord::run_membership(&mut report).await;
     accord::run_ceremony(&mut report).await;
+    canonical::run(&mut report).await;
     verify::run(&mut report).await;
 
     let ok = report.print_and_status();
