@@ -766,8 +766,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "8.9.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.9.0#31a3a6fd1dc50f77b39bd388fce004f9ec41bf7f"
+version = "8.10.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.0#a64c08996edd0e9c4c0fd27c1fae72dcedc4474f"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -793,8 +793,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "9.1.6"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v9.1.6#1c1f1f02329e9b47330660f33ea284193689cb96"
+version = "9.1.7"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v9.1.7#baee59cb85775d4f1fc1dc9c858b8742983c8a05"
 dependencies = [
  "async-trait",
  "axum",
@@ -847,8 +847,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "8.9.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.9.0#31a3a6fd1dc50f77b39bd388fce004f9ec41bf7f"
+version = "8.10.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.0#a64c08996edd0e9c4c0fd27c1fae72dcedc4474f"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -911,8 +911,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "13.4.1"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v13.4.1#e0370aade3acdbc6ce26feb235f7ae69a1405114"
+version = "13.4.2"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v13.4.2#ac214bf3df87693a13fca9f62e2a021d4eefb19e"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.87"
+version = "0.5.88"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -991,8 +991,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "8.9.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.9.0#31a3a6fd1dc50f77b39bd388fce004f9ec41bf7f"
+version = "8.10.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.0#a64c08996edd0e9c4c0fd27c1fae72dcedc4474f"
 dependencies = [
  "android_system_properties",
  "async-trait",

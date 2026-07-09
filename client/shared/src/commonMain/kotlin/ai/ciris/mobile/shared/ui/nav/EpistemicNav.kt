@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.ui.nav
 
 import androidx.compose.ui.graphics.vector.ImageVector
+import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 
 /**
@@ -463,6 +464,34 @@ data class NavGroup(
  * The dropped NavSurface objects remain defined (route compatibility) but are
  * no longer surfaced in any group.
  */
+/**
+ * The AGENT group — the agent's own brain cards, re-applied on top of the
+ * inherited server (node) nav shell ONLY on the agent build (gated in
+ * [EPISTEMIC_NAV_GROUPS] on [CIRISBuild.HAS_AGENT]). This is the FULL agent
+ * client = the node client + the agent's cards. The server prunes these pure
+ * agent/brain surfaces for its standalone AI-free node build; on the agent build
+ * they are surfaced again so the agent's Interact reasoning-stream chat, sessions,
+ * tasks/scheduler, tools, task-memory and the agent Settings sub-tree (LLM /
+ * System / Runtime / Config / Skills) are reachable. Node-observation infra
+ * (GraphMemory, WiseAuthority, Telemetry+Logs, Services, System/Runtime/Config)
+ * also lives in the [NODE_GROUP] below; a few surfaces intentionally appear in
+ * both — the agent framing (a Settings sub-tree, a Memory→Graph card) alongside
+ * the node-infra framing. Defined unconditionally (route/reference stability);
+ * only surfaced when HAS_AGENT.
+ */
+val AGENT_GROUP = NavGroup(
+    id = "agent",
+    label = "Agent",
+    icon = CIRISIcons.thought,
+    surfaces = listOf(
+        NavSurface.Interact,        // + Sessions (agent chat / reasoning stream)
+        NavSurface.Tickets,         // + Scheduler (agent tasks)
+        NavSurface.Tools,           // agent tools
+        NavSurface.Memory,          // + Graph (agent task memory)
+        NavSurface.AgentSettings,   // + LLM, System, Runtime, Config, Skills
+    ),
+        labelKey = "nav.group.agent",)
+
 val NODE_GROUP = NavGroup(
     id = "node",
     label = "Node",
@@ -531,14 +560,16 @@ val COMMONS_GROUP = NavGroup(
     label = "Commons",
     icon = CIRISIcons.globe,
     accentHex = "#C96A38", // CIRISColors.BusTool — shares the federation accent
-    surfaces = listOf(
-        // LayerAgent (Agent/Self) dropped from the nav for the AI-free node
-        // client; the object remains defined for route compatibility.
-        NavSurface.LayerFamily,
-        NavSurface.LayerLocalCommunity,
-        NavSurface.LayerGlobalCommunities,
-        NavSurface.LayerGlobalCommons,
-    ),
+    surfaces = buildList {
+        // LayerAgent (Agent/Self) — the agent's own self-scope layer hub. Surfaced
+        // only on the agent build; dropped from the AI-free node client's nav (the
+        // object remains defined for route compatibility).
+        if (CIRISBuild.HAS_AGENT) add(NavSurface.LayerAgent)
+        add(NavSurface.LayerFamily)
+        add(NavSurface.LayerLocalCommunity)
+        add(NavSurface.LayerGlobalCommunities)
+        add(NavSurface.LayerGlobalCommons)
+    },
         labelKey = "nav.group.commons_layers",)
 
 // FEDERATION_GROUP deleted 2.9.6 — it duplicated COMMONS_GROUP (same domain,
@@ -548,16 +579,39 @@ val COMMONS_GROUP = NavGroup(
 // (redundant with LayerGlobalCommons) and "Trust Topology" (subsumed by the
 // per-scope Trust sections + NetworkTrustGraph) were removed entirely.
 
-// CLIENT_GROUP removed for the AI-free node client — both its surfaces
-// (AgentsList, ClientInterface) are pure agent/client cards and were dropped.
-// The NavSurface objects (NavSurface.AgentsList, NavSurface.ClientInterface)
-// remain defined for route compatibility.
+// CLIENT_GROUP — surfaced only on the agent build (gated in [EPISTEMIC_NAV_GROUPS]
+// on [CIRISBuild.HAS_AGENT]). Its surfaces (AgentsList, ClientInterface) are pure
+// agent/client cards the server drops for its standalone AI-free node build; on
+// the agent build they are surfaced again. Defined unconditionally for
+// route/reference stability.
+val CLIENT_GROUP = NavGroup(
+    id = "client",
+    label = "Client",
+    icon = CIRISIcons.home,
+    surfaces = listOf(
+        NavSurface.AgentsList,
+        NavSurface.ClientInterface,
+    ),
+        labelKey = "nav.group.client",)
 
 /** All groups in display order. The scale-organized Commons group absorbs what
  *  used to be the separate Federation group (deleted 2.9.6). The former "Agent"
- *  group is now the node-observation "Node" group; the "Client" group is dropped
- *  (standalone AI-free node client). */
-val EPISTEMIC_NAV_GROUPS = listOf(NODE_GROUP, SAFETY_GROUP, MANAGE_GROUP, COMMONS_GROUP)
+ *  group is now the node-observation "Node" group.
+ *
+ *  Agent-only groups (AGENT_GROUP, CLIENT_GROUP) are gated on
+ *  [CIRISBuild.HAS_AGENT] — dormant/absent for the AI-free node client, so the
+ *  agent's adoption is a single flag flip. Under HAS_AGENT the full agent client
+ *  leads with AGENT_GROUP (agent brain cards), followed by the inherited
+ *  node-observation NODE_GROUP + the shared Safety / Manage / Commons shells, with
+ *  CLIENT_GROUP last. */
+val EPISTEMIC_NAV_GROUPS: List<NavGroup> = buildList {
+    if (CIRISBuild.HAS_AGENT) add(AGENT_GROUP)
+    add(NODE_GROUP)
+    add(SAFETY_GROUP)
+    add(MANAGE_GROUP)
+    add(COMMONS_GROUP)
+    if (CIRISBuild.HAS_AGENT) add(CLIENT_GROUP)
+}
 
 /**
  * Walk the entire surface tree (depth-first) — used by routers needing the

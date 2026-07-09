@@ -114,6 +114,11 @@ class NodeSwitcherViewModel(
             null
         }
 
+        // Fed-ID presence for the logged-in owner: owner key_id present = has a
+        // fed-ID; null/blank = legacy WA owner with no fed-ID (offer Add Fed ID);
+        // owned==null = unknown (leave the entry hidden).
+        _ownerHasFedId.value = owned?.let { !it.owner.isNullOrBlank() }
+
         val projected: List<NodeProfile> = if (owned != null) {
             PlatformLogger.i(
                 TAG,
@@ -397,6 +402,21 @@ class NodeSwitcherViewModel(
     val upgradeInProgress: StateFlow<Boolean> = _upgradeInProgress.asStateFlow()
 
     /**
+     * **Does the logged-in owner already have a federation ID?** — detected from the
+     * local node's `GET /v1/setup/owned-nodes` projection: [OwnedNodesDto.owner] is
+     * the bound owner's *fed-ID key_id*, and is null/blank when the node is owned the
+     * legacy way (a password/OAuth ROOT WA with NO fed-ID). Within the management UI
+     * the user is always the authenticated owner, so:
+     *   - `false` = owner is bound but has NO fed-ID → offer "Add Federation ID".
+     *   - `true`  = owner already has a fed-ID → hide the entry.
+     *   - `null`  = unknown (owned-nodes not reachable) → hide the entry (fail-closed;
+     *     don't offer an upgrade we can't reason about).
+     * Refreshed on every [reload].
+     */
+    private val _ownerHasFedId = MutableStateFlow<Boolean?>(null)
+    val ownerHasFedId: StateFlow<Boolean?> = _ownerHasFedId.asStateFlow()
+
+    /**
      * **Upgrade THIS device's local node to a fed-ID owner-binding** — the
      * WAs-need-fed-IDs migration (the agent team's 2.9.7). For a node owned the
      * legacy way (a password/OAuth ROOT WA with NO fed-ID), this mints the owner's
@@ -409,22 +429,68 @@ class NodeSwitcherViewModel(
      * adopt-existing-fed-ID path (pkcs11/provision=false) — left for the YubiKey
      * reclaim case; null mints a fresh hardware-rooted fed-ID.
      */
-    fun upgradeToFedId(label: String? = null) {
+    fun upgradeToFedId(
+        label: String? = null,
+        announce: Boolean = false,
+        traceOptIn: Boolean = false,
+    ) {
         if (_upgradeInProgress.value) return
         _upgradeInProgress.value = true
         _error.value = null
+        _notice.value = null
         viewModelScope.launch {
             try {
                 // 1) Mint the owner's fed-ID on the local node (owner-gated; uses the
                 //    current owner session). Secure-only — substrate auto-picks custody.
+                //    A validated, non-generic label is passed by the guided flow to
+                //    avoid the ciris-client-user identity collision.
                 apiClient.mintUserIdentity(
                     label = label?.trim()?.ifBlank { null },
                     backend = null,
                     localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
                 )
-                // 2) Re-root the existing node on the just-minted fed-ID.
+                // 2) Re-root the existing node on the just-minted fed-ID (login
+                //    preserved — non-destructive owner-binding model).
                 apiClient.upgradeOwnerToFedId(localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
                 PlatformLogger.i(TAG, "[upgradeToFedId] node re-rooted on a fed-ID owner-binding")
+
+                // 3) If the user chose to announce, promote the owner-binding
+                //    self→FEDERATION + enable the identity announce. This is UPSTREAM
+                //    of traces/community; takes effect next boot. Non-fatal — a failed
+                //    announce must not undo the (successful) fed-ID upgrade, so surface
+                //    a soft notice rather than an error (mirrors first-run handling).
+                if (announce) {
+                    try {
+                        val ann = apiClient.announceOwnership(localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
+                        PlatformLogger.i(
+                            TAG,
+                            "[upgradeToFedId] announced to federation owner=${ann.owner} " +
+                                "scope=${ann.cohortScope} effect=${ann.announceTakesEffect}",
+                        )
+                    } catch (e: Exception) {
+                        PlatformLogger.w(TAG, "[upgradeToFedId] federation announce failed (non-fatal): ${e.message}")
+                        _notice.value = "Fed ID added, but announcing to the federation didn't go " +
+                            "through — you can turn on announcing later. (${e.message})"
+                    }
+                }
+
+                // 4) Trace opt-in (only meaningful once announced). Non-fatal.
+                if (announce && traceOptIn) {
+                    try {
+                        apiClient.updateAccordSettings(consentGiven = true)
+                        PlatformLogger.i(TAG, "[upgradeToFedId] accord metrics consent enabled")
+                    } catch (e: Exception) {
+                        PlatformLogger.w(TAG, "[upgradeToFedId] accord opt-in failed (non-fatal): ${e.message}")
+                    }
+                }
+
+                if (_notice.value == null) {
+                    _notice.value = if (announce) {
+                        "Fed ID added and announced — federation visibility takes effect on next launch."
+                    } else {
+                        "Fed ID added. Your node stays private (self-scoped)."
+                    }
+                }
                 reload()
             } catch (e: Exception) {
                 PlatformLogger.e(TAG, "[upgradeToFedId] failed: ${e.message}", e)

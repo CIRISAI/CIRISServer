@@ -24,6 +24,7 @@ import ai.ciris.mobile.shared.models.ConfigStepResultData
 import ai.ciris.mobile.shared.models.DiscoveredItemData
 import ai.ciris.mobile.shared.models.LoadableAdaptersData
 import ai.ciris.mobile.shared.ui.components.AdapterWizardDialog
+import ai.ciris.mobile.shared.ui.components.AnnounceDecisionCard
 import ai.ciris.mobile.shared.ui.components.LocalLlmServerDiscovery
 import ai.ciris.mobile.shared.ui.components.rememberLocalLlmDiscoveryState
 import ai.ciris.mobile.shared.viewmodels.DeviceAuthStatus
@@ -624,12 +625,30 @@ private fun StepIndicators(
     // Node-client first-run flow (both branches): account-first 4-step path
     //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP →
     //   AGE_RANGE  (→ COMPLETE)
-    val steps = listOf(
-        SetupStep.WELCOME to "1",
-        SetupStep.ACCOUNT_AND_CONFIRMATION to "2",
-        SetupStep.FEDERATION_IDENTITY_SETUP to "3",
-        SetupStep.AGE_RANGE to "4"
-    )
+    // Agent build (CIRISBuild.HAS_AGENT): LLM_CONFIGURATION is inserted after
+    // the fed-ID (5-step path). NOTE: the visual order here does NOT match the
+    // SetupStep enum's ordinal order (LLM_CONFIGURATION is declared before
+    // ACCOUNT_AND_CONFIRMATION), so active/complete state is computed from the
+    // POSITION in this list when the current step is one of the listed steps;
+    // ordinal comparison is kept as the fallback for off-path steps (COMPLETE,
+    // legacy NODE_AUTH/QUICK_SETUP flows).
+    val steps = if (CIRISBuild.HAS_AGENT) {
+        listOf(
+            SetupStep.WELCOME to "1",
+            SetupStep.ACCOUNT_AND_CONFIRMATION to "2",
+            SetupStep.FEDERATION_IDENTITY_SETUP to "3",
+            SetupStep.LLM_CONFIGURATION to "4",
+            SetupStep.AGE_RANGE to "5"
+        )
+    } else {
+        listOf(
+            SetupStep.WELCOME to "1",
+            SetupStep.ACCOUNT_AND_CONFIRMATION to "2",
+            SetupStep.FEDERATION_IDENTITY_SETUP to "3",
+            SetupStep.AGE_RANGE to "4"
+        )
+    }
+    val currentFlowIndex = steps.indexOfFirst { it.first == currentStep }
 
     Row(
         modifier = modifier.testable("setup_step_indicators"),
@@ -637,8 +656,8 @@ private fun StepIndicators(
         verticalAlignment = Alignment.CenterVertically
     ) {
         steps.forEachIndexed { index, (step, number) ->
-            val isActive = currentStep >= step
-            val isComplete = currentStep > step
+            val isActive = if (currentFlowIndex >= 0) currentFlowIndex >= index else currentStep >= step
+            val isComplete = if (currentFlowIndex >= 0) currentFlowIndex > index else currentStep > step
             val stepName = step.name.lowercase()
 
             Box(
@@ -665,7 +684,7 @@ private fun StepIndicators(
                         .width(48.dp)
                         .height(2.dp)
                         .background(
-                            color = if (currentStep > step) SetupColors.Primary else SetupColors.GrayLight
+                            color = if (isComplete) SetupColors.Primary else SetupColors.GrayLight
                         )
                 )
             }
@@ -1978,25 +1997,45 @@ private fun OptionalFeaturesStep(
                     DataPointRow("Performance metrics", SetupColors.InfoText)
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.testableClickable("item_accord_metrics_consent") {
-                        viewModel.setAccordMetricsConsent(!state.accordMetricsConsent)
-                    }
-                ) {
-                    Checkbox(
-                        checked = state.accordMetricsConsent,
-                        onCheckedChange = { viewModel.setAccordMetricsConsent(it) },
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = SetupColors.Primary,
-                            uncheckedColor = SetupColors.TextSecondary
+                // Trace opt-in is GATED on announcing: un-announced nodes are
+                // self-scoped and never federate their traces, so the opt-in is only
+                // meaningful once the owner has announced (set on the fed-ID step).
+                if (state.announceOwnership) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.testableClickable("item_accord_metrics_consent") {
+                            viewModel.setAccordMetricsConsent(!state.accordMetricsConsent)
+                        }
+                    ) {
+                        Checkbox(
+                            checked = state.accordMetricsConsent,
+                            onCheckedChange = { viewModel.setAccordMetricsConsent(it) },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = SetupColors.Primary,
+                                uncheckedColor = SetupColors.TextSecondary
+                            )
                         )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = localizedString("mobile.setup_alignment_agree"),
+                            color = SetupColors.InfoDark,
+                            fontSize = 14.sp
+                        )
+                    }
+                } else {
                     Text(
-                        text = localizedString("mobile.setup_alignment_agree"),
-                        color = SetupColors.InfoDark,
-                        fontSize = 14.sp
+                        // New key (not yet in en.json): localizedString returns the
+                        // key itself when absent, so guard on "blank or == key".
+                        text = localizedString("mobile.announce_decision_trace_locked").let {
+                            if (it.isBlank() || it == "mobile.announce_decision_trace_locked") {
+                                "Turn on announcing above to enable sending reasoning traces and " +
+                                    "joining communities."
+                            } else {
+                                it
+                            }
+                        },
+                        color = SetupColors.TextSecondary,
+                        fontSize = 13.sp,
                     )
                 }
 
@@ -2617,10 +2656,22 @@ private fun FederationIdentityStep(
                         SecureWith2FACard(state = state, viewModel = viewModel)
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Federation opt-in — privacy-first, default OFF. Ownership
-                        // is self-scoped (private) unless the user chooses to
-                        // announce; the toggle lives with the other fed-ID choices.
-                        AnnounceOwnershipCard(state = state, viewModel = viewModel)
+                        // Federation opt-in — now a FIRST-CLASS decision: announcing
+                        // is upstream of everything the community touches (traces +
+                        // joining communities). Privacy-first, default OFF. The trace
+                        // opt-in (accordMetricsConsent) is GATED inside this card — it
+                        // can only be enabled once the user announces (un-announced
+                        // nodes never federate their traces). Turning announce OFF also
+                        // clears the trace opt-in so state stays consistent.
+                        AnnounceDecisionCard(
+                            announce = state.announceOwnership,
+                            onAnnounceChange = { on ->
+                                viewModel.setAnnounceOwnership(on)
+                                if (!on) viewModel.setAccordMetricsConsent(false)
+                            },
+                            traceOptIn = state.accordMetricsConsent,
+                            onTraceOptInChange = { viewModel.setAccordMetricsConsent(it) },
+                        )
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Button(
@@ -3935,26 +3986,45 @@ private fun QuickSetupStep(
                     )
                 }
 
-                // Accord metrics consent checkbox
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.testableClickable("item_accord_metrics_consent_quick") {
-                        viewModel.setAccordMetricsConsent(!state.accordMetricsConsent)
-                    }
-                ) {
-                    Checkbox(
-                        checked = state.accordMetricsConsent,
-                        onCheckedChange = { viewModel.setAccordMetricsConsent(it) },
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = SetupColors.Primary,
-                            uncheckedColor = SetupColors.TextSecondary
+                // Accord metrics consent checkbox — GATED on announcing (un-announced
+                // nodes never federate their traces, so the opt-in is only meaningful
+                // once the owner has announced).
+                if (state.announceOwnership) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.testableClickable("item_accord_metrics_consent_quick") {
+                            viewModel.setAccordMetricsConsent(!state.accordMetricsConsent)
+                        }
+                    ) {
+                        Checkbox(
+                            checked = state.accordMetricsConsent,
+                            onCheckedChange = { viewModel.setAccordMetricsConsent(it) },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = SetupColors.Primary,
+                                uncheckedColor = SetupColors.TextSecondary
+                            )
                         )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = localizedString("mobile.setup_alignment_agree"),
+                            color = SetupColors.InfoDark,
+                            fontSize = 14.sp
+                        )
+                    }
+                } else {
                     Text(
-                        text = localizedString("mobile.setup_alignment_agree"),
-                        color = SetupColors.InfoDark,
-                        fontSize = 14.sp
+                        // New key (not yet in en.json): localizedString returns the
+                        // key itself when absent, so guard on "blank or == key".
+                        text = localizedString("mobile.announce_decision_trace_locked").let {
+                            if (it.isBlank() || it == "mobile.announce_decision_trace_locked") {
+                                "Turn on announcing above to enable sending reasoning traces and " +
+                                    "joining communities."
+                            } else {
+                                it
+                            }
+                        },
+                        color = SetupColors.TextSecondary,
+                        fontSize = 13.sp,
                     )
                 }
 

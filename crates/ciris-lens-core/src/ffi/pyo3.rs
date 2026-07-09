@@ -563,9 +563,12 @@ enum LensClientInner {
 /// )
 /// ```
 ///
-/// The cohabitation path calls these engine Python methods:
+/// The cohabitation path calls these engine Python methods (the seal is HYBRID —
+/// CIRISServer#121 — so both signing halves are invoked):
 /// - `engine.local_key_id()` → str — key ID stamped onto the trace
 /// - `engine.local_sign(canonical_bytes: bytes)` → 64-byte Ed25519 sig
+/// - `engine.local_pqc_sign(canonical ‖ ed25519_sig: bytes)` → ML-DSA-65 sig
+/// - `engine.local_pqc_public_key_b64()` → str — the producer's ML-DSA-65 pubkey
 /// - `engine.receive_and_persist(batch_bytes: bytes, pre_verified=False)` →
 ///   `{"envelopes_processed": N, "trace_events_inserted": N, ...,
 ///    "signatures_verified": N}` — persists via the host engine's
@@ -607,7 +610,7 @@ enum LensClientInner {
 /// cohabiting in the same process) cannot be tested in-repo — it requires
 /// two separately-built wheels. This is a CIRISConformance `requires_lens`
 /// cohabitation cell (not faked here). The Rust side of the cohabitation path
-/// (`PyEngineCapture::prepare` → `canonical_bytes_for` → `apply_signature_and_batch`)
+/// (`PyEngineCapture::prepare` → `canonical_bytes_for` → `apply_hybrid_signature_and_batch`)
 /// IS tested in `src/capture/py_engine.rs` via `py_engine_path_bytes_round_trip_through_persist`.
 #[pyclass(name = "LensClient")]
 struct PyLensClient {
@@ -863,18 +866,21 @@ impl PyLensClient {
 
             // ── Cohabitation path (CIRISLensCore#43.1 P0 fix) ────────
             //
-            // Orchestration:
+            // Orchestration (HYBRID seal — CIRISServer#121; an Ed25519-only seal is
+            // rejected by persist's hybrid-strict floor with verify_hybrid_required):
             // 1. PyEngineCapture::prepare (Rust) — store, consent, provenance,
             //    stamp deployment_profile + trace_level. Sync, no tokio needed.
             // 2. For non-sealing outcomes → return immediately.
             // 3. For ReadyToSeal:
             //    a. canonical_bytes_for (Rust — JCS / V2Jcs dispatch)
-            //    b. engine.local_key_id() (Python)
-            //    c. engine.local_sign(canonical_bytes) (Python) → 64-byte sig
-            //    d. PyEngineCapture::apply_signature_and_batch (Rust)
-            //    e. tee_write_if_configured (Rust)
-            //    f. engine.receive_and_persist(batch_bytes) (Python) → summary
-            //    g. Extract trace_events_inserted + signatures_verified from summary
+            //    b. engine_federation_key_id (Python) — the DERIVED key_id (#118)
+            //    c. engine.local_sign(canonical) (Python) → 64-byte Ed25519 sig
+            //    d. engine.local_pqc_sign(canonical ‖ ed25519_sig) (Python) → ML-DSA-65
+            //    e. engine.local_pqc_public_key_b64() (Python) — rides the envelope
+            //    f. PyEngineCapture::apply_hybrid_signature_and_batch (Rust)
+            //    g. tee_write_if_configured (Rust)
+            //    h. engine.receive_and_persist(batch_bytes) (Python) → summary
+            //    i. Extract trace_events_inserted + signatures_verified from summary
             LensClientInner::Cohabitation { capture, py_engine } => {
                 let cap = Arc::clone(capture);
                 let engine = py_engine.bind(py);
