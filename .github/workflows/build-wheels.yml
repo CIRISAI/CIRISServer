@@ -46,7 +46,7 @@ jobs:
           - { name: linux-aarch64, runs-on: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       # Restore the release substrate compile (warmed on main with the matching
       # shared-key). Saves only on main; on a tag this is restore-only (a tag-
       # scoped save can't be read by the next tag, so it would just burn budget).
@@ -249,6 +249,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
+          rust-toolchain: "1.97.0"
           args: --release --strip --out dist
           # maturin-action's built-in compiler cache (sccache over the GHA cache
           # backend), warmed on main by warm-release-cache.yml calling this same
@@ -348,6 +349,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
+          rust-toolchain: "1.97.0"
           args: --release --strip --out dist
           # Compiler cache (sccache over the GHA backend), warmed on main via
           # warm-release-cache.yml. Restore-on-tag; harmless otherwise.
@@ -383,7 +385,7 @@ jobs:
           - { abi: arm64-v8a,   target: aarch64-linux-android,   clang: aarch64-linux-android24,    legacy: aarch64-linux-android, pw: 64 }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
       # Cache the NDK cross-compile of the substrate per-ABI (the target-specific
