@@ -268,6 +268,68 @@ pub async fn run_federation_delivery(
         }
     }
 
+    // 3b. PRIME the admitted explicit-hash canonical peers (CIRISServer#205 gap #1).
+    //    `ciris-canonical-1` is a v7.0.0 EXPLICIT-HASH destination that CANNOT
+    //    announce (Leviculum `ExplicitHashCannotAnnounce`), so `knows_peer(canonical)`
+    //    stays false and sends can't address it — zero delivery — until the peer is
+    //    ROOTED out-of-band via edge's prime mechanism. persist v13.5.0 (#397) now
+    //    carries the transport-tier `(dest-hash, transport-Ed25519)` binding in the
+    //    directory, so we resolve + prime each admitted canonical here (mirrors edge
+    //    v9.3.0's `PyEdge::prime_peer` — the same `inject_rooted_peer_for_test` core).
+    //    Best-effort: a missing/undecodable binding WARNs and skips (the expected
+    //    state until Node A publishes its transport binding via the canonical
+    //    address-update) — never fatal. `reticulum_transport()` is `None` on a
+    //    transport-less build → warn + skip the whole prime step (targets stay
+    //    admitted). Matches the crate's reticulum surface (compose/holonomic call
+    //    `reticulum_transport()` unconditionally — the edge dep always pins
+    //    `transport-reticulum`, so no server-side cfg gate is needed).
+    match edge.reticulum_transport() {
+        Some(transport) => {
+            for canonical in &admitted_targets {
+                match directory.list_transport_destinations_for(canonical).await {
+                    Ok(dests) => match resolve_reticulum_prime_binding(&dests) {
+                        Ok(Some((dest_hash, ed25519))) => {
+                            let before = transport.knows_peer(canonical).await;
+                            transport
+                                .inject_rooted_peer_for_test(canonical, dest_hash, ed25519)
+                                .await;
+                            let after = transport.knows_peer(canonical).await;
+                            tracing::info!(
+                                canonical = %canonical,
+                                dest_hash = %hex::encode(dest_hash),
+                                knows_peer_before = before,
+                                knows_peer_after = after,
+                                "federation delivery: primed {canonical}"
+                            );
+                        }
+                        Ok(None) => tracing::warn!(
+                            canonical = %canonical,
+                            "federation delivery: {canonical}: no reticulum transport-tier binding \
+                             in directory — cannot prime (explicit-hash canonical stays unrooted; \
+                             publish it via the canonical address-update)"
+                        ),
+                        Err(e) => tracing::warn!(
+                            canonical = %canonical,
+                            error = %e,
+                            "federation delivery: {canonical}: reticulum transport binding failed \
+                             to decode — cannot prime, skipping this target"
+                        ),
+                    },
+                    Err(e) => tracing::warn!(
+                        canonical = %canonical,
+                        error = %e,
+                        "federation delivery: directory transport-destination lookup for \
+                         {canonical} failed — cannot prime, skipping this target"
+                    ),
+                }
+            }
+        }
+        None => tracing::warn!(
+            "federation delivery: embedded edge has no Reticulum transport — cannot prime the \
+             explicit-hash canonicals (they stay unrooted until announce-reachable)"
+        ),
+    }
+
     // 4. Start the ONE ReplicationRuntime over the shared transport, seeding the
     //    admitted canonical key_ids as extra_targets (belt-and-suspenders alongside
     //    the consent grant above). Reuses the EXACT compose core.
@@ -375,6 +437,68 @@ pub(crate) fn distinct_canonical_key_ids(
     out
 }
 
+/// Select the reticulum transport-tier binding from a directory's transport
+/// destinations for an occurrence and decode it into the raw `prime` inputs.
+///
+/// Picks the first entry with `transport_kind == "reticulum"` that carries a
+/// `transport_ed25519_pubkey_base64` (the #397 field), then decodes:
+///   - `destination` (lowercase hex) → the 16-byte RNS dest-hash,
+///   - `transport_ed25519_pubkey_base64` (base64-standard) → the 32-byte
+///     transport-tier Ed25519 verifying key.
+///
+/// Returns:
+///   - `Ok(Some((dest_hash, ed25519)))` — a usable binding to prime with.
+///   - `Ok(None)` — no reticulum entry carries a transport ed25519 pubkey yet
+///     (Node A hasn't published its transport binding — the caller WARNs + skips).
+///   - `Err(_)` — an entry was found but its hex/base64 is malformed or the wrong
+///     length (the caller WARNs + skips that target).
+///
+/// Pure over its input slice so the resolve/decode/selection logic is unit-testable
+/// without a live directory or transport (the actual `inject_rooted_peer_for_test`
+/// needs a live edge — covered by the agent live-lens QA).
+pub(crate) fn resolve_reticulum_prime_binding(
+    dests: &[ciris_persist::federation::TransportDestination],
+) -> Result<Option<([u8; 16], [u8; 32])>> {
+    use base64::Engine as _;
+
+    let Some(entry) = dests
+        .iter()
+        .find(|d| d.transport_kind == "reticulum" && d.transport_ed25519_pubkey_base64.is_some())
+    else {
+        return Ok(None);
+    };
+    // Safe: the `find` predicate guarantees `Some`.
+    let pubkey_b64 = entry
+        .transport_ed25519_pubkey_base64
+        .as_deref()
+        .expect("find predicate guarantees transport_ed25519_pubkey_base64 is Some");
+
+    let dest_hash_vec = hex::decode(&entry.destination).with_context(|| {
+        format!(
+            "reticulum destination must be lowercase hex; got {:?}",
+            entry.destination
+        )
+    })?;
+    let dest_hash: [u8; 16] = dest_hash_vec.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "reticulum dest-hash must decode to 16 bytes; got {}",
+            dest_hash_vec.len()
+        )
+    })?;
+
+    let ed_vec = base64::engine::general_purpose::STANDARD
+        .decode(pubkey_b64)
+        .context("transport_ed25519_pubkey_base64 must be base64-standard")?;
+    let ed25519: [u8; 32] = ed_vec.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "transport ed25519 pubkey must decode to 32 bytes; got {}",
+            ed_vec.len()
+        )
+    })?;
+
+    Ok(Some((dest_hash, ed25519)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +548,110 @@ mod tests {
     #[test]
     fn build_replication_peers_empty_target_set() {
         assert!(crate::compose::build_replication_peers(&[]).is_empty());
+    }
+
+    // ---- resolve_reticulum_prime_binding ----
+
+    use base64::Engine as _;
+    use ciris_persist::federation::TransportDestination;
+
+    /// A `TransportDestination` fixture. `dest`/`ed_b64` are the raw address +
+    /// transport-Ed25519 (already encoded as the store carries them).
+    fn dest(kind: &str, dest_hex: &str, ed_b64: Option<&str>) -> TransportDestination {
+        TransportDestination {
+            occurrence_key_id: "canon-1".to_string(),
+            transport_kind: kind.to_string(),
+            destination: dest_hex.to_string(),
+            asserted_at: chrono::Utc::now(),
+            last_seen_at: None,
+            transport_ed25519_pubkey_base64: ed_b64.map(str::to_string),
+        }
+    }
+
+    /// 16-byte dest-hash as lowercase hex + a valid 32-byte base64 ed25519.
+    fn good_hex_16() -> String {
+        hex::encode([0xABu8; 16])
+    }
+    fn good_ed_b64() -> String {
+        base64::engine::general_purpose::STANDARD.encode([0x11u8; 32])
+    }
+
+    #[test]
+    fn prime_binding_decodes_reticulum_entry_16_32() {
+        let dests = vec![dest("reticulum", &good_hex_16(), Some(&good_ed_b64()))];
+        let (dh, ed) = resolve_reticulum_prime_binding(&dests)
+            .expect("decodes")
+            .expect("some binding");
+        assert_eq!(dh, [0xAB; 16]);
+        assert_eq!(ed, [0x11; 32]);
+    }
+
+    #[test]
+    fn prime_binding_picks_the_reticulum_entry_with_a_transport_ed25519() {
+        // A websocket entry (ignored), a reticulum entry WITHOUT a transport key
+        // (not primeable — must be skipped), then the reticulum entry WITH one.
+        let dests = vec![
+            dest("websocket", "wss://example.test", Some(&good_ed_b64())),
+            dest("reticulum", &good_hex_16(), None),
+            dest(
+                "reticulum",
+                &hex::encode([0xCDu8; 16]),
+                Some(&good_ed_b64()),
+            ),
+        ];
+        let (dh, ed) = resolve_reticulum_prime_binding(&dests)
+            .expect("decodes")
+            .expect("some binding");
+        assert_eq!(dh, [0xCD; 16]);
+        assert_eq!(ed, [0x11; 32]);
+    }
+
+    #[test]
+    fn prime_binding_none_when_no_reticulum_transport_key() {
+        // Reticulum entry exists but carries no transport ed25519 (Node A hasn't
+        // published the #397 binding yet) → None (caller warns "no binding").
+        let dests = vec![
+            dest("websocket", "wss://example.test", Some(&good_ed_b64())),
+            dest("reticulum", &good_hex_16(), None),
+        ];
+        assert!(resolve_reticulum_prime_binding(&dests)
+            .expect("ok")
+            .is_none());
+    }
+
+    #[test]
+    fn prime_binding_none_on_empty() {
+        assert!(resolve_reticulum_prime_binding(&[]).expect("ok").is_none());
+    }
+
+    #[test]
+    fn prime_binding_err_on_bad_dest_hash_length() {
+        // Valid hex but only 8 bytes → not a 16-byte dest-hash → Err (skip target).
+        let dests = vec![dest(
+            "reticulum",
+            &hex::encode([0u8; 8]),
+            Some(&good_ed_b64()),
+        )];
+        assert!(resolve_reticulum_prime_binding(&dests).is_err());
+    }
+
+    #[test]
+    fn prime_binding_err_on_non_hex_dest() {
+        let dests = vec![dest("reticulum", "not-hex-zzzz", Some(&good_ed_b64()))];
+        assert!(resolve_reticulum_prime_binding(&dests).is_err());
+    }
+
+    #[test]
+    fn prime_binding_err_on_bad_ed25519_length() {
+        // Valid base64 but 16 bytes → not a 32-byte ed25519 → Err (skip target).
+        let short_ed = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
+        let dests = vec![dest("reticulum", &good_hex_16(), Some(&short_ed))];
+        assert!(resolve_reticulum_prime_binding(&dests).is_err());
+    }
+
+    #[test]
+    fn prime_binding_err_on_non_base64_ed25519() {
+        let dests = vec![dest("reticulum", &good_hex_16(), Some("!!!not base64!!!"))];
+        assert!(resolve_reticulum_prime_binding(&dests).is_err());
     }
 }
