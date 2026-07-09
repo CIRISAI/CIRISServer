@@ -1,8 +1,7 @@
 name: Localization
 
 on:
-  push:
-    branches: [main]
+  # PR-only — the squash-merge is identical to the passed PR; no main-only side effect.
   pull_request:
 
 jobs:
