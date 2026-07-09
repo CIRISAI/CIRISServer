@@ -1133,14 +1133,14 @@ fn dict_to_inbound_event(d: &Bound<'_, PyDict>) -> PyResult<InboundEvent> {
 
     let task_id: Option<String> = d
         .get_item("task_id")?
-        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .filter(|v| !v.is_none())
         .map(|v| v.extract::<String>())
         .transpose()
         .map_err(|_| PyValueError::new_err("component field \"task_id\" must be a str or None"))?;
 
     let trace_level: Option<String> = d
         .get_item("trace_level")?
-        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .filter(|v| !v.is_none())
         .map(|v| v.extract::<String>())
         .transpose()
         .map_err(|_| {

@@ -347,6 +347,10 @@ async fn add_occurrence(
                 destination: dest.clone(),
                 asserted_at: now,
                 last_seen_at: Some(now),
+                // v13.5.0 (#397): the submitted occurrence-bind carries only
+                // (kind, dest); the transport-tier Ed25519 is populated by the
+                // reticulum self-publish path, not this generic bind.
+                transport_ed25519_pubkey_base64: None,
             })
             .await
         {
