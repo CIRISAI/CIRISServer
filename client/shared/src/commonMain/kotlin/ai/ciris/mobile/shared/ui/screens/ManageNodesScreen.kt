@@ -87,6 +87,9 @@ fun ManageNodesScreen(
     onBack: () -> Unit,
     /** Navigate to the claim-ownership flow (ClaimNodeScreen). */
     onClaimNode: () -> Unit,
+    /** Navigate to the guided "Add Federation ID" catch-up flow (AddFederationIdScreen).
+     *  Only surfaced when the logged-in owner has NO fed-ID. */
+    onAddFederationId: () -> Unit = {},
     /** Delegations (owner → agent edges) — drives the graph's delegation/agent vertices. */
     delegationsViewModel: DelegationsViewModel? = null,
     /** consent:replication peering (node ↔ node) — drives the graph's consent edges. */
@@ -162,6 +165,7 @@ fun ManageNodesScreen(
                 NodesListView(
                     viewModel = viewModel,
                     onClaimNode = onClaimNode,
+                    onAddFederationId = onAddFederationId,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -201,6 +205,7 @@ private fun RowScope.ViewTab(
 private fun NodesListView(
     viewModel: NodeSwitcherViewModel,
     onClaimNode: () -> Unit,
+    onAddFederationId: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profiles by viewModel.profiles.collectAsState()
@@ -457,7 +462,7 @@ private fun NodesListView(
             // ── Claim ownership affordance ───────────────────────────────────
             Button(
                 onClick = onClaimNode,
-                modifier = Modifier.fillMaxWidth().testable("btn_manage_nodes_claim"),
+                modifier = Modifier.fillMaxWidth().testableClickable("btn_manage_nodes_claim") { onClaimNode() },
             ) {
                 Icon(CIRISIcons.keySecure, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
@@ -471,29 +476,30 @@ private fun NodesListView(
 
             Spacer(Modifier.height(12.dp))
 
-            // ── Upgrade to Fed ID (WAs-need-fed-IDs migration) ───────────────
+            // ── Add Federation ID (WAs-need-fed-IDs migration, catch-up flow) ─
             // For a node owned the legacy way (a password/OAuth WA with NO fed-ID):
-            // mint the owner's hardware-rooted fed-ID + re-root the node on it
-            // (login preserved). Idempotent on a node that's already fed-ID-rooted.
-            val upgrading by viewModel.upgradeInProgress.collectAsState()
-            OutlinedButton(
-                onClick = { viewModel.upgradeToFedId() },
-                enabled = !upgrading,
-                modifier = Modifier.fillMaxWidth().testable("btn_upgrade_to_fed_id"),
-            ) {
-                if (upgrading) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+            // route to the GUIDED AddFederationIdScreen (name → announce decision →
+            // confirm) instead of a bare one-tap mint. Shown ONLY when the logged-in
+            // owner has no fed-ID (ownerHasFedId == false); hidden once they have one
+            // (true) or when it can't be determined (null — fail-closed).
+            val ownerHasFedId by viewModel.ownerHasFedId.collectAsState()
+            if (ownerHasFedId == false) {
+                OutlinedButton(
+                    onClick = onAddFederationId,
+                    modifier = Modifier.fillMaxWidth().testableClickable("btn_add_federation_id") { onAddFederationId() },
+                ) {
+                    Icon(CIRISIcons.keySecure, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
+                    Text(localizedString("mobile.manage_nodes_upgrade_fed_id"))
                 }
-                Text(localizedString("mobile.manage_nodes_upgrade_fed_id"))
-            }
-            Text(
-                text = localizedString("mobile.manage_nodes_upgrade_fed_id_note"),
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+                Text(
+                    text = localizedString("mobile.manage_nodes_upgrade_fed_id_note"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
-            Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(12.dp))
+            }
 
             // ── Carry your nodes to another device (USB sneakernet) ──────────
             // Private/offline owners don't announce, so owned-node bindings never
