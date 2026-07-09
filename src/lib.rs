@@ -99,6 +99,12 @@ pub mod family;
 /// (owner-authority model). Public so the integration test
 /// (`tests/federation_admin.rs`) can drive the router directly.
 pub mod federation_admin;
+/// Agent-embedded federation-delivery controller (CIRISServer#205, subsuming
+/// #204): the ONE entry a bare AGENT calls after its embedded edge is up so it
+/// drives the compose delivery machinery (ReplicationRuntime + consent:replication
+/// reconcile + announce logger) against the baked canonical peer — in-process, via
+/// `current_rust_engine()` + `current_edge()`.
+pub mod federation_delivery;
 /// THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
 /// §0.10): `GET /v1/federation/node-code` — the PUBLIC bootstrap code an operator
 /// reads off the node and hands to a founder's app. Public so the integration
@@ -722,6 +728,40 @@ mod python {
         py.detach(|| rt_block_on(crate::serve_with_adapter(cfg, adapter)))
     }
 
+    /// `ciris_server.start_federation_delivery(cadence_seconds=None,
+    /// announce_logger=True)` — CIRISServer#205 (subsuming #204). The ONE entry a
+    /// bare AGENT calls AFTER its embedded edge is up (`init_edge_runtime`) so the
+    /// edge actually DELIVERS its CEG traces to the canonical mesh.
+    ///
+    /// It drives the SAME delivery machinery ciris-server's compose node runs, but
+    /// against the in-process embedded handles rather than a freshly-composed node:
+    /// grabs `current_rust_engine()` + `current_edge()`, seeds the baked canonical
+    /// key_ids as replication targets (reading their transport hints — subsumes
+    /// #204), authors this node's `consent:replication` grant at the canonical
+    /// peer, starts the `ReplicationRuntime` + the reconcile loop, and subscribes
+    /// the announce logger. Returns the number of admitted canonical targets
+    /// seeded. Idempotent per process (a second call is a no-op).
+    ///
+    /// The controller + its driving runtime are held in a process static, so the
+    /// caller need not retain the return value for delivery to keep running.
+    /// A clear Python error is raised if the engine or edge is not yet initialized,
+    /// or the embedded edge carries no Reticulum transport.
+    #[pyfunction]
+    #[pyo3(name = "start_federation_delivery", signature = (cadence_seconds=None, announce_logger=true))]
+    fn py_start_federation_delivery(
+        py: Python<'_>,
+        cadence_seconds: Option<u64>,
+        announce_logger: bool,
+    ) -> PyResult<u64> {
+        // Release the GIL: the controller bring-up awaits async engine/edge I/O on
+        // its own runtime and the spawned scheduler tasks run detached afterwards.
+        let count = py.detach(|| {
+            crate::federation_delivery::start_and_hold(cadence_seconds, announce_logger)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })?;
+        Ok(count as u64)
+    }
+
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
     // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
     // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
@@ -791,6 +831,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
+        m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +
