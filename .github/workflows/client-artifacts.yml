@@ -124,7 +124,7 @@ jobs:
           python-version: '3.12'
 
       - name: Set up Rust (maturin builds the abi3 wheel)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.0
 
       # CIRISCache 4-layer centipede (CIRISServer#99) — restore the substrate
       # compile so the windows-installer maturin build doesn't cold-compile

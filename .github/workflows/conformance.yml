@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       # Cache the cargo registry/git + the release target/ deps. This is the
       # WARMER for the tag-triggered publish-pypi linux-x86_64 wheel: it builds
       # the SAME `maturin build --release` on the SAME runner, so the substrate
