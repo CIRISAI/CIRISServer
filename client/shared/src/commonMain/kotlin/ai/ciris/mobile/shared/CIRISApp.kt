@@ -432,6 +432,9 @@ fun CIRISApp(
             // GraphMemory goes back to Memory list
             is Screen.GraphMemory -> Screen.Memory
 
+            // Add Federation ID (catch-up) goes back to Manage Nodes
+            is Screen.AddFederationId -> Screen.ManageNodes
+
             // DataManagement and LLMSettings go back to Interact (main screen)
             is Screen.DataManagement -> Screen.Interact
             is Screen.LLMSettings -> Screen.Interact
@@ -2900,12 +2903,25 @@ fun CIRISApp(
                     viewModel = nodeSwitcherViewModel,
                     onBack = { currentScreen = Screen.Interact },
                     onClaimNode = { currentScreen = Screen.ClaimNode },
+                    // Catch-up: legacy owner (no fed-ID) → guided Add Federation ID.
+                    onAddFederationId = { currentScreen = Screen.AddFederationId },
                     // Graph-view data sources: delegations (you → agent),
                     // consent:replication (node ↔ node), plus the shared API
                     // client that powers the live neural background.
                     delegationsViewModel = delegationsViewModel,
                     consentObjectsViewModel = consentObjectsViewModel,
                     apiClient = apiClient,
+                )
+            }
+
+            Screen.AddFederationId -> {
+                // Catch-up guided flow for an existing logged-in owner with NO
+                // fed-ID: name → announce decision → confirm → upgrade-owner.
+                PlatformLogger.d(TAG, "[Screen.AddFederationId] Rendering add-federation-id screen")
+                AddFederationIdScreen(
+                    viewModel = nodeSwitcherViewModel,
+                    onBack = { currentScreen = Screen.ManageNodes },
+                    onDone = { currentScreen = Screen.ManageNodes },
                 )
             }
 
@@ -4284,13 +4300,22 @@ private fun CIRISTopBar(
 }
 
 /**
- * The default post-auth landing screen. For the standalone AI-free node client
- * the agent chat (Screen.Interact) is no longer a surfaced nav card, so the app
- * opens on the node-management surface (the Nodes card, NavSurface.Nodes). The
- * Interact screen object remains defined and reachable; it is simply not the
- * landing destination and not in the sidebar.
+ * The default post-auth landing screen.
+ *
+ * - **Node client (CIRISBuild.HAS_AGENT == false):** the agent chat
+ *   (Screen.Interact) is not a surfaced nav card, so the app opens on the
+ *   node-management surface (the Nodes card, NavSurface.Nodes). The Interact
+ *   screen object remains defined and reachable; it is simply not the landing
+ *   destination and not in the sidebar.
+ * - **Agent build (HAS_AGENT == true):** the full agent client — the agent chat
+ *   (AGENT_GROUP → NavSurface.Interact) is a first-class surfaced card, so the
+ *   app opens on the reasoning-stream chat. Node management stays reachable from
+ *   the Manage group.
+ *
+ * Gated on the flag so the agent's adoption is a single HAS_AGENT flip.
  */
-private val HOME_SCREEN: Screen = Screen.ManageNodes
+private val HOME_SCREEN: Screen =
+    if (CIRISBuild.HAS_AGENT) Screen.Interact else Screen.ManageNodes
 
 /**
  * Navigation screens
@@ -4339,6 +4364,10 @@ private sealed class Screen {
     // Node management (CRUD over saved NodeProfiles) — first-class Manage-group
     // surface, promoted from the in-page node-switcher dropdown.
     object ManageNodes : Screen()
+    // Add Federation ID (catch-up): an existing logged-in owner whose node has NO
+    // fed-ID (legacy WA claim) adds one via the session-authed upgrade path
+    // (mint → /v1/self/upgrade-owner). Flow-only (reached from Manage Nodes).
+    object AddFederationId : Screen()
     // Consent management (consent:replication peering + user-data consent).
     object ManageConsent : Screen()
     // Contacts / Identities — browse the local node's known federation peer store;
@@ -4479,7 +4508,8 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.LayerGlobalCommunities -> ai.ciris.mobile.shared.ui.nav.NavSurface.LayerGlobalCommunities
     Screen.LayerGlobalCommons -> ai.ciris.mobile.shared.ui.nav.NavSurface.LayerGlobalCommons
     // Flow-only / no sidebar
-    Screen.Startup, Screen.Login, Screen.Setup, Screen.ServerConnection, Screen.ClaimNode, Screen.Help -> null
+    Screen.Startup, Screen.Login, Screen.Setup, Screen.ServerConnection, Screen.ClaimNode,
+    Screen.AddFederationId, Screen.Help -> null
 }
 
 private fun surfaceToScreen(s: ai.ciris.mobile.shared.ui.nav.NavSurface): Screen = when (s) {
