@@ -2294,6 +2294,13 @@ struct CanonicalAddressUpdate {
     invocation_id: String,
     /// RFC3339 assertion time.
     asserted_at: String,
+    /// v13.5.0 (#397) — the canonical's transport-tier Ed25519 pubkey (base64,
+    /// 32 raw bytes), pairing with a `reticulum` `destination` dest-hash so any
+    /// peer can `prime_peer` this explicit-hash canonical (which cannot announce).
+    /// Optional; `skip_serializing_if` keeps a pre-#397 invocation's JCS bytes —
+    /// and its threshold signatures — byte-identical when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport_ed25519_pubkey_base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2383,6 +2390,10 @@ async fn update_canonical_address(
             destination: inv.destination.trim().to_string(),
             asserted_at,
             last_seen_at: None,
+            // v13.5.0 (#397): the transport-tier Ed25519 that pairs with the
+            // dest-hash so peers can prime_peer this (explicit-hash) canonical.
+            // Carried on the address-update invocation when present.
+            transport_ed25519_pubkey_base64: inv.transport_ed25519_pubkey_base64.clone(),
         })
         .await
     {
