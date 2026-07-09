@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.90"
+version = "0.5.91"
 dependencies = [
  "anyhow",
  "async-trait",

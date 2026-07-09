@@ -331,6 +331,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .await
         .context("assemble /v1/identity aggregate")?;
 
+    // ── Self-publish this node's reticulum transport-tier binding ─────────────
+    // (dest_hash + transport-tier Ed25519) into the federation directory, so a
+    // peer can `prime_peer`-root this node even though a v7.0.0 explicit-hash
+    // destination CANNOT announce (Leviculum `ExplicitHashCannotAnnounce`).
+    // CIRISServer#205 gap #2 / CIRISPersist#397: the baked/self-signed record
+    // carries only the identity-tier Ed25519 + the IP hint; the transport
+    // identity is edge-runtime-derived (unknown at genesis-bake), so the node
+    // asserts it here at boot — the same self-authenticating basis (its own
+    // key_id, its own edge-owned transport identity) as an attested announce.
+    // Best-effort; a node with no Reticulum transport is a no-op. This is why
+    // delivery converges with ZERO operator action: restarting the node IS the
+    // publish (the directory row replicates, peers resolve + prime it).
+    publish_self_transport_destination(&engine, &edge, &cfg.key_id).await;
+
     // ── Directed-consent federation peering with Node B (ciris-status) ────────
     // Bidirectional replication A<->B is authorized by DIRECTED CONSENT
     // ATTESTATIONS (federation scope) + MUTUAL KEY REGISTRATION — NOT in-group
@@ -936,6 +950,64 @@ async fn local_identity_json(
         }
     }
     serde_json::to_string(&v).context("serialize identity aggregate JSON")
+}
+
+/// Self-publish this node's **reticulum transport-tier binding** (dest-hash +
+/// transport Ed25519) into the federation directory so any peer can
+/// [`prime_peer`]-root it — the durable close of CIRISServer#205 gap #2.
+///
+/// A v7.0.0 explicit-hash canonical (e.g. `ciris-canonical-1`, baked with an IP
+/// hint) **cannot announce** (Leviculum `ExplicitHashCannotAnnounce`), so the only
+/// rooting path is out-of-band `prime_peer(key_id, dest_hash, transport_ed25519)`.
+/// That transport-tier Ed25519 is edge-owned and **not** in the (genesis-baked)
+/// identity record — so the node asserts it here at boot, for its OWN key_id, from
+/// its OWN live edge (`local_dest_hash` / `local_transport_pubkey`). Same
+/// self-authenticating basis as an attested announce; no accord quorum needed for
+/// a node to declare its own reachability. Once written it replicates, and a
+/// consuming node's `start_federation_delivery` resolves + primes it.
+///
+/// Best-effort: a node without a Reticulum transport (relay-off / non-reticulum
+/// build) is a silent no-op, and a directory-write failure is logged, never fatal.
+async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id: &str) {
+    use base64::Engine as _;
+    let (Some(dest_hash), Some(transport_pubkey)) =
+        (edge.local_dest_hash(), edge.local_transport_pubkey())
+    else {
+        tracing::debug!(
+            key_id,
+            "no Reticulum transport identity — skipping self transport-destination publish"
+        );
+        return;
+    };
+    let dest_hex = hex::encode(dest_hash);
+    // The transport identity is X25519(0..32) ‖ Ed25519(32..64); prime_peer wants
+    // the Ed25519 half, base64-standard.
+    let transport_ed25519_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&transport_pubkey[32..64]);
+    let record = ciris_persist::federation::TransportDestination {
+        occurrence_key_id: key_id.to_string(),
+        transport_kind: "reticulum".to_string(),
+        destination: dest_hex.clone(),
+        asserted_at: chrono::Utc::now(),
+        last_seen_at: None,
+        transport_ed25519_pubkey_base64: Some(transport_ed25519_b64),
+    };
+    match engine
+        .federation_directory()
+        .put_transport_destination(&record)
+        .await
+    {
+        Ok(()) => tracing::info!(
+            key_id,
+            dest_hash = %dest_hex,
+            "published self reticulum transport-tier binding — peers can now prime_peer this node (#205 gap #2)"
+        ),
+        Err(e) => tracing::warn!(
+            key_id,
+            error = %e,
+            "could not publish self transport-destination — peers cannot prime this node until it is asserted"
+        ),
+    }
 }
 
 /// `GET /v1/identity` → the cached identity-aggregate JSON (stable for the

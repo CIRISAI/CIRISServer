@@ -1,13 +1,10 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-    # Docs-only commits don't change the Rust build — skip the full compile.
-    paths-ignore:
-      - "**/*.md"
-      - "FSD/**"
-      - "docs/**"
+  # PR-only (CI-redundancy trim): a squash-merge to main is byte-identical to the
+  # PR that just passed this clippy+test matrix, so re-running on push:main is pure
+  # duplication. No CIRISCache save lives here (it's in conformance.yml) — nothing
+  # main-only is lost; the tag's publish gate + release are the post-merge check.
   pull_request:
     paths-ignore:
       - "**/*.md"
