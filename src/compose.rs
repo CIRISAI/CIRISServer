@@ -1468,9 +1468,77 @@ async fn setup_peer_replication(
     edge: &Edge,
     cfg: &ServerConfig,
 ) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
-    use ciris_edge::replication::{
-        EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig,
-    };
+    // Server 0.5 (zero env): there is NO env peer-bootstrap branch. The replication
+    // topology is owner-authored consent ONLY — a peer is admitted + a
+    // consent:replication object emitted via the owner-gated POST
+    // /v1/federation/peering. The prior CIRIS_PEER_B_* env-seed branch is deleted.
+    tracing::info!(
+        "replication topology is owner-authored consent only (POST /v1/federation/peering) — \
+         zero env (Server 0.5)"
+    );
+    // Compose seeds NO extra targets: the boot topology is exactly the corpus's
+    // consent:replication set. The agent-embedded delivery controller
+    // (crate::federation_delivery) is the caller that seeds the baked canonical
+    // key_ids as extra_targets — the ONLY behavioural difference between the two.
+    start_replication_runtime(engine, edge, &cfg.key_id, &[]).await
+}
+
+/// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
+/// admitted peer `key_id`s. Two coordinators per peer:
+///   - [`EnvelopeKind::Attestation`] — capacity:* / trace out, health:liveness in.
+///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane.
+///
+/// Pure (no I/O) so both the compose boot path and the agent-embedded delivery
+/// controller share ONE assembly, and it is unit-testable without an engine.
+pub(crate) fn build_replication_peers(
+    desired: &[String],
+) -> Vec<ciris_edge::replication::ReplicationPeer> {
+    use ciris_edge::replication::{EnvelopeKind, ReplicationPeer};
+    desired
+        .iter()
+        .flat_map(|p| {
+            [
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::Attestation,
+                },
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::Key,
+                },
+            ]
+        })
+        .collect()
+}
+
+/// Core replication-runtime bring-up, shared by the compose boot path
+/// ([`setup_peer_replication`], `extra_targets = &[]`) AND the agent-embedded
+/// federation-delivery controller ([`crate::federation_delivery`], `extra_targets`
+/// = the baked canonical `key_id`s). Factoring the body here keeps the two callers
+/// byte-identical except for the extra seed set, so compose's boot behaviour is
+/// unchanged when `extra_targets` is empty.
+///
+/// `node_key_id` is the local federation signing key (the consent AUTHOR + the
+/// KERI publish-own selector); compose passes `cfg.key_id`, the delivery
+/// controller passes `edge.signer_key_id()`.
+///
+/// Returns `Ok(None)` when the Edge carries no Reticulum transport — the read API
+/// still writes CEG (consent objects), there is just no runtime to converge.
+///
+/// MUST run BEFORE `edge.run()` consumes the Edge on the COMPOSE path (so
+/// `install_replication_routing` + `reticulum_transport()` are wired before the
+/// inbound loop starts). On the agent-embedded path the Edge is ALREADY running;
+/// this is safe because `Edge::run` clones the `Arc<OnceLock>` replication-registry
+/// and reads `.get()` LIVE per inbound frame (edge.rs `run`), so a post-boot
+/// `install_replication_routing` is observed on the next frame — see
+/// [`crate::federation_delivery`] for the full ordering note.
+pub(crate) async fn start_replication_runtime(
+    engine: &Arc<Engine>,
+    edge: &Edge,
+    node_key_id: &str,
+    extra_targets: &[String],
+) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
+    use ciris_edge::replication::{ReplicationRuntime, ReplicationRuntimeConfig};
     use ciris_persist::federation::FederationDirectory;
 
     // Require a Reticulum transport to run replication at all. Without it the read
@@ -1487,19 +1555,19 @@ async fn setup_peer_replication(
         .context("replication runtime requires a SQLite-backed Engine")?
         .clone();
 
-    // Server 0.5 (zero env): there is NO env peer-bootstrap branch. The replication
-    // topology is owner-authored consent ONLY — a peer is admitted + a
-    // consent:replication object emitted via the owner-gated POST
-    // /v1/federation/peering. The prior CIRIS_PEER_B_* env-seed branch is deleted.
-    tracing::info!(
-        "replication topology is owner-authored consent only (POST /v1/federation/peering) — \
-         zero env (Server 0.5)"
-    );
-
-    // 1. Desired Initiator set from CEG — admitted consent:replication subjects.
-    let consented = crate::peer::replication_peers_from_consent(engine, &cfg.key_id).await?;
-    let mut desired: Vec<String> = Vec::with_capacity(consented.len());
-    for peer in consented {
+    // 1. Desired Initiator set from CEG — admitted consent:replication subjects,
+    //    UNIONED with any caller-seeded `extra_targets` (the delivery controller's
+    //    baked canonical key_ids). Every candidate is admission-filtered against the
+    //    federation directory (an unknown key has no record to route/verify).
+    let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
+    let mut candidates: Vec<String> = consented;
+    for t in extra_targets {
+        if !candidates.contains(t) {
+            candidates.push(t.clone());
+        }
+    }
+    let mut desired: Vec<String> = Vec::with_capacity(candidates.len());
+    for peer in candidates {
         match directory.lookup_public_key(&peer).await {
             Ok(Some(_)) => desired.push(peer),
             Ok(None) => tracing::warn!(
@@ -1517,28 +1585,10 @@ async fn setup_peer_replication(
 
     // 2. Always start the ONE long-lived runtime (even with an empty desired set)
     //    so the registry + routing exist for the reconciler's runtime hot-add.
-    //    EnvelopeKind::Attestation carries BOTH directions: capacity:* out,
-    //    health:liveness in. v5.1.0 `start` installs the scheduler control channel
-    //    unconditionally, so the runtime accepts `set_peers` mutation with no
-    //    extra opt-in (CIRISEdge#173 resolved).
-    // Two coordinators per consent peer: Attestation (capacity:* / health:liveness)
-    // AND Key (#144, CIRISEdge#257 — the KERI publish-own key plane). The reconciler
-    // (replication_reconcile.rs) converges the same pair set at runtime.
-    let peers: Vec<ReplicationPeer> = desired
-        .iter()
-        .flat_map(|p| {
-            [
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Attestation,
-                },
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Key,
-                },
-            ]
-        })
-        .collect();
+    //    v5.1.0 `start` installs the scheduler control channel unconditionally, so
+    //    the runtime accepts `set_peers` mutation with no extra opt-in
+    //    (CIRISEdge#173 resolved).
+    let peers = build_replication_peers(&desired);
 
     // Key-plane publish selector (CIRISEdge#257 / edge v8.6.0): the Key plane's
     // `list_keys` advertises the key_ids THIS selector yields — the node's OWN
@@ -1547,7 +1597,7 @@ async fn setup_peer_replication(
     // record (scrub_key_id = an accord holder), the NEXT anti-entropy round
     // publishes the scrubbed, ANCHORED record to consent peers → they root it.
     // (KERI publish-own: the controller publishes its own establishment record.)
-    let own_key_id = cfg.key_id.clone();
+    let own_key_id = node_key_id.to_string();
     let key_selector: ciris_edge::replication::CohortProvider =
         Arc::new(move || vec![own_key_id.clone()]);
 
@@ -1562,15 +1612,8 @@ async fn setup_peer_replication(
 
     // Wire the runtime's registry into the Edge's inbound dispatch (CIRISEdge#119) —
     // EXACTLY ONCE on the single long-lived runtime (set-once OnceLock; never
-    // rebuild the runtime).
+    // rebuild the runtime). Safe post-boot on the embedded path (see the fn doc).
     edge.install_replication_routing(&runtime);
-
-    // OPT-IN to the v5.1.0 scheduler control channel so the reconciler can mutate
-    // the live Initiator set at runtime (register_initiator_peer / remove_peer /
-    // set_peers). In edge v5.1.0 `ReplicationRuntime::start` already installs the
-    // control channel unconditionally — the runtime exposes no separate public
-    // `install_control_channel`; the orchestrator is always-on after `start`, so
-    // there is nothing further to call here (CIRISEdge#173 resolved).
 
     tracing::info!(
         initiator_peers = desired.len(),
@@ -1597,7 +1640,7 @@ async fn setup_peer_replication(
 /// (transport teardown) or on a closed channel. A lagged receiver logs the
 /// drop count rather than aborting — announces are periodic, so a missed batch
 /// is re-emitted on the next `ANNOUNCE_INTERVAL`.
-fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
+pub(crate) fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
     use ciris_edge::events::EventSeverity;
     use tokio::sync::broadcast::error::RecvError;
     let mut rx = bus.subscribe_announces();
@@ -1887,7 +1930,7 @@ async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerC
 /// pubkey-derived overlay address (not an internet bootstrap target) and is skipped.
 /// Returns empty on a substrate whose canonical records carry no `transport_hints`
 /// yet (forward-compatible: a pre-#381 record simply has no such envelope key).
-async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr> {
+pub(crate) async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr> {
     match engine.canonical_bootstrap_hints().await {
         Ok(hints) => ip_addrs_from_hints(&hints),
         Err(e) => {
@@ -1902,7 +1945,7 @@ async fn canonical_bootstrap_addrs(engine: &Engine) -> Vec<std::net::SocketAddr>
 /// canonical records' signed envelopes (CIRISPersist#381). Split out so the filter is
 /// unit-testable without an engine. Skips non-`ip` kinds (a `reticulum` hint is a
 /// pubkey-derived overlay address, not a TCP bootstrap target) + un-parseable dests.
-fn ip_addrs_from_hints(
+pub(crate) fn ip_addrs_from_hints(
     hints: &[(String, ciris_persist::federation::types::TransportHint)],
 ) -> Vec<std::net::SocketAddr> {
     let mut out = Vec::new();
