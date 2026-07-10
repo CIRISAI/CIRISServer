@@ -980,8 +980,12 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
         return;
     };
     let dest_hex = hex::encode(dest_hash);
-    // The transport identity is X25519(0..32) ‖ Ed25519(32..64); prime_peer wants
-    // the Ed25519 half, base64-standard.
+    // The transport identity is X25519(0..32) ‖ Ed25519(32..64). prime_peer wants
+    // the Ed25519 half (rooting/addressing); the X25519 half is the transport-tier
+    // KEX pubkey a peer needs to SEAL to this node (CIRISPersist#411 / CIRISEdge#299).
+    // Persist BOTH so this node's own binding is fully sealable after a peer's boot-load.
+    let transport_x25519_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&transport_pubkey[0..32]);
     let transport_ed25519_b64 =
         base64::engine::general_purpose::STANDARD.encode(&transport_pubkey[32..64]);
     let record = ciris_persist::federation::TransportDestination {
@@ -991,6 +995,7 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
         asserted_at: chrono::Utc::now(),
         last_seen_at: None,
         transport_ed25519_pubkey_base64: Some(transport_ed25519_b64),
+        transport_x25519_pubkey_base64: Some(transport_x25519_b64),
     };
     match engine
         .federation_directory()
