@@ -2403,6 +2403,7 @@ async fn update_canonical_address(
             // v13.8.0 (#411): the transport-tier X25519 KEX pubkey — carried so a
             // peer can seal to the canonical after the move.
             transport_x25519_pubkey_base64: inv.transport_x25519_pubkey_base64.clone(),
+            binding_provenance: ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
         })
         .await
     {
