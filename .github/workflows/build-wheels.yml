@@ -14,11 +14,17 @@ name: build-wheels
 #     run can only READ the default branch's caches, so it SAVES only on main
 #     (`save-if: main`) and restores everywhere.
 #   • CIRISCache (GHCR L2, restore@v2) — a GHCR package is NOT ref-scoped, so the
-#     SERVER `-s<version>` blob is saved on main AND on the v* tag publish (this
-#     workflow's only caller now that warm-release-cache is retired). That keeps a
-#     per-version `-s` blob so the next release's restore@v2 `-s*` prefix fallback
-#     pulls the latest lean ~1 GB server blob instead of the larger edge layer.
-# The maturin-action legs (macOS/Windows) use the action's built-in `sccache`.
+#     SERVER `-s<version>` blob is saved on main AND on the v* tag publish. That
+#     keeps a per-version `-s` blob so the next release's restore@v2 `-s*` prefix
+#     fallback pulls the latest lean ~1 GB server blob instead of the larger edge
+#     layer. (NB: the GHCR blob restores the target dir but its tar mtimes predate
+#     the fresh checkout, so cargo rebuilds — it warms the source/registry, not the
+#     compile. The maturin legs' real compile cache is sccache, below.)
+#   • sccache (GHA, maturin-action `sccache: true`, macOS/Windows) — content-
+#     addressed, so mtime-immune. GHA-scoped: a tag run only READS default-branch
+#     entries, so warm-release-cache.yml (on main, substrate-bump-gated) builds the
+#     wheels on main to POPULATE it; the tag publish then restores it warm. Without
+#     that warm the Windows tag build is 100% cold (v0.5.91: 0% sccache hits).
 
 on:
   workflow_call:
