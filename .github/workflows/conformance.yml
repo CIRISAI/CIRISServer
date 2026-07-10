@@ -41,19 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
-      # Cache the cargo registry/git + the release target/ deps. This is the
-      # WARMER for the tag-triggered publish-pypi linux-x86_64 wheel: it builds
-      # the SAME `maturin build --release` on the SAME runner, so the substrate
-      # (persist/edge/verify + transitive) compiled here is restored there.
-      # `shared-key` overrides rust-cache's default per-job key so the two
-      # workflows share one cache; saving is restricted to main (GitHub scopes
-      # caches by ref — only the default branch is readable from a tag run).
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          shared-key: release-linux-x86_64
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
       # CIRISCache (CIRISServer#99) — 4-layer centipede layered over the Swatinem
       # GHA L1 above (the documented two-tier model). Restore verify→persist→edge→
       # server; this on-main build POPULATES ghcr.io/cirisai/ciriscache under the
@@ -115,11 +104,15 @@ jobs:
       - name: Build abi3 wheel (maturin)
         # [tool.maturin] in pyproject.toml supplies features = ["extension-module"]
         # + module-name = ciris_server; pyo3 abi3-py310 → one wheel for 3.10+.
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
         run: |
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
           maturin build --release --strip --out dist
           ls -l dist/
+          sccache --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: ciris_server-wheel-linux-x86_64

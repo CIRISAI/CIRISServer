@@ -82,6 +82,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Install build deps (Linux native)
         if: runner.os == 'Linux' && !matrix.cross
         run: |
@@ -90,12 +93,6 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev libudev-dev
-
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          key: release-${{ matrix.target }}-${{ github.ref_name }}
 
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # PLAT mapped from the canonical build-target table (armv7 → linux-armv7,
@@ -169,7 +166,15 @@ jobs:
       - name: Build (native)
         if: ${{ !matrix.cross }}
         shell: bash
-        run: cargo build --release --target "${{ matrix.target }}" -p ciris-server
+        # sccache only on the native compile — the `cross` path builds inside a
+        # docker container where the host sccache binary is absent (a RUSTC_WRAPPER
+        # there would fail to launch), so it is scoped to this step, not the job.
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+        run: |
+          cargo build --release --target "${{ matrix.target }}" -p ciris-server
+          sccache --show-stats
 
       - name: Stage + strip binary
         shell: bash
@@ -205,16 +210,16 @@ jobs:
     # zigbuild cross can't satisfy the TPM backend's target libtss2 — allowed to
     # fail so it never blocks the release (aarch64-gnu native covers ARM64 Linux).
     continue-on-error: true
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: aarch64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          key: release-musl-aarch64-${{ github.ref_name }}
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # PLAT=linux-aarch64-musl (off the canonical table → harmless miss, but the
       # scheme stays uniform). Restore verify→persist→edge→server; save on main.
@@ -269,6 +274,9 @@ jobs:
           retry_on: timeout
           command: cargo install cargo-zigbuild
       - run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ciris-server
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: Stage + strip
         run: |
           BIN=target/aarch64-unknown-linux-musl/release/ciris-server
