@@ -399,6 +399,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // node's lifetime AND shared with the CEG-driven reconcile loop below.
     let replication = setup_peer_replication(&engine, &edge, &cfg).await?;
 
+    // ── CEG-native trusted-peer boot prime (CIRISServer#221 companion) ────────
+    // An explicit-hash canonical (v7.0.0, Leviculum ExplicitHashCannotAnnounce)
+    // NEVER self-roots via the inbound admit-advisory path — it is the OUTBOUND
+    // delivery target the node DIALS, so it must be rooted out-of-band via
+    // `prime_peer`. `start_federation_delivery` primes on the embedded edge; the
+    // node-composed runtime (the agent fold, serve_with_python_adapter) needs the
+    // same, or the canonical stays knows_peer=false → coordinator error → 0
+    // envelopes. Runs in BOTH the standalone node and the fold (edge is shared).
+    prime_trusted_peers(&engine, &edge).await;
+
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
     // The publisher advertises the fountain content THIS node holds as signed
     // FountainHoldingClaim envelopes to the consent cohort; the converger acts
@@ -1068,6 +1078,93 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
             "could not publish self transport-destination — peers cannot prime this node until it is asserted"
         ),
     }
+}
+
+/// **CEG-native trusted-peer boot prime.** Root — via edge's out-of-band
+/// `prime_peer` (`inject_rooted_peer_for_test`) — every peer the persisted CEG
+/// state marks TRUSTED, i.e. every `transport_destinations` row with
+/// [`BindingProvenance::Rooted`](ciris_persist::federation::self_at_login::BindingProvenance::Rooted).
+///
+/// **No hardcoded canonical list** — the trust set is loaded from the directory:
+/// - `Rooted` = authoritative (a federation-key-signed occurrence / `root_binding`
+///   verified it / this node or a peer self-published it) → an outbound trust target.
+/// - `Advisory` (CIRISEdge#301) = a self-consistent announce, a routing hint only,
+///   NOT an outbound authorization → skipped.
+/// - An operator who **untrusts** a canonical/community withdraws it (the row is
+///   removed or downgraded), so it is simply absent from the Rooted set → not primed.
+///
+/// On first boot the Rooted set IS the baked canonicals (which cannot announce, so
+/// prime is their only rooting path); as the mesh grows it is whatever the corpus
+/// trusts. Mirrors `start_federation_delivery`'s prime, but driven by the FULL
+/// directory rather than a delivery-controller target list — so the node-composed
+/// runtime (the agent fold) roots its trusted peers too. Best-effort: a
+/// missing/undecodable binding or a transport-less build warns + skips, never fatal.
+async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
+    use ciris_persist::federation::self_at_login::BindingProvenance;
+    let Some(transport) = edge.reticulum_transport() else {
+        tracing::debug!("trusted-peer prime: no Reticulum transport on this build — skipping");
+        return;
+    };
+    let dests = match engine
+        .federation_directory()
+        .list_all_transport_destinations()
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "trusted-peer prime: list_all_transport_destinations failed — skipping");
+            return;
+        }
+    };
+    // Trusted = Rooted-provenance rows only. Group per peer key_id;
+    // `resolve_reticulum_prime_binding` selects the reticulum entry carrying the
+    // transport-tier Ed25519 (paired with the dest-hash) for that peer.
+    let mut trusted: std::collections::BTreeMap<
+        String,
+        Vec<ciris_persist::federation::TransportDestination>,
+    > = std::collections::BTreeMap::new();
+    for d in dests {
+        if d.binding_provenance == BindingProvenance::Rooted {
+            trusted
+                .entry(d.occurrence_key_id.clone())
+                .or_default()
+                .push(d);
+        }
+    }
+    let mut primed = 0usize;
+    for (key_id, peer_dests) in &trusted {
+        match crate::federation_delivery::resolve_reticulum_prime_binding(peer_dests) {
+            Ok(Some((dest_hash, ed25519))) => {
+                let before = transport.knows_peer(key_id).await;
+                transport
+                    .inject_rooted_peer_for_test(key_id, dest_hash, ed25519)
+                    .await;
+                let after = transport.knows_peer(key_id).await;
+                primed += 1;
+                tracing::info!(
+                    peer = %key_id,
+                    dest_hash = %hex::encode(dest_hash),
+                    knows_peer_before = before,
+                    knows_peer_after = after,
+                    "trusted-peer boot prime: rooted {key_id} (CEG-native, provenance=Rooted)"
+                );
+            }
+            Ok(None) => tracing::debug!(
+                peer = %key_id,
+                "trusted-peer prime: Rooted row(s) but no reticulum transport binding — skip"
+            ),
+            Err(e) => tracing::warn!(
+                peer = %key_id,
+                error = %e,
+                "trusted-peer prime: binding decode failed — skip"
+            ),
+        }
+    }
+    tracing::info!(
+        trusted_peers = trusted.len(),
+        primed,
+        "trusted-peer boot prime complete — trusted (explicit-hash) peers reachable-by-key_id with no announce"
+    );
 }
 
 /// `GET /v1/identity` → the cached identity-aggregate JSON (stable for the
