@@ -20,8 +20,11 @@ name: build-wheels
 #     layer. (NB: the GHCR blob restores the target dir but its tar mtimes predate
 #     the fresh checkout, so cargo rebuilds — it warms the source/registry, not the
 #     compile. The maturin legs' real compile cache is sccache, below.)
-#   • sccache (GHA, maturin-action `sccache: true`, macOS/Windows) — content-
-#     addressed, so mtime-immune. GHA-scoped: a tag run only READS default-branch
+#   • sccache (GHA) — content-addressed, so mtime-immune. macOS/Windows get it via
+#     maturin-action `sccache: true`; the linux legs wire it directly (the
+#     mozilla-actions/sccache-action step + RUSTC_WRAPPER=sccache on the raw
+#     `maturin build`, mirroring PR #215's client-artifacts wiring) since they do
+#     NOT use maturin-action. GHA-scoped: a tag run only READS default-branch
 #     entries, so warm-release-cache.yml (on main, substrate-bump-gated) builds the
 #     wheels on main to POPULATE it; the tag publish then restores it warm. Without
 #     that warm the Windows tag build is 100% cold (v0.5.91: 0% sccache hits).
@@ -53,6 +56,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
+      # Content-addressed compiler cache over the GHA backend — the ONLY tier that
+      # actually warms the compile on these raw-`maturin build` legs. The CIRISCache
+      # GHCR blob restores the target dir but its tar mtimes predate the fresh
+      # checkout, so cargo rebuilds anyway (mtime invalidation) → the linux compile
+      # was effectively cold. sccache keys on compilation-unit content, so it is
+      # mtime-immune and hits across substrate bumps for unchanged crates (this is
+      # why the maturin-action macOS/Windows legs already reach ~86%). Warmed on
+      # main by warm-release-cache.yml (substrate-bump-gated), restored on a tag.
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
       # Restore the release substrate compile (warmed on main with the matching
       # shared-key). Saves only on main; on a tag this is restore-only (a tag-
       # scoped save can't be read by the next tag, so it would just burn budget).
@@ -142,10 +155,15 @@ jobs:
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
           ls -l ../python/ciris_server/desktop_app/
       - name: Build wheel (maturin)
+        env:
+          # Route rustc through sccache (mirrors PR #215's client-artifacts wiring).
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
         run: |
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
           maturin build --release --strip --out dist
+          sccache --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.plat.name }}
