@@ -39,9 +39,14 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
@@ -49,11 +54,6 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
           sudo apt-get update
           sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          key: bench
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # Single leg: PLAT=linux-x86_64. Restore verify→persist→edge→server; SAVE
       # under the server-specific -s key on main.
@@ -122,6 +122,9 @@ jobs:
             --commit "$GITHUB_SHA" \
             --date "$(date -u +%Y-%m-%d)" \
             --out bench_results.json
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: Generate interpreted page
         run: |
           BENCH_DATE="$(date -u +%Y-%m-%d)" \

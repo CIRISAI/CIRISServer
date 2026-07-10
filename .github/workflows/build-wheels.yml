@@ -66,16 +66,6 @@ jobs:
       # main by warm-release-cache.yml (substrate-bump-gated), restored on a tag.
       - name: Set up sccache (compiler cache over GHA)
         uses: mozilla-actions/sccache-action@v0.0.9
-      # Restore the release substrate compile (warmed on main with the matching
-      # shared-key). Saves only on main; on a tag this is restore-only (a tag-
-      # scoped save can't be read by the next tag, so it would just burn budget).
-      # linux-x86_64 also shares the key conformance.yml warms on every push.
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          shared-key: release-${{ matrix.plat.name }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # Restore widest→narrowest (verify→persist→edge→server); SAVE under the
       # server-specific -s key so we never collide with edge's canonical blob.
@@ -412,16 +402,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
-      # Cache the NDK cross-compile of the substrate per-ABI (the target-specific
-      # CC/linker env is exported in the build step AFTER this, so it never
-      # pollutes the cache key — warmer and publish share cleanly). Saves on main
-      # (warm-release-cache), restores on a tag publish.
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          cache-bin: false
-          shared-key: release-android-${{ matrix.abi }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1,
       # per-ABI NDK cross-compile of the substrate. Restore verify→persist→edge→
       # server; SAVE under the server-specific -s key.
@@ -493,6 +475,10 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_API_LEVEL: "24" # maturin can't infer the API level for armv7 (it can for arm64)
+          # Route rustc through sccache (content-addressed, mtime-immune) — this leg
+          # previously relied on Swatinem for its compiler cache.
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
         run: |
           # cc-rs guesses the wrong NDK clang name (arm-linux-androideabi-clang);
           # point CC/CXX/AR + the cargo linker at the real r26b tools (what
@@ -518,6 +504,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
           maturin build --release --strip --out dist --target ${{ matrix.target }}
+          sccache --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-android-${{ matrix.abi }}
