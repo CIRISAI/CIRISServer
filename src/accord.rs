@@ -2301,6 +2301,12 @@ struct CanonicalAddressUpdate {
     /// and its threshold signatures — byte-identical when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transport_ed25519_pubkey_base64: Option<String>,
+    /// v13.8.0 (CIRISPersist#411) — the canonical's transport-tier **X25519** KEX
+    /// pubkey (base64, 32 raw bytes), so a peer can SEAL to this canonical after an
+    /// address move without waiting for a fresh announce/boot-load. Same back-compat
+    /// posture as the ed25519 above (`skip_serializing_if` keeps prior sigs valid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport_x25519_pubkey_base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2394,6 +2400,9 @@ async fn update_canonical_address(
             // dest-hash so peers can prime_peer this (explicit-hash) canonical.
             // Carried on the address-update invocation when present.
             transport_ed25519_pubkey_base64: inv.transport_ed25519_pubkey_base64.clone(),
+            // v13.8.0 (#411): the transport-tier X25519 KEX pubkey — carried so a
+            // peer can seal to the canonical after the move.
+            transport_x25519_pubkey_base64: inv.transport_x25519_pubkey_base64.clone(),
         })
         .await
     {

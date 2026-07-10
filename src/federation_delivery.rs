@@ -565,6 +565,7 @@ mod tests {
             asserted_at: chrono::Utc::now(),
             last_seen_at: None,
             transport_ed25519_pubkey_base64: ed_b64.map(str::to_string),
+            transport_x25519_pubkey_base64: None,
         }
     }
 
