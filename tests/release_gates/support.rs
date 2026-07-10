@@ -35,8 +35,8 @@ use std::path::PathBuf;
 // KeyRecord.consent_role, the accord-conferred `canonical` identity_type role
 // (CIRISPersist#372), single-owner `owner_of` (#162), verify unchanged v8.7.0.
 pub const TARGET_VERIFY: &str = "v8.10.1";
-pub const TARGET_PERSIST: &str = "v13.6.0";
-pub const TARGET_EDGE: &str = "v9.4.0";
+pub const TARGET_PERSIST: &str = "v13.6.1";
+pub const TARGET_EDGE: &str = "v9.4.1";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
