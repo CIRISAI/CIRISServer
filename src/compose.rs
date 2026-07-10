@@ -86,7 +86,31 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // build_engine + the federation/pqc/user signers above all key their KEYSTORE
     // blobs off `cfg.keystore_alias` (the RAW --key-id label) — so they MUST run
     // BEFORE the key_id derivation below, which leaves `keystore_alias` untouched.
-    let engine = build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
+    //
+    // CIRISServer#221 — the AGENT FOLD. When the wheel runs with an already-composed
+    // in-process engine (the brain's embedded runtime installed the persist
+    // process-singleton via `Engine(config)`, so `current_rust_engine()` returns it),
+    // REUSE it rather than `build_engine`'s `Engine::with_hardware_signer_hybrid`,
+    // which opens a SECOND connection pool + sweeper on the same DSN (WAL-safe but
+    // not clean; SQLITE_BUSY under a bursty cognitive loop). Mirrors
+    // `start_federation_delivery`'s reuse. `embedded` then also drives the edge reuse
+    // + skip-run below. The standalone binary (no embedded engine → `None`) builds
+    // fresh, byte-for-byte unchanged.
+    #[cfg(feature = "python")]
+    let embedded_engine = ciris_persist::ffi::pyo3::current_rust_engine();
+    #[cfg(not(feature = "python"))]
+    let embedded_engine: Option<Arc<Engine>> = None;
+    let embedded = embedded_engine.is_some();
+    let engine = match embedded_engine {
+        Some(e) => {
+            tracing::info!(
+                "serve_with_adapter: folding onto the in-process embedded Engine \
+                 (CIRISServer#221) — one pool, one sweeper, no second writer"
+            );
+            e
+        }
+        None => build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?,
+    };
 
     // ── Derive the FSD-003 fingerprinted federation key_id (CIRISServer#27) ────
     // `cfg.key_id` started as the BARE label (== keystore_alias). Replace it with
@@ -293,16 +317,32 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Edge transport flags are boot-structural: built ONCE from the resolved
     // config:* snapshot (transport.node / transport.store_and_forward). Changing
     // them in CEG reconciles on the next boot.
-    let edge = build_edge(
-        &engine,
-        &cfg,
-        initial_config.transport_node,
-        initial_config.store_and_forward,
-        &initial_config,
-        Arc::clone(&signer),
-        Arc::clone(&pqc),
-    )
-    .await?;
+    // CIRISServer#221 — in the fold, REUSE the agent's already-running edge
+    // (`init_edge_runtime` installed it; `current_edge()` returns the `Arc<Edge>`)
+    // instead of `build_edge`, which would bind a SECOND Reticulum transport on the
+    // same `net.listen_addr` (:4242) — a hard "address in use" conflict with the
+    // agent's transport. The reused edge is already `run()`ing, so the edge.run()
+    // spawn below is skipped for `embedded`. Slice attach + read-API mount proceed
+    // on the shared edge (the routing registries edge reads live per inbound frame).
+    let edge: Arc<Edge> = if embedded {
+        ciris_edge::current_edge().context(
+            "CIRISServer#221 fold: embedded Engine present but current_edge() is None — \
+             init_edge_runtime must run before serve_with_python_adapter",
+        )?
+    } else {
+        Arc::new(
+            build_edge(
+                &engine,
+                &cfg,
+                initial_config.transport_node,
+                initial_config.store_and_forward,
+                &initial_config,
+                Arc::clone(&signer),
+                Arc::clone(&pqc),
+            )
+            .await?,
+        )
+    };
 
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
@@ -408,8 +448,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // — the enabler for the C1 initiator leg. All the pre-run captures above
     // (`local_transport_pubkey`, `setup_peer_replication`, the swarm runtime,
     // the mesh responder registration) took `&edge` before this point and are
-    // done; from here `edge` is shared between the run task and the requester.
-    let edge = Arc::new(edge);
+    // done; from here `edge` (already an `Arc<Edge>` — freshly built + wrapped, or
+    // the reused embedded edge per #221) is shared between the run task and the
+    // requester.
 
     // The local SEND leg (C1's mesh hop) — the Phase E INITIATOR leg, now LIVE.
     // `target == self` short-circuits into the in-process responder (edge does
@@ -424,9 +465,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     );
 
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
+    // CIRISServer#221: in the fold the embedded edge is ALREADY `run()`ing (the
+    // agent spawned it from init_edge_runtime) — spawning a second run loop on the
+    // same Edge would double-drive one transport. Skip it; the standalone node runs it.
     let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
-    let edge_run = Arc::clone(&edge);
-    let edge_join = tokio::spawn(async move { edge_run.run(edge_shutdown_rx).await });
+    let edge_join = if embedded {
+        drop(edge_shutdown_rx);
+        None
+    } else {
+        let edge_run = Arc::clone(&edge);
+        Some(tokio::spawn(
+            async move { edge_run.run(edge_shutdown_rx).await },
+        ))
+    };
 
     // ── The CEG-driven replication reconcile loop ─────────────────────────────
     // Converges the live ReplicationRuntime to the corpus's consent:replication
@@ -896,7 +947,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let _ = config_sd_tx.send(true);
     let _ = config_reconcile_join.await;
     let _ = edge_shutdown_tx.send(true);
-    let _ = edge_join.await;
+    // `None` in the #221 fold — the agent owns the edge's run loop (init_edge_runtime).
+    if let Some(edge_join) = edge_join {
+        let _ = edge_join.await;
+    }
     Ok(())
 }
 

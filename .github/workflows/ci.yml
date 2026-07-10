@@ -1,10 +1,20 @@
 name: CI
 
 on:
-  # PR-only (CI-redundancy trim): a squash-merge to main is byte-identical to the
-  # PR that just passed this clippy+test matrix, so re-running on push:main is pure
-  # duplication. No CIRISCache save lives here (it's in conformance.yml) — nothing
-  # main-only is lost; the tag's publish gate + release are the post-merge check.
+  # The main run is NOT a redundant gate — it is the CACHE WARMER. Swatinem below
+  # is `save-if: main`, and GHA caches are only cross-readable from the default
+  # branch, so a PR can only restore a warm cache if this workflow has RUN + SAVED
+  # on main. Dropping the main trigger (the earlier "redundancy trim") left every
+  # PR's clippy+test fully COLD (no base cache to restore). Keep push:main so main
+  # populates the shared Swatinem cache the PR matrix restores; paths-ignore keeps
+  # doc-only churn off both. (The gate value of the main re-run is incidental; the
+  # cache warm is the point.)
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "FSD/**"
+      - "docs/**"
   pull_request:
     paths-ignore:
       - "**/*.md"
