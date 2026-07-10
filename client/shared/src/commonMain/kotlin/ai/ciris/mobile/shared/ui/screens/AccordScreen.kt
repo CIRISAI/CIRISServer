@@ -522,7 +522,7 @@ private fun handleOpCanonical(
     open: (AccordSheet) -> Unit,
 ) {
     when (op) {
-        AttOp.Supersede -> open(AccordSheet.AddCanonical(replace = server)) // replace = 1-of-N re-mint
+        AttOp.Supersede -> open(AccordSheet.AddCanonical(replace = server)) // replace = m-of-n co-scrub re-mint (same 2-of-3 family quorum as add)
         AttOp.Withdraw -> open(AccordSheet.Withdraw(server))
         else -> handleOp(op, att, open)
     }
@@ -670,7 +670,7 @@ private fun AddCanonicalSheet(
 ) {
     val ownedNodes by viewModel.ownedNodes.collectAsState()
     val target by viewModel.canonicalResolvedTarget.collectAsState()
-    // Replace = a 1-of-N re-mint of an existing canonical record: seed the resolved
+    // Replace = an m-of-n co-scrub re-mint of an existing canonical record: seed the resolved
     // target + current IP from the row (mirrors the old selectCanonicalForReplace).
     val seededIp = remember(replace) {
         replace?.transportHints?.firstOrNull { h -> h.kind == "ip" }?.destination.orEmpty() ?: ""
@@ -740,20 +740,19 @@ private fun AddCanonicalSheet(
         },
         onSubmit = { holderKeyId, usbPath, pin, modulePath ->
             target?.let { t ->
-                if (replace != null) {
-                    // Replace / update = the shipped 1-of-N re-mint of a live record.
-                    viewModel.addCanonicalServer(
-                        holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
-                        transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
-                    )
-                } else {
-                    // A fresh canonical server is now m-of-n: propose is scrub #1; the
-                    // partial gossips to the next holder to cosign (CIRISServer#174).
-                    viewModel.proposeCanonical(
-                        holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
-                        transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
-                    )
-                }
+                // BOTH add and replace/update go through the m-of-n family-quorum
+                // co-scrub (CIRISServer#174): propose is scrub #1; the partial gossips
+                // to the next holder to cosign, conferring `canonical` iff
+                // distinct_scrub_count >= the family quorum. Replace re-mints the SAME
+                // key_id's record with the corrected address at the same 2-of-3 quorum —
+                // NEVER a 1-of-N re-mint, which would produce a 1-scrub record that fails
+                // the canonical admission gate on fresh installs (a worse break than a
+                // stale address). The `replace` mode only pre-resolves the target + seeds
+                // the current IP; the ceremony is identical.
+                viewModel.proposeCanonical(
+                    holderKeyId, usbPath, t.keyId, t.ed25519, t.mldsa, pin,
+                    transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
+                )
             }
             onDismiss()
         },
