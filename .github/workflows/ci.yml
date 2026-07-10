@@ -62,6 +62,11 @@ jobs:
         continue-on-error: true
         with:
           cache-bin: false
+          # Save only on main (matches conformance.yml). A PR-scoped save is
+          # readable only by that same PR, costs ~2 min/job, and — worse — its large
+          # windows/macos entries evict the SHARED main caches from the 10 GB quota,
+          # making every other PR colder. PRs restore main's cache (base fallback).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # PLAT from the NATIVE target of each runner (macos-latest = arm64). Restore
       # verify→persist→edge→server; SAVE under the server-specific -s key on main.
@@ -127,9 +132,14 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --test noise_floor -- --nocapture
       # The PyO3 wheel surface (Linux only; libpython linked, no extension-module).
+      # --lib, NOT --all-targets: the `python` feature is used ONLY in the lib
+      # (src/lib.rs + src/federation_delivery.rs) — no test/bin/example gates on it —
+      # so --all-targets recompiled the entire test surface (and the binary, which
+      # must never link libpython) with python for ZERO added lint coverage. --lib
+      # is faster and strictly more correct.
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
-        run: cargo clippy --all-targets --features python -- -D warnings
+        run: cargo clippy --lib --features python -- -D warnings
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the
