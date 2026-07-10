@@ -353,6 +353,10 @@ async fn add_occurrence(
                 // generic bind.
                 transport_x25519_pubkey_base64: None,
                 transport_ed25519_pubkey_base64: None,
+                // The occurrence-bind is a federation-key-signed identity_occurrence
+                // (part_3 §1054) — an authoritative binding, not an unverified announce.
+                binding_provenance:
+                    ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
             })
             .await
         {
