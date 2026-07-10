@@ -126,9 +126,19 @@ jobs:
       - name: Set up Rust (maturin builds the abi3 wheel)
         uses: dtolnay/rust-toolchain@1.97.0
 
-      # CIRISCache 4-layer centipede (CIRISServer#99) — restore the substrate
-      # compile so the windows-installer maturin build doesn't cold-compile
-      # persist/edge/verify every run. PLAT=windows-x64 (matches the wheel leg).
+      # Compiler cache (sccache over the GHA backend). This is the fix for the
+      # 19-min COLD maturin compile: sccache is content-addressed (mtime-immune),
+      # so it (a) SELF-WARMS on this workflow's own main runs and (b) SHARES entries
+      # with the publish wheel's windows compile (build-wheels.yml, warmed on main
+      # by warm-release-cache.yml on a substrate bump) — same crates, same 1.97.0,
+      # same flags → same sccache keys. The CIRISCache blob below can't do this: its
+      # tar mtimes predate the fresh checkout, so cargo rebuilds regardless.
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # CIRISCache 4-layer centipede (CIRISServer#99) — restores the substrate
+      # SOURCE (registry/git); the compile itself is warmed by sccache above.
+      # PLAT=windows-x64 (matches the wheel leg).
       - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
         id: cachekey
         shell: bash
@@ -206,10 +216,14 @@ jobs:
 
       - name: Build + install the ciris-server wheel (maturin)
         shell: bash
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
         run: |
           python -m pip install --upgrade pip maturin pyinstaller
           # The wheel carries the staged JAR (pyproject [tool.maturin] include).
           maturin build --release --out dist-wheel
+          sccache --show-stats
           WHL=$(ls dist-wheel/*.whl | head -1)
           echo "installing $WHL"
           pip install "$WHL"
