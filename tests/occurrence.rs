@@ -132,19 +132,21 @@ async fn register_key(engine: &Engine, dev: &Device, identity_type: &str) {
 /// the precondition for the enrollment flow (the self already has one device).
 async fn bind_primary(engine: &Engine, identity_key_id: &str, dev: &Device) {
     let now = chrono::Utc::now();
+    // v14 (CIRISPersist#418): fixture bind rides the TRUSTED-LOCAL path — the same
+    // one `bind_occurrence_core` uses for content-only device binds (the signed gate
+    // now requires a producer-signed envelope with a transport_destination).
     engine
         .federation_directory()
-        .put_identity_occurrence(ciris_persist::federation::SignedIdentityOccurrence {
-            identity_occurrence: ciris_persist::federation::IdentityOccurrence {
-                identity_key_id: identity_key_id.to_string(),
-                occurrence_key_id: dev.key_id.clone(),
-                device_class: "laptop".into(),
-                hardware_attestation: None,
-                asserted_at: now,
-                valid_until: None,
-                encryption_pubkeys: None,
-                persist_row_hash: String::new(),
-            },
+        .put_identity_occurrence_local(ciris_persist::federation::IdentityOccurrence {
+            identity_key_id: identity_key_id.to_string(),
+            occurrence_key_id: dev.key_id.clone(),
+            device_class: "laptop".into(),
+            hardware_attestation: None,
+            asserted_at: now,
+            valid_until: None,
+            encryption_pubkeys: None,
+            transport_binding: None,
+            persist_row_hash: String::new(),
         })
         .await
         .expect("bind primary occurrence");
