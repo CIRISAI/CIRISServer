@@ -385,6 +385,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // publish (the directory row replicates, peers resolve + prime it).
     publish_self_transport_destination(&engine, &edge, &cfg.key_id).await;
 
+    // ── Sealability twin (#227 S1): publish this node's SIGNED identity occurrence
+    // (content-enc pubkeys from sealed custody) so peers can resolve + SEAL to it —
+    // transport binding = how to REACH me, occurrence = how to SEAL to me. Best-effort,
+    // idempotent (last-signed-wins re-assert each boot); the agent does nothing.
+    publish_self_identity_occurrence(&engine, &edge, &cfg).await;
+
     // ── Directed-consent federation peering with Node B (ciris-status) ────────
     // Bidirectional replication A<->B is authorized by DIRECTED CONSENT
     // ATTESTATIONS (federation scope) + MUTUAL KEY REGISTRATION — NOT in-group
@@ -1076,6 +1082,159 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
             key_id,
             error = %e,
             "could not publish self transport-destination — peers cannot prime this node until it is asserted"
+        ),
+    }
+}
+
+/// **Boot self-publish of THIS node's SIGNED identity occurrence** — the sealability
+/// twin of [`publish_self_transport_destination`] (CIRISServer#227 S1, occurrence-KEX
+/// arc 4/4). The transport binding says *how to reach me*; the occurrence says *how to
+/// SEAL to me*: it carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
+/// that a peer's `resolve_peer_kex_pubkeys` reads before `FederationSession::initiate`.
+///
+/// Custody-agnostic by construction (CIRISVerify#183): the enc pubkeys come from
+/// [`ciris_keyring::self_enc_keys::SelfEncKeys`] — derived INSIDE the keyring from the
+/// same sealed Ed25519 seed the federation signer uses (retrieve → HKDF → scrub; no
+/// private half ever crosses an API). Deterministic, so every boot and every restore
+/// republishes the identical keypair (the #151 restore property).
+///
+/// The occurrence is SIGNED (CIRISPersist#418, v14): the envelope — byte-matching what
+/// `verify_transport_binding` JCS-canonicalizes, including the REQUIRED
+/// `transport_destination` member (edge's transport identity + dest-hash, which the
+/// gate recomputes per §5.6.8.8.1.1, and which satisfies C4 since the content-KEM
+/// x25519 is HKDF-derived, distinct from the transport x25519) — is signed by the
+/// node's own hybrid signer via `produce_signed_identity_occurrence` and admitted
+/// through the ONE fail-secure gate (`put_identity_occurrence`). Signed-put rows are
+/// exactly what `list_signed_identity_occurrences_for` re-publishes byte-exact on the
+/// replication plane (edge v9.8.0 #305), so peers verify the SAME signature this
+/// node's persist verified.
+///
+/// Idempotent every boot: a re-assert carries a fresh `asserted_at` and supersedes
+/// under persist's last-signed-wins upsert; a stale replay elsewhere is a no-op.
+/// Best-effort (mirrors the transport publish): no Reticulum transport → debug no-op.
+/// THE AGENT DOES NOTHING — the node self-publishes its sealability, deleting the
+/// agent-side publish step entirely.
+async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &ServerConfig) {
+    use ciris_keyring::self_enc_keys::SelfEncKeys;
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+    use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
+
+    let key_id = cfg.key_id.as_str();
+    let (Some(dest_hash), Some(transport_pubkey)) =
+        (edge.local_dest_hash(), edge.local_transport_pubkey())
+    else {
+        tracing::debug!(
+            key_id,
+            "no Reticulum transport identity — skipping self identity-occurrence publish"
+        );
+        return;
+    };
+
+    // Content-enc pubkeys from CUSTODY (never a raw seed in this function).
+    let enc = match SelfEncKeys::open(cfg.keystore_alias.clone(), cfg.identity_dir.clone())
+        .and_then(|k| k.enc_pubkeys())
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                key_id,
+                error = %e,
+                "self content-enc pubkeys unavailable from the keyring — this node cannot be \
+                 SEALED to until the sealed federation seed opens (peers will resolve None)"
+            );
+            return;
+        }
+    };
+
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let now = chrono::Utc::now();
+    // Envelope member names byte-match persist's admission parse + the producer the
+    // gate verifies (verify_signed_identity_occurrence). app_name/aspects are edge's
+    // RNS destination constants ("ciris"."edge") — the gate recomputes dest_hash from
+    // (app_name, aspects, x25519, ed25519) and must land on edge's own hash.
+    let tb_env = serde_json::json!({
+        "reticulum_x25519_pubkey": b64.encode(&transport_pubkey[0..32]),
+        "reticulum_ed25519_pubkey": b64.encode(&transport_pubkey[32..64]),
+        "destination_hash": b64.encode(dest_hash),
+        "app_name": "ciris",
+        "aspects": ["edge"],
+    });
+    let envelope = serde_json::json!({
+        "identity_key_id": key_id,
+        "occurrence_key_id": key_id,
+        "transport_destination": tb_env,
+        "encryption_pubkeys": {
+            "x25519_base64": enc.x25519_base64,
+            "ml_kem_768_base64": enc.ml_kem_768_base64,
+        },
+        "asserted_at": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+
+    // Sign with the node's own hybrid identity (the build_self_key_record pattern);
+    // attesting_key_id == identity_key_id == this node's registered key, so the
+    // gate's signer_acts_for is satisfied by the identity's own key.
+    let signed = async {
+        let ed: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
+        let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
+        let identity = HardwareRootedIdentity::new(cfg.key_id.clone(), ed, pqc)
+            .map_err(|e| anyhow::anyhow!("node self-signer identity: {e}"))?;
+        let (signed_envelope, signature) = produce_signed_identity_occurrence(&identity, envelope)
+            .await
+            .map_err(|e| anyhow::anyhow!("produce signed identity occurrence: {e}"))?;
+        anyhow::Ok((signed_envelope, signature))
+    }
+    .await;
+    let (signed_envelope, signature) = match signed {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(key_id, error = %e, "could not sign the self identity occurrence");
+            return;
+        }
+    };
+
+    let row = ciris_persist::federation::IdentityOccurrence {
+        identity_key_id: key_id.to_string(),
+        occurrence_key_id: key_id.to_string(),
+        device_class: "agent".to_string(),
+        hardware_attestation: None,
+        asserted_at: now,
+        valid_until: None,
+        encryption_pubkeys: Some(ciris_persist::federation::EncryptionPubkeys {
+            x25519_base64: enc.x25519_base64.clone(),
+            ml_kem_768_base64: enc.ml_kem_768_base64.clone(),
+        }),
+        transport_binding: Some(
+            ciris_persist::federation::types::OccurrenceTransportBinding {
+                reticulum_x25519_pubkey_base64: b64.encode(&transport_pubkey[0..32]),
+                reticulum_ed25519_pubkey_base64: b64.encode(&transport_pubkey[32..64]),
+                destination_hash_base64: b64.encode(dest_hash),
+                app_name: "ciris".to_string(),
+                aspects: vec!["edge".to_string()],
+            },
+        ),
+        persist_row_hash: String::new(),
+    };
+    match engine
+        .federation_directory()
+        .put_identity_occurrence(ciris_persist::federation::SignedIdentityOccurrence {
+            identity_occurrence: row,
+            attesting_key_id: key_id.to_string(),
+            signed_envelope,
+            signature,
+        })
+        .await
+    {
+        Ok(()) => tracing::info!(
+            key_id,
+            "published this node's SIGNED self identity-occurrence (content-enc pubkeys from \
+             sealed custody) — peers can now resolve + SEAL to this node (#227 S1)"
+        ),
+        Err(e) => tracing::warn!(
+            key_id,
+            error = %e,
+            "could not publish the signed self identity-occurrence — peers cannot seal to this \
+             node until it is admitted"
         ),
     }
 }

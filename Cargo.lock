@@ -766,8 +766,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "8.10.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.1#11aa3b5244666062b7d22f3deee694156a73bbd5"
+version = "8.12.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.12.0#3f833b59f5b77c383ba394dc2b89fee12c5fb991"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -793,8 +793,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "9.7.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v9.7.0#909b01bfac648c2da4809c78dc994128ef4b5357"
+version = "9.8.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v9.8.0#b59798747098287b5a20ad28d658419074ac2d56"
 dependencies = [
  "async-trait",
  "axum",
@@ -847,11 +847,12 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "8.10.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.1#11aa3b5244666062b7d22f3deee694156a73bbd5"
+version = "8.12.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.12.0#3f833b59f5b77c383ba394dc2b89fee12c5fb991"
 dependencies = [
  "aes-gcm",
  "async-trait",
+ "base64 0.21.7",
  "block2",
  "ciris-crypto",
  "core-foundation 0.9.4",
@@ -911,8 +912,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "13.9.1"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v13.9.1#e69509bfa9b43fb49d09faac5d833fbdc6cdd7f8"
+version = "14.1.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v14.1.0#929819a8c18c00668b0109d00d8e0df176b4fe68"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -949,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.99"
+version = "0.5.100"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -991,8 +992,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "8.10.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.10.1#11aa3b5244666062b7d22f3deee694156a73bbd5"
+version = "8.12.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v8.12.0#3f833b59f5b77c383ba394dc2b89fee12c5fb991"
 dependencies = [
  "android_system_properties",
  "async-trait",

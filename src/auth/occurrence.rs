@@ -42,8 +42,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::types::{
-    IdentityOccurrence, IdentityOccurrenceRevocation, SignedIdentityOccurrence,
-    SignedIdentityOccurrenceRevocation,
+    IdentityOccurrence, IdentityOccurrenceRevocation, SignedIdentityOccurrenceRevocation,
 };
 use ciris_persist::federation::{EncryptionPubkeys, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, HybridPolicy};
@@ -188,6 +187,18 @@ pub async fn bind_occurrence_core(
 
     // (2) Bind the occurrence under the identity (idempotent on the
     // (identity, occurrence) PK; persist runs check_device_class admission).
+    //
+    // v14 (CIRISPersist#418): this is the TRUSTED-LOCAL path — a content-only
+    // occurrence (DEK-cascade KEX target, no reticulum transport binding),
+    // locally produced on behalf of the authenticated requester (the request-
+    // level `signer_acts_for` gate upstream), never peer-received. Persist's
+    // `put_identity_occurrence_local` stores it with NULL signature columns and
+    // deliberately EXCLUDES it from `list_signed_identity_occurrences_for`, so a
+    // local bind can never signed-replicate — only the node's own boot-published
+    // SIGNED occurrence (compose::publish_self_identity_occurrence) rides the
+    // wire. The signed gate (`put_identity_occurrence`) is for producer-signed
+    // envelopes; it now also REQUIRES a transport_destination member, which a
+    // device bind doesn't have.
     let now = chrono::Utc::now();
     let row = IdentityOccurrence {
         identity_key_id: identity_key_id.to_string(),
@@ -197,14 +208,13 @@ pub async fn bind_occurrence_core(
         asserted_at: now,
         valid_until: None,
         encryption_pubkeys,
+        transport_binding: None,
         persist_row_hash: String::new(),
     };
     directory
-        .put_identity_occurrence(SignedIdentityOccurrence {
-            identity_occurrence: row,
-        })
+        .put_identity_occurrence_local(row)
         .await
-        .map_err(|e| format!("put_identity_occurrence: {e}"))?;
+        .map_err(|e| format!("put_identity_occurrence_local: {e}"))?;
 
     // (3) Self-DEK cascade: retroactively wrap every existing cohort_scope:self
     // at-rest DEK to the newcomer so the new key decrypts the self's content.
