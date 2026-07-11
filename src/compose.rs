@@ -1120,12 +1120,34 @@ async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &Se
     use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
 
     let key_id = cfg.key_id.as_str();
-    let (Some(dest_hash), Some(transport_pubkey)) =
-        (edge.local_dest_hash(), edge.local_transport_pubkey())
-    else {
+    let Some(transport_pubkey) = edge.local_transport_pubkey() else {
         tracing::debug!(
             key_id,
             "no Reticulum transport identity — skipping self identity-occurrence publish"
+        );
+        return;
+    };
+
+    // The occurrence's transport_destination MUST carry the NAMED Reticulum dest hash
+    // — `sha256(name_hash("ciris"."edge") || sha256(x25519||ed25519)[..16])[..16]` — the
+    // one `verify_transport_binding` recomputes per §5.6.8.8.1.1 and the one edge
+    // announces + listens on for mesh-routed delivery (`local_named_dest_hash`). NOT
+    // `edge.local_dest_hash()`, which is the *explicit* hash `sha256(fed_pubkey)[..16]`
+    // (v7.0.0 direct-dial) — that mismatches the gate's recompute (DestinationHashMismatch,
+    // field-reported on 0.5.100) and blocks inbound sealing. Computed here with the gate's
+    // own `compute_destination_hash` so the two are byte-identical by construction (the
+    // 0.5.100 e2e used this same fn to BUILD the envelope, which is why it never caught
+    // the divergence — the bug lived only in the local_dest_hash() call this replaces).
+    let Some(named_dest_hash) = ciris_verify_core::transport_binding::compute_destination_hash(
+        "ciris",
+        &["edge".to_string()],
+        &transport_pubkey[0..32],
+        &transport_pubkey[32..64],
+    ) else {
+        tracing::warn!(
+            key_id,
+            "could not compute the named RNS destination hash for the self occurrence — \
+             skipping (peers cannot seal until this publishes)"
         );
         return;
     };
@@ -1156,7 +1178,7 @@ async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &Se
     let tb_env = serde_json::json!({
         "reticulum_x25519_pubkey": b64.encode(&transport_pubkey[0..32]),
         "reticulum_ed25519_pubkey": b64.encode(&transport_pubkey[32..64]),
-        "destination_hash": b64.encode(dest_hash),
+        "destination_hash": b64.encode(named_dest_hash),
         "app_name": "ciris",
         "aspects": ["edge"],
     });
@@ -1208,7 +1230,7 @@ async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &Se
             ciris_persist::federation::types::OccurrenceTransportBinding {
                 reticulum_x25519_pubkey_base64: b64.encode(&transport_pubkey[0..32]),
                 reticulum_ed25519_pubkey_base64: b64.encode(&transport_pubkey[32..64]),
-                destination_hash_base64: b64.encode(dest_hash),
+                destination_hash_base64: b64.encode(named_dest_hash),
                 app_name: "ciris".to_string(),
                 aspects: vec!["edge".to_string()],
             },
