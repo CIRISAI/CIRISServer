@@ -1713,9 +1713,17 @@ async fn setup_peer_replication(
 }
 
 /// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
-/// admitted peer `key_id`s. Two coordinators per peer:
+/// admitted peer `key_id`s. Three coordinators per peer:
 ///   - [`EnvelopeKind::Attestation`] — capacity:* / trace out, health:liveness in.
-///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane.
+///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane
+///     (verification + transport identity).
+///   - [`EnvelopeKind::IdentityOccurrence`] (CIRISEdge#305) — the KEX plane: the
+///     occurrence carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
+///     that `resolve_peer_kex_pubkeys` reads. Without this coordinator the plane is
+///     never exchanged, so a peer's enc keys never reach the directory → sealing to it
+///     resolves `None` → 0 content delivery (the last trace-flow gap). Publish-own is
+///     the `occurrence_selector` in [`start_replication_runtime`]; this is the
+///     anti-entropy carriage.
 ///
 /// Pure (no I/O) so both the compose boot path and the agent-embedded delivery
 /// controller share ONE assembly, and it is unit-testable without an engine.
@@ -1734,6 +1742,10 @@ pub(crate) fn build_replication_peers(
                 ReplicationPeer {
                     peer_key_id: p.clone(),
                     kind: EnvelopeKind::Key,
+                },
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::IdentityOccurrence,
                 },
             ]
         })
@@ -1830,12 +1842,28 @@ pub(crate) async fn start_replication_runtime(
     let key_selector: ciris_edge::replication::CohortProvider =
         Arc::new(move || vec![own_key_id.clone()]);
 
+    // IdentityOccurrence-plane publish-own selector (CIRISEdge#305, the KEX analogue
+    // of `key_selector`). Yields THIS node's own key_id so `list_identity_occurrences`
+    // advertises the node's OWN occurrence — which carries the content-tier
+    // `encryption_pubkeys` a peer needs to seal to it — instead of only cohort-members'
+    // occurrences the node happens to hold. The node's self-occurrence is published by
+    // the agent (agent = node = one keypair: the agent derives the content-enc keypair
+    // from the node's Ed25519 seed at mint and writes it via `put_identity_occurrence`);
+    // this selector makes the next anti-entropy round replicate it to consent peers, and
+    // the `IdentityOccurrence` coordinator (see `build_replication_peers`) pulls peers'
+    // occurrences in — so `resolve_peer_kex_pubkeys(peer)` finally resolves and content
+    // seals. `list_identity_occurrences_for` re-reads live each tick.
+    let occ_key_id = node_key_id.to_string();
+    let occurrence_selector: ciris_edge::replication::CohortProvider =
+        Arc::new(move || vec![occ_key_id.clone()]);
+
     let runtime = ReplicationRuntime::start(
         directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
         peers,
         ReplicationRuntimeConfig::default(),
         Some(key_selector),
+        Some(occurrence_selector),
     )
     .await;
 

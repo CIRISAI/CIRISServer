@@ -68,23 +68,32 @@ pub async fn reconcile_once(
     // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
     // health:liveness in).
     let directory = engine.federation_directory();
-    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 2);
+    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 3);
     for peer in consented {
         match directory.lookup_public_key(&peer).await {
             Ok(Some(_)) => {
-                // BOTH planes per admitted peer:
+                // ALL THREE planes per admitted peer (mirrors compose::build_replication_peers):
                 //  - Attestation: capacity:* out, health:liveness in (as before).
                 //  - Key (#144, CIRISEdge#257): the KEY-PLANE anti-entropy. Paired
                 //    with the runtime's `key_selector` (publishes the node's OWN
                 //    record — KERI publish-own), this converges a node's scrub-signed
                 //    accord-anchored record to its consent peers so they can ROOT it.
+                //  - IdentityOccurrence (CIRISEdge#305): the KEX plane — the occurrence
+                //    carries the content-tier `encryption_pubkeys`. Paired with the
+                //    runtime's `occurrence_selector` (publish-own), this converges the
+                //    node's enc keys to peers so they can SEAL to it (and pulls peers'
+                //    enc keys in). Without it a hot-added peer roots but never KEXes.
                 desired.push(ReplicationPeer {
                     peer_key_id: peer.clone(),
                     kind: EnvelopeKind::Attestation,
                 });
                 desired.push(ReplicationPeer {
-                    peer_key_id: peer,
+                    peer_key_id: peer.clone(),
                     kind: EnvelopeKind::Key,
+                });
+                desired.push(ReplicationPeer {
+                    peer_key_id: peer,
+                    kind: EnvelopeKind::IdentityOccurrence,
                 });
             }
             Ok(None) => tracing::warn!(
@@ -103,9 +112,9 @@ pub async fn reconcile_once(
     // Diff-converge the live Initiator set to the desired consent peers. Adds
     // become active Initiators (scheduler-driven pull) at runtime; removals stop
     // their rounds + drop inbound routing — all without a restart.
-    // `desired` holds TWO coordinators per peer (Attestation + Key); the reported
-    // count is distinct consent peers.
-    let count = desired.len() / 2;
+    // `desired` holds THREE coordinators per peer (Attestation + Key +
+    // IdentityOccurrence); the reported count is distinct consent peers.
+    let count = desired.len() / 3;
     if let Err(e) = runtime.set_peers(desired).await {
         // The runtime's scheduler has stopped (shutdown) — surface so the caller
         // logs + skips; the controller never panics.
