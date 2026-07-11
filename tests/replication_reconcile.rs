@@ -239,6 +239,7 @@ async fn runtime_for(engine: &Arc<Engine>, peers: Vec<&str>) -> Arc<ReplicationR
             boot,
             ReplicationRuntimeConfig::default(),
             None, // no Key-plane selector in this reconciler-topology test
+            None, // no IdentityOccurrence-plane selector either (CIRISEdge#305)
         )
         .await,
     )

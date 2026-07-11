@@ -529,20 +529,22 @@ mod tests {
     }
 
     #[test]
-    fn build_replication_peers_two_coordinators_per_target() {
+    fn build_replication_peers_three_coordinators_per_target() {
         use ciris_edge::replication::EnvelopeKind;
         // The delivery controller hands the admitted canonical targets to the SAME
-        // peer-assembly the compose boot path uses: exactly Attestation + Key per
-        // target, in target order.
+        // peer-assembly the compose boot path uses: exactly Attestation + Key +
+        // IdentityOccurrence (CIRISEdge#305, the KEX plane) per target, in target order.
         let desired = vec!["canon-1".to_string(), "peer-b".to_string()];
         let peers = crate::compose::build_replication_peers(&desired);
-        assert_eq!(peers.len(), 4);
+        assert_eq!(peers.len(), 6);
         assert_eq!(peers[0].peer_key_id, "canon-1");
         assert!(matches!(peers[0].kind, EnvelopeKind::Attestation));
         assert!(matches!(peers[1].kind, EnvelopeKind::Key));
-        assert_eq!(peers[2].peer_key_id, "peer-b");
-        assert!(matches!(peers[2].kind, EnvelopeKind::Attestation));
-        assert!(matches!(peers[3].kind, EnvelopeKind::Key));
+        assert!(matches!(peers[2].kind, EnvelopeKind::IdentityOccurrence));
+        assert_eq!(peers[3].peer_key_id, "peer-b");
+        assert!(matches!(peers[3].kind, EnvelopeKind::Attestation));
+        assert!(matches!(peers[4].kind, EnvelopeKind::Key));
+        assert!(matches!(peers[5].kind, EnvelopeKind::IdentityOccurrence));
     }
 
     #[test]
