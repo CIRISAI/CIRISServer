@@ -705,6 +705,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
             pubkey_ed25519_base64: t_ed.clone(),
             pubkey_ml_dsa_65_base64: t_mldsa,
             identity_type: "node".to_string(),
+            roles: Vec::new(),
         },
         &now,
         &[],

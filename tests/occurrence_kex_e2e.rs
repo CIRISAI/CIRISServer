@@ -310,7 +310,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     //    anti-entropy hop carries it to A, and A's gate RE-VERIFIES the signature.
     let bridge_b =
         FederationDirectoryReplicationBridge::new(Arc::clone(&dir_b), Arc::new(Vec::new))
-            .with_occurrence_selector(Some(selector(NODE_B_KEY_ID)));
+            .with_self_provider(Some(selector(NODE_B_KEY_ID)));
     let refs = bridge_b
         .list_envelope_refs(EnvelopeKind::IdentityOccurrence)
         .await;

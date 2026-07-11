@@ -1262,6 +1262,7 @@ async fn admit_node_impl(
             pubkey_ed25519_base64: req.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.target.identity_type.trim().to_string(),
+            roles: Vec::new(),
         },
         &valid_from,
         // #172: transport hints ride INSIDE this scrub-signed envelope, so the accord
@@ -1603,6 +1604,7 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
             pubkey_ed25519_base64: req.admit.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.admit.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.admit.target.identity_type.clone(),
+            roles: Vec::new(),
         },
         &valid_from,
         &hints,
