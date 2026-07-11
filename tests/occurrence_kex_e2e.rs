@@ -179,8 +179,9 @@ async fn agent_published_occurrence_replicates_and_becomes_sealable() {
          (the pre-#305 cohort-only projection — the bug)"
     );
 
-    let bridge_b = FederationDirectoryReplicationBridge::new(Arc::clone(&dir_b), Arc::new(Vec::new))
-        .with_occurrence_selector(Some(selector(NODE_B_KEY_ID)));
+    let bridge_b =
+        FederationDirectoryReplicationBridge::new(Arc::clone(&dir_b), Arc::new(Vec::new))
+            .with_occurrence_selector(Some(selector(NODE_B_KEY_ID)));
     let refs = bridge_b
         .list_envelope_refs(EnvelopeKind::IdentityOccurrence)
         .await;
@@ -196,7 +197,8 @@ async fn agent_published_occurrence_replicates_and_becomes_sealable() {
         .fetch_envelope_bytes(EnvelopeKind::IdentityOccurrence, &refs[0].envelope_hash)
         .await
         .expect("fetch B occurrence bytes");
-    let bridge_a = FederationDirectoryReplicationBridge::new(Arc::clone(&dir_a), Arc::new(Vec::new));
+    let bridge_a =
+        FederationDirectoryReplicationBridge::new(Arc::clone(&dir_a), Arc::new(Vec::new));
     assert!(
         bridge_a
             .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes)
@@ -230,7 +232,11 @@ async fn agent_published_occurrence_replicates_and_becomes_sealable() {
             .expect("x25519 b64")
             .try_into()
             .expect("x25519 32B"),
-        mlkem768_pub: Some(BASE64.decode(&resolved.ml_kem_768_base64).expect("ml-kem b64")),
+        mlkem768_pub: Some(
+            BASE64
+                .decode(&resolved.ml_kem_768_base64)
+                .expect("ml-kem b64"),
+        ),
     };
     let (handshake, sender_key) =
         FederationSession::initiate(&peer, KexAlgorithm::Hybrid).expect("A seals to B (initiate)");
