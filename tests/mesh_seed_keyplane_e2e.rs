@@ -143,6 +143,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
             pubkey_ed25519_base64: a_ed_b64.clone(),
             pubkey_ml_dsa_65_base64: a_mldsa_b64,
             identity_type: "node".to_string(),
+            roles: Vec::new(),
         },
         &now,
         &[],
@@ -172,7 +173,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     let key_sel: CohortProvider = Arc::new(move || vec![node_a_key.to_string()]);
     let a_bridge =
         FederationDirectoryReplicationBridge::with_config(a_dir, cohort_a, BridgeConfig::default())
-            .with_key_selector(Some(key_sel));
+            .with_self_provider(Some(key_sel));
 
     let refs = a_bridge.list_envelope_refs(EnvelopeKind::Key).await;
     assert_eq!(
