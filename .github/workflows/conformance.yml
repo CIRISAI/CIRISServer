@@ -113,6 +113,36 @@ jobs:
           maturin build --release --strip --out dist
           ls -l dist/
           sccache --show-stats
+      # ── Verify-FFI fold smoke (CIRISServer#232) ──────────────────────────────
+      # The same assertion build-wheels.yml runs on the macOS/Windows legs at
+      # release time — repeated HERE so it gates every PR/push on linux too, and
+      # so the smoke script itself is exercised long before it can fail a publish.
+      # We fold ciris-verify-ffi (rlib) into _native.so, but NOTHING in our Rust
+      # calls its #[no_mangle] fns (the agent reaches them via ctypes at runtime),
+      # so --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
+      # per-platform-silently. Load the built wheel exactly the way the agent will
+      # and assert the surface actually resolves.
+      - name: Verify-FFI fold smoke (CIRISServer#232 — symbols must survive the linker strip)
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python - <<'PY'
+          import ctypes, ciris_server
+          p = ciris_server.verify_ffi_path()
+          print("verify_ffi_path ->", p)
+          lib = ctypes.CDLL(p)
+          need = [
+              "ciris_verify_ffi_link_anchor", "ciris_verify_jcs_canonicalize",
+              "ciris_verify_self_enc_pubkeys", "ciris_verify_self_enc_respond",
+              "ciris_verify_wrap_dek_for_recipient", "ciris_verify_unwrap_dek",
+              "ciris_verify_kex_respond_hybrid_with_public",
+              "ciris_verify_create_federation_identity",
+              "ciris_verify_locale_merkle_root", "ciris_verify_admit_attestation",
+          ]
+          missing = [s for s in need if not hasattr(lib, s)]
+          assert not missing, "verify FFI symbols MISSING from _native (linker --gc-sections stripped the fold): %s" % missing
+          print("OK - verify FFI folded: %d symbols resolvable via ctypes from the built wheel" % len(need))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: ciris_server-wheel-linux-x86_64
