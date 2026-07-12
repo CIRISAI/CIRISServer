@@ -30,6 +30,17 @@ on:
     branches: [main]
     paths:
       - Cargo.toml   # the substrate pins live here; detect-job filters further
+  # Manual trigger. The substrate-bump gate below means a change that touches ONLY
+  # the wheel-build steps (e.g. the CIRISServer#232 verify-FFI fold smoke) never runs
+  # the macOS/Windows legs on a push — so it would first execute during the v* tag
+  # publish, where a bug burns a release tag. `force: true` runs the full wheel matrix
+  # on demand so those legs can be proven BEFORE tagging.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build the full wheel matrix even with no substrate pin change (validate wheel-build/CI changes pre-tag)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -53,7 +64,10 @@ jobs:
       - id: d
         shell: bash
         run: |
-          if git diff HEAD~1 HEAD -- Cargo.toml \
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::forced via workflow_dispatch — building the full wheel matrix regardless of substrate pins"
+          elif git diff HEAD~1 HEAD -- Cargo.toml \
              | grep -qE '^[+-].*(ciris-persist|ciris-edge|ciris-verify).*(tag|rev)[[:space:]]*='; then
             echo "bumped=true" >> "$GITHUB_OUTPUT"
             echo "::notice::substrate pin(s) changed — warming the release cache"
