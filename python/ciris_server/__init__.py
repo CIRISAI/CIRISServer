@@ -50,4 +50,22 @@ try:  # pragma: no cover - metadata is always present for an installed wheel
 except Exception:  # pragma: no cover
     pass
 
-__all__ = ["main", "import_traces", "__version__"]
+
+def verify_ffi_path() -> str:
+    """Absolute path to the shared object carrying the verify FFI symbols.
+
+    ciris-server folds ``ciris-verify-ffi`` (CIRISServer#232) directly into the
+    compiled ``ciris_server._native`` extension, so the ~84 ``ciris_verify_*`` C
+    symbols live in *this* wheel's ``.so`` — there is no separate
+    ``libciris_verify_ffi.so``. The agent's ``ffi_bindings`` ctypes loader points
+    at the path returned here instead of a standalone ``ciris-verify`` wheel, so
+    jcs_canonicalize / attestation / self_enc / hybrid_kex / key_grant run against
+    the SAME verify the substrate uses — version-skew is impossible by construction
+    (CIRISAgent#917). Returns the ``_native`` extension's own file path.
+    """
+    from . import _native  # the compiled extension carrying the folded FFI
+
+    return _native.__file__
+
+
+__all__ = ["main", "import_traces", "verify_ffi_path", "__version__"]
