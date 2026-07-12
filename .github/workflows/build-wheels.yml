@@ -154,27 +154,51 @@ jobs:
           pip install "maturin>=1.7,<2"
           maturin build --release --strip --out dist
           sccache --show-stats
+      # ── Verify-FFI fold smoke (CIRISServer#232) ─────────────────────────────
+      # We fold ciris-verify-ffi (rlib) into _native, but NOTHING in our Rust calls
+      # its #[no_mangle] fns (the agent reaches them via ctypes at runtime), so
+      # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
+      # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
+      #
+      # Two modes, because one leg cross-compiles:
+      #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
+      #                agent uses. The faithful check.
+      #   cross leg  → macos-x86_64 builds an x86_64 wheel on an arm64 runner, so pip
+      #                rightly refuses it ("not a supported wheel on this platform")
+      #                and ctypes is impossible. Fall back to a static symbol dump of
+      #                the .so inside the wheel — proves the same thing without
+      #                executing it. Only macOS takes this branch, and its `nm` reads
+      #                foreign-arch Mach-O fine (Mach-O underscore-prefixes symbols,
+      #                hence the substring grep rather than an exact match).
       - name: Verify-FFI fold smoke (CIRISServer#232 — symbols must survive the linker strip)
         shell: bash
+        env:
+          NEED: >-
+            ciris_verify_ffi_link_anchor ciris_verify_jcs_canonicalize
+            ciris_verify_self_enc_pubkeys ciris_verify_self_enc_respond
+            ciris_verify_wrap_dek_for_recipient ciris_verify_unwrap_dek
+            ciris_verify_kex_respond_hybrid_with_public
+            ciris_verify_create_federation_identity
+            ciris_verify_locale_merkle_root ciris_verify_admit_attestation
         run: |
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          python - <<'PY'
-          import ctypes, ciris_server
-          p = ciris_server.verify_ffi_path()
-          print("verify_ffi_path ->", p)
-          lib = ctypes.CDLL(p)
-          need = [
-              "ciris_verify_ffi_link_anchor", "ciris_verify_jcs_canonicalize",
-              "ciris_verify_self_enc_pubkeys", "ciris_verify_self_enc_respond",
-              "ciris_verify_wrap_dek_for_recipient", "ciris_verify_unwrap_dek",
-              "ciris_verify_kex_respond_hybrid_with_public",
-              "ciris_verify_create_federation_identity",
-              "ciris_verify_locale_merkle_root", "ciris_verify_admit_attestation",
-          ]
-          missing = [s for s in need if not hasattr(lib, s)]
-          assert not missing, "verify FFI symbols MISSING from _native (linker --gc-sections stripped the fold): %s" % missing
-          print("OK - verify FFI folded: %d symbols resolvable via ctypes from the built wheel" % len(need))
-          PY
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          echo "wheel: $WHL"
+          if python -m pip install --force-reinstall --no-deps "$WHL"; then
+            python -c "import ctypes,os,ciris_server; p=ciris_server.verify_ffi_path(); print('verify_ffi_path ->',p); lib=ctypes.CDLL(p); need=os.environ['NEED'].split(); missing=[s for s in need if not hasattr(lib,s)]; assert not missing, 'verify FFI symbols MISSING from _native (--gc-sections stripped the fold): %s' % missing; print('OK (ctypes) - verify FFI folded: %d symbols resolvable from the built wheel' % len(need))"
+          else
+            echo "wheel is cross-compiled for another arch (pip cannot install it here) — using a static symbol dump instead"
+            TMP=$(mktemp -d)
+            unzip -q "$WHL" -d "$TMP"
+            LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+            test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
+            echo "lib: $LIB"
+            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            MISSING=""
+            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
+            echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.plat.name }}
@@ -290,27 +314,51 @@ jobs:
           # backend), warmed on main by warm-release-cache.yml calling this same
           # workflow. Restores main-scoped sccache objects on a tag publish.
           sccache: true
+      # ── Verify-FFI fold smoke (CIRISServer#232) ─────────────────────────────
+      # We fold ciris-verify-ffi (rlib) into _native, but NOTHING in our Rust calls
+      # its #[no_mangle] fns (the agent reaches them via ctypes at runtime), so
+      # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
+      # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
+      #
+      # Two modes, because one leg cross-compiles:
+      #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
+      #                agent uses. The faithful check.
+      #   cross leg  → macos-x86_64 builds an x86_64 wheel on an arm64 runner, so pip
+      #                rightly refuses it ("not a supported wheel on this platform")
+      #                and ctypes is impossible. Fall back to a static symbol dump of
+      #                the .so inside the wheel — proves the same thing without
+      #                executing it. Only macOS takes this branch, and its `nm` reads
+      #                foreign-arch Mach-O fine (Mach-O underscore-prefixes symbols,
+      #                hence the substring grep rather than an exact match).
       - name: Verify-FFI fold smoke (CIRISServer#232 — symbols must survive the linker strip)
         shell: bash
+        env:
+          NEED: >-
+            ciris_verify_ffi_link_anchor ciris_verify_jcs_canonicalize
+            ciris_verify_self_enc_pubkeys ciris_verify_self_enc_respond
+            ciris_verify_wrap_dek_for_recipient ciris_verify_unwrap_dek
+            ciris_verify_kex_respond_hybrid_with_public
+            ciris_verify_create_federation_identity
+            ciris_verify_locale_merkle_root ciris_verify_admit_attestation
         run: |
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          python - <<'PY'
-          import ctypes, ciris_server
-          p = ciris_server.verify_ffi_path()
-          print("verify_ffi_path ->", p)
-          lib = ctypes.CDLL(p)
-          need = [
-              "ciris_verify_ffi_link_anchor", "ciris_verify_jcs_canonicalize",
-              "ciris_verify_self_enc_pubkeys", "ciris_verify_self_enc_respond",
-              "ciris_verify_wrap_dek_for_recipient", "ciris_verify_unwrap_dek",
-              "ciris_verify_kex_respond_hybrid_with_public",
-              "ciris_verify_create_federation_identity",
-              "ciris_verify_locale_merkle_root", "ciris_verify_admit_attestation",
-          ]
-          missing = [s for s in need if not hasattr(lib, s)]
-          assert not missing, "verify FFI symbols MISSING from _native (linker --gc-sections stripped the fold): %s" % missing
-          print("OK - verify FFI folded: %d symbols resolvable via ctypes from the built wheel" % len(need))
-          PY
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          echo "wheel: $WHL"
+          if python -m pip install --force-reinstall --no-deps "$WHL"; then
+            python -c "import ctypes,os,ciris_server; p=ciris_server.verify_ffi_path(); print('verify_ffi_path ->',p); lib=ctypes.CDLL(p); need=os.environ['NEED'].split(); missing=[s for s in need if not hasattr(lib,s)]; assert not missing, 'verify FFI symbols MISSING from _native (--gc-sections stripped the fold): %s' % missing; print('OK (ctypes) - verify FFI folded: %d symbols resolvable from the built wheel' % len(need))"
+          else
+            echo "wheel is cross-compiled for another arch (pip cannot install it here) — using a static symbol dump instead"
+            TMP=$(mktemp -d)
+            unzip -q "$WHL" -d "$TMP"
+            LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+            test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
+            echo "lib: $LIB"
+            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            MISSING=""
+            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
+            echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -410,27 +458,51 @@ jobs:
           # Compiler cache (sccache over the GHA backend), warmed on main via
           # warm-release-cache.yml. Restore-on-tag; harmless otherwise.
           sccache: true
+      # ── Verify-FFI fold smoke (CIRISServer#232) ─────────────────────────────
+      # We fold ciris-verify-ffi (rlib) into _native, but NOTHING in our Rust calls
+      # its #[no_mangle] fns (the agent reaches them via ctypes at runtime), so
+      # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
+      # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
+      #
+      # Two modes, because one leg cross-compiles:
+      #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
+      #                agent uses. The faithful check.
+      #   cross leg  → macos-x86_64 builds an x86_64 wheel on an arm64 runner, so pip
+      #                rightly refuses it ("not a supported wheel on this platform")
+      #                and ctypes is impossible. Fall back to a static symbol dump of
+      #                the .so inside the wheel — proves the same thing without
+      #                executing it. Only macOS takes this branch, and its `nm` reads
+      #                foreign-arch Mach-O fine (Mach-O underscore-prefixes symbols,
+      #                hence the substring grep rather than an exact match).
       - name: Verify-FFI fold smoke (CIRISServer#232 — symbols must survive the linker strip)
         shell: bash
+        env:
+          NEED: >-
+            ciris_verify_ffi_link_anchor ciris_verify_jcs_canonicalize
+            ciris_verify_self_enc_pubkeys ciris_verify_self_enc_respond
+            ciris_verify_wrap_dek_for_recipient ciris_verify_unwrap_dek
+            ciris_verify_kex_respond_hybrid_with_public
+            ciris_verify_create_federation_identity
+            ciris_verify_locale_merkle_root ciris_verify_admit_attestation
         run: |
-          python -m pip install --force-reinstall --no-deps dist/*.whl
-          python - <<'PY'
-          import ctypes, ciris_server
-          p = ciris_server.verify_ffi_path()
-          print("verify_ffi_path ->", p)
-          lib = ctypes.CDLL(p)
-          need = [
-              "ciris_verify_ffi_link_anchor", "ciris_verify_jcs_canonicalize",
-              "ciris_verify_self_enc_pubkeys", "ciris_verify_self_enc_respond",
-              "ciris_verify_wrap_dek_for_recipient", "ciris_verify_unwrap_dek",
-              "ciris_verify_kex_respond_hybrid_with_public",
-              "ciris_verify_create_federation_identity",
-              "ciris_verify_locale_merkle_root", "ciris_verify_admit_attestation",
-          ]
-          missing = [s for s in need if not hasattr(lib, s)]
-          assert not missing, "verify FFI symbols MISSING from _native (linker --gc-sections stripped the fold): %s" % missing
-          print("OK - verify FFI folded: %d symbols resolvable via ctypes from the built wheel" % len(need))
-          PY
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          echo "wheel: $WHL"
+          if python -m pip install --force-reinstall --no-deps "$WHL"; then
+            python -c "import ctypes,os,ciris_server; p=ciris_server.verify_ffi_path(); print('verify_ffi_path ->',p); lib=ctypes.CDLL(p); need=os.environ['NEED'].split(); missing=[s for s in need if not hasattr(lib,s)]; assert not missing, 'verify FFI symbols MISSING from _native (--gc-sections stripped the fold): %s' % missing; print('OK (ctypes) - verify FFI folded: %d symbols resolvable from the built wheel' % len(need))"
+          else
+            echo "wheel is cross-compiled for another arch (pip cannot install it here) — using a static symbol dump instead"
+            TMP=$(mktemp -d)
+            unzip -q "$WHL" -d "$TMP"
+            LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+            test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
+            echo "lib: $LIB"
+            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            MISSING=""
+            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
+            echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64
