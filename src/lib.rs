@@ -619,6 +619,23 @@ pub fn parse_config_value(raw: &str) -> ConfigValue {
 mod python {
     use pyo3::prelude::*;
 
+    // ── Verify-FFI keep-alive (CIRISServer#232 / CIRISVerify#189) ────────────
+    // We fold `ciris-verify-ffi` (rlib) into `_native.so` so the agent rides us
+    // for verify and drops its standalone `ciris-verify` wheel. But NOTHING in
+    // our Rust code calls the FFI's `#[no_mangle] extern "C"` fns (the agent
+    // reaches them via `ctypes`/`dlopen` at runtime), so the linker's
+    // `--gc-sections` would dead-strip all ~84 `ciris_verify_*` symbols out of
+    // the final cdylib — per-platform-silently. Referencing the crate's
+    // `ciris_verify_ffi_link_anchor()` from a `#[used]` static transitively pins
+    // every FFI object file; the anchor takes the address of every export, which
+    // the compiler cannot resolve without keeping the symbol. `verify_ffi_path()`
+    // (python/ciris_server/__init__.py) resolves `_native`'s own path for the
+    // agent's ctypes loader. A cross-platform `nm`/`dumpbin` CI smoke asserts the
+    // surface is actually present in the built artifact (never trust cargo-green).
+    #[used]
+    static _KEEP_VERIFY_FFI: extern "C" fn() -> usize =
+        ciris_verify_ffi::ciris_verify_ffi_link_anchor;
+
     fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
         // ONE multi-thread runtime; the node spawns onto it (never a second
         // runtime around the Engine — the persist dual-runtime-deadlock rule).
@@ -828,6 +845,10 @@ mod python {
     /// unchanged at the import sites; only the .so's in-wheel location moved.
     #[pymodule]
     fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+        // Belt-and-suspenders alongside the `#[used]` static: a live reference to
+        // the verify-FFI anchor at init, so the fold survives even a linker that
+        // ignores `#[used]` on statics (CIRISServer#232). Cheap XOR-fold; discarded.
+        let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;

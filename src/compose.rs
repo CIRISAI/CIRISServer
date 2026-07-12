@@ -415,6 +415,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // envelopes. Runs in BOTH the standalone node and the fold (edge is shared).
     prime_trusted_peers(&engine, &edge).await;
 
+    // ── Canonical bootstrap boot prime (CIRISServer#238) ──────────────────────
+    // `prime_trusted_peers` primes from Rooted `transport_destination` ROWS — but
+    // the baked canonical seed carries only a KeyRecord (+ an IP dial hint), no
+    // such row, so the canonical was NEVER boot-primed and rooted only via its
+    // slow/unreliable announce (~130-200s, or never). An explicit-hash peer needs
+    // just `(dest_hash, ed25519)`, BOTH deterministically derivable from the fed
+    // Ed25519 pubkey the seed already carries: `dest_hash =
+    // reticulum_destination_for_pubkey(fed_ed25519) = sha256(fed_ed25519)[..16]`,
+    // and the link signing key IS that same fed Ed25519 (transport and federation
+    // share the Ed25519 signing half; the v10.1.0 split was in the unused X25519).
+    prime_canonical_bootstrap_peers(&engine, &edge).await;
+
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
     // The publisher advertises the fountain content THIS node holds as signed
     // FountainHoldingClaim envelopes to the consent cohort; the converger acts
@@ -1345,6 +1357,101 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
         trusted_peers = trusted.len(),
         primed,
         "trusted-peer boot prime complete — trusted (explicit-hash) peers reachable-by-key_id with no announce"
+    );
+}
+
+/// Boot-prime the canonical bootstrap peer(s) as explicit-hash Reticulum
+/// destinations, derived purely from the baked KeyRecord — CIRISServer#238.
+///
+/// The canonical seed carries a `KeyRecord` (with `pubkey_ed25519_base64`) and an
+/// IP dial hint, but NO `transport_destination` row, so [`prime_trusted_peers`]
+/// (which primes from Rooted rows) never touches it and the canonical roots only
+/// via its slow announce. But an explicit-hash peer (edge v7.0.0) needs only
+/// `(dest_hash, ed25519)`, and both come from the fed Ed25519 pubkey:
+///   - `dest_hash = reticulum_destination_for_pubkey(fed_ed25519) = sha256(fed)[..16]`
+///   - `signing_key = fed_ed25519` — transport and federation share the Ed25519
+///     signing half (the split is in the X25519 half, which priming doesn't use).
+///
+/// So we look up the canonical's KeyRecord, derive both, and inject a Rooted peer.
+/// Deterministic, no announce dependency, no seed change. Runs in BOTH the
+/// standalone node and the agent fold.
+async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
+    use base64::Engine as _;
+    let Some(transport) = edge.reticulum_transport() else {
+        tracing::debug!("canonical prime: no Reticulum transport on this build — skipping");
+        return;
+    };
+    let hints = match engine.canonical_bootstrap_hints().await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "canonical prime: canonical_bootstrap_hints failed — skipping");
+            return;
+        }
+    };
+    let canonical_key_ids = crate::federation_delivery::distinct_canonical_key_ids(&hints);
+    let mut primed = 0usize;
+    for key_id in &canonical_key_ids {
+        // NB: on the canonical node ITSELF this primes its own key_id. That is
+        // benign (a self-entry in the peers map is never a delivery target) and is
+        // the same behaviour `prime_trusted_peers` already has — so we don't special
+        // -case it rather than thread the node's own key_id down here for nothing.
+        let rec = match engine
+            .federation_directory()
+            .lookup_public_key(key_id)
+            .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                tracing::warn!(
+                    canonical = %key_id,
+                    "canonical prime: no KeyRecord for canonical key_id — cannot derive explicit-hash binding, will fall back to announce"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(canonical = %key_id, error = %e, "canonical prime: lookup_public_key failed — skip");
+                continue;
+            }
+        };
+        let ed_bytes = match base64::engine::general_purpose::STANDARD
+            .decode(rec.pubkey_ed25519_base64.as_bytes())
+        {
+            Ok(b) if b.len() == 32 => b,
+            Ok(b) => {
+                tracing::warn!(
+                    canonical = %key_id,
+                    len = b.len(),
+                    "canonical prime: pubkey_ed25519_base64 is not 32 bytes — skip"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(canonical = %key_id, error = %e, "canonical prime: pubkey_ed25519_base64 not base64 — skip");
+                continue;
+            }
+        };
+        let mut fed_ed = [0u8; 32];
+        fed_ed.copy_from_slice(&ed_bytes);
+        let dest_hash =
+            ciris_edge::transport::addressing::reticulum_destination_for_pubkey(&fed_ed);
+        let before = transport.knows_peer(key_id).await;
+        transport
+            .inject_rooted_peer_for_test(key_id, dest_hash, fed_ed)
+            .await;
+        let after = transport.knows_peer(key_id).await;
+        primed += 1;
+        tracing::info!(
+            canonical = %key_id,
+            dest_hash = %hex::encode(dest_hash),
+            knows_peer_before = before,
+            knows_peer_after = after,
+            "canonical boot prime: rooted {key_id} from baked KeyRecord (explicit-hash, no announce)"
+        );
+    }
+    tracing::info!(
+        canonical_peers = canonical_key_ids.len(),
+        primed,
+        "canonical boot prime complete — canonical(s) reachable-by-key_id at boot with no announce dependency"
     );
 }
 
