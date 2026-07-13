@@ -156,7 +156,10 @@ const REPLICATION_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// (`yubikey_attestation_chain_hex`), which `verify_accord_custody_attestation`
 /// walks (variable length) up to this anchor. Validated against a real YubiKey 5
 /// FIPS (fw 5.7.4) by the verify team. See the `accord-custody-gate-pinning` note.
-const YUBICO_ATTESTATION_ROOT_1_DER: &[u8] =
+/// `pub(crate)`: the CC 4.2.2.1 hardware-class gate
+/// ([`crate::hardware_attestation`]) verifies every `ExternalSecureElement`
+/// claim against this SAME anchor — one pinned trust root for the node, not two.
+pub(crate) const YUBICO_ATTESTATION_ROOT_1_DER: &[u8] =
     include_bytes!("accord_pki/yubico_attestation_root_1.der");
 /// The node-boot wiring the operational halt needs: WHERE to latch the disk halt,
 /// WHO the known peers are to replicate to, and (in prod) that a verified halt
@@ -590,7 +593,14 @@ async fn register_holder(
     let mut key_record = req.key_record;
     key_record.record.attestation_evidence = Some(attestation_evidence);
 
-    match st.engine.register_federation_key(key_record).await {
+    // CC 4.2.2.1 (CIRISServer#159): admit through the hardware-class chokepoint, not
+    // the raw engine call. For THIS path the gate is a re-confirmation (the custody
+    // attestation was just chain-verified above) — deliberately so: the chokepoint is
+    // where the class claim is proven, and no admission path is allowed to be the
+    // exception that proves nothing.
+    match crate::hardware_attestation::register_attested_federation_key(&st.engine, key_record)
+        .await
+    {
         Ok(_) => (
             StatusCode::OK,
             Json(serde_json::json!({ "registered": true, "key_id": key_id, "custody": custody_summary })),

@@ -257,6 +257,14 @@ libsqlite3-sys = { version = "0.28", features = ["bundled"] }
 # ed25519-dalek MUST match persist's locked 2.x (the SigningKey type crosses the
 # Engine::with_signer / put_public_key API boundary).
 [dev-dependencies]
+# Generate the mock YubiKey PIV attestation chain (root → f9 → 9c, Ed25519, with
+# the Yubico firmware/touch/FIPS extension OIDs) the CC 4.2.2.1 hardware-class
+# gate test drives (tests/hardware_class_admission.rs, CIRISServer#159). Nobody
+# can mint a cert under the REAL pinned Yubico Attestation Root 1, so proving
+# "a valid attestation admits at the claimed class" requires generating a chain
+# under a test root — the same way CIRISVerify tests `verify_yubikey_piv_attestation`.
+# Already in the locked graph at 0.13.2; dev/test only, no substrate pin touched.
+rcgen         = "0.13"
 ed25519-dalek = "2"
 base64        = "0.22"
 chrono        = { version = "0.4", features = ["serde"] }

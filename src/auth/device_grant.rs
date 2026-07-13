@@ -419,12 +419,18 @@ async fn register_minted_agent_key(
                 ))
             }
         };
-    engine.register_federation_key(signed).await.map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("admit minted agent key into federation_keys: {e}"),
-        )
-    })?;
+    // CC 4.2.2.1 (CIRISServer#159) — every admission goes through the hardware-class
+    // chokepoint. This agent key is server-minted and claims no class, so the gate
+    // resolves to `SoftwareUnattested`; routing it here anyway keeps the invariant
+    // "no `register_federation_key` call site bypasses the class gate" mechanical.
+    crate::hardware_attestation::register_attested_federation_key(engine, signed)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("admit minted agent key into federation_keys: {e}"),
+            )
+        })?;
     Ok(())
 }
 

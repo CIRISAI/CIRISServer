@@ -128,9 +128,15 @@ pub async fn register_peer_key(engine: &Engine, peer: &PeerB) -> Result<()> {
              must be admitted through the custody-gated POST /v1/accord/holder"
         ));
     }
-    match engine
-        .register_federation_key(peer.key_record.clone())
-        .await
+    // CC 4.2.2.1 (CIRISServer#159): the peering route is the classic unchecked-
+    // self-report surface — a peer hands us its own record, hardware_class and all.
+    // `register_attested_federation_key` proves any hardware-class claim (chain to a
+    // pinned root + bound to THIS record's key) before persist's PoP gate stores it.
+    match crate::hardware_attestation::register_attested_federation_key(
+        engine,
+        peer.key_record.clone(),
+    )
+    .await
     {
         Ok(()) => {
             tracing::info!(
