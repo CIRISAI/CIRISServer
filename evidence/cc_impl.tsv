@@ -71,7 +71,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.4.3.10	CLM-policy-trusted	—	—	open
 4.5.1.1	CLM-axis	CIRISPersist	src/federation/schema_resolver.rs#BlobBackedSchemaResolver	ciris-persist@v16.1.0
 4.5.2.1	CLM-subject_kind-subject-3	—	—	open
-4.5.2.2	CLM-compliance-vertical	—	—	open
+4.5.2.2	CLM-compliance-vertical	CIRISServer	src/compliance.rs#ComplianceMap	ciris-server@main
 4.5.3	CLM-takedown	CIRISPersist	src/cirisnode/takedown_handler.rs#process_takedown_admission	ciris-persist@v16.1.0
 4.5.4	CLM-registry-named	CIRISServer	src/safety/named.rs#existence_verdict	ciris-server@main
 4.5.5	CLM-takedown-moderation	CIRISServer	src/safety/moderation.rs#admit_moderation_action	ciris-server@main
