@@ -369,6 +369,8 @@ async fn add_occurrence(
                 // (part_3 §1054) — an authoritative binding, not an unverified announce.
                 binding_provenance:
                     ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
+                epoch: 0,
+                retired_at: None,
             })
             .await
         {

@@ -83,7 +83,11 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
         .expect("A1 self-signed anchor");
     let a1_ed_b64 = anchor.record.pubkey_ed25519_base64.clone();
     engine
-        .register_federation_key(to_persist(&anchor))
+        .register_federation_key({
+            let mut r = to_persist(&anchor);
+            r.record.attestation_evidence = Some(accord_test_evidence());
+            r
+        })
         .await
         .expect("register A1 anchor (strict gate)");
 
@@ -182,7 +186,11 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
         .expect("A1 anchor");
     let a1_ed_b64 = anchor.record.pubkey_ed25519_base64.clone();
     engine
-        .register_federation_key(to_persist(&anchor))
+        .register_federation_key({
+            let mut r = to_persist(&anchor);
+            r.record.attestation_evidence = Some(accord_test_evidence());
+            r
+        })
         .await
         .expect("register A1 anchor");
 
@@ -268,4 +276,27 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
         matches!(again, AdoptScrubOutcome::AlreadyAdopted),
         "second adopt is idempotent, got {again:?}"
     );
+}
+
+/// CIRISPersist#443/v17 made accord-holder `attestation_evidence` MANDATORY at
+/// registration (was lenient in v16). Production A1 holders ARE FIPS YubiKeys
+/// and carry a real chain (`accord_provision.rs`); this software fixture supplies
+/// the minimal STRUCTURALLY-valid `{platform_attestation, nonce_captured_at}` the
+/// persist gate checks for presence — the real chain validation is the CONSUMER's
+/// job (CC 4.2.2.1, `src/hardware_attestation.rs`), not this admission gate.
+fn accord_test_evidence() -> serde_json::Value {
+    serde_json::json!({
+        "platform_attestation": {
+            "ExternalSecureElement": {
+                "hardware_class": "YubiKey_5_FIPS",
+                "attestation_cert_der": [1u8, 2, 3],
+                "attestation_chain_der": [[4u8, 5, 6]],
+                "firmware": "5.7.4",
+                "serial": 12_345_678u64,
+                "fips_certified": true,
+                "touch_always": true,
+            }
+        },
+        "nonce_captured_at": chrono::Utc::now().to_rfc3339(),
+    })
 }

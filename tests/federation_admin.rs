@@ -677,7 +677,11 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         .try_into()
         .expect("32-byte a1 ed");
     engine
-        .register_federation_key(to_persist(&anchor))
+        .register_federation_key({
+            let mut r = to_persist(&anchor);
+            r.record.attestation_evidence = Some(accord_test_evidence());
+            r
+        })
         .await
         .expect("seed A1 anchor");
 
@@ -780,4 +784,27 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         j2["outcome"], "already_adopted",
         "second adopt is idempotent"
     );
+}
+
+/// CIRISPersist#443/v17 made accord-holder `attestation_evidence` MANDATORY at
+/// registration (was lenient in v16). Production A1 holders ARE FIPS YubiKeys
+/// and carry a real chain (`accord_provision.rs`); this software fixture supplies
+/// the minimal STRUCTURALLY-valid `{platform_attestation, nonce_captured_at}` the
+/// persist gate checks for presence — the real chain validation is the CONSUMER's
+/// job (CC 4.2.2.1, `src/hardware_attestation.rs`), not this admission gate.
+fn accord_test_evidence() -> serde_json::Value {
+    serde_json::json!({
+        "platform_attestation": {
+            "ExternalSecureElement": {
+                "hardware_class": "YubiKey_5_FIPS",
+                "attestation_cert_der": [1u8, 2, 3],
+                "attestation_chain_der": [[4u8, 5, 6]],
+                "firmware": "5.7.4",
+                "serial": 12_345_678u64,
+                "fips_certified": true,
+                "touch_always": true,
+            }
+        },
+        "nonce_captured_at": chrono::Utc::now().to_rfc3339(),
+    })
 }
