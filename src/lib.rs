@@ -69,6 +69,12 @@ pub mod benchmarks;
 /// to the target's `POST /v1/setup/root`. The app does NO crypto. Public so the
 /// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
 pub mod claim_remote;
+/// **CC 4.5.2.2 `compliance-vertical`** — the machine-readable vertical/statutory
+/// compliance map (CIRISServer#159). Bakes `evidence/cc_compliance_map.tsv` (a faithful
+/// transcription of CC 4.5.2.2 + CC 8.8.5 Annex C) into the binary and parses it into
+/// typed rows. Mappings the Constitution does not state are `unmapped`, never invented.
+/// Gated by `tests/compliance_map.rs`.
+pub mod compliance;
 mod compose;
 /// Zero-setup node configuration (Server 0.5 — conventions + CLI, NO env). Public
 /// so the binary's flag parser can read the baked-default constants

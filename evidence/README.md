@@ -39,15 +39,65 @@ checkouts). For every non-`open` row it asserts:
 3. (locally, when the sibling repo is present) every `impl:CIRISServer#155`-tagged claim
    in the Constitution's `claims.tsv` has a manifest row (coverage).
 
+## [`cc_compliance_map.tsv`](cc_compliance_map.tsv) — the CC 4.5.2.2 vertical/statutory map
+
+CC 4.5.2.2 `compliance-vertical` requires the vertical compliance mapping be published as a
+**machine-readable** artifact; it existed as Constitution prose only. `cc_compliance_map.tsv`
+is that artifact (CIRISServer#159) — a faithful, row-for-row **transcription** of the two
+compliance tables:
+
+- **CC 4.5.2.2** "Vertical compliance mapping (informational)" — regulatory framework →
+  CEG wire primitive → how it composes (10 rows: GDPR ×4, HIPAA ×2, FERPA, CCPA, EU AI Act
+  Art 50, CIRIS Accord M-1).
+- **CC 8.8.5 Annex C** "Regulatory Cross-Walk" §2 — external framework → CIRIS Book/Annex §
+  (17 rows: EU AI Act ×9, NIST AI RMF, ISO/IEC 42001 ×2, OSHA, EU HLEG, IEEE EAD, ASEAN,
+  *Magnifica Humanitas*).
+
+Columns: `cc_section, framework, provision, ceg_primitive, ciris_mapping,
+implementing_evidence, composition, source_status, cc_refs, tracking_issue`.
+
+### The chain: `statute → CIRIS document → SHIPPING SYMBOL + TEST`
+
+Columns 1-5 and 7-9 are pure transcription — **nothing is inferred.** A mapping the
+Constitution does not state is the literal token `unmapped`: Annex C names no CEG wire
+primitive for any statutory row, so all 17 carry `ceg_primitive = unmapped`. Per CC 8.8.5 §3
+the statutory rows are informative engineering correspondences, **not** legal opinions; a row
+graduates to "verified" only on qualified legal review, which this repo does not perform.
+
+A Book/Annex reference is a pointer to *prose*, not evidence. **`implementing_evidence` is the
+tier that makes a compliance claim defensible** — the concrete shipping artifact (`Repo:path#symbol`
+and/or the test that proves it) that actually discharges the obligation. It is the one column
+NOT from the Constitution; every token was established by **reading the code**, never inferred
+from a filename. `partial:` prefixes a cell whose artifact discharges only part of the
+obligation. `unmapped` means **no enforcer ships** — these holes are the point of the artifact,
+not evasions.
+
+Every gap names a `tracking_issue` (`CIRISServer#N`, or `CIRISAgent:compliance` for rows Annex C
+itself assigns to the agent's cross-walk + the Covenant Books). `untracked` explicitly flags a
+gap that still needs an issue filed — an honest gap with a tracker is defensible; a blank is not.
+
+**Standing: 6 rows fully evidenced, 2 partial, 19 unmapped.** The canonical hole is **EU AI Act
+Art 14** (human oversight — intervene/interrupt/stop): `oversight_mode` is a wire field with **no
+enforcer in any shipping artifact** (CIRISServer#115, re-proven by grep). A dedicated test pins
+that hole open.
+
+Loaded by [`src/compliance.rs`](../src/compliance.rs) (`ComplianceMap`, baked in with
+`include_str!`); gated by [`tests/compliance_map.rs`](../tests/compliance_map.rs), which asserts
+well-formedness, completeness against the source row/framework counts (a dropped **or invented**
+row fails), the honesty invariants above, that **every cited `implementing_evidence` path exists
+on disk and contains the cited symbol** (a citation can neither rot nor be invented), that Art 14
+stays unmapped, that every gap is tracked, and that no `cc_impl.tsv` claim the map leans on has
+regressed to `open`.
+
 ## Coverage
 
-**98 / 111** claims tagged `impl:CIRISServer#155` resolve to a grep-verified symbol at
-the pinned versions. The remaining **13** carry no substrate `impl` symbol — they are
+**99 / 111** claims tagged `impl:CIRISServer#155` resolve to a grep-verified symbol at
+the pinned versions. The remaining **12** carry no substrate `impl` symbol — they are
 feedback to the Constitution (below), not gaps in this manifest.
 
 ## Open findings → close them (implement) or `normative-only`
 
-These 13 claims are tagged `impl:CIRISServer#155` but have no reference-implementation
+These 12 claims are tagged `impl:CIRISServer#155` but have no reference-implementation
 symbol yet. A claim the Constitution tags `impl:` asserts a reference implementation
 *should* exist — so where one is genuinely possible, the disposition is **implement it**
 (tracked below), not retag it away. Only claims with no realizable runtime artifact (a
@@ -61,7 +111,6 @@ bibliography, a MUST/SHOULD glossary) stay `normative-only`.
 | 2.6.4 | CLM-policy-versioning | implement — CIRISServer#159 (version-negotiation policy) |
 | 4.1.4 | CLM-withdraws-arbitrage | implement — CIRISServer#159 (arbitrage countermeasure) |
 | 4.2.2.1 | CLM-hardware-class-hardware | implement — CIRISServer#159 (attest hardware_class; closes CC 8.3.1 R5) |
-| 4.5.2.2 | CLM-compliance-vertical | implement — CIRISServer#159 (machine-readable vertical map) |
 | 3.4.9 | CLM-co-stewarded | implement — CIRISPersist#365 (`licensure:*` co-stewarded admission) |
 | 4.4.1 | CLM-frickerian | implement — CIRISAgent#911 (consumer tier) |
 | 4.5.8.3 | CLM-settled | implement — CIRISAgent#911 (consumer tier) |
