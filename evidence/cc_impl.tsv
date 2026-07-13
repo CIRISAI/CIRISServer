@@ -49,7 +49,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 3.4.10	CLM-witness-emitter	CIRISPersist	src/federation/admission.rs#default_reserved_prefix_rules	ciris-persist@v13.3.1
 3.5.1	CLM-concurrent-write	CIRISPersist	src/federation/precedence.rs#precedence_winner	ciris-persist@v13.3.1
 4.1.1	CLM-anti-pattern-delegation	CIRISPersist	src/federation/admission.rs#AttestationLadderTransitionPolicy	ciris-persist@v13.3.1
-4.1.4	CLM-withdraws-arbitrage	—	—	open
+4.1.4	CLM-withdraws-arbitrage	CIRISServer	src/withdraws_arbitrage.rs#enforce	ciris-server@main
 4.2.1.1	CLM-invocation	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#Invocation::canonical_bytes	ciris-verify-core@v8.9.0
 4.2.1.2	CLM-notify	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#InvocationKind	ciris-verify-core@v8.9.0
 4.2.1.3	CLM-lifecycle	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#LIFECYCLE_DOMAIN_PREFIX	ciris-verify-core@v8.9.0

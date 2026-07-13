@@ -206,6 +206,41 @@ async fn peering(
         );
     }
 
+    // ── CC 4.1.4 (CIRISServer#159) — withdraws-arbitrage refusal ─────────────
+    // Before we agree to CONSUME a peer's corpus, judge how it *retracts*. An
+    // attester that emits `withdraws` (free) where an honest one emits `recants`
+    // (costly — it admits the row was false at issuance) is buying the effect of a
+    // retraction without paying the epistemic-error price; over a rolling window a
+    // ratio above the configured threshold (CC 4.1.4 default 5:1) is the signature
+    // of that arbitrage (see `crate::withdraws_arbitrage`). CC 4.1.4 puts the
+    // countermeasure in CONSUMER POLICY, not the wire: we do not refuse the peer's
+    // `withdraws` rows at admission (CC 2.4.1.1 makes that a substrate MUST-admit,
+    // and a wire-level refusal would be the CC 4.1.2 anti-pattern) — we refuse the
+    // *peering*, which is the one lever a consumer legitimately holds.
+    //
+    // The ledger is built from the rows THIS node already holds for that attester
+    // (a first-contact peer has none → clean → admitted; a peer we have been
+    // replicating with, and whose behavior we have therefore observed, is judged on
+    // that observed history). Fail closed: an unreadable ledger refuses too.
+    {
+        let policy = crate::withdraws_arbitrage::load_policy(&st.engine, &st.node_key_id).await;
+        if let Err(refusal) = crate::withdraws_arbitrage::enforce(
+            &st.engine,
+            &req.peer_key_id,
+            policy,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            tracing::warn!(
+                peer_key_id = %req.peer_key_id,
+                refusal = %refusal,
+                "CC 4.1.4 withdraws-arbitrage: REFUSING federation peering"
+            );
+            return err(StatusCode::FORBIDDEN, refusal.to_string());
+        }
+    }
+
     // ── (a) Admission: register the peer's self-signed key (fail-secure verify;
     //    benign Conflict on a matching existing row). ──────────────────────────
     let peer = PeerB {
