@@ -45,7 +45,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 3.4.7.1	CLM-identity-set	CIRISPersist	src/federation/types.rs#identity_type::set_contains	ciris-persist@v13.3.1
 3.4.7.2	CLM-consent-counter	CIRISEdge	src/detector/probe_pattern_observer.rs#ConsentRole::permits_detection_emission	ciris-edge@v9.1.4
 3.4.8	CLM-detector-only	CIRISEdge	src/detector/probe_pattern_observer.rs#ProbePatternObserver	ciris-edge@v9.1.4
-3.4.9	CLM-co-stewarded	—	—	open
+3.4.9	CLM-co-stewarded	CIRISServer	src/compose_policy.rs#Composer::licensure_cap	ciris-server@main
 3.4.10	CLM-witness-emitter	CIRISPersist	src/federation/admission.rs#default_reserved_prefix_rules	ciris-persist@v13.3.1
 3.5.1	CLM-concurrent-write	CIRISPersist	src/federation/precedence.rs#precedence_winner	ciris-persist@v13.3.1
 4.1.1	CLM-anti-pattern-delegation	CIRISPersist	src/federation/admission.rs#AttestationLadderTransitionPolicy	ciris-persist@v13.3.1
@@ -56,8 +56,8 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.2.2	CLM-hardware-class	CIRISVerify	src/ciris-keyring/src/types.rs#HardwareType	ciris-keyring@v8.9.0
 4.2.2.1	CLM-hardware-class-hardware	—	—	open
 4.2.6	CLM-accord-livequorum	CIRISVerify	src/ciris-verify-core/src/accord_live_quorum.rs#verify_membership_change_by_live_quorum	ciris-verify-core@v8.9.0
-4.4	CLM-composition-policies	—	—	open
-4.4.1	CLM-frickerian	—	—	open
+4.4	CLM-composition-policies	CIRISServer	src/compose_policy.rs#Composer::compose	ciris-server@main
+4.4.1	CLM-frickerian	CIRISServer	src/compose_policy.rs#Composer::weigh	ciris-server@main
 4.4.3.1.1	CLM-sub-quorum	CIRISServer	src/accord.rs#replicate_and_maybe_halt	ciris-server@main
 4.4.3.2.1	CLM-community-three	CIRISPersist	src/federation/community_dek.rs#encrypt_and_cascade_community	ciris-persist@v13.3.1
 4.4.3.2.4.1	CLM-deterministic	CIRISVerify	src/ciris-verify-core/src/transport_binding.rs#compute_destination_hash	ciris-verify-core@v8.9.0
