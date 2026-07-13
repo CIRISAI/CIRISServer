@@ -193,9 +193,20 @@ jobs:
             LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
             test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
             echo "lib: $LIB"
-            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            # Dump the symbol table to a FILE, then grep the file. Do NOT pipe
+            # `echo "$SYMS" | grep -q`: `grep -q` exits the moment it matches, which
+            # closes the pipe while `echo` is still writing -> `echo` dies with EPIPE
+            # -> and under `set -o pipefail` the PIPELINE then reports failure even
+            # though grep FOUND the symbol -> the `||` fires and a PRESENT symbol is
+            # reported MISSING. That is a race, so it can false-PASS just as easily as
+            # it false-FAILS (it false-FAILED v0.5.108 on ciris_verify_kex_respond_
+            # hybrid_with_public, and got lucky on 0.5.107). A gate that lies in both
+            # directions is worse than no gate. No pipe = no EPIPE = deterministic.
+            SYMFILE=$(mktemp)
+            nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE"
+            echo "symbols in _native: $(wc -l < "$SYMFILE")"
             MISSING=""
-            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            for s in $NEED; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
@@ -353,9 +364,20 @@ jobs:
             LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
             test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
             echo "lib: $LIB"
-            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            # Dump the symbol table to a FILE, then grep the file. Do NOT pipe
+            # `echo "$SYMS" | grep -q`: `grep -q` exits the moment it matches, which
+            # closes the pipe while `echo` is still writing -> `echo` dies with EPIPE
+            # -> and under `set -o pipefail` the PIPELINE then reports failure even
+            # though grep FOUND the symbol -> the `||` fires and a PRESENT symbol is
+            # reported MISSING. That is a race, so it can false-PASS just as easily as
+            # it false-FAILS (it false-FAILED v0.5.108 on ciris_verify_kex_respond_
+            # hybrid_with_public, and got lucky on 0.5.107). A gate that lies in both
+            # directions is worse than no gate. No pipe = no EPIPE = deterministic.
+            SYMFILE=$(mktemp)
+            nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE"
+            echo "symbols in _native: $(wc -l < "$SYMFILE")"
             MISSING=""
-            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            for s in $NEED; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
@@ -497,9 +519,20 @@ jobs:
             LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
             test -n "$LIB" || { echo "FATAL: no _native lib found inside the wheel"; exit 1; }
             echo "lib: $LIB"
-            SYMS=$(nm -g "$LIB" 2>/dev/null || llvm-nm -g "$LIB")
+            # Dump the symbol table to a FILE, then grep the file. Do NOT pipe
+            # `echo "$SYMS" | grep -q`: `grep -q` exits the moment it matches, which
+            # closes the pipe while `echo` is still writing -> `echo` dies with EPIPE
+            # -> and under `set -o pipefail` the PIPELINE then reports failure even
+            # though grep FOUND the symbol -> the `||` fires and a PRESENT symbol is
+            # reported MISSING. That is a race, so it can false-PASS just as easily as
+            # it false-FAILS (it false-FAILED v0.5.108 on ciris_verify_kex_respond_
+            # hybrid_with_public, and got lucky on 0.5.107). A gate that lies in both
+            # directions is worse than no gate. No pipe = no EPIPE = deterministic.
+            SYMFILE=$(mktemp)
+            nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE"
+            echo "symbols in _native: $(wc -l < "$SYMFILE")"
             MISSING=""
-            for s in $NEED; do echo "$SYMS" | grep -q "$s" || MISSING="$MISSING $s"; done
+            for s in $NEED; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
