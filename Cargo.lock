@@ -1023,6 +1023,7 @@ dependencies = [
  "libsqlite3-sys",
  "pbkdf2",
  "pyo3",
+ "rcgen",
  "reqwest",
  "rusqlite",
  "serde",

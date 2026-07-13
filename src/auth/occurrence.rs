@@ -176,8 +176,12 @@ pub async fn bind_occurrence_core(
                 "occurrence_key_record.record.key_id does not match occurrence_key_id".to_string(),
             );
         }
-        engine
-            .register_federation_key(record)
+        // CC 4.2.2.1 (CIRISServer#159): `occurrence_key_record` is CALLER-SUPPLIED —
+        // a device asserting its own key. Any hardware-class claim on it is proven
+        // (chain to a pinned root, bound to this key) or the admission is refused;
+        // an occurrence is exactly where a "my key lives in a Secure Enclave" lie
+        // would otherwise buy real trust.
+        crate::hardware_attestation::register_attested_federation_key(engine, record)
             .await
             .map_err(|e| format!("occurrence key registration rejected: {e}"))?;
         key_freshly_registered = true;

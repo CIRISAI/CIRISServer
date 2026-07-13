@@ -1749,7 +1749,9 @@ async fn register_substrate_key(
     let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist substrate SignedKeyRecord: {e}"))?;
     let key_id = signed.record.key_id.clone();
-    match engine.register_federation_key(signed).await {
+    // CC 4.2.2.1 (CIRISServer#159) — through the hardware-class chokepoint like every
+    // other admission (this self-record claims no class → `SoftwareUnattested`).
+    match crate::hardware_attestation::register_attested_federation_key(engine, signed).await {
         Ok(()) | Err(FederationError::Conflict(_)) => Ok(key_id),
         Err(e) => Err(anyhow::anyhow!("register substrate_persist key: {e}")),
     }
@@ -1835,9 +1837,14 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
         }
     }
 
-    match engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
+    // CC 4.2.2.1 (CIRISServer#159) — the node's OWN key goes through the same
+    // hardware-class chokepoint as a peer's: a node does not get to believe its own
+    // unproven class claim either (today it makes none → `SoftwareUnattested`).
+    match crate::hardware_attestation::register_attested_federation_key(
+        engine,
+        SignedKeyRecord { record },
+    )
+    .await
     {
         Ok(()) => {
             tracing::info!(

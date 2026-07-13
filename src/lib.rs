@@ -143,6 +143,17 @@ pub mod federation_peers;
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
+/// **CC 4.2.2.1** (CIRISServer#159, closes CC 8.3.1 R5) — the hardware-class
+/// admission gate. `federation_keys.hardware_class` (which rides inside
+/// `attestation_evidence`) was an UNCHECKED SELF-REPORT on every admission path
+/// but the accord one: persist enforces its `HardwareAttestationPolicy` only for
+/// `identity_type = 'accord_holder'`. This module applies that same substrate
+/// policy to EVERY key the server admits, and adds the cryptographic chain +
+/// key-binding check persist explicitly defers to the consumer. An unverifiable
+/// hardware claim is REFUSED (fail-closed); a key that claims nothing is admitted
+/// as software-class. `register_attested_federation_key` is the chokepoint every
+/// `register_federation_key` call site in this crate goes through.
+pub mod hardware_attestation;
 /// Server health — the fabric node's own liveness endpoint (`/health`,
 /// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
 /// `/v1/system/health` with optional cognitive health.
