@@ -63,6 +63,20 @@ pub async fn reconcile_once(
     // Desired topology from the corpus (the consent objects ARE the topology).
     let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
 
+    // ── CC 4.1.4 (CIRISServer#159) — the withdraws-arbitrage countermeasure ──
+    // Consent is granted once; behavior is continuous. A peer that was clean at
+    // peering time can turn into a `withdraws`-arbitrager afterwards (spray
+    // aggressive attestations, retract whatever fails to stick, never `recants`,
+    // never pay the epistemic-error price — see `crate::withdraws_arbitrage`). The
+    // window is ROLLING, so this tick re-judges every consent peer in BOTH
+    // directions: an attester that crosses the threshold stops being pulled from
+    // on the next tick, and one that mends its ways (or simply ages out) is
+    // re-admitted with no operator action. This is consumer policy — we refuse to
+    // CONSUME the arbitrager's corpus. Substrate admission of any individual
+    // `withdraws` is untouched (CC 2.4.1.1 MUST-admit).
+    let policy = crate::withdraws_arbitrage::load_policy(engine, node_key_id).await;
+    let now = chrono::Utc::now();
+
     // Admission filter: only peers whose key is a verified federation_keys row
     // can be replicated with (the runtime would have no key to route/verify).
     // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
@@ -70,6 +84,19 @@ pub async fn reconcile_once(
     let directory = engine.federation_directory();
     let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 3);
     for peer in consented {
+        // Fail closed: an over-threshold attester — or one whose behavioral ledger
+        // we cannot read at all — is dropped from the desired set this tick.
+        if let Err(refusal) = crate::withdraws_arbitrage::enforce(engine, &peer, policy, now).await
+        {
+            tracing::warn!(
+                peer_key_id = %peer,
+                refusal = %refusal,
+                "CC 4.1.4 withdraws-arbitrage: consent peer REFUSED — not replicating from it \
+                 this tick (consumer-policy downweight to zero; the consent CEG is untouched \
+                 and the peer is re-admitted automatically once its in-window ratio recovers)"
+            );
+            continue;
+        }
         match directory.lookup_public_key(&peer).await {
             Ok(Some(_)) => {
                 // ALL THREE planes per admitted peer (mirrors compose::build_replication_peers):

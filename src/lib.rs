@@ -245,6 +245,13 @@ pub mod safety;
 pub mod scorer;
 pub mod system_data;
 pub mod telemetry_logs;
+/// **CC 4.1.4** — the `withdraws`:`recants` arbitrage countermeasure
+/// (CIRISServer#159). Consumer-policy behavioral analysis: per-attester
+/// precedence-collapsed `withdraws:recants` ratio over a rolling window, with a
+/// fail-closed refusal to consume from an over-threshold (default 5:1) attester.
+/// Gates federation peering + the replication reconciler; it does NOT touch
+/// substrate admission (CC 2.4.1.1 MUST-admit stays intact).
+pub mod withdraws_arbitrage;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
 
