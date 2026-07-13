@@ -217,6 +217,10 @@ impl TrustSet {
     /// Pin a key AND classify it as one of the CC 3.4.9 `licensure:*`
     /// co-stewards. A co-steward is trusted by construction (pinning is
     /// implied) — an unpinned "co-steward" would be a contradiction.
+    /// CIRISServer#253: RETIRED as a production path — `compose_for_key` now
+    /// resolves co-steward roles from the substrate (`has_effective_role`,
+    /// persist v17). Kept for unit tests, which compose over a synthetic
+    /// corpus with no live accord roster to resolve against.
     pub fn pin_co_steward(&mut self, key_id: impl Into<String>, class: CoSteward) -> &mut Self {
         let key_id = key_id.into();
         self.pinned.insert(key_id.clone());
@@ -540,12 +544,61 @@ impl Composer {
         engine: &Engine,
         attested_key_id: &str,
     ) -> Result<Composition> {
-        let rows = engine
-            .federation_directory()
+        let dir = engine.federation_directory();
+        let rows = dir
             .list_attestations_for(attested_key_id)
             .await
             .map_err(|e| anyhow::anyhow!("list_attestations_for({attested_key_id}): {e}"))?;
-        Ok(self.compose(&rows))
+
+        // CC 3.4.9 co-steward resolution — CIRISServer#253, persist v17.
+        //
+        // `licensure_cap` caps a `licensure:*` fold below full confidence until
+        // BOTH co-stewards (CIRISRegistry + CIRISVerify) have emitted. Which
+        // co-steward an attesting key IS was, pre-17.0.0, unresolvable from the
+        // substrate — the identity_type vocabulary had no `registry`/`verify`
+        // member — so the composer resolved it by an out-of-band consumer PIN
+        // (`TrustSet::pin_co_steward`, the #159 workaround). persist v17
+        // (CIRISPersist#440) carries the co-steward roles ON the key record with
+        // accord-conferred, self-authenticating semantics, so we resolve from the
+        // substrate here and RETIRE the by-pin fallback in production.
+        //
+        // `has_effective_role` is self-authenticating by design: a decorative
+        // pre-17 self-claimed `roles=["registry"]` row reads `false` (its co-scrub
+        // set must re-verify against the LIVE accord roster), so this read never
+        // trusts write-gate history. Resolution happens in THIS async phase; the
+        // pure `compose` stays synchronous (and the pin API remains, for tests).
+        use ciris_persist::federation::admission::has_effective_role;
+        use ciris_persist::federation::types::identity_type::{REGISTRY, VERIFY};
+        let mut trust = self.trust.clone();
+        let mut resolved: BTreeMap<String, CoSteward> = BTreeMap::new();
+        for att in &rows {
+            if !envelope_str(att, "dimension").is_some_and(|d| d.starts_with(DIM_LICENSURE)) {
+                continue;
+            }
+            let k = &att.attesting_key_id;
+            if resolved.contains_key(k) {
+                continue;
+            }
+            if has_effective_role(dir.as_ref(), k, REGISTRY)
+                .await
+                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, registry): {e}"))?
+            {
+                resolved.insert(k.clone(), CoSteward::Registry);
+            } else if has_effective_role(dir.as_ref(), k, VERIFY)
+                .await
+                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, verify): {e}"))?
+            {
+                resolved.insert(k.clone(), CoSteward::Verify);
+            }
+        }
+        for (k, class) in resolved {
+            trust.pin_co_steward(k, class);
+        }
+        let composer = Composer {
+            trust,
+            cfg: self.cfg.clone(),
+        };
+        Ok(composer.compose(&rows))
     }
 
     /// Compose a corpus of attestations into verdicts. Pure — no I/O, so the

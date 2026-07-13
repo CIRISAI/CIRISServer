@@ -2414,6 +2414,8 @@ async fn update_canonical_address(
             // peer can seal to the canonical after the move.
             transport_x25519_pubkey_base64: inv.transport_x25519_pubkey_base64.clone(),
             binding_provenance: ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
+            epoch: 0,
+            retired_at: None,
         })
         .await
     {

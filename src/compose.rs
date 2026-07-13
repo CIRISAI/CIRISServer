@@ -1094,6 +1094,8 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
         transport_ed25519_pubkey_base64: Some(transport_ed25519_b64),
         transport_x25519_pubkey_base64: Some(transport_x25519_b64),
         binding_provenance: ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
+        epoch: 0,
+        retired_at: None,
     };
     match engine
         .federation_directory()
