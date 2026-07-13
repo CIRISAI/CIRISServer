@@ -70,6 +70,13 @@ pub mod benchmarks;
 /// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
 pub mod claim_remote;
 mod compose;
+/// **The CEG consumer-composition tier** (CC 4.4 / CC 4.4.1 / CC 4.4.2 /
+/// CC 4.4.3.8 / CC 4.4.3.9 / CC 3.4.9) — the MUST behind this node's `CCC`
+/// (CEG-Conforming Consumer) wire declaration: *"A CEG-Conforming Consumer MUST
+/// implement at least Policy A"* (CC 4.4). Turns attestations read from persist
+/// into typed, fail-closed verdicts. Public so `tests/compose_policy.rs` can
+/// drive the composition adversarially.
+pub mod compose_policy;
 /// Zero-setup node configuration (Server 0.5 — conventions + CLI, NO env). Public
 /// so the binary's flag parser can read the baked-default constants
 /// ([`config::DEFAULT_CIRIS_HOME`] / [`config::DEFAULT_KEY_ID`]).
