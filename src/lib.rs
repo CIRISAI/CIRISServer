@@ -69,7 +69,20 @@ pub mod benchmarks;
 /// to the target's `POST /v1/setup/root`. The app does NO crypto. Public so the
 /// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
 pub mod claim_remote;
+/// **CC 4.5.2.2 `compliance-vertical`** — the machine-readable vertical/statutory
+/// compliance map (CIRISServer#159). Bakes `evidence/cc_compliance_map.tsv` (a faithful
+/// transcription of CC 4.5.2.2 + CC 8.8.5 Annex C) into the binary and parses it into
+/// typed rows. Mappings the Constitution does not state are `unmapped`, never invented.
+/// Gated by `tests/compliance_map.rs`.
+pub mod compliance;
 mod compose;
+/// **The CEG consumer-composition tier** (CC 4.4 / CC 4.4.1 / CC 4.4.2 /
+/// CC 4.4.3.8 / CC 4.4.3.9 / CC 3.4.9) — the MUST behind this node's `CCC`
+/// (CEG-Conforming Consumer) wire declaration: *"A CEG-Conforming Consumer MUST
+/// implement at least Policy A"* (CC 4.4). Turns attestations read from persist
+/// into typed, fail-closed verdicts. Public so `tests/compose_policy.rs` can
+/// drive the composition adversarially.
+pub mod compose_policy;
 /// Zero-setup node configuration (Server 0.5 — conventions + CLI, NO env). Public
 /// so the binary's flag parser can read the baked-default constants
 /// ([`config::DEFAULT_CIRIS_HOME`] / [`config::DEFAULT_KEY_ID`]).
@@ -86,6 +99,14 @@ pub mod config_api;
 /// touches the runtime — it writes CEG and nudges this loop. Public so the
 /// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
 pub mod config_reconcile;
+/// **CC 2.2 conformance levels + CC 2.6.4 versioning policy** (CIRISServer#159) —
+/// the node's DECLARED conformance level (CCP / CCC / CCS) and the enforcement that
+/// HONORS it (a federation-wire op whose profiles the declaration does not claim is
+/// REFUSED), plus the CC 2.6.4 SemVer wire-version + wire-vocabulary-hash
+/// negotiation that REFUSES an incompatible peer rather than silently proceeding.
+/// Both fail closed. Public so the integration test (`tests/conformance_gate.rs`)
+/// can drive the gate + the negotiation directly.
+pub mod conformance;
 /// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
@@ -122,6 +143,17 @@ pub mod federation_peers;
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
+/// **CC 4.2.2.1** (CIRISServer#159, closes CC 8.3.1 R5) — the hardware-class
+/// admission gate. `federation_keys.hardware_class` (which rides inside
+/// `attestation_evidence`) was an UNCHECKED SELF-REPORT on every admission path
+/// but the accord one: persist enforces its `HardwareAttestationPolicy` only for
+/// `identity_type = 'accord_holder'`. This module applies that same substrate
+/// policy to EVERY key the server admits, and adds the cryptographic chain +
+/// key-binding check persist explicitly defers to the consumer. An unverifiable
+/// hardware claim is REFUSED (fail-closed); a key that claims nothing is admitted
+/// as software-class. `register_attested_federation_key` is the chokepoint every
+/// `register_federation_key` call site in this crate goes through.
+pub mod hardware_attestation;
 /// Server health — the fabric node's own liveness endpoint (`/health`,
 /// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
 /// `/v1/system/health` with optional cognitive health.
@@ -232,6 +264,13 @@ pub mod safety;
 pub mod scorer;
 pub mod system_data;
 pub mod telemetry_logs;
+/// **CC 4.1.4** — the `withdraws`:`recants` arbitrage countermeasure
+/// (CIRISServer#159). Consumer-policy behavioral analysis: per-attester
+/// precedence-collapsed `withdraws:recants` ratio over a rolling window, with a
+/// fail-closed refusal to consume from an over-threshold (default 5:1) attester.
+/// Gates federation peering + the replication reconciler; it does NOT touch
+/// substrate admission (CC 2.4.1.1 MUST-admit stays intact).
+pub mod withdraws_arbitrage;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
 

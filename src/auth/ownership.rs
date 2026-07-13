@@ -700,11 +700,18 @@ async fn register_user_key(
     };
     let signed = SignedKeyRecord { record };
     if via_gate.is_some() {
-        engine
-            .register_federation_key(signed)
+        // CC 4.2.2.1 (CIRISServer#159) — through the hardware-class chokepoint.
+        crate::hardware_attestation::register_attested_federation_key(engine, signed)
             .await
             .map_err(|e| OwnershipError::Persist(e.to_string()))?;
     } else {
+        // The direct-directory path skips persist's PoP gate, so it MUST NOT skip the
+        // class gate too — that would be the one door left open (CC 4.2.2.1). This
+        // row is server-built from the binding and carries no attestation_evidence,
+        // so today the gate resolves to `SoftwareUnattested`; the call is here so a
+        // future evidence-bearing binding cannot slip a class claim in unchecked.
+        crate::hardware_attestation::admit_hardware_class(&signed.record, chrono::Utc::now())
+            .map_err(|e| OwnershipError::Persist(e.to_string()))?;
         engine
             .federation_directory()
             .put_public_key(signed)

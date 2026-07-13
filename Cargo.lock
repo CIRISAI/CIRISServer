@@ -814,8 +814,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "9.0.2"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v9.0.2#946184d4664681cf7d98b8fec54df7a75fee2b63"
+version = "10.1.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v10.1.1#1c3c2bf52eaca2a82889c7b320c5ad6f06937175"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "10.1.2"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v10.1.2#3da1bd44d18d94b50b4aba9bb8e666d4eb07efb7"
+version = "11.1.2"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v11.1.2#e75c122c61052e80394c96818d4310eaded384fa"
 dependencies = [
  "async-trait",
  "axum",
@@ -895,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "9.0.2"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v9.0.2#946184d4664681cf7d98b8fec54df7a75fee2b63"
+version = "10.1.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v10.1.1#1c3c2bf52eaca2a82889c7b320c5ad6f06937175"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -960,8 +960,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "15.1.2"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v15.1.2#52563d22af97c9fa3c3b2836d420bc89a290cad8"
+version = "16.1.1"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v16.1.1#5679c787b75384ab3021f9bab0b97e3a6ceb9db9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.107"
+version = "0.5.108"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1023,6 +1023,7 @@ dependencies = [
  "libsqlite3-sys",
  "pbkdf2",
  "pyo3",
+ "rcgen",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1041,8 +1042,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "9.0.2"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v9.0.2#946184d4664681cf7d98b8fec54df7a75fee2b63"
+version = "10.1.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v10.1.1#1c3c2bf52eaca2a82889c7b320c5ad6f06937175"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1082,8 +1083,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "9.0.2"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v9.0.2#946184d4664681cf7d98b8fec54df7a75fee2b63"
+version = "10.1.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v10.1.1#1c3c2bf52eaca2a82889c7b320c5ad6f06937175"
 dependencies = [
  "aes-gcm",
  "android_logger",
@@ -1093,7 +1094,6 @@ dependencies = [
  "ciris-crypto",
  "ciris-keyring",
  "ciris-verify-core",
- "ctor",
  "dirs",
  "ed25519-dalek",
  "hex",
@@ -1444,16 +1444,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1fd850498411e4057f1cba79e6e2bc7cbe960544c1046ab46d4685c403a1121"
 dependencies = [
  "libloading",
-]
-
-[[package]]
-name = "ctor"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
-dependencies = [
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]

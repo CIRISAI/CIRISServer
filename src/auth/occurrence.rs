@@ -41,9 +41,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::types::{
-    IdentityOccurrence, IdentityOccurrenceRevocation, SignedIdentityOccurrenceRevocation,
-};
+use ciris_persist::federation::types::{IdentityOccurrence, IdentityOccurrenceRevocation};
 use ciris_persist::federation::{EncryptionPubkeys, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use ciris_persist::FederationDirectory;
@@ -178,8 +176,12 @@ pub async fn bind_occurrence_core(
                 "occurrence_key_record.record.key_id does not match occurrence_key_id".to_string(),
             );
         }
-        engine
-            .register_federation_key(record)
+        // CC 4.2.2.1 (CIRISServer#159): `occurrence_key_record` is CALLER-SUPPLIED —
+        // a device asserting its own key. Any hardware-class claim on it is proven
+        // (chain to a pinned root, bound to this key) or the admission is refused;
+        // an occurrence is exactly where a "my key lives in a Secure Enclave" lie
+        // would otherwise buy real trust.
+        crate::hardware_attestation::register_attested_federation_key(engine, record)
             .await
             .map_err(|e| format!("occurrence key registration rejected: {e}"))?;
         key_freshly_registered = true;
@@ -478,12 +480,28 @@ async fn revoke_occurrence(
         witness_set: vec![caller.key_id.clone()],
         persist_row_hash: String::new(),
     };
+    // persist v16.0.0 (CIRISPersist#421) closed the gap 0.5.100 deliberately refused
+    // to ship: the wire revocation was UNSIGNED, so any consented peer could kill any
+    // identity's sealability (a permanent-DoS forgery). v16 splits the primitive:
+    //   * put_identity_occurrence_revocation      — signed gate ({attesting_key_id,
+    //     signed_envelope, signature} + signer_acts_for §11.7.4 single-vouch-for-self).
+    //     This is the REPLICATED path.
+    //   * put_identity_occurrence_revocation_local — trusted-local, signature columns
+    //     NULL, EXCLUDED from the signed replication read, never reachable from the
+    //     replication apply. "Engine-internal writes on behalf of the local user where
+    //     the revocation is locally produced — NOT peer-received."
+    // THIS endpoint is precisely the latter: an owner-authenticated, locally-produced
+    // revocation over HTTP. So it takes the _local path — which is byte-for-byte the
+    // behaviour we already had (revocation carriage was never wired, #227 S2), minus
+    // the forgery surface. We do NOT synthesise a signature here: we hold no mandate to
+    // sign as an arbitrary `identity_key_id`, and faking one would re-open the very DoS
+    // the gate closes. Wiring the SIGNED, replicating revocation (now finally possible,
+    // with list_signed_identity_occurrence_revocations_for as its byte-exact re-read) is
+    // tracked separately as the #227 S2 carriage work.
     if let Err(e) = st
         .engine
         .federation_directory()
-        .put_identity_occurrence_revocation(SignedIdentityOccurrenceRevocation {
-            identity_occurrence_revocation: revocation,
-        })
+        .put_identity_occurrence_revocation_local(revocation)
         .await
     {
         return err(

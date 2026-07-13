@@ -41,17 +41,44 @@ checkouts). For every non-`open` row it asserts:
 
 ## Coverage
 
-**98 / 111** claims tagged `impl:CIRISServer#155` resolve to a grep-verified symbol at
-the pinned versions. The remaining **13** carry no substrate `impl` symbol — they are
-feedback to the Constitution (below), not gaps in this manifest.
+**83** rows resolve to a symbol that was read against the CC text and confirmed to
+*enforce* the claim; **30** rows are `open` — no enforcer exists at the substrate tier.
+
+A row is only non-`open` when the cited symbol carries the section's normative weight.
+A struct/const that merely *carries* a field the CC demands be *gated* is not evidence,
+and several rows were demoted to `open` on exactly that ground (2026-07 evidence audit:
+137 rows re-read against the CC text; 29 mis-assignments + 44 over-claims corrected).
+An honest `open` is worth more than a plausible symbol that does not hold the line.
 
 ## Open findings → close them (implement) or `normative-only`
 
-These 13 claims are tagged `impl:CIRISServer#155` but have no reference-implementation
+These claims are tagged `impl:CIRISServer#155` but have no reference-implementation
 symbol yet. A claim the Constitution tags `impl:` asserts a reference implementation
 *should* exist — so where one is genuinely possible, the disposition is **implement it**
 (tracked below), not retag it away. Only claims with no realizable runtime artifact (a
 bibliography, a MUST/SHOULD glossary) stay `normative-only`.
+
+**Coverage gaps exposed by the evidence audit** (no enforcer anywhere; each needs an issue):
+
+| decimal | claim | the missing enforcer |
+|---|---|---|
+| 2.1.1 | CLM-forward-compatibility | consumer-side unknown-envelope-field discipline (preserve on read + re-emission, exclude from verdict, never reject) |
+| 2.3.1 | CLM-subject_kind-subject-2 | admission gate: a subject-naming dimension MUST carry `subject_key_ids` |
+| 2.3.2.1 | CLM-registry-canonical | the `canonical:{hashalg}:{hex}` wire tag + `{platform}:{entity_kind}:{id}` preimage codec |
+| 2.6.1.2 | CLM-per-field | the per-field omit-vs-materialize catalog (informational; no encoder implements the table) |
+| 3.1.2.1 | CLM-provenance | the **v2** canonical-bytes contracts — shipped code is the v1 line-oriented preimage (`ciris.skill_import.v1` / `ciris.locale_manifest.v1`), CC pins JCS `…v2` |
+| 3.4.6 | CLM-reservation-delivery | `delivery_receipt:` reserved-prefix rule + the "attester is a current stream/community member" emitter gate |
+| 4.1.1 | CLM-anti-pattern-delegation | admission-time `delegates_to` **cycle rejection** (traversal is cycle-safe; the cycle-closing emission is never refused) + the 5-hop default cap |
+| 4.4.3.1.1 | CLM-sub-quorum | the locality cell-pool `min_pool` fallback (`hard_case:locality_{scale_down,underpopulated,quorum_unreachable}`) |
+| 4.4.3.2.4.1 | CLM-deterministic | `resolve_community` determinism pins (latest-non-superseded comparator, member ordering, founder-subset) + `resolve_member_transport` |
+| 4.4.3.2.8 | CLM-affiliations | the affiliation institutional-governance record (`membership_basis`, classification/retention limbs, archetype presets) |
+| 4.4.3.6 | CLM-policy-attestation | Policy I `ladder_verdict` composition; persist also still defaults to `DualAccept` (the deprecated `attestation:l{N}:*` form is admitted, contra the CC) |
+| 4.4.3.10 | CLM-policy-trusted | Policy J composition gate (distributor chain ∧ content_class ∧ content_rating ∧ age_assurance) |
+| 4.5.2.1 | CLM-subject_kind-subject-3 | same gate as 2.3.1 — `subject_key_ids` bearing for subject-naming dimensions |
+| 4.5.8.1 | CLM-cohabitation | steward cross-attestation for substrate-role emissions (no cross-attestation surface exists in persist) |
+| 4.5.13 | CLM-reverse-quorum | the **community** instance: 48 h proposal window, moderator/steward single-signature fast path, live-majority fallback tally |
+| 5.3.2.4.1 | CLM-authority-local | `witness_relation` MUST be `self` on local-tier writes (`witness_relation` appears in no persist non-test code) |
+| 5.3.4 | CLM-multi-steward | signed steward discovery responses — **CIRISServer#248** |
 
 **Implement (tracked):**
 
@@ -80,3 +107,16 @@ bibliography, a MUST/SHOULD glossary) stay `normative-only`.
 enforcer (`verify_membership_change_by_live_quorum`), but the specific *"post-W contest on
 append-log evidence + mandatory restore"* refinement has no symbol yet — tracked by
 CIRISServer#122 (FSD-004 live-quorum Phase 3).
+
+**Resolved-but-partial (the cited symbol enforces the section's core, a named limb is missing):**
+
+| decimal | claim | what the cite does NOT cover |
+|---|---|---|
+| 3.4.3 | CLM-system | only the `substrate_persist` half — `substrate_edge` is not a representable `identity_type` in persist, so Edge's `system:*` reservation is unenforceable |
+| 3.4.7.1 | CLM-identity-set | the reserved-prefix **rule table** uses `identity_type::set_contains`, but the inline `accord:` / `hard_case:` arms of `check_reserved_prefix_admission` still use scalar `!=` — a folded `{accord_holder, agent}` key is wrongly rejected (persist bug) |
+| 4.2.1.2 | CLM-notify | the client badge distinguishes CONSTITUTIONAL / DRILL / NOTIFY, but `lifecycle:active` falls through to the NOTIFY branch — the CC forbids exactly that conflation |
+| 4.5.1.1 | CLM-axis | per-axis schema validation exists (`BlobBackedSchemaResolver`) but the **default** resolver is `NoOpSchemaResolver` (fail-open) |
+| 5.3.2.1 | CLM-holder | TTL + ContentMiss downweight ship; the `withdrawal_reason: "content_miss"` stamp is never emitted and the 2-holder-parallel policy is deferred |
+| 5.3.6.1 | CLM-envelope-error | `CONSISTENCY_PROOF_INVALID` (422) is absent from `CegErrorCode` |
+| 5.4.4 | CLM-welcome-wrap | the ML-DSA-65 inviter signature **is** implemented and verified before `open_base`; `unwrap_welcome` still falls back to the message's **inline** inviter pubkey when the directory misses (TOFU ⇒ no real sender authentication) — **CIRISEdge#331** |
+| 5.4.5 | CLM-witness-content | the rate-hiding cover leaf ships; the per-tier witness-content scoping discipline does not |

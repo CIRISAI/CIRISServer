@@ -1,0 +1,72 @@
+# CIRIS evidence registry — vertical/statutory compliance map (CIRISServer#159)
+# CC 4.5.2.2 `compliance-vertical` requires the vertical compliance mapping be published
+# as a machine-readable artifact. This file IS that artifact.
+#
+# THE CHAIN THIS MAP CARRIES:   statute -> CIRIS document -> SHIPPING SYMBOL + TEST
+# A document reference is a pointer to prose; only `implementing_evidence` is evidence.
+#
+# SOURCES (columns 1-5,7-9 are a faithful, row-for-row TRANSCRIPTION — nothing inferred):
+#   cc_section 4.5.2.2 -> CC 4.5.2.2 "Vertical compliance mapping (informational)"
+#                         (CIRISConstitution constitution/part_4_composition_governance.md)
+#                         columns: Regulatory framework | CEG primitive | How it composes
+#   cc_section 8.8.5   -> CC 8.8.5 Annex C "Regulatory Cross-Walk" §2, the statutory and
+#                         standards mapping (constitution/part_8_appendices.md)
+#                         columns: External Framework | Relevant Articles / Clauses |
+#                                  CIRIS Mapping (Book / Annex §) | Status
+#
+# `implementing_evidence` (NOT from the Constitution — established by READING the code):
+#   the concrete SHIPPING artifact that discharges the obligation. Semicolon-separated
+#   `Repo:path#symbol` / `Repo:path` tokens. Every token was verified by reading the code,
+#   never inferred from a filename. A whole-cell `partial:` prefix means the cited artifact
+#   discharges only PART of the obligation — the remainder is a real gap and is tracked.
+#   `unmapped` = NO enforcer ships. These holes are the point of the artifact, not evasions.
+#
+# `tracking_issue`:
+#   `none`                  - fully mapped, no gap to track
+#   `CIRISServer#N`         - the open issue tracking the gap (a partial row's remainder,
+#                             or the whole hole)
+#   `CIRISAgent:compliance` - Annex C itself assigns the row to CIRISAgent's `compliance/`
+#                             cross-walk + the Covenant Books, NOT to this repo's substrate
+#   `untracked`             - A GAP WITH NO TRACKER. Needs an issue filed.
+#
+# HONESTY RULES (enforced by tests/compliance_map.rs):
+#   - A mapping the source does NOT state is `unmapped` — never invented. CC 4.5.2.2 states
+#     a CEG wire primitive but no Book/Annex §; Annex C states a Book/Annex § but NO CEG wire
+#     primitive and NO substrate symbol — so those columns are `unmapped` on the two tiers.
+#   - ACCURACY OVER COVERAGE: a cited symbol that does not actually discharge the obligation
+#     is worse than `unmapped`. Unsure => `unmapped`.
+#   - Per CC 8.8.5 §3 (graduation rule) statutory rows are INFORMATIVE engineering
+#     correspondences, not legal opinions, and are not compliance claims.
+#   - `cc_refs` lists ONLY the CC sections the row's own source cells cross-reference
+#     verbatim; it is the join key into evidence/cc_impl.tsv.
+#
+# Loaded by src/compliance.rs (ComplianceMap); gated by tests/compliance_map.rs.
+# Columns: cc_section, framework, provision, ceg_primitive, ciris_mapping, implementing_evidence, composition, source_status, cc_refs, tracking_issue
+cc_section	framework	provision	ceg_primitive	ciris_mapping	implementing_evidence	composition	source_status	cc_refs	tracking_issue
+4.5.2.2	GDPR	Article 7 (consent)	consent:state:granted + consent_record.subject_key_id	unmapped	CIRISPersist:src/federation/mod.rs#resolve_consent_state;CIRISPersist:src/federation/admission.rs#resolve_withdraws_admission_rule	Subject's wire-format declaration of consent; revocable via CC 2.4.1.1 rule 2	informational	2.4.1.1	none
+4.5.2.2	GDPR	Article 9 (special category — health, biometric, sexual orientation, etc.)	subject_key_ids MANDATORY for special-category content; producer's consent:deletion_sla SHOULD be <= 30 days	unmapped	unmapped	Substrate-level recognition that special category requires subject-side wire authority	informational	unmapped	untracked
+4.5.2.2	GDPR	Article 17 (right to erasure)	consent:state:revoked -> substrate-watched consent:deletion_sla:{days} -> producer emits consent:deletion_complete OR substrate emits hard_case:consent_sla_breach	unmapped	CIRISPersist:src/engine.rs#evict_fountain_content_hard_delete;CIRISPersist:src/federation/mod.rs#run_consent_sla_watch;CIRISServer:tests/noise_floor.rs	The CC 4.4.3.5.2 SLA watcher is the wire-format observability primitive for Article 17 compliance	informational	4.4.3.5.2	none
+4.5.2.2	GDPR	Article 20 (data portability)	DSAR export via attestations.where(s in subject_key_ids) query	unmapped	unmapped	CIRISAgent's DSARExportPackage composes from this query trivially	informational	unmapped	untracked
+4.5.2.2	HIPAA	45 CFR 164.502 (uses + disclosures)	consent:scope:{retain|share|analyze|train|publish} + cohort_scope	unmapped	partial:CIRISPersist:src/federation/admission.rs#check_write_cohort_scope	scope qualifier names the permitted use; cohort_scope names the permitted visibility	informational	unmapped	CIRISServer#243
+4.5.2.2	HIPAA	45 CFR 164.524 (patient right of access)	DSAR export per Article 20 above	unmapped	unmapped	Same composition	informational	unmapped	untracked
+4.5.2.2	FERPA	34 CFR Part 99 (educational records)	subject_key_ids: [student_key] + delegates_to(parent_key -> student_canonical_hash, scope: [consent_revocation]) for minors	unmapped	CIRISPersist:src/federation/admission.rs#check_user_target_steward_binding_admission	Parental authority composes via the existing delegates_to primitive; no new shape needed	informational	unmapped	none
+4.5.2.2	CCPA	§1798.105 (right to delete)	Same composition as GDPR Article 17	unmapped	CIRISPersist:src/engine.rs#evict_fountain_content_hard_delete;CIRISPersist:src/federation/mod.rs#run_consent_sla_watch;CIRISServer:tests/noise_floor.rs	Substrate-watched SLA + consent:deletion_complete	informational	unmapped	none
+4.5.2.2	EU-AI-ACT	Article 50 (training data transparency + opt-out)	consent:scope:train + is_ai_generated field at content publish + subject's consent:state:revoked against the training-datum Contribution	unmapped	unmapped	Subject can withdraw training-set consent; producer's deletion-SLA fires on the training-corpus Contribution	informational	unmapped	CIRISServer#243
+4.5.2.2	CIRIS-ACCORD	M-1 (sustainable adaptive coherence — consent revocability)	The entire subject-authority surface	unmapped	CIRISServer:src/accord.rs#replicate_and_maybe_halt;CIRISServer:tests/accord.rs	The constitutional anchor — "consent (M-1's load-bearing property) requires revocability, and revocability requires a halt-authority that lives outside the system being halted" (CC 4.2 + MISSION.md §1.5). This recognition extends from accord-carriers (federation-as-a-whole halt) to all subject-authorities (per-Contribution halt) at scale.	informational	4.2	none
+8.8.5	EU-AI-ACT	Art 9 Risk-management system	unmapped	Book II §II (PDMA); Annex D CRE	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	EU-AI-ACT	Art 10 Data & data governance (10(2)(f) bias examination)	unmapped	Annex G TX-6 bias audit; Annex I §1.2 (DISCRIMINATION capability gate)	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	EU-AI-ACT	Art 12 Record-keeping	unmapped	Book IV Ch 3 audit trails; Annex F §4	CIRISPersist:src/audit/service.rs#record_entry;CIRISPersist:src/audit/service.rs#verify_chain;CIRISServer:tests/audit_chain.rs	unmapped	informative	unmapped	none
+8.8.5	EU-AI-ACT	Art 13 Transparency to deployers	unmapped	Book II §II Step 6; Book IV Ch 3	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	EU-AI-ACT	Art 14 Human oversight (incl. 14(4) intervene / interrupt / stop)	unmapped	Book II §III (WBD); Annex F authority lattice + autonomy tiers	unmapped	unmapped	informative	unmapped	CIRISServer#115
+8.8.5	EU-AI-ACT	Art 15 Accuracy, robustness & cybersecurity	unmapped	Annex G (RS >= 0.97; adversarial robustness)	partial:CIRISServer:tests/federation_session_kex.rs	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	EU-AI-ACT	Art 16 Provider obligations (high-risk)	unmapped	Annex F autonomy tiers; GDPR Art 22 HITL	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	EU-AI-ACT	Art 50 Transparency (50(1) AI-interaction disclosure; 50(2) machine-readable AI-content marking)	unmapped	is_bot disclosure; C2PA profile CC 8.4.2 (applies 2 Aug 2026)	unmapped	unmapped	informative	8.4.2	untracked
+8.8.5	EU-AI-ACT	Art 72 Post-market monitoring (was Art 61 in the 2021 COM(2021) 206 proposal)	unmapped	Annex H drift controls + continuous audit	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	NIST-AI-RMF	Govern -> Map -> Measure -> Manage	unmapped	Govern: Books I, VI; Map: Book II §II Steps 1-2; Measure: Annex A metrics + Annex H baselines; Manage: Annex F/H workflows	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	ISO-IEC-42001	Cl 6.2 Risk Assessment	unmapped	Book II §II	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	ISO-IEC-42001	Annex A controls	unmapped	CIRISAgent compliance/ dimension docs (per-control correspondence pending)	unmapped	unmapped	informative	unmapped	CIRISAgent:compliance
+8.8.5	OSHA-ROBOTICS	Sec 5.E Safety Audits	unmapped	Annex D CRE	unmapped	unmapped	partial	unmapped	CIRISAgent:compliance
+8.8.5	EU-HLEG	7 Requirements	unmapped	Operational cross-walk, dimensions D01-D27	unmapped	unmapped	evidence-bearing	unmapped	CIRISAgent:compliance
+8.8.5	IEEE-EAD	8 General Principles	unmapped	Operational cross-walk, dimensions D01-D27	unmapped	unmapped	evidence-bearing	unmapped	CIRISAgent:compliance
+8.8.5	ASEAN-AI-GG	7 Principles; HITL/HOTL/HOOTL	unmapped	Operational cross-walk; Annex F autonomy tiers	unmapped	unmapped	evidence-bearing	unmapped	CIRISAgent:compliance
+8.8.5	MAGNIFICA-HUMANITAS	245 ¶¶ (paragraph-grain mapping)	unmapped	Operational cross-walk, dimensions D01-D27	unmapped	unmapped	evidence-bearing	unmapped	CIRISAgent:compliance

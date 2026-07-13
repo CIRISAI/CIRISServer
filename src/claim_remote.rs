@@ -586,9 +586,12 @@ async fn register_target_key(
     }
 
     // STRICT hybrid PoP gate — re-verifies the target's self-signature over BOTH
-    // halves; a forged or incomplete record is rejected here, not stored.
-    engine
-        .register_federation_key(signed)
+    // halves; a forged or incomplete record is rejected here, not stored. Fronted by
+    // the CC 4.2.2.1 hardware-class gate (CIRISServer#159): a claimed hardware class
+    // on a claimed node's record is proven (chain to a pinned root, bound to this
+    // key) or the whole admission is refused — a PoP signature proves key custody,
+    // NOT that the key lives in the hardware it says it does.
+    crate::hardware_attestation::register_attested_federation_key(engine, signed)
         .await
         .map_err(|e| format!("register target hybrid key (strict gate): {e}"))
 }
