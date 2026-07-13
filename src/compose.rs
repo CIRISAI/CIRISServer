@@ -419,12 +419,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // `prime_trusted_peers` primes from Rooted `transport_destination` ROWS — but
     // the baked canonical seed carries only a KeyRecord (+ an IP dial hint), no
     // such row, so the canonical was NEVER boot-primed and rooted only via its
-    // slow/unreliable announce (~130-200s, or never). An explicit-hash peer needs
-    // just `(dest_hash, ed25519)`, BOTH deterministically derivable from the fed
-    // Ed25519 pubkey the seed already carries: `dest_hash =
-    // reticulum_destination_for_pubkey(fed_ed25519) = sha256(fed_ed25519)[..16]`,
-    // and the link signing key IS that same fed Ed25519 (transport and federation
-    // share the Ed25519 signing half; the v10.1.0 split was in the unused X25519).
+    // slow/unreliable announce (~130-200s, or never). We prime the ROOTING
+    // (trust) directory here from `(dest_hash, ed25519)` derivable from the baked
+    // fed Ed25519: `dest_hash = reticulum_destination_for_pubkey(fed_ed25519) =
+    // sha256(fed_ed25519)[..16]`; the link signing key IS that same fed Ed25519
+    // (transport and federation share the Ed25519 half; the v10.1.0 split was in
+    // the unused X25519).
+    //
+    // ⚠️ ROOTING ≠ ROUTING — the sealed root cause of the CIRISServer#238 /
+    // CIRISEdge#336 saga. `sha256(fed_ed25519)` is an EXPLICIT-HASH dest. It is
+    // the right key to ROOT under (trust, announce-independent — #238's whole
+    // point), but it is NOT the dest the canonical is REACHABLE on: edge announces
+    // and serves links on its RNS NAMED dest, `sha256(name_hash("ciris","edge") ‖
+    // identity_hash)[..16]` (a DIFFERENT derivation — sharing the key does not make
+    // the hashes coincide, which an earlier version of this comment wrongly
+    // asserted). Explicit-hash dests categorically cannot be announced, so a peer
+    // can never self-learn a route to `sha256(fed_ed25519)`; a replication send
+    // aimed there gets no path and a silent 30 s transport timeout. Routing to the
+    // canonical is HEALED from its (v12-transmitting) announce, which carries the
+    // transport identity → the routable named dest. See CIRISEdge#336 for the
+    // announce-heal of the peer's routing dest + the LINK_REQUEST_TX-with-no-path
+    // guard that turns any future recurrence into a loud immediate error.
     prime_canonical_bootstrap_peers(&engine, &edge).await;
 
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
