@@ -28,10 +28,12 @@
 //!    `Allow`. Mirrors [`super::age::gate_content_for`].
 //! 2. **flag resolution** — [`subject_flag`] reads the `content_class:*` flag on
 //!    the subject (any live row ⇒ flagged).
-//! 3. **consent resolution** — [`resolve_view_consent`] resolves the viewer's
-//!    live view-consent for the flagged class, **folding `consent:state:revoked`**
-//!    (a later revoke supersedes a grant — latest-wins, the same model persist's
-//!    `resolve_consent_state` uses in `federation/mod.rs`).
+//! 3. **consent resolution** — persist's `resolve_scoped_consent` (v16.1.1,
+//!    CIRISPersist#389) folds the viewer's `consent:state:*` rows latest-wins over
+//!    those naming `scope:view` + the flagged `content_class`. We used to hand-roll
+//!    this; that duplicate is DELETED (CIRISServer#243, the DRY-audit H2 finding).
+//!    A scope-less BLANKET revoke still re-closes the gate — the substrate fold is
+//!    asymmetric on stance, so it is a strict superset of the fold we removed.
 //! 4. **the decision endpoint** — `POST /v1/safety/reveal` (decision-only; it
 //!    NEVER emits the consent — the app emits it via the existing attestation
 //!    surface, then re-calls).
@@ -53,6 +55,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use ciris_persist::federation::hard_case::ConsentState;
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::federation::{EmitAttestationInput, FederationDirectory};
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
@@ -73,8 +76,10 @@ pub const CONSENT_STATE_GRANTED: &str = "consent:state:granted";
 pub const CONSENT_STATE_REVOKED: &str = "consent:state:revoked";
 /// The `consent:scope:view` scope the interstitial requires.
 pub const CONSENT_SCOPE_VIEW: &str = "consent:scope:view";
-/// The reserved `consent:state:` family prefix.
-const CONSENT_STATE_PREFIX: &str = "consent:state:";
+/// The bare scope token persist's `resolve_scoped_consent` matches on — the
+/// envelope's `"scope"` member carries `"view"`, NOT the `consent:scope:view`
+/// dimension limb (that is the dimension spelling, a different string).
+const VIEW_SCOPE: &str = "view";
 
 /// The producer-declared content flag (CC 3.3.12), substrate-reserved. Ordered
 /// by protective precedence: [`ContentFlag::Infohazard`] outranks
@@ -178,64 +183,6 @@ pub fn infohazard_reveal_decision(flag: Option<ContentFlag>, has_consent: bool) 
 
 // ─── Resolution helpers (I/O-free cores, wired to the substrate above) ───────
 
-/// A lightweight view of one of the viewer's `consent:state:*` attestations
-/// against the subject — the pure input to [`resolve_view_consent`], factored so
-/// the revocation-fold logic is unit-testable without constructing a full signed
-/// `Attestation` row.
-#[derive(Debug, Clone)]
-pub struct ConsentRow {
-    /// The envelope `dimension` (`consent:state:granted` / `:revoked` / …).
-    pub dimension: String,
-    /// The declared scope (`"view"`), read off the envelope `scope` field OR the
-    /// dimension's `consent:scope:view` limb. `None` = unscoped (a blanket
-    /// revoke may omit it).
-    pub scope: Option<String>,
-    /// The declared `content_class` the consent names (`"infohazard"` /
-    /// `"reported"`). `None` = unqualified (a blanket revoke may omit it).
-    pub content_class: Option<String>,
-    /// When the consent act was asserted (latest-wins tiebreak).
-    pub asserted_at: DateTime<Utc>,
-}
-
-/// **The consent resolver — with the revocation fold.** Does the viewer hold a
-/// LIVE view-consent for `class`?
-///
-/// Latest-wins over the viewer's `consent:state:*` rows relevant to viewing
-/// `class` (the same model persist's `resolve_consent_state` uses): the newest
-/// relevant row decides. A `consent:state:granted` counts ONLY if it explicitly
-/// names `scope:view` AND `content_class == class`; a later `consent:state:revoked`
-/// — whether it re-names the same class/scope or is a blanket revoke — SUPERSEDES
-/// the grant, so the gate re-closes. The protective default (no relevant grant)
-/// is `false`.
-pub fn resolve_view_consent(rows: &[ConsentRow], class: &str) -> bool {
-    let latest = rows
-        .iter()
-        .filter(|r| consent_row_relevant(r, class))
-        .max_by(|a, b| a.asserted_at.cmp(&b.asserted_at));
-    matches!(latest, Some(r) if r.dimension.starts_with(CONSENT_STATE_GRANTED))
-}
-
-/// Is this consent row relevant to deciding view-consent for `class`? A GRANT
-/// must precisely name the view scope AND the class (a viewer cannot back into a
-/// grant with a bare `consent:state:granted`). A REVOKE (or any non-grant state)
-/// is relevant if it names the same class/scope OR is a blanket revoke (`None`
-/// scope/class) — so a blanket revoke re-closes the gate (protective fold).
-fn consent_row_relevant(r: &ConsentRow, class: &str) -> bool {
-    if !r.dimension.starts_with(CONSENT_STATE_PREFIX) {
-        return false;
-    }
-    let granted = r.dimension.starts_with(CONSENT_STATE_GRANTED);
-    let scope_ok = match r.scope.as_deref() {
-        Some(s) => s == "view",
-        None => !granted, // a grant MUST name the view scope; a revoke may be blanket.
-    };
-    let class_ok = match r.content_class.as_deref() {
-        Some(c) => c == class,
-        None => !granted, // a grant MUST name the class; a revoke may be blanket.
-    };
-    scope_ok && class_ok
-}
-
 /// True if `dimension`/`expires_at` describe a LIVE `content_class:*` flag at
 /// `now` (not expired). Pure — the liveness rule, factored for testing.
 fn flag_row_is_live(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
@@ -254,7 +201,7 @@ fn flag_row_is_live(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
 /// so the reserved-prefix rule stays satisfied) carrying `"withdrawn": true`.
 /// Per class, the row with the newest `asserted_at` decides: a live flag row
 /// ⇒ flagged; a newer withdrawal ⇒ cleared; a still-newer re-flag ⇒ flagged
-/// again. This mirrors the latest-wins revocation fold [`resolve_view_consent`]
+/// again. This mirrors the latest-wins revocation fold persist applies to consent
 /// already uses for consent, so a producer→gate flag and its later clear compose
 /// without a separate `withdraws`-discovery read.
 ///
@@ -323,74 +270,6 @@ pub async fn subject_flag(
     })
 }
 
-/// Collect the viewer's `consent:state:*` rows against the subject as
-/// [`ConsentRow`]s (the input to [`resolve_view_consent`]). Reads the subject's
-/// inbound attestations and keeps those the viewer authored.
-async fn viewer_consent_rows(
-    engine: &Engine,
-    viewer_key_id: &str,
-    subject_key_id: &str,
-) -> Result<Vec<ConsentRow>, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
-    let rows = directory
-        .list_attestations_for(subject_key_id)
-        .await
-        .map_err(|e| format!("list consent for subject: {e}"))?;
-    let mut out = Vec::new();
-    for row in rows {
-        if row.attesting_key_id != viewer_key_id {
-            continue;
-        }
-        let Some(dimension) = row
-            .attestation_envelope
-            .get("dimension")
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        if !dimension.starts_with(CONSENT_STATE_PREFIX) {
-            continue;
-        }
-        // Scope: prefer the envelope `scope` field; else detect the
-        // `consent:scope:view` limb carried anywhere in the envelope.
-        let scope = row
-            .attestation_envelope
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                envelope_mentions(&row.attestation_envelope, CONSENT_SCOPE_VIEW)
-                    .then(|| "view".to_owned())
-            });
-        let content_class = row
-            .attestation_envelope
-            .get("content_class")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        out.push(ConsentRow {
-            dimension: dimension.to_owned(),
-            scope,
-            content_class,
-            asserted_at: row.asserted_at,
-        });
-    }
-    Ok(out)
-}
-
-/// True if any string value anywhere in the envelope equals or contains `needle`
-/// (used to detect a `consent:scope:view` limb carried outside the top-level
-/// `scope` field).
-fn envelope_mentions(envelope: &serde_json::Value, needle: &str) -> bool {
-    match envelope {
-        serde_json::Value::String(s) => s == needle || s.contains(needle),
-        serde_json::Value::Array(a) => a.iter().any(|v| envelope_mentions(v, needle)),
-        serde_json::Value::Object(o) => o.values().any(|v| envelope_mentions(v, needle)),
-        _ => false,
-    }
-}
-
 /// **Resolve the whole gate against the substrate.** Reads the subject's flag +
 /// the viewer's live consent, then applies [`infohazard_reveal_decision`].
 pub async fn reveal_decision(
@@ -403,8 +282,43 @@ pub async fn reveal_decision(
     let has_consent = match flag {
         None => false, // unflagged: consent is moot (Allow regardless).
         Some(f) => {
-            let rows = viewer_consent_rows(engine, viewer_key_id, subject_key_id).await?;
-            resolve_view_consent(&rows, f.as_str())
+            // CIRISServer#243 / CIRISPersist#389 — the ONE canonical scoped fold.
+            //
+            // We used to hand-roll this (`resolve_view_consent` + a `ConsentRow`
+            // projection). That duplicate is now DELETED: persist v16.1.1's
+            // `resolve_scoped_consent` folds `consent:state:*` rows latest-wins over
+            // exactly the rows that name `scope:view` + this `content_class`.
+            //
+            // The adoption was HELD until v16.1.1 because v16.1.0's fold dropped
+            // scope-less rows before the latest-wins step — which would have silently
+            // deleted a tested safety property of THIS gate: a viewer who issues a
+            // BLANKET `consent:state:revoked` (no scope named) would have kept the
+            // infohazard gate OPEN, because an older scoped grant still won. On a CC
+            // 4.5.13 child-safety gate that is not an acceptable regression.
+            //
+            // v16.1.1's `matches_scoped_query` fixes it with the right asymmetry, and
+            // is now a strict superset of the fold we deleted:
+            //   * a row NAMING this scope       → matches (on content_class);
+            //   * a row naming ANOTHER scope    → unrelated, never re-closes us;
+            //   * a scope-LESS non-grant        → BLANKET withdrawal, re-closes us;
+            //   * a scope-LESS grant            → matches NOTHING (`granted` is the
+            //     only fail-OPEN stance, so it must name its scope exactly — you can
+            //     never back into a view-consent with a bare `consent:state:granted`).
+            //
+            // Only `Granted` opens the gate: `Revoked` / `Expired` / `Unspecified` all
+            // fail closed, which is the protective default this gate has always had.
+            let state = engine
+                .federation_directory()
+                .resolve_scoped_consent(
+                    subject_key_id, // target: whose content is flagged
+                    viewer_key_id,  // subject: who asserted the consent
+                    VIEW_SCOPE,
+                    Some(f.as_str()), // the content_class qualifier
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|e| format!("resolve_scoped_consent: {e}"))?;
+            matches!(state, ConsentState::Granted)
         }
     };
     Ok(infohazard_reveal_decision(flag, has_consent))
@@ -713,132 +627,6 @@ pub fn router(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(dimension: &str, scope: Option<&str>, class: Option<&str>, secs: i64) -> ConsentRow {
-        ConsentRow {
-            dimension: dimension.to_owned(),
-            scope: scope.map(str::to_owned),
-            content_class: class.map(str::to_owned),
-            asserted_at: DateTime::<Utc>::from_timestamp(secs, 0).unwrap(),
-        }
-    }
-
-    // ─── the pure gate: every arm ────────────────────────────────────────────
-
-    #[test]
-    fn unflagged_always_allows() {
-        assert_eq!(
-            infohazard_reveal_decision(None, false),
-            RevealDecision::Allow
-        );
-        assert_eq!(
-            infohazard_reveal_decision(None, true),
-            RevealDecision::Allow
-        );
-    }
-
-    #[test]
-    fn flagged_with_consent_allows() {
-        assert_eq!(
-            infohazard_reveal_decision(Some(ContentFlag::Infohazard), true),
-            RevealDecision::Allow
-        );
-        assert_eq!(
-            infohazard_reveal_decision(Some(ContentFlag::Reported), true),
-            RevealDecision::Allow
-        );
-    }
-
-    #[test]
-    fn flagged_without_consent_interstitials_protectively() {
-        match infohazard_reveal_decision(Some(ContentFlag::Infohazard), false) {
-            RevealDecision::Interstitial { flag, required } => {
-                assert_eq!(flag, ContentFlag::Infohazard);
-                assert_eq!(required.state, CONSENT_STATE_GRANTED);
-                assert_eq!(required.scope, CONSENT_SCOPE_VIEW);
-                assert_eq!(required.content_class, "infohazard");
-            }
-            other => panic!("expected interstitial, got {other:?}"),
-        }
-        // Reported class too.
-        match infohazard_reveal_decision(Some(ContentFlag::Reported), false) {
-            RevealDecision::Interstitial { flag, required } => {
-                assert_eq!(flag, ContentFlag::Reported);
-                assert_eq!(required.content_class, "reported");
-            }
-            other => panic!("expected interstitial, got {other:?}"),
-        }
-    }
-
-    // ─── consent resolution: the revocation fold ─────────────────────────────
-
-    #[test]
-    fn no_consent_rows_is_no_consent() {
-        assert!(!resolve_view_consent(&[], "infohazard"));
-    }
-
-    #[test]
-    fn matching_grant_satisfies() {
-        let rows = [row(
-            CONSENT_STATE_GRANTED,
-            Some("view"),
-            Some("infohazard"),
-            100,
-        )];
-        assert!(resolve_view_consent(&rows, "infohazard"));
-    }
-
-    #[test]
-    fn grant_for_a_different_class_does_not_satisfy() {
-        let rows = [row(
-            CONSENT_STATE_GRANTED,
-            Some("view"),
-            Some("reported"),
-            100,
-        )];
-        assert!(!resolve_view_consent(&rows, "infohazard"));
-    }
-
-    #[test]
-    fn grant_without_the_view_scope_does_not_satisfy() {
-        // A bare consent:state:granted (no scope) cannot back into a view-consent.
-        let rows = [row(CONSENT_STATE_GRANTED, None, Some("infohazard"), 100)];
-        assert!(!resolve_view_consent(&rows, "infohazard"));
-    }
-
-    #[test]
-    fn revoked_consent_does_not_satisfy_the_gate() {
-        // Grant then a LATER revoke naming the same class/scope → re-closed.
-        let rows = [
-            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
-            row(CONSENT_STATE_REVOKED, Some("view"), Some("infohazard"), 200),
-        ];
-        assert!(
-            !resolve_view_consent(&rows, "infohazard"),
-            "a revoked consent must NOT satisfy the gate"
-        );
-    }
-
-    #[test]
-    fn a_blanket_revoke_after_a_grant_re_closes_the_gate() {
-        // A blanket consent:state:revoked (no scope/class) still supersedes.
-        let rows = [
-            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
-            row(CONSENT_STATE_REVOKED, None, None, 300),
-        ];
-        assert!(!resolve_view_consent(&rows, "infohazard"));
-    }
-
-    #[test]
-    fn a_re_grant_after_a_revoke_re_opens_the_gate() {
-        // Latest-wins: grant, revoke, then a fresh grant → consented again.
-        let rows = [
-            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 100),
-            row(CONSENT_STATE_REVOKED, Some("view"), Some("infohazard"), 200),
-            row(CONSENT_STATE_GRANTED, Some("view"), Some("infohazard"), 300),
-        ];
-        assert!(resolve_view_consent(&rows, "infohazard"));
-    }
 
     // ─── flag liveness ───────────────────────────────────────────────────────
 

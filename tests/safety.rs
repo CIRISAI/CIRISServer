@@ -1594,3 +1594,208 @@ async fn flag_endpoint_rejects_a_non_duty_caller() {
         "a rejected flag emits nothing"
     );
 }
+
+/// Emit a `consent:state:*` row with EXPLICIT control over whether the envelope
+/// names a `scope` / `content_class` at all. `None` on both = the **blanket**
+/// stance ("I revoke my consent", unqualified) — the case CIRISServer#243 turns on.
+#[allow(clippy::too_many_arguments)]
+async fn emit_consent_scoped(
+    engine: &Engine,
+    viewer: &LocalSigner,
+    subject: &str,
+    state: &str,
+    scope: Option<&str>,
+    class: Option<&str>,
+    secs: i64,
+) {
+    let viewer_key = viewer.key_id().to_string();
+    let now = chrono::Utc::now() + chrono::Duration::seconds(secs);
+    let mut envelope = serde_json::json!({ "dimension": format!("consent:state:{state}:v1") });
+    if let Some(sc) = scope {
+        envelope["scope"] = serde_json::json!(sc);
+    }
+    if let Some(c) = class {
+        envelope["content_class"] = serde_json::json!(c);
+    }
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize consent");
+    let sig = viewer.sign_hybrid(&canonical).await.expect("sign consent");
+    let attestation = Attestation {
+        attestation_id: format!(
+            "consent-{viewer_key}-{subject}-{state}-{}-{}-{secs}",
+            scope.unwrap_or("noscope"),
+            class.unwrap_or("noclass")
+        ),
+        attesting_key_id: viewer_key.clone(),
+        attested_key_id: subject.to_string(),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: viewer_key.clone(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![subject.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put scoped consent");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CIRISServer#243 — the SUBSTRATE-RESOLVER EQUIVALENCE TEST.
+//
+// 0.5.108 deleted this gate's hand-rolled consent fold and routed it through
+// persist v16.1.1's `resolve_scoped_consent` (CIRISPersist#389, the DRY-audit H2
+// finding). The fold we deleted carried a NAMED, TESTED safety property:
+//
+//     a scope-less BLANKET `consent:state:revoked` re-closes the gate.
+//
+// persist v16.1.0's first cut of the scoped resolver DROPPED scope-less rows
+// before the latest-wins fold — which would have silently deleted that property:
+// a viewer who withdrew ALL consent would have kept the infohazard gate OPEN,
+// because an older scoped grant still won. On a CC 4.5.13 child-safety gate that
+// is not an acceptable regression, so the adoption was HELD and persist fixed it
+// in v16.1.1 (`matches_scoped_query`, asymmetric on stance).
+//
+// These tests are the reason the property survives the deletion: they exercise
+// the REAL substrate resolver end-to-end through `reveal_decision`, so the fold
+// can never silently regress in a future substrate bump. Deleting our own tests
+// along with our own fold would have left this property untested ANYWHERE.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cc_243_blanket_revoke_re_closes_the_infohazard_gate() {
+    let engine = node().await;
+    let viewer = register_party(&engine, "viewer-blanket", identity_type::USER).await;
+    let subject = "subject-blanket";
+    register_party(&engine, subject, identity_type::USER).await;
+    let flagger = register_party(
+        &engine,
+        "subject-blanket-flagger",
+        ciris_persist::federation::types::identity_type::SUBSTRATE_PERSIST,
+    )
+    .await;
+    flag_subject(&engine, &flagger, subject, "infohazard").await;
+
+    // A scoped grant OPENS the gate.
+    emit_consent_scoped(
+        &engine,
+        &viewer,
+        subject,
+        "granted",
+        Some("view"),
+        Some("infohazard"),
+        10,
+    )
+    .await;
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
+                .await
+                .unwrap(),
+            infohazard::RevealDecision::Allow
+        ),
+        "a scoped view-grant must open the gate"
+    );
+
+    // A LATER BLANKET revoke — no scope, no content_class: "I withdraw my consent",
+    // unqualified — must RE-CLOSE it. This is the whole point of #243.
+    emit_consent_scoped(&engine, &viewer, subject, "revoked", None, None, 20).await;
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
+                .await
+                .unwrap(),
+            infohazard::RevealDecision::Interstitial { .. }
+        ),
+        "a BLANKET consent:state:revoked MUST re-close the infohazard gate — a viewer \
+         who withdraws all consent must not keep seeing flagged material"
+    );
+}
+
+#[tokio::test]
+async fn cc_243_an_unrelated_scope_revoke_does_not_re_close_the_gate() {
+    let engine = node().await;
+    let viewer = register_party(&engine, "viewer-unrelated", identity_type::USER).await;
+    let subject = "subject-unrelated";
+    register_party(&engine, subject, identity_type::USER).await;
+    let flagger = register_party(
+        &engine,
+        "subject-unrelated-flagger",
+        ciris_persist::federation::types::identity_type::SUBSTRATE_PERSIST,
+    )
+    .await;
+    flag_subject(&engine, &flagger, subject, "infohazard").await;
+
+    emit_consent_scoped(
+        &engine,
+        &viewer,
+        subject,
+        "granted",
+        Some("view"),
+        Some("infohazard"),
+        10,
+    )
+    .await;
+    // Revoking an UNRELATED scope (e.g. replication) must NOT collaterally close the
+    // view gate. This is the property the scoped resolver exists to give us, and the
+    // reason a blanket revoke and a different-scope revoke must be told apart.
+    emit_consent_scoped(
+        &engine,
+        &viewer,
+        subject,
+        "revoked",
+        Some("replication"),
+        None,
+        20,
+    )
+    .await;
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
+                .await
+                .unwrap(),
+            infohazard::RevealDecision::Allow
+        ),
+        "revoking an unrelated scope must NOT re-close the view gate"
+    );
+}
+
+#[tokio::test]
+async fn cc_243_a_scope_less_grant_cannot_back_into_a_view_consent() {
+    let engine = node().await;
+    let viewer = register_party(&engine, "viewer-bare", identity_type::USER).await;
+    let subject = "subject-bare";
+    register_party(&engine, subject, identity_type::USER).await;
+    let flagger = register_party(
+        &engine,
+        "subject-bare-flagger",
+        ciris_persist::federation::types::identity_type::SUBSTRATE_PERSIST,
+    )
+    .await;
+    flag_subject(&engine, &flagger, subject, "infohazard").await;
+
+    // `granted` is the ONLY fail-OPEN stance, so it must name its scope exactly.
+    // A bare `consent:state:granted` must open NOTHING (the asymmetry's other half).
+    emit_consent_scoped(&engine, &viewer, subject, "granted", None, None, 10).await;
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
+                .await
+                .unwrap(),
+            infohazard::RevealDecision::Interstitial { .. }
+        ),
+        "a bare consent:state:granted must NOT back into a scoped view-consent"
+    );
+}
