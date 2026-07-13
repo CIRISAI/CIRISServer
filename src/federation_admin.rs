@@ -251,7 +251,7 @@ async fn peering(
                 local_wire = %refusal.local_ceg_wire_version,
                 "CC 2.6.4: peering REFUSED — incompatible peer wire"
             );
-            return crate::conformance::wire_refusal_response(refusal);
+            return crate::conformance::wire_refusal_response(*refusal);
         }
     };
 

@@ -710,9 +710,9 @@ pub fn negotiate(announced: &PeerWireAnnouncement) -> Result<WireVersion, Box<Wi
 /// Render a [`WireRefusal`] as the `409 Conflict` a peer receives. `409` (not `400`):
 /// the request is well-formed, but it CONFLICTS with the state of this node's wire —
 /// the peer must upgrade/downgrade, not re-phrase.
-pub fn wire_refusal_response(refusal: Box<WireRefusal>) -> axum::response::Response {
+pub fn wire_refusal_response(refusal: WireRefusal) -> axum::response::Response {
     use axum::response::IntoResponse;
-    (axum::http::StatusCode::CONFLICT, axum::Json(*refusal)).into_response()
+    (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response()
 }
 
 #[cfg(test)]

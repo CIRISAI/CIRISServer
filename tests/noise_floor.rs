@@ -957,7 +957,7 @@ async fn dominance_and_multiplicity_are_rejected_on_v3() {
         "900/1000 dominated fold ⇒ n_eff collapses toward 1 (got {n_eff_dominated})"
     );
 
-    let fixed = |m: f64| (m * f64::from(MASS_FIXED_POINT_SCALE)).round() as u64;
+    let fixed = |m: f64| (m * MASS_FIXED_POINT_SCALE).round() as u64;
     let mass_root = |masses: &[f64]| {
         let leaves: Vec<(String, u64)> = member_ids
             .iter()
