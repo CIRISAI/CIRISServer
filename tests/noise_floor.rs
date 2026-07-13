@@ -325,21 +325,38 @@ async fn signed_agg_inputs(
     let (ed_sk, _ed_pk_b64, mldsa) = producer_keys();
     let commitment = member_commitment(member_ids);
     let commitment_hex = hex_lower(&commitment);
+    // §19.7.1.3 (verify v10 / CIRISVerify#191, CC 6.1.2.1.2 R9): the mass Merkle
+    // root is over `(member_id, mass)` leaves. This fixture is a BALANCED fold —
+    // every member carries equal mass — which is what makes `n_eff == N` honest.
+    let masses: Vec<(String, u64)> = member_ids.iter().map(|id| (id.clone(), 1u64)).collect();
+    let mass_root = ciris_verify_core::holonomic::mass_commitment(&masses);
     let meta = ciris_verify_core::holonomic::AggregationMetaV1 {
-        // v8.7.0 §19.7.1.2 dominance gate (CIRISVerify#167): version-2 carries a
-        // SIGNED n_eff (in the preimage) so the composite passes the gate. A
-        // balanced fold of N equal members has n_eff == source_count == N, which
-        // clears `passes_dominance_gate` for any min_ratio ≤ 1; a version-1 tier
-        // has no dominance surface and fails closed (→ AggregationMetaRejected).
-        version: 2,
+        // v10 §19.7.1.3 (CIRISVerify#191): version-3 carries a SIGNED
+        // `max_source_multiplicity` + `mass_commitment`. This is a FLAG-DAY cut —
+        // a v1/v2 tier lacks the surface and fails CLOSED at
+        // `passes_multiplicity_gate` (no deprecation window) — so the fixture must
+        // move to v3 to stay admissible. (v2 added the signed n_eff dominance
+        // surface, §19.7.1.2 / #167; v1 had neither and fails both gates.)
+        version: 3,
         content_id: composite_cid.to_owned(),
         corpus_kind: aggregate_corpus_kind(source_corpus),
         tier: 1,
         aggregation_algorithm_id: "raptorq-pyramid-v1".to_owned(),
         source_count: member_ids.len() as u32,
-        n_eff: member_ids.len() as u32, // balanced fold ⇒ n_eff == N (signed, v2)
+        // Balanced fold of N equal-mass members ⇒ n_eff == N (signed, v2+), which
+        // clears `passes_dominance_gate` for any min_ratio ≤ 1.
+        n_eff: member_ids.len() as u32,
+        // The R9 residual the mass-based n_eff cannot see: 900 near-DUPLICATE
+        // contents folded as 900 distinct members at equal mass yield an honest
+        // n_eff == 1000, yet the composite blur IS the data subject. Here the
+        // members are genuinely DISTINCT contents, so the largest
+        // content-similarity cluster is a single member ⇒ multiplicity 1, and
+        // `passes_multiplicity_gate` (max_source_multiplicity * n_min <=
+        // source_count) clears for any n_min <= N.
+        max_source_multiplicity: 1,
         member_commitment: commitment,
         noise_floor_descriptor: "mean+stddev".to_owned(),
+        mass_commitment: mass_root,
     };
     let preimage = meta.signing_preimage();
     let ed_sig = ed_sk.sign(&preimage).to_bytes();
@@ -354,7 +371,9 @@ async fn signed_agg_inputs(
         aggregation_algorithm_id: meta.aggregation_algorithm_id.clone(),
         source_count: meta.source_count,
         n_eff: meta.n_eff,
+        max_source_multiplicity: meta.max_source_multiplicity,
         member_commitment_hex: commitment_hex.clone(),
+        mass_commitment_hex: hex_lower(&meta.mass_commitment),
         noise_floor_descriptor: meta.noise_floor_descriptor.clone(),
         sig_ed25519_b64: BASE64.encode(ed_sig),
         sig_ml_dsa_65_b64: BASE64.encode(&pqc_sig),
@@ -890,112 +909,191 @@ async fn aggregation_collapse_erases_the_individual_pending_ciris_edge_266() {
     );
     let _ = &cfg; // codec retained for the post-#266 measurement.
 }
-
 // ════════════════════════════════════════════════════════════════════
-// (d) DOMINANCE counter-case (#5) — PENDING a dominance / N_eff surface.
+// (d) DOMINANCE + MULTIPLICITY are REJECTED — the v3 hard fork (CIRISVerify#167
+//     + #191, CC 6.1.2 / 6.1.2.1.2 R9; CIRISServer#239).
 //
-// A fold where ONE source is ~90% of the mass (900 of 1000) is, by every
-// invariant the shipped `AggregationMetaV1` exposes, INDISTINGUISHABLE from a
-// balanced fold over the same members: `source_count` counts members (N), not
-// mass, and `member_commitment` is a Merkle root over member IDs — neither
-// carries weights. So a dominance attack (one member drowning the aggregate)
-// hybrid-verifies identically. This #[ignore]d test PINS that gap as a waiting
-// acceptance test: when an N_eff / dominance descriptor lands (CIRISVerify#167,
-// twin CIRISConstitution#6), it should FAIL to verify (or expose N_eff≈1) for
-// the dominated fold while the balanced fold keeps N_eff≈N.
+// This test used to be the INVERSE: it characterized the gap, asserting that a
+// 900/1000-dominated fold hybrid-verifies exactly like a balanced one because
+// `AggregationMetaV1` could not encode mass at all. It was meant to "fail loudly
+// when the surface lands" — but it pinned `version: 1`, which is blind BY
+// CONSTRUCTION, so the tripwire could never fire no matter what shipped. That is
+// the stale-tripwire defect (#239): a test that can only ever pass is not a test.
+//
+// The surface has now landed and we are HARD-FORKED onto version 3 — no v1/v2
+// producer, no flag-day window, no legacy tolerance (the mesh is still seeding,
+// so there is nothing to be backward-compatible WITH). So the assertions invert
+// into a positive pin of the two gates:
+//
+//   * DOMINANCE (§19.7.1.2, v2+): one member owning 900/1000 of the MASS collapses
+//     n_eff → ~1.2, and `passes_dominance_gate` rejects it.
+//   * MULTIPLICITY (§19.7.1.3, v3, the R9 residual): 900 NEAR-DUPLICATE contents
+//     folded as 900 *distinct members at equal mass* are mass-honest — n_eff == N
+//     exactly, so the dominance gate is blind to them — yet the composite blur IS
+//     the data subject. Only `max_source_multiplicity` sees it. This is the case
+//     n_eff provably cannot catch, and it is why v3 exists.
 // ════════════════════════════════════════════════════════════════════
-// NOTE: this test RUNS (not #[ignore]d) — it makes real assertions that PASS
-// today, characterizing the live gap: the shipped verifier accepts a
-// 900/1000-dominated fold as readily as a balanced one. When the dominance/N_eff
-// surface lands (CIRISVerify#167 / CIRISConstitution#6) this test FAILS loudly —
-// the signal that the gap closed and the assertions must invert (dominated fold
-// rejected / N_eff exposed). That fail-when-fixed is the Rust analogue of a
-// strict-xfail; keeping it running is real coverage, not a skip.
 #[tokio::test]
-async fn dominance_undetectable_pending_ciris_verify_167() {
-    // Same member set, two very different mass distributions.
-    let member_ids: Vec<String> = (0..10).map(|i| format!("nf-dom-member-{i}")).collect();
-    let balanced_weights = vec![100.0_f64; 10]; // uniform → N_eff = 10
-    let mut dominated_weights = vec![100.0_f64 / 9.0; 10]; // ~11.1 each …
-    dominated_weights[0] = 900.0; // … except member 0 owns 900/1000 of the mass.
+async fn dominance_and_multiplicity_are_rejected_on_v3() {
+    use ciris_verify_core::holonomic::{
+        effective_source_count, mass_commitment, passes_dominance_gate, passes_multiplicity_gate,
+        verify_aggregation_meta, AggregationMetaV1, AggregationMetaVerification,
+        MASS_FIXED_POINT_SCALE,
+    };
 
-    let n_eff_balanced = n_eff(&balanced_weights);
-    let n_eff_dominated = n_eff(&dominated_weights);
+    const N: usize = 10;
+    let member_ids: Vec<String> = (0..N).map(|i| format!("nf-dom-member-{i}")).collect();
+
+    // Two mass distributions over the SAME members.
+    let balanced_masses = vec![100.0_f64; N]; // uniform      → n_eff == N
+    let mut dominated_masses = vec![100.0_f64 / 9.0; N]; // ~11.1 each …
+    dominated_masses[0] = 900.0; // … except member 0 owns 900/1000 of the mass.
+
+    let n_eff_balanced = effective_source_count(&balanced_masses);
+    let n_eff_dominated = effective_source_count(&dominated_masses);
+    assert_eq!(n_eff_balanced, N as u32, "balanced fold ⇒ n_eff == N");
     assert!(
-        (n_eff_balanced - 10.0).abs() < 1e-9,
-        "balanced fold: N_eff == N == 10 (got {n_eff_balanced})"
-    );
-    assert!(
-        n_eff_dominated < 2.0,
-        "dominated fold: N_eff collapses toward 1 (got {n_eff_dominated:.4})"
+        n_eff_dominated <= 1,
+        "900/1000 dominated fold ⇒ n_eff collapses toward 1 (got {n_eff_dominated})"
     );
 
-    // Build a real, hybrid-signed AggregationMetaV1 for the (dominated) fold and
-    // drive the SHIPPED verifier — it accepts it, because the meta cannot encode
-    // the dominance at all.
-    let (ed_sk, _ed_pk_b64, mldsa) = producer_keys();
-    let ed_pk = ed_sk.verifying_key().to_bytes();
-    let pqc_pk = mldsa.public_key().await.unwrap();
+    let fixed = |m: f64| (m * f64::from(MASS_FIXED_POINT_SCALE)).round() as u64;
+    let mass_root = |masses: &[f64]| {
+        let leaves: Vec<(String, u64)> = member_ids
+            .iter()
+            .cloned()
+            .zip(masses.iter().map(|m| fixed(*m)))
+            .collect();
+        mass_commitment(&leaves)
+    };
 
-    let make_meta = |src: u32| ciris_verify_core::holonomic::AggregationMetaV1 {
-        version: 1,
+    // `multiplicity` = size of the largest content-similarity cluster. Distinct
+    // contents ⇒ 1. The R9 case below fabricates 900 near-duplicates ⇒ 900.
+    let make_meta = |n_eff: u32, multiplicity: u32, masses: &[f64], src: u32| AggregationMetaV1 {
+        version: 3, // HARD FORK — v1/v2 are not produced and fail closed.
         content_id: "nf-dominated-root".to_owned(),
         corpus_kind: aggregate_corpus_kind("trace"),
         tier: 1,
         aggregation_algorithm_id: "raptorq-pyramid-v1".to_owned(),
         source_count: src,
-        n_eff: src, // neutral placeholder (== source_count, #167)
+        n_eff,
+        max_source_multiplicity: multiplicity,
         member_commitment: member_commitment(&member_ids),
         noise_floor_descriptor: "mean+stddev".to_owned(),
+        mass_commitment: mass_root(masses),
     };
-    let meta_balanced = make_meta(member_ids.len() as u32);
-    let meta_dominated = make_meta(member_ids.len() as u32);
 
-    // The blindness, stated as assertions: the two folds are byte-identical on
-    // every field a verifier can see, despite N_eff 10 vs ~1.2.
-    assert_eq!(
-        meta_balanced.source_count, meta_dominated.source_count,
-        "source_count cannot tell a dominated fold from a balanced one"
-    );
-    assert_eq!(
-        meta_balanced.member_commitment, meta_dominated.member_commitment,
-        "member_commitment (ID Merkle root) is mass-blind"
-    );
-    assert_eq!(
+    let meta_balanced = make_meta(n_eff_balanced, 1, &balanced_masses, N as u32);
+    let meta_dominated = make_meta(n_eff_dominated, 1, &dominated_masses, N as u32);
+
+    // The OLD test asserted these were byte-identical (dominance invisible). At v3
+    // they MUST differ — the mass distribution is now inside the SIGNED surface.
+    assert_ne!(
         meta_balanced.signing_preimage(),
         meta_dominated.signing_preimage(),
-        "the signed preimage is identical — dominance is not in the signed surface"
+        "at v3 the signed preimage carries n_eff + mass_commitment, so a dominated \
+         fold can no longer forge the balanced fold's signature surface"
+    );
+    assert_ne!(
+        meta_balanced.mass_commitment, meta_dominated.mass_commitment,
+        "the mass Merkle root makes a lying n_eff mechanically provable from held members"
     );
 
-    // And the shipped verifier HYBRID-VERIFIES the dominated fold: nothing rejects
-    // it, so a 900/1000 attack passes today.
-    let preimage = meta_dominated.signing_preimage();
+    // ── Gate 1: DOMINANCE ────────────────────────────────────────────────────
+    // Consume the CEG-PINNED floors from the ENFORCING path — persist's
+    // `verify_for_admission` gates admission with exactly these. A local `0.5`
+    // literal here would only pin our own copy of the number and would silently
+    // diverge if the substrate retuned the floor; the point of the test is to pin
+    // what the admission gate actually enforces.
+    use ciris_persist::fountain::aggregation::{DEFAULT_MULTIPLICITY_N_MIN, MIN_DOMINANCE_RATIO};
+    const MIN_RATIO: f64 = MIN_DOMINANCE_RATIO;
+    assert!(
+        passes_dominance_gate(&meta_balanced, MIN_RATIO),
+        "a balanced fold must be ADMITTED"
+    );
+    assert!(
+        !passes_dominance_gate(&meta_dominated, MIN_RATIO),
+        "the 900/1000 dominated fold must be REJECTED — this is the assertion the \
+         old characterization test was waiting to invert"
+    );
+
+    // ── Gate 2: MULTIPLICITY — the R9 residual n_eff CANNOT see ──────────────
+    // 1000 members, equal mass, but 900 of them are NEAR-DUPLICATE contents filed
+    // under distinct ids. n_eff is mass-based, so it reports a perfectly honest
+    // 1000 and the dominance gate happily admits. Only the content-similarity
+    // multiplicity exposes that the composite is really ~1 subject.
+    const R9_N: u32 = 1000;
+    const R9_DUPES: u32 = 900;
+    let r9_masses = vec![1.0_f64; R9_N as usize];
+    let r9_n_eff = effective_source_count(&r9_masses);
+    assert_eq!(
+        r9_n_eff, R9_N,
+        "R9: equal-mass near-duplicates are MASS-honest — n_eff == N exactly"
+    );
+    let r9 = AggregationMetaV1 {
+        version: 3,
+        source_count: R9_N,
+        n_eff: r9_n_eff,
+        max_source_multiplicity: R9_DUPES,
+        ..make_meta(r9_n_eff, R9_DUPES, &balanced_masses, R9_N)
+    };
+    const N_MIN: u32 = DEFAULT_MULTIPLICITY_N_MIN; // the pinned floor, not a local guess
+    assert!(
+        passes_dominance_gate(&r9, MIN_RATIO),
+        "the dominance gate is BLIND to R9 (n_eff == N) — this is exactly why the \
+         multiplicity surface had to exist; if this ever fails, the premise moved"
+    );
+    assert!(
+        !passes_multiplicity_gate(&r9, N_MIN),
+        "R9 MUST be rejected: 900 near-duplicates behind 1000 distinct ids means the \
+         composite blur IS the data subject (max_source_multiplicity * n_min > source_count)"
+    );
+    let r9_clean = AggregationMetaV1 {
+        max_source_multiplicity: 1,
+        ..r9.clone()
+    };
+    assert!(
+        passes_multiplicity_gate(&r9_clean, N_MIN),
+        "the same fold over genuinely distinct contents must be ADMITTED"
+    );
+
+    // ── The hard fork: v1/v2 fail CLOSED, no legacy tolerance ────────────────
+    for stale in [1u32, 2u32] {
+        let old = AggregationMetaV1 {
+            version: stale,
+            ..meta_balanced.clone()
+        };
+        assert!(
+            !passes_multiplicity_gate(&old, N_MIN),
+            "v{stale} lacks the multiplicity surface and MUST fail closed — the mesh is \
+             still seeding, so there is no legacy producer to grandfather"
+        );
+    }
+    assert!(
+        !passes_dominance_gate(
+            &AggregationMetaV1 {
+                version: 1,
+                ..meta_balanced.clone()
+            },
+            MIN_RATIO
+        ),
+        "v1 has no signed n_eff and MUST fail the dominance gate closed"
+    );
+
+    // ── And the signed v3 meta still HYBRID-VERIFIES end to end ──────────────
+    let (ed_sk, _ed_pk_b64, mldsa) = producer_keys();
+    let ed_pk = ed_sk.verifying_key().to_bytes();
+    let pqc_pk = mldsa.public_key().await.unwrap();
+    let preimage = meta_balanced.signing_preimage();
     let ed_sig = ed_sk.sign(&preimage).to_bytes();
     let mut bound = preimage.clone();
     bound.extend_from_slice(&ed_sig);
     let pqc_sig = mldsa.sign(&bound).await.unwrap();
-    let verdict = ciris_verify_core::holonomic::verify_aggregation_meta(
-        &meta_dominated,
-        &ed_sig,
-        &pqc_sig,
-        &ed_pk,
-        &pqc_pk,
-    );
     assert_eq!(
-        verdict,
-        ciris_verify_core::holonomic::AggregationMetaVerification::HybridVerified,
-        "the dominated fold verifies — the invariant that would reject it does not exist yet"
-    );
-
-    // WAITING ACCEPTANCE (post-CIRISVerify#167): when a dominance descriptor
-    // lands, this becomes
-    //   assert!(meta.n_eff() >= DOMINANCE_FLOOR)  // rejects N_eff ≈ 1.2
-    // and the two metas above STOP being equal.
-    eprintln!(
-        "[noise-floor] PENDING CIRISVerify#167: balanced N_eff={n_eff_balanced:.3} vs dominated \
-         N_eff={n_eff_dominated:.3}, yet source_count={} and member_commitment are identical and \
-         the dominated fold HYBRID-VERIFIES. Dominance is invisible to the shipped invariants.",
-        meta_dominated.source_count
+        verify_aggregation_meta(&meta_balanced, &ed_sig, &pqc_sig, &ed_pk, &pqc_pk),
+        AggregationMetaVerification::HybridVerified,
+        "a well-formed v3 balanced fold verifies; the GATES (not the signature) are \
+         what reject dominance and multiplicity"
     );
 }
 
