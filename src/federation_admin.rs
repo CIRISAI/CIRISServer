@@ -137,6 +137,15 @@ struct PeeringRequest {
     /// deduped) before it lands in the grant payload.
     #[serde(default)]
     attestation_prefixes: Vec<String>,
+    /// **CC 2.6.4 wire-version negotiation** (CIRISServer#159). The peer's declared
+    /// CEG wire version + pinned `WIRE_VOCABULARY.md` SHA-256. Optional-with-
+    /// documented-default (a peer that predates negotiation omits them and is judged
+    /// against [`crate::conformance::PRE_NEGOTIATION_WIRE_VERSION`]); a peer that
+    /// DOES announce an incompatible wire is REFUSED (`409`), never silently
+    /// tolerated. Flattened so the fields ride the request body top-level
+    /// (`ceg_wire_version` / `wire_vocabulary_sha256`).
+    #[serde(default, flatten)]
+    wire: crate::conformance::PeerWireAnnouncement,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +165,13 @@ struct PeeringResponse {
     /// Human-readable note that the consent was recorded as CEG and the node's
     /// reconcile loop (NOT this API call) converges the live runtime to it.
     reconciler_note: String,
+    /// **CC 2.6.4** — the wire version this node NEGOTIATED with the peer (the
+    /// peer's announced version, positively established as interoperable with ours).
+    negotiated_ceg_wire_version: String,
+    /// **CC 2.2** — THIS node's declared conformance level, echoed so negotiation is
+    /// SYMMETRIC: the requester can refuse US if our declaration does not claim the
+    /// profiles it needs from a replication peer.
+    conformance: crate::conformance::DeclaredConformance,
 }
 
 async fn peering(
@@ -192,9 +208,51 @@ async fn peering(
         }
         Err(resp) => return resp,
     }
+    // ── (CC 2.2 — conformance levels, CIRISServer#159) ────────────────────────
+    // Peering is the full federation-wire act: this node EMITS a hybrid-signed
+    // consent grant (CCP), ADMITS the peer's key record through the fail-secure
+    // admission gate (CCC), and thereafter REPLICATES rows under the CC 5.3.1 /
+    // 5.3.2 storage+transport guarantees (CCS). A node performs on the wire ONLY
+    // the roles it CLAIMS: if its declared level
+    // (`config:node.conformance_profiles`) does not claim all three, peering is
+    // REFUSED (403) — before any key is admitted and before any grant is authored.
+    // Fail-closed: an unreadable / invalid declaration claims NOTHING.
+    if let Some(resp) = crate::conformance::require_op(
+        &st.engine,
+        &st.node_key_id,
+        crate::auth::gate::CapabilityVerb::Peer,
+    )
+    .await
+    {
+        return resp;
+    }
+
     let req: PeeringRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+
+    // ── (CC 2.6.4 — versioning policy, CIRISServer#159) ───────────────────────
+    // "A peer knows from the version alone whether it can still interoperate."
+    // Negotiate the peer's announced CEG wire version (SemVer 2.0.0 mapping: a
+    // differing MAJOR — or, pre-1.0-publication, a differing MINOR / pre-release —
+    // is a WIRE BREAK) and its pinned WIRE_VOCABULARY.md hash ("a hash mismatch at
+    // cohabitation is a substrate-tier build failure, not a warning"). An
+    // incompatible / malformed wire is REFUSED (409) BEFORE the peer's key is
+    // admitted: admitting a key from a peer whose envelopes we cannot correctly
+    // canonicalize is exactly the silent divergence CC 2.6.4 forecloses.
+    let negotiated = match crate::conformance::negotiate(&req.wire) {
+        Ok(v) => v,
+        Err(refusal) => {
+            tracing::warn!(
+                peer_key_id = %req.peer_key_id,
+                error = refusal.error,
+                peer_wire = %refusal.peer_ceg_wire_version,
+                local_wire = %refusal.local_ceg_wire_version,
+                "CC 2.6.4: peering REFUSED — incompatible peer wire"
+            );
+            return crate::conformance::wire_refusal_response(refusal);
+        }
     };
 
     // Consistency: the carried record's key_id MUST match the declared peer_key_id
@@ -297,9 +355,32 @@ async fn peering(
                               peer becomes an active Initiator immediately, no restart (edge \
                               v5.1.0, CIRISEdge#173 resolved)"
                 .to_owned(),
+            negotiated_ceg_wire_version: negotiated.to_string(),
+            conformance: crate::conformance::declared(&st.engine, &st.node_key_id).await,
         }),
     )
         .into_response()
+}
+
+// ─── GET /v1/federation/conformance (unauthenticated; the peer-facing surface) ─
+
+/// `GET /v1/federation/conformance` — THIS node's **declared CC 2.2 conformance
+/// level** + its **CC 2.6.4 wire identity** (CIRISServer#159).
+///
+/// CC 2.2 exists so that "conforming" means the same thing to every peer — which
+/// requires the claim to be READABLE by a peer BEFORE it commits to a federation
+/// relationship. This is that surface: a peer fetches it alongside
+/// `/v1/federation/self-key-record` and can refuse us (wrong wire version, wrong
+/// wire vocabulary, or a declaration that does not claim the profile it needs from
+/// a replication partner) exactly as we refuse it in `peering`. Negotiation is
+/// SYMMETRIC or it is theatre.
+///
+/// Unauthenticated by design, like the self-key-record beside it: a conformance
+/// declaration is public governance data (it carries no secret — only what this node
+/// claims to be), and a peer must be able to read it to bootstrap.
+async fn conformance(State(st): State<FederationAdminState>) -> Response {
+    let declared = crate::conformance::declared(&st.engine, &st.node_key_id).await;
+    (StatusCode::OK, Json(declared)).into_response()
 }
 
 /// The owner-directed federation-operations router — merge onto the control API
@@ -414,6 +495,11 @@ pub fn router(
             axum::routing::get(self_key_record),
         )
         .route("/v1/federation/peering", axum::routing::post(peering))
+        // CC 2.2 / CC 2.6.4 (CIRISServer#159) — the peer-facing declaration.
+        .route(
+            "/v1/federation/conformance",
+            axum::routing::get(conformance),
+        )
         .route(
             "/v1/federation/adopt-scrubbed",
             axum::routing::post(adopt_scrubbed),

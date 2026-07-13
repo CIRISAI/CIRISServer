@@ -99,6 +99,14 @@ pub mod config_api;
 /// touches the runtime — it writes CEG and nudges this loop. Public so the
 /// integration test (`tests/config_reconcile.rs`) can drive `resolve` directly.
 pub mod config_reconcile;
+/// **CC 2.2 conformance levels + CC 2.6.4 versioning policy** (CIRISServer#159) —
+/// the node's DECLARED conformance level (CCP / CCC / CCS) and the enforcement that
+/// HONORS it (a federation-wire op whose profiles the declaration does not claim is
+/// REFUSED), plus the CC 2.6.4 SemVer wire-version + wire-vocabulary-hash
+/// negotiation that REFUSES an incompatible peer rather than silently proceeding.
+/// Both fail closed. Public so the integration test (`tests/conformance_gate.rs`)
+/// can drive the gate + the negotiation directly.
+pub mod conformance;
 /// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
