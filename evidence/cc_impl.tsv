@@ -5,7 +5,7 @@
 # Columns: decimal_id, claim_id, repo, path#symbol, crate@version
 decimal_id	claim_id	repo	path#symbol	crate@version
 2.1.1	CLM-forward-compatibility	CIRISServer	src/auth/device_grant.rs#with_constraints	ciris-server@main
-2.2	CLM-conformance	—	—	open
+2.2	CLM-conformance	CIRISServer	src/conformance.rs#require_op	ciris-server@main
 2.3.1	CLM-subject_kind-subject-2	CIRISVerify	src/ciris-verify-core/src/fedcode.rs#FedKind	ciris-verify-core@v8.9.0
 2.3.2.1	CLM-registry-canonical	CIRISVerify	src/ciris-verify-core/src/federation_self_record.rs#produce_self_key_record	ciris-verify-core@v8.9.0
 2.4.1.1	CLM-withdraws	CIRISPersist	src/federation/admission.rs#resolve_withdraws_admission_rule	ciris-persist@v13.3.1
@@ -16,7 +16,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 2.6.1.4	CLM-worked	—	—	open
 2.6.2	CLM-canonicalization	CIRISVerify	src/ciris-verify-core/src/skill_import.rs#check_canonical_rfc3339	ciris-verify-core@v8.9.0
 2.6.3	CLM-canonicalization-hexadecimal	CIRISVerify	src/ciris-verify-core/src/skill_import.rs#check_canonical_hex64	ciris-verify-core@v8.9.0
-2.6.4	CLM-policy-versioning	—	—	open
+2.6.4	CLM-policy-versioning	CIRISServer	src/conformance.rs#negotiate	ciris-server@main
 2.6.5	CLM-references	—	—	open
 2.6.6	CLM-canonicalization-cell	CIRISPersist	src/federation/location.rs#parse_canonical_cell	ciris-persist@v13.3.1
 2.6.6.1	CLM-location	CIRISPersist	src/federation/location.rs#validate_location_cell	ciris-persist@v13.3.1

@@ -23,11 +23,34 @@ use axum::routing::get;
 use axum::{Json, Router};
 use ciris_persist::prelude::Engine;
 
+/// The node's **CC 2.2 / CC 2.6.4 wire identity** as health reports it
+/// (CIRISServer#159): the profiles this BUILD implements, the CEG wire version it
+/// speaks, and the `WIRE_VOCABULARY.md` SHA-256 it pinned at build.
+///
+/// This is the BUILD-level (capability) view — the STATE-level view (what the node
+/// actually *declares*, which an operator may narrow via
+/// `config:node.conformance_profiles`) is the authenticated-substrate read served at
+/// `GET /v1/federation/conformance`, because it requires the Engine. Health is
+/// stateless and public, so it reports the honest ceiling + the wire identity a peer
+/// or LB needs to know it is even talking to a compatible node.
+fn build_conformance() -> serde_json::Value {
+    serde_json::json!({
+        "build_profiles": crate::conformance::BUILD_PROFILES
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>(),
+        "ceg_wire_version": crate::conformance::CEG_WIRE_VERSION,
+        "wire_vocabulary_sha256": crate::conformance::wire_vocabulary_sha256(),
+        "declared_at": "/v1/federation/conformance",
+    })
+}
+
 /// Plain liveness — `{"status":"ok","version":"…"}`.
 async fn plain_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "conformance": build_conformance(),
     }))
 }
 
@@ -42,6 +65,8 @@ async fn server_health() -> Json<serde_json::Value> {
             "role": "fabric-node",
             "version": env!("CARGO_PKG_VERSION"),
             "services": {},
+            // CC 2.2 / CC 2.6.4 (CIRISServer#159) — see `build_conformance`.
+            "conformance": build_conformance(),
         }
     }))
 }
