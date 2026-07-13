@@ -35,7 +35,6 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 3.3.6.2	CLM-transport-authenticated	CIRISVerify	src/ciris-verify-core/src/transport_binding.rs#verify_transport_binding	ciris-verify-core@v10.1.1
 3.3.6.2.1	CLM-rns	CIRISVerify	src/ciris-verify-core/src/transport_binding.rs#compute_destination_hash	ciris-verify-core@v10.1.1
 3.3.7	CLM-consent-directed	CIRISServer	src/peer.rs#emit_replication_consent	ciris-server@main
-<<<<<<< HEAD
 3.4.1	CLM-accord-reservation	CIRISPersist	src/federation/admission.rs#check_reserved_prefix_admission	ciris-persist@v16.1.0
 3.4.2	CLM-community-location	CIRISPersist	src/federation/admission.rs#check_reserved_prefix_admission	ciris-persist@v16.1.0
 3.4.3	CLM-system	CIRISPersist	src/federation/admission.rs#default_reserved_prefix_rules	ciris-persist@v16.1.0
@@ -55,27 +54,6 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.2.1.2	CLM-notify	CIRISServer	client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/ui/screens/AccordScreen.kt#invocationBadge	ciris-server@main
 4.2.1.3	CLM-lifecycle	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#verify_invocation	ciris-verify-core@v10.1.1
 4.2.2	CLM-hardware-class	CIRISVerify	src/ciris-keyring/src/hw_token.rs#hardware_class_table	ciris-keyring@v10.1.1
-=======
-3.4.1	CLM-accord-reservation	CIRISPersist	src/federation/admission.rs#check_reserved_prefix_admission	ciris-persist@v13.3.1
-3.4.2	CLM-community-location	CIRISPersist	src/federation/hard_case.rs#kind::COMMUNITY_MEMBERSHIP_CHANGE	ciris-persist@v13.3.1
-3.4.3	CLM-system	CIRISPersist	src/federation/admission.rs#default_reserved_prefix_rules	ciris-persist@v13.3.1
-3.4.4	CLM-family-self	CIRISPersist	src/federation/hard_case.rs#kind::FAMILY_MEMBERSHIP_CHANGE	ciris-persist@v13.3.1
-3.4.5	CLM-capacity-score	CIRISPersist	src/federation/admission.rs#check_reserved_prefix_admission	ciris-persist@v13.3.1
-3.4.6	CLM-reservation-delivery	CIRISPersist	src/federation/stream_receipt.rs#DeliveryReceipt	ciris-persist@v13.3.1
-3.4.7	CLM-enforcement	CIRISPersist	src/federation/admission.rs#DimensionAdmissionPolicy::check	ciris-persist@v13.3.1
-3.4.7.1	CLM-identity-set	CIRISPersist	src/federation/types.rs#identity_type::set_contains	ciris-persist@v13.3.1
-3.4.7.2	CLM-consent-counter	CIRISEdge	src/detector/probe_pattern_observer.rs#ConsentRole::permits_detection_emission	ciris-edge@v9.1.4
-3.4.8	CLM-detector-only	CIRISEdge	src/detector/probe_pattern_observer.rs#ProbePatternObserver	ciris-edge@v9.1.4
-3.4.9	CLM-co-stewarded	—	—	open
-3.4.10	CLM-witness-emitter	CIRISPersist	src/federation/admission.rs#default_reserved_prefix_rules	ciris-persist@v13.3.1
-3.5.1	CLM-concurrent-write	CIRISPersist	src/federation/precedence.rs#precedence_winner	ciris-persist@v13.3.1
-4.1.1	CLM-anti-pattern-delegation	CIRISPersist	src/federation/admission.rs#AttestationLadderTransitionPolicy	ciris-persist@v13.3.1
-4.1.4	CLM-withdraws-arbitrage	CIRISServer	src/withdraws_arbitrage.rs#enforce	ciris-server@main
-4.2.1.1	CLM-invocation	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#Invocation::canonical_bytes	ciris-verify-core@v8.9.0
-4.2.1.2	CLM-notify	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#InvocationKind	ciris-verify-core@v8.9.0
-4.2.1.3	CLM-lifecycle	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#LIFECYCLE_DOMAIN_PREFIX	ciris-verify-core@v8.9.0
-4.2.2	CLM-hardware-class	CIRISVerify	src/ciris-keyring/src/types.rs#HardwareType	ciris-keyring@v8.9.0
->>>>>>> worktree-agent-af76496e0297adecf
 4.2.2.1	CLM-hardware-class-hardware	CIRISServer	src/hardware_attestation.rs#admit_hardware_class	ciris-server@main
 4.2.6	CLM-accord-livequorum	CIRISVerify	src/ciris-verify-core/src/accord_live_quorum.rs#verify_membership_change_by_live_quorum	ciris-verify-core@v10.1.1
 4.4	CLM-composition-policies	CIRISServer	src/compose_policy.rs#Composer::compose	ciris-server@main
