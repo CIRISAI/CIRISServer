@@ -264,6 +264,8 @@ pub mod safety;
 pub mod scorer;
 pub mod system_data;
 pub mod telemetry_logs;
+#[cfg(feature = "test-anchor")]
+mod test_bless;
 /// **CC 4.1.4** — the `withdraws`:`recants` arbitrage countermeasure
 /// (CIRISServer#159). Consumer-policy behavioral analysis: per-attester
 /// precedence-collapsed `withdraws:recants` ratio over a rolling window, with a
@@ -802,6 +804,22 @@ mod python {
     /// caller need not retain the return value for delivery to keep running.
     /// A clear Python error is raised if the engine or edge is not yet initialized,
     /// or the embedded edge carries no Reticulum transport.
+    /// Initialize the rust tracing subscriber inside a Python-embedded process
+    /// (stdout, `RUST_LOG`-filtered) — the same `init_tracing` the binary paths
+    /// use. Without this a Python host (e.g. the harness `agent_boot.py`) sees
+    /// NO rust-side logs at all. Idempotent (`try_init` inside — a second call
+    /// is a no-op).
+    #[pyfunction]
+    #[pyo3(name = "init_tracing")]
+    fn py_init_tracing() {
+        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer())
+            .try_init();
+    }
+
     #[pyfunction]
     #[pyo3(name = "start_federation_delivery", signature = (cadence_seconds=None, announce_logger=true))]
     fn py_start_federation_delivery(
@@ -892,6 +910,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
+        m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +

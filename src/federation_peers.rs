@@ -186,6 +186,125 @@ async fn get_peer(State(st): State<PeersState>, Path(key_id): Path<String>) -> R
         .into_response()
 }
 
+/// TEST-ANCHOR-ONLY (CIRISServer#258) — serve THIS node's own **directory row**
+/// as a registrable `SignedKeyRecord` (`{"record": {...}}`), i.e. the
+/// test-root-BLESSED record after `test_bless` upgraded it — unlike
+/// `/v1/federation/self-key-record`, which serves the boot-time SELF-SIGNED
+/// record. The harness agent fetches this to admit the harness canonical
+/// (whose blessed row carries `canonical,node` + the dial hint) into its own
+/// directory, standing in for the baked genesis the test override skips.
+/// Compile-fenced with the rest of the harness surface; never in prod.
+#[cfg(feature = "test-anchor")]
+async fn test_blessed_self_record(State(st): State<PeersState>) -> Response {
+    let rec = match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&st.self_key_id)
+        .await
+    {
+        Ok(Some(rec)) => rec,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "self record not in directory"),
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    };
+    (StatusCode::OK, Json(serde_json::json!({ "record": rec }))).into_response()
+}
+
+/// TEST-ANCHOR-ONLY (CIRISServer#258) — admit a peer's `SignedKeyRecord` into
+/// THIS node's federation directory, unauthenticated. Stands in for the
+/// owner-gated claim/peering flows a production mesh admits agents through, so
+/// the harness canonical can ATTRIBUTE the agent's inbound round envelopes
+/// (without a directory row the source_key_id resolves to None, the frame is
+/// dropped pre-dispatch — the #317 class — and every anti-entropy round times
+/// out awaiting the reply). The record still passes the FULL untouched
+/// admission gates (`register_federation_key`: Strict hybrid self-scrub
+/// verify, hardware-class chokepoint, role gates) — only the CALLER auth is
+/// waived, and only in a test-anchor build.
+#[cfg(feature = "test-anchor")]
+async fn test_admit_peer(
+    State(st): State<PeersState>,
+    Json(signed): Json<serde_json::Value>,
+) -> Response {
+    use ciris_verify_core::federation_self_record::{produce_scrubbed_key_record, ScrubTarget};
+
+    let rec: ciris_persist::federation::SignedKeyRecord = match serde_json::from_value(signed) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("SignedKeyRecord: {e}")),
+    };
+    let key_id = rec.record.key_id.clone();
+
+    // BLESS-then-register — the harness mirror of the prod admit-node ceremony
+    // (accord_provision.rs: an accord holder scrub-signs the node's record).
+    // A merely self-signed row admits but roots only ADVISORY
+    // (`rooting_not_rooted_at_steward`): the provenance chain must terminate at
+    // an accord holder for the announce to root, and without Rooted provenance
+    // the inbound round envelopes stay unattributed → the round times out.
+    // Scrubbing with the SW test root (terminus `test-accord-holder-0`, in the
+    // swapped anchor) makes the peer root exactly as an A1-admitted node does.
+    let blessed = {
+        let Some(ml) = rec.record.pubkey_ml_dsa_65_base64.clone() else {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "peer record has no ML-DSA-65 pubkey — cannot scrub-sign",
+            );
+        };
+        let test_root = match crate::test_bless::mint_test_root() {
+            Ok(r) => r,
+            Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("test root: {e}")),
+        };
+        let target = ScrubTarget {
+            key_id: key_id.clone(),
+            pubkey_ed25519_base64: rec.record.pubkey_ed25519_base64.clone(),
+            pubkey_ml_dsa_65_base64: ml,
+            identity_type: rec.record.identity_type.clone(),
+            roles: Vec::new(),
+        };
+        let valid_from = chrono::Utc::now().to_rfc3339();
+        let scrubbed = match produce_scrubbed_key_record(&test_root, target, &valid_from, &[]).await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &format!("test-root scrub-sign of {key_id}: {e}"),
+                )
+            }
+        };
+        match serde_json::to_value(&scrubbed).ok().and_then(|v| {
+            serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>(v).ok()
+        }) {
+            Some(p) => p,
+            None => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "scrubbed record bridge failed",
+                )
+            }
+        }
+    };
+    let blessed_json = serde_json::to_value(&blessed).unwrap_or_default();
+
+    match crate::hardware_attestation::register_attested_federation_key(&st.engine, blessed).await {
+        Ok(()) => {
+            tracing::warn!(
+                peer = %key_id,
+                "TEST-ANCHOR: peer BLESSED (SW test-root scrub) + admitted via unauthenticated \
+                 test-admit-peer (harness only) — announce will root as Rooted provenance"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "admitted": key_id, "blessed": true, "record": blessed_json })),
+            )
+                .into_response()
+        }
+        Err(ciris_persist::federation::Error::Conflict(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "admitted": key_id, "blessed": true, "conflict": true })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &format!("admission: {e}")),
+    }
+}
+
 /// The federation-peers read router. `self_key_id` is the node's own derived
 /// federation `key_id` (excluded from the listing).
 pub fn router(engine: Arc<Engine>, self_key_id: String) -> Router {
@@ -193,11 +312,21 @@ pub fn router(engine: Arc<Engine>, self_key_id: String) -> Router {
         engine,
         self_key_id,
     };
-    Router::new()
+    let router = Router::new()
         .route("/v1/federation/peers", axum::routing::get(list_peers))
         .route(
             "/v1/federation/peers/{key_id}",
             axum::routing::get(get_peer),
+        );
+    #[cfg(feature = "test-anchor")]
+    let router = router
+        .route(
+            "/v1/federation/test-blessed-self-record",
+            axum::routing::get(test_blessed_self_record),
         )
-        .with_state(state)
+        .route(
+            "/v1/federation/test-admit-peer",
+            axum::routing::post(test_admit_peer),
+        );
+    router.with_state(state)
 }

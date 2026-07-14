@@ -348,6 +348,7 @@ pub async fn run_federation_delivery(
     // 5. Announce logger — RNS rooting visibility over the edge's event bus.
     if announce_logger {
         crate::compose::spawn_announce_logger(edge.events());
+        crate::compose::spawn_event_bus_logger(edge.events());
         tracing::info!("federation delivery: announce logger subscribed to the edge event bus");
     }
 
