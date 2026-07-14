@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""mesh-repro harness — the AGENT role.
+
+Reproduces, from the ONE published `ciris-server` wheel, the exact federation
+boot CIRISAgent's embedded edge runs (ciris_engine/logic/runtime/edge_runtime.py):
+
+    engine = Engine("sqlite:///<db>", key_id)          # persist
+    edge   = init_edge_runtime(engine, identity.rid,   # embedded edge + transport
+                 listen_addr, bootstrap_peers=[canonical:4242], enable_transport=True)
+    ciris_server.start_federation_delivery()           # drive rounds to the canonical
+
+`start_federation_delivery` is the one call a bare agent makes after its edge is
+up: it seeds the baked canonical key_ids as replication targets, authors this
+node's `consent:replication` grant at the canonical peer, and starts the
+ReplicationRuntime + reconcile loop. That is the machinery under test — the
+IdentityOccurrence round whose resource transfer stalls over the (remote,
+lossy) canonical link. Here it runs over a zero-loss Docker bridge, so a stall
+is a real coordinator/resource bug and a completion means the remote failure is
+packet-loss resilience.
+
+All knobs are env vars (same names CIRISAgent uses):
+  CIRIS_HOME                 home dir            (default /var/lib/ciris)
+  CIRIS_KEY_ID               keystore alias      (default ciris-agent-harness-1)
+  CIRIS_EDGE_LISTEN_ADDR     RNS listen          (default 0.0.0.0:4242)
+  CIRIS_EDGE_BOOTSTRAP_PEERS host:port CSV to dial (e.g. canonical:4242)
+  CIRIS_AGENT_MODE           client|proxy|server (default server)
+  CIRIS_FEDERATION_DELIVERY  true/false          (default true)
+"""
+
+import os
+import pathlib
+import socket
+import sys
+import time
+
+
+def log(msg: str) -> None:
+    print(f"[HARNESS-AGENT] {msg}", flush=True)
+
+
+def main() -> int:
+    home = pathlib.Path(os.environ.get("CIRIS_HOME", "/var/lib/ciris"))
+    key_id = os.environ.get("CIRIS_KEY_ID", "ciris-agent-harness-1")
+    listen = os.environ.get("CIRIS_EDGE_LISTEN_ADDR", "0.0.0.0:4242")
+    raw_peers = [p.strip() for p in os.environ.get("CIRIS_EDGE_BOOTSTRAP_PEERS", "").split(",") if p.strip()]
+    # init_edge_runtime parses each entry as a SocketAddr (IP:port), so resolve
+    # the Docker service name (`canonical`) to its bridge IP first.
+    peers = []
+    for hp in raw_peers:
+        host, sep, port = hp.rpartition(":")
+        if not sep:
+            peers.append(hp)
+            continue
+        try:
+            peers.append(f"{socket.gethostbyname(host)}:{port}")
+        except socket.gaierror:
+            peers.append(hp)
+    agent_mode = os.environ.get("CIRIS_AGENT_MODE", "server")
+    delivery_on = os.environ.get("CIRIS_FEDERATION_DELIVERY", "true").strip().lower() not in ("0", "false", "no", "off")
+
+    (home / "data").mkdir(parents=True, exist_ok=True)
+    (home / "logs").mkdir(parents=True, exist_ok=True)
+    db = home / "data" / "ciris.db"
+    identity_path = str(home / "edge_identity.rid")
+
+    # One wheel, one PyO3 type registry: import Engine and init_edge_runtime from
+    # the SAME ciris_server module so the Engine handed to edge is the identical
+    # registered Rust type (avoids the cross-crate "'Engine' is not an instance
+    # of 'Engine'" cohabitation refusal).
+    import ciris_server
+    from ciris_server import Engine
+    from ciris_server.edge import init_edge_runtime
+
+    # Surface the rust-side tracing (RUST_LOG-filtered) — without this a Python
+    # host process shows NO rust logs, hiding the delivery/rooting diagnostics.
+    if hasattr(ciris_server, "init_tracing"):
+        ciris_server.init_tracing()
+
+    log(f"ciris_server {getattr(ciris_server, '__version__', '?')} | key_id={key_id} peers={peers} mode={agent_mode} delivery={delivery_on}")
+
+    # The embedded-edge init needs a SOFTWARE Ed25519 (+ ML-DSA) signer, not the
+    # default hardware/HSM keyring (which yields a 65-byte EC pubkey edge rejects).
+    # Mirror CIRISAgent's bootstrap: two 32-byte seed files, minted on first boot.
+    seed = home / "data" / "local_signing.seed"
+    pqc_seed = home / "data" / "local_pqc_signing.seed"
+    for s in (seed, pqc_seed):
+        if not s.exists():
+            s.write_bytes(os.urandom(32))
+            try:
+                s.chmod(0o600)
+            except OSError:
+                pass
+    engine = Engine(
+        f"sqlite:///{db}",
+        key_id,
+        local_key_id=key_id,
+        local_key_path=str(seed),
+        local_pqc_key_id=key_id,
+        local_pqc_key_path=str(pqc_seed),
+    )
+    log("persist engine opened (software Ed25519 + ML-DSA seeds)")
+
+    # Register THIS node's own key in its own federation directory (what the
+    # real CIRISAgent's edge_runtime.py does at boot) — the consent grant
+    # authored at delivery start attests AS this key, and emit_attestation_self
+    # requires the attesting key to be an admitted federation_keys row.
+    self_key = None
+    try:
+        self_key = engine.register_self_federation_key("agent", key_id)
+        log(f"registered own federation key: {self_key}")
+    except Exception as e:  # noqa: BLE001 — Conflict (already present) is benign
+        log(f"self-key registration: {type(e).__name__}: {e} (benign if already present)")
+
+    edge = init_edge_runtime(
+        engine,
+        identity_path,
+        listen_addr=listen,
+        bootstrap_peers=peers,
+        agent_mode=agent_mode,
+        enable_transport=delivery_on,
+    )
+    try:
+        signer = edge.signer_key_id()
+    except Exception:  # noqa: BLE001 — best-effort label for the log only
+        signer = "?"
+    log(f"embedded edge up: signer_key_id={signer} listen={listen}")
+
+    # TEST-ANCHOR harness: the test override skips the baked canonical genesis
+    # (CIRISPersist#449), so the agent admits the HARNESS canonical explicitly —
+    # fetch its test-root-BLESSED directory row (`canonical,node` + dial hint,
+    # scrubbed by the seeded SW holder) and register it. Admission runs the full
+    # untouched gates: Strict hybrid scrub-verify against the (PQC-complete,
+    # scrub-verifying) seeded holder + the m-of-n canonical add gate (1-of-1
+    # over the test roster). After this, canonical_bootstrap_hints() on THIS
+    # engine yields the harness canonical → delivery seeds it as a target.
+    if os.environ.get("CIRIS_TESTING_MODE", "").strip().lower() == "true" and raw_peers:
+        import json
+        import urllib.request
+        canon_host = raw_peers[0].rpartition(":")[0] or raw_peers[0]
+        url = f"http://{canon_host}:4243/v1/federation/test-blessed-self-record"
+        blessed = None
+        for attempt in range(12):
+            try:
+                blessed = urllib.request.urlopen(url, timeout=5).read().decode()
+                break
+            except Exception as e:  # noqa: BLE001 — canonical may still be booting
+                log(f"blessed-record fetch attempt {attempt + 1}: {type(e).__name__}: {e}")
+                time.sleep(5)
+        if blessed is None:
+            log("WARN could not fetch the canonical's blessed record — delivery will seed 0 targets")
+        else:
+            rec = json.loads(blessed)
+            try:
+                engine.register_federation_key(json.dumps(rec))
+                log(f"admitted harness canonical {rec['record']['key_id']} "
+                    f"(identity_type={rec['record']['identity_type']})")
+            except Exception as e:  # noqa: BLE001 — surface admission failures loudly
+                log(f"WARN admit harness canonical failed: {type(e).__name__}: {e}")
+
+        # And the REVERSE admission: hand OUR self record to the canonical so it
+        # can ATTRIBUTE our inbound round envelopes (without a directory row the
+        # source_key_id resolves to None → frame dropped pre-dispatch (#317) →
+        # every round times out awaiting the reply). Stands in for the
+        # owner-gated claim/peering flows of a production mesh.
+        try:
+            my_row = engine.lookup_public_key(self_key) if self_key else None
+            if my_row:
+                body = json.dumps({"record": json.loads(my_row)}).encode()
+                req = urllib.request.Request(
+                    f"http://{canon_host}:4243/v1/federation/test-admit-peer",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                resp = urllib.request.urlopen(req, timeout=10).read().decode()
+                log(f"registered self at canonical: {resp}")
+            else:
+                log("WARN own directory row not found — canonical cannot attribute our frames")
+        except Exception as e:  # noqa: BLE001 — surface loudly
+            log(f"WARN register self at canonical failed: {type(e).__name__}: {e}")
+
+    if delivery_on:
+        # cadence_seconds=None → default round cadence (~30s). Returns the number
+        # of admitted canonical targets seeded; 0 means the agent has not yet
+        # rooted/admitted the canonical (it will after the dial + announce heal).
+        seeded = ciris_server.start_federation_delivery(cadence_seconds=None, announce_logger=True)
+        log(f"federation delivery started: {seeded} canonical target(s) seeded")
+        if seeded == 0:
+            log("NOTE seeded=0 — the agent has not admitted a canonical peer yet; "
+                "if it stays 0, the canonical identity the agent targets (baked genesis) "
+                "differs from this harness canonical — see README §Fidelity.")
+
+    log("running — federation delivery drives rounds on its own cadence; watch both logs")
+    while True:
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # noqa: BLE001 — surface any boot failure loudly to docker logs
+        log(f"FATAL {type(e).__name__}: {e}")
+        raise

@@ -1,0 +1,3 @@
+# Build artifacts: the locally-built test-anchor wheel (pack_wheel.py output).
+# NEVER committed — rebuilt per run; the test-anchor wheel must not be distributed.
+wheels/

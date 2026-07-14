@@ -157,6 +157,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
+    // TEST-ANCHOR-ONLY (CIRISServer#258): in a `test-anchor` build with
+    // CIRIS_TESTING_MODE=true, self-bless with the SW test trust root so the
+    // local harness canonical roots with no operator YubiKeys. No-op in prod.
+    #[cfg(feature = "test-anchor")]
+    crate::test_bless::maybe_test_bless_self(&engine, &cfg).await?;
 
     // ── The node-scoped `substrate_persist` producer identity (CIRISServer#181) ─
     // A SEPARATE hybrid key (identity_type = substrate_persist) the node uses to
@@ -2229,6 +2234,56 @@ pub(crate) fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
     });
 }
 
+/// Log EVERY edge event-bus event (`subscribe_all`) at INFO/WARN with its kind,
+/// peer, destination and message — the transport's full observable lifecycle
+/// (AnnounceSent/Received, Link Established/Dropped, Path Discovered/Lost,
+/// SignatureFailure, PolicyBlock, …) in one uniform `edge-event:` stream. The
+/// announce logger above stays: it narrates the announce→ROOTING outcome; this
+/// tap makes every other transition (esp. whether an announce was even SENT,
+/// and link/path churn) impossible to miss. Spawned beside the announce logger
+/// wherever the event bus is subscribed.
+pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
+    use ciris_edge::events::{EventKind, EventSeverity};
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = bus.subscribe_all();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    // The announce logger already narrates AnnounceReceived.
+                    if matches!(ev.kind, EventKind::AnnounceReceived) {
+                        continue;
+                    }
+                    let dest = ev.destination_hash.as_deref().map(hex::encode);
+                    let link = ev.link_id.as_deref().map(hex::encode);
+                    match ev.severity {
+                        EventSeverity::Warning | EventSeverity::Error => tracing::warn!(
+                            kind = ?ev.kind,
+                            peer = ?ev.peer_key_id,
+                            dest = ?dest,
+                            link = ?link,
+                            "edge-event: {}",
+                            ev.message
+                        ),
+                        EventSeverity::Info => tracing::info!(
+                            kind = ?ev.kind,
+                            peer = ?ev.peer_key_id,
+                            dest = ?dest,
+                            link = ?link,
+                            "edge-event: {}",
+                            ev.message
+                        ),
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("event-bus logger lagged; dropped {n} events");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -2345,6 +2400,7 @@ async fn build_edge(
     // BEFORE the transport starts so no early announce is missed.
     let event_bus = Arc::new(ciris_edge::events::EventBus::default());
     spawn_announce_logger(Arc::clone(&event_bus));
+    spawn_event_bus_logger(Arc::clone(&event_bus));
 
     let ret_auth = ReticulumAuth {
         signer: Some(Arc::clone(&signer)),
