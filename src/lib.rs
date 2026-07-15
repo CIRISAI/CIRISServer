@@ -540,7 +540,22 @@ pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
         .with(filter)
         .with(fmt::layer()) // stdout/console
         .with(file_layer) // file sink (Option<Layer> is a no-op when None)
-        .init();
+        .try_init()
+        // CIRISServer#264 — MUST NOT panic when a subscriber is already set. In a
+        // Python-embedded process the agent may have called
+        // `ciris_server.init_tracing()` first (CIRISAgent#919), and an in-process
+        // node restart re-enters this fn; `.init()` panicked, the panic crossed
+        // pyo3 as PanicException (a BaseException the fold's `except Exception`
+        // never catches), and `serve_with_python_adapter` died SILENTLY before
+        // its first log line — the deterministic configured-home fold hang. The
+        // cost of falling through: log output keeps flowing to the FIRST
+        // subscriber (stdout) instead of gaining the <home>/logs file sink.
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "ciris-server: tracing subscriber already installed — keeping it \
+                 (file sink to <home>/logs not attached this call)"
+            );
+        });
 }
 
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
@@ -782,15 +797,47 @@ mod python {
         let home = home
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(crate::config::DEFAULT_CIRIS_HOME));
+        // FIRST BREATH (CIRISServer#264 ask 1) — emitted via eprintln (NOT tracing:
+        // the subscriber may not exist yet, or belong to the host) BEFORE any call
+        // that can block or die, so a field hang is attributable to a phase instead
+        // of reading as silence. Tonight's four instrumented boots = this one line.
+        eprintln!(
+            "ciris-server: serve_with_python_adapter entered (home={}) — init tracing → adapter \
+             config → ServerConfig::from_home → compose",
+            home.display()
+        );
         crate::init_tracing_with(Some(&home.join("logs")));
         // Read the Python adapter's static config under the GIL.
         let adapter = crate::py_adapter::build(py, adapter)?;
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
         let cfg = crate::config::ServerConfig::from_home(home, key_id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        tracing::info!(
+            key_id = %cfg.key_id,
+            "serve_with_python_adapter: config resolved — entering the blocking serve \
+             (next log lines come from compose)"
+        );
         // Release the GIL while the (blocking) server runs so the adapter's
         // start/stop hooks can re-acquire it on their blocking threads.
-        py.detach(|| rt_block_on(crate::serve_with_adapter(cfg, adapter)))
+        // catch_unwind (#264): a rust panic here crosses pyo3 as PanicException —
+        // a BaseException the agent fold's `except Exception` does NOT catch, so
+        // the fold thread dies silently and 4243 never binds with zero log output.
+        // Convert to a normal RuntimeError the fold catches + logs as node_error.
+        py.detach(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rt_block_on(crate::serve_with_adapter(cfg, adapter))
+            }))
+            .unwrap_or_else(|p| {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "serve_with_python_adapter panicked: {msg}"
+                )))
+            })
+        })
     }
 
     /// `ciris_server.start_federation_delivery(cadence_seconds=None,
