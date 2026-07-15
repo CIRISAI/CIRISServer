@@ -16,6 +16,11 @@ RUN pip install --no-cache-dir /opt/harness/wheels/ciris_server-*.whl
 
 # Match a stable uid so bind/named volumes are writable.
 RUN useradd --uid 1000 --create-home --shell /bin/bash ciris
+# Pre-create the home with ciris ownership: a FRESH NAMED VOLUME copies the
+# image dir's ownership on first mount (the configured-home variant uses named
+# volumes; without this the volume is root-owned and the uid-1000 node dies on
+# `create /var/lib/ciris/data`). tmpfs mounts never hit this (world-writable).
+RUN mkdir -p /var/lib/ciris && chown 1000:1000 /var/lib/ciris
 
 # The agent boot shim (reproduces CIRISAgent's Engine + init_edge_runtime +
 # start_federation_delivery — see agent_boot.py). The canonical role ignores it

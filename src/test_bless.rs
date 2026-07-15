@@ -143,10 +143,24 @@ pub(crate) async fn maybe_test_bless_self(engine: &Engine, cfg: &ServerConfig) -
     let persist_rec: SignedKeyRecord =
         serde_json::from_value(serde_json::to_value(&scrubbed).context("scrubbed -> value")?)
             .context("scrubbed -> persist SignedKeyRecord")?;
-    let outcome = engine
-        .adopt_scrub_upgrade(persist_rec)
-        .await
-        .map_err(|e| anyhow!("adopt the test-root-blessed self record: {e}"))?;
+    // IDEMPOTENT on a CONFIGURED-home restart (#264 ask 3 exposed this): boot 2
+    // re-blesses the row boot 1 already upgraded and adopt_scrub_upgrade returns
+    // a Conflict ("already anchored") — benign; the row IS blessed. Only a
+    // non-conflict error is fatal.
+    let outcome = match engine.adopt_scrub_upgrade(persist_rec).await {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("already anc") || msg.contains("onflict") {
+                tracing::info!(
+                    key_id = %rec.key_id,
+                    "TEST-ANCHOR: self record already blessed (configured-home restart) — continuing"
+                );
+                return Ok(());
+            }
+            return Err(anyhow!("adopt the test-root-blessed self record: {e}"));
+        }
+    };
 
     tracing::warn!(
         key_id = %rec.key_id,
