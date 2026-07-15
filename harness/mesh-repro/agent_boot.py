@@ -238,6 +238,45 @@ def main() -> int:
             log(f"KEX-GATE VERDICT: resolve_peer_kex_pubkeys({canon_key}) = None after {deadline}s "
                 f"with rounds completing — #260 REPRODUCED locally (sealed envelopes blocked)")
 
+    # ── EMBEDDED-FOLD variant (CIRISServer#264 must-have 2) ──────────────────
+    # The topology run_configured.sh structurally cannot reproduce: a LIVE
+    # in-process Engine + Edge (their tokio runtime active) and THEN
+    # serve_with_python_adapter on the same process — the agent-embedded shape
+    # where the `Cannot start a runtime from within a runtime` reentrancy panic
+    # fired on every mobile boot. With the #264 rt_block_on thread-hop shield
+    # the fold must BIND 4243; without it, this reproduces the panic (now a
+    # loud RuntimeError with file:line + backtrace, never silence).
+    if os.environ.get("CIRIS_HARNESS_EMBEDDED_FOLD", "").strip().lower() == "true":
+        import threading
+        import urllib.request as _rq
+
+        class _StubAdapter:
+            adapter_type = "harness-embedded"
+            enabled = True
+
+        home2 = str(home / "foldnode")
+
+        def _fold() -> None:
+            try:
+                log("EMBEDDED-FOLD: invoking serve_with_python_adapter on the LIVE engine/edge process")
+                ciris_server.serve_with_python_adapter(_StubAdapter(), home2, key_id)
+            except BaseException as e:  # noqa: BLE001 — catch PanicException too (it derives BaseException)
+                log(f"EMBEDDED-FOLD FAILED: {type(e).__name__}: {e}")
+
+        threading.Thread(target=_fold, name="harness-embedded-fold", daemon=True).start()
+        bound = False
+        for waited in range(0, 120, 5):
+            time.sleep(5)
+            try:
+                _rq.urlopen("http://127.0.0.1:4243/health", timeout=3)
+                bound = True
+                log(f"EMBEDDED-FOLD: read-API BOUND on 4243 after ~{waited + 5}s — reentrancy shield holds")
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if not bound:
+            log("EMBEDDED-FOLD VERDICT: 4243 did NOT bind in 120s — #264 embedded-topology REPRO")
+
     log("running — federation delivery drives rounds on its own cadence; watch both logs")
     while True:
         time.sleep(10)
