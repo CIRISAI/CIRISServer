@@ -742,7 +742,18 @@ mod python {
     static _KEEP_VERIFY_FFI: extern "C" fn() -> usize =
         ciris_verify_ffi::ciris_verify_ffi_link_anchor;
 
-    fn rt_block_on<F>(fut: F) -> PyResult<()>
+    /// Plain block_on for the CLI-shaped entries (`import-traces`, `config`,
+    /// console serve) — always fresh processes with no ambient runtime, and
+    /// their futures need not be `Send` (import_traces holds a `dyn io::Read`
+    /// across awaits). The EMBEDDED entry uses [`rt_block_on_reentrant`].
+    fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        rt.block_on(fut)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn rt_block_on_reentrant<F>(fut: F) -> PyResult<()>
     where
         F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
@@ -953,7 +964,7 @@ mod python {
         // Convert to a normal RuntimeError the fold catches + logs as node_error.
         py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                rt_block_on(crate::serve_with_adapter(cfg, adapter))
+                rt_block_on_reentrant(crate::serve_with_adapter(cfg, adapter))
             }))
             .unwrap_or_else(|p| {
                 // #264 must-have 3: the hook captured location + backtrace —
