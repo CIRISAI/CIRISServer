@@ -132,6 +132,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         run: |
@@ -261,6 +271,16 @@ jobs:
       # runner that is the macOS JAR (CIRIS-macos-<arch>-<ver>.jar). The arch
       # follows the runner/JDK, so the aarch64 + x86_64 matrix legs each stage
       # the JAR matching their wheel target. maturin bundles it via include.
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         run: |
@@ -419,6 +439,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         shell: bash
