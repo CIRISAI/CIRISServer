@@ -863,14 +863,41 @@ mod python {
     /// use. Without this a Python host (e.g. the harness `agent_boot.py`) sees
     /// NO rust-side logs at all. Idempotent (`try_init` inside — a second call
     /// is a no-op).
+    /// `log_dir` (CIRISServer#264 ask 5): also attach the `<log_dir>/ciris-server.log`
+    /// daily file sink — the ONE subscriber a Python host installs should carry the
+    /// file layer, because a later `serve_with_python_adapter` cannot retrofit it
+    /// onto an existing subscriber (its `init_tracing_with` falls through, #264).
+    /// `filter` overrides the env filter (e.g. `"info,ciris_edge=debug"`) — on
+    /// Android the host env whitelist can drop `RUST_LOG` before this runs, so an
+    /// explicit arg beats the env round-trip. Both optional; bare call unchanged.
     #[pyfunction]
-    #[pyo3(name = "init_tracing")]
-    fn py_init_tracing() {
+    #[pyo3(name = "init_tracing", signature = (log_dir=None, filter=None))]
+    fn py_init_tracing(log_dir: Option<String>, filter: Option<String>) {
         use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = filter
+            .map(EnvFilter::new)
+            .or_else(|| EnvFilter::try_from_default_env().ok())
+            .unwrap_or_else(|| EnvFilter::new("info"));
+        let file_layer = log_dir.and_then(|dir| {
+            let dir = std::path::PathBuf::from(dir);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!(
+                    "ciris-server: init_tracing could not create log dir {} ({e}) — file \
+                     logging disabled",
+                    dir.display()
+                );
+                return None;
+            }
+            let appender = tracing_appender::rolling::daily(&dir, "ciris-server.log");
+            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+            // Leak: the guard must outlive the process or buffered lines drop on exit.
+            Box::leak(Box::new(guard));
+            Some(fmt::layer().with_ansi(false).with_writer(non_blocking))
+        });
         let _ = tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer())
+            .with(file_layer)
             .try_init();
     }
 

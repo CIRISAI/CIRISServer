@@ -565,6 +565,10 @@ jobs:
         include:
           - { abi: armeabi-v7a, target: armv7-linux-androideabi, clang: armv7a-linux-androideabi24, legacy: arm-linux-androideabi,  pw: 32 }
           - { abi: arm64-v8a,   target: aarch64-linux-android,   clang: aarch64-linux-android24,    legacy: aarch64-linux-android, pw: 64 }
+          # x86_64 (CIRISServer#264 ask 4) — Android EMULATORS are x86_64; without
+          # this wheel every emulator QA run executes arm64 under ndk_translation
+          # (slower + one more variable in every repro). Same recipe, x86_64 names.
+          - { abi: x86_64,      target: x86_64-linux-android,    clang: x86_64-linux-android24,     legacy: x86_64-linux-android,  pw: 64 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0

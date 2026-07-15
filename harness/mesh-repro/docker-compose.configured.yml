@@ -1,0 +1,18 @@
+# Overlay for the CONFIGURED-home variant (CIRISServer#264 ask 3, run_configured.sh):
+# swap the tmpfs homes for NAMED VOLUMES so state SURVIVES a container restart —
+# phase 2 then boots both roles on populated homes (keys, genesis, directory
+# rows), the exact shape the #264 fold hang needed and the fresh-node run
+# structurally cannot produce.
+services:
+  canonical:
+    tmpfs: !reset []
+    volumes:
+      - canonical-home:/var/lib/ciris
+  agent:
+    tmpfs: !reset []
+    volumes:
+      - agent-home:/var/lib/ciris
+
+volumes:
+  canonical-home:
+  agent-home:
