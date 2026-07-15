@@ -149,12 +149,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -288,12 +287,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -456,12 +454,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
