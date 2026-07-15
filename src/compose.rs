@@ -38,6 +38,26 @@ use crate::config::{Capabilities, ServerConfig};
 /// Re-announce cadence for the local Reticulum destination (Leviculum default).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 
+/// The effective periodic-announce interval. PROD: the 300s const, always
+/// (zero-env). TEST-ANCHOR builds only: `CIRIS_TEST_ANNOUNCE_SECS` overrides it
+/// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
+/// out a 5-minute announce cycle per direction — the single dominant wait in
+/// the ~7-minute run. Compile-fenced like every other harness knob.
+fn announce_interval() -> Duration {
+    #[cfg(feature = "test-anchor")]
+    if let Ok(v) = std::env::var("CIRIS_TEST_ANNOUNCE_SECS") {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            let secs = secs.max(5);
+            tracing::warn!(
+                secs,
+                "TEST-ANCHOR: announce interval overridden (harness only)"
+            );
+            return Duration::from_secs(secs);
+        }
+    }
+    ANNOUNCE_INTERVAL
+}
+
 /// Boot the node with the default ([`NoopAdapter`]) — the byte-identical
 /// pre-seam composition: build the shared Engine + Reticulum Edge, attach the
 /// active slices the host can support, serve until shutdown.
@@ -2352,7 +2372,7 @@ async fn build_edge(
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
         identity_path: cfg.ret_identity_path(),
-        announce_interval: ANNOUNCE_INTERVAL,
+        announce_interval: announce_interval(),
         local_key_id: cfg.key_id.clone(),
         local_epoch: 0,
         interfaces: vec![],

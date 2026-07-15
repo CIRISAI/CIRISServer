@@ -190,6 +190,54 @@ def main() -> int:
                 "if it stays 0, the canonical identity the agent targets (baked genesis) "
                 "differs from this harness canonical — see README §Fidelity.")
 
+    # ── CIRISServer#260 trace gate (intermediate assert) ─────────────────────
+    # Rounds completing is NECESSARY but not SUFFICIENT for trace delivery: the
+    # sealed-envelope path additionally needs resolve_peer_kex_pubkeys(canonical)
+    # = Some (the canonical's self-occurrence encryption_pubkeys must have
+    # replicated INTO this agent's store via the IdentityOccurrence round). Poll
+    # it and, to disambiguate #260's candidates, also dump what occurrence rows
+    # this agent actually holds for the canonical.
+    canon_key = None
+    try:
+        import json as _j
+        canon = _j.loads(engine.list_canonical_servers() or "[]")
+        canon_key = canon[0]["key_id"] if canon else None
+    except Exception as e:  # noqa: BLE001
+        log(f"KEX-GATE: list_canonical_servers failed: {e}")
+    if canon_key and delivery_on:
+        deadline, waited = 420, 0
+        while waited < deadline:
+            time.sleep(15)
+            waited += 15
+            try:
+                kex = edge.resolve_peer_kex_pubkeys(canon_key)
+            except Exception as e:  # noqa: BLE001
+                kex = None
+                log(f"KEX-GATE: resolve error: {type(e).__name__}: {e}")
+            if kex:
+                log(f"KEX-GATE: resolve_peer_kex_pubkeys({canon_key}) = PRESENT after {waited}s "
+                    f"— sealed-envelope path UNBLOCKED (trace gate would PASS)")
+                break
+            if waited % 60 == 0:
+                # Disambiguate: does this agent hold ANY occurrence row for the
+                # canonical (round carried it but resolve fails), or none (the
+                # round never carried the canonical's self-occurrence)?
+                row = None
+                for meth in ("lookup_identity_for_occurrence", "get_identity_occurrence"):
+                    try:
+                        row = getattr(engine, meth)(canon_key)
+                        break
+                    except AttributeError:
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        row = f"<{type(e).__name__}: {e}>"
+                        break
+                log(f"KEX-GATE: still None at {waited}s — occurrence row at agent for "
+                    f"{canon_key}: {'PRESENT' if isinstance(row, str) and row.startswith('{') else row!r}")
+        else:
+            log(f"KEX-GATE VERDICT: resolve_peer_kex_pubkeys({canon_key}) = None after {deadline}s "
+                f"with rounds completing — #260 REPRODUCED locally (sealed envelopes blocked)")
+
     log("running — federation delivery drives rounds on its own cadence; watch both logs")
     while True:
         time.sleep(10)
