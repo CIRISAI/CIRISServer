@@ -1016,6 +1016,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "fs2",
+ "futures-util",
  "getrandom 0.3.4",
  "hex",
  "http-body-util",

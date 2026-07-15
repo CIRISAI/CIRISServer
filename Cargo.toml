@@ -209,6 +209,11 @@ reqwest    = { version = "0.12", default-features = false, features = ["rustls-t
 # §5.4). Already in the lock as axum's own dependency (and a dev-dep) — promoting
 # it to a runtime dep adds no new resolution.
 tower      = { version = "0.5", features = ["util"] }
+# The /v1/federation/events/{channel} SSE bridge (CIRISServer#261,
+# src/federation_surface.rs): stream combinators (iter/chain/unfold/map) over
+# the edge event-bus broadcast receivers into axum's Sse. Already in the lock
+# as axum's own dependency — promoting it adds no new resolution.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 flate2     = "1"     # read the gz'd legacy-trace dump (import-traces subcommand)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

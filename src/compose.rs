@@ -860,6 +860,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                     ))
+                    // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
+                    // GET /v1/federation/identity + /metrics, POST
+                    // /v1/federation/content/{content_id}, and the SSE bridge
+                    // GET /v1/federation/events/{channel} over the shared edge
+                    // event bus — the four routes the CIRISAgent wave-2 DRY
+                    // purge deletes from Python that need the live Arc<Edge>
+                    // (the peers sideband rides federation_peers above). The
+                    // deleted agent route files are the wire spec; the vendored
+                    // KMP client consumes these shapes. identity/metrics/events
+                    // are unauthenticated reads (agent OBSERVER+ ≈ the node's
+                    // open read posture); content POST is owner-gated like the
+                    // agent's SYSTEM_ADMIN gate.
+                    .merge(crate::federation_surface::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        Arc::clone(&edge),
+                    ))
                     // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
                     // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
                     // GET /v1/memory/{node_id}, GET /v1/memory/{node_id}/edges. Projects

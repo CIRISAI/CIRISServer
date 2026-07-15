@@ -137,6 +137,13 @@ pub mod federation_nodecode;
 /// `LocalPeerState` wire contract so the desktop/mobile Network card works in
 /// server mode.
 pub mod federation_peers;
+/// **The agent-compat federation edge surface** (CIRISServer#261): `GET
+/// /v1/federation/identity` + `GET /v1/federation/metrics` + `POST
+/// /v1/federation/content/{content_id}` + the `GET
+/// /v1/federation/events/{channel}` SSE bridge over the edge event bus — the
+/// four routes the CIRISAgent wave-2 DRY purge deletes from Python that need
+/// the live `Arc<Edge>`. The deleted agent route files are the wire spec.
+pub mod federation_surface;
 /// **Config-as-CEG** (Server 0.5 Phase 1) — a signed, owner-gated GraphConfig
 /// service over the CEG, mirroring CIRISAgent's `GraphConfigService` but
 /// hybrid-signed + owner-gated. Config entries are self-attested `config:v1`
