@@ -514,28 +514,71 @@ pub fn init_tracing() {
 /// install a non-blocking daily-rolling file appender (`<log_dir>/ciris-server.log`)
 /// — the node logs RELIABLY to disk, mirroring how the agent logs to files.
 /// stdout stays on too (the console still works when present).
-pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let file_layer = log_dir.and_then(|dir| {
-        if let Err(e) = std::fs::create_dir_all(dir) {
+/// Build the `<dir>/ciris-server.log` file layer with a SYNCHRONOUS rolling
+/// appender — no `tracing_appender::non_blocking` worker thread. CIRISServer#264
+/// must-have 4: under Chaquopy/JNI the non_blocking worker never flushed and
+/// mobile shipped a 0-byte log file on every boot, so every Android substrate
+/// issue started blind. Synchronous writes cost microseconds per line and ALWAYS
+/// land. Probes writability up front and says so loudly either way, so "where
+/// are the rust logs" is answerable from stderr alone.
+pub(crate) fn sync_file_layer<S>(
+    dir: &std::path::Path,
+) -> Option<
+    tracing_subscriber::fmt::Layer<
+        S,
+        tracing_subscriber::fmt::format::DefaultFields,
+        tracing_subscriber::fmt::format::Format,
+        tracing_appender::rolling::RollingFileAppender,
+    >,
+>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use std::io::Write as _;
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!(
+            "ciris-server: WARN could not create log dir {} ({e}) — file logging disabled",
+            dir.display()
+        );
+        return None;
+    }
+    // Probe: prove the dir is actually writable HERE (Chaquopy sandboxes can
+    // create-but-not-append) and stamp a boot marker so even a crash-before-
+    // first-tracing-line leaves evidence in the file.
+    let probe = dir.join("ciris-server.log.boot");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&probe)
+        .and_then(|mut f| {
+            writeln!(f, "boot marker {}", chrono::Utc::now().to_rfc3339())?;
+            f.flush()
+        }) {
+        Ok(()) => {}
+        Err(e) => {
             eprintln!(
-                "ciris-server: WARN could not create log dir {} ({e}) — file logging disabled",
+                "ciris-server: WARN log dir {} is not writable ({e}) — file logging disabled",
                 dir.display()
             );
             return None;
         }
-        let appender = tracing_appender::rolling::daily(dir, "ciris-server.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        // The WorkerGuard must outlive the process or buffered lines are dropped on
-        // exit. A node runs until killed, so leaking it is the correct lifetime.
-        Box::leak(Box::new(guard));
-        eprintln!(
-            "ciris-server: logging to {}/ciris-server.log",
-            dir.display()
-        );
-        Some(fmt::layer().with_ansi(false).with_writer(non_blocking))
-    });
+    }
+    eprintln!(
+        "ciris-server: logging to {}/ciris-server.log (synchronous appender)",
+        dir.display()
+    );
+    let appender = tracing_appender::rolling::daily(dir, "ciris-server.log");
+    Some(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(appender),
+    )
+}
+
+pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_layer = log_dir.and_then(sync_file_layer);
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer()) // stdout/console
@@ -699,13 +742,108 @@ mod python {
     static _KEEP_VERIFY_FFI: extern "C" fn() -> usize =
         ciris_verify_ffi::ciris_verify_ffi_link_anchor;
 
+    /// Plain block_on for the CLI-shaped entries (`import-traces`, `config`,
+    /// console serve) — always fresh processes with no ambient runtime, and
+    /// their futures need not be `Send` (import_traces holds a `dyn io::Read`
+    /// across awaits). The EMBEDDED entry uses [`rt_block_on_reentrant`].
     fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
-        // ONE multi-thread runtime; the node spawns onto it (never a second
-        // runtime around the Engine — the persist dual-runtime-deadlock rule).
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         rt.block_on(fut)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn rt_block_on_reentrant<F>(fut: F) -> PyResult<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        // ONE multi-thread runtime; the node spawns onto it (never a second
+        // runtime around the Engine — the persist dual-runtime-deadlock rule).
+        //
+        // REENTRANCY-SAFE (CIRISServer#264 must-fix): on the agent-EMBEDDED
+        // topology the calling thread can carry an ambient tokio context (live
+        // asyncio + the reused `current_rust_engine()`'s runtime enters context
+        // through pyo3 callbacks), and `Runtime::new()`/`block_on` there panics
+        // `Cannot start a runtime from within a runtime` — the true root cause
+        // of the entire configured-home fold saga (the panic crossed FFI as a
+        // silent PanicException before 0.5.116's catch_unwind). When a handle
+        // is current, HOP to a fresh OS thread: it has NO ambient context, so
+        // the nested-runtime rule cannot fire — topology-independent by
+        // construction, and the same shield covers every inner persist/lens
+        // sync helper reached from this entry.
+        let run = || -> PyResult<()> {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            rt.block_on(fut)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return run();
+        }
+        eprintln!(
+            "ciris-server: ambient tokio runtime detected on the calling thread — \
+             hopping to a dedicated OS thread (embedded-fold reentrancy shield, #264)"
+        );
+        std::thread::Builder::new()
+            .name("ciris-serve-rt".into())
+            .spawn(run)
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("spawn serve thread: {e}"))
+            })?
+            .join()
+            .unwrap_or_else(|panic| {
+                Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "serve thread panicked: {}{}",
+                    panic_message(&panic),
+                    last_panic_detail()
+                )))
+            })
+    }
+
+    /// Best-effort string from a panic payload.
+    fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+        p.downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string())
+    }
+
+    /// CIRISServer#264 must-have 3 — a process-wide panic hook that CAPTURES the
+    /// panic location + backtrace so the catch_unwind sites can attach file:line
+    /// to the error a Python caller sees (RUST_BACKTRACE on the Python side
+    /// yields zero rust frames otherwise; tonight's field diagnosis took four
+    /// instrumented boots for want of one line). The hook also eprintln!s the
+    /// full detail immediately — competent logging on every platform even when
+    /// the exception path is swallowed upstream. Chains the previous hook.
+    static PANIC_DETAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    static PANIC_HOOK_ONCE: std::sync::Once = std::sync::Once::new();
+
+    fn install_panic_capture() {
+        PANIC_HOOK_ONCE.call_once(|| {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let loc = info
+                    .location()
+                    .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                    .unwrap_or_else(|| "<unknown location>".to_string());
+                let bt = std::backtrace::Backtrace::force_capture();
+                let detail = format!(" [at {loc}]\nbacktrace:\n{bt}");
+                eprintln!("ciris-server PANIC{detail}");
+                if let Ok(mut slot) = PANIC_DETAIL.lock() {
+                    *slot = Some(detail);
+                }
+                prev(info);
+            }));
+        });
+    }
+
+    /// The last captured panic's `[at file:line]` + backtrace (consumed), or "".
+    fn last_panic_detail() -> String {
+        PANIC_DETAIL
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take())
+            .unwrap_or_default()
     }
 
     /// Console entry point: `pip install ciris-server` → the `ciris-server`
@@ -801,6 +939,7 @@ mod python {
         // the subscriber may not exist yet, or belong to the host) BEFORE any call
         // that can block or die, so a field hang is attributable to a phase instead
         // of reading as silence. Tonight's four instrumented boots = this one line.
+        install_panic_capture();
         eprintln!(
             "ciris-server: serve_with_python_adapter entered (home={}) — init tracing → adapter \
              config → ServerConfig::from_home → compose",
@@ -825,16 +964,15 @@ mod python {
         // Convert to a normal RuntimeError the fold catches + logs as node_error.
         py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                rt_block_on(crate::serve_with_adapter(cfg, adapter))
+                rt_block_on_reentrant(crate::serve_with_adapter(cfg, adapter))
             }))
             .unwrap_or_else(|p| {
-                let msg = p
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .or_else(|| p.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                // #264 must-have 3: the hook captured location + backtrace —
+                // attach it so the Python-side error names file:line.
                 Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "serve_with_python_adapter panicked: {msg}"
+                    "serve_with_python_adapter panicked: {}{}",
+                    panic_message(&p),
+                    last_panic_detail()
                 )))
             })
         })
@@ -878,21 +1016,10 @@ mod python {
             .map(EnvFilter::new)
             .or_else(|| EnvFilter::try_from_default_env().ok())
             .unwrap_or_else(|| EnvFilter::new("info"));
+        install_panic_capture();
         let file_layer = log_dir.and_then(|dir| {
             let dir = std::path::PathBuf::from(dir);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                eprintln!(
-                    "ciris-server: init_tracing could not create log dir {} ({e}) — file \
-                     logging disabled",
-                    dir.display()
-                );
-                return None;
-            }
-            let appender = tracing_appender::rolling::daily(&dir, "ciris-server.log");
-            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-            // Leak: the guard must outlive the process or buffered lines drop on exit.
-            Box::leak(Box::new(guard));
-            Some(fmt::layer().with_ansi(false).with_writer(non_blocking))
+            crate::sync_file_layer(&dir)
         });
         let _ = tracing_subscriber::registry()
             .with(filter)

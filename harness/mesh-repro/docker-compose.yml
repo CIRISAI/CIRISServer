@@ -83,6 +83,8 @@ services:
       CIRIS_EDGE_BOOTSTRAP_PEERS: "canonical:4242"
       CIRIS_AGENT_MODE: server
       CIRIS_FEDERATION_DELIVERY: "true"
+      # Embedded-fold variant switch (run_embedded.sh, CIRISServer#264 must-have 2).
+      CIRIS_HARNESS_EMBEDDED_FOLD: "${CIRIS_HARNESS_EMBEDDED_FOLD:-false}"
       RUST_LOG: "info,ciris_edge=debug,reticulum_core=debug"
     networks: [mesh]
     tmpfs:
