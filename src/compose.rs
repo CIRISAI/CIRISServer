@@ -38,6 +38,26 @@ use crate::config::{Capabilities, ServerConfig};
 /// Re-announce cadence for the local Reticulum destination (Leviculum default).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 
+/// The effective periodic-announce interval. PROD: the 300s const, always
+/// (zero-env). TEST-ANCHOR builds only: `CIRIS_TEST_ANNOUNCE_SECS` overrides it
+/// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
+/// out a 5-minute announce cycle per direction — the single dominant wait in
+/// the ~7-minute run. Compile-fenced like every other harness knob.
+fn announce_interval() -> Duration {
+    #[cfg(feature = "test-anchor")]
+    if let Ok(v) = std::env::var("CIRIS_TEST_ANNOUNCE_SECS") {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            let secs = secs.max(5);
+            tracing::warn!(
+                secs,
+                "TEST-ANCHOR: announce interval overridden (harness only)"
+            );
+            return Duration::from_secs(secs);
+        }
+    }
+    ANNOUNCE_INTERVAL
+}
+
 /// Boot the node with the default ([`NoopAdapter`]) — the byte-identical
 /// pre-seam composition: build the shared Engine + Reticulum Edge, attach the
 /// active slices the host can support, serve until shutdown.
@@ -859,6 +879,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::federation_peers::router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
+                    ))
+                    // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
+                    // GET /v1/federation/identity + /metrics, POST
+                    // /v1/federation/content/{content_id}, and the SSE bridge
+                    // GET /v1/federation/events/{channel} over the shared edge
+                    // event bus — the four routes the CIRISAgent wave-2 DRY
+                    // purge deletes from Python that need the live Arc<Edge>
+                    // (the peers sideband rides federation_peers above). The
+                    // deleted agent route files are the wire spec; the vendored
+                    // KMP client consumes these shapes. identity/metrics/events
+                    // are unauthenticated reads (agent OBSERVER+ ≈ the node's
+                    // open read posture); content POST is owner-gated like the
+                    // agent's SYSTEM_ADMIN gate.
+                    .merge(crate::federation_surface::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        Arc::clone(&edge),
                     ))
                     // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
                     // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
@@ -2335,7 +2372,7 @@ async fn build_edge(
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
         identity_path: cfg.ret_identity_path(),
-        announce_interval: ANNOUNCE_INTERVAL,
+        announce_interval: announce_interval(),
         local_key_id: cfg.key_id.clone(),
         local_epoch: 0,
         interfaces: vec![],

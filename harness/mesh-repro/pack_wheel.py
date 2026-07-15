@@ -35,6 +35,11 @@ def main() -> int:
     # abi3 for CPython 3.10+, Linux x86_64 (harness Docker base is controlled).
     tag = "cp310-abi3-linux_x86_64"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Purge STALE wheels first — the Dockerfile pip-installs `ciris_server-*.whl`,
+    # and two versions in the dir means pip may install the OLD one (a run that
+    # silently tests yesterday's substrate — it happened).
+    for stale in OUT_DIR.glob("ciris_server-*.whl"):
+        stale.unlink()
     whl = OUT_DIR / f"ciris_server-{ver}-{tag}.whl"
 
     # (arcname, bytes) for every member; the .so + the pure-python launcher glue.
