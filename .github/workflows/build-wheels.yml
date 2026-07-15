@@ -90,6 +90,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -108,13 +109,17 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
           # 403s and tanks apt-get update (its packages are not needed here).
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev libudev-dev patchelf
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources          # CIRISServer#99 — retry apt (ports.ubuntu.com intermittently network-times-out
+          # on the arm64 runners; a bare failure tanked 0.5.117's linux-aarch64 wheel).
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y libsqlite3-dev libudev-dev patchelf && break
+            echo "apt attempt $i failed; retrying in $((i*20))s"; sleep $((i*20))
+          done
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -297,6 +302,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -315,6 +321,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -453,6 +460,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -471,6 +479,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -600,6 +609,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -618,6 +628,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
