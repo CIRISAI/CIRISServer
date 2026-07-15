@@ -14,10 +14,10 @@
 //!
 //! Writes reuse the EXACT signing path [`crate::peer::emit_replication_consent`]
 //! uses: `ceg_produce_canonicalize` → `SHA-256` → `engine.sign_hybrid` →
-//! `put_attestation`. Reads mirror
-//! [`crate::peer::replication_peers_from_consent`]:
-//! `list_attestations_by(node) → filter SCORES && envelope["dimension"] ==
-//! CONFIG_DIMENSION`.
+//! `put_attestation`. Reads are the persist v17.4.0 `list_scores` seek
+//! (CIRISServer#267, FSD-005 Appendix C): ONE cursor-paged
+//! `{attester: node, subject: node, dimension_exact: config:v1, lifecycle:
+//! Live}` query — the substrate excludes retracted rows server-side.
 //!
 //! ## Versioning (latest-wins)
 //!
@@ -26,17 +26,25 @@
 //! mutates a prior row — it appends a NEW row with `version = prev + 1` and
 //! `previous_version = <prior row id>`. A read folds all rows for a key and
 //! returns the **highest `version`** (latest-wins, ties broken by `asserted_at`).
+//! (That per-key version fold is CONFIG semantics — chained by
+//! `envelope["version"]`, not by the CEG lifecycle — so it stays client-side
+//! by design; the substrate fold retires only the retraction re-scan.)
 //!
-//! ## Revocation (stubbed — flagged)
+//! ## Revocation (CEG §6.1, substrate-side since #267)
 //!
-//! Like [`crate::peer::replication_peers_from_consent`], **presence == active**:
-//! a `withdraws`/`recants` against a config row's `attestation_id` is honored
-//! here (a recanted key reads as absent), via [`config_key_revoked`], which is
-//! the same `withdraws`/`recants`-by-the-node + `revocations_for` shape
-//! [`crate::auth::ownership::is_steward_bound`]'s `delegation_revoked` uses. There
-//! is no substrate `supersede`-aware reader yet (the finer RC29 §5.6.8.15
-//! supersede flow is TODO upstream); the version-fold already gives last-write-
-//! wins for the common path.
+//! A `withdraws`/`recants` the node authors against a config row's
+//! `attestation_id` still makes the key read as absent — but the fold moved
+//! into persist: `lifecycle: Live` excludes any row a same-attester structural
+//! composer names via the CEG §6.1 canonical envelope member
+//! `references_attestation_id`. This RETIRES the pre-#267 `config_key_revoked`
+//! N+1 (a full `list_attestations_by(node)` re-scan per row, plus a
+//! `revocations_for` probe) and, with it, that helper's ad-hoc targeting
+//! conventions (`attested_key_id`/`subject_key_ids` carrying the row id, and
+//! attestation-ids probed through the key-revocation table): nothing in
+//! production ever emitted those shapes — a retraction now speaks CEG §6.1 or
+//! it does not retract. The RC29 §5.6.8.15 partial-narrowing supersede remains
+//! TODO upstream; the version-fold already gives last-write-wins for the
+//! common path.
 //!
 //! ## Scope (declared now; finer enforcement is Phase 2)
 //!
@@ -237,74 +245,75 @@ struct StoredRow {
     entry: ConfigEntry,
 }
 
-/// Read every LIVE (unrevoked) `config:v1` row this node authored, parsed into
-/// [`StoredRow`]s. Mirrors [`crate::peer::replication_peers_from_consent`]'s read
-/// (`list_attestations_by(node) → filter SCORES && dimension`).
+/// Page size for the [`live_config_rows`] `list_scores` seek. Config stores
+/// are small (tens of keys × a few versions); one page is the common case and
+/// the cursor loop stays correct for any size.
+const CONFIG_SCORES_PAGE: i64 = 512;
+
+/// Read every LIVE (unretracted) `config:v1` row this node authored, parsed
+/// into [`StoredRow`]s — the persist v17.4.0 `list_scores` read
+/// (CIRISServer#267, FSD-005 Appendix C, CIRISPersist#455/#456).
+///
+/// ## Why one seek and not a scan + re-scan (#267)
+///
+/// Pre-#267 this was `list_attestations_by(node)` (EVERY row the node ever
+/// attested, every type, every dimension) filtered client-side to
+/// `SCORES && dimension == config:v1` — and then, PER surviving row, a second
+/// full `list_attestations_by(node)` walk + a `revocations_for` probe to
+/// decide revocation (`config_key_revoked`): the O(N²) N+1 the 2026-07-14
+/// demand survey flagged. `list_scores` is the ordered V106 subject+dimension
+/// seek with `lifecycle: Live` — withdrawn/recanted/superseded rows are
+/// excluded server-side by the CEG §6.1 fold (composers match via the
+/// canonical `references_attestation_id` envelope member), so the whole
+/// revocation re-scan is gone.
+///
+/// The ONE [`AttestationFilter`](ciris_persist::read::AttestationFilter) is
+/// built once and reused across pages (the pin-once contract, Appendix C.4 —
+/// `#[non_exhaustive]`, so it is mutated from `Default` rather than
+/// struct-literal-constructed). Both attester AND subject pin to the node:
+/// config rows are self-directed (`subject_key_ids == [node]`, see
+/// [`set_config`]), and the attester pin keeps a peer-replicated row about us
+/// from ever reading as OUR config.
+///
+/// The read is unauthenticated (`caller = ""`): config rows are
+/// `cohort_scope: federation` by construction ([`config_envelope`]), which the
+/// §4.3 gate admits to any caller — so the empty caller skips the per-page
+/// admission resolution without narrowing the result.
 async fn live_config_rows(engine: &Arc<Engine>, node_key_id: &str) -> Result<Vec<StoredRow>> {
+    use ciris_persist::read::{AttestationFilter, LifecycleView};
+
     let directory = engine.federation_directory();
-    let rows = directory
-        .list_attestations_by(node_key_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("list attestations by {node_key_id}: {e}"))?;
+
+    let mut filter = AttestationFilter::default();
+    filter.attesting_key_id = Some(node_key_id.to_owned());
+    filter.subject_key_id = Some(node_key_id.to_owned());
+    filter.attestation_type = Some(attestation_type::SCORES.to_owned());
+    filter.dimension_exact = Some(CONFIG_DIMENSION.to_owned());
+    filter.lifecycle = LifecycleView::Live;
 
     let mut out = Vec::new();
-    for a in rows {
-        if a.attestation_type != attestation_type::SCORES {
-            continue;
+    let mut cursor = None;
+    loop {
+        let page = directory
+            .list_scores("", filter.clone(), cursor.take(), CONFIG_SCORES_PAGE)
+            .await
+            .map_err(|e| anyhow::anyhow!("list_scores(config:v1, {node_key_id}): {e}"))?;
+        for a in page.items {
+            // Defensive: a malformed envelope is skipped, not fatal.
+            if let Some(entry) = entry_from_envelope(&a.attestation_envelope) {
+                out.push(StoredRow {
+                    attestation_id: a.attestation_id,
+                    asserted_at: a.asserted_at,
+                    entry,
+                });
+            }
         }
-        if a.attestation_envelope
-            .get("dimension")
-            .and_then(|d| d.as_str())
-            != Some(CONFIG_DIMENSION)
-        {
-            continue;
-        }
-        // Revocation: a recanted/withdrawn config row reads as absent.
-        if config_key_revoked(engine, node_key_id, &a.attestation_id).await {
-            continue;
-        }
-        if let Some(entry) = entry_from_envelope(&a.attestation_envelope) {
-            out.push(StoredRow {
-                attestation_id: a.attestation_id,
-                asserted_at: a.asserted_at,
-                entry,
-            });
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
         }
     }
     Ok(out)
-}
-
-/// True iff a config row (`attestation_id`) authored by `node_key_id` has been
-/// revoked — by a `withdraws`/`recants` the node authored against it, or by a
-/// `revocations_for` row. Same shape as
-/// `crate::auth::ownership`'s `delegation_revoked`, scoped to the config row id.
-///
-/// NOTE (flagged): the substrate has no `supersede`-aware federation-tier reader
-/// yet, so partial-narrowing supersede (RC29 §5.6.8.15) is NOT honored — only
-/// explicit withdraws/recants/revocation. For the common last-write-wins path the
-/// version-fold already supersedes prior values.
-async fn config_key_revoked(engine: &Arc<Engine>, node_key_id: &str, attestation_id: &str) -> bool {
-    let directory = engine.federation_directory();
-    if let Ok(by_node) = directory.list_attestations_by(node_key_id).await {
-        for a in by_node {
-            let is_retraction = a.attestation_type == attestation_type::WITHDRAWS
-                || a.attestation_type == attestation_type::RECANTS;
-            // A retraction can target the row either via attested_key_id or via
-            // its subject_key_ids carrying the row id.
-            if is_retraction
-                && (a.attested_key_id == attestation_id
-                    || a.subject_key_ids.iter().any(|s| s == attestation_id))
-            {
-                return true;
-            }
-        }
-    }
-    if let Ok(revs) = directory.revocations_for(attestation_id).await {
-        if !revs.is_empty() {
-            return true;
-        }
-    }
-    false
 }
 
 /// Fold a key's rows to the latest-wins [`ConfigEntry`] + its row id: highest
@@ -320,7 +329,7 @@ fn latest_for_key<'a>(rows: &'a [StoredRow], key: &str) -> Option<&'a StoredRow>
 
 /// Read the latest [`ConfigEntry`] for `key` (highest version, latest-wins), or
 /// `None` if the key has no live row. A recanted/withdrawn key reads as absent
-/// (see [`config_key_revoked`]).
+/// (excluded substrate-side by [`live_config_rows`]' `lifecycle: Live` seek).
 pub async fn get_config(
     engine: &Arc<Engine>,
     node_key_id: &str,
