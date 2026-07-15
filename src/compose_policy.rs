@@ -217,10 +217,11 @@ impl TrustSet {
     /// Pin a key AND classify it as one of the CC 3.4.9 `licensure:*`
     /// co-stewards. A co-steward is trusted by construction (pinning is
     /// implied) — an unpinned "co-steward" would be a contradiction.
-    /// CIRISServer#253: RETIRED as a production path — `compose_for_key` now
-    /// resolves co-steward roles from the substrate (`has_effective_role`,
-    /// persist v17). Kept for unit tests, which compose over a synthetic
-    /// corpus with no live accord roster to resolve against.
+    /// CIRISServer#253/#267: in production `compose_for_key` resolves
+    /// co-steward roles from the substrate (`has_effective_role`, persist
+    /// v17), consulting these consumer pins FIRST; the pin API is also what
+    /// lets unit tests compose over a synthetic corpus with no live accord
+    /// roster to resolve against.
     pub fn pin_co_steward(&mut self, key_id: impl Into<String>, class: CoSteward) -> &mut Self {
         let key_id = key_id.into();
         self.pinned.insert(key_id.clone());
@@ -533,72 +534,298 @@ impl Composer {
         &self.trust
     }
 
-    /// Compose every `scores` attestation about `attested_key_id` that this
-    /// node holds, reading from persist. The async convenience wrapper over
-    /// [`Composer::compose`].
+    /// Compose the substrate's verdict for one `(dimension, attested_key_id)`
+    /// tuple — the production read path, now executed **substrate-side** via
+    /// persist v17.4.0's `resolve_scores` (CIRISServer#267, FSD-005 Appendix C,
+    /// CIRISPersist#455/#456).
+    ///
+    /// ## Why this is one substrate call and not a client fold (#267)
+    ///
+    /// Pre-#267 this read `list_attestations_for(subject)` — the WHOLE signed
+    /// history — and re-implemented the `(subject, dimension, trust, time,
+    /// state) → verdict` fold in Rust, plus an N+1 `has_effective_role` pair
+    /// per `licensure:*` attester in that history (the 2026-07-14 demand
+    /// survey's "wrong-shaped-read → client-fold" smell). `resolve_scores`
+    /// runs the CEG §6.1 precedence + per-attester latest-wins + CC 4.4.2
+    /// polarity aggregation as ONE composite op inside persist's `.so` (the
+    /// #329 pattern), so a cohabiting consumer can never run a stale composer
+    /// against newer data — and the history never crosses the seam.
+    ///
+    /// The ONE [`AttestationFilter`] is built once (the pin-once contract,
+    /// Appendix C.4): a future substrate re-layout is invisible here.
+    ///
+    /// ## What each screen became (persist now owns the fold)
+    ///
+    /// | pre-#267 client screen | #267 home |
+    /// |---|---|
+    /// | Policy A trust gate (CC 4.4.3.8) | `attester_filter: Explicit(pinned)` — untrusted rows never leave the substrate |
+    /// | staleness (`expires_at`, CC 2.1) | `valid_at: now` (`src/scorer.rs` mirrors `valid_until` onto `expires_at`) |
+    /// | retraction precedence (CEG §6.1) | the `resolve_scores` fold (`supersedes`/`withdraws`/`recants`) |
+    /// | aggregation (CC 4.4.2) | `policy` = signed-mean / boolean-min, verdict as a [`ConfidenceBand`](ciris_persist::read::ConfidenceBand) |
+    ///
+    /// ## Fidelity deltas vs. the retired client fold (stated per #267)
+    ///
+    /// The pure [`Composer::compose`] REMAINS the CC 4.4 normative surface,
+    /// adversarially pinned by `tests/compose_policy.rs`; what follows are the
+    /// deltas of THIS production read against it:
+    ///
+    /// - **Per-tuple, not per-corpus.** The signature gained `dimension`
+    ///   (persist's verdict is per `(subject, dimension)`); the returned
+    ///   [`Composition`] carries exactly one [`Verdict`] — always, including
+    ///   the empty fold ([`Decision::Undetermined`], visibly undecided).
+    /// - **persist owns `value` and the band.** [`Verdict::value`] is the
+    ///   fold's `aggregate` (from the open trace); the qualitative band maps
+    ///   to [`Decision`] (`InsufficientWitnesses` → `Undetermined`, else the
+    ///   consumer `threshold` over the aggregate, as before).
+    /// - **CC 4.4.1 weighting is not yet substrate-side.** Frickerian
+    ///   low-density and CC 3.4.7 self-track-record downweights do not run
+    ///   here (contributions report `weight = 1.0`); persist's fold notes the
+    ///   server-tier column-resolver refinement as its own TODO.
+    /// - **Polarity coverage.** persist executes `signed-mean` and
+    ///   `boolean-min`; [`Polarity::Detector`]/[`Polarity::Enumerated`]/
+    ///   [`Polarity::PositiveOnly`] dimensions currently fold under the
+    ///   signed-mean default (flagged; the reported [`Verdict::polarity`]
+    ///   stays the CC 3.1 column so consumers see the intent).
+    /// - **No refusal ledger.** Gated/untrusted/expired rows are excluded
+    ///   server-side and never cross the wire (no verdict-differencing), so
+    ///   [`Composition::refusals`] only carries the CC 3.4.5 re-check below.
+    /// - **CC 3.1.9.3 sole-evidence screen** (`slashing:*` vs
+    ///   `testimonial_witness:*` `evidence_refs`) needs the raw corpus and
+    ///   runs only at admission + in the pure compose tier (flagged).
+    /// - **No Policy D tie-break** — persist's residual determinism is
+    ///   latest-`asserted_at`/lex-id, not CC 4.4.3.9 affected-population.
+    ///
+    /// ## What is deliberately KEPT client-side
+    ///
+    /// - **CC 3.4.9 licensure cap** ("single-source … MUST be marked as
+    ///   `confidence ≤ 0.5` in consumer composition"): co-steward classes are
+    ///   resolved via `has_effective_role` (CIRISPersist#440) over the fold's
+    ///   HEAD attesters only — bounded by `contributor_count`, never by
+    ///   history size, which is what kills the survey's N+1. The cap marks
+    ///   the reported confidences; the persist-owned `value`/band are not
+    ///   re-capped (CC's MUST is about the confidence marking).
+    ///   `TrustSet::pin_co_steward` pins still resolve first (tests compose
+    ///   over synthetic corpora with no live accord roster).
+    /// - **CC 3.4.5 self-emission re-check** (CC 3.4.7: "Both checks MUST
+    ///   agree"): a `capacity:*` head attested by its own subject — which the
+    ///   substrate admission gate should have refused — is surfaced as a
+    ///   [`RefusalReason::SelfEmission`] refusal and the verdict fails closed
+    ///   to [`Decision::Undetermined`] (we cannot subtract it from persist's
+    ///   aggregate without re-folding, and a disagreement between the two
+    ///   lines of defense must never silently affirm).
     ///
     /// # Errors
-    /// Propagates the federation-directory read error.
+    /// Propagates the `resolve_scores` / `has_effective_role` substrate errors
+    /// (fail-closed: no verdict without a substrate answer).
     pub async fn compose_for_key(
         &self,
         engine: &Engine,
         attested_key_id: &str,
+        dimension: &str,
     ) -> Result<Composition> {
-        let dir = engine.federation_directory();
-        let rows = dir
-            .list_attestations_for(attested_key_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("list_attestations_for({attested_key_id}): {e}"))?;
-
-        // CC 3.4.9 co-steward resolution — CIRISServer#253, persist v17.
-        //
-        // `licensure_cap` caps a `licensure:*` fold below full confidence until
-        // BOTH co-stewards (CIRISRegistry + CIRISVerify) have emitted. Which
-        // co-steward an attesting key IS was, pre-17.0.0, unresolvable from the
-        // substrate — the identity_type vocabulary had no `registry`/`verify`
-        // member — so the composer resolved it by an out-of-band consumer PIN
-        // (`TrustSet::pin_co_steward`, the #159 workaround). persist v17
-        // (CIRISPersist#440) carries the co-steward roles ON the key record with
-        // accord-conferred, self-authenticating semantics, so we resolve from the
-        // substrate here and RETIRE the by-pin fallback in production.
-        //
-        // `has_effective_role` is self-authenticating by design: a decorative
-        // pre-17 self-claimed `roles=["registry"]` row reads `false` (its co-scrub
-        // set must re-verify against the LIVE accord roster), so this read never
-        // trusts write-gate history. Resolution happens in THIS async phase; the
-        // pure `compose` stays synchronous (and the pin API remains, for tests).
         use ciris_persist::federation::admission::has_effective_role;
         use ciris_persist::federation::types::identity_type::{REGISTRY, VERIFY};
-        let mut trust = self.trust.clone();
-        let mut resolved: BTreeMap<String, CoSteward> = BTreeMap::new();
-        for att in &rows {
-            if !envelope_str(att, "dimension").is_some_and(|d| d.starts_with(DIM_LICENSURE)) {
-                continue;
-            }
-            let k = &att.attesting_key_id;
-            if resolved.contains_key(k) {
-                continue;
-            }
-            if has_effective_role(dir.as_ref(), k, REGISTRY)
-                .await
-                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, registry): {e}"))?
-            {
-                resolved.insert(k.clone(), CoSteward::Registry);
-            } else if has_effective_role(dir.as_ref(), k, VERIFY)
-                .await
-                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, verify): {e}"))?
-            {
-                resolved.insert(k.clone(), CoSteward::Verify);
-            }
-        }
-        for (k, class) in resolved {
-            trust.pin_co_steward(k, class);
-        }
-        let composer = Composer {
-            trust,
-            cfg: self.cfg.clone(),
+        use ciris_persist::read::{AttestationFilter, AttesterSet, ConfidenceBand, LifecycleView};
+
+        let dir = engine.federation_directory();
+        let now = self.cfg.now.unwrap_or_else(Utc::now);
+
+        // ── The ONE pin-once filter (FSD-005 Appendix C.4) ───────────────────
+        // subject axis: server-emitted scores set `subject_key_ids ==
+        // [attested_key_id]` (`src/scorer.rs`), so the V106 subject seek is the
+        // same population the retired attested_key_id point-read served.
+        let mut filter = AttestationFilter::default();
+        filter.subject_key_id = Some(attested_key_id.to_owned());
+        filter.dimension_exact = Some(dimension.to_owned());
+        // CC 2.1 staleness, server-side: `asserted_at <= now < expires_at`.
+        filter.valid_at = Some(now);
+        // CEG §6.1 lifecycle: retracted rows never reach the fold.
+        filter.lifecycle = LifecycleView::Live;
+        // CC 4.4.3.8 Policy A, server-side: ONLY pinned attesters contribute.
+        // An empty trust set compiles to a constant-false predicate — zero
+        // rows, InsufficientWitnesses, Undetermined (fail-closed preserved).
+        filter.attester_filter = Some(AttesterSet::Explicit(
+            self.trust.pinned().map(str::to_owned).collect(),
+        ));
+
+        // CC 4.4.2 polarity → the persist policy id. Detector / Enumerated /
+        // PositiveOnly fold under persist's signed-mean default for now (see
+        // the doc-comment delta above).
+        let polarity = polarity_for(dimension);
+        let policy = match polarity {
+            Polarity::BooleanViaScore | Polarity::NegativeOnly => "cc-4.4.2-boolean-min",
+            _ => "cc-4.4.2-signed-mean",
         };
-        Ok(composer.compose(&rows))
+
+        // The node composes on its own behalf: its derived federation key_id
+        // is the §4.3 caller (self/family/community-scoped rows it is admitted
+        // to stay visible). A node without a derived key reads unauthenticated
+        // (broad tiers — which includes every federation-scope row).
+        let caller = engine.local_derived_key_id().await.unwrap_or_default();
+
+        // ── ONE substrate call: gate + fetch + fold inside persist's `.so` ──
+        let verdict = dir
+            .resolve_scores(&caller, filter, policy.to_owned(), /* trace: */ true)
+            .await
+            .map_err(|e| anyhow::anyhow!("resolve_scores({attested_key_id}, {dimension}): {e}"))?;
+
+        // The trace is the OPEN escape hatch (Appendix C.3) — requested above,
+        // so its absence is a substrate contract violation, not an empty fold.
+        let trace = verdict
+            .trace
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("resolve_scores returned no trace (trace=true)"))?;
+        let aggregate = trace
+            .get("aggregate")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let empty = Vec::new();
+        let inputs = trace
+            .get("inputs")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or(&empty);
+
+        // The fold's HEADS are the contributors (one per attester, CEG §6.1
+        // latest-wins) — exactly what persist aggregated.
+        struct Head {
+            attestation_id: String,
+            attester: String,
+            score: f64,
+            confidence: f64,
+        }
+        let mut heads: Vec<Head> = Vec::new();
+        for i in inputs {
+            if i.get("is_head").and_then(serde_json::Value::as_bool) != Some(true) {
+                continue;
+            }
+            heads.push(Head {
+                attestation_id: i
+                    .get("attestation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                attester: i
+                    .get("attester")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                score: i
+                    .get("score")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+                confidence: i
+                    .get("confidence")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+            });
+        }
+
+        // ── CC 3.4.9 licensure cap — HEADS-only co-steward resolution ───────
+        // Bounded by contributor_count (the survey's N+1 ranged over the whole
+        // history). Consumer pins resolve first; the substrate roles
+        // (CIRISPersist#440, accord-conferred + self-authenticating) resolve
+        // the rest.
+        let mut licensure_capped = false;
+        if dimension.starts_with(DIM_LICENSURE) {
+            let mut classes: BTreeSet<CoSteward> = BTreeSet::new();
+            for h in &heads {
+                if let Some(class) = self.trust.co_steward(&h.attester) {
+                    classes.insert(class);
+                    continue;
+                }
+                if has_effective_role(dir.as_ref(), &h.attester, REGISTRY)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("has_effective_role({}, registry): {e}", h.attester)
+                    })?
+                {
+                    classes.insert(CoSteward::Registry);
+                } else if has_effective_role(dir.as_ref(), &h.attester, VERIFY)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("has_effective_role({}, verify): {e}", h.attester)
+                    })?
+                {
+                    classes.insert(CoSteward::Verify);
+                }
+            }
+            // Fail-closed reading of "only one of the two co-stewards has
+            // emitted": zero classes is also < 2 and is capped; two keys of
+            // the SAME institution do not lift the cap.
+            licensure_capped = classes.len() < 2;
+        }
+
+        // ── CC 3.4.5 re-check (CC 3.4.7: "Both checks MUST agree") ──────────
+        // A self-emitted capacity head slipping through the substrate gate is
+        // a disagreement between the two lines of defense → refuse + fail
+        // closed to Undetermined rather than affirm over a tainted aggregate.
+        let mut refusals: Vec<Refusal> = Vec::new();
+        if dimension.starts_with(DIM_CAPACITY) {
+            for h in &heads {
+                if h.attester == attested_key_id {
+                    refusals.push(Refusal {
+                        attestation_id: h.attestation_id.clone(),
+                        attesting_key_id: h.attester.clone(),
+                        dimension: Some(dimension.to_owned()),
+                        reason: RefusalReason::SelfEmission,
+                    });
+                }
+            }
+        }
+        let self_emission_disagreement = !refusals.is_empty();
+
+        let contributions: Vec<Contribution> = heads
+            .iter()
+            .map(|h| Contribution {
+                attestation_id: h.attestation_id.clone(),
+                attesting_key_id: h.attester.clone(),
+                score: h.score,
+                confidence: if licensure_capped {
+                    h.confidence.min(0.5)
+                } else {
+                    h.confidence
+                },
+                // CC 4.4.1 weighting is not substrate-side yet (see doc).
+                weight: 1.0,
+                self_track_record_applied: false,
+                low_density_applied: false,
+                licensure_capped,
+            })
+            .collect();
+
+        let confidence = if contributions.is_empty() {
+            0.0
+        } else {
+            (contributions.iter().map(|c| c.confidence).sum::<f64>() / contributions.len() as f64)
+                .clamp(0.0, 1.0)
+        };
+
+        let decision = if self_emission_disagreement
+            || contributions.is_empty()
+            || verdict.band == ConfidenceBand::InsufficientWitnesses
+        {
+            Decision::Undetermined
+        } else if aggregate >= self.cfg.threshold {
+            Decision::Affirm
+        } else {
+            Decision::Deny
+        };
+
+        Ok(Composition {
+            verdicts: vec![Verdict {
+                dimension: dimension.to_owned(),
+                attested_key_id: attested_key_id.to_owned(),
+                polarity,
+                value: aggregate,
+                confidence,
+                single_source_licensure: licensure_capped,
+                // persist's fold has no CC 4.4.3.9 tie-break (see doc).
+                lexical_tie_break_applied: false,
+                contributions,
+                decision,
+            }],
+            refusals,
+        })
     }
 
     /// Compose a corpus of attestations into verdicts. Pure — no I/O, so the

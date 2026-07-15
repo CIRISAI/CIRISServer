@@ -378,15 +378,17 @@ async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
 }
 
 /// Emit a node-authored RECANTS attestation targeting `target_attestation_id`
-/// (subject_key_ids carries the row id) — the revocation shape `config_key_revoked`
-/// recognizes.
+/// via the CEG §6.1 canonical envelope member `references_attestation_id` —
+/// the shape persist's `lifecycle: Live` server-side fold honors
+/// (CIRISServer#267; pre-#267 the ad-hoc `config_key_revoked` helper matched
+/// a `"recants"` envelope key / `subject_key_ids` instead).
 async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
     let now = chrono::Utc::now();
     let nk = node_key_id(engine).await;
     let envelope = serde_json::json!({
         "dimension": "config:v1",
         "attesting_key_id": nk,
-        "recants": target_attestation_id,
+        "references_attestation_id": target_attestation_id,
         "asserted_at": now.to_rfc3339(),
     });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize recant");
