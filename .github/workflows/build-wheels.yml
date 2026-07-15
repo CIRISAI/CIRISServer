@@ -90,6 +90,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -108,13 +109,17 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Install build deps
         run: |
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
           # 403s and tanks apt-get update (its packages are not needed here).
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev libudev-dev patchelf
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources          # CIRISServer#99 — retry apt (ports.ubuntu.com intermittently network-times-out
+          # on the arm64 runners; a bare failure tanked 0.5.117's linux-aarch64 wheel).
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y libsqlite3-dev libudev-dev patchelf && break
+            echo "apt attempt $i failed; retrying in $((i*20))s"; sleep $((i*20))
+          done
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -127,6 +132,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         run: |
@@ -134,12 +149,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -256,6 +270,16 @@ jobs:
       # runner that is the macOS JAR (CIRIS-macos-<arch>-<ver>.jar). The arch
       # follows the runner/JDK, so the aarch64 + x86_64 matrix legs each stage
       # the JAR matching their wheel target. maturin bundles it via include.
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         run: |
@@ -263,12 +287,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -297,6 +320,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -315,6 +339,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -412,6 +437,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # CIRISServer#99 — cache the Compose 'packageUberJar' gradle build. It ran
+      # COLD on every wheel leg (~5 min, on the windows/macOS critical path) even
+      # though the JAR only changes when the CLIENT source does — near-never on a
+      # substrate/version bump. setup-gradle caches ~/.gradle + the build cache,
+      # read-only off main so tag runs restore the main-warmed cache.
+      - name: Cache gradle (desktop JAR)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          gradle-home-cache-cleanup: true
       - name: Build + stage desktop JAR
         working-directory: client
         shell: bash
@@ -419,12 +454,11 @@ jobs:
           # Keep the desktop client's CLIENT_VERSION in lockstep with the release
           # version (Cargo.toml) so the node-vs-client "update recommended" banner
           # never false-fires on a wheel-bundled local node.
-          CV=$(grep -m1 '^version = ' ../Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          CVF=shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt
-          # portable in-place edit (GNU + BSD/macOS sed both accept -i.bak)
-          sed -i.bak "s/const val CLIENT_VERSION = \"[^\"]*\"/const val CLIENT_VERSION = \"$CV\"/" "$CVF"
-          rm -f "$CVF.bak"
-          echo "synced CLIENT_VERSION -> $CV"
+          # CLIENT_VERSION is authoritative in COMMITTED source (kept in lockstep by
+          # scripts/sync-client-version.sh + the pre-commit hook, CIRISServer#272).
+          # CI VERIFIES, never mutates — mutating source here recompiled the whole
+          # Compose client every leg and defeated the gradle cache warm->tag.
+          ../scripts/sync-client-version.sh --check
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
@@ -453,6 +487,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -471,6 +506,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
         with:
@@ -600,6 +636,7 @@ jobs:
             echo "key-edge=${KEY_EDGE}"
             echo "key=${KEY_SERVER}"
             echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"  # CIRISServer#99 rolling substrate-head: newest prior build for this PLAT+rustc — restored ONLY on a full substrate-pin miss so a version bump recompiles the DELTA, not cold
           } >> "$GITHUB_OUTPUT"
           echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
           echo "::notice::${KEY_VERIFY}"
@@ -618,6 +655,7 @@ jobs:
             ${{ steps.cachekey.outputs.key-edge }}
             ${{ steps.cachekey.outputs.key-persist }}
             ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
