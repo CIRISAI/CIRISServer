@@ -1044,6 +1044,26 @@ mod python {
         Ok(count as u64)
     }
 
+    /// In-process accessor for the first-run ownership claim PIN (CIRISServer#277).
+    ///
+    /// On the agent-embedded (fold) topology the embedding process IS the console:
+    /// it launched the node in-process via `serve_with_python_adapter`, so it is
+    /// the party the console-only claim PIN is minted for. But on Android the
+    /// banner may never become observable bytes (0-byte rust file sink at compose;
+    /// nothing in logcat or `<home>/logs/*`), so log-scrape capture is unreliable.
+    /// `compose` stashes the PIN in memory the instant it is minted; this returns
+    /// it directly — deterministic capture with no wire exposure.
+    ///
+    /// Returns the PIN string on a fresh, UNCLAIMED first-run, or `None` once the
+    /// node has a ROOT owner (no PIN minted) — or if called before compose has
+    /// minted it (the host should poll). Non-consuming: safe to call repeatedly
+    /// and to retry the claim; the value lives only for this process.
+    #[pyfunction]
+    #[pyo3(name = "first_run_claim_pin")]
+    fn py_first_run_claim_pin() -> Option<String> {
+        crate::auth::bootstrap::first_run_claim_pin()
+    }
+
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
     // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
     // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
@@ -1119,6 +1139,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
+        m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +
