@@ -2462,6 +2462,13 @@ async fn build_edge(
         local_epoch: 0,
         interfaces: vec![],
         enable_transport: transport_node,
+        // CIRISEdge#363: 30s bootstrap link keepalive (60s stale = 2× the
+        // anti-entropy cadence) so an advisory-admitted link survives long enough
+        // to exchange the Key + IdentityOccurrence planes that promote a peer to a
+        // KEX'd delivery target — the first-mobile-trace delivery fix. (Clamped
+        // into leviculum's valid band edge-side; an override can't escape the
+        // DoS bound.)
+        link_keepalive: Some(std::time::Duration::from_secs(30)),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The

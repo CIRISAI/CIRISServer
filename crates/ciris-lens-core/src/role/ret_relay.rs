@@ -140,6 +140,9 @@ impl LensCore {
             // composition-root choice (CIRISServer build_edge), not a default
             // every lens relay inherits.
             enable_transport: false,
+            // CIRISEdge#363: 30s bootstrap link keepalive so links survive the
+            // Key/IdentityOccurrence anti-entropy exchange (clamped edge-side).
+            link_keepalive: Some(std::time::Duration::from_secs(30)),
         };
 
         // Auth bundle — wire the federation signer into the authenticated
