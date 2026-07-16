@@ -532,7 +532,7 @@ pub(crate) fn sync_file_layer<S>(
         S,
         tracing_subscriber::fmt::format::DefaultFields,
         tracing_subscriber::fmt::format::Format,
-        tracing_appender::rolling::RollingFileAppender,
+        SyncDailyMakeWriter,
     >,
 >
 where
@@ -568,15 +568,51 @@ where
         }
     }
     eprintln!(
-        "ciris-server: logging to {}/ciris-server.log (synchronous appender)",
+        "ciris-server: logging to {}/ciris-server.log (per-event append writer)",
         dir.display()
     );
-    let appender = tracing_appender::rolling::daily(dir, "ciris-server.log");
     Some(
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .with_writer(appender),
+            .with_writer(SyncDailyMakeWriter {
+                dir: dir.to_path_buf(),
+            }),
     )
+}
+
+/// Per-event append writer for the `<dir>/ciris-server.log.<utc-date>` sink
+/// (CIRISServer#279 ask 1, part 2). The field showed the install-race fix alone
+/// wasn't enough: with the layer LIVE (`file_layer_attached=true`) the write
+/// itself still failed on Android (`first_write_ok=false`) — while the `.boot`
+/// probe, a plain `OpenOptions::append` + `writeln`, always lands. So the sink
+/// now uses EXACTLY that proven primitive: every event opens the dated file
+/// append-mode, writes, and closes. No held FD across the Chaquopy lifecycle,
+/// no roll state, no worker thread — daily rolling falls out of the filename.
+/// Open cost is microseconds and the node's log volume is modest; correctness
+/// on the fold beats throughput here. Filename matches the first-write probe
+/// (both derive the date via chrono UTC).
+struct SyncDailyMakeWriter {
+    dir: std::path::PathBuf,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SyncDailyMakeWriter {
+    type Writer = Box<dyn std::io::Write>;
+    fn make_writer(&'a self) -> Self::Writer {
+        let dated = self.dir.join(format!(
+            "ciris-server.log.{}",
+            chrono::Utc::now().format("%Y-%m-%d")
+        ));
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dated)
+        {
+            Ok(f) => Box::new(f),
+            // Never panic the fmt layer: an unwritable event degrades to /dev/null
+            // (the init-time probe + first_write_ok already report the condition).
+            Err(_) => Box::new(std::io::sink()),
+        }
+    }
 }
 
 /// Result of a tracing init/reattach attempt — the host-visible verdict on

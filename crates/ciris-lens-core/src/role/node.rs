@@ -893,14 +893,19 @@ impl LensCore {
         };
         let router = extra.merge(build_read_router(state));
         let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
+        // Bind SYNCHRONOUSLY, before spawning the accept loop (CIRISServer#279).
+        // The old shape bound inside the spawned task and swallowed the error
+        // into a log line — the caller got a "successful" handle with NO
+        // listener behind it, and on a platform where that log line never
+        // became bytes the node ran forever with the read API silently absent.
+        // Now a bind failure is the CALLER's error (compose fails loudly with
+        // the real reason, e.g. AddrInUse), and a returned handle GUARANTEES
+        // the port is bound — the kernel accepts connections from this line on
+        // even before the accept loop polls.
+        let listener = tokio::net::TcpListener::bind(listen_addr)
+            .await
+            .map_err(|e| NodeError::Http(format!("bind {listen_addr}: {e}")))?;
         let http_join = tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(listen_addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(%e, %listen_addr, "lens read API listener bind failed");
-                    return;
-                }
-            };
             tracing::info!(%listen_addr, "lens read API listening");
             // Attach per-connection peer info so downstream routers can extract
             // `ConnectInfo<SocketAddr>` (used by ciris-server's loopback guard to
