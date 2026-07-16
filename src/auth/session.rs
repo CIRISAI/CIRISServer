@@ -71,7 +71,8 @@ const PBKDF2_ITERATIONS: u32 = 100_000;
 pub fn hash_password(password: &str) -> String {
     use base64::Engine as _;
     let mut salt = [0u8; PBKDF2_SALT_LEN];
-    let _ = getrandom::fill(&mut salt);
+    // Fail-secure CSPRNG (CIRISServer#283 finding 2): never a zero salt.
+    ciris_crypto::random::fill(&mut salt).expect("CSPRNG for PBKDF2 salt");
     let mut key = [0u8; PBKDF2_KEY_LEN];
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, PBKDF2_ITERATIONS, &mut key);
     let mut blob = Vec::with_capacity(PBKDF2_SALT_LEN + PBKDF2_KEY_LEN);
@@ -131,7 +132,7 @@ struct LoginResponse {
 fn issue_session_token(wa_id: &str) -> String {
     use base64::Engine as _;
     let mut raw = [0u8; 24];
-    let _ = getrandom::fill(&mut raw);
+    ciris_crypto::random::fill(&mut raw).expect("CSPRNG for session token");
     let r = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
     format!("sess:{wa_id}:{r}")
 }
@@ -378,7 +379,7 @@ pub(crate) fn now_unix() -> u64 {
 pub fn register_delegated_grant(grant: DelegatedGrant) -> String {
     use base64::Engine as _;
     let mut raw = [0u8; 24];
-    let _ = getrandom::fill(&mut raw);
+    ciris_crypto::random::fill(&mut raw).expect("CSPRNG for delegated-grant token");
     let r = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
     let token = format!("{DELEGATED_TOKEN_PREFIX}{r}");
     DELEGATED_GRANTS

@@ -80,11 +80,20 @@ class HybridFederationSigner(
     private val base64: (ByteArray) -> String,
 ) : FederationSigner {
     override suspend fun signHeaders(body: ByteArray): Map<String, String> {
+        // Crypto-DRY (CIRISServer#283 finding 1): the hybrid BOUND rule is
+        // `ml_dsa_65 = sign(body ‖ ed25519_sig)`, NOT sign(body). Verify's
+        // `ciris_crypto::hybrid` rebuilds `data ‖ classical_sig` and persist's
+        // `HybridPolicy::Strict` rejects a PQC signature over the raw body — so
+        // the ed25519 half MUST be captured and folded into the PQC preimage.
+        val ed25519Sig = signEd25519(body)
         val headers = mutableMapOf(
             FederationSigner.HEADER_KEY_ID to keyId,
-            FederationSigner.HEADER_ED25519 to base64(signEd25519(body)),
+            FederationSigner.HEADER_ED25519 to base64(ed25519Sig),
         )
-        signMlDsa65?.let { headers[FederationSigner.HEADER_ML_DSA_65] = base64(it(body)) }
+        signMlDsa65?.let {
+            val bound = body + ed25519Sig
+            headers[FederationSigner.HEADER_ML_DSA_65] = base64(it(bound))
+        }
         return headers
     }
 }

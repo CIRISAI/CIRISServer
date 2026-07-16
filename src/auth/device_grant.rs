@@ -207,7 +207,7 @@ const USER_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// A human-typeable `XXXX-XXXX` user code from unambiguous chars.
 fn gen_user_code() -> String {
     let mut raw = [0u8; 8];
-    let _ = getrandom::fill(&mut raw);
+    ciris_crypto::random::fill(&mut raw).expect("CSPRNG for device/user code");
     let mut s = String::with_capacity(9);
     for (i, b) in raw.iter().enumerate() {
         if i == 4 {
@@ -222,7 +222,7 @@ fn gen_user_code() -> String {
 fn gen_device_code() -> String {
     use base64::Engine as _;
     let mut raw = [0u8; 32];
-    let _ = getrandom::fill(&mut raw);
+    ciris_crypto::random::fill(&mut raw).expect("CSPRNG for device/user code");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
 }
 

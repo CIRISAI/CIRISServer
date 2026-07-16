@@ -332,7 +332,8 @@ fn open_software_ed25519_signer(
         })?
     } else {
         let mut s = [0u8; 32];
-        getrandom::fill(&mut s).map_err(|e| anyhow::anyhow!("mint user ed25519 seed: {e}"))?;
+        ciris_crypto::random::fill(&mut s)
+            .map_err(|e| anyhow::anyhow!("mint user ed25519 seed: {e}"))?;
         std::fs::write(&seed_path, s).with_context(|| format!("write {}", seed_path.display()))?;
         #[cfg(unix)]
         {
@@ -601,8 +602,10 @@ pub async fn mint_portable_software_occurrence(
     // Generate both 32-byte seeds.
     let mut ed_seed = [0u8; 32];
     let mut ml_seed = [0u8; 32];
-    getrandom::fill(&mut ed_seed).map_err(|e| anyhow::anyhow!("mint ed25519 seed: {e}"))?;
-    getrandom::fill(&mut ml_seed).map_err(|e| anyhow::anyhow!("mint ml-dsa-65 seed: {e}"))?;
+    ciris_crypto::random::fill(&mut ed_seed)
+        .map_err(|e| anyhow::anyhow!("mint ed25519 seed: {e}"))?;
+    ciris_crypto::random::fill(&mut ml_seed)
+        .map_err(|e| anyhow::anyhow!("mint ml-dsa-65 seed: {e}"))?;
 
     let ed = Ed25519Signer::from_seed(&ed_seed)
         .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;

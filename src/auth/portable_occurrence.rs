@@ -488,7 +488,7 @@ fn slug(label: &str) -> String {
 /// copies minted under the same label/owner don't collide on one USB.
 fn short_unique() -> String {
     let mut b = [0u8; 6];
-    let _ = getrandom::fill(&mut b);
+    ciris_crypto::random::fill(&mut b).expect("CSPRNG for occurrence suffix");
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 

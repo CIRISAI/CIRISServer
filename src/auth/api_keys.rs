@@ -98,7 +98,8 @@ struct CreateApiKeyResponse {
 fn mint_api_key() -> (String, String) {
     use base64::Engine as _;
     let mut raw = [0u8; 32];
-    let _ = getrandom::fill(&mut raw);
+    // Fail-secure CSPRNG (CIRISServer#283 finding 2): never a predictable key.
+    ciris_crypto::random::fill(&mut raw).expect("CSPRNG for API-key secret");
     let secret = format!(
         "ak_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)

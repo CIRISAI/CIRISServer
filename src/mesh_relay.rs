@@ -160,7 +160,8 @@ impl ControlEnvelope {
         body: serde_json::Value,
     ) -> ControlEnvelope {
         let mut nonce = [0u8; 16];
-        let _ = getrandom::fill(&mut nonce);
+        // Fail-secure CSPRNG (CIRISServer#283 finding 2): never a zero nonce.
+        ciris_crypto::random::fill(&mut nonce).expect("CSPRNG for control-envelope nonce");
         ControlEnvelope {
             v: 1,
             target_key_id: target_key_id.to_owned(),

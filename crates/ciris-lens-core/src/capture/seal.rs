@@ -284,12 +284,8 @@ pub fn apply_hybrid_signature(
 /// the same fail-closed shape as CIRISAgent's `verify_trace`. This is
 /// the federation-verifier algorithm; a trace lens-core seals must pass
 /// it under the producer's public key.
-pub fn verify_trace_signature(
-    trace: &CompleteTrace,
-    verifying_key: &ed25519_dalek::VerifyingKey,
-) -> bool {
+pub fn verify_trace_signature(trace: &CompleteTrace, verifying_key: &[u8; 32]) -> bool {
     use base64::Engine as _;
-    use ed25519_dalek::Verifier;
 
     let Some(sig_b64) = &trace.signature else {
         return false;
@@ -305,14 +301,16 @@ pub fn verify_trace_signature(
     else {
         return false;
     };
-    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_raw.as_slice()) else {
-        return false;
-    };
-    let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
     let Ok(message) = canonical_bytes(trace) else {
         return false;
     };
-    verifying_key.verify(&message, &signature).is_ok()
+    // Crypto-DRY (CIRISServer#283 finding 5): route through the one Ed25519
+    // acceptance facade instead of a direct ed25519-dalek dep. `verify_strict`
+    // matches persist's trace-verify floor (RFC 8032 strict; rejects torsion
+    // components) and parses/length-checks the raw key + signature internally.
+    ciris_crypto::Ed25519Verifier::new()
+        .verify_strict(verifying_key, &message, &sig_raw)
+        .unwrap_or(false)
 }
 
 /// Error sealing (signing) a trace.
@@ -576,7 +574,7 @@ mod tests {
         // passes — exactly CIRISAgent's sign_trace/verify_trace pair.
         use ed25519_dalek::{Signer, SigningKey};
         let sk = SigningKey::from_bytes(&[7u8; 32]); // deterministic, no rng
-        let vk = sk.verifying_key();
+        let vk = sk.verifying_key().to_bytes();
 
         let mut t = sealed_trace();
         let msg = canonical_bytes(&t).expect("canonicalize");
@@ -596,7 +594,7 @@ mod tests {
         // that's the whole point of binding provenance into the bytes.
         use ed25519_dalek::{Signer, SigningKey};
         let sk = SigningKey::from_bytes(&[9u8; 32]);
-        let vk = sk.verifying_key();
+        let vk = sk.verifying_key().to_bytes();
 
         let mut t = sealed_trace();
         let sig = sk.sign(&canonical_bytes(&t).unwrap());
@@ -614,7 +612,9 @@ mod tests {
         assert!(!verify_trace_signature(&tampered2, &vk));
 
         // Wrong key fails too.
-        let other = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let other = SigningKey::from_bytes(&[1u8; 32])
+            .verifying_key()
+            .to_bytes();
         assert!(!verify_trace_signature(&t, &other));
     }
 
@@ -628,7 +628,7 @@ mod tests {
         use ed25519_dalek::SigningKey;
 
         let sk = SigningKey::from_bytes(&[42u8; 32]);
-        let vk = sk.verifying_key();
+        let vk = sk.verifying_key().to_bytes();
         // from_parts: in-memory test signer over the same Ed25519 key
         // (no seed file, no PQC — traces are Ed25519-only).
         let signer = LocalSigner::from_parts(sk, "host-unified-key".into(), None, None);
@@ -651,7 +651,9 @@ mod tests {
     #[test]
     fn verify_fails_closed_on_missing_or_garbled_signature() {
         use ed25519_dalek::SigningKey;
-        let vk = SigningKey::from_bytes(&[3u8; 32]).verifying_key();
+        let vk = SigningKey::from_bytes(&[3u8; 32])
+            .verifying_key()
+            .to_bytes();
         let mut t = sealed_trace();
         // No signature → false (not a panic).
         assert!(!verify_trace_signature(&t, &vk));
@@ -872,7 +874,7 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
 
         let sk = SigningKey::from_bytes(&[11u8; 32]);
-        let vk = sk.verifying_key();
+        let vk = sk.verifying_key().to_bytes();
 
         let mut t = sealed_trace(); // TRACE_SCHEMA_VERSION = "3.0.0" after the flip
         assert_eq!(
