@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-lens-core"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "async-trait",

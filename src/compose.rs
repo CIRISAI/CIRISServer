@@ -620,9 +620,28 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    time from the conventional user-seed path; see `resolve_user_signer`. ─────
 
     crate::compose_status::phase("read_api_bind");
-    // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
-    //    when the host meets the lens-store minimum. ───────────────────────────
-    let read = if caps.lens_store {
+    // ── Lens read API (the 7 frozen endpoints) + the FULL fabric surface over
+    //    the shared Engine. ALWAYS served (CIRISServer#279): this one listener
+    //    also carries /v1/identity, auth, setup/claim, config, ingest — the
+    //    node's entire HTTP interface. It was previously gated on
+    //    `caps.lens_store` (free disk ≥ 5 GiB), which was meant to protect the
+    //    GROWING lens corpus — but on a low-disk host (a stock Android emulator
+    //    has ~2-4 GiB free) the gate silently produced a node with NO port 4243
+    //    at all: no bind, no error, no panic — the embedded app could never
+    //    claim/login, and the only witness was one INFO line on a dark sink.
+    //    The read surface is read-only and corpus-safe; the corpus-GROWTH tiers
+    //    (scorer, holonomic swarm, replication) stay gated on `caps.lens_store`
+    //    below. ──────────────────────────────────────────────────────────────
+    if !caps.lens_store {
+        tracing::warn!(
+            disk_free_gib = caps.disk_free_gib(),
+            min_gib = cfg.lens_store_min_gib,
+            "lens-store capability OFF (low disk) — corpus-growth tiers (scorer/\
+             holonomic/replication) disabled, but the read API + fabric surface \
+             still serve on the read-API port [#279]"
+        );
+    }
+    let read = {
         let read = LensCore::read_api_with_extra(
             Arc::clone(&engine),
             cfg.read_api_addr(),
@@ -990,9 +1009,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .await
         .context("start read API")?;
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
+        // #279: the listener is now guaranteed BOUND here (lens-core binds
+        // synchronously before spawning the accept loop and a bind failure is
+        // the `?` above). Stamp the milestone so compose_status distinguishes
+        // "binding" from "bound and serving".
+        crate::compose_status::phase("read_api_serving");
         Some(read)
-    } else {
-        None
     };
 
     // ── Capacity scorer — the score→emit pipeline (periodic, NOT in the ingest
