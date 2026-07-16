@@ -1,0 +1,30 @@
+# CIRISEdge#353 overlay — the NAT'd initiator-only agent scenario.
+#
+# Layer ON TOP of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.353.yml -p ciris-mesh-repro up --build
+# (run_353.sh does this.) It flips the agent into the #353 topology:
+#   * CIRIS_HARNESS_NAT353=true  → agent_boot installs the iptables NAT-sim
+#     (silently DROP NEW inbound to its edge port = initiator-only) AND starts
+#     the busy-link generator (real trace resource-transfers saturating the
+#     link so the canonical's round replies collide "resource transfer already
+#     in progress").
+#   * cap_add NET_ADMIN + run as root → iptables is allowed inside the netns
+#     (the base image runs uid 1000; this role needs root for iptables only,
+#     scoped to the agent container's own network namespace — no host reach).
+#
+# The canonical is unchanged: it roots, KEXes, runs its 15s anti-entropy round,
+# and its reply to the NAT'd agent is what we watch fail-over and time out.
+
+services:
+  agent:
+    user: "0:0"                 # root — for iptables in this netns only
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CIRIS_HARNESS_NAT353: "true"
+      # Tunables (defaults in agent_boot): fat traces stretch each resource
+      # transfer so the 15s-cadence canonical reply lands mid-transfer.
+      CIRIS_HARNESS_NAT353_PAD_KB: "${NAT353_PAD_KB:-256}"
+      CIRIS_HARNESS_NAT353_PERIOD_S: "${NAT353_PERIOD_S:-4}"
+      # See the reverse-path/fallback/timeout decisions in the edge logs.
+      RUST_LOG: "info,ciris_edge=debug,reticulum_core=debug"
