@@ -78,8 +78,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Before anything else: refuse to boot if a 2-of-3 CONSTITUTIONAL halt latch
     // exists. "Not a recoverable pause" — only a manual removal of the latch (the
     // human act a valid accord:lifecycle:active re-activation authorizes) clears it.
+    crate::compose_status::phase("halt_gate");
     crate::accord_halt::check_halt_gate(&cfg.home)?;
 
+    crate::compose_status::phase("capabilities");
     let caps = Capabilities::detect(&cfg);
     tracing::info!(
         disk_free_gib = caps.disk_free_gib(),
@@ -95,13 +97,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    (no re-key on takeover). Shared by the persist Engine AND the edge
     //    transport signer => ONE federation identity, hardware-custodied
     //    (MISSION §1.5). Software-encrypted fallback when no hardware. ──────────
+    crate::compose_status::phase("federation_signer");
     let signer: Arc<dyn HardwareSigner> = Arc::from(federation_signer(&cfg)?);
 
     // ── The post-quantum half (ML-DSA-65) → the federation signature is a FULL
     //    HYBRID (Ed25519 + ML-DSA-65). Classical is hardware-sealed; PQC is a
     //    software seed (no sealed-ML-DSA backend exists). ───────────────────────
+    crate::compose_status::phase("pqc_signer");
     let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(&cfg)?;
 
+    crate::compose_status::phase("engine");
     // ── ONE shared persist Engine (hybrid hardware signer — hard cut) ─────────
     // build_engine + the federation/pqc/user signers above all key their KEYSTORE
     // blobs off `cfg.keystore_alias` (the RAW --key-id label) — so they MUST run
@@ -132,6 +137,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         None => build_engine(&cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?,
     };
 
+    crate::compose_status::phase("key_id_derivation");
     // ── Derive the FSD-003 fingerprinted federation key_id (CIRISServer#27) ────
     // `cfg.key_id` started as the BARE label (== keystore_alias). Replace it with
     // the WIRE/DIRECTORY identity `derive_key_id(label, ed25519_pubkey)` =
@@ -164,6 +170,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         cfg: cfg.clone(),
     };
 
+    crate::compose_status::phase("self_register_key");
     // ── Self-register Node A's own signing key in the federation directory ────
     // Required BEFORE any attestation Node A authors will be admitted:
     // `put_attestation` enforces that BOTH the attesting and attested keys exist
@@ -183,6 +190,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     #[cfg(feature = "test-anchor")]
     crate::test_bless::maybe_test_bless_self(&engine, &cfg).await?;
 
+    crate::compose_status::phase("substrate_identity");
     // ── The node-scoped `substrate_persist` producer identity (CIRISServer#181) ─
     // A SEPARATE hybrid key (identity_type = substrate_persist) the node uses to
     // author substrate-RESERVED rows — today the CC 4.5.13 `content_class:*`
@@ -213,6 +221,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Idempotent, version-safe, fail-secure (a projection error only logs).
     crate::memory_api::seed_ceg_graph(&engine, &cfg.key_id).await;
 
+    crate::compose_status::phase("config_resolution");
     // ── CONFIG-AS-CEG resolution (Server 0.5 Phase 2) ─────────────────────────
     // Resolve the migrated runtime-tunable knobs from the corpus's signed
     // `config:*` objects (baked default per absent key) into the initial snapshot,
@@ -267,6 +276,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     let (config_tx, config_rx) = watch::channel(initial_config.clone());
 
+    crate::compose_status::phase("root_bootstrap");
     // ── ROOT-user bootstrap (CIRISServer#19) ──────────────────────────────────
     // Server 0.5 (zero env): a fresh node has NO baked root — it trusts
     // ciris-canonical (per the constitution) and the FOUNDER claims ROOT via the
@@ -308,6 +318,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
 
+    crate::compose_status::phase("claim_pin");
     // ── One-time CLAIM PIN — the operator-presence secret for the first-run
     //    ownership claim (CIRISServer first-run-PIN). On a FRESH, UNCLAIMED boot
     //    (no ROOT WaCert, no seed → BootstrapOutcome::NoSeedAvailable) mint a
@@ -353,6 +364,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             None
         };
 
+    crate::compose_status::phase("edge_runtime");
     // ── ONE shared Reticulum edge runtime — the node's single federation
     //    transport identity. From here the node IS a Reticulum node. ───────────
     // Edge transport flags are boot-structural: built ONCE from the resolved
@@ -385,6 +397,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         )
     };
 
+    crate::compose_status::phase("edge_slices");
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
         // Observation slice: ingest handler on the shared Edge.
@@ -412,6 +425,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .await
         .context("assemble /v1/identity aggregate")?;
 
+    crate::compose_status::phase("transport_binding");
     // ── Self-publish this node's reticulum transport-tier binding ─────────────
     // (dest_hash + transport-tier Ed25519) into the federation directory, so a
     // peer can `prime_peer`-root this node even though a v7.0.0 explicit-hash
@@ -432,6 +446,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // idempotent (last-signed-wins re-assert each boot); the agent does nothing.
     publish_self_identity_occurrence(&engine, &edge, &cfg).await;
 
+    crate::compose_status::phase("peering");
     // ── Directed-consent federation peering with Node B (ciris-status) ────────
     // Bidirectional replication A<->B is authorized by DIRECTED CONSENT
     // ATTESTATIONS (federation scope) + MUTUAL KEY REGISTRATION — NOT in-group
@@ -483,6 +498,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // guard that turns any future recurrence into a loud immediate error.
     prime_canonical_bootstrap_peers(&engine, &edge).await;
 
+    crate::compose_status::phase("holonomic");
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
     // The publisher advertises the fountain content THIS node holds as signed
     // FountainHoldingClaim envelopes to the consent cohort; the converger acts
@@ -548,6 +564,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&mesh_responder),
     );
 
+    crate::compose_status::phase("edge_run");
     // ── Run the one shared Edge (a single Reticulum transport per node) ───────
     // CIRISServer#221: in the fold the embedded edge is ALREADY `run()`ing (the
     // agent spawned it from init_edge_runtime) — spawning a second run loop on the
@@ -563,6 +580,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         ))
     };
 
+    crate::compose_status::phase("replication_loop");
     // ── The CEG-driven replication reconcile loop ─────────────────────────────
     // Converges the live ReplicationRuntime to the corpus's consent:replication
     // objects (the desired topology). Driven by a cadence tick
@@ -580,6 +598,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         )
     });
 
+    crate::compose_status::phase("config_reconcile_loop");
     // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
     // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
     // own cadence + the SAME `reconcile_notify` the config API fires after a write,
@@ -600,6 +619,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    DURING the first-run wizard). The claim-remote router resolves it at request
     //    time from the conventional user-seed path; see `resolve_user_signer`. ─────
 
+    crate::compose_status::phase("read_api_bind");
     // ── Lens read API (the 7 frozen endpoints) over the shared Engine — only
     //    when the host meets the lens-store minimum. ───────────────────────────
     let read = if caps.lens_store {
@@ -1012,6 +1032,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .await
         .context("adapter start()")?;
     let (adapter_sd_tx, adapter_sd_rx) = watch::channel(false);
+    crate::compose_status::phase("adapter_start");
     let adapter_join = tokio::spawn({
         let a = Arc::clone(&adapter);
         let ctx = adapter_ctx.clone();
@@ -1027,6 +1048,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         mode = %initial_config.mode,
         "CIRISServer up as a Reticulum node — ctrl-c to stop"
     );
+    crate::compose_status::complete();
     tokio::signal::ctrl_c().await.context("await ctrl_c")?;
 
     if let Some(read) = read {

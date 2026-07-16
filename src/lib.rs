@@ -83,6 +83,10 @@ mod compose;
 /// into typed, fail-closed verdicts. Public so `tests/compose_policy.rs` can
 /// drive the composition adversarially.
 pub mod compose_policy;
+/// Compose-phase boot progress + record-and-continue watchdog (CIRISServer#279)
+/// — the in-process channel that localizes an embedded-fold compose hang to a
+/// named phase. Read via the `ciris_server.compose_status()` PyO3 accessor.
+pub mod compose_status;
 /// Zero-setup node configuration (Server 0.5 — conventions + CLI, NO env). Public
 /// so the binary's flag parser can read the baked-default constants
 /// ([`config::DEFAULT_CIRIS_HOME`] / [`config::DEFAULT_KEY_ID`]).
@@ -575,30 +579,163 @@ where
     )
 }
 
-pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let file_layer = log_dir.and_then(sync_file_layer);
-    tracing_subscriber::registry()
+/// Result of a tracing init/reattach attempt — the host-visible verdict on
+/// whether rust diagnostics will actually become bytes (CIRISServer#279 ask 1).
+/// Surfaced to Python by `init_tracing` so the embedding agent can detect a
+/// dark file sink at t=0 instead of discovering it via a t+60s sentinel.
+#[derive(Debug, Clone)]
+pub struct TracingInitStatus {
+    /// This call installed the process's global subscriber (first-in wins).
+    pub fresh_subscriber: bool,
+    /// The `<log_dir>/ciris-server.log.<date>` file layer is LIVE — either
+    /// installed fresh or retrofitted onto our existing subscriber.
+    pub file_layer_attached: bool,
+    /// Verdict of the first-write probe THROUGH the tracing pipeline: a marker
+    /// event was emitted and the dated file verified non-empty. `None` when no
+    /// `log_dir` was requested.
+    pub first_write_ok: Option<bool>,
+    /// The dated log file the probe checked, when a `log_dir` was requested.
+    pub log_path: Option<String>,
+}
+
+/// The file sink slot, kept hot-swappable behind a `reload` handle so LATER
+/// init calls can retrofit/replace the file layer on the live subscriber.
+type ErasedFileLayer =
+    Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+static FILE_RELOAD: std::sync::OnceLock<
+    tracing_subscriber::reload::Handle<Option<ErasedFileLayer>, tracing_subscriber::Registry>,
+> = std::sync::OnceLock::new();
+
+/// Install the tracing subscriber, or RETROFIT the file sink onto the one this
+/// process already installed (CIRISServer#279 ask 1 — the dark-sink fix).
+///
+/// The old path attached the file layer only if its `try_init()` was the FIRST
+/// in the process, and `let _ =` swallowed the loss. On Android the agent's
+/// early bare `init_tracing()` (no log_dir; CIRISAgent#919) — or a subscriber
+/// surviving Chaquopy's process reuse across app relaunches — always won, so
+/// the later `init_tracing(log_dir=…)` was a silent no-op: `sync_file_layer`
+/// had already eagerly CREATED the dated file (tracing-appender opens at
+/// construction), which then stayed 0 bytes forever — the exact field
+/// signature. Compose ran with no observable byte channel.
+///
+/// Now the file sink lives behind a process-global `reload` handle: the first
+/// call through here installs `reload(file) → filter → fmt` and stows the
+/// handle; every later call `modify()`s the slot in place — bare-then-dir,
+/// re-serve, and process-reuse all end with a LIVE file sink. Only a FOREIGN
+/// subscriber (installed by something other than this fn) is unfixable, and
+/// that is now REPORTED in the returned status instead of swallowed.
+fn install_or_reattach_tracing(
+    log_dir: Option<&std::path::Path>,
+    filter: tracing_subscriber::EnvFilter,
+) -> TracingInitStatus {
+    use tracing_subscriber::{fmt, prelude::*};
+    let build_file_layer = |dir: Option<&std::path::Path>| -> Option<ErasedFileLayer> {
+        dir.and_then(|d| {
+            sync_file_layer::<tracing_subscriber::Registry>(d)
+                .map(|l| Box::new(l) as ErasedFileLayer)
+        })
+    };
+
+    // Our subscriber already live → hot-swap the file slot (the reattach path).
+    if let Some(handle) = FILE_RELOAD.get() {
+        let layer = build_file_layer(log_dir);
+        let built = layer.is_some();
+        let attached = built && handle.modify(|slot| *slot = layer).is_ok();
+        return probe_first_write(false, attached, log_dir);
+    }
+
+    let layer = build_file_layer(log_dir);
+    let built = layer.is_some();
+    let (reload_layer, handle) = tracing_subscriber::reload::Layer::new(layer);
+    let fresh = tracing_subscriber::registry()
+        // reload(file) sits closest to the Registry so the handle's type is
+        // nameable; the EnvFilter above it still gates ALL layers globally.
+        .with(reload_layer)
         .with(filter)
         .with(fmt::layer()) // stdout/console
-        .with(file_layer) // file sink (Option<Layer> is a no-op when None)
+        // CIRISServer#264 — MUST NOT panic when a subscriber is already set:
+        // `.init()`'s panic crossed pyo3 as PanicException and killed
+        // `serve_with_python_adapter` silently. try_init + explicit handling.
         .try_init()
-        // CIRISServer#264 — MUST NOT panic when a subscriber is already set. In a
-        // Python-embedded process the agent may have called
-        // `ciris_server.init_tracing()` first (CIRISAgent#919), and an in-process
-        // node restart re-enters this fn; `.init()` panicked, the panic crossed
-        // pyo3 as PanicException (a BaseException the fold's `except Exception`
-        // never catches), and `serve_with_python_adapter` died SILENTLY before
-        // its first log line — the deterministic configured-home fold hang. The
-        // cost of falling through: log output keeps flowing to the FIRST
-        // subscriber (stdout) instead of gaining the <home>/logs file sink.
-        .unwrap_or_else(|_| {
-            eprintln!(
-                "ciris-server: tracing subscriber already installed — keeping it \
-                 (file sink to <home>/logs not attached this call)"
-            );
-        });
+        .is_ok();
+    if fresh {
+        let _ = FILE_RELOAD.set(handle);
+        return probe_first_write(true, built, log_dir);
+    }
+    // Lost the install race. If OUR handle appeared meanwhile (two threads of
+    // this fn racing), retrofit through it; otherwise a FOREIGN subscriber owns
+    // the process and no file sink is attachable — say so, loudly and in the
+    // returned status (#279: never swallow this again).
+    if let Some(handle) = FILE_RELOAD.get() {
+        let layer = build_file_layer(log_dir);
+        let built = layer.is_some();
+        let attached = built && handle.modify(|slot| *slot = layer).is_ok();
+        return probe_first_write(false, attached, log_dir);
+    }
+    eprintln!(
+        "ciris-server: a FOREIGN tracing subscriber is already installed — file sink \
+         to <home>/logs NOT attachable (rust diagnostics may be dark) [#279]"
+    );
+    probe_first_write(false, false, log_dir)
+}
+
+/// Emit a marker event through the pipeline and verify the dated file grew —
+/// the "one compose line = one-line RCA" guarantee, checked at init time.
+fn probe_first_write(
+    fresh: bool,
+    attached: bool,
+    log_dir: Option<&std::path::Path>,
+) -> TracingInitStatus {
+    let (first_write_ok, log_path) = match log_dir {
+        None => (None, None),
+        Some(dir) => {
+            let dated = dir.join(format!(
+                "ciris-server.log.{}",
+                chrono::Utc::now().format("%Y-%m-%d")
+            ));
+            let path = dated.display().to_string();
+            let ok = if attached {
+                tracing::info!(
+                    target: "ciris_server::boot",
+                    fresh_subscriber = fresh,
+                    "tracing file sink online (first-write probe) [#279]"
+                );
+                std::fs::metadata(&dated)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            (Some(ok), Some(path))
+        }
+    };
+    let status = TracingInitStatus {
+        fresh_subscriber: fresh,
+        file_layer_attached: attached,
+        first_write_ok,
+        log_path,
+    };
+    if log_dir.is_some() && status.first_write_ok != Some(true) {
+        eprintln!(
+            "ciris-server: WARN file sink verdict: attached={} first_write_ok={:?} — \
+             rust file diagnostics are DARK this boot [#279]",
+            status.file_layer_attached, status.first_write_ok
+        );
+    }
+    status
+}
+
+pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
+    let _ = init_tracing_with_status(log_dir);
+}
+
+/// [`init_tracing_with`] returning the [`TracingInitStatus`] verdict — the
+/// entry the Python binding and tests use to assert the file sink is LIVE
+/// (attached + first-write-verified) rather than trusting a silent init.
+pub fn init_tracing_with_status(log_dir: Option<&std::path::Path>) -> TracingInitStatus {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    install_or_reattach_tracing(log_dir, filter)
 }
 
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
@@ -1010,22 +1147,33 @@ mod python {
     /// explicit arg beats the env round-trip. Both optional; bare call unchanged.
     #[pyfunction]
     #[pyo3(name = "init_tracing", signature = (log_dir=None, filter=None))]
-    fn py_init_tracing(log_dir: Option<String>, filter: Option<String>) {
-        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    fn py_init_tracing(
+        py: Python<'_>,
+        log_dir: Option<String>,
+        filter: Option<String>,
+    ) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+        use tracing_subscriber::EnvFilter;
         let filter = filter
             .map(EnvFilter::new)
             .or_else(|| EnvFilter::try_from_default_env().ok())
             .unwrap_or_else(|| EnvFilter::new("info"));
         install_panic_capture();
-        let file_layer = log_dir.and_then(|dir| {
-            let dir = std::path::PathBuf::from(dir);
-            crate::sync_file_layer(&dir)
-        });
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer())
-            .with(file_layer)
-            .try_init();
+        // #279 ask 1: route through the reload-handle installer, so a LATER call
+        // with a log_dir retrofits the file sink onto the live subscriber (the
+        // old try_init lost that race silently — the 0-byte dated log on every
+        // Android boot). Return the verdict so the host detects a dark sink at
+        // t=0: {"fresh_subscriber", "file_layer_attached", "first_write_ok",
+        // "log_path"}. Existing callers that ignore the return are unchanged.
+        let status = crate::install_or_reattach_tracing(
+            log_dir.map(std::path::PathBuf::from).as_deref(),
+            filter,
+        );
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("fresh_subscriber", status.fresh_subscriber)?;
+        d.set_item("file_layer_attached", status.file_layer_attached)?;
+        d.set_item("first_write_ok", status.first_write_ok)?;
+        d.set_item("log_path", status.log_path)?;
+        Ok(d.into())
     }
 
     #[pyfunction]
@@ -1062,6 +1210,22 @@ mod python {
     #[pyo3(name = "first_run_claim_pin")]
     fn py_first_run_claim_pin() -> Option<String> {
         crate::auth::bootstrap::first_run_claim_pin()
+    }
+
+    /// In-process compose-progress snapshot (CIRISServer#279). Returns a JSON
+    /// string: `{"completed": bool, "current": {"phase", "elapsed_s", "stuck",
+    /// "stuck_warnings"} | null, "history": [{"phase", "ms"}, ...]}`.
+    ///
+    /// On the embedded fold every byte-channel diagnostic can be dark (0-byte
+    /// tracing file sink at compose; rust `eprintln!` dropped under Chaquopy),
+    /// so when compose hangs — serve thread alive, 4243 never binds, no panic —
+    /// the host polls THIS: `current.phase` names the exact seam the boot is
+    /// wedged in, and `stuck` flips true after the watchdog threshold. Cheap,
+    /// callable from any thread, at any time (null `current` before serve).
+    #[pyfunction]
+    #[pyo3(name = "compose_status")]
+    fn py_compose_status() -> String {
+        crate::compose_status::snapshot_json()
     }
 
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
@@ -1140,6 +1304,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
+        m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +
