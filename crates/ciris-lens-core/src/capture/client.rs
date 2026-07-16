@@ -987,7 +987,7 @@ mod tests {
 
         assert_eq!(trace.signature_key_id.as_deref(), Some("hw-key-alias"));
         assert!(
-            seal::verify_trace_signature(&trace, &vk),
+            seal::verify_trace_signature(&trace, &vk.to_bytes()),
             "signature stamped by local signer must verify"
         );
     }

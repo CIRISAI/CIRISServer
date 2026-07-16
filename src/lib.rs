@@ -506,6 +506,19 @@ pub fn bench_results_json(
     .to_json()
 }
 
+/// Arm the RNG SP 800-90B startup health-check latch ONCE per process
+/// (CIRISServer#283 finding 2). Until this runs, `ciris_crypto::random::fill`'s
+/// fail-secure gate is inert (it only READS the latch). Idempotent across calls;
+/// the check itself draws entropy once. Called from `serve_with_adapter` (node
+/// boot) and the CLI entry so every secret-drawing path is gated.
+pub fn init_rng_health() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let verdict = ciris_crypto::rng_health::run_startup_health_check();
+        tracing::info!(?verdict, "RNG SP 800-90B startup health-check armed (#283)");
+    });
+}
+
 /// Initialize tracing — stdout ONLY. Kept for short-lived CLI subcommands that
 /// have no data root. Node serve paths use [`init_tracing_with`] so the node logs
 /// reliably to a file.

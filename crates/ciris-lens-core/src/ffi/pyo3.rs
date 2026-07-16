@@ -353,6 +353,11 @@ fn process_one<'py>(
     // Replicates LocalSigner::sign_hybrid's internal construction
     // so verify_hybrid_via_directory (invoked inside
     // engine.put_detection_event) recognizes it.
+    // CRYPTO-DRY (CIRISServer#283 finding 3): this hand-composition can only be
+    // retired once the Engine PyO3 boundary exposes a hybrid-sign verb —
+    // tracked as CIRISPersist#470. The Engine here is a Python object exposing
+    // only `local_sign`/`local_pqc_sign` (the raw halves), so until #470 lands
+    // this is the one remaining site that must mirror the binding rule.
     let mut bound_msg = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
     bound_msg.extend_from_slice(&prepared.canonical_bytes);
     bound_msg.extend_from_slice(&ed25519_sig);

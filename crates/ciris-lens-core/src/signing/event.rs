@@ -28,11 +28,10 @@
 //! ```
 //!
 //! This is what `ciris_persist::prelude::verify_hybrid_via_directory`
-//! verifies under `HybridPolicy::Strict`. We manually compose the
-//! same primitive here rather than calling `sign_hybrid` so the
-//! function doesn't need to deconstruct the
-//! `ciris_crypto::HybridSignature` struct (which would force a
-//! direct dep on `ciris_crypto`).
+//! verifies under `HybridPolicy::Strict`. `sign_detection` (the RLib
+//! path) calls `LocalSigner::sign_hybrid` directly and reads the two
+//! halves off the returned `HybridSignature` — the crypto-DRY fix
+//! (CIRISServer#283 finding 3) that retires the hand-composed binding.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -343,11 +342,16 @@ pub async fn sign_detection(
 ) -> Result<(DetectionEvent, Summary), SigningError> {
     let prepared = prepare_detection(&inputs, signer.key_id())?;
 
-    let ed25519_sig = signer.sign_ed25519(&prepared.canonical_bytes)?;
-    let mut bound = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
-    bound.extend_from_slice(&prepared.canonical_bytes);
-    bound.extend_from_slice(&ed25519_sig);
-    let ml_dsa_65_sig = signer.sign_ml_dsa_65(&bound).await?;
+    // Crypto-DRY (CIRISServer#283 finding 3): call the ONE hybrid composer
+    // (`LocalSigner::sign_hybrid`) instead of re-deriving `canonical ‖
+    // ed25519_sig` here. It owns the binding rule persist's
+    // `verify_hybrid_via_directory` checks under `HybridPolicy::Strict`, so the
+    // two can no longer drift. (The PyO3-boundary sibling in `ffi/pyo3.rs` still
+    // hand-composes — blocked on CIRISPersist#470, an Engine `local_sign_hybrid`
+    // PyO3 verb.)
+    let hybrid = signer.sign_hybrid(&prepared.canonical_bytes).await?;
+    let ed25519_sig = hybrid.classical.signature;
+    let ml_dsa_65_sig = hybrid.pqc.signature;
 
     let signing_key_id = signer.key_id().to_string();
     assemble_event(

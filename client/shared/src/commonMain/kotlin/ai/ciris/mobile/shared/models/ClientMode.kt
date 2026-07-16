@@ -53,7 +53,7 @@ fun clientModeFrom(cognitiveState: String?, serviceCount: Int): ClientMode =
  * it recompiled the whole Compose client and defeated the desktop-JAR gradle
  * cache every leg (CIRISServer#272). Do not hand-edit — run the script.
  */
-const val CLIENT_VERSION = "0.5.122"
+const val CLIENT_VERSION = "0.5.123"
 
 /**
  * Whether [nodeVersion] differs materially from [CLIENT_VERSION] — i.e. a

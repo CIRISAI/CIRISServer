@@ -1144,9 +1144,14 @@ async fn hardware_sign_invocation(
 fn synth_invocation(kind: InvocationKind, invocation_id: &str, payload: &[u8]) -> Invocation {
     use base64::Engine as _;
     let mut nonce = [0u8; 32];
-    // Best-effort CSPRNG; a drill / notify is non-binding, so a fill fault (never
-    // observed on a supported target) degrades to a zero nonce rather than failing.
-    let _ = getrandom::fill(&mut nonce);
+    // CSPRNG via the fail-secure facade (CIRISServer#283 finding 2). This is ALSO
+    // the nonce for a RAISED CONSTITUTIONAL halt (initiate_halt), so a zero nonce
+    // is not acceptable — degrade CLOSED (panic) rather than emit a predictable
+    // kill-switch nonce. The RNG-health latch fault is never observed on a
+    // supported target; ciris_crypto::random::fill also refuses to draw if the
+    // SP 800-90B startup check has failed.
+    ciris_crypto::random::fill(&mut nonce)
+        .expect("CSPRNG for constitutional-halt/invocation nonce");
     let now = chrono::Utc::now();
     Invocation {
         invocation_kind: kind,

@@ -74,6 +74,14 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
+    // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
+    // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
+    // fail-secure gate is live: if the OS entropy source is producing detectably
+    // non-random output, every subsequent draw (nonces, keys, salts, seeds)
+    // degrades CLOSED instead of emitting predictable bytes. Idempotent; the
+    // check draws once here, never on the hot path.
+    crate::init_rng_health();
+
     // ── HUMANITY_ACCORD STARTUP GATE (CC 4.2.3) ───────────────────────────────
     // Before anything else: refuse to boot if a 2-of-3 CONSTITUTIONAL halt latch
     // exists. "Not a recoverable pause" — only a manual removal of the latch (the
@@ -1703,7 +1711,8 @@ pub(crate) fn federation_pqc_signer(cfg: &ServerConfig) -> Result<Arc<dyn PqcSig
     } else {
         // Mint a fresh 32-byte ML-DSA-65 seed on first boot.
         let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed).map_err(|e| anyhow::anyhow!("mint ML-DSA-65 seed: {e}"))?;
+        ciris_crypto::random::fill(&mut seed)
+            .map_err(|e| anyhow::anyhow!("mint ML-DSA-65 seed: {e}"))?;
         std::fs::write(&path, seed).with_context(|| format!("write {}", path.display()))?;
         #[cfg(unix)]
         {
@@ -1817,7 +1826,7 @@ pub(crate) async fn substrate_persist_signer(
             .map_err(|e| anyhow::anyhow!("adopt substrate ML-DSA-65 seed: {e}"))?
     } else {
         let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed)
+        ciris_crypto::random::fill(&mut seed)
             .map_err(|e| anyhow::anyhow!("mint substrate ML-DSA-65 seed: {e}"))?;
         std::fs::write(&pqc_path, seed).with_context(|| format!("write {}", pqc_path.display()))?;
         #[cfg(unix)]

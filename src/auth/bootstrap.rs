@@ -422,7 +422,7 @@ const CLAIM_PIN_LEN: usize = 8;
 /// zero modulo bias.
 pub fn generate_claim_pin() -> String {
     let mut bytes = [0u8; CLAIM_PIN_LEN];
-    getrandom::fill(&mut bytes).expect("OS CSPRNG (getrandom) for the one-time claim PIN");
+    ciris_crypto::random::fill(&mut bytes).expect("CSPRNG for the one-time claim PIN");
     let mut chars: Vec<char> = bytes
         .iter()
         .map(|b| CLAIM_PIN_ALPHABET[(b & 0x1F) as usize] as char)
