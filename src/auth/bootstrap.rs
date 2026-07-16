@@ -437,7 +437,53 @@ pub fn generate_claim_pin() -> String {
 /// secret). When `pin_file` is `Some`, ALSO writes the PIN to that path (`0600`)
 /// for headless ops (Server 0.5: the conventional `home/claim_pin` path, NOT an
 /// env). The PIN is NEVER served over HTTP.
+/// In-process, single-slot holder for the first-run claim PIN (CIRISServer#277).
+///
+/// On the **agent-embedded (fold) topology** — Android/Chaquopy — the embedding
+/// process IS the console: it launches the node in-process via
+/// `serve_with_python_adapter`, owns its home and stdout, and is precisely the
+/// party the operator-presence PIN is minted for. But the console-only banner may
+/// never become observable *bytes* on that topology (the rust daily file sink can
+/// be 0-byte at compose time, and the banner reaches neither logcat nor
+/// `<home>/logs/*`), so a log-scrape capture is unreliable. We therefore ALSO
+/// stash the freshly-minted PIN here, in memory, the instant it is announced.
+///
+/// This holder is **IN-PROCESS ONLY** — never serialized, never returned over any
+/// HTTP route, and gone when the process exits. It preserves the "PIN is never on
+/// the wire" security model: the only reader is the embedding host in the same
+/// address space, reached via the `first_run_claim_pin()` PyO3 accessor. The
+/// getter is a non-consuming peek (not one-shot) so the host can poll for it and
+/// retry the claim idempotently; the value simply dies with the process.
+static FIRST_RUN_CLAIM_PIN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Stash the just-minted first-run claim PIN for in-process retrieval by the
+/// embedding host (CIRISServer#277). Called from `announce_ownership_unclaimed`
+/// so the PIN is captured on the SAME path that prints the banner.
+fn stash_first_run_claim_pin(pin: &str) {
+    if let Ok(mut slot) = FIRST_RUN_CLAIM_PIN.lock() {
+        *slot = Some(pin.to_string());
+    }
+}
+
+/// Retrieve (without consuming) the first-run claim PIN minted this boot, or
+/// `None` when the node already has a ROOT owner (no PIN minted) or the value has
+/// not been announced yet. IN-PROCESS ONLY — the accessor for the embedding host
+/// on the agent-fold topology, where the app is the console. Never expose this
+/// over HTTP.
+pub fn first_run_claim_pin() -> Option<String> {
+    FIRST_RUN_CLAIM_PIN
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
 pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str, pin_file: Option<PathBuf>) {
+    // Capture into the in-process holder FIRST (CIRISServer#277) — before the
+    // banner and the optional file write, both of which can fail to become
+    // readable bytes on the embedded (Chaquopy) topology. The embedding host is
+    // the intended recipient and reads it via `first_run_claim_pin()`.
+    stash_first_run_claim_pin(claim_pin);
+
     tracing::warn!(
         "\n\
          ╔══════════════════════════════════════════════════════════════════════╗\n\
@@ -1162,5 +1208,20 @@ mod tests {
             root_wa_id_for_identity("ciris-founder")
         );
         assert_ne!(root_wa_id_for_identity("a"), root_wa_id_for_identity("b"));
+    }
+
+    #[test]
+    fn in_process_claim_pin_round_trips_and_is_non_consuming() {
+        // CIRISServer#277: announcing the unclaimed banner also stashes the PIN
+        // in the in-process holder so the embedding host (the console on the
+        // agent-fold topology) can read it without scraping logs.
+        let pin = generate_claim_pin();
+        // No file sink, no NodeCode side effects needed for the in-memory path.
+        announce_ownership_unclaimed("node-code-under-test", &pin, None);
+        // Retrievable — this is the deterministic capture the Android app relies on.
+        assert_eq!(first_run_claim_pin().as_deref(), Some(pin.as_str()));
+        // Non-consuming: a poll/retry sees the same value (the host may re-read
+        // it if a first claim attempt fails). It lives until the process exits.
+        assert_eq!(first_run_claim_pin().as_deref(), Some(pin.as_str()));
     }
 }

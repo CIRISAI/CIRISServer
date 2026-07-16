@@ -329,11 +329,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 &pin,
                 Some(cfg.claim_pin_file()),
             );
+            // Raw-stderr breadcrumb (CIRISServer#277). On the embedded/Chaquopy
+            // topology the tracing file sink can be 0-byte at compose, so the
+            // mint DECISION is otherwise unobservable on-device. stderr reaches
+            // logcat; the PIN itself stays off this line (in-process accessor +
+            // banner only) — this just proves the mint path was taken.
+            eprintln!(
+                "[ciris-server] first-run claim PIN MINTED (node unclaimed) — \
+                 retrieve in-process via first_run_claim_pin() [#277]"
+            );
             Some(pin)
         } else {
             tracing::info!(
             "node already has a ROOT owner — no first-run claim PIN minted (setup/root is closed)"
         );
+            // Same breadcrumb for the skip branch: answers the #277 question of
+            // whether an UNCONFIGURED embedded first-run wrongly reports a ROOT
+            // owner (which would suppress the mint on this topology).
+            eprintln!(
+                "[ciris-server] no first-run claim PIN minted — node already has a \
+                 ROOT owner (bootstrap outcome={bootstrap_outcome:?}) [#277]"
+            );
             None
         };
 
