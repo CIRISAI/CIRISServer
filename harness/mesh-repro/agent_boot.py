@@ -38,6 +38,94 @@ def log(msg: str) -> None:
     print(f"[HARNESS-AGENT] {msg}", flush=True)
 
 
+def setup_nat_sim(listen: str) -> None:
+    """NAT-sim for the CIRISEdge#353 scenario: make this agent an
+    **initiator-only** peer, exactly like the live Node A ↔ Android repro.
+
+    DROPs NEW inbound TCP to the edge listen port (silent drop = faithful NAT
+    behavior: the canonical's fallback outbound dial hangs to timeout, not
+    connection-refused). ESTABLISHED/RELATED stays ACCEPTed so replies riding
+    OUR OWN outbound connection keep flowing — which is precisely the #353
+    contract: the responder's reply must ride the existing inbound link,
+    because a fresh dial back to us can never connect.
+
+    Needs root + NET_ADMIN (the docker-compose.353.yml overlay provides both).
+    Failure is non-fatal but loudly logged: without the drop the scenario can
+    still show the busy-link collision, just not the Timeout consequence.
+    """
+    import subprocess
+
+    port = listen.rsplit(":", 1)[1] if ":" in listen else "4242"
+    rules = [
+        ["iptables", "-A", "INPUT", "-m", "conntrack",
+         "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", port,
+         "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"],
+    ]
+    try:
+        for r in rules:
+            subprocess.run(r, check=True, capture_output=True, text=True)
+        log(f"NAT-SIM: NEW inbound tcp/{port} silently DROPPED — this agent is "
+            f"initiator-only (dial-back can never connect; #353 topology)")
+    except Exception as e:  # noqa: BLE001
+        log(f"NAT-SIM WARN: iptables setup failed ({type(e).__name__}: {e}) — "
+            f"scenario degrades to collision-only (fallback dial will succeed)")
+
+
+def busy_link_generator(stop, pad_kb: int, period_s: float) -> None:
+    """CIRISEdge#353 busy-link pressure: keep this agent's link to the canonical
+    OCCUPIED with real trace resource-transfers, so the canonical's round reply
+    collides with an in-progress transfer ("resource transfer already in
+    progress") and exercises the reverse-path-busy → fallback-dial path.
+
+    Mechanism = the REAL trace-duplication path, not a synthetic blast: each
+    period writes an `accord_traces.jsonl` batch of fat traces (padded context
+    component) and runs `ciris_server.import_traces` — the imported trace
+    events land in this agent's store and the federation-delivery controller
+    seals + ships them to the canonical as resource transfers, exactly like a
+    live agent duplicating a trace. Big payloads stretch each transfer so the
+    canonical's 15s-cadence round replies land INSIDE one.
+    """
+    import datetime
+    import json
+    import shutil
+    import tempfile
+    import uuid
+
+    import ciris_server
+
+    batch = 0
+    while not stop.is_set():
+        batch += 1
+        dump = pathlib.Path(tempfile.mkdtemp(prefix="busy353-"))
+        try:
+            pad = "b" * (pad_kb * 1024)
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            rows = []
+            for i in range(3):
+                rows.append(json.dumps({
+                    "trace_id": f"busy353-{batch}-{i}-{uuid.uuid4().hex[:8]}",
+                    "thought_id": f"busy353-thought-{batch}-{i}",
+                    "started_at": now,
+                    "completed_at": now,
+                    "trace_level": "generic",
+                    "schema_version": "1.9.3",
+                    # A real component column (context → environmental_context):
+                    # the pad rides INSIDE the reconstructed CEG batch, making
+                    # each sealed envelope a long resource transfer.
+                    "context": {"busy353_pad": pad, "batch": batch, "i": i},
+                }))
+            (dump / "accord_traces.jsonl").write_text("\n".join(rows) + "\n")
+            ciris_server.import_traces(str(dump))
+            log(f"BUSY-LINK: batch {batch} imported (3 traces × ~{pad_kb}KB pad) — "
+                f"delivery seals+ships as resource transfers")
+        except Exception as e:  # noqa: BLE001
+            log(f"BUSY-LINK WARN: batch {batch} failed: {type(e).__name__}: {e}")
+        finally:
+            shutil.rmtree(dump, ignore_errors=True)
+        stop.wait(period_s)
+
+
 def main() -> int:
     home = pathlib.Path(os.environ.get("CIRIS_HOME", "/var/lib/ciris"))
     key_id = os.environ.get("CIRIS_KEY_ID", "ciris-agent-harness-1")
@@ -57,6 +145,12 @@ def main() -> int:
             peers.append(hp)
     agent_mode = os.environ.get("CIRIS_AGENT_MODE", "server")
     delivery_on = os.environ.get("CIRIS_FEDERATION_DELIVERY", "true").strip().lower() not in ("0", "false", "no", "off")
+    nat353 = os.environ.get("CIRIS_HARNESS_NAT353", "").strip().lower() == "true"
+
+    # CIRISEdge#353 scenario: become initiator-only BEFORE the edge binds, so the
+    # very first link the canonical opens back to us is already un-dialable.
+    if nat353:
+        setup_nat_sim(listen)
 
     (home / "data").mkdir(parents=True, exist_ok=True)
     (home / "logs").mkdir(parents=True, exist_ok=True)
@@ -189,6 +283,26 @@ def main() -> int:
             log("NOTE seeded=0 — the agent has not admitted a canonical peer yet; "
                 "if it stays 0, the canonical identity the agent targets (baked genesis) "
                 "differs from this harness canonical — see README §Fidelity.")
+
+        # CIRISEdge#353 busy-link pressure: once delivery is live, keep OUR link
+        # to the canonical saturated with real trace resource-transfers so the
+        # canonical's round replies collide mid-transfer. Combined with the
+        # NAT-sim (initiator-only), the fallback outbound dial then can't reach
+        # us → the link times out (Timeout close), exactly the field signature.
+        if nat353:
+            import threading
+
+            pad_kb = int(os.environ.get("CIRIS_HARNESS_NAT353_PAD_KB", "256"))
+            period_s = float(os.environ.get("CIRIS_HARNESS_NAT353_PERIOD_S", "4"))
+            stop353 = threading.Event()
+            threading.Thread(
+                target=busy_link_generator,
+                args=(stop353, pad_kb, period_s),
+                name="busy-link-353",
+                daemon=True,
+            ).start()
+            log(f"NAT353: busy-link generator running (pad={pad_kb}KB, every {period_s}s) "
+                f"— reproducing the reverse-path-busy → fallback-dial → Timeout path")
 
     # ── CIRISServer#260 trace gate (intermediate assert) ─────────────────────
     # Rounds completing is NECESSARY but not SUFFICIENT for trace delivery: the

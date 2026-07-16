@@ -213,6 +213,9 @@ pub mod memory_api;
 /// (`FSD/RNS_CONTROL_RELAY.md` + `FSD/EDGE_8_0_OPAQUE_MIGRATION.md` §6). Public
 /// so the mesh-seed TDD gate (`tests/mesh_seed_e2e.rs`) can drive both halves.
 pub mod mesh_relay;
+/// In-process node lifecycle control — the `shutdown_node()` stop handle that
+/// frees `:4243` deterministically on an embedded-fold restart (CIRISServer#276).
+pub mod node_control;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the
@@ -1264,6 +1267,20 @@ mod python {
         crate::compose_status::snapshot_json()
     }
 
+    /// `ciris_server.shutdown_node(timeout_secs=30.0)` — stop the node started by
+    /// `serve_with_python_adapter` and DON'T return until `:4243` is bindable
+    /// again (CIRISServer#276). The embedded fold's clean-restart primitive:
+    /// detect the port held → `shutdown_node()` → re-serve, mirroring the agent's
+    /// own `:8080` local-shutdown-and-wait. Returns `True` once the port is free
+    /// (or immediately if no node is serving — idempotent), `False` on timeout.
+    /// Blocks with the GIL released; safe to call from the agent's Python thread.
+    #[pyfunction]
+    #[pyo3(name = "shutdown_node", signature = (timeout_secs=30.0))]
+    fn py_shutdown_node(py: Python<'_>, timeout_secs: f64) -> bool {
+        let timeout = std::time::Duration::from_secs_f64(timeout_secs.max(0.0));
+        py.detach(|| crate::node_control::shutdown_node_blocking(timeout))
+    }
+
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
     // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
     // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
@@ -1341,6 +1358,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_shutdown_node, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +

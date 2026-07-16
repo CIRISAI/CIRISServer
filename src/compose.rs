@@ -1014,6 +1014,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // the `?` above). Stamp the milestone so compose_status distinguishes
         // "binding" from "bound and serving".
         crate::compose_status::phase("read_api_serving");
+        // #276: record the bound addr so an in-process shutdown_node() can stop
+        // this node and wait for the port to free on a fold restart.
+        crate::node_control::arm(read.listen_addr());
         Some(read)
     };
 
@@ -1068,14 +1071,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     tracing::info!(
         ret = %cfg.listen_addr,
         mode = %initial_config.mode,
-        "CIRISServer up as a Reticulum node — ctrl-c to stop"
+        "CIRISServer up as a Reticulum node — ctrl-c or shutdown_node() to stop"
     );
     crate::compose_status::complete();
-    tokio::signal::ctrl_c().await.context("await ctrl_c")?;
+    // Wait for a stop trigger: ctrl-c (standalone) OR an in-process
+    // shutdown_node() request (the embedded fold's clean restart, #276). The
+    // read-API addr was armed in node_control when the listener bound, so
+    // shutdown_node() can wait for :4243 to actually free after teardown below.
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => { r.context("await ctrl_c")?; }
+        _ = crate::node_control::shutdown_requested() => {
+            tracing::info!("node shutdown requested (shutdown_node) — releasing :4243");
+        }
+    }
 
     if let Some(read) = read {
         read.shutdown().await.context("shutdown lens read API")?;
     }
+    // #276: read.shutdown() joined the accept task, so :4243 is released here.
+    // Clear the recorded addr — shutdown_node() is now a no-op until the next
+    // serve arms it, and its port-free probe will already be succeeding.
+    crate::node_control::disarm();
     // ── ADAPTER SEAM teardown (stop) ──────────────────────────────────────────
     // Signal the lifecycle to return, run the adapter's `stop()`, and join the
     // lifecycle task — around the edge teardown so the adapter unwinds with the
