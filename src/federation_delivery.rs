@@ -227,6 +227,109 @@ pub fn reprime_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> 
     Ok(admitted.len())
 }
 
+/// Gather the live, per-canonical-peer delivery state — the queryable half of
+/// "why isn't the trace sailing?" (CIRISServer#294). Pure async over the current
+/// edge/engine; the wheel wrapper [`delivery_status_json`] supplies the handles.
+#[cfg(feature = "python")]
+async fn gather_delivery_status(
+    engine: Option<Arc<Engine>>,
+    edge: Arc<Edge>,
+    started: bool,
+    held_targets: Option<Vec<String>>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let node_key_id = edge.signer_key_id().to_string();
+    // The peers delivery cares about: the held controller's seeded canonical
+    // targets when running, else the baked canonical hints (so the answer is
+    // meaningful even before start / after a restart that didn't re-prime).
+    let targets: Vec<String> = match held_targets {
+        Some(t) => t,
+        None => match &engine {
+            Some(eng) => match eng.canonical_bootstrap_hints().await {
+                Ok(hints) => distinct_canonical_key_ids(&hints),
+                Err(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        },
+    };
+    let mut peers = Vec::with_capacity(targets.len());
+    for t in &targets {
+        // knows_peer = transport-rooted (prime succeeded); kex_present =
+        // resolve_peer_kex_pubkeys is Some (the IdentityOccurrence enc-keys
+        // replicated) — the two gates a sealed envelope must clear to be
+        // deliverable. Both false with no FramesDropped WARN ⇒ never primed;
+        // both true but no delivery ⇒ look at the driver (leviculum#25 loss).
+        let knows_peer = match edge.reticulum_transport() {
+            Some(tr) => tr.knows_peer(t).await,
+            None => false,
+        };
+        let kex_present = edge
+            .resolve_peer_kex_pubkeys(t)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        peers.push(json!({
+            "key_id": t,
+            "knows_peer": knows_peer,
+            "kex_present": kex_present,
+            "deliverable": knows_peer && kex_present,
+        }));
+    }
+    json!({
+        "delivery_started": started,
+        "edge_up": true,
+        "node_key_id": node_key_id,
+        "transport_present": edge.reticulum_transport().is_some(),
+        "canonical_targets": targets,
+        "peers": peers,
+        // FramesDropped (in-flight loss on an interface disconnect) is emitted as
+        // an edge WARN + NodeEvent (leviculum v0.9.3+ciris.1 / edge v13.3.1) — grep
+        // the node log for `frames=` on the peer's iface if a deliverable peer
+        // still isn't receiving.
+        "note": "frames-dropped surfaces as an edge WARN/NodeEvent; see leviculum#25",
+    })
+}
+
+/// `ciris_server.delivery_status()` backing fn (CIRISServer#294) — a one-shot
+/// snapshot of federation-delivery state so "why isn't the trace sailing for
+/// peer X?" is a single query, not log archaeology. Same in-process accessor
+/// pattern as `first_run_claim_pin()` / `compose_status()`. Never over the wire.
+#[cfg(feature = "python")]
+pub fn delivery_status_json() -> String {
+    let started = is_started();
+    let edge = match ciris_edge::current_edge() {
+        Ok(e) => e,
+        Err(e) => {
+            return serde_json::json!({
+                "delivery_started": started,
+                "edge_up": false,
+                "error": e.to_string(),
+            })
+            .to_string()
+        }
+    };
+    let engine = ciris_persist::ffi::pyo3::current_rust_engine();
+    let held_targets = HELD.get().map(|(_, c)| c.canonical_targets.clone());
+    let fut = gather_delivery_status(engine, edge, started, held_targets);
+    // Run on the held delivery runtime when we have one; else a throwaway
+    // current-thread runtime just for the point-in-time queries.
+    let value = match HELD.get() {
+        Some((rt, _)) => rt.block_on(fut),
+        None => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(fut),
+            Err(e) => serde_json::json!({
+                "delivery_started": started,
+                "error": format!("delivery_status runtime: {e}"),
+            }),
+        },
+    };
+    value.to_string()
+}
+
 /// The default reconcile cadence, matching the compose default
 /// ([`crate::config_reconcile::DEFAULT_REPLICATION_RECONCILE_SECS`]).
 pub const DEFAULT_DELIVERY_CADENCE_SECS: u64 =
