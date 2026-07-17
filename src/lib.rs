@@ -1266,6 +1266,20 @@ mod python {
         Ok(count as u64)
     }
 
+    /// `ciris_server.delivery_status()` (CIRISServer#294) — a one-shot JSON
+    /// snapshot of federation-delivery state so "why isn't the trace sailing for
+    /// peer X?" is one query, not log archaeology: `{delivery_started, edge_up,
+    /// node_key_id, transport_present, canonical_targets, peers:[{key_id,
+    /// knows_peer, kex_present, deliverable}]}`. `knows_peer=false` ⇒ never primed;
+    /// `deliverable=true` but no delivery ⇒ driver-layer frame loss (grep the log
+    /// for the edge FramesDropped WARN, leviculum#25). In-process only, never over
+    /// the wire; GIL released.
+    #[pyfunction]
+    #[pyo3(name = "delivery_status")]
+    fn py_delivery_status(py: Python<'_>) -> String {
+        py.detach(crate::federation_delivery::delivery_status_json)
+    }
+
     /// In-process accessor for the first-run ownership claim PIN (CIRISServer#277).
     ///
     /// On the agent-embedded (fold) topology the embedding process IS the console:
@@ -1391,6 +1405,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
+        m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
