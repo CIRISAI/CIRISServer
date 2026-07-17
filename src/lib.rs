@@ -1244,6 +1244,28 @@ mod python {
         Ok(count as u64)
     }
 
+    /// `ciris_server.reprime_federation_delivery(cadence_seconds=None,
+    /// announce_logger=True)` — re-drive the canonical delivery prime on a
+    /// post-restart re-serve (CIRISServer#288). Unlike `start_federation_delivery`
+    /// (which no-ops once started), this re-roots canonical as a KEX'd delivery
+    /// peer against the CURRENT embedded handles on the held runtime, so the
+    /// mobile fold's in-process restart re-establishes `peer_count_canonical`
+    /// instead of leaving the sealed trace with no peer to sail to. Idempotent;
+    /// safe every restart. Returns the re-seeded canonical target count.
+    #[pyfunction]
+    #[pyo3(name = "reprime_federation_delivery", signature = (cadence_seconds=None, announce_logger=true))]
+    fn py_reprime_federation_delivery(
+        py: Python<'_>,
+        cadence_seconds: Option<u64>,
+        announce_logger: bool,
+    ) -> PyResult<u64> {
+        let count = py.detach(|| {
+            crate::federation_delivery::reprime_and_hold(cadence_seconds, announce_logger)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })?;
+        Ok(count as u64)
+    }
+
     /// In-process accessor for the first-run ownership claim PIN (CIRISServer#277).
     ///
     /// On the agent-embedded (fold) topology the embedding process IS the console:
@@ -1368,6 +1390,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
+        m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;

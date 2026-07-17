@@ -60,6 +60,7 @@ fn transport_node_flag_maps_into_reticulum_config() {
         local_epoch: 0,
         interfaces: vec![],
         enable_transport: enabled,
+        link_keepalive: Some(Duration::from_secs(30)), // CIRISEdge#363
     };
 
     assert!(

@@ -185,6 +185,48 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     Ok(hold(rt, controller))
 }
 
+/// Re-prime canonical delivery on a post-restart re-serve (CIRISServer#288).
+///
+/// The embedded fold's setup-complete restart is an in-process reload: the edge
+/// runtime + persist engine are reused process-singletons, and
+/// [`start_and_hold`] is `is_started()`-guarded, so the canonical prime never
+/// re-fires — `knows_peer(canonical)` stays false and the sealed trace has no
+/// delivery peer (`peer_count_canonical: 0`). This re-drives ONLY the prime
+/// ([`prime_canonicals`]: read baked hints → author consent → re-root each
+/// canonical's transport binding) against the CURRENT handles, on the held
+/// runtime — the already-running reconcile loop then delivers on its next tick.
+///
+/// It does NOT rebuild the [`ReplicationRuntime`]: the reused edge's
+/// `replication_registry` is a set-once `OnceLock`, so a fresh runtime could not
+/// re-register. Re-rooting on the held runtime is sufficient.
+///
+/// Idempotent; safe to call on every post-restart re-serve. If delivery was
+/// never started, this is equivalent to [`start_and_hold`] (a first start).
+#[cfg(feature = "python")]
+pub fn reprime_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Result<usize> {
+    if !is_started() {
+        // Never started (e.g. reprime called on a cold path) → a normal first start.
+        return start_and_hold(cadence_seconds, announce_logger);
+    }
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine().context(
+        "reprime: no in-process persist Engine (current_rust_engine() is None) — call after the \
+         embedded engine is initialized",
+    )?;
+    let edge: Arc<Edge> = ciris_edge::current_edge().map_err(|e| {
+        anyhow::anyhow!("reprime: no in-process embedded Edge (current_edge() failed: {e})")
+    })?;
+    let node_key_id = edge.signer_key_id().to_string();
+    // Drive the async prime on the HELD runtime (already owns the delivery tasks).
+    let (rt, _controller) = HELD.get().expect("is_started() checked above");
+    let admitted = rt.block_on(prime_canonicals(&engine, &edge, &node_key_id))?;
+    tracing::info!(
+        canonical_targets = ?admitted,
+        "federation delivery REPRIMED — canonical peers re-rooted on the held runtime \
+         (post-restart self-heal, CIRISServer#288)"
+    );
+    Ok(admitted.len())
+}
+
 /// The default reconcile cadence, matching the compose default
 /// ([`crate::config_reconcile::DEFAULT_REPLICATION_RECONCILE_SECS`]).
 pub const DEFAULT_DELIVERY_CADENCE_SECS: u64 =
@@ -197,14 +239,21 @@ pub const DEFAULT_DELIVERY_CADENCE_SECS: u64 =
 /// the persist pyo3 static) so the whole controller compiles + is checked in the
 /// default (non-`python`) build; the wheel wrapper [`start_and_hold`] supplies the
 /// process singletons.
-pub async fn run_federation_delivery(
-    engine: Arc<Engine>,
-    edge: Arc<Edge>,
-    cadence_seconds: Option<u64>,
-    announce_logger: bool,
-) -> Result<DeliveryController> {
-    let node_key_id = edge.signer_key_id().to_string();
-
+/// Prime the admitted canonical peers: read the baked canonical record(s),
+/// author the directed `consent:replication` grant (idempotent), and ROOT each
+/// admitted canonical's transport binding so `knows_peer(canonical)` is true.
+/// Returns the admitted canonical `key_id`s. Shared by first-boot start
+/// ([`run_federation_delivery`]) AND the post-restart reprime
+/// ([`reprime_and_hold`], CIRISServer#288): a restart re-drives THIS against the
+/// current handles to re-establish canonical as a delivery peer — without
+/// rebuilding the `ReplicationRuntime` (the edge's set-once `replication_registry`
+/// OnceLock forbids re-registration on a reused edge), so the already-running
+/// reconcile loop picks the re-rooted target up on its next tick.
+async fn prime_canonicals(
+    engine: &Arc<Engine>,
+    edge: &Arc<Edge>,
+    node_key_id: &str,
+) -> Result<Vec<String>> {
     // 2. Read the baked canonical record(s): key_ids (replication targets) + ip
     //    hints (dial addresses — logged; see the dial-set caveat in the module
     //    doc). Subsumes #204's read of the transport_hints.
@@ -233,8 +282,8 @@ pub async fn run_federation_delivery(
         match directory.lookup_public_key(canonical).await {
             Ok(Some(_)) => {
                 match crate::peer::emit_replication_consent(
-                    &engine,
-                    &node_key_id,
+                    engine,
+                    node_key_id,
                     canonical,
                     crate::peer::DEFAULT_GRANT_ATTESTATION_PREFIXES,
                 )
@@ -329,6 +378,21 @@ pub async fn run_federation_delivery(
              explicit-hash canonicals (they stay unrooted until announce-reachable)"
         ),
     }
+    Ok(admitted_targets)
+}
+
+pub async fn run_federation_delivery(
+    engine: Arc<Engine>,
+    edge: Arc<Edge>,
+    cadence_seconds: Option<u64>,
+    announce_logger: bool,
+) -> Result<DeliveryController> {
+    let node_key_id = edge.signer_key_id().to_string();
+
+    // 2-3b. Prime the admitted canonical peers (read baked hints → author
+    //    consent:replication → ROOT each canonical's transport binding). The
+    //    post-restart reprime re-drives exactly this (CIRISServer#288).
+    let admitted_targets = prime_canonicals(&engine, &edge, &node_key_id).await?;
 
     // 4. Start the ONE ReplicationRuntime over the shared transport, seeding the
     //    admitted canonical key_ids as extra_targets (belt-and-suspenders alongside
