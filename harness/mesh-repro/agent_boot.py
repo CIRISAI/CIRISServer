@@ -475,6 +475,14 @@ def main() -> int:
                         break
                 log(f"KEX-GATE: still None at {waited}s — occurrence row at agent for "
                     f"{canon_key}: {'PRESENT' if isinstance(row, str) and row.startswith('{') else row!r}")
+                # Emit delivery_status DURING the stuck gate so round_diagnostics
+                # (send-failure classes + the differential hint) is observable
+                # exactly when KEX is failing — the whole point of the accessor.
+                if hasattr(ciris_server, "delivery_status"):
+                    try:
+                        log(f"[DELIVERY-STATUS] {ciris_server.delivery_status()}")
+                    except Exception as e:  # noqa: BLE001
+                        log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
         else:
             log(f"KEX-GATE VERDICT: resolve_peer_kex_pubkeys({canon_key}) = None after {deadline}s "
                 f"with rounds completing — #260 REPRODUCED locally (sealed envelopes blocked)")
