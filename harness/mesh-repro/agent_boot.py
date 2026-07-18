@@ -146,10 +146,11 @@ def main() -> int:
     agent_mode = os.environ.get("CIRIS_AGENT_MODE", "server")
     delivery_on = os.environ.get("CIRIS_FEDERATION_DELIVERY", "true").strip().lower() not in ("0", "false", "no", "off")
     nat353 = os.environ.get("CIRIS_HARNESS_NAT353", "").strip().lower() == "true"
+    nat_only = os.environ.get("CIRIS_HARNESS_NAT_ONLY", "").strip().lower() == "true"
 
     # CIRISEdge#353 scenario: become initiator-only BEFORE the edge binds, so the
     # very first link the canonical opens back to us is already un-dialable.
-    if nat353:
+    if nat353 or nat_only:
         setup_nat_sim(listen)
 
     (home / "data").mkdir(parents=True, exist_ok=True)
@@ -391,9 +392,23 @@ def main() -> int:
         if not bound:
             log("EMBEDDED-FOLD VERDICT: 4243 did NOT bind in 120s — #264 embedded-topology REPRO")
 
+    # ── Lifecycle probe (run_lifecycle.sh, FSD/RNS_LIFECYCLE_STATES.md) ──────
+    # Print the L3/L5 delivery state as a grep-able [DELIVERY-STATUS] line each
+    # poll, so the lifecycle conformance gate asserts states (advisory→rooted→
+    # kex→deliverable) from log lines instead of inferring them from absence.
+    lifecycle = os.environ.get("CIRIS_HARNESS_LIFECYCLE", "").strip().lower() == "true"
+    if lifecycle and not hasattr(ciris_server, "delivery_status"):
+        log("LIFECYCLE: wheel has no delivery_status() (needs >=0.5.125) — probe disabled")
+        lifecycle = False
+
     log("running — federation delivery drives rounds on its own cadence; watch both logs")
     while True:
         time.sleep(10)
+        if lifecycle:
+            try:
+                log(f"[DELIVERY-STATUS] {ciris_server.delivery_status()}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

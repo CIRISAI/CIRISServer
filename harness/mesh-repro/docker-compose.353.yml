@@ -21,7 +21,8 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      CIRIS_HARNESS_NAT353: "true"
+      CIRIS_HARNESS_NAT353: "${NAT353_BUSY:-true}"
+      CIRIS_HARNESS_NAT_ONLY: "${NAT_ONLY:-false}"
       # Tunables (defaults in agent_boot): fat traces stretch each resource
       # transfer so the 15s-cadence canonical reply lands mid-transfer.
       CIRIS_HARNESS_NAT353_PAD_KB: "${NAT353_PAD_KB:-256}"
