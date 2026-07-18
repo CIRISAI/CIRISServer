@@ -33,8 +33,29 @@ WINDOW="${1:-300}"
 export CIRIS_HARNESS_LIFECYCLE=true
 export CIRIS_SERVER_VERSION="${CIRIS_SERVER_VERSION:-0.5.126}"
 
-compose() { docker compose -p "$PROJECT" "$@"; }
-logs_all() { compose logs --no-color 2>/dev/null; }
+# UNBLESSED=1 → layer the unblessed-agent overlay: the agent keeps the anchor
+# pubkeys (roots the canonical → knows_peer) but drops the SEED (never
+# self-blesses → the canonical admits it Advisory). This is the field-faithful
+# Advisory-admit → IdentityOccurrence path where the field KEX-none lives; the
+# blessed harness SKIPs the advisory rung because it can't express it.
+FILES=(-f docker-compose.yml)
+# FIELD=1 = the complete field topology for the KEX-none repro: advisory admit
+# (unblessed overlay) + NAT'd initiator (353 overlay carries NET_ADMIN + root;
+# NAT_ONLY drops inbound without the busy-link generator). This is the exact
+# ciris-agent-bootstrap-4lf56coiez condition on Node A. Advisory-admit ALONE was
+# ruled out (canonical pushes IdentityOccurrence to advisory peers → kex resolves
+# on a clean bridge); the differentiator is the NAT reverse-path.
+if [ "${FIELD:-0}" = "1" ]; then
+  FILES+=(-f docker-compose.field.yml)
+  echo "── FIELD topology: advisory admit + NAT'd initiator (the 4lf56coiez repro) ──"
+elif [ "${UNBLESSED:-0}" = "1" ]; then
+  FILES+=(-f docker-compose.unblessed.yml)
+  echo "── UNBLESSED variant: agent admitted Advisory (field-faithful KEX path) ──"
+fi
+compose() { docker compose "${FILES[@]}" -p "$PROJECT" "$@"; }
+# --no-color still leaves tracing's per-field ANSI (key\x1b[2m=\x1b[0mval), which
+# breaks `grep key=val`. Strip ALL escape sequences so structured fields match.
+logs_all() { compose logs --no-color 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g'; }
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ]; then
@@ -126,7 +147,7 @@ report_row() { # id label
 }
 for row in "${LADDER[@]}"; do
   id="${row%%|*}"; rest="${row#*|}"; label="${rest%%|*}"
-  if [ "$id" = "advisory" ] && [ -z "${HIT[advisory]:-}" ] && ! grep -qiE "provenance=" <<<"$(logs_all)"; then
+  if [ "$id" = "advisory" ] && [ "${UNBLESSED:-0}" != "1" ] && [ "${FIELD:-0}" != "1" ] && [ -z "${HIT[advisory]:-}" ] && ! grep -qiE "provenance=" <<<"$(logs_all)"; then
     # Test-anchor blesses BOTH nodes, so admits go straight to Rooted — the
     # Advisory rung is topology-inexpressible here. The field-faithful variant
     # (unblessed agent -> advisory-admit -> KEX) is the run_lifecycle NAT/
