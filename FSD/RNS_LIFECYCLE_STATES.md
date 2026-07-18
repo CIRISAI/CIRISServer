@@ -143,7 +143,32 @@ ran/re-fired · `knows_peer=false` → never promoted past Advisory ·
 | Silent frame destruction (leviculum#25) | L2 | driver killed queued frames uncounted on iface death | `FramesDropped` event, leviculum v0.9.3+ciris.1 / edge v13.3.1 |
 | Resource contention (#353 ask 2 / leviculum#27) | L2 | reverse-path reply lost the 8s window to a busy `Transferring` Resource | reply ships as link packet, edge v13.4.0 |
 | Restart no-re-prime (#288) | L5/7 | `is_started()` guard froze the boot-time prime | `reprime_federation_delivery()`, 0.5.124 |
-| KEX-none regression (open) | L3 | Advisory admit, IdentityOccurrence round never completes; L1 link storm | under repro; suspect = v13.4.0 `MessageReceived` attribution merge |
+| KEX-none (RCA'd) | L4/L3 | Advisory admit OK, but the reverse IdentityOccurrence round `transport timeout after 30s` and never completes → `kex_present` stays false | **canonical-side contention under concurrent peers** — NOT a v13.4.0 regression (exonerated) |
+
+### KEX-none RCA (2026-07, mesh-repro)
+
+The field `kex_present:false` on Node A was reproduced **deterministically** and
+localized. Ruling out, each on a field-faithful bridge (advisory admit + verified
+NAT), everything network: packet loss ≤50%, latency 180ms/jitter 60ms, NAT
+rebind / link churn, and all combined — **KEX always resolves** via v13.4.0's
+#353-ask-2 link-packet reply. The differentiator is **concurrent-peer load on
+the canonical**:
+
+| Concurrent peers | Probe (advisory+NAT) KEX |
+|---|---|
+| 0 | 55s |
+| 20 | 54s |
+| **40** | **KEX-NONE** — round `transport timeout after 30s`, never completes |
+| 60 | KEX-NONE |
+
+Mechanism (verified, `run_load_repro.sh` N=40): the probe roots fine
+(`knows_peer=true`), but its L4 reverse IdentityOccurrence round repeatedly hits
+`coordinator error during round error=transport: transport timeout after 30s`;
+the canonical, juggling 40 peers, emits ~900 contention signals (link closes,
+resource-transfer-busy, timeouts) and cannot service the round inside its 30s
+window. Threshold is between 20 and 40 peers; Node A ran ~85. **Fix target =
+canonical-side per-peer round fairness / transport-round concurrency / adaptive
+round timeout — L4, not the L2 link-packet reply and not edge v13.4.0.**
 
 ---
 
