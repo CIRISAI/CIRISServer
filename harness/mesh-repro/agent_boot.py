@@ -65,11 +65,109 @@ def setup_nat_sim(listen: str) -> None:
     try:
         for r in rules:
             subprocess.run(r, check=True, capture_output=True, text=True)
-        log(f"NAT-SIM: NEW inbound tcp/{port} silently DROPPED — this agent is "
-            f"initiator-only (dial-back can never connect; #353 topology)")
     except Exception as e:  # noqa: BLE001
-        log(f"NAT-SIM WARN: iptables setup failed ({type(e).__name__}: {e}) — "
-            f"scenario degrades to collision-only (fallback dial will succeed)")
+        # HARD FAIL — never silently degrade. A NAT-sim that can't install the
+        # DROP rule is a NAT run that isn't NAT'd; letting it continue produces a
+        # false "field topology" verdict (this masked the repro for many runs:
+        # iptables was absent from the slim image, so every NAT-sim no-op'd while
+        # claiming initiator-only). Crash loudly so the run is unmistakably wrong.
+        detail = getattr(e, "stderr", "") or ""
+        log(f"NAT-SIM FATAL: iptables DROP install failed ({type(e).__name__}: {e}) {detail} "
+            f"— refusing to run a NAT scenario without NAT (install iptables in the image)")
+        raise SystemExit(3)
+    # Verify the rule is actually in the table — belt-and-suspenders against a
+    # silent accept (some sandboxes accept the command but no-op the filter).
+    check = subprocess.run(["iptables", "-C", "INPUT", "-p", "tcp", "--dport", port,
+                            "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"],
+                           capture_output=True, text=True)
+    if check.returncode != 0:
+        log(f"NAT-SIM FATAL: DROP rule not present after install (verify rc={check.returncode}) "
+            f"— NAT is not actually engaged")
+        raise SystemExit(3)
+    log(f"NAT-SIM: NEW inbound tcp/{port} DROP installed + VERIFIED — this agent is "
+        f"initiator-only (dial-back can never connect; #353 topology)")
+
+
+def setup_netem(loss_pct: float, delay_ms: int, jitter_ms: int) -> None:
+    """Lossy-link sim: apply `tc netem` to the agent's default-route interface so
+    the reverse-path IdentityOccurrence round runs over a link with real packet
+    loss + latency — the field's NAT'd mobile link, which a zero-loss Docker
+    bridge cannot express. netem is EGRESS (agent→canonical); on RNS that starves
+    the round symmetrically — the agent's link keepalives/acks/round-request
+    packets drop, so the canonical's reply can't ride a link the agent can no
+    longer keep alive, reproducing the field kex-none.
+
+    Hard-fails (SystemExit 3) if tc is missing or the qdisc doesn't verify — same
+    no-silent-degrade contract as the NAT-sim: a loss run that isn't lossy is a
+    false verdict.
+    """
+    import re
+    import subprocess
+
+    # Default-route interface (docker usually eth0, but detect it, don't assume).
+    try:
+        route = subprocess.run(["ip", "route", "get", "1.1.1.1"],
+                               check=True, capture_output=True, text=True).stdout
+        m = re.search(r"\bdev\s+(\S+)", route)
+        iface = m.group(1) if m else "eth0"
+    except Exception as e:  # noqa: BLE001
+        log(f"NETEM FATAL: could not resolve default iface ({type(e).__name__}: {e})")
+        raise SystemExit(3)
+
+    netem = ["tc", "qdisc", "add", "dev", iface, "root", "netem"]
+    if loss_pct > 0:
+        netem += ["loss", f"{loss_pct:g}%"]
+    if delay_ms > 0:
+        netem += ["delay", f"{delay_ms}ms"] + ([f"{jitter_ms}ms"] if jitter_ms > 0 else [])
+    try:
+        subprocess.run(netem, check=True, capture_output=True, text=True)
+    except Exception as e:  # noqa: BLE001
+        detail = getattr(e, "stderr", "") or ""
+        log(f"NETEM FATAL: tc qdisc install failed on {iface} ({type(e).__name__}: {e}) {detail} "
+            f"— refusing to run a lossy-link scenario without loss (install iproute2)")
+        raise SystemExit(3)
+    # Verify the qdisc is actually there.
+    show = subprocess.run(["tc", "qdisc", "show", "dev", iface],
+                          capture_output=True, text=True).stdout
+    if "netem" not in show:
+        log(f"NETEM FATAL: netem qdisc not present after install on {iface} "
+            f"(show={show!r}) — loss is not actually engaged")
+        raise SystemExit(3)
+    log(f"NETEM: {iface} loss={loss_pct:g}% delay={delay_ms}ms jitter={jitter_ms}ms "
+        f"installed + VERIFIED — reverse-path round now runs over a lossy link")
+
+
+def nat_rebind_loop(stop, period_s: float, blackout_s: float, canon_ip: str) -> None:
+    """Mobile NAT-rebind sim — the field's link-storm cause.
+
+    A real cellular/NAT mapping for the agent's OUTBOUND link to the canonical
+    expires every ~45-60s; when it rebinds, the established connection's packets
+    are silently dropped, RNS sees the link die (stale/keepalive-timeout), tears
+    it down and re-dials — a NEW link. Repeat = the field's ~20-links/min storm,
+    and every in-flight multi-round-trip IdentityOccurrence exchange is cut off
+    mid-round, so KEX never completes. This is what plain loss (retransmit on the
+    SAME link) cannot reproduce.
+
+    Mechanism: every `period_s`, insert an iptables rule that DROPs all traffic
+    to/from the canonical IP for `blackout_s` (longer than a keepalive retransmit
+    so the link is declared dead), then remove it → RNS re-dials → new link. Uses
+    iptables (already installed); no new dependency.
+    """
+    import subprocess
+
+    def rule(action):  # -A add / -D delete
+        for chain, io in (("OUTPUT", "-d"), ("INPUT", "-s")):
+            subprocess.run(["iptables", action, chain, io, canon_ip, "-j", "DROP"],
+                           capture_output=True, text=True)
+
+    n = 0
+    while not stop.wait(period_s):
+        n += 1
+        rule("-A")
+        log(f"NAT-REBIND: blackout #{n} — dropping canonical {canon_ip} for {blackout_s}s "
+            f"(mapping expiry → link dies → re-dial; models the field link storm)")
+        stop.wait(blackout_s)
+        rule("-D")
 
 
 def busy_link_generator(stop, pad_kb: int, period_s: float) -> None:
@@ -146,11 +244,21 @@ def main() -> int:
     agent_mode = os.environ.get("CIRIS_AGENT_MODE", "server")
     delivery_on = os.environ.get("CIRIS_FEDERATION_DELIVERY", "true").strip().lower() not in ("0", "false", "no", "off")
     nat353 = os.environ.get("CIRIS_HARNESS_NAT353", "").strip().lower() == "true"
+    nat_only = os.environ.get("CIRIS_HARNESS_NAT_ONLY", "").strip().lower() == "true"
 
     # CIRISEdge#353 scenario: become initiator-only BEFORE the edge binds, so the
     # very first link the canonical opens back to us is already un-dialable.
-    if nat353:
+    if nat353 or nat_only:
         setup_nat_sim(listen)
+
+    # Lossy-link sim (applied BEFORE the edge binds so the very first handshake
+    # already runs over loss). netem_loss/delay model the field's NAT'd mobile
+    # link — the last variable a zero-loss bridge can't express.
+    netem_loss = float(os.environ.get("CIRIS_HARNESS_NETEM_LOSS", "0") or "0")
+    netem_delay = int(os.environ.get("CIRIS_HARNESS_NETEM_DELAY", "0") or "0")
+    netem_jitter = int(os.environ.get("CIRIS_HARNESS_NETEM_JITTER", "0") or "0")
+    if netem_loss > 0 or netem_delay > 0:
+        setup_netem(netem_loss, netem_delay, netem_jitter)
 
     (home / "data").mkdir(parents=True, exist_ok=True)
     (home / "logs").mkdir(parents=True, exist_ok=True)
@@ -304,6 +412,25 @@ def main() -> int:
             log(f"NAT353: busy-link generator running (pad={pad_kb}KB, every {period_s}s) "
                 f"— reproducing the reverse-path-busy → fallback-dial → Timeout path")
 
+    # Mobile NAT-rebind sim (the field link-storm cause): periodically black out
+    # the canonical so the established link dies + re-dials. Requires the canonical
+    # IP (resolved into `peers`) + NET_ADMIN (field/353 overlay). 0 = off.
+    rebind_secs = float(os.environ.get("CIRIS_HARNESS_NAT_REBIND_SECS", "0") or "0")
+    if rebind_secs > 0 and peers:
+        import threading
+
+        canon_ip = peers[0].rpartition(":")[0]
+        blackout_s = float(os.environ.get("CIRIS_HARNESS_NAT_REBIND_BLACKOUT_S", "5"))
+        stop_rebind = threading.Event()
+        threading.Thread(
+            target=nat_rebind_loop,
+            args=(stop_rebind, rebind_secs, blackout_s, canon_ip),
+            name="nat-rebind",
+            daemon=True,
+        ).start()
+        log(f"NAT-REBIND: loop running (every {rebind_secs}s, {blackout_s}s blackout of "
+            f"{canon_ip}) — models mobile NAT mapping expiry → the field link storm")
+
     # ── CIRISServer#260 trace gate (intermediate assert) ─────────────────────
     # Rounds completing is NECESSARY but not SUFFICIENT for trace delivery: the
     # sealed-envelope path additionally needs resolve_peer_kex_pubkeys(canonical)
@@ -348,6 +475,14 @@ def main() -> int:
                         break
                 log(f"KEX-GATE: still None at {waited}s — occurrence row at agent for "
                     f"{canon_key}: {'PRESENT' if isinstance(row, str) and row.startswith('{') else row!r}")
+                # Emit delivery_status DURING the stuck gate so round_diagnostics
+                # (send-failure classes + the differential hint) is observable
+                # exactly when KEX is failing — the whole point of the accessor.
+                if hasattr(ciris_server, "delivery_status"):
+                    try:
+                        log(f"[DELIVERY-STATUS] {ciris_server.delivery_status()}")
+                    except Exception as e:  # noqa: BLE001
+                        log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
         else:
             log(f"KEX-GATE VERDICT: resolve_peer_kex_pubkeys({canon_key}) = None after {deadline}s "
                 f"with rounds completing — #260 REPRODUCED locally (sealed envelopes blocked)")
@@ -391,9 +526,23 @@ def main() -> int:
         if not bound:
             log("EMBEDDED-FOLD VERDICT: 4243 did NOT bind in 120s — #264 embedded-topology REPRO")
 
+    # ── Lifecycle probe (run_lifecycle.sh, FSD/RNS_LIFECYCLE_STATES.md) ──────
+    # Print the L3/L5 delivery state as a grep-able [DELIVERY-STATUS] line each
+    # poll, so the lifecycle conformance gate asserts states (advisory→rooted→
+    # kex→deliverable) from log lines instead of inferring them from absence.
+    lifecycle = os.environ.get("CIRIS_HARNESS_LIFECYCLE", "").strip().lower() == "true"
+    if lifecycle and not hasattr(ciris_server, "delivery_status"):
+        log("LIFECYCLE: wheel has no delivery_status() (needs >=0.5.125) — probe disabled")
+        lifecycle = False
+
     log("running — federation delivery drives rounds on its own cadence; watch both logs")
     while True:
         time.sleep(10)
+        if lifecycle:
+            try:
+                log(f"[DELIVERY-STATUS] {ciris_server.delivery_status()}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

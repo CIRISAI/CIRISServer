@@ -14,6 +14,23 @@ FROM python:3.12-slim
 COPY wheels/ /opt/harness/wheels/
 RUN pip install --no-cache-dir /opt/harness/wheels/ciris_server-*.whl
 
+# iptables — the NAT-sim (CIRIS_HARNESS_NAT_ONLY / NAT353) needs it to DROP new
+# inbound and make the agent an initiator-only peer. The slim base lacks it, so
+# for a long time the NAT-sim silently degraded to collision-only ("iptables:
+# No such file"); the scenario claimed to test NAT while it wasn't. Install it
+# so NAT actually engages, and (agent_boot) hard-fail if it's still missing.
+RUN apt-get update && apt-get install -y --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# iproute2 — `tc netem` for the lossy-link sim (CIRIS_HARNESS_NETEM_*): the
+# field failure is on a real NAT'd mobile link with packet loss + latency,
+# which a zero-loss Docker bridge structurally cannot express. netem injects
+# loss/delay/jitter so the reverse-path IdentityOccurrence round can be pushed
+# to the same failure the field sees. Same noisy contract: agent_boot hard-fails
+# if tc is missing when a netem run is requested.
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Match a stable uid so bind/named volumes are writable.
 RUN useradd --uid 1000 --create-home --shell /bin/bash ciris
 # Pre-create the home with ciris ownership: a FRESH NAMED VOLUME copies the

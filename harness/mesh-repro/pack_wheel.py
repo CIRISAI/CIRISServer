@@ -9,11 +9,14 @@ pyo3 wheel by hand: `ciris_server/_native.abi3.so` + the hand-written Python
 package (`python/ciris_server/*.py`). This is the QA-runner's build step; it is
 NEVER how the prod wheel is built (that is maturin in CI, without test-anchor).
 """
-import base64, csv, hashlib, io, sys, zipfile
+import base64, csv, hashlib, io, os, sys, zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]          # CIRISServer/
-SO = ROOT / "target" / "release" / "libciris_server.so"
+# CIRIS_PACK_PROFILE=debug packs the debug .so — same logic, ~2x faster to
+# build; use for lifecycle/logic repros where opt-level doesn't matter.
+PROFILE = os.environ.get("CIRIS_PACK_PROFILE", "release")
+SO = ROOT / "target" / PROFILE / "libciris_server.so"
 PYPKG = ROOT / "python" / "ciris_server"
 OUT_DIR = Path(__file__).resolve().parent / "wheels"
 

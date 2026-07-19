@@ -1,0 +1,33 @@
+# Unblessed-agent overlay — the field-faithful Advisory-admit path.
+#
+# Layer ON TOP of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.unblessed.yml -p ciris-mesh-repro up
+# (run_lifecycle.sh UNBLESSED=1 does this.) It reproduces the field topology the
+# test-anchor's mutual-bless CANNOT express:
+#
+#   The canonical keeps the full test-anchor (SEED + pubkeys) → it self-blesses,
+#   publishes its blessed record, roots under the anchor as normal.
+#
+#   The agent KEEPS the anchor PUBKEYS (CIRIS_TEST_TRUST_ROOT / _PQC) so it can
+#   still verify + register the canonical's blessed record → knows_peer(canonical)
+#   == true — but it DROPS the SEED, so `maybe_test_bless_self` skips (it logs the
+#   "SEED unset — skipping self-bless … node stays self-signed" WARN). The agent's
+#   announce therefore carries NO attestation the canonical can verify against the
+#   anchor → the canonical admits the agent as `provenance=Advisory`
+#   (`rooting_unknown_key_id`, `owns_key=false`) — EXACTLY the field admit for
+#   ciris-agent-bootstrap-4lf56coiez on Node A.
+#
+# This is the topology that exercises the Advisory-admit -> IdentityOccurrence
+# reverse round — the rung the blessed harness SKIPs and where the field
+# KEX-none lives.
+
+services:
+  agent:
+    environment:
+      # UNSET only the seed (Compose `!reset` removes a merged key). Everything
+      # else (CIRIS_TESTING_MODE, the anchor pubkeys, the scrub pair) stays via
+      # the x-test-anchor-env merge in the base file. It must be truly UNSET, not
+      # blank: maybe_test_bless_self skips on is_err() (unset); an EMPTY value is
+      # Ok("") → proceeds to mint_test_root → base64("") = 0 bytes → fatal `?`.
+      # `!reset null` drops the key so std::env::var returns Err → clean skip.
+      CIRIS_TEST_TRUST_ROOT_SEED: !reset null

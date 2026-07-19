@@ -1,0 +1,42 @@
+# Field-topology overlay (SELF-CONTAINED) — the ciris-agent-bootstrap-4lf56coiez
+# repro: an advisory-admitted, NAT'd initiator. ONE overlay on the base file so
+# there is no 3-way merge ambiguity (layering unblessed + 353 separately let the
+# 353 env block re-materialize the SEED that unblessed's `!reset` had dropped —
+# the agent silently self-blessed and the run tested the wrong topology).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.field.yml \
+#     -p ciris-mesh-repro up
+# (run_lifecycle.sh FIELD=1 does this.)
+#
+# Combines, in one place:
+#   * advisory admit — drop the SEED (`!reset null`) so maybe_test_bless_self
+#     skips (SEED-unset path); the agent keeps the anchor pubkeys (base merge) so
+#     it still roots the canonical (knows_peer), but its own announce is
+#     unverifiable → the canonical admits it provenance=Advisory
+#     (rooting_unknown_key_id, owns_key=false) — the exact field admit.
+#   * NAT'd initiator — cap_add NET_ADMIN + run as root so agent_boot's iptables
+#     NAT-sim (CIRIS_HARNESS_NAT_ONLY) can DROP new inbound to the edge port:
+#     the canonical's reverse dial to the agent can never connect, so its
+#     IdentityOccurrence push must ride the agent's existing inbound link.
+#   * NAT-only (no busy-link generator), so the KEX-round failure is isolated
+#     from the #353 resource-contention confound.
+
+services:
+  agent:
+    user: "0:0"                 # root — iptables in this netns only
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CIRIS_TEST_TRUST_ROOT_SEED: !reset null   # unset → advisory admit
+      CIRIS_HARNESS_NAT_ONLY: "true"            # iptables NAT-sim, no busy-link
+      # Lossy-link sim (0 = off). The field's NAT'd mobile link is lossy; set
+      # these (FIELD_LOSS / FIELD_DELAY / FIELD_JITTER in run_lifecycle) to push
+      # the reverse-path round to the field's kex-none failure.
+      CIRIS_HARNESS_NETEM_LOSS: "${FIELD_LOSS:-0}"
+      CIRIS_HARNESS_NETEM_DELAY: "${FIELD_DELAY:-0}"
+      CIRIS_HARNESS_NETEM_JITTER: "${FIELD_JITTER:-0}"
+      # Mobile NAT-rebind (the field link-storm cause): periodically black out
+      # the canonical so the link dies + re-dials. 0 = off.
+      CIRIS_HARNESS_NAT_REBIND_SECS: "${FIELD_REBIND:-0}"
+      CIRIS_HARNESS_NAT_REBIND_BLACKOUT_S: "${FIELD_REBIND_BLACKOUT:-5}"
+      RUST_LOG: "${FIELD_RUST_LOG:-info,ciris_edge=debug,reticulum_core=debug}"

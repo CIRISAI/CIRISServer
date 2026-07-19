@@ -57,7 +57,7 @@ services:
     # `tmpfs` and mount a named volume + drop a pre-provisioned keystore here for
     # full baked-identity fidelity (see README §Fidelity).
     tmpfs:
-      - /var/lib/ciris
+      - /var/lib/ciris:mode=1777
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:4243/health', timeout=3)"]
       interval: 5s
@@ -85,10 +85,12 @@ services:
       CIRIS_FEDERATION_DELIVERY: "true"
       # Embedded-fold variant switch (run_embedded.sh, CIRISServer#264 must-have 2).
       CIRIS_HARNESS_EMBEDDED_FOLD: "${CIRIS_HARNESS_EMBEDDED_FOLD:-false}"
+      # Lifecycle probe: print [DELIVERY-STATUS] JSON each poll (run_lifecycle.sh).
+      CIRIS_HARNESS_LIFECYCLE: "${CIRIS_HARNESS_LIFECYCLE:-false}"
       RUST_LOG: "info,ciris_edge=debug,reticulum_core=debug"
     networks: [mesh]
     tmpfs:
-      - /var/lib/ciris
+      - /var/lib/ciris:mode=1777
 
 networks:
   mesh:

@@ -1,0 +1,36 @@
+# Concurrent-peer load overlay — the canonical-scale KEX-none repro.
+#
+# The field KEX-none (ciris-agent-bootstrap-4lf56coiez) was ruled out for every
+# network condition on a 2-node bridge (advisory+NAT+loss+latency+rebind all
+# resolve). The only unreproduced field variable is Node A's SCALE: ~85
+# concurrent peers contending for the canonical's per-peer round scheduler +
+# its one-resource-transfer-per-link path. This overlay adds a scalable pool of
+# blessed "load" agents that each root the canonical and drive their own
+# IdentityOccurrence/Key/Attestation rounds, so the measured PROBE agent (the
+# base `agent`, kept on the field topology: advisory admit + NAT, clean link)
+# must complete its reverse round while the canonical juggles N others.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.field.yml \
+#     -f docker-compose.load.yml -p <proj> up -d --scale load-agent=N
+# (run_load_repro.sh sweeps N.) The probe is measured; the load-agents just
+# create canonical-side contention. If the probe's KEX time climbs with N (or
+# fails past a threshold), that is the reproduced contention RCA.
+
+services:
+  # Blessed load peers — inherit the base agent (image, test-anchor env, command,
+  # tmpfs) via extends; override to a distinct key base, no lifecycle spam, quiet
+  # logs. Scaled with --scale load-agent=N; each replica mints a unique fed key
+  # (random suffix) and runs in its own netns, so no key/port collision.
+  load-agent:
+    extends:
+      file: docker-compose.yml
+      service: agent
+    depends_on:
+      canonical:
+        condition: service_healthy
+    environment:
+      CIRIS_KEY_ID: ciris-load
+      CIRIS_HARNESS_LIFECYCLE: "false"
+      # Quiet — 60 chatty agents would bury the probe's [DELIVERY-STATUS].
+      RUST_LOG: "warn,ciris_edge=warn"
+    networks: [mesh]
