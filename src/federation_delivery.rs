@@ -300,6 +300,11 @@ async fn gather_delivery_status(
     }
     let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
     let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
+    // CIRISEdge#373 (edge v13.6.0): inbound frames dropped because a stalled
+    // responder reply parked the coordinator drain. The tripwire — should sit at
+    // 0. Non-zero = the trace is being actively LOST (a reply is still stalling
+    // long enough to fill the channel), even for a deliverable peer.
+    let backpressure_drops = snap.replication_inbound_backpressure_drops;
     let sent_total: u64 = snap.envelopes_sent_total.values().sum();
     let recv_total: u64 = snap.envelopes_received_total.values().sum();
     let any_knows_peer = peers.iter().any(|p| p["knows_peer"] == json!(true));
@@ -314,6 +319,12 @@ async fn gather_delivery_status(
         "delivery not started — call start_federation_delivery / reprime_federation_delivery"
     } else if !any_knows_peer {
         "no peer rooted (knows_peer all false) — prime never seeded a canonical; check canonical_bootstrap_hints + prime_canonicals"
+    } else if backpressure_drops > 0 {
+        // The #373 backstop is firing: a responder reply stalled long enough to
+        // fill the coordinator drain, so inbound TRACE frames are being dropped.
+        // Highest-signal failure when present — the trace is actively being lost
+        // even if the peer is deliverable.
+        "inbound frames DROPPED (round_diagnostics.inbound_backpressure_drops > 0, CIRISEdge#373) — a responder reply is stalling long enough to park the coordinator drain and the trace is being LOST. The reverse-path reply is not reaching the peer's current live link (#353); escalate (reply-over-arrival-link is the held follow-up). Watch round_outcomes.timed_out and the node log for `responder reply send TIMED OUT`"
     } else if !any_kex_missing {
         "peers deliverable (or no kex gap) — if a deliverable peer still isn't receiving, grep the node log for `frames=` (leviculum#25 in-flight loss)"
     } else if round_timed_out > 0 && round_timed_out >= round_completed {
@@ -347,6 +358,8 @@ async fn gather_delivery_status(
             // CIRISEdge#370 Ask 2 (v13.5.0): anti-entropy round outcome counts —
             // timed_out climbing vs completed is the direct KEX-none signal.
             "round_outcomes": round_outcomes,
+            // CIRISEdge#373 (v13.6.0): the trace-loss tripwire — should be 0.
+            "inbound_backpressure_drops": backpressure_drops,
             "envelopes_sent_total": sent_total,
             "envelopes_received_total": recv_total,
             "hint": hint,
