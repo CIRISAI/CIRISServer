@@ -291,6 +291,15 @@ async fn gather_delivery_status(
     for ((_transport, class), n) in &snap.send_failures_total {
         *failures_by_class.entry(class.clone()).or_insert(0) += n;
     }
+    // CIRISEdge#370 Ask 2 (edge v13.5.0): anti-entropy round outcomes are now
+    // counted in EdgeMetrics — so the round-not-completing case is queryable
+    // (round_timed_out climbing) instead of a log grep.
+    let mut round_outcomes: std::collections::BTreeMap<String, u64> = Default::default();
+    for (outcome, n) in &snap.replication_round_outcomes_total {
+        round_outcomes.insert(outcome.as_str().to_string(), *n);
+    }
+    let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
+    let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
     let sent_total: u64 = snap.envelopes_sent_total.values().sum();
     let recv_total: u64 = snap.envelopes_received_total.values().sum();
     let any_knows_peer = peers.iter().any(|p| p["knows_peer"] == json!(true));
@@ -307,20 +316,21 @@ async fn gather_delivery_status(
         "no peer rooted (knows_peer all false) — prime never seeded a canonical; check canonical_bootstrap_hints + prime_canonicals"
     } else if !any_kex_missing {
         "peers deliverable (or no kex gap) — if a deliverable peer still isn't receiving, grep the node log for `frames=` (leviculum#25 in-flight loss)"
+    } else if round_timed_out > 0 && round_timed_out >= round_completed {
+        // The direct signal now that edge v13.5.0 counts round outcomes: rounds
+        // are timing out more than completing → the reverse IdentityOccurrence
+        // round isn't being serviced. This is the FSD KEX-none RCA (canonical
+        // round contention under concurrent-peer load, transport-layer ceiling —
+        // CIRISEdge#370 / leviculum concurrency).
+        "kex missing + round_timed_out >= round_completed — the reverse IdentityOccurrence round is TIMING OUT, not completing. This is canonical round contention under concurrent-peer load (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA; transport-layer ceiling per CIRISEdge#370). Check the canonical's live peer count — advisory/low-legitimacy peers starving real ones"
     } else if timeouts > 0 {
-        "kex missing + send timeouts — the reverse IdentityOccurrence round is TIMING OUT (transport timeout). Likely canonical round contention under concurrent-peer load (FSD KEX-none RCA); confirm with the canonical's peer count + round-timeout rate"
+        "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with round_diagnostics.round_outcomes.timed_out"
     } else if unreachable > 0 {
         "kex missing + unreachable — transport/routing gap: the responder has no Reticulum destination for us (not rooted at the peer, or path lost), NOT a round-servicing problem"
     } else if sent_total > 0 && recv_total == 0 {
         "kex missing, envelopes sent but NONE received — one-way reply path (reverse-path to a NAT'd peer; see #353 / leviculum#27)"
     } else {
-        // No send-failure metric fires for the anti-entropy ROUND path — round
-        // transport timeouts are logged as a scheduler WARN but NOT yet counted
-        // in EdgeMetrics (CIRISEdge round-observability ask). So knows_peer:true
-        // + kex missing + no metrics is the round-not-completing case: most often
-        // the reverse IdentityOccurrence round TIMING OUT under canonical
-        // concurrent-peer contention (FSD KEX-none RCA — reproduced at N>=40 peers).
-        "kex missing, peer rooted, no send-failure metrics — the reverse IdentityOccurrence round is not completing (round timeouts aren't yet in EdgeMetrics). CONFIRM by grepping the node log for `coordinator error during round` / `transport timeout after`. Top cause: canonical round contention under many concurrent peers (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA) — check the canonical's live peer count"
+        "kex missing, peer rooted, no round timeouts or send failures yet — round may be mid-first-cycle; if it persists, watch round_diagnostics.round_outcomes for timed_out (contention) vs refused (malformed/out-of-state peer)"
     };
 
     json!({
@@ -334,6 +344,9 @@ async fn gather_delivery_status(
         // but kex_present:false. `hint` names the layer + the doc to open.
         "round_diagnostics": {
             "send_failures_by_class": failures_by_class,
+            // CIRISEdge#370 Ask 2 (v13.5.0): anti-entropy round outcome counts —
+            // timed_out climbing vs completed is the direct KEX-none signal.
+            "round_outcomes": round_outcomes,
             "envelopes_sent_total": sent_total,
             "envelopes_received_total": recv_total,
             "hint": hint,

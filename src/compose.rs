@@ -409,7 +409,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // ── Attach the slices the host can support (before running the Edge) ──────
     if caps.lens_store {
         // Observation slice: ingest handler on the shared Edge.
-        LensCore::attach_handler(&edge, Arc::clone(&engine))
+        LensCore::attach_handler(edge.as_ref(), Arc::clone(&engine))
             .await
             .map_err(|e| anyhow::anyhow!("attach lens ingest handler: {e}"))?;
     } else {
@@ -2289,11 +2289,21 @@ pub(crate) async fn start_replication_runtime(
     let self_provider: ciris_edge::replication::CohortProvider =
         Arc::new(move || vec![own_key_id.clone()]);
 
+    // CIRISEdge#370 — wire the Edge's metrics handle into the runtime so the
+    // scheduler routes per-round RoundEvents into the round-outcome counter
+    // (completed/refused/timed_out/error). Without this the counter stays empty
+    // and delivery_status().round_diagnostics.round_outcomes can't observe the
+    // KEX-none contention cliff — the edge FFI path wires it (pyo3.rs), but this
+    // server-owned runtime start (start_federation_delivery) must do so itself.
+    let runtime_config = ReplicationRuntimeConfig {
+        metrics: Some(edge.metrics()),
+        ..ReplicationRuntimeConfig::default()
+    };
     let runtime = ReplicationRuntime::start(
         directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
         peers,
-        ReplicationRuntimeConfig::default(),
+        runtime_config,
         Some(self_provider),
     )
     .await;
