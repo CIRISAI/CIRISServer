@@ -184,6 +184,7 @@ pub async fn enable_watchlist(
         "route_to_moderator": enable.route_to_moderator,
     });
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: signer_key_id.to_owned(),
         attested_key_id: Some(enable.group_key_id.clone()),
         attestation_type: WATCHLIST_CONFIG_TYPE.to_owned(),
@@ -231,6 +232,7 @@ pub async fn disable_watchlist(
         "enabled": false,
     });
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: signer_key_id.to_owned(),
         attested_key_id: Some(group_key_id.to_owned()),
         attestation_type: attestation_type::WITHDRAWS.to_owned(),

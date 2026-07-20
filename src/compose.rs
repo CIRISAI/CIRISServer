@@ -2230,10 +2230,12 @@ pub(crate) async fn start_replication_runtime(
         );
         return Ok(None);
     };
-    let directory: Arc<dyn FederationDirectory> = engine
-        .sqlite_backend()
-        .context("replication runtime requires a SQLite-backed Engine")?
-        .clone();
+    // CIRISServer#303: use the backend-agnostic `federation_directory()` (persist
+    // v18.1.0) so a POSTGRES-backed canonical runs replication too. The former
+    // `sqlite_backend()?` gate silently exempted postgres nodes from the ENTIRE
+    // trace/CEG replication plane (non-fatal warn → zero delivery) — which now
+    // matters directly: a postgres canonical would receive no traces at all.
+    let directory: Arc<dyn FederationDirectory> = engine.federation_directory();
 
     // 1. Desired Initiator set from CEG — admitted consent:replication subjects,
     //    UNIONED with any caller-seeded `extra_targets` (the delivery controller's

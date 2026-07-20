@@ -53,12 +53,15 @@
 //! `HardwareSigner::sign` — never duplicating the canonicalization
 //! rules (MISSION.md boundary; CIRISPersist#7 lesson).
 //!
-//! # Fan-out (issue #11 Cut 4)
+//! # Federation replication (NOT a fan-out / outbox)
 //!
-//! `Engine` in v4.13 has **no** `send_durable` method; that surface
-//! lives on `ciris_edge::Edge`. The `upstreams` field is stubbed here
-//! for the Cut 4 landing; actual dispatch is deferred. See comment on
-//! [`CaptureClient::upstreams`].
+//! A sealed trace does NOT get copied or pushed anywhere from here. It
+//! seals + persists locally, and edge replicates it to the canonical
+//! from the CEG state (consent + trust graph) — the trace flows, or it
+//! does not, by the consent attestation. There is deliberately no
+//! `send_durable` / upstream fan-out on this path; that would break the
+//! single-source-of-truth (persist) + consent model. See the persist +
+//! edge substrate work for `trace_events`-as-CEG-objects replication.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -75,8 +78,6 @@ use super::correlation::CorrelationMetadata;
 use super::partial::CompleteTrace;
 use super::partial::{CaptureOutcome, InboundEvent, PartialTraceStore};
 use super::seal::{self, apply_signature, canonical_bytes, TraceSealError};
-
-use crate::config::UpstreamLens;
 
 // ── Error types ──────────────────────────────────────────────────────
 
@@ -445,17 +446,6 @@ pub struct CaptureClient {
     /// Monotonic sequence counter for tee filenames (Gap 4).
     /// Incremented atomically per seal; never resets within a process.
     tee_seq: AtomicU64,
-
-    /// Upstream lenses for federation fan-out.
-    ///
-    /// Fan-out dispatch via `ciris_edge::Edge::send_durable` lands with
-    /// the edge outbound cut; see #11 Cut 4. `Engine` v4.13 has no
-    /// `send_durable` method — that surface lives on `ciris_edge::Edge`.
-    /// The field is reserved here so the Cut 4 PR can add the `Edge`
-    /// handle and the dispatch loop without touching the constructor
-    /// signature.
-    #[allow(dead_code)]
-    upstreams: Vec<UpstreamLens>,
 }
 
 impl CaptureClient {
@@ -505,7 +495,6 @@ impl CaptureClient {
             consent_config,
             local_copy_dir,
             tee_seq: AtomicU64::new(0),
-            upstreams: Vec::new(),
         }
     }
 
@@ -710,10 +699,10 @@ impl CaptureClient {
                     "client sealed and persisted trace",
                 );
 
-                // Fan-out to upstreams: deferred to #11 Cut 4. `Engine` v4.13
-                // has no `send_durable` method; that surface is on
-                // `ciris_edge::Edge`. The field is reserved; dispatch lands
-                // when the Cut 4 PR introduces the `Edge` handle.
+                // No fan-out / push here by design: the sealed trace is now in
+                // persist, and edge replicates it to the canonical from the CEG
+                // state (consent + trust graph). The trace flows by the consent
+                // attestation, not by an outbound copy from this path.
 
                 Ok(CaptureEventOutcome::SealedAndPersisted {
                     trace_id,

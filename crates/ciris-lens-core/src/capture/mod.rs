@@ -23,8 +23,11 @@
 //!   `local_sign`/`local_pqc_sign` + `receive_and_persist`. Verifies
 //!   the v4 write-path admission gate (AV-45) admits self-authored
 //!   traces.
-//! - **Cut 4 — fan-out.** Enqueue to each `UpstreamLens` via edge's
-//!   `outbound` dispatcher (design-fork A1).
+//! - **Cut 4 — RETIRED (no fan-out).** There is deliberately no
+//!   outbound copy / `send_durable` dispatch from the capture path: a
+//!   sealed trace persists locally and edge replicates it from the CEG
+//!   state (consent + trust graph). Traces flow as `trace_events` CEG
+//!   objects via persist's replication substrate, not a bespoke outbox.
 //! - **Cut 5 — PyO3 surface + Python shim.** Flat `lens.capture_event`
 //!   / `lens.flush` / `lens.orphan_sweep` (design-fork B1; sub-object
 //!   form tracked at #36); the ~10-line `accord_metrics/__init__.py`

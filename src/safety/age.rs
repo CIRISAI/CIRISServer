@@ -309,6 +309,7 @@ async fn emit_age_assurance_inner(
         "level": level.as_str(),
     });
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: subject_key_id.to_owned(),
         attested_key_id: Some(subject_key_id.to_owned()),
         attestation_type: attestation_type::SCORES.to_owned(),

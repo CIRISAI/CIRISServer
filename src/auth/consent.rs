@@ -107,6 +107,7 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         "granted": req.granted,
     });
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: req.consenting_key_id,
         attested_key_id: None,
         attestation_type: "consent".to_string(),

@@ -106,6 +106,7 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
     };
 
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: req.attesting_key_id,
         attested_key_id: req.attested_key_id,
         attestation_type: req.attestation_type,

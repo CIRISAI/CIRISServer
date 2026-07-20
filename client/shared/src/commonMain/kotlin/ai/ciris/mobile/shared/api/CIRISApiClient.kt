@@ -3053,6 +3053,142 @@ class CIRISApiClient(
     }
 
     /**
+     * **Propose a batch of CI-worker keys (co-scrub scrub #1)** —
+     * `POST {nodeUrl}/v1/accord/ci-key/propose`. The BATCH twin of
+     * [proposeCanonicalServer]: the local accord holder RE-OPENS their YubiKey +
+     * USB-wrapped ML-DSA and scrub-signs EVERY [targets] node key in ONE ceremony
+     * (roles set `infra:attest` server-side — the app sends no roles). Same hardware
+     * inputs; the target list rides as a `targets` ARRAY. Each result is a single
+     * co-scrub propose. The app holds NO keys — the YubiKey touch is consent.
+     */
+    suspend fun proposeCiKeys(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        targets: List<ai.ciris.mobile.shared.models.federation.CiKeyTargetInput>,
+        pivSlot: String? = null,
+        modulePath: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CiKeyProposeResponse {
+        val method = "proposeCiKeys"
+        logInfo(method, "POST $nodeUrl/v1/accord/ci-key/propose holder=$holderKeyId targets=${targets.size} usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub signatures; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
+            }
+            val targetsJson = JsonArray(
+                targets.map { t ->
+                    buildJsonObject {
+                        put("key_id", JsonPrimitive(t.keyId.trim()))
+                        put("pubkey_ed25519_base64", JsonPrimitive(t.pubkeyEd25519Base64.trim()))
+                        put("pubkey_ml_dsa_65_base64", JsonPrimitive(t.pubkeyMlDsa65Base64.trim()))
+                        put("identity_type", JsonPrimitive(t.identityType.trim().ifBlank { "node" }))
+                    }
+                },
+            )
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                put("targets", targetsJson)
+            }
+            val response = client.post("$nodeUrl/v1/accord/ci-key/propose") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("propose ci-keys failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CiKeyProposeResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "proposed ci-keys results=${parsed.results.size}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "propose ci-keys failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Cosign a batch of CI-worker co-scrubs** —
+     * `POST {nodeUrl}/v1/accord/ci-key/cosign`. The BATCH twin of
+     * [cosignCanonicalServer]: THIS holder RE-OPENS their YubiKey + USB ML-DSA and
+     * appends their scrub to EVERY [partials] `SignedKeyRecord` over the BYTE-IDENTICAL
+     * envelope. Each partial rides as a raw [JsonElement] and is submitted UNCHANGED so
+     * the canonical bytes match. Each result is a single co-scrub cosign.
+     */
+    suspend fun cosignCiKeys(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        partials: List<JsonElement>,
+        pivSlot: String? = null,
+        modulePath: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.CiKeyCosignResponse {
+        val method = "cosignCiKeys"
+        logInfo(method, "POST $nodeUrl/v1/accord/ci-key/cosign holder=$holderKeyId partials=${partials.size} usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the scrub signatures; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                // Submit the partials VERBATIM — never re-encode the signed envelopes.
+                put("partials", JsonArray(partials))
+            }
+            val response = client.post("$nodeUrl/v1/accord/ci-key/cosign") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("cosign ci-keys failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.CiKeyCosignResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "cosigned ci-keys results=${parsed.results.size} conferred=${parsed.results.count { it.conferred }}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "cosign ci-keys failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **List pending canonical co-scrubs** —
      * `GET {nodeUrl}/v1/accord/canonical/pending` (CIRISServer#174). The co-scrub
      * partials this node holds that are still short of the family m-of-n (arrived via

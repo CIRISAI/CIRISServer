@@ -7,6 +7,7 @@ import ai.ciris.mobile.shared.models.federation.AccordHolderDto
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.models.federation.CanonicalServerDto
 import ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto
+import ai.ciris.mobile.shared.models.federation.CiKeyTargetInput
 import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
 import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
@@ -93,6 +94,8 @@ import kotlinx.coroutines.launch
 private sealed interface AccordSheet {
     data object AdmitNode : AccordSheet
     data class AddCanonical(val replace: CanonicalServerDto?) : AccordSheet
+    /** Batch-bless the substrate CI workers (default-populated one-click card). */
+    data object BlessCiWorkers : AccordSheet
     data object Drill : AccordSheet
     data object Halt : AccordSheet
     data object Announce : AccordSheet
@@ -178,6 +181,11 @@ fun AccordScreen(
                                 add(
                                     NewAttestationAction("add_canonical", "mobile.accord_new_add_canonical") {
                                         sheet = AccordSheet.AddCanonical(replace = null)
+                                    },
+                                )
+                                add(
+                                    NewAttestationAction("bless_ci_workers", "mobile.accord_new_bless_ci_workers") {
+                                        sheet = AccordSheet.BlessCiWorkers
                                     },
                                 )
                                 add(
@@ -449,6 +457,7 @@ fun AccordScreen(
         is AccordSheet.AdmitNode -> AdmitNodeSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.AddCanonical ->
             AddCanonicalSheet(viewModel, holders, busy, s.replace) { sheet = null }
+        is AccordSheet.BlessCiWorkers -> BlessCiWorkersSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Drill -> DrillSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Halt -> HaltSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Announce -> AnnounceSheet(viewModel, holders, busy) { sheet = null }
@@ -670,15 +679,30 @@ private fun AddCanonicalSheet(
 ) {
     val ownedNodes by viewModel.ownedNodes.collectAsState()
     val target by viewModel.canonicalResolvedTarget.collectAsState()
+    val canonicalServers by viewModel.canonicalServers.collectAsState()
+    // Re-bless made easy: a fresh propose (replace == null) defaults its target to the
+    // first canonical server (e.g. ciris-canonical-1) so re-blessing it — to add
+    // `infra:serve` — is a confirm, not a retype. Blank when none loaded (prior behavior).
+    val defaultCanonical = if (replace == null) canonicalServers.firstOrNull() else null
     // Replace = an m-of-n co-scrub re-mint of an existing canonical record: seed the resolved
-    // target + current IP from the row (mirrors the old selectCanonicalForReplace).
-    val seededIp = remember(replace) {
-        replace?.transportHints?.firstOrNull { h -> h.kind == "ip" }?.destination.orEmpty() ?: ""
+    // target + current IP from the row (mirrors the old selectCanonicalForReplace). Propose
+    // seeds the same IP from the defaulted canonical so the address survives the re-bless.
+    val seededIp = remember(replace, defaultCanonical?.keyId) {
+        (replace ?: defaultCanonical)?.transportHints?.firstOrNull { h -> h.kind == "ip" }?.destination.orEmpty()
     }
     LaunchedEffect(replace) {
         if (replace != null) {
             viewModel.selectCanonicalForReplace(replace)
             viewModel.clearCanonicalReplaceSeed()
+        }
+    }
+    // Best-effort pre-fill of the defaulted canonical's hybrid pubkeys via the same
+    // resolve wiring the target picker uses; fires once when the roster is loaded and
+    // nothing is resolved yet, so a manual re-pick is never overridden.
+    LaunchedEffect(defaultCanonical?.keyId) {
+        val d = defaultCanonical
+        if (d != null && target == null) {
+            viewModel.resolveCanonicalTarget(d.keyId)
         }
     }
     var ip by remember { mutableStateOf(seededIp) }
@@ -754,6 +778,105 @@ private fun AddCanonicalSheet(
                     transport.ifBlank { null }, ip.ifBlank { null }, modulePath,
                 )
             }
+            onDismiss()
+        },
+        onDismiss = onDismiss,
+    )
+}
+
+/** One default-populated substrate CI worker row in the "Bless CI workers" card. */
+private data class CiWorkerDefault(val keyId: String, val ed25519: String)
+
+/**
+ * The five substrate CI workers, pre-filled for a one-click batch bless. Each ed25519
+ * pubkey is the repo's published build-key half (44-char base64); the 2604-char
+ * ML-DSA-65 half is NOT embedded — the operator pastes it from each repo's export-job
+ * artifact. `ciris-server-build-v1` has a pending export job, so both halves start blank.
+ */
+private val CI_WORKER_DEFAULTS = listOf(
+    CiWorkerDefault("ciris-verify-build-pipeline", "W8LfgUYjZz4h8r5hcoDv09cG0xKj9ZKuPYZP45sOS9E="),
+    CiWorkerDefault("ciris-persist-build-v1", "TS2WwSTQAqQ8k+8MhIp7Kb9W6DF+Eyknv7++YZZ5FQk="),
+    CiWorkerDefault("agent-steward-2026", "Tynw+BfXmHV4N0jM/Vbr/Ogm1Ts9YZLD5vlYpwfNw1w="),
+    CiWorkerDefault("ciris-edge-build-v1", "NapSP3umS+EIfiXqqW8g6WGxgDIwx8o9sgTE+JGWYDg="),
+    CiWorkerDefault("ciris-server-build-v1", ""),
+)
+
+/**
+ * **Bless CI workers** — batch-propose the substrate CI worker keys (build pipelines +
+ * the agent steward) as `infra:attest` co-scrubs in ONE holder ceremony. Built on
+ * [HardwareScrubSheet]; the [extras] block default-populates all five rows so it is a
+ * one-click card — the operator pastes each repo's ML-DSA-65 pubkey (and the pending
+ * `ciris-server-build-v1` ed25519) from its export-job artifact. Submit blesses every
+ * row with BOTH pubkeys filled via `AccordViewModel.proposeCiKeys`.
+ */
+@Composable
+private fun BlessCiWorkersSheet(
+    viewModel: AccordViewModel,
+    holders: List<AccordHolderDto>,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+) {
+    // One editable pubkey pair per default row (kept out of the submit lambda's closure
+    // by reading .value); ed25519 pre-fills the published build-key half, ML-DSA is blank.
+    val edStates = remember { CI_WORKER_DEFAULTS.map { mutableStateOf(it.ed25519) } }
+    val mlStates = remember { CI_WORKER_DEFAULTS.map { mutableStateOf("") } }
+    val anyReady = CI_WORKER_DEFAULTS.indices.any {
+        edStates[it].value.isNotBlank() && mlStates[it].value.isNotBlank()
+    }
+    HardwareScrubSheet(
+        title = localizedString("mobile.accord_bless_ci_title"),
+        subtitle = localizedString("mobile.accord_bless_ci_desc"),
+        holders = holders,
+        busy = busy,
+        submitLabel = localizedString("mobile.accord_bless_ci_submit"),
+        submitBusyLabel = localizedString("mobile.accord_bless_ci_submit_busy"),
+        tagPrefix = "bless_ci",
+        extraReady = anyReady,
+        extras = {
+            CI_WORKER_DEFAULTS.forEachIndexed { i, w ->
+                Text(
+                    w.keyId,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.testable("bless_ci_key_${w.keyId}"),
+                )
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = edStates[i].value,
+                    onValueChange = { edStates[i].value = it },
+                    singleLine = true,
+                    label = { Text(localizedString("mobile.accord_bless_ci_ed25519_label")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_ci_ed25519_${w.keyId}"),
+                )
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = mlStates[i].value,
+                    onValueChange = { mlStates[i].value = it },
+                    singleLine = false,
+                    label = { Text(localizedString("mobile.accord_bless_ci_mldsa_label")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_ci_mldsa_${w.keyId}"),
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+        },
+        onSubmit = { holderKeyId, usbPath, pin, modulePath ->
+            val targets = CI_WORKER_DEFAULTS.mapIndexedNotNull { i, w ->
+                val ed = edStates[i].value.trim()
+                val ml = mlStates[i].value.trim()
+                if (ed.isNotBlank() && ml.isNotBlank()) {
+                    CiKeyTargetInput(
+                        keyId = w.keyId,
+                        pubkeyEd25519Base64 = ed,
+                        pubkeyMlDsa65Base64 = ml,
+                        identityType = "node",
+                    )
+                } else {
+                    null
+                }
+            }
+            viewModel.proposeCiKeys(holderKeyId, usbPath, pin, targets, modulePath)
             onDismiss()
         },
         onDismiss = onDismiss,

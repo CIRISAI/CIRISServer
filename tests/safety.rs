@@ -373,6 +373,7 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
     for i in 0..count {
         let dimension = format!("moderation_track_record:{community}:item{i}:v1");
         let input = LocalAttestationInput {
+            attestation_id: None,
             attesting_key_id: member.to_string(),
             attested_key_id: Some(member.to_string()),
             attestation_type: attestation_type::SCORES.to_string(),

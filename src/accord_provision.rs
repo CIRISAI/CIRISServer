@@ -1122,7 +1122,8 @@ async fn admit_node(State(st): State<ProvisionState>, body: axum::body::Bytes) -
     }
     // admit-node embeds no transport hint (it's a plain trust-root admission); the
     // reachability-carrying variant is add-canonical, which passes its ip hint.
-    admit_node_impl(st.engine, req, &[]).await
+    // No roles conferred — only a canonical node gets infra:serve (CIRISServer#300).
+    admit_node_impl(st.engine, req, &[], &[]).await
 }
 
 #[cfg(not(feature = "pkcs11"))]
@@ -1130,6 +1131,7 @@ async fn admit_node_impl(
     _engine: Arc<Engine>,
     _req: AdmitNodeRequest,
     _transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
+    _roles: &[String],
 ) -> Response {
     err(
         StatusCode::NOT_IMPLEMENTED,
@@ -1227,6 +1229,12 @@ async fn admit_node_impl(
     engine: Arc<Engine>,
     req: AdmitNodeRequest,
     transport_hints: &[ciris_verify_core::federation_self_record::TransportHint],
+    // Roles to confer INSIDE the scrub-signed envelope (accord-attested, not
+    // self-claimed). Empty for a plain admit-node; add-canonical passes
+    // [infra:serve] so the canonical KeyRecord carries the accord-blessed
+    // "serve as infrastructure" capability — trusted-by-default as a trace
+    // recipient, the role edge's #379 gate is fail-closed on (CIRISServer#300).
+    roles: &[String],
 ) -> Response {
     use ciris_verify_core::federation_self_record::{
         produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
@@ -1262,7 +1270,7 @@ async fn admit_node_impl(
             pubkey_ed25519_base64: req.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.target.identity_type.trim().to_string(),
-            roles: Vec::new(),
+            roles: roles.to_vec(),
         },
         &valid_from,
         // #172: transport hints ride INSIDE this scrub-signed envelope, so the accord
@@ -1486,7 +1494,19 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
     // (1) Hardware scrub (embedding the hint) + adopt via the shipped admit-node path.
     //     adopt_scrub_upgrade runs check_canonical_role_admission, so a non-anchor
     //     scrubber is rejected there (the role never lands). Surface non-200 verbatim.
-    let resp = admit_node_impl(engine.clone(), req.admit, &hints).await;
+    // add-canonical confers `infra:serve` in the scrub-signed envelope — the
+    // accord-blessed "serve as infrastructure" capability (CC 4.4.3.4.3). A node
+    // the trust root blesses with infra:serve is TRUSTED-BY-DEFAULT as a trace
+    // recipient; edge's #379 serve gate is fail-closed on it. Withdrawing the role
+    // (the canonical withdraw op) un-trusts the node. TRUST (this role) + CONSENT
+    // (the self→community promotion) are jointly what make traces flow.
+    let resp = admit_node_impl(
+        engine.clone(),
+        req.admit,
+        &hints,
+        &[ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string()],
+    )
+    .await;
     if resp.status() != StatusCode::OK {
         return resp;
     }
@@ -1604,7 +1624,15 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
             pubkey_ed25519_base64: req.admit.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.admit.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.admit.target.identity_type.clone(),
-            roles: Vec::new(),
+            // Confer `infra:serve` (CC 4.4.3.4.3 — "serve as infrastructure") INSIDE
+            // this scrub-signed envelope so the accord co-scrub (m-of-n) attests the
+            // role rather than the node self-claiming it (CIRISPersist#441). A node
+            // the trust root blesses with infra:serve is trusted-by-default as a
+            // trace recipient — the fail-closed gate (CIRISEdge#379 / CIRISServer#300)
+            // that, together with the peer's consent, decides whether traces arrive.
+            roles: vec![
+                ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
+            ],
         },
         &valid_from,
         &hints,
@@ -1762,6 +1790,276 @@ async fn cosign_canonical_impl(st: ProvisionState, req: CosignCanonicalRequest) 
             "saved_to": saved_to,
             "gossiped_to": gossiped,
         })),
+    )
+        .into_response()
+}
+
+// ─── CI-key co-scrub (CIRISServer#290) ────────────────────────────────────────
+//
+// A CI build-signing pipeline key is blessed by the SAME m-of-n accord co-scrub
+// as a canonical server (CIRISVerify#185), but carries `roles:["infra:attest"]`
+// (NOT canonical / infra:serve) and keeps `identity_type="node"` — it is not a
+// canonical, just an infrastructure attester whose hybrid signature verifies build
+// manifests. The client blesses ALL substrate repos' pipeline keys in ONE ceremony
+// (a BATCH of targets), so a single YubiKey session covers the whole fleet. The
+// handlers mirror propose_canonical / cosign_canonical exactly; only the roles, the
+// absent canonical-forcing + transport hint, and the batch shape differ.
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct CiKeyTarget {
+    key_id: String,
+    pubkey_ed25519_base64: String,
+    pubkey_ml_dsa_65_base64: String,
+    #[serde(default = "ci_key_default_identity_type")]
+    identity_type: String,
+}
+
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+fn ci_key_default_identity_type() -> String {
+    ciris_persist::federation::types::identity_type::NODE.to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct ProposeCiKeyRequest {
+    /// The proposing accord holder (A1) — the seal alias its YubiKey+USB opens.
+    key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The CI pipeline keys to bless — all in ONE co-scrub (the whole substrate fleet).
+    targets: Vec<CiKeyTarget>,
+}
+
+/// `POST /v1/accord/ci-key/propose` — the FIRST scrub of a BATCH CI-key co-scrub.
+/// Each target is scrub-signed with `roles:["infra:attest"]` (identity_type stays
+/// `node` — NOT canonical); the 1-scrub partials do not yet confer (m-of-n). Returns
+/// one partial per target — hand them to the next holder (they gossip, or transfer the
+/// JSON) to `cosign`. CIRISServer#290 / CIRISVerify#185.
+async fn propose_ci_key(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: ProposeCiKeyRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.key_id.trim().is_empty() || req.mldsa_usb_path.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "propose requires the holder key_id + USB path",
+        );
+    }
+    if req.targets.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "propose requires at least one target CI key",
+        );
+    }
+    for t in &req.targets {
+        if t.key_id.trim().is_empty()
+            || t.pubkey_ed25519_base64.trim().is_empty()
+            || t.pubkey_ml_dsa_65_base64.trim().is_empty()
+        {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "each target needs key_id + both hybrid pubkeys",
+            );
+        }
+        if t.key_id.contains(['/', '\\']) || t.key_id.contains("..") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "a target key_id contains path separators",
+            );
+        }
+    }
+    propose_ci_key_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn propose_ci_key_impl(_st: ProvisionState, _req: ProposeCiKeyRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "ci-key propose needs the `pkcs11` feature (the holder's YubiKey + USB ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn propose_ci_key_impl(st: ProvisionState, req: ProposeCiKeyRequest) -> Response {
+    use ciris_verify_core::federation_self_record::{produce_scrubbed_key_record, ScrubTarget};
+    // Open the holder's YubiKey+USB session ONCE for the whole batch.
+    let identity =
+        match open_holder_identity(req.key_id.trim(), req.mldsa_usb_path.trim(), &req.pkcs11).await
+        {
+            Ok(i) => i,
+            Err((code, msg)) => return err(code, &msg),
+        };
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let mut results = Vec::with_capacity(req.targets.len());
+    for t in &req.targets {
+        let target_key_id = t.key_id.trim().to_string();
+        let partial = match produce_scrubbed_key_record(
+            &identity,
+            ScrubTarget {
+                key_id: target_key_id.clone(),
+                pubkey_ed25519_base64: t.pubkey_ed25519_base64.trim().to_string(),
+                pubkey_ml_dsa_65_base64: t.pubkey_ml_dsa_65_base64.trim().to_string(),
+                identity_type: t.identity_type.trim().to_string(),
+                // A CI pipeline key is an infrastructure attester — infra:attest,
+                // NOT canonical/infra:serve. Its hybrid signature verifies build
+                // manifests (CIRISVerify#185). No transport hint — it doesn't serve.
+                roles: vec![
+                    ciris_persist::federation::types::delegation_scope::INFRA_ATTEST.to_string(),
+                ],
+            },
+            &valid_from,
+            &[],
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("scrub {target_key_id}: {e}"),
+                )
+            }
+        };
+        let count = partial.record.distinct_scrub_count();
+        let saved_to = save_coscrub_partial(&target_key_id, &partial);
+        let partial_json = serde_json::to_value(&partial).unwrap_or(serde_json::Value::Null);
+        let gossiped = ingest_partial(&st, partial_json)
+            .await
+            .map(|(_, _, g, _)| g)
+            .unwrap_or(0);
+        results.push(serde_json::json!({
+            "target_key_id": target_key_id,
+            "distinct_scrub_count": count,
+            "partial": partial,
+            "saved_to": saved_to,
+            "gossiped_to": gossiped,
+        }));
+    }
+    tracing::info!(
+        blessed = results.len(),
+        "Trust Root: CI-key BATCH co-scrub proposed (scrub #1) — the next holder cosigns"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "results": results,
+            "note": "1 scrub each — not yet blessed. They gossiped to accord peers; the next holder cosigns.",
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct CosignCiKeyRequest {
+    /// The cosigning accord holder (e.g. B1).
+    key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The partials (verify `SignedKeyRecord`s) from `propose` or a prior `cosign`.
+    partials: Vec<serde_json::Value>,
+}
+
+/// `POST /v1/accord/ci-key/cosign` — append THIS holder's scrub to each partial in the
+/// batch (over the byte-identical envelope, roles preserved); persist's gate confers
+/// each key at family m-of-n. Returns one advanced record per input. CIRISServer#290.
+async fn cosign_ci_key(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CosignCiKeyRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    if req.key_id.trim().is_empty() || req.mldsa_usb_path.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "cosign requires the holder key_id + USB path",
+        );
+    }
+    if req.partials.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "cosign requires at least one partial",
+        );
+    }
+    cosign_ci_key_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn cosign_ci_key_impl(_st: ProvisionState, _req: CosignCiKeyRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "ci-key cosign needs the `pkcs11` feature (the holder's YubiKey + USB ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Response {
+    use ciris_verify_core::federation_self_record::{
+        append_scrub, SignedKeyRecord as VSignedKeyRecord,
+    };
+    let identity =
+        match open_holder_identity(req.key_id.trim(), req.mldsa_usb_path.trim(), &req.pkcs11).await
+        {
+            Ok(i) => i,
+            Err((code, msg)) => return err(code, &msg),
+        };
+    let mut results = Vec::with_capacity(req.partials.len());
+    for p in req.partials {
+        let partial: VSignedKeyRecord = match serde_json::from_value(p) {
+            Ok(x) => x,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("a partial is not a SignedKeyRecord: {e}"),
+                )
+            }
+        };
+        let target_key_id = partial.record.key_id.clone();
+        let advanced = match append_scrub(partial, &identity).await {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("append scrub {target_key_id} (already signed by this holder?): {e}"),
+                )
+            }
+        };
+        let count = advanced.record.distinct_scrub_count();
+        let saved_to = save_coscrub_partial(&target_key_id, &advanced);
+        let (conferred, outcome) = match serde_json::to_value(&advanced).ok().and_then(|v| {
+            serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>(v).ok()
+        }) {
+            Some(pr) => match st.engine.adopt_scrub_upgrade(pr).await {
+                Ok(o) => (true, format!("{o:?}")),
+                Err(e) => (false, e.to_string()),
+            },
+            None => (false, "record convert failed".to_string()),
+        };
+        let advanced_json = serde_json::to_value(&advanced).unwrap_or(serde_json::Value::Null);
+        let gossiped = ingest_partial(&st, advanced_json)
+            .await
+            .map(|(_, _, g, _)| g)
+            .unwrap_or(0);
+        if conferred {
+            clear_pending(&st, &target_key_id);
+        }
+        results.push(serde_json::json!({
+            "target_key_id": target_key_id,
+            "distinct_scrub_count": count,
+            "conferred": conferred,
+            "outcome": outcome,
+            "advanced": advanced,
+            "saved_to": saved_to,
+            "gossiped_to": gossiped,
+        }));
+    }
+    tracing::info!(count = results.len(), "Trust Root: CI-key BATCH cosigned");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "results": results })),
     )
         .into_response()
 }
@@ -2282,6 +2580,18 @@ pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
         .route(
             "/v1/accord/canonical/cosign",
             axum::routing::post(cosign_canonical),
+        )
+        // CI-key co-scrub (CIRISServer#290) — bless the substrate fleet's CI
+        // build-signing keys (roles:["infra:attest"]) in ONE batch ceremony. Same
+        // m-of-n propose→cosign as canonical, driven by the client's "bless CI
+        // workers" card.
+        .route(
+            "/v1/accord/ci-key/propose",
+            axum::routing::post(propose_ci_key),
+        )
+        .route(
+            "/v1/accord/ci-key/cosign",
+            axum::routing::post(cosign_ci_key),
         )
         // The "Pending co-signs" list (partials below the family quorum), read by the client.
         .route(

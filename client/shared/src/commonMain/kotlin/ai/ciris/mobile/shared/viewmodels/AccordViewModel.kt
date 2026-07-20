@@ -6,6 +6,7 @@ import ai.ciris.mobile.shared.models.federation.AccordFamilyDto
 import ai.ciris.mobile.shared.models.federation.AccordHolderDto
 import ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
+import ai.ciris.mobile.shared.models.federation.CiKeyTargetInput
 import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
@@ -777,6 +778,102 @@ class AccordViewModel(
                     msg.contains("already signed", ignoreCase = true) ->
                         "This holder has already scrubbed this record — a distinct holder must cosign."
                     else -> "Couldn't cosign the co-scrub: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Bless a batch of CI-worker keys (co-scrub scrub #1)**. The BATCH twin of
+     * [proposeCanonical]: the local accord holder RE-OPENS their YubiKey + USB-wrapped
+     * ML-DSA and scrub-signs EVERY [targets] node key in one ceremony (roles are set
+     * `infra:attest` server-side — the app sends no roles). Each 1-scrub partial gossips
+     * to the other holders' devices to cosign toward the family m-of-n. Refreshes the
+     * canonical roster + pending list after. The app holds NO keys — the touch is consent.
+     */
+    fun proposeCiKeys(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        targets: List<CiKeyTargetInput>,
+        modulePath: String? = null,
+    ) {
+        if (_busy.value) return
+        if (targets.isEmpty()) {
+            _error.value = "Paste at least one CI worker's ed25519 + ML-DSA pubkeys first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _canonicalSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.proposeCiKeys(holderKeyId, mldsaUsbPath, userPin, targets, modulePath = modulePath)
+                _notice.value =
+                    "Proposed co-scrubs for ${res.results.size} CI worker key(s). " +
+                        "Hand / gossip the partials to the next holder to cosign."
+                loadCanonicalServers()
+                loadPendingCoscrubs()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[proposeCiKeys] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — propose needs the YubiKey signer."
+                    else -> "Couldn't propose the CI worker keys: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Cosign a batch of CI-worker co-scrubs**. The BATCH twin of [cosignCanonical]:
+     * THIS holder RE-OPENS their YubiKey + USB ML-DSA and appends their scrub to EVERY
+     * [partials] `SignedKeyRecord` over the BYTE-IDENTICAL envelope. Each partial MUST be
+     * verbatim (a pending entry's `partial` or a pasted one) — submitted UNCHANGED so the
+     * canonical bytes match. At the family m-of-n each record is conferred. Refreshes.
+     */
+    fun cosignCiKeys(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        partials: List<JsonElement>,
+        modulePath: String? = null,
+    ) {
+        if (_busy.value) return
+        if (partials.isEmpty()) {
+            _error.value = "No co-scrub partials to cosign."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _canonicalSavedTo.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.cosignCiKeys(holderKeyId, mldsaUsbPath, userPin, partials, modulePath = modulePath)
+                val conferred = res.results.count { it.conferred }
+                _notice.value =
+                    "Cosigned ${res.results.size} CI worker key(s) — $conferred conferred at the family quorum."
+                loadCanonicalServers()
+                loadPendingCoscrubs()
+                refresh()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[cosignCiKeys] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — cosign needs the YubiKey signer."
+                    else -> "Couldn't cosign the CI worker keys: ${e.message}"
                 }
             } finally {
                 _busy.value = false

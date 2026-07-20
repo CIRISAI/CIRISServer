@@ -160,6 +160,7 @@ pub async fn emit_moderation_event(
         "payload": payload,
     });
     let input = LocalAttestationInput {
+        attestation_id: None,
         attesting_key_id: signer_key_id.to_owned(),
         attested_key_id: target_key_ids.first().cloned(),
         attestation_type: attestation_type::SCORES.to_owned(),
