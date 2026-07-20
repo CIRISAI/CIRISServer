@@ -1,0 +1,86 @@
+name: Export pipeline pubkeys (bless a CI keypair)
+
+# Surfaces the PUBLIC halves of CIRISServer's existing build-pipeline signing
+# keypair so an accord holder can bless it (delegate infra:attest -> the pipeline
+# key_id, and pin its pubkeys as the pipeline_member). Derives from the SAME
+# secrets CI signs with (CIRIS_BUILD_ED25519_SECRET / CIRIS_BUILD_MLDSA_SECRET),
+# so the blessed key provably matches the signing key -- no prod seed copied by
+# hand. NEVER prints or uploads a seed byte.
+#
+# Manual only. Mirrors CIRISVerify's export-pipeline-pubkeys.yml.
+# See CIRISServer#193 / CIRISServer#290 (the ci-key co-scrub serve leg) /
+# CIRISVerify#176.
+
+on:
+  workflow_dispatch:
+    inputs:
+      key_id:
+        description: "Pipeline node key_id these pubkeys belong to"
+        required: true
+        default: "ciris-server-build-v1"
+
+permissions:
+  contents: read
+
+jobs:
+  export-pubkeys:
+    runs-on: ubuntu-latest
+    env:
+      CIRIS_BUILD_ED25519_SECRET: ${{ secrets.CIRIS_BUILD_ED25519_SECRET }}
+      CIRIS_BUILD_MLDSA_SECRET: ${{ secrets.CIRIS_BUILD_MLDSA_SECRET }}
+    steps:
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      # CIRISServer does not vendor ciris-build-tool; install the CLI from the
+      # pinned verify tag so the derived pubkeys match the version our substrate
+      # roots to.
+      - name: Install ciris-build-sign (from pinned CIRISVerify tag)
+        run: |
+          cargo install --git https://github.com/CIRISAI/CIRISVerify \
+            --tag v10.5.0 ciris-build-tool --bin ciris-build-sign --locked
+
+      - name: Derive + surface the pipeline pubkeys (no secret ever printed)
+        run: |
+          set -euo pipefail
+          if [ -z "${CIRIS_BUILD_ED25519_SECRET:-}" ] || [ -z "${CIRIS_BUILD_MLDSA_SECRET:-}" ]; then
+            echo "::error::CIRIS_BUILD_* secrets are not set on this repo — nothing to derive."
+            exit 1
+          fi
+
+          mkdir -p /tmp/pk && chmod 0700 /tmp/pk
+          # Same tolerant decode as release.yml (hex / base64 / raw → 32 bytes).
+          decode_secret() {
+            local v cleaned; v="$1"; cleaned=$(printf '%s' "$v" | tr -d '[:space:]')
+            if [ "${#cleaned}" -eq 64 ] && printf '%s' "$cleaned" | grep -qE '^[0-9a-fA-F]+$'; then
+              printf '%s' "$cleaned" | xxd -r -p > "$2"; [ "$(wc -c < "$2")" -eq 32 ] && return 0
+            fi
+            if printf '%s' "$cleaned" | base64 -d > "$2" 2>/dev/null && [ "$(wc -c < "$2")" -eq 32 ]; then return 0; fi
+            printf '%s' "$v" > "$2"; [ "$(wc -c < "$2")" -eq 32 ] && return 0
+            echo "::error::could not decode $3 secret to 32 bytes"; return 1
+          }
+          decode_secret "$CIRIS_BUILD_ED25519_SECRET" /tmp/pk/ed25519.seed "ed25519"
+          decode_secret "$CIRIS_BUILD_MLDSA_SECRET"   /tmp/pk/mldsa65.secret "mldsa65"
+          chmod 0600 /tmp/pk/*
+
+          ciris-build-sign pubkey \
+            --ed25519-seed /tmp/pk/ed25519.seed \
+            --mldsa-secret /tmp/pk/mldsa65.secret \
+            --key-id "${{ inputs.key_id }}" \
+            > pipeline-pubkeys.json
+
+          # Immediately destroy the seed material.
+          shred -u /tmp/pk/* 2>/dev/null || rm -f /tmp/pk/*
+          rmdir /tmp/pk || true
+
+          echo "## Bless this CI keypair" >> "$GITHUB_STEP_SUMMARY"
+          echo "Paste into the client's *bless a CI keypair* card (public material only):" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat pipeline-pubkeys.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload pipeline-pubkeys.json (public material only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-pubkeys
+          path: pipeline-pubkeys.json
+          if-no-files-found: error

@@ -49,7 +49,6 @@ use super::consent::{ConsentConfig, ConsentResolution, GrantState};
 use super::correlation::CorrelationMetadata;
 use super::partial::{CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore};
 use super::seal;
-use crate::config::UpstreamLens;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -136,10 +135,6 @@ pub struct PyEngineCapture {
 
     /// Monotonic sequence counter for tee filenames.
     tee_seq: AtomicU64,
-
-    /// Upstream lenses (reserved for Cut 4 fan-out; empty).
-    #[allow(dead_code)]
-    upstreams: Vec<UpstreamLens>,
 }
 
 impl PyEngineCapture {
@@ -165,7 +160,6 @@ impl PyEngineCapture {
             trace_schema_version,
             local_copy_dir,
             tee_seq: AtomicU64::new(0),
-            upstreams: Vec::new(),
         }
     }
 

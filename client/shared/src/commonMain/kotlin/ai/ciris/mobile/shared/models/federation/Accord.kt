@@ -419,6 +419,53 @@ data class CosignCanonicalResponse(
     val gossipedTo: Int = 0,
 )
 
+// ─── CI-worker batch blessing (CIRISServer ci-key/propose|cosign) ─────────────
+//
+// The substrate CI workers (build pipelines + the agent steward) are ONE batch of
+// `infra:attest` node keys an accord holder scrub-signs in a single ceremony — the
+// SAME m-of-n co-scrub as a canonical server, except (a) `targets` / `partials` ride
+// as ARRAYS (batch) and (b) the roles are set `infra:attest` server-side (the client
+// sends no roles). Each per-target result carries the same fields as a single
+// canonical propose / cosign, so the batch responses reuse those element DTOs.
+
+/**
+ * One CI-worker target of a batch `POST /v1/accord/ci-key/propose` — the node key an
+ * accord holder scrub-signs. Same fields as a canonical `target`; [identityType]
+ * defaults to `node`. Built by the "Bless CI workers" card from each repo's
+ * export-job artifact (the operator pastes the ed25519 + ML-DSA-65 pubkeys).
+ */
+@Serializable
+data class CiKeyTargetInput(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String,
+    @SerialName("identity_type")
+    val identityType: String = "node",
+)
+
+/**
+ * `POST /v1/accord/ci-key/propose` response — one [ProposeCanonicalResponse]-shaped
+ * result per target in the batch (each `{target_key_id, distinct_scrub_count, partial,
+ * saved_to, gossiped_to}`).
+ */
+@Serializable
+data class CiKeyProposeResponse(
+    val results: List<ProposeCanonicalResponse> = emptyList(),
+)
+
+/**
+ * `POST /v1/accord/ci-key/cosign` response — one [CosignCanonicalResponse]-shaped
+ * result per partial in the batch (each `{target_key_id, distinct_scrub_count,
+ * conferred, outcome, advanced, saved_to, gossiped_to}`).
+ */
+@Serializable
+data class CiKeyCosignResponse(
+    val results: List<CosignCanonicalResponse> = emptyList(),
+)
+
 // ─── Genesis ceremony (CIRISServer #41) ──────────────────────────────────────
 //
 // The guided HUMANITY_ACCORD genesis ceremony stands up a NEW mesh's 2-of-3
