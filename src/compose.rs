@@ -2297,8 +2297,16 @@ pub(crate) async fn start_replication_runtime(
     // and delivery_status().round_diagnostics.round_outcomes can't observe the
     // KEX-none contention cliff — the edge FFI path wires it (pyo3.rs), but this
     // server-owned runtime start (start_federation_delivery) must do so itself.
+    // CIRISEdge#386 / CIRISServer#300 ask 1 — BLOCKING the trace plane. The gate's
+    // leg B asks "does the recipient's infra:serve capability root to a root THIS
+    // node trusts?" (`capability_roots_to_trusted_root`), which requires knowing who
+    // "I" am. Left `None`, the trace gate FAIL-CLOSES: every `trace:*` row is
+    // withheld from every peer (it logs "replication runtime has no local_key_id").
+    // Same `node_key_id` already threaded into `replication_peers_from_consent` and
+    // the publish-own `self_provider` above.
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
+        local_key_id: Some(node_key_id.to_string()),
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(
