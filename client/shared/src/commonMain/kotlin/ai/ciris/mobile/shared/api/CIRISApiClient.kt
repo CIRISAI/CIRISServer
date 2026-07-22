@@ -3355,6 +3355,150 @@ class CIRISApiClient(
     }
 
     /**
+     * The seed ceremony's refusal text — a non-200 body is `{"error": …}`. Falls back
+     * to the raw prefix when the body isn't that shape, so nothing is swallowed.
+     */
+    private fun genesisSeedError(raw: String): String =
+        runCatching {
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisSeedErrorDto.serializer(),
+                raw,
+            ).error
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: raw.take(220)
+
+    /**
+     * **Propose the portable mesh-genesis seed (authorization #1)** —
+     * `POST {nodeUrl}/v1/accord/genesis/propose`. The FIRST accord holder RE-OPENS
+     * their YubiKey + USB-wrapped ML-DSA and signs the seed's charter + grant over
+     * the existing roster and the [serveKeyId] canonical node. Same hardware inputs
+     * as [proposeCanonicalServer] / [proposeCiKeys]; [ip] optionally overrides the
+     * serve node's address hint.
+     *
+     * Returns the (still-partial) bundle VERBATIM plus the running authorization
+     * tally — hold the bundle unchanged and hand it to [cosignGenesis]. The app
+     * holds NO keys; the YubiKey touch is the human consent.
+     */
+    suspend fun proposeGenesis(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        serveKeyId: String,
+        ip: String? = null,
+        pivSlot: String? = null,
+        modulePath: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.GenesisSeedResponse {
+        val method = "proposeGenesis"
+        logInfo(method, "POST $nodeUrl/v1/accord/genesis/propose holder=$holderKeyId serve=$serveKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the seed signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("holder_key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                put("serve_key_id", JsonPrimitive(serveKeyId.trim()))
+                ip?.takeIf { it.isNotBlank() }?.let { put("ip", JsonPrimitive(it.trim())) }
+            }
+            val response = client.post("$nodeUrl/v1/accord/genesis/propose") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("propose genesis seed failed: ${response.status}: ${genesisSeedError(raw)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisSeedResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "proposed seed authorizations=${parsed.authorizationsHave}/${parsed.authorizationsNeeded} complete=${parsed.complete}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "propose genesis seed failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Cosign the portable mesh-genesis seed (authorization #2…)** —
+     * `POST {nodeUrl}/v1/accord/genesis/cosign`. The SECOND accord holder authorizes
+     * the SAME [bundle] on their own YubiKey. [bundle] rides VERBATIM (the raw
+     * [JsonElement] returned by [proposeGenesis] / a prior cosign) — never re-encoded
+     * through a typed model, so the authorized bytes match and no server field is
+     * dropped. `complete` flips true once the tally meets what the server needs; the
+     * node REJECTS a holder who has already authorized this bundle.
+     */
+    suspend fun cosignGenesis(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String? = null,
+        bundle: JsonElement,
+        pivSlot: String? = null,
+        modulePath: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.GenesisSeedResponse {
+        val method = "cosignGenesis"
+        logInfo(method, "POST $nodeUrl/v1/accord/genesis/cosign holder=$holderKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch (slot 9c is touch-ALWAYS) for the seed signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val pkcs11 = buildJsonObject {
+                userPin?.takeIf { it.isNotBlank() }?.let { put("user_pin", JsonPrimitive(it)) }
+                pivSlot?.takeIf { it.isNotBlank() }?.let { put("piv_slot", JsonPrimitive(it)) }
+                modulePath?.takeIf { it.isNotBlank() }?.let { put("module_path", JsonPrimitive(it)) }
+            }
+            val bodyJson = buildJsonObject {
+                put("holder_key_id", JsonPrimitive(holderKeyId.trim()))
+                put("mldsa_usb_path", JsonPrimitive(mldsaUsbPath.trim()))
+                put("pkcs11", pkcs11)
+                // The bundle VERBATIM — never re-encode the authorized envelope.
+                put("bundle", bundle)
+            }
+            val response = client.post("$nodeUrl/v1/accord/genesis/cosign") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("cosign genesis seed failed: ${response.status}: ${genesisSeedError(raw)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisSeedResponse.serializer(),
+                raw,
+            )
+            logInfo(method, "cosigned seed authorizations=${parsed.authorizationsHave}/${parsed.authorizationsNeeded} complete=${parsed.complete}")
+            parsed
+        } catch (e: Exception) {
+            val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {
+                " — timed out waiting for the YubiKey touch; touch the key when it blinks and retry"
+            } else {
+                ""
+            }
+            logException(method, e, "nodeUrl=$nodeUrl$hint")
+            throw RuntimeException("${e.message ?: "cosign genesis seed failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
      * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
      * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the

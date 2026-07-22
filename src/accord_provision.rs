@@ -2109,6 +2109,332 @@ async fn family_quorum(engine: &Engine, roster_n: usize) -> (usize, usize) {
     )
 }
 
+// ─── the seed ceremony (FSD/MESH_GENESIS.md): propose → cosign → seed ─────────
+//
+// Minting a trust root is a QUORUM act, not one holder's decision. A1 proposes —
+// their YubiKey mints and signs the charter (self-referential, pre-committing to
+// the OTHER seated holders as its recovery set) plus one `infra:serve` grant per
+// serve node — and authorizes the result. B1 (and any further holder the family's
+// entrenched M requires) cosigns the SAME artifact. The bundle is a seed only once
+// `authorizations` reaches M distinct seated holders, which `verify_bundle` proves
+// offline against the bundle itself.
+
+#[derive(Deserialize)]
+struct ProposeGenesisRequest {
+    /// The proposing accord holder (e.g. A1) — the seal alias its YubiKey opens.
+    holder_key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The canonical to carry as the mesh's serve node.
+    serve_key_id: String,
+}
+
+#[derive(Deserialize)]
+struct CosignGenesisRequest {
+    holder_key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The partial bundle from `propose` (or a prior `cosign`).
+    bundle: serde_json::Value,
+}
+
+/// The ceremony's progress, identical from `propose` and `cosign` so the card can
+/// render one state machine.
+fn genesis_ceremony_response(bundle: crate::mesh_genesis::GenesisBundle) -> Response {
+    let needed = match crate::mesh_genesis::authorizations_needed(&bundle) {
+        Ok(n) => n,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let have = bundle.authorizations.len();
+    let complete = crate::mesh_genesis::verify_bundle(&bundle).is_ok();
+    let fingerprint = crate::mesh_genesis::fingerprint(&bundle).unwrap_or_default();
+    tracing::info!(
+        family_key_id = %bundle.family_key_id,
+        have, needed, complete,
+        "Trust Root: genesis ceremony progressed"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "bundle": bundle,
+            "authorizations_have": have,
+            "authorizations_needed": needed,
+            "complete": complete,
+            "fingerprint": fingerprint,
+        })),
+    )
+        .into_response()
+}
+
+async fn propose_genesis(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: ProposeGenesisRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    propose_genesis_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn propose_genesis_impl(_st: ProvisionState, _req: ProposeGenesisRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "the seed ceremony needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) -> Response {
+    use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
+    use ciris_verify_core::self_at_login::SelfSigner;
+
+    let holders = ciris_persist::federation::genesis::effective_accord_holder_records();
+    if holders.is_empty() {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no accord holder roster is resolvable on this node — nothing to root to",
+        );
+    }
+    let root = req.holder_key_id.trim().to_string();
+    if !holders.iter().any(|h| h.record.key_id == root) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("{root} is not a seated accord holder on this node"),
+        );
+    }
+    // The pre-rotation successor set = the OTHER seated holders. Never a fixed
+    // pair: if the charter key is compromised, exactly these keys may rotate it,
+    // and persist binds this set's hash into the commitment.
+    let successors: Vec<String> = holders
+        .iter()
+        .map(|h| h.record.key_id.clone())
+        .filter(|k| k != &root)
+        .collect();
+    if successors.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "a single-holder accord cannot pre-commit a recovery set — charter-key \
+             compromise would be unrecoverable by construction",
+        );
+    }
+
+    // The serve node: an existing canonical, carried as-is (its own m-of-n scrub
+    // chain is what makes it trustworthy; we never re-bless it here).
+    let serve_rec = match st.engine.list_canonical_servers().await {
+        Ok(rows) => match rows
+            .into_iter()
+            .find(|r| r.key_id == req.serve_key_id.trim())
+        {
+            Some(r) => r,
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("{} is not a known canonical on this node", req.serve_key_id),
+                )
+            }
+        },
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("list_canonical_servers: {e}"),
+            )
+        }
+    };
+    let serve_signed = ciris_persist::federation::SignedKeyRecord {
+        record: serve_rec.clone(),
+    };
+    let serve_key_id = serve_rec.key_id.clone();
+
+    let identity = match open_holder_identity(&root, &req.mldsa_usb_path, &req.pkcs11).await {
+        Ok(i) => i,
+        Err((code, msg)) => return err(code, &msg),
+    };
+
+    // Sign one attestation row (charter or grant) with the holder's hardware key.
+    async fn sign_att(
+        signer: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+        id: &str,
+        attested_key_id: &str,
+        envelope: serde_json::Value,
+    ) -> Result<SignedAttestation, String> {
+        use sha2::Digest as _;
+        let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+            .map_err(|e| format!("canonicalize {id}: {e}"))?;
+        let (ed, pqc) = signer
+            .sign_bound(&canonical)
+            .await
+            .map_err(|e| format!("sign {id}: {e}"))?;
+        let now = chrono::Utc::now();
+        Ok(SignedAttestation {
+            attestation: Attestation {
+                attestation_id: id.to_string(),
+                attesting_key_id: signer.key_id().to_string(),
+                attested_key_id: attested_key_id.to_string(),
+                attestation_type: attestation_type::DELEGATES_TO.to_string(),
+                weight: Some(1.0),
+                asserted_at: now,
+                // Deliberately no expiry on the charter/grant themselves: the
+                // revocable, user-owned act is the `delegates_to(user → root)`
+                // trust edge, which the operator writes on attach and can delete.
+                expires_at: None,
+                attestation_envelope: envelope,
+                original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
+                scrub_signature_classical: ed,
+                scrub_signature_pqc: Some(pqc),
+                scrub_key_id: signer.key_id().to_string(),
+                scrub_timestamp: now,
+                pqc_completed_at: Some(now),
+                persist_row_hash: String::new(),
+                subject_key_ids: Vec::new(),
+                withdraws_admission_rule: None,
+                cohort_scope: "federation".to_string(),
+                tier: ciris_persist::federation::types::attestation_tier::FEDERATION.to_string(),
+                promoted_at: None,
+            },
+        })
+    }
+
+    let charter_env = match crate::mesh_genesis::charter_envelope(&successors) {
+        Ok(e) => e,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let charter = match sign_att(
+        &identity,
+        crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+        &root,
+        charter_env,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let grant_id = format!(
+        "{}:{serve_key_id}",
+        crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+    );
+    let grant = match sign_att(
+        &identity,
+        &grant_id,
+        &serve_key_id,
+        crate::mesh_genesis::grant_envelope(&serve_key_id),
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+
+    let (m, n) = family_quorum(&st.engine, holders.len()).await;
+    let family_key_id =
+        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut bundle = match crate::mesh_genesis::produce_genesis(
+        &family_key_id,
+        &format!("quorum:{m}/{n}"),
+        vec![serve_signed],
+        vec![charter, grant],
+        Vec::new(),
+        &now,
+    ) {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+
+    // The proposer authorizes their own artifact — one of the M.
+    match authorize_bundle(&identity, &mut bundle).await {
+        Ok(()) => {}
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+    genesis_ceremony_response(bundle)
+}
+
+/// Append `signer`'s bound-hybrid signature over the bundle digest.
+#[cfg(feature = "pkcs11")]
+async fn authorize_bundle(
+    signer: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+    bundle: &mut crate::mesh_genesis::GenesisBundle,
+) -> Result<(), String> {
+    use ciris_verify_core::self_at_login::SelfSigner;
+    let key_id = signer.key_id().to_string();
+    if bundle
+        .authorizations
+        .iter()
+        .any(|a| a.holder_key_id == key_id)
+    {
+        return Err(format!(
+            "{key_id} has already authorized this genesis — m-of-n counts DISTINCT holders"
+        ));
+    }
+    let digest = crate::mesh_genesis::authorization_digest(bundle).map_err(|e| e.to_string())?;
+    let (ed, pqc) = signer
+        .sign_bound(&digest)
+        .await
+        .map_err(|e| format!("authorize: {e}"))?;
+    bundle
+        .authorizations
+        .push(crate::mesh_genesis::GenesisAuthorization {
+            holder_key_id: key_id,
+            signature_classical: ed,
+            signature_pqc: pqc,
+        });
+    Ok(())
+}
+
+async fn cosign_genesis(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CosignGenesisRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    cosign_genesis_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn cosign_genesis_impl(_st: ProvisionState, _req: CosignGenesisRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "the seed ceremony needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> Response {
+    let mut bundle: crate::mesh_genesis::GenesisBundle = match serde_json::from_value(req.bundle) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("bundle is not a GenesisBundle: {e}"),
+            )
+        }
+    };
+    // Never co-sign something structurally broken: a cosigner's key must not be
+    // spent endorsing a bundle whose charter or grants do not hold up.
+    if let Err(e) = crate::mesh_genesis::verify_bundle_structure(&bundle) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("refusing to cosign an invalid genesis: {e}"),
+        );
+    }
+    let key_id = req.holder_key_id.trim();
+    if !bundle.holders.iter().any(|h| h.record.key_id == key_id) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("{key_id} is not a holder carried in this genesis"),
+        );
+    }
+    let identity = match open_holder_identity(key_id, &req.mldsa_usb_path, &req.pkcs11).await {
+        Ok(i) => i,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    if let Err(e) = authorize_bundle(&identity, &mut bundle).await {
+        return err(StatusCode::BAD_REQUEST, &e);
+    }
+    let _ = &st;
+    genesis_ceremony_response(bundle)
+}
+
 async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
     let holders: Vec<serde_json::Value> =
         ciris_persist::federation::genesis::effective_accord_holder_records()
@@ -2181,47 +2507,6 @@ struct ProduceGenesisRequest {
     /// Optional override; defaults to the baked HUMANITY_ACCORD family.
     #[serde(default)]
     family_key_id: Option<String>,
-}
-
-/// `POST /v1/accord/genesis/produce` — emit the portable, self-verifying genesis
-/// bundle from completed re-mint records.
-///
-/// Refuses a bundle with no `infra:serve`-conferring serve node, so a dark mesh
-/// cannot be packaged and handed to anyone (`FSD/MESH_GENESIS.md`).
-async fn genesis_produce(body: axum::body::Bytes) -> Response {
-    let req: ProduceGenesisRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
-    };
-    let mut serve: Vec<ciris_persist::federation::SignedKeyRecord> =
-        Vec::with_capacity(req.serve_records.len());
-    for v in req.serve_records {
-        match serde_json::from_value(v) {
-            Ok(r) => serve.push(r),
-            Err(e) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    &format!("a serve_record is not a SignedKeyRecord: {e}"),
-                )
-            }
-        }
-    }
-    let family_key_id = req.family_key_id.unwrap_or_else(|| {
-        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id
-    });
-    let now = chrono::Utc::now().to_rfc3339();
-    match crate::mesh_genesis::produce_genesis(&family_key_id, serve, &now) {
-        Ok(bundle) => {
-            tracing::info!(
-                family_key_id = %bundle.family_key_id,
-                holders = bundle.holders.len(),
-                serve_nodes = bundle.serve_nodes.len(),
-                "Trust Root: portable mesh genesis produced (trust root + serve node)"
-            );
-            (StatusCode::OK, Json(bundle)).into_response()
-        }
-        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
-    }
 }
 
 /// Persist a co-scrub partial/complete record to the predictable outbox (the artifact
@@ -2761,8 +3046,12 @@ pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
             axum::routing::get(genesis_remint_source),
         )
         .route(
-            "/v1/accord/genesis/produce",
-            axum::routing::post(genesis_produce),
+            "/v1/accord/genesis/propose",
+            axum::routing::post(propose_genesis),
+        )
+        .route(
+            "/v1/accord/genesis/cosign",
+            axum::routing::post(cosign_genesis),
         )
         // The "Pending co-signs" list (partials below the family quorum), read by the client.
         .route(

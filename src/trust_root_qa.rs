@@ -539,12 +539,79 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     let fx = mint_portable_root().await;
 
     let family = ciris_persist::federation::genesis::accord_family_genesis_record();
-    let bundle = produce_genesis(
+
+    // The delegation plane the seed ceremony mints: a charter pre-committing to
+    // the OTHER seated holders as its recovery set, plus the serve grant. Signed
+    // here in software by A1 — the live ceremony signs the identical shapes with
+    // A1's YubiKey through `/v1/accord/genesis/propose`.
+    let charter = SignedAttestation {
+        attestation: sign_row(
+            crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+            &fx.holders[0],
+            ROOT,
+            attestation_type::DELEGATES_TO,
+            crate::mesh_genesis::charter_envelope(&[
+                HOLDER_IDS[1].to_string(),
+                HOLDER_IDS[2].to_string(),
+            ])
+            .expect("charter envelope"),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
+    let grant_id = format!(
+        "{}:{CANONICAL}",
+        crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+    );
+    let grant = SignedAttestation {
+        attestation: sign_row(
+            &grant_id,
+            &fx.holders[0],
+            CANONICAL,
+            attestation_type::DELEGATES_TO,
+            crate::mesh_genesis::grant_envelope(CANONICAL),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
+
+    let mut bundle = produce_genesis(
         &family.family_key_id,
+        "quorum:2/3",
         vec![fx.canonical.clone()],
+        vec![charter, grant],
+        Vec::new(),
         "2026-07-22T00:00:00Z",
     )
     .expect("an envelope-attested infra:serve canonical must produce a genesis");
+
+    // Under-authorized: structurally sound, but not yet a seed. This is the
+    // mid-ceremony state the card shows between A1 proposing and B1 cosigning.
+    assert!(
+        matches!(
+            verify_bundle(&bundle),
+            Err(crate::mesh_genesis::GenesisError::QuorumNotMet { needed: 2, .. })
+        ),
+        "an unauthorized bundle must not pass as a seed"
+    );
+
+    // A1 then B1 authorize — the m-of-n that makes minting a trust root a quorum
+    // act. Each signs the digest binding the WHOLE artifact, so a signature
+    // cannot be replayed onto a bundle with a swapped serve node.
+    for h in [&fx.holders[0], &fx.holders[1]] {
+        let digest =
+            crate::mesh_genesis::authorization_digest(&bundle).expect("authorization digest");
+        let (ed, pqc) = h.sign_bound(&digest).await.expect("authorize");
+        bundle
+            .authorizations
+            .push(crate::mesh_genesis::GenesisAuthorization {
+                holder_key_id: h.key_id().to_string(),
+                signature_classical: ed,
+                signature_pqc: pqc,
+            });
+    }
     assert_eq!(bundle.holders.len(), 3, "all 3 accord holders ride along");
     assert_eq!(
         bundle.serve_nodes.len(),

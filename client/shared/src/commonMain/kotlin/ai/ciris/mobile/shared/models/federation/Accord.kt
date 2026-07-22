@@ -634,6 +634,114 @@ data class ProduceGenesisResult(
     val summary: GenesisBundleDto,
 )
 
+// ─── Portable mesh-genesis SEED ceremony (propose → cosign) ───────────────────
+//
+// Two accord holders — real people, one YubiKey each — turn the EXISTING roster
+// plus one canonical serve node into a portable trust-root seed, in the SAME
+// propose → cosign shape as the canonical / CI-key co-scrubs:
+//   1. POST /v1/accord/genesis/propose  (the first holder) → charter + grant, signed
+//   2. POST /v1/accord/genesis/cosign   (the second holder) → the SAME bundle, again
+// The bundle rides VERBATIM as a raw `JsonElement` between the two calls — never
+// re-serialized through a typed model — so unknown server fields survive the
+// round-trip and the authorized bytes stay byte-identical.
+
+/**
+ * `POST /v1/accord/genesis/propose` and `POST /v1/accord/genesis/cosign` response —
+ * the same shape for both. [bundle] is the (possibly still-partial) seed JSON held
+ * VERBATIM; [authorizationsHave] / [authorizationsNeeded] are the running tally the
+ * card shows, and [complete] is the server's own verdict (it is authoritative — the
+ * client NEVER re-derives it from a threshold of its own).
+ */
+@Serializable
+data class GenesisSeedResponse(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    @SerialName("authorizations_have")
+    val authorizationsHave: Int = 0,
+    @SerialName("authorizations_needed")
+    val authorizationsNeeded: Int = 0,
+    val complete: Boolean = false,
+)
+
+/** A non-200 `{"error": …}` body from the seed ceremony — the node's refusal text. */
+@Serializable
+data class GenesisSeedErrorDto(
+    val error: String = "",
+)
+
+/**
+ * The seed ceremony's live, resumable state — held between propose and cosign so a
+ * partially authorized bundle is never lost or re-derived. [bundle] is the server's
+ * JSON VERBATIM (passed back unchanged to cosign); [prettyJson] is the SAME bytes
+ * pretty-printed for Copy / Save only.
+ *
+ * [authorizedKeyIds] is who has already authorized — used to keep the cosign holder
+ * picker from offering a holder the server would reject as a duplicate.
+ */
+data class GenesisSeedState(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    val prettyJson: String,
+    val authorizationsHave: Int,
+    val authorizationsNeeded: Int,
+    val complete: Boolean,
+    val authorizedKeyIds: List<String> = emptyList(),
+)
+
+/**
+ * The DISPLAY-only reads off a seed [GenesisSeedState.bundle]. Read field-by-field
+ * off the raw JSON rather than decoded into a typed model, so nothing the server
+ * sends is dropped: [fingerprint] is absent on bundles that carry none (omit the
+ * line then — never invent one), and counts are 0 when the arrays are absent.
+ */
+data class GenesisSeedDisplay(
+    val familyKeyId: String,
+    val holderCount: Int,
+    val serveNodeCount: Int,
+    val fingerprint: String?,
+    val authorizedKeyIds: List<String>,
+)
+
+/**
+ * Read [GenesisSeedDisplay] off a VERBATIM seed bundle. Tolerant by design — the
+ * bundle is the server's artifact and may carry fields this client has never heard
+ * of; every read is best-effort and absence is rendered as absence.
+ *
+ * `authorizations` is read as either an array of strings or an array of objects
+ * carrying `holder_key_id` / `key_id`, so the cosign picker can exclude holders who
+ * authorized on ANOTHER device (a bundle carried in on a USB stick).
+ */
+fun genesisSeedDisplay(bundle: kotlinx.serialization.json.JsonElement): GenesisSeedDisplay {
+    val obj = bundle as? kotlinx.serialization.json.JsonObject
+    fun str(field: String): String? =
+        (obj?.get(field) as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?.takeIf { it.isNotBlank() }
+    fun size(field: String): Int =
+        (obj?.get(field) as? kotlinx.serialization.json.JsonArray)?.size ?: 0
+    val authorized = (obj?.get("authorizations") as? kotlinx.serialization.json.JsonArray)
+        ?.mapNotNull { entry ->
+            when (entry) {
+                is kotlinx.serialization.json.JsonPrimitive ->
+                    entry.takeIf { it.isString }?.content
+                is kotlinx.serialization.json.JsonObject ->
+                    (entry["holder_key_id"] ?: entry["key_id"])
+                        ?.let { it as? kotlinx.serialization.json.JsonPrimitive }
+                        ?.takeIf { it.isString }
+                        ?.content
+                else -> null
+            }
+        }
+        ?.filter { it.isNotBlank() }
+        .orEmpty()
+    return GenesisSeedDisplay(
+        familyKeyId = str("family_key_id").orEmpty(),
+        holderCount = size("holders"),
+        serveNodeCount = size("serve_nodes"),
+        fingerprint = str("fingerprint"),
+        authorizedKeyIds = authorized,
+    )
+}
+
 /**
  * ``GET /v1/accord/yubikey-status`` — the inserted YubiKey's readiness for accord
  * provisioning, so the ceremony UI can show a clear banner + the PIN/PUK tries.
