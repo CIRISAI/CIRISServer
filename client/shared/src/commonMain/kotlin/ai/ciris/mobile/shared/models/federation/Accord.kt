@@ -62,7 +62,8 @@ data class AccordHolderDto(
 /** ``GET /v1/accord-holders`` response. */
 @Serializable
 data class AccordHoldersResponse(
-    val threshold: Int = 2,
+    /** The accord's m-of-n threshold as served. **0 = unknown**, never guessed. */
+    val threshold: Int = 0,
     @SerialName("holder_count")
     val holderCount: Int = 0,
     val holders: List<AccordHolderDto> = emptyList(),
@@ -89,7 +90,13 @@ data class AccordInvocationDto(
     @SerialName("valid_signers")
     val validSigners: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     /** The holder key_ids on the roster for this invocation. */
     @SerialName("roster_member_ids")
     val rosterMemberIds: List<String> = emptyList(),
@@ -122,7 +129,13 @@ data class AccordEventDto(
      * signer (announce). */
     val signers: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     /** Announce ONLY — the free-text message (bound to the signed payload), or null. */
     val message: String? = null,
 )
@@ -145,7 +158,13 @@ data class AccordHaltRecordDto(
     @SerialName("valid_signers")
     val validSigners: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     @SerialName("latched_at")
     val latchedAt: String? = null,
 )
@@ -510,6 +529,218 @@ data class GenesisAssembleResponse(
     val genesis: kotlinx.serialization.json.JsonElement,
     val message: String? = null,
 )
+
+// ─── Re-mint existing trust root → portable genesis (FSD/MESH_GENESIS.md) ─────
+//
+// The EXISTING accord + canonical are re-minted into a portable, self-verifying
+// genesis bundle (src/accord_provision.rs). The operator flow:
+//   1. GET  /v1/accord/genesis/remint-source  → pre-fill (holders + canonicals).
+//      C1 need not be present — quorum 2/3, so its record rides the roster.
+//   2. POST /v1/accord/canonical/propose      (A1, pre-filled)   → partial
+//   3. POST /v1/accord/canonical/cosign       (B1)               → completed record,
+//      now carrying `infra:serve` in the SIGNED identity_type set.
+//   4. POST /v1/accord/genesis/produce        (completed record) → the bundle.
+
+/**
+ * One accord holder of the re-mint roster — an entry of
+ * `GET /v1/accord/genesis/remint-source`. The FULL roster (A1/B1/C1) rides the
+ * genesis even when only two sign, so 2-of-3 never silently narrows to 2-of-2.
+ */
+@Serializable
+data class RemintHolderDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("identity_type")
+    val identityType: String? = null,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
+)
+
+/**
+ * One existing canonical server of the re-mint roster. [confersInfraServe] is
+ * whether the record ALREADY confers `infra:serve` (identity_type ∪ roles) —
+ * `false` is exactly what the re-mint fixes.
+ */
+@Serializable
+data class RemintCanonicalDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("identity_type")
+    val identityType: String,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
+    @SerialName("scrub_key_id")
+    val scrubKeyId: String? = null,
+    @SerialName("transport_hints")
+    val transportHints: List<TransportHintDto>? = null,
+    @SerialName("confers_infra_serve")
+    val confersInfraServe: Boolean = false,
+)
+
+/**
+ * `GET /v1/accord/genesis/remint-source` response — everything needed to PRE-FILL
+ * a "re-mint existing trust root" ceremony, so nothing is retyped and no key
+ * material is invented.
+ */
+@Serializable
+data class RemintSourceDto(
+    val holders: List<RemintHolderDto> = emptyList(),
+    val canonicals: List<RemintCanonicalDto> = emptyList(),
+    /** The family quorum, e.g. ``2/3``. */
+    /**
+     * The family's **entrenched** m-of-n, rendered by the server (e.g. `"2/3"`).
+     * Never assume a value: the accord's threshold and seat count are governance
+     * state, not constants. Empty until the source call returns — render nothing
+     * rather than a guess, because this string tells an operator how many humans
+     * to bring to a ceremony.
+     */
+    val quorum: String = "",
+    @SerialName("quorum_m")
+    val quorumM: Int = 0,
+    @SerialName("quorum_n")
+    val quorumN: Int = 0,
+    val note: String? = null,
+)
+
+/**
+ * The portable `GenesisBundle` decoded for DISPLAY — `POST /v1/accord/genesis/produce`
+ * returns the bundle itself. [holders] / [serveNodes] are opaque signed
+ * `SignedKeyRecord`s the app never inspects, so they ride as raw
+ * [kotlinx.serialization.json.JsonElement]s (counts only).
+ */
+@Serializable
+data class GenesisBundleDto(
+    val version: Int = 0,
+    @SerialName("family_key_id")
+    val familyKeyId: String = "",
+    val holders: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+    @SerialName("serve_nodes")
+    val serveNodes: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+    @SerialName("produced_at")
+    val producedAt: String? = null,
+)
+
+/**
+ * The parsed `POST /v1/accord/genesis/produce` result: [bundle] is the portable
+ * `GenesisBundle` JSON VERBATIM (the artifact the operator saves / shares);
+ * [summary] is the same bytes decoded for display.
+ */
+data class ProduceGenesisResult(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    val summary: GenesisBundleDto,
+)
+
+// ─── Portable mesh-genesis SEED ceremony (propose → cosign) ───────────────────
+//
+// Two accord holders — real people, one YubiKey each — turn the EXISTING roster
+// plus one canonical serve node into a portable trust-root seed, in the SAME
+// propose → cosign shape as the canonical / CI-key co-scrubs:
+//   1. POST /v1/accord/genesis/propose  (the first holder) → charter + grant, signed
+//   2. POST /v1/accord/genesis/cosign   (the second holder) → the SAME bundle, again
+// The bundle rides VERBATIM as a raw `JsonElement` between the two calls — never
+// re-serialized through a typed model — so unknown server fields survive the
+// round-trip and the authorized bytes stay byte-identical.
+
+/**
+ * `POST /v1/accord/genesis/propose` and `POST /v1/accord/genesis/cosign` response —
+ * the same shape for both. [bundle] is the (possibly still-partial) seed JSON held
+ * VERBATIM; [authorizationsHave] / [authorizationsNeeded] are the running tally the
+ * card shows, and [complete] is the server's own verdict (it is authoritative — the
+ * client NEVER re-derives it from a threshold of its own).
+ */
+@Serializable
+data class GenesisSeedResponse(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    @SerialName("authorizations_have")
+    val authorizationsHave: Int = 0,
+    @SerialName("authorizations_needed")
+    val authorizationsNeeded: Int = 0,
+    val complete: Boolean = false,
+)
+
+/** A non-200 `{"error": …}` body from the seed ceremony — the node's refusal text. */
+@Serializable
+data class GenesisSeedErrorDto(
+    val error: String = "",
+)
+
+/**
+ * The seed ceremony's live, resumable state — held between propose and cosign so a
+ * partially authorized bundle is never lost or re-derived. [bundle] is the server's
+ * JSON VERBATIM (passed back unchanged to cosign); [prettyJson] is the SAME bytes
+ * pretty-printed for Copy / Save only.
+ *
+ * [authorizedKeyIds] is who has already authorized — used to keep the cosign holder
+ * picker from offering a holder the server would reject as a duplicate.
+ */
+data class GenesisSeedState(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    val prettyJson: String,
+    val authorizationsHave: Int,
+    val authorizationsNeeded: Int,
+    val complete: Boolean,
+    val authorizedKeyIds: List<String> = emptyList(),
+)
+
+/**
+ * The DISPLAY-only reads off a seed [GenesisSeedState.bundle]. Read field-by-field
+ * off the raw JSON rather than decoded into a typed model, so nothing the server
+ * sends is dropped: [fingerprint] is absent on bundles that carry none (omit the
+ * line then — never invent one), and counts are 0 when the arrays are absent.
+ */
+data class GenesisSeedDisplay(
+    val familyKeyId: String,
+    val holderCount: Int,
+    val serveNodeCount: Int,
+    val fingerprint: String?,
+    val authorizedKeyIds: List<String>,
+)
+
+/**
+ * Read [GenesisSeedDisplay] off a VERBATIM seed bundle. Tolerant by design — the
+ * bundle is the server's artifact and may carry fields this client has never heard
+ * of; every read is best-effort and absence is rendered as absence.
+ *
+ * `authorizations` is read as either an array of strings or an array of objects
+ * carrying `holder_key_id` / `key_id`, so the cosign picker can exclude holders who
+ * authorized on ANOTHER device (a bundle carried in on a USB stick).
+ */
+fun genesisSeedDisplay(bundle: kotlinx.serialization.json.JsonElement): GenesisSeedDisplay {
+    val obj = bundle as? kotlinx.serialization.json.JsonObject
+    fun str(field: String): String? =
+        (obj?.get(field) as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?.takeIf { it.isNotBlank() }
+    fun size(field: String): Int =
+        (obj?.get(field) as? kotlinx.serialization.json.JsonArray)?.size ?: 0
+    val authorized = (obj?.get("authorizations") as? kotlinx.serialization.json.JsonArray)
+        ?.mapNotNull { entry ->
+            when (entry) {
+                is kotlinx.serialization.json.JsonPrimitive ->
+                    entry.takeIf { it.isString }?.content
+                is kotlinx.serialization.json.JsonObject ->
+                    (entry["holder_key_id"] ?: entry["key_id"])
+                        ?.let { it as? kotlinx.serialization.json.JsonPrimitive }
+                        ?.takeIf { it.isString }
+                        ?.content
+                else -> null
+            }
+        }
+        ?.filter { it.isNotBlank() }
+        .orEmpty()
+    return GenesisSeedDisplay(
+        familyKeyId = str("family_key_id").orEmpty(),
+        holderCount = size("holders"),
+        serveNodeCount = size("serve_nodes"),
+        fingerprint = str("fingerprint"),
+        authorizedKeyIds = authorized,
+    )
+}
 
 /**
  * ``GET /v1/accord/yubikey-status`` — the inserted YubiKey's readiness for accord

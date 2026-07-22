@@ -205,6 +205,7 @@ pub mod ingest_http;
 /// `cirisgraph_nodes` / `cirisgraph_edges` SQLite tables onto the client's
 /// wire contract so both cards work in server mode.
 pub mod memory_api;
+pub mod mesh_genesis;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
 /// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
@@ -280,6 +281,11 @@ pub mod system_data;
 pub mod telemetry_logs;
 #[cfg(feature = "test-anchor")]
 mod test_bless;
+// TEST-ANCHOR-ONLY QA — mint a portable trust root (accord + canonical) in
+// substrate test mode and USE it: the acceptance gate for the next persist
+// repin (CIRISPersist#486/#488). Test-only by construction.
+#[cfg(all(test, feature = "test-anchor"))]
+mod trust_root_qa;
 /// **CC 4.1.4** — the `withdraws`:`recants` arbitrage countermeasure
 /// (CIRISServer#159). Consumer-policy behavioral analysis: per-attester
 /// precedence-collapsed `withdraws:recants` ratio over a rolling window, with a

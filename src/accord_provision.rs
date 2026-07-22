@@ -1270,6 +1270,16 @@ async fn admit_node_impl(
             pubkey_ed25519_base64: req.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.target.identity_type.trim().to_string(),
+            // Conferral rides `ScrubTarget.roles`, which verify materializes INTO the
+            // scrub-signed `registration_envelope` (v10.5.0 `:421` — "attested by this
+            // scrub"), readable back via `SignedKeyRecord::roles_in_envelope()`. This
+            // is the attested home for an accord-conferred capability.
+            //
+            // NOTE (CIRISPersist#486): persist does not yet lift the envelope-attested
+            // roles into the top-level `KeyRecord.roles` that `claims_role` reads, so
+            // the conferral is *attested but not yet visible* to `has_effective_role`.
+            // Consumers holding the SignedKeyRecord (e.g. `mesh_genesis`) read the
+            // envelope directly and see it today.
             roles: roles.to_vec(),
         },
         &valid_from,
@@ -1624,12 +1634,13 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
             pubkey_ed25519_base64: req.admit.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.admit.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.admit.target.identity_type.clone(),
-            // Confer `infra:serve` (CC 4.4.3.4.3 — "serve as infrastructure") INSIDE
-            // this scrub-signed envelope so the accord co-scrub (m-of-n) attests the
-            // role rather than the node self-claiming it (CIRISPersist#441). A node
-            // the trust root blesses with infra:serve is trusted-by-default as a
-            // trace recipient — the fail-closed gate (CIRISEdge#379 / CIRISServer#300)
-            // that, together with the peer's consent, decides whether traces arrive.
+            // Confer `infra:serve` (CC 4.4.3.4.3 — "serve as infrastructure"). Verify
+            // materializes `ScrubTarget.roles` into the scrub-signed envelope, so the
+            // accord co-scrub (m-of-n) ATTESTS the capability rather than the node
+            // self-claiming it (CIRISPersist#441). A node the trust root blesses with
+            // infra:serve is trusted-by-default as a trace recipient — CIRISEdge#386
+            // leg A — which together with the peer's consent decides whether traces
+            // arrive. (Visibility to `claims_role` awaits CIRISPersist#486.)
             roles: vec![
                 ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
             ],
@@ -2060,6 +2071,547 @@ async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Resp
     (
         StatusCode::OK,
         Json(serde_json::json!({ "results": results })),
+    )
+        .into_response()
+}
+
+// ─── Re-mint an existing trust root → a portable genesis (FSD/MESH_GENESIS.md) ──
+//
+// The operator flow this serves:
+//   1. GET  /v1/accord/genesis/remint-source  → pre-fill from the EXISTING accord +
+//      canonical. C1's record comes from here, so **C1 need not be present** — the
+//      family is quorum:2/3, so A1 + B1 alone can sign.
+//   2. POST /v1/accord/canonical/propose      (A1, pre-filled) → partial
+//   3. POST /v1/accord/canonical/cosign       (B1)             → completed record,
+//      now carrying `infra:serve` in the SIGNED identity_type set.
+//   4. POST /v1/accord/genesis/produce        (the completed record) → the portable,
+//      self-verifying genesis bundle.
+
+/// `GET /v1/accord/genesis/remint-source` — everything needed to PRE-FILL a
+/// "re-mint existing trust root" ceremony, so nothing is retyped and no key material
+/// is invented: the full accord holder roster (A1/B1/C1) and the existing canonical
+/// server(s) with their pubkeys + transport hints.
+///
+/// **Why the whole roster when only two sign:** the m-of-n is evaluated OVER the
+/// roster, so a genesis that shipped only the two signers would silently redefine
+/// 2-of-3 as 2-of-2 — narrowing the kill switch and breaking recovery if a signer is
+/// later lost. Two signers, three seats.
+/// Resolve the accord family's **entrenched** m-of-n — never a literal. The
+/// family's `consensus_protocol` (`quorum:M/N`) is the authority; absent a
+/// resolvable family we fall back to a strict majority over the roster we can
+/// actually see. Hard-coding `2/3` anywhere is a bug waiting for the day the
+/// accord's seats or threshold change: it would tell an operator to bring the
+/// wrong number of humans to a ceremony.
+async fn family_quorum(engine: &Engine, roster_n: usize) -> (usize, usize) {
+    (
+        crate::accord::family_quorum_m(engine, roster_n).await,
+        roster_n,
+    )
+}
+
+// ─── the seed ceremony (FSD/MESH_GENESIS.md): propose → cosign → seed ─────────
+//
+// Minting a trust root is a QUORUM act, not one holder's decision. A1 proposes —
+// their YubiKey mints and signs the charter (self-referential, pre-committing to
+// the OTHER seated holders as its recovery set) plus one `infra:serve` grant per
+// serve node — and authorizes the result. B1 (and any further holder the family's
+// entrenched M requires) cosigns the SAME artifact. The bundle is a seed only once
+// `authorizations` reaches M distinct seated holders, which `verify_bundle` proves
+// offline against the bundle itself.
+
+#[derive(Deserialize)]
+struct ProposeGenesisRequest {
+    /// The proposing accord holder (e.g. A1) — the seal alias its YubiKey opens.
+    holder_key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The canonical to carry as the mesh's serve node.
+    serve_key_id: String,
+}
+
+#[derive(Deserialize)]
+struct CosignGenesisRequest {
+    holder_key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: ProvisionPkcs11,
+    /// The partial bundle from `propose` (or a prior `cosign`).
+    bundle: serde_json::Value,
+}
+
+/// On the MINTING node, write `delegates_to(node → root)` the moment the ceremony
+/// reaches quorum — the node's own trust edge to the root its operators just
+/// created.
+///
+/// This is not a consent shortcut. A trust edge must be a deliberate act, and here
+/// it *is* one: a quorum of seated holders just signed this charter into existence
+/// on their own hardware. Making them then answer "do you trust this root?" would
+/// be theater — they are the accord. What must stay deliberate is the RECEIVING
+/// side, which is why [`crate::mesh_genesis::attach_genesis`] still refuses to
+/// write this edge: a bundle must never assign a stranger a trust root.
+///
+/// The edge is the node's own signed, deletable, nuclear-revocable act (un-trust =
+/// delete this row). Best-effort: a failure is reported to the operator but never
+/// invalidates the seed, which is a portable artifact independent of this node.
+async fn write_node_trust_edge(
+    engine: &Engine,
+    bundle: &crate::mesh_genesis::GenesisBundle,
+) -> Result<String, String> {
+    use ciris_persist::federation::types::{
+        attestation_tier, attestation_type, Attestation, SignedAttestation,
+    };
+    use ciris_verify_core::self_at_login::{HardwareRootedIdentity, SelfSigner};
+    use sha2::Digest as _;
+
+    let root = crate::mesh_genesis::charter_root_key_id(bundle)
+        .ok_or_else(|| "genesis carries no charter — nothing to trust".to_string())?;
+
+    let cfg = crate::config::ServerConfig::defaults().map_err(|e| format!("server config: {e}"))?;
+    let node_key_id = cfg.key_id.clone();
+    if node_key_id == root {
+        // The node IS the root (single-box mesh): the self-loop charter already
+        // says so, and `trust_root_valid` requires root != user.
+        return Ok(String::new());
+    }
+    let ed: std::sync::Arc<dyn ciris_keyring::HardwareSigner> =
+        std::sync::Arc::from(crate::compose::federation_signer(&cfg).map_err(|e| e.to_string())?);
+    let pqc: std::sync::Arc<dyn ciris_keyring::PqcSigner> =
+        crate::compose::federation_pqc_signer(&cfg).map_err(|e| e.to_string())?;
+    let identity = HardwareRootedIdentity::new(node_key_id.clone(), ed, pqc)
+        .map_err(|e| format!("node self-signer: {e}"))?;
+
+    let id = format!("trust-edge:{node_key_id}:{root}");
+    let envelope = serde_json::json!({
+        "references_attestation_id": id,
+        // The node trusts the root for exactly what a root is for. Attenuation
+        // does the rest: the node can never exercise more than the charter holds.
+        "scope": [
+            ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
+            ciris_persist::federation::trust_root::INFRA_SERVE_SCOPE,
+        ],
+    });
+    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+        .map_err(|e| format!("canonicalize trust edge: {e}"))?;
+    let (sig_ed, sig_pqc) = identity
+        .sign_bound(&canonical)
+        .await
+        .map_err(|e| format!("sign trust edge: {e}"))?;
+    let now = chrono::Utc::now();
+    let row = SignedAttestation {
+        attestation: Attestation {
+            attestation_id: id.clone(),
+            attesting_key_id: node_key_id.clone(),
+            attested_key_id: root.clone(),
+            attestation_type: attestation_type::DELEGATES_TO.to_string(),
+            weight: Some(1.0),
+            asserted_at: now,
+            expires_at: None,
+            attestation_envelope: envelope,
+            original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
+            scrub_signature_classical: sig_ed,
+            scrub_signature_pqc: Some(sig_pqc),
+            scrub_key_id: node_key_id.clone(),
+            scrub_timestamp: now,
+            pqc_completed_at: Some(now),
+            persist_row_hash: String::new(),
+            subject_key_ids: Vec::new(),
+            withdraws_admission_rule: None,
+            cohort_scope: "federation".to_string(),
+            tier: attestation_tier::FEDERATION.to_string(),
+            promoted_at: None,
+        },
+    };
+    engine
+        .federation_directory()
+        .put_attestation(row)
+        .await
+        .map_err(|e| format!("write trust edge: {e}"))?;
+    tracing::info!(
+        node_key_id = %node_key_id,
+        root_key_id = %root,
+        "Trust Root: node trust edge written — this node now trusts the root its \
+         holders minted (delete this attestation to un-trust)"
+    );
+    Ok(root)
+}
+
+/// The ceremony's progress, identical from `propose` and `cosign` so the card can
+/// render one state machine.
+async fn genesis_ceremony_response(
+    engine: &Engine,
+    bundle: crate::mesh_genesis::GenesisBundle,
+) -> Response {
+    let needed = match crate::mesh_genesis::authorizations_needed(&bundle) {
+        Ok(n) => n,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let have = bundle.authorizations.len();
+    let complete = crate::mesh_genesis::verify_bundle(&bundle).is_ok();
+    let fingerprint = crate::mesh_genesis::fingerprint(&bundle).unwrap_or_default();
+
+    // On completion the minting node adopts the root its holders just created:
+    // without `delegates_to(node → root)` the trace gate's leg B has nothing to
+    // walk and the mesh stays dark on the very node that genesised it.
+    let (trusts_root, trust_edge_error) = if complete {
+        match write_node_trust_edge(engine, &bundle).await {
+            Ok(root) => (root, None),
+            Err(e) => {
+                tracing::warn!(error = %e, "Trust Root: node trust edge NOT written");
+                (String::new(), Some(e))
+            }
+        }
+    } else {
+        (String::new(), None)
+    };
+
+    tracing::info!(
+        family_key_id = %bundle.family_key_id,
+        have, needed, complete,
+        "Trust Root: genesis ceremony progressed"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "bundle": bundle,
+            "authorizations_have": have,
+            "authorizations_needed": needed,
+            "complete": complete,
+            "fingerprint": fingerprint,
+            // The root this node now trusts (empty until the ceremony completes).
+            "node_trusts_root": trusts_root,
+            // Non-fatal: the seed is portable and valid regardless.
+            "trust_edge_error": trust_edge_error,
+        })),
+    )
+        .into_response()
+}
+
+async fn propose_genesis(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: ProposeGenesisRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    propose_genesis_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn propose_genesis_impl(_st: ProvisionState, _req: ProposeGenesisRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "the seed ceremony needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) -> Response {
+    use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
+    use ciris_verify_core::self_at_login::SelfSigner;
+
+    let holders = ciris_persist::federation::genesis::effective_accord_holder_records();
+    if holders.is_empty() {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no accord holder roster is resolvable on this node — nothing to root to",
+        );
+    }
+    let root = req.holder_key_id.trim().to_string();
+    if !holders.iter().any(|h| h.record.key_id == root) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("{root} is not a seated accord holder on this node"),
+        );
+    }
+    // The pre-rotation successor set = the OTHER seated holders. Never a fixed
+    // pair: if the charter key is compromised, exactly these keys may rotate it,
+    // and persist binds this set's hash into the commitment.
+    let successors: Vec<String> = holders
+        .iter()
+        .map(|h| h.record.key_id.clone())
+        .filter(|k| k != &root)
+        .collect();
+    if successors.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "a single-holder accord cannot pre-commit a recovery set — charter-key \
+             compromise would be unrecoverable by construction",
+        );
+    }
+
+    // The serve node: an existing canonical, carried as-is (its own m-of-n scrub
+    // chain is what makes it trustworthy; we never re-bless it here).
+    let serve_rec = match st.engine.list_canonical_servers().await {
+        Ok(rows) => match rows
+            .into_iter()
+            .find(|r| r.key_id == req.serve_key_id.trim())
+        {
+            Some(r) => r,
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("{} is not a known canonical on this node", req.serve_key_id),
+                )
+            }
+        },
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("list_canonical_servers: {e}"),
+            )
+        }
+    };
+    let serve_signed = ciris_persist::federation::SignedKeyRecord {
+        record: serve_rec.clone(),
+    };
+    let serve_key_id = serve_rec.key_id.clone();
+
+    let identity = match open_holder_identity(&root, &req.mldsa_usb_path, &req.pkcs11).await {
+        Ok(i) => i,
+        Err((code, msg)) => return err(code, &msg),
+    };
+
+    // Sign one attestation row (charter or grant) with the holder's hardware key.
+    async fn sign_att(
+        signer: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+        id: &str,
+        attested_key_id: &str,
+        envelope: serde_json::Value,
+    ) -> Result<SignedAttestation, String> {
+        use sha2::Digest as _;
+        let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+            .map_err(|e| format!("canonicalize {id}: {e}"))?;
+        let (ed, pqc) = signer
+            .sign_bound(&canonical)
+            .await
+            .map_err(|e| format!("sign {id}: {e}"))?;
+        let now = chrono::Utc::now();
+        Ok(SignedAttestation {
+            attestation: Attestation {
+                attestation_id: id.to_string(),
+                attesting_key_id: signer.key_id().to_string(),
+                attested_key_id: attested_key_id.to_string(),
+                attestation_type: attestation_type::DELEGATES_TO.to_string(),
+                weight: Some(1.0),
+                asserted_at: now,
+                // Deliberately no expiry on the charter/grant themselves: the
+                // revocable, user-owned act is the `delegates_to(user → root)`
+                // trust edge, which the operator writes on attach and can delete.
+                expires_at: None,
+                attestation_envelope: envelope,
+                original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
+                scrub_signature_classical: ed,
+                scrub_signature_pqc: Some(pqc),
+                scrub_key_id: signer.key_id().to_string(),
+                scrub_timestamp: now,
+                pqc_completed_at: Some(now),
+                persist_row_hash: String::new(),
+                subject_key_ids: Vec::new(),
+                withdraws_admission_rule: None,
+                cohort_scope: "federation".to_string(),
+                tier: ciris_persist::federation::types::attestation_tier::FEDERATION.to_string(),
+                promoted_at: None,
+            },
+        })
+    }
+
+    let charter_env = match crate::mesh_genesis::charter_envelope(&successors) {
+        Ok(e) => e,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let charter = match sign_att(
+        &identity,
+        crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+        &root,
+        charter_env,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let grant_id = format!(
+        "{}:{serve_key_id}",
+        crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+    );
+    let grant = match sign_att(
+        &identity,
+        &grant_id,
+        &serve_key_id,
+        crate::mesh_genesis::grant_envelope(&serve_key_id),
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+
+    let (m, n) = family_quorum(&st.engine, holders.len()).await;
+    let family_key_id =
+        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut bundle = match crate::mesh_genesis::produce_genesis(
+        &family_key_id,
+        &format!("quorum:{m}/{n}"),
+        vec![serve_signed],
+        vec![charter, grant],
+        Vec::new(),
+        &now,
+    ) {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+
+    // The proposer authorizes their own artifact — one of the M.
+    match authorize_bundle(&identity, &mut bundle).await {
+        Ok(()) => {}
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+    genesis_ceremony_response(&st.engine, bundle).await
+}
+
+/// Append `signer`'s bound-hybrid signature over the bundle digest.
+#[cfg(feature = "pkcs11")]
+async fn authorize_bundle(
+    signer: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+    bundle: &mut crate::mesh_genesis::GenesisBundle,
+) -> Result<(), String> {
+    use ciris_verify_core::self_at_login::SelfSigner;
+    let key_id = signer.key_id().to_string();
+    if bundle
+        .authorizations
+        .iter()
+        .any(|a| a.holder_key_id == key_id)
+    {
+        return Err(format!(
+            "{key_id} has already authorized this genesis — m-of-n counts DISTINCT holders"
+        ));
+    }
+    let digest = crate::mesh_genesis::authorization_digest(bundle).map_err(|e| e.to_string())?;
+    let (ed, pqc) = signer
+        .sign_bound(&digest)
+        .await
+        .map_err(|e| format!("authorize: {e}"))?;
+    bundle
+        .authorizations
+        .push(crate::mesh_genesis::GenesisAuthorization {
+            holder_key_id: key_id,
+            signature_classical: ed,
+            signature_pqc: pqc,
+        });
+    Ok(())
+}
+
+async fn cosign_genesis(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
+    let req: CosignGenesisRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    cosign_genesis_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn cosign_genesis_impl(_st: ProvisionState, _req: CosignGenesisRequest) -> Response {
+    err(
+        StatusCode::NOT_IMPLEMENTED,
+        "the seed ceremony needs the `pkcs11` feature (the holder's YubiKey + USB-wrapped ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> Response {
+    let mut bundle: crate::mesh_genesis::GenesisBundle = match serde_json::from_value(req.bundle) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("bundle is not a GenesisBundle: {e}"),
+            )
+        }
+    };
+    // Never co-sign something structurally broken: a cosigner's key must not be
+    // spent endorsing a bundle whose charter or grants do not hold up.
+    if let Err(e) = crate::mesh_genesis::verify_bundle_structure(&bundle) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("refusing to cosign an invalid genesis: {e}"),
+        );
+    }
+    let key_id = req.holder_key_id.trim();
+    if !bundle.holders.iter().any(|h| h.record.key_id == key_id) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("{key_id} is not a holder carried in this genesis"),
+        );
+    }
+    let identity = match open_holder_identity(key_id, &req.mldsa_usb_path, &req.pkcs11).await {
+        Ok(i) => i,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    if let Err(e) = authorize_bundle(&identity, &mut bundle).await {
+        return err(StatusCode::BAD_REQUEST, &e);
+    }
+    genesis_ceremony_response(&st.engine, bundle).await
+}
+
+async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
+    let holders: Vec<serde_json::Value> =
+        ciris_persist::federation::genesis::effective_accord_holder_records()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "key_id": h.record.key_id,
+                    "identity_type": h.record.identity_type,
+                    "pubkey_ed25519_base64": h.record.pubkey_ed25519_base64,
+                    "pubkey_ml_dsa_65_base64": h.record.pubkey_ml_dsa_65_base64,
+                })
+            })
+            .collect();
+    let canonicals = match st.engine.list_canonical_servers().await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "key_id": r.key_id,
+                    "identity_type": r.identity_type,
+                    "pubkey_ed25519_base64": r.pubkey_ed25519_base64,
+                    "pubkey_ml_dsa_65_base64": r.pubkey_ml_dsa_65_base64,
+                    "scrub_key_id": r.scrub_key_id,
+                    "transport_hints": r.registration_envelope.get("transport_hints")
+                        .cloned().unwrap_or(serde_json::Value::Null),
+                    // Does this record ALREADY confer serve? (identity_type ∪ roles —
+                    // the same surface `claims_role` reads.) `false` here is exactly
+                    // what the re-mint fixes.
+                    "confers_infra_serve": ciris_persist::federation::types::identity_type::set_contains(
+                        &r.identity_type,
+                        ciris_persist::federation::types::delegation_scope::INFRA_SERVE,
+                    ) || r.roles.iter().any(|x| x == ciris_persist::federation::types::delegation_scope::INFRA_SERVE),
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("list_canonical_servers: {e}"),
+            )
+        }
+    };
+    let (quorum_m, quorum_n) = family_quorum(&st.engine, holders.len()).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "holders": holders,
+            "canonicals": canonicals,
+            "quorum": format!("{quorum_m}/{quorum_n}"),
+            "quorum_m": quorum_m,
+            "quorum_n": quorum_n,
+            "note": format!(
+                "Select an existing accord + canonical to re-mint. {quorum_m} of the \
+                 {quorum_n} holders need be present to sign (the family's entrenched \
+                 quorum); the remaining records are carried from here so the roster \
+                 stays complete. The re-mint confers infra:serve in the SIGNED \
+                 identity_type set."
+            ),
+        })),
     )
         .into_response()
 }
@@ -2592,6 +3144,21 @@ pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
         .route(
             "/v1/accord/ci-key/cosign",
             axum::routing::post(cosign_ci_key),
+        )
+        // Re-mint an existing trust root into a portable genesis (FSD/MESH_GENESIS.md):
+        // pre-fill from the existing accord + canonical, then emit the bundle after
+        // the 2-of-3 re-mint. C1 need not be present; its record rides the roster.
+        .route(
+            "/v1/accord/genesis/remint-source",
+            axum::routing::get(genesis_remint_source),
+        )
+        .route(
+            "/v1/accord/genesis/propose",
+            axum::routing::post(propose_genesis),
+        )
+        .route(
+            "/v1/accord/genesis/cosign",
+            axum::routing::post(cosign_genesis),
         )
         // The "Pending co-signs" list (partials below the family quorum), read by the client.
         .route(

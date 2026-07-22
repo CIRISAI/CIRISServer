@@ -7,7 +7,10 @@ import ai.ciris.mobile.shared.models.federation.AccordHolderDto
 import ai.ciris.mobile.shared.models.federation.AccordHaltStatusResponse
 import ai.ciris.mobile.shared.models.federation.AccordInvocationDto
 import ai.ciris.mobile.shared.models.federation.CiKeyTargetInput
+import ai.ciris.mobile.shared.models.federation.GenesisSeedState
 import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
+import ai.ciris.mobile.shared.models.federation.RemintSourceDto
+import ai.ciris.mobile.shared.models.federation.genesisSeedDisplay
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -917,6 +920,221 @@ class AccordViewModel(
                     msg.contains("401") || msg.contains("403") ->
                         "Sign in as the owner on this node first."
                     else -> "Couldn't supersede the canonical server: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    // ── Re-mint existing trust root → portable genesis (FSD/MESH_GENESIS.md) ──
+    // Steps 1–2 reuse [proposeCanonical] / [cosignCanonical] (the same m-of-n
+    // co-scrub, pre-filled from the remint source); only the pre-fill roster and
+    // the final produce are new.
+
+    /** The re-mint pre-fill (holders + canonicals + quorum) — [loadRemintSource]. */
+    private val _remintSource = MutableStateFlow<RemintSourceDto?>(null)
+    val remintSource: StateFlow<RemintSourceDto?> = _remintSource.asStateFlow()
+
+    /**
+     * The pretty-printed portable `GenesisBundle` JSON from the LAST [produceGenesis]
+     * — surfaced so the sheet can offer Save / Copy (mirrors [lastCoscrubJson]).
+     * Null when nothing has been produced yet.
+     */
+    private val _genesisBundleJson = MutableStateFlow<String?>(null)
+    val genesisBundleJson: StateFlow<String?> = _genesisBundleJson.asStateFlow()
+
+    /** Dismiss the bundle export affordance after the operator is done with it. */
+    fun clearGenesisBundleJson() {
+        _genesisBundleJson.value = null
+    }
+
+    /**
+     * Load the re-mint pre-fill roster (called on sheet open): the full accord
+     * holder roster (A1/B1/C1) + the existing canonical server(s) with their
+     * `confers_infra_serve` state. C1 need not be present — its record rides here.
+     */
+    fun loadRemintSource() {
+        viewModelScope.launch {
+            try {
+                _remintSource.value = apiClient.getGenesisRemintSource()
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[loadRemintSource] ${e.message}")
+                _error.value = "Couldn't load the re-mint source: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * **Produce the portable genesis** (re-mint step 3). Takes the COMPLETED
+     * (m-of-n co-signed) `SignedKeyRecord`(s) — each rides VERBATIM, never
+     * re-encoded — and emits the portable `GenesisBundle`, surfaced as pretty JSON
+     * via [genesisBundleJson] for Save / Copy. The node refuses (400, clear error)
+     * a record that doesn't confer `infra:serve`. No YubiKey — nothing is signed here.
+     */
+    fun produceGenesis(serveRecords: List<JsonElement>, familyKeyId: String? = null) {
+        if (_busy.value) return
+        if (serveRecords.isEmpty()) {
+            _error.value = "Paste the completed (co-signed) record JSON first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        _genesisBundleJson.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.produceGenesis(serveRecords, familyKeyId)
+                _genesisBundleJson.value = prettyCoscrub(res.bundle)
+                _notice.value =
+                    "Produced the portable genesis for ${res.summary.familyKeyId} — " +
+                        "${res.summary.holders.size} holder(s), ${res.summary.serveNodes.size} serve node(s). " +
+                        "Save the bundle (mesh-genesis.json)."
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[produceGenesis] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    else -> "Couldn't produce the genesis: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    // ── The portable mesh-genesis SEED ceremony (propose → cosign) ────────────
+    // Two accord holders — one YubiKey each — authorize ONE bundle. The bundle is
+    // held VERBATIM as a raw JsonElement between the calls (never re-serialized
+    // through a typed model), so unknown server fields survive the round-trip and
+    // the authorized bytes stay byte-identical.
+
+    /** The live seed ceremony — null until the first holder proposes. */
+    private val _genesisSeed = MutableStateFlow<GenesisSeedState?>(null)
+    val genesisSeed: StateFlow<GenesisSeedState?> = _genesisSeed.asStateFlow()
+
+    /** Drop the ceremony state (sheet closed / a fresh seed started). */
+    fun clearGenesisSeed() {
+        _genesisSeed.value = null
+    }
+
+    /**
+     * Fold one propose / cosign response into the resumable ceremony state, unioning
+     * the holder who just signed with whoever the bundle itself declares as having
+     * authorized (so a bundle carried in from another device still hides its own
+     * signers from the cosign picker).
+     */
+    private fun applyGenesisSeed(
+        res: ai.ciris.mobile.shared.models.federation.GenesisSeedResponse,
+        signedBy: String,
+    ) {
+        val fromBundle = genesisSeedDisplay(res.bundle).authorizedKeyIds
+        val previous = _genesisSeed.value?.authorizedKeyIds.orEmpty()
+        _genesisSeed.value = GenesisSeedState(
+            bundle = res.bundle,
+            prettyJson = prettyCoscrub(res.bundle) ?: res.bundle.toString(),
+            authorizationsHave = res.authorizationsHave,
+            authorizationsNeeded = res.authorizationsNeeded,
+            complete = res.complete,
+            authorizedKeyIds = (previous + fromBundle + signedBy.trim())
+                .filter { it.isNotBlank() }
+                .distinct(),
+        )
+    }
+
+    /**
+     * **Propose the portable seed** (ceremony step 2 — the FIRST holder). The holder
+     * RE-OPENS their YubiKey + USB-wrapped ML-DSA; the node mints and signs the seed's
+     * charter + grant over the existing roster and the [serveKeyId] canonical node.
+     * The returned bundle is held VERBATIM for [cosignGenesis]. The app holds NO keys.
+     */
+    fun proposeGenesis(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        serveKeyId: String,
+        ip: String? = null,
+        modulePath: String? = null,
+    ) {
+        if (_busy.value) return
+        if (serveKeyId.isBlank()) {
+            _error.value = "Select the canonical serve node the seed will carry first."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.proposeGenesis(
+                    holderKeyId, mldsaUsbPath, userPin, serveKeyId, ip, modulePath = modulePath,
+                )
+                applyGenesisSeed(res, holderKeyId)
+                _notice.value =
+                    "Proposed the seed — ${res.authorizationsHave} of ${res.authorizationsNeeded} " +
+                        "authorization(s). Hand the device to the next holder to cosign."
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[proposeGenesis] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — propose needs the YubiKey signer."
+                    else -> "Couldn't propose the seed: ${e.message}"
+                }
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /**
+     * **Cosign the portable seed** (ceremony step 3 — the SECOND holder). Authorizes
+     * the SAME held bundle on a DISTINCT holder's YubiKey; the bundle is submitted
+     * verbatim. Repeat until the server reports `complete`. The node REJECTS a holder
+     * who has already authorized this bundle — the picker never offers one.
+     */
+    fun cosignGenesis(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        userPin: String?,
+        modulePath: String? = null,
+    ) {
+        if (_busy.value) return
+        val seed = _genesisSeed.value
+        if (seed == null) {
+            _error.value = "Propose the seed with the first holder before cosigning."
+            return
+        }
+        _busy.value = true
+        _error.value = null
+        _notice.value = null
+        viewModelScope.launch {
+            try {
+                val res = apiClient.cosignGenesis(
+                    holderKeyId, mldsaUsbPath, userPin, seed.bundle, modulePath = modulePath,
+                )
+                applyGenesisSeed(res, holderKeyId)
+                _notice.value = if (res.complete) {
+                    "The seed is authorized (${res.authorizationsHave} of ${res.authorizationsNeeded}) — " +
+                        "save it, then compare the fingerprint out of band before anyone attaches it."
+                } else {
+                    "Cosigned the seed — ${res.authorizationsHave} of ${res.authorizationsNeeded} " +
+                        "authorization(s). Another holder must still authorize."
+                }
+            } catch (e: Exception) {
+                PlatformLogger.w(TAG, "[cosignGenesis] ${e.message}")
+                val msg = e.message.orEmpty()
+                _error.value = when {
+                    msg.contains("401") || msg.contains("403") ->
+                        "Sign in as the owner on this node first."
+                    msg.contains("501") || msg.contains("NotSupported", ignoreCase = true) ->
+                        "This build lacks pkcs11 — cosign needs the YubiKey signer."
+                    msg.contains("already", ignoreCase = true) ->
+                        "That holder has already authorized this seed — a DISTINCT holder must cosign."
+                    else -> "Couldn't cosign the seed: ${e.message}"
                 }
             } finally {
                 _busy.value = false

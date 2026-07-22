@@ -109,19 +109,36 @@ pub const AGENCY_SCOPE_PREFIX: &str = "agency:";
 /// `infra:network_presence` — announce/resolve the node's reachability (the
 /// CC 3.3.6.2 `transport_destination`) under the owner's authority.
 pub const INFRA_NETWORK_PRESENCE: &str = "infra:network_presence";
-/// `infra:membership` — hold (non-infra) group-membership *standing* under the
-/// owner's authority. The CC 3.2 owner-binding that lets a node count as a
-/// member without itself being an accountable party.
-pub const INFRA_MEMBERSHIP: &str = "infra:membership";
+/// `infra:hold_community_membership` — occupy a member seat on **community**
+/// rosters under the owner's standing. Membership is STANDING, not judgment:
+/// steward/moderator/founder roles are bestowed on the MEMBER (the user/agent)
+/// and are never node-holdable (CC 1.13.5 / CC 4.4.3.4.3 conformance rule).
+///
+/// RC3 crystal-vocabulary hard cut (`FSD/TRUST_ROOT_CAPABILITY_GATE.md`): this
+/// token and the family twin RETIRE both `infra:membership` (server legacy)
+/// and `infra:join_communities` (CC RC2 / persist) — which, being exact-string
+/// matched, never even matched EACH OTHER on the wire. No aliases; pre-fleet,
+/// no backwards compat.
+pub const INFRA_HOLD_COMMUNITY_MEMBERSHIP: &str = "infra:hold_community_membership";
+/// `infra:hold_family_membership` — occupy a member seat on **family** rosters
+/// under the owner's standing. Split from the community twin because family and
+/// community are distinct CEG objects in different sensitivity classes — an
+/// owner can give a node community standing while keeping it out of the family.
+pub const INFRA_HOLD_FAMILY_MEMBERSHIP: &str = "infra:hold_family_membership";
 /// `infra:serve` — serve reads / relay / store / transport (the serve-only
 /// floor an unowned node is limited to).
 pub const INFRA_SERVE: &str = "infra:serve";
 
-/// The canonical owner-binding scope set: identity + membership standing +
-/// serve, all infra-class, in sorted (canonical) order. This is what
-/// [`emit_steward_binding`] stamps when the caller does not narrow it.
-pub const OWNER_BINDING_INFRA_SCOPES: &[&str] =
-    &[INFRA_MEMBERSHIP, INFRA_NETWORK_PRESENCE, INFRA_SERVE];
+/// The canonical owner-binding scope set: identity + membership standing
+/// (community + family seats) + serve, all infra-class, in sorted (canonical)
+/// order. This is what [`emit_steward_binding`] stamps when the caller does not
+/// narrow it (tighten-only: the owner may drop the family seat, etc.).
+pub const OWNER_BINDING_INFRA_SCOPES: &[&str] = &[
+    INFRA_HOLD_COMMUNITY_MEMBERSHIP,
+    INFRA_HOLD_FAMILY_MEMBERSHIP,
+    INFRA_NETWORK_PRESENCE,
+    INFRA_SERVE,
+];
 
 /// The legacy unprefixed agency kinds (the pre-split Self-at-login act-on-behalf
 /// vocabulary). On a node-key delegation these are agency and MUST be rejected
@@ -1179,7 +1196,7 @@ mod tests {
     fn infra_only_accepts_infra_prefixed() {
         assert!(scopes_are_infra_only(&[
             INFRA_NETWORK_PRESENCE.to_string(),
-            INFRA_MEMBERSHIP.to_string(),
+            INFRA_HOLD_COMMUNITY_MEMBERSHIP.to_string(),
             INFRA_SERVE.to_string(),
         ]));
         assert!(scopes_are_infra_only(&["infra:store".to_string()]));

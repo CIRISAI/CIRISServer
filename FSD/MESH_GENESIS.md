@@ -38,6 +38,30 @@ can validate build manifests too), and additional serve/store/transport nodes.
 **Minimum viable mesh = trust root + 1 serve node.** That is the invariant this object
 guarantees: attach it and you have something to trust *and* something to serve you.
 
+3. **The delegation plane** (v2 — the seed ceremony). Records alone are *inert*: a
+   bundle of keys with no charter attaches as authority-free key material,
+   `trust_root_valid` stays false, and the capability gate stays shut. A genesis
+   therefore carries:
+   - the **charter** — `delegates_to(root → root)` over the accord's ceiling scopes,
+     carrying a `pre_rotation_commitment` over a pre-committed successor set (the
+     recovery path; without it charter-key compromise is unrecoverable by
+     construction). Deliberately EXCLUDES `network_presence` and the
+     `hold_*_membership` scopes: root-granted presence would make un-trust
+     unsurvivable.
+   - one **`infra:serve` grant** per serve node — the capability that must root to
+     the trust root (the trace gate's leg B).
+   - **m-of-n holder authorizations** — bound-hybrid signatures over a digest binding
+     the whole artifact, so minting a trust root is a quorum act and a co-signature
+     cannot be replayed onto a bundle with a swapped serve node. The threshold is the
+     family's entrenched `quorum:M/N`, **carried** in the bundle rather than assumed,
+     and floored at a strict majority of the holders present so a tampered policy
+     string cannot talk it down.
+
+   `attach_genesis` writes all of it — verifying FIRST, so an under-authorized or
+   tampered bundle can never seed — and reports the charter's own key as the trust
+   root (never `family_key_id`, which carries no authority and cannot be delegated
+   to).
+
 ## 2. Self-verifying structure (no external directory)
 
 The object verifies **internally**, offline:
@@ -49,9 +73,20 @@ The object verifies **internally**, offline:
 - the serve node carries `roles:["infra:serve"]` in its signed envelope, so its
   trace-recipient authority is attested by the same holders, not self-claimed.
 
-A tampered or forged genesis fails these checks — the object is trustworthy because it
-proves its own m-of-n rooting, not because of where it came from. It is therefore safe to
-transfer over any channel (file, QR, device-to-device, USB).
+A tampered genesis fails these checks — so the object is **tamper-evident** over any
+channel (file, QR, device-to-device, USB).
+
+**What self-verification does NOT prove (prior-art lesson, `FSD/PRIOR_ART.md` §2.2).**
+An attacker's genesis bundle — with its own self-referential charter and its own
+holders — self-verifies *identically*. Internal consistency can never tell you which
+bundle is the right one; KERI concedes the same via OOBI (first contact is out-of-band,
+always). The TOFU moment is not eliminated — it moves to the **distribution channel**,
+which is therefore the attack surface. Consequently the attach flow (§4) MUST treat
+out-of-band fingerprint comparison as a first-class step: the bundle carries a short
+content-address fingerprint, and the UI presents it for comparison against a
+second channel (the person who handed it to you, a published value, another device)
+before the trust edge is offered for signing. Verification proves *untampered*;
+only the human's second channel proves *intended*.
 
 ## 3. Portability
 

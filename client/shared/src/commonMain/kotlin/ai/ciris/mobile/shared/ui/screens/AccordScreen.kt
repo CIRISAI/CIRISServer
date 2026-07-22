@@ -9,6 +9,7 @@ import ai.ciris.mobile.shared.models.federation.CanonicalServerDto
 import ai.ciris.mobile.shared.models.federation.CanonicalWithdrawalDto
 import ai.ciris.mobile.shared.models.federation.CiKeyTargetInput
 import ai.ciris.mobile.shared.models.federation.PendingCoscrubDto
+import ai.ciris.mobile.shared.models.federation.genesisSeedDisplay
 import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
@@ -23,6 +24,7 @@ import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.components.ConfirmDestructive
 import ai.ciris.mobile.shared.ui.components.CosignSheet
 import ai.ciris.mobile.shared.ui.components.HardwareScrubSheet
+import ai.ciris.mobile.shared.ui.components.HolderSignInputs
 import ai.ciris.mobile.shared.ui.components.NewAttestationAction
 import ai.ciris.mobile.shared.ui.components.NewAttestationMenu
 import ai.ciris.mobile.shared.ui.components.ViewerAuthority
@@ -36,6 +38,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -43,6 +46,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -96,6 +100,8 @@ private sealed interface AccordSheet {
     data class AddCanonical(val replace: CanonicalServerDto?) : AccordSheet
     /** Batch-bless the substrate CI workers (default-populated one-click card). */
     data object BlessCiWorkers : AccordSheet
+    /** Re-mint the EXISTING trust root into a portable genesis (FSD/MESH_GENESIS.md). */
+    data object RemintTrustRoot : AccordSheet
     data object Drill : AccordSheet
     data object Halt : AccordSheet
     data object Announce : AccordSheet
@@ -186,6 +192,11 @@ fun AccordScreen(
                                 add(
                                     NewAttestationAction("bless_ci_workers", "mobile.accord_new_bless_ci_workers") {
                                         sheet = AccordSheet.BlessCiWorkers
+                                    },
+                                )
+                                add(
+                                    NewAttestationAction("remint_trust_root", "mobile.accord_new_remint_trust_root") {
+                                        sheet = AccordSheet.RemintTrustRoot
                                     },
                                 )
                                 add(
@@ -458,6 +469,7 @@ fun AccordScreen(
         is AccordSheet.AddCanonical ->
             AddCanonicalSheet(viewModel, holders, busy, s.replace) { sheet = null }
         is AccordSheet.BlessCiWorkers -> BlessCiWorkersSheet(viewModel, holders, busy) { sheet = null }
+        is AccordSheet.RemintTrustRoot -> RemintTrustRootSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Drill -> DrillSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Halt -> HaltSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Announce -> AnnounceSheet(viewModel, holders, busy) { sheet = null }
@@ -577,11 +589,12 @@ private fun coscrubAttestation(entry: PendingCoscrubDto): Attestation = Attestat
     status = AttStatus.Pending,
     badge = localizedString("mobile.accord_canonical_badge").uppercase(),
     signed = entry.distinctScrubCount,
-    // quorum_needed is best-effort (0 when the node can't resolve M) — fall back to 2.
-    threshold = entry.quorumNeeded.takeIf { it > 0 } ?: 2,
+    // quorum_needed is best-effort: 0 when the node can't resolve M. Pass the 0
+    // through — the pill renders "?" rather than inventing a threshold.
+    threshold = entry.quorumNeeded,
     dimension = localizedString("mobile.accord_coscrub_badge")
         .replace("{signed}", entry.distinctScrubCount.toString())
-        .replace("{needed}", (entry.quorumNeeded.takeIf { it > 0 } ?: 2).toString()),
+        .replace("{needed}", entry.quorumNeeded.takeIf { it > 0 }?.toString() ?: "?"),
     timestamp = entry.receivedAt,
     // These flooded in over the accord peer-plane (or were minted here by propose).
     arrivedViaGossip = true,
@@ -882,6 +895,583 @@ private fun BlessCiWorkersSheet(
         onDismiss = onDismiss,
     )
 }
+
+/**
+ * **Portable mesh-genesis seed** — the seed ceremony (FSD/MESH_GENESIS.md). Two
+ * accord holders (real people, one YubiKey each) turn the EXISTING roster plus one
+ * canonical serve node into a portable trust-root seed, pre-filled from
+ * `GET /v1/accord/genesis/remint-source` so nothing is retyped and no key material —
+ * and no quorum number — is invented. Three steps, one sheet:
+ *   1. **Review** — the roster, the serve node, the address, and the server's own
+ *      quorum. Nothing is signed; this is where a human checks what the seed carries.
+ *   2. **Propose** — the FIRST holder mints and signs the charter + grant
+ *      (`AccordViewModel.proposeGenesis`). The returned bundle is HELD VERBATIM.
+ *   3. **Cosign** — the SECOND holder authorizes the SAME bundle
+ *      (`AccordViewModel.cosignGenesis`), repeated until the server says `complete`.
+ * Then the seed is offered Save (`mesh-genesis.json`) / Copy, with its fingerprint
+ * to compare out of band before anyone attaches it.
+ *
+ * Multi-step with two DIFFERENT people signing, so it embeds [HolderSignInputs]
+ * directly — twice, one set of hardware inputs per holder — rather than
+ * [HardwareScrubSheet]'s single submit. The ceremony state lives in the ViewModel,
+ * so closing and reopening the sheet resumes a half-authorized seed.
+ */
+@Composable
+private fun RemintTrustRootSheet(
+    viewModel: AccordViewModel,
+    holders: List<AccordHolderDto>,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val source by viewModel.remintSource.collectAsState()
+    val seed by viewModel.genesisSeed.collectAsState()
+    val clipboard = LocalClipboardManager.current
+    val saveScope = rememberCoroutineScope()
+
+    // On open: pull the pre-fill roster (holders + canonicals + the server's quorum).
+    LaunchedEffect(Unit) { viewModel.loadRemintSource() }
+
+    // Where the ceremony is. Resumable: reopening on a half-authorized seed lands on
+    // the cosign step rather than making the operator walk the review again.
+    var step by remember {
+        mutableStateOf(if (viewModel.genesisSeed.value != null) REMINT_STEP_COSIGN else REMINT_STEP_REVIEW)
+    }
+    // Propose lands the first authorization → advance to cosign.
+    LaunchedEffect(seed) {
+        if (seed != null && step == REMINT_STEP_PROPOSE) step = REMINT_STEP_COSIGN
+    }
+
+    // Canonical selector — DEFAULTS to the first canonical (canonical-server-1).
+    var selectedKeyId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(source) {
+        if (selectedKeyId == null) selectedKeyId = source?.canonicals?.firstOrNull()?.keyId
+    }
+    val selected = source?.canonicals?.firstOrNull { it.keyId == selectedKeyId }
+
+    // The ip hint baked into the selected canonical's record — seeded, editable.
+    var ip by remember(selected?.keyId) {
+        mutableStateOf(selected?.transportHints?.firstOrNull { it.kind == "ip" }?.destination.orEmpty())
+    }
+
+    // The ceremony roster: the re-mint source's holders when it has them (that IS the
+    // roster the seed carries), else the node's accord roster.
+    val ceremonyHolders = remember(source, holders) {
+        val fromSource = source?.holders.orEmpty().map {
+            AccordHolderDto(
+                keyId = it.keyId,
+                pubkeyEd25519Base64 = it.pubkeyEd25519Base64,
+                pubkeyMlDsa65Base64 = it.pubkeyMlDsa65Base64,
+            )
+        }
+        fromSource.ifEmpty { holders }
+    }
+
+    // TWO holders, TWO YubiKeys, TWO PINs — never one set of inputs reused, so the
+    // second person never inherits the first person's PIN in a field.
+    var proposeHolder by remember { mutableStateOf("") }
+    var proposeUsb by remember { mutableStateOf("") }
+    var proposePin by remember { mutableStateOf("") }
+    var proposeModule by remember { mutableStateOf("") }
+    LaunchedEffect(ceremonyHolders) {
+        if (proposeHolder.isBlank()) proposeHolder = ceremonyHolders.firstOrNull()?.keyId.orEmpty()
+    }
+    var cosignHolder by remember { mutableStateOf("") }
+    var cosignUsb by remember { mutableStateOf("") }
+    var cosignPin by remember { mutableStateOf("") }
+    var cosignModule by remember { mutableStateOf("") }
+
+    // The server rejects a holder who already authorized this bundle — so don't offer
+    // one. What remains defaults the picker to the next un-signed holder.
+    val remainingHolders = ceremonyHolders.filter { it.keyId !in seed?.authorizedKeyIds.orEmpty() }
+    LaunchedEffect(remainingHolders) {
+        if (cosignHolder.isBlank() || cosignHolder !in remainingHolders.map { h -> h.keyId }) {
+            cosignHolder = remainingHolders.firstOrNull()?.keyId.orEmpty()
+        }
+    }
+
+    var canonicalMenu by remember { mutableStateOf(false) }
+    var bundleSaveDir by remember { mutableStateOf<String?>(null) }
+
+    val complete = seed?.complete == true
+    val display = seed?.let { genesisSeedDisplay(it.bundle) }
+
+    val reviewReady = selected != null
+    val proposeReady = proposeHolder.isNotBlank() && proposeUsb.isNotBlank() &&
+        proposePin.isNotBlank() && selected != null && !busy
+    val cosignReady = cosignHolder.isNotBlank() && cosignUsb.isNotBlank() &&
+        cosignPin.isNotBlank() && seed != null && !busy
+
+    val doPropose = {
+        selected?.let { sel ->
+            viewModel.proposeGenesis(
+                proposeHolder, proposeUsb, proposePin.ifBlank { null },
+                sel.keyId, ip.ifBlank { null }, proposeModule.ifBlank { null },
+            )
+        }
+        Unit
+    }
+    val doCosign = {
+        viewModel.cosignGenesis(
+            cosignHolder, cosignUsb, cosignPin.ifBlank { null }, cosignModule.ifBlank { null },
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(localizedString("mobile.accord_remint_title")) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testable("sheet_remint_trust_root"),
+            ) {
+                Text(
+                    localizedString("mobile.accord_remint_desc"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (complete) {
+                        localizedString("mobile.accord_remint_step_done")
+                    } else {
+                        localizedString(
+                            "mobile.accord_remint_step_of",
+                            mapOf("step" to step.toString(), "total" to REMINT_STEP_COUNT.toString()),
+                        )
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.testable("remint_step_indicator"),
+                )
+                Spacer(Modifier.height(10.dp))
+
+                when {
+                    // ── Done — the authorized, portable seed ──
+                    complete -> {
+                        Text(
+                            localizedString("mobile.accord_remint_done_title"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.testable("remint_done_title"),
+                        )
+                        Text(
+                            localizedString("mobile.accord_remint_done_desc"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        seed?.let { s ->
+                            Text(
+                                remintTallyText(s.authorizationsHave, s.authorizationsNeeded),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testable("remint_auth_tally"),
+                            )
+                        }
+                        display?.let { d ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                localizedString("mobile.accord_remint_done_family", "key", d.familyKeyId),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testable("remint_done_family"),
+                            )
+                            Text(
+                                localizedString(
+                                    "mobile.accord_remint_done_holders",
+                                    "count",
+                                    d.holderCount.toString(),
+                                ),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testable("remint_done_holders"),
+                            )
+                            Text(
+                                localizedString(
+                                    "mobile.accord_remint_done_serve_nodes",
+                                    "count",
+                                    d.serveNodeCount.toString(),
+                                ),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testable("remint_done_serve_nodes"),
+                            )
+                            // Only when the bundle actually carries one — never invented.
+                            d.fingerprint?.let { fp ->
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    localizedString("mobile.accord_remint_done_fingerprint", "fingerprint", fp),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.testable("remint_done_fingerprint"),
+                                )
+                                Text(
+                                    localizedString("mobile.accord_remint_done_fingerprint_caption"),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.testable("remint_done_fingerprint_caption"),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            localizedString("mobile.accord_remint_bundle_ready"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testable("remint_bundle_ready"),
+                        )
+                        seed?.prettyJson?.let { json ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(
+                                    onClick = { clipboard.setText(AnnotatedString(json)) },
+                                    modifier = Modifier.testableClickable("btn_remint_copy_bundle") {
+                                        clipboard.setText(AnnotatedString(json))
+                                    },
+                                ) { Text(localizedString("mobile.accord_op_copy")) }
+                                TextButton(
+                                    onClick = { bundleSaveDir = "" },
+                                    modifier = Modifier.testableClickable("btn_remint_save_bundle") {
+                                        bundleSaveDir = ""
+                                    },
+                                ) { Text(localizedString("mobile.accord_remint_save_bundle")) }
+                            }
+                        }
+                        // Deliberately NOT automatic: an authorized seed is only
+                        // dropped when a human says so, never by closing the sheet.
+                        TextButton(
+                            onClick = {
+                                viewModel.clearGenesisSeed()
+                                step = REMINT_STEP_REVIEW
+                            },
+                            modifier = Modifier.testableClickable("btn_remint_start_over") {
+                                viewModel.clearGenesisSeed()
+                                step = REMINT_STEP_REVIEW
+                            },
+                        ) { Text(localizedString("mobile.accord_remint_start_over_btn")) }
+                    }
+
+                    // ── Step 1 — Review ──
+                    step == REMINT_STEP_REVIEW -> {
+                        Text(
+                            localizedString("mobile.accord_remint_review_title"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            localizedString("mobile.accord_remint_seed_scope"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(10.dp))
+
+                        // The holder roster (read-only; the FULL roster rides the seed).
+                        Text(
+                            localizedString("mobile.accord_remint_roster_title"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        val roster = source?.holders.orEmpty()
+                        if (roster.isEmpty()) {
+                            Text(
+                                localizedString("mobile.accord_remint_roster_empty"),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testable("remint_roster_empty"),
+                            )
+                        } else {
+                            roster.forEach { h ->
+                                Text(
+                                    "${h.keyId}  ${truncatedPubkey(h.pubkeyEd25519Base64)}",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.testable("remint_holder_${h.keyId}"),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        // The quorum as the SERVER renders it — "?" when it hasn't said.
+                        Text(
+                            localizedString(
+                                "mobile.accord_remint_quorum_line",
+                                mapOf(
+                                    "m" to remintQuorumPart(source?.quorumM),
+                                    "n" to remintQuorumPart(source?.quorumN),
+                                ),
+                            ),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testable("remint_quorum_line"),
+                        )
+                        Spacer(Modifier.height(10.dp))
+
+                        // The canonical serve node the seed will carry.
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = { canonicalMenu = true },
+                                modifier = Modifier.fillMaxWidth().testable("dd_remint_canonical"),
+                            ) {
+                                Text(selected?.keyId ?: localizedString("mobile.accord_remint_canonical_select"))
+                            }
+                            DropdownMenu(
+                                expanded = canonicalMenu,
+                                onDismissRequest = { canonicalMenu = false },
+                            ) {
+                                val canonicals = source?.canonicals.orEmpty()
+                                if (canonicals.isEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text(localizedString("mobile.accord_remint_no_canonicals")) },
+                                        onClick = { canonicalMenu = false },
+                                    )
+                                }
+                                canonicals.forEach { c ->
+                                    DropdownMenuItem(
+                                        text = { Text(c.keyId, fontFamily = FontFamily.Monospace) },
+                                        onClick = { selectedKeyId = c.keyId; canonicalMenu = false },
+                                        modifier = Modifier.testableClickable("remint_canonical_${c.keyId}") {
+                                            selectedKeyId = c.keyId; canonicalMenu = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        selected?.let { sel ->
+                            Spacer(Modifier.height(4.dp))
+                            // The serve badge — `false` is exactly what this seed fixes.
+                            Text(
+                                localizedString(
+                                    if (sel.confersInfraServe) "mobile.accord_remint_serve_ok"
+                                    else "mobile.accord_remint_serve_missing",
+                                ),
+                                fontSize = 11.sp,
+                                color = if (sel.confersInfraServe) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testable("remint_serve_state_${sel.keyId}"),
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = ip,
+                            onValueChange = { ip = it },
+                            singleLine = true,
+                            label = { Text(localizedString("mobile.accord_canonical_ip_label")) },
+                            modifier = Modifier.fillMaxWidth().testable("input_remint_ip"),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Button(
+                            onClick = { step = REMINT_STEP_PROPOSE },
+                            enabled = reviewReady,
+                            modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_continue") {
+                                if (reviewReady) step = REMINT_STEP_PROPOSE
+                            },
+                        ) { Text(localizedString("mobile.accord_remint_continue_btn")) }
+                    }
+
+                    // ── Step 2 — Propose (the first holder) ──
+                    step == REMINT_STEP_PROPOSE -> {
+                        Text(
+                            localizedString("mobile.accord_remint_propose_title"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            localizedString("mobile.accord_remint_propose_desc"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            localizedString(
+                                "mobile.accord_remint_serve_node_line",
+                                "key",
+                                selected?.keyId.orEmpty(),
+                            ),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testable("remint_propose_serve_node"),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        HolderSignInputs(
+                            holders = ceremonyHolders,
+                            holderKeyId = proposeHolder,
+                            onHolder = { proposeHolder = it },
+                            usbPath = proposeUsb,
+                            onUsb = { proposeUsb = it },
+                            pin = proposePin,
+                            onPin = { proposePin = it },
+                            tagPrefix = "remint_propose",
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = proposeModule,
+                            onValueChange = { proposeModule = it },
+                            singleLine = true,
+                            label = { Text(localizedString("mobile.accord_scrub_module_label")) },
+                            placeholder = { Text(localizedString("mobile.accord_scrub_module_hint")) },
+                            modifier = Modifier.fillMaxWidth().testable("input_scrub_module_remint_propose"),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Button(
+                            onClick = doPropose,
+                            enabled = proposeReady,
+                            modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_propose") {
+                                if (proposeReady) doPropose()
+                            },
+                        ) {
+                            Text(
+                                if (busy) localizedString("mobile.accord_remint_propose_btn_busy")
+                                else localizedString("mobile.accord_remint_propose_btn"),
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(
+                            onClick = { step = REMINT_STEP_REVIEW },
+                            modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_back_review") {
+                                step = REMINT_STEP_REVIEW
+                            },
+                        ) { Text(localizedString("mobile.accord_remint_back_btn")) }
+                    }
+
+                    // ── Step 3 — Cosign (the second holder) ──
+                    else -> {
+                        Text(
+                            localizedString("mobile.accord_remint_cosign_title"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            localizedString("mobile.accord_remint_cosign_desc"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        seed?.let { s ->
+                            Text(
+                                remintTallyText(s.authorizationsHave, s.authorizationsNeeded),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testable("remint_auth_tally"),
+                            )
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        if (remainingHolders.isEmpty()) {
+                            Text(
+                                localizedString("mobile.accord_remint_cosign_all_signed"),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testable("remint_cosign_all_signed"),
+                            )
+                        } else {
+                            HolderSignInputs(
+                                holders = remainingHolders,
+                                holderKeyId = cosignHolder,
+                                onHolder = { cosignHolder = it },
+                                usbPath = cosignUsb,
+                                onUsb = { cosignUsb = it },
+                                pin = cosignPin,
+                                onPin = { cosignPin = it },
+                                tagPrefix = "remint_cosign",
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = cosignModule,
+                                onValueChange = { cosignModule = it },
+                                singleLine = true,
+                                label = { Text(localizedString("mobile.accord_scrub_module_label")) },
+                                placeholder = { Text(localizedString("mobile.accord_scrub_module_hint")) },
+                                modifier = Modifier.fillMaxWidth().testable("input_scrub_module_remint_cosign"),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Button(
+                                onClick = doCosign,
+                                enabled = cosignReady,
+                                modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_cosign") {
+                                    if (cosignReady) doCosign()
+                                },
+                            ) {
+                                Text(
+                                    if (busy) localizedString("mobile.accord_remint_cosign_btn_busy")
+                                    else localizedString("mobile.accord_remint_cosign_btn"),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testableClickable("btn_remint_close") { onDismiss() },
+            ) { Text(localizedString("mobile.accord_remint_close_btn")) }
+        },
+    )
+
+    // Save flow: pick a folder, then write the portable seed into it (mirrors the
+    // screen's co-scrub partial save).
+    DirectoryPickerDialog(
+        show = bundleSaveDir == "",
+        onDirectoryPicked = { dir ->
+            bundleSaveDir = null
+            val json = seed?.prettyJson
+            if (json != null) {
+                saveScope.launch {
+                    val ok = writeTextFile(dir, "mesh-genesis.json", json)
+                    viewModel.setExternalNotice(
+                        if (ok) "Saved the genesis seed to $dir."
+                        else "Couldn't save to $dir (this platform may not support file writes).",
+                        error = !ok,
+                    )
+                }
+            }
+        },
+        onDismiss = { bundleSaveDir = null },
+    )
+}
+
+/** The seed ceremony's steps: review → propose → cosign. */
+private const val REMINT_STEP_REVIEW = 1
+private const val REMINT_STEP_PROPOSE = 2
+private const val REMINT_STEP_COSIGN = 3
+private const val REMINT_STEP_COUNT = 3
+
+/**
+ * One half of the quorum as the SERVER rendered it — `?` when the node hasn't said
+ * (0 = UNKNOWN). NEVER a guessed number: this tells an operator how many humans to
+ * bring to a ceremony, and a wrong guess is worse than an honest "?".
+ */
+private fun remintQuorumPart(value: Int?): String =
+    value?.takeIf { it > 0 }?.toString() ?: "?"
+
+/** `key_id` plus a truncated pubkey — enough to recognize a holder, not to retype one. */
+private fun truncatedPubkey(pubkey: String?): String {
+    val key = pubkey.orEmpty()
+    return if (key.length <= 16) key else key.take(16) + "…"
+}
+
+/** The running authorization tally, `?` for a count the server hasn't stated. */
+@Composable
+private fun remintTallyText(have: Int, needed: Int): String = localizedString(
+    "mobile.accord_remint_auth_tally",
+    mapOf(
+        "have" to have.toString(),
+        "needed" to remintQuorumPart(needed),
+    ),
+)
 
 @Composable
 private fun DrillSheet(
