@@ -62,7 +62,8 @@ data class AccordHolderDto(
 /** ``GET /v1/accord-holders`` response. */
 @Serializable
 data class AccordHoldersResponse(
-    val threshold: Int = 2,
+    /** The accord's m-of-n threshold as served. **0 = unknown**, never guessed. */
+    val threshold: Int = 0,
     @SerialName("holder_count")
     val holderCount: Int = 0,
     val holders: List<AccordHolderDto> = emptyList(),
@@ -89,7 +90,13 @@ data class AccordInvocationDto(
     @SerialName("valid_signers")
     val validSigners: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     /** The holder key_ids on the roster for this invocation. */
     @SerialName("roster_member_ids")
     val rosterMemberIds: List<String> = emptyList(),
@@ -122,7 +129,13 @@ data class AccordEventDto(
      * signer (announce). */
     val signers: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     /** Announce ONLY — the free-text message (bound to the signed payload), or null. */
     val message: String? = null,
 )
@@ -145,7 +158,13 @@ data class AccordHaltRecordDto(
     @SerialName("valid_signers")
     val validSigners: List<String> = emptyList(),
     @SerialName("quorum_threshold")
-    val quorumThreshold: Int = 2,
+    /**
+     * The m-of-n threshold as reported by the substrate. **0 = unknown** — never
+     * defaulted to a literal: the accord's threshold is governance state, and a
+     * guessed number in a quorum badge misreports how many humans an operation
+     * actually needs.
+     */
+    val quorumThreshold: Int = 0,
     @SerialName("latched_at")
     val latchedAt: String? = null,
 )
@@ -572,7 +591,18 @@ data class RemintSourceDto(
     val holders: List<RemintHolderDto> = emptyList(),
     val canonicals: List<RemintCanonicalDto> = emptyList(),
     /** The family quorum, e.g. ``2/3``. */
-    val quorum: String = "2/3",
+    /**
+     * The family's **entrenched** m-of-n, rendered by the server (e.g. `"2/3"`).
+     * Never assume a value: the accord's threshold and seat count are governance
+     * state, not constants. Empty until the source call returns — render nothing
+     * rather than a guess, because this string tells an operator how many humans
+     * to bring to a ceremony.
+     */
+    val quorum: String = "",
+    @SerialName("quorum_m")
+    val quorumM: Int = 0,
+    @SerialName("quorum_n")
+    val quorumN: Int = 0,
     val note: String? = null,
 )
 

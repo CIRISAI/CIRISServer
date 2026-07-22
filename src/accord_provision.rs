@@ -2096,6 +2096,19 @@ async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Resp
 /// roster, so a genesis that shipped only the two signers would silently redefine
 /// 2-of-3 as 2-of-2 — narrowing the kill switch and breaking recovery if a signer is
 /// later lost. Two signers, three seats.
+/// Resolve the accord family's **entrenched** m-of-n — never a literal. The
+/// family's `consensus_protocol` (`quorum:M/N`) is the authority; absent a
+/// resolvable family we fall back to a strict majority over the roster we can
+/// actually see. Hard-coding `2/3` anywhere is a bug waiting for the day the
+/// accord's seats or threshold change: it would tell an operator to bring the
+/// wrong number of humans to a ceremony.
+async fn family_quorum(engine: &Engine, roster_n: usize) -> (usize, usize) {
+    (
+        crate::accord::family_quorum_m(engine, roster_n).await,
+        roster_n,
+    )
+}
+
 async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
     let holders: Vec<serde_json::Value> =
         ciris_persist::federation::genesis::effective_accord_holder_records()
@@ -2138,16 +2151,22 @@ async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
             )
         }
     };
+    let (quorum_m, quorum_n) = family_quorum(&st.engine, holders.len()).await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "holders": holders,
             "canonicals": canonicals,
-            "quorum": "2/3",
-            "note": "Select an existing accord + canonical to re-mint. Only 2 of the 3 \
-                     holders need be present to sign (quorum 2/3); the third's record is \
-                     carried from here so the roster stays complete. The re-mint confers \
-                     infra:serve in the SIGNED identity_type set.",
+            "quorum": format!("{quorum_m}/{quorum_n}"),
+            "quorum_m": quorum_m,
+            "quorum_n": quorum_n,
+            "note": format!(
+                "Select an existing accord + canonical to re-mint. {quorum_m} of the \
+                 {quorum_n} holders need be present to sign (the family's entrenched \
+                 quorum); the remaining records are carried from here so the roster \
+                 stays complete. The re-mint confers infra:serve in the SIGNED \
+                 identity_type set."
+            ),
         })),
     )
         .into_response()

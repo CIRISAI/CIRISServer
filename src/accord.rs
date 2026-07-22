@@ -124,9 +124,14 @@ use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::resolve_bearer;
 
-/// The §9.2.1 2-of-3 holder threshold (verify enforces this internally; surfaced
-/// here for the response + the cold-start roster sanity check).
-const ACCORD_THRESHOLD: usize = 2;
+/// Fallback threshold used ONLY when no roster is resolvable at all (no family,
+/// no seats) — a strict majority of an empty set is 1, so state that plainly
+/// rather than pretending to know the accord's M. Everywhere a roster IS
+/// resolvable, the threshold comes from the family's entrenched `quorum:M/N`
+/// via [`kill_switch_quorum_m`]. Never hard-code `2`: the accord's threshold and
+/// seat count are governance state, and a literal here would misreport to an
+/// operator how many humans an operation actually requires.
+const ACCORD_THRESHOLD_UNKNOWN: usize = 0;
 
 /// Backstop caps on the in-memory coordination tables (defense-in-depth: only
 /// holder-signed traffic reaches them now, but bound them anyway so a compromised
@@ -383,6 +388,16 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
 /// no family is entrenched (cold-start / baked-genesis recognition). NEVER a
 /// hard-coded 2 (N1 review finding: the halt paths previously used the literal `2`).
 async fn kill_switch_quorum_m(engine: &Engine, roster: &[ThresholdMember]) -> usize {
+    family_quorum_m(engine, roster.len()).await
+}
+
+/// The family's **entrenched** M (`quorum:M/N`), falling back to a strict
+/// majority over `roster_n` when the family cannot be resolved locally. The one
+/// place the threshold is decided — callers that only know the seat count use
+/// this directly rather than fabricating [`ThresholdMember`]s just to be
+/// counted. Never returns a hard-coded `2`: the accord's threshold is
+/// governance state that must be read, not assumed.
+pub(crate) async fn family_quorum_m(engine: &Engine, roster_n: usize) -> usize {
     if let Ok(Some(family)) = crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         if let Some(m) = family
             .consensus_protocol
@@ -393,7 +408,7 @@ async fn kill_switch_quorum_m(engine: &Engine, roster: &[ThresholdMember]) -> us
             return m;
         }
     }
-    strict_majority(roster.len())
+    strict_majority(roster_n)
 }
 
 /// Defense-in-depth distinct-key gate on the kill-switch roster (N2): the family
@@ -672,10 +687,17 @@ async fn list_holders(State(st): State<AccordState>) -> Response {
                 return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}"))
             }
         };
+    // The family's entrenched M over the seats we actually resolved — never a
+    // literal (0 when no roster is resolvable, which the client renders as "?").
+    let threshold = if seats.is_empty() {
+        ACCORD_THRESHOLD_UNKNOWN
+    } else {
+        family_quorum_m(&st.engine, seats.len()).await
+    };
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "threshold": ACCORD_THRESHOLD,
+            "threshold": threshold,
             "family_established": family_established,
             "seat_count": seats.len(),
             "holders": seats,
@@ -1731,7 +1753,7 @@ fn invocation_response(obj: &SignedCegObject) -> Response {
         .and_then(|p| accord_invocation_status(&p).ok());
     let (quorum_met, valid_signers, threshold) = match &status {
         Some(s) => (s.quorum_met, s.valid_signers.clone(), s.quorum_threshold),
-        None => (false, Vec::new(), ACCORD_THRESHOLD),
+        None => (false, Vec::new(), ACCORD_THRESHOLD_UNKNOWN),
     };
     (
         StatusCode::OK,

@@ -589,11 +589,12 @@ private fun coscrubAttestation(entry: PendingCoscrubDto): Attestation = Attestat
     status = AttStatus.Pending,
     badge = localizedString("mobile.accord_canonical_badge").uppercase(),
     signed = entry.distinctScrubCount,
-    // quorum_needed is best-effort (0 when the node can't resolve M) — fall back to 2.
-    threshold = entry.quorumNeeded.takeIf { it > 0 } ?: 2,
+    // quorum_needed is best-effort: 0 when the node can't resolve M. Pass the 0
+    // through — the pill renders "?" rather than inventing a threshold.
+    threshold = entry.quorumNeeded,
     dimension = localizedString("mobile.accord_coscrub_badge")
         .replace("{signed}", entry.distinctScrubCount.toString())
-        .replace("{needed}", (entry.quorumNeeded.takeIf { it > 0 } ?: 2).toString()),
+        .replace("{needed}", entry.quorumNeeded.takeIf { it > 0 }?.toString() ?: "?"),
     timestamp = entry.receivedAt,
     // These flooded in over the accord peer-plane (or were minted here by propose).
     arrivedViaGossip = true,
