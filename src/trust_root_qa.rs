@@ -634,6 +634,58 @@ async fn qa_mints_and_produces_a_portable_genesis() {
         .expect("attach onto a fresh directory");
     assert_eq!(report.holders_seeded, 3);
     assert_eq!(report.serve_nodes_seeded, 1);
+    // The delegation plane must LAND, not just ride along. Seeding keys alone is
+    // exactly what made a v1 genesis inert on arrival.
+    assert_eq!(
+        report.attestations_seeded, 2,
+        "the charter + the serve grant must be written on attach"
+    );
+    assert_eq!(
+        report.trust_root_key_id, ROOT,
+        "the trust root is the key that chartered itself, not the family id"
+    );
+
+    // The acceptance property for a portable seed: on a node that has never seen
+    // this mesh, once the operator signs their own trust edge, BOTH trace-gate
+    // legs resolve. That is the whole promise of the artifact.
+    // Register the user FIRST: the federation-tier ingest gate refuses a row whose
+    // attester has no registered pubkeys to verify against (CC 5.3.2.4.3.1).
+    dir2.put_public_key(to_persist(
+        &produce_self_key_record(&fx.user, "user", VALID_FROM, &[])
+            .await
+            .expect("user self record"),
+    ))
+    .await
+    .expect("user record admits on the fresh node");
+    put_att(
+        &dir2,
+        signed_delegates_to(
+            "qa-trust-edge-attached",
+            &fx.user,
+            ROOT,
+            serde_json::json!([INFRA_ATTEST, INFRA_SERVE]),
+            None,
+        )
+        .await,
+    )
+    .await;
+    put_att(
+        &dir2,
+        signed_lifecycle("qa-lifecycle-attached", &fx.holders[1], ROOT).await,
+    )
+    .await;
+
+    assert!(
+        has_effective_role(&dir2, CANONICAL, INFRA_SERVE)
+            .await
+            .expect("has_effective_role on the attached node"),
+        "leg A must resolve on a node that only ever saw the seed"
+    );
+    let grant = capability_roots_to_trusted_root(&dir2, USER, CANONICAL, INFRA_SERVE)
+        .await
+        .expect("capability walk on the attached node")
+        .expect("leg B must resolve on a node that only ever saw the seed");
+    assert_eq!(grant.root_key_id, ROOT);
     let row = dir2
         .lookup_public_key(CANONICAL)
         .await

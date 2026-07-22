@@ -546,8 +546,12 @@ pub struct AttachReport {
     pub family_key_id: String,
     pub holders_seeded: usize,
     pub serve_nodes_seeded: usize,
+    /// The charter + grants written — the delegation plane. Zero here would mean
+    /// the attach seeded keys with no authority (the v1 defect).
+    pub attestations_seeded: usize,
     /// The root the caller should now sign `delegates_to(user → root)` against —
-    /// attaching seeds the RECORDS; the trust edge is the user's own signed act.
+    /// the key that CHARTERED itself, never the family grouping id.
+    /// Attaching seeds the RECORDS; the trust edge is the user's own signed act.
     pub trust_root_key_id: String,
 }
 
@@ -577,11 +581,30 @@ where
             .map_err(|e| GenesisError::Directory(e.to_string()))?;
     }
 
+    // The delegation plane — the whole point of a v2 bundle. Seeding the KEYS
+    // alone is what made a v1 genesis inert: the charter is what makes the root a
+    // root (`trust_root_valid`), and the grants are what let a serve node's
+    // capability root to it (edge trace-gate leg B). Writing these goes through
+    // persist's real ingest gate, so a tampered charter is rejected HERE too,
+    // independently of `verify_bundle` — defense in depth on the attach path.
+    for a in &bundle.attestations {
+        dir.put_attestation(a.clone())
+            .await
+            .map_err(|e| GenesisError::Directory(e.to_string()))?;
+    }
+
+    // The trust root is the key that CHARTERED itself — not the family grouping
+    // id, which carries no authority and cannot be delegated to.
+    let trust_root_key_id = charter_of(bundle)
+        .map(|c| c.attesting_key_id.clone())
+        .ok_or(GenesisError::NoCharter)?;
+
     Ok(AttachReport {
+        attestations_seeded: bundle.attestations.len(),
+        trust_root_key_id,
         family_key_id: bundle.family_key_id.clone(),
         holders_seeded: bundle.holders.len(),
         serve_nodes_seeded: bundle.serve_nodes.len(),
-        trust_root_key_id: bundle.family_key_id.clone(),
     })
 }
 

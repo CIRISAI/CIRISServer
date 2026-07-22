@@ -38,6 +38,30 @@ can validate build manifests too), and additional serve/store/transport nodes.
 **Minimum viable mesh = trust root + 1 serve node.** That is the invariant this object
 guarantees: attach it and you have something to trust *and* something to serve you.
 
+3. **The delegation plane** (v2 — the seed ceremony). Records alone are *inert*: a
+   bundle of keys with no charter attaches as authority-free key material,
+   `trust_root_valid` stays false, and the capability gate stays shut. A genesis
+   therefore carries:
+   - the **charter** — `delegates_to(root → root)` over the accord's ceiling scopes,
+     carrying a `pre_rotation_commitment` over a pre-committed successor set (the
+     recovery path; without it charter-key compromise is unrecoverable by
+     construction). Deliberately EXCLUDES `network_presence` and the
+     `hold_*_membership` scopes: root-granted presence would make un-trust
+     unsurvivable.
+   - one **`infra:serve` grant** per serve node — the capability that must root to
+     the trust root (the trace gate's leg B).
+   - **m-of-n holder authorizations** — bound-hybrid signatures over a digest binding
+     the whole artifact, so minting a trust root is a quorum act and a co-signature
+     cannot be replayed onto a bundle with a swapped serve node. The threshold is the
+     family's entrenched `quorum:M/N`, **carried** in the bundle rather than assumed,
+     and floored at a strict majority of the holders present so a tampered policy
+     string cannot talk it down.
+
+   `attach_genesis` writes all of it — verifying FIRST, so an under-authorized or
+   tampered bundle can never seed — and reports the charter's own key as the trust
+   root (never `family_key_id`, which carries no authority and cannot be delegated
+   to).
+
 ## 2. Self-verifying structure (no external directory)
 
 The object verifies **internally**, offline:
