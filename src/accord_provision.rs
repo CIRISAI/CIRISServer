@@ -2140,9 +2140,108 @@ struct CosignGenesisRequest {
     bundle: serde_json::Value,
 }
 
+/// On the MINTING node, write `delegates_to(node → root)` the moment the ceremony
+/// reaches quorum — the node's own trust edge to the root its operators just
+/// created.
+///
+/// This is not a consent shortcut. A trust edge must be a deliberate act, and here
+/// it *is* one: a quorum of seated holders just signed this charter into existence
+/// on their own hardware. Making them then answer "do you trust this root?" would
+/// be theater — they are the accord. What must stay deliberate is the RECEIVING
+/// side, which is why [`crate::mesh_genesis::attach_genesis`] still refuses to
+/// write this edge: a bundle must never assign a stranger a trust root.
+///
+/// The edge is the node's own signed, deletable, nuclear-revocable act (un-trust =
+/// delete this row). Best-effort: a failure is reported to the operator but never
+/// invalidates the seed, which is a portable artifact independent of this node.
+async fn write_node_trust_edge(
+    engine: &Engine,
+    bundle: &crate::mesh_genesis::GenesisBundle,
+) -> Result<String, String> {
+    use ciris_persist::federation::types::{
+        attestation_tier, attestation_type, Attestation, SignedAttestation,
+    };
+    use ciris_verify_core::self_at_login::{HardwareRootedIdentity, SelfSigner};
+    use sha2::Digest as _;
+
+    let root = crate::mesh_genesis::charter_root_key_id(bundle)
+        .ok_or_else(|| "genesis carries no charter — nothing to trust".to_string())?;
+
+    let cfg = crate::config::ServerConfig::defaults().map_err(|e| format!("server config: {e}"))?;
+    let node_key_id = cfg.key_id.clone();
+    if node_key_id == root {
+        // The node IS the root (single-box mesh): the self-loop charter already
+        // says so, and `trust_root_valid` requires root != user.
+        return Ok(String::new());
+    }
+    let ed: std::sync::Arc<dyn ciris_keyring::HardwareSigner> =
+        std::sync::Arc::from(crate::compose::federation_signer(&cfg).map_err(|e| e.to_string())?);
+    let pqc: std::sync::Arc<dyn ciris_keyring::PqcSigner> =
+        crate::compose::federation_pqc_signer(&cfg).map_err(|e| e.to_string())?;
+    let identity = HardwareRootedIdentity::new(node_key_id.clone(), ed, pqc)
+        .map_err(|e| format!("node self-signer: {e}"))?;
+
+    let id = format!("trust-edge:{node_key_id}:{root}");
+    let envelope = serde_json::json!({
+        "references_attestation_id": id,
+        // The node trusts the root for exactly what a root is for. Attenuation
+        // does the rest: the node can never exercise more than the charter holds.
+        "scope": [
+            ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
+            ciris_persist::federation::trust_root::INFRA_SERVE_SCOPE,
+        ],
+    });
+    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+        .map_err(|e| format!("canonicalize trust edge: {e}"))?;
+    let (sig_ed, sig_pqc) = identity
+        .sign_bound(&canonical)
+        .await
+        .map_err(|e| format!("sign trust edge: {e}"))?;
+    let now = chrono::Utc::now();
+    let row = SignedAttestation {
+        attestation: Attestation {
+            attestation_id: id.clone(),
+            attesting_key_id: node_key_id.clone(),
+            attested_key_id: root.clone(),
+            attestation_type: attestation_type::DELEGATES_TO.to_string(),
+            weight: Some(1.0),
+            asserted_at: now,
+            expires_at: None,
+            attestation_envelope: envelope,
+            original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
+            scrub_signature_classical: sig_ed,
+            scrub_signature_pqc: Some(sig_pqc),
+            scrub_key_id: node_key_id.clone(),
+            scrub_timestamp: now,
+            pqc_completed_at: Some(now),
+            persist_row_hash: String::new(),
+            subject_key_ids: Vec::new(),
+            withdraws_admission_rule: None,
+            cohort_scope: "federation".to_string(),
+            tier: attestation_tier::FEDERATION.to_string(),
+            promoted_at: None,
+        },
+    };
+    engine
+        .federation_directory()
+        .put_attestation(row)
+        .await
+        .map_err(|e| format!("write trust edge: {e}"))?;
+    tracing::info!(
+        node_key_id = %node_key_id,
+        root_key_id = %root,
+        "Trust Root: node trust edge written — this node now trusts the root its \
+         holders minted (delete this attestation to un-trust)"
+    );
+    Ok(root)
+}
+
 /// The ceremony's progress, identical from `propose` and `cosign` so the card can
 /// render one state machine.
-fn genesis_ceremony_response(bundle: crate::mesh_genesis::GenesisBundle) -> Response {
+async fn genesis_ceremony_response(
+    engine: &Engine,
+    bundle: crate::mesh_genesis::GenesisBundle,
+) -> Response {
     let needed = match crate::mesh_genesis::authorizations_needed(&bundle) {
         Ok(n) => n,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -2150,6 +2249,22 @@ fn genesis_ceremony_response(bundle: crate::mesh_genesis::GenesisBundle) -> Resp
     let have = bundle.authorizations.len();
     let complete = crate::mesh_genesis::verify_bundle(&bundle).is_ok();
     let fingerprint = crate::mesh_genesis::fingerprint(&bundle).unwrap_or_default();
+
+    // On completion the minting node adopts the root its holders just created:
+    // without `delegates_to(node → root)` the trace gate's leg B has nothing to
+    // walk and the mesh stays dark on the very node that genesised it.
+    let (trusts_root, trust_edge_error) = if complete {
+        match write_node_trust_edge(engine, &bundle).await {
+            Ok(root) => (root, None),
+            Err(e) => {
+                tracing::warn!(error = %e, "Trust Root: node trust edge NOT written");
+                (String::new(), Some(e))
+            }
+        }
+    } else {
+        (String::new(), None)
+    };
+
     tracing::info!(
         family_key_id = %bundle.family_key_id,
         have, needed, complete,
@@ -2163,6 +2278,10 @@ fn genesis_ceremony_response(bundle: crate::mesh_genesis::GenesisBundle) -> Resp
             "authorizations_needed": needed,
             "complete": complete,
             "fingerprint": fingerprint,
+            // The root this node now trusts (empty until the ceremony completes).
+            "node_trusts_root": trusts_root,
+            // Non-fatal: the seed is portable and valid regardless.
+            "trust_edge_error": trust_edge_error,
         })),
     )
         .into_response()
@@ -2347,7 +2466,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         Ok(()) => {}
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
-    genesis_ceremony_response(bundle)
+    genesis_ceremony_response(&st.engine, bundle).await
 }
 
 /// Append `signer`'s bound-hybrid signature over the bundle digest.
@@ -2431,8 +2550,7 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
     if let Err(e) = authorize_bundle(&identity, &mut bundle).await {
         return err(StatusCode::BAD_REQUEST, &e);
     }
-    let _ = &st;
-    genesis_ceremony_response(bundle)
+    genesis_ceremony_response(&st.engine, bundle).await
 }
 
 async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {

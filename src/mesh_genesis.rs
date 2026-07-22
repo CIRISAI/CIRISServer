@@ -281,6 +281,12 @@ pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     })
 }
 
+/// The key that chartered itself — the bundle's actual trust root, as opposed to
+/// `family_key_id` (a grouping identifier that carries no authority).
+pub fn charter_root_key_id(bundle: &GenesisBundle) -> Option<String> {
+    charter_of(bundle).map(|c| c.attesting_key_id.clone())
+}
+
 /// Parse `quorum:M/N` into M. Returns `None` when absent/unparseable — callers
 /// must treat that as "unknown", never as a default threshold.
 fn policy_m(consensus_protocol: &str) -> Option<usize> {
