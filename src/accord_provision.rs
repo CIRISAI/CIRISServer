@@ -2498,17 +2498,6 @@ async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
         .into_response()
 }
 
-#[derive(Debug, Deserialize)]
-struct ProduceGenesisRequest {
-    /// Completed (m-of-n) `SignedKeyRecord`s from the re-mint cosign — the serve
-    /// candidates. Records not conferring `infra:serve` are filtered, and if that
-    /// leaves none the produce REFUSES.
-    serve_records: Vec<serde_json::Value>,
-    /// Optional override; defaults to the baked HUMANITY_ACCORD family.
-    #[serde(default)]
-    family_key_id: Option<String>,
-}
-
 /// Persist a co-scrub partial/complete record to the predictable outbox (the artifact
 /// that gossips as accord traffic OR transfers device-to-device for the next cosign /
 /// the persist bake). Best-effort — a write failure is logged, not fatal.
