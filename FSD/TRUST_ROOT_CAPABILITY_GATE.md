@@ -40,6 +40,106 @@ removing one **never touches the base self-attestation**. Each external root **c
 infra:attest / infra:serve + cross-node score validity + vouching, and **holds over you**
 the kill switch (the accord's 2-of-3 `accord:*` halt) — all on that one `user → root` edge.
 
+**The charter model (RC3).** The self-declaration is the root's **charter**: because
+down-chain grants are **attenuation-bound** (a `delegates_to` only resolves if the chain
+bears the scope from a holder of it — no amplification, ever), the charter is the
+capability ceiling of the entire trust domain. A root may amend its own charter at any
+point (self-referential — no higher authority exists), but amendment is a governance
+ceremony: the scopes live in the signed bytes, so it is an m-of-n re-scrub. Because the
+gate is a live graph walk, a charter amendment immediately re-resolves existing
+down-chain grants — declarative state, no re-issuance.
+
+**Charter recovery is IN the record, or it does not exist (prior-art REQUIREMENT,
+`FSD/PRIOR_ART.md` §2.1).** Tombstone-revocation assumes the revoker's key is honest —
+compromise the charter key and the attacker owns the tombstoning pen. A self-referential
+root has no superior to appeal to, so the charter record itself MUST carry:
+(a) a **pre-rotation commitment** — the hash of the next key set, KERI-style, published
+before it is ever needed — and (b) an **m-of-n recovery ceremony** by which the holder
+roster rotates a compromised charter to the pre-committed successor. Without both,
+root-key compromise is unrecoverable *by construction* (the Parity lesson: powers not
+pre-committed do not exist when needed). The m-of-n itself must be audited for holder
+**independence**, not signature count (Ronin: 5-of-9 that was one org).
+
+**The halt carries a severance window (prior-art REQUIREMENT, `FSD/PRIOR_ART.md`
+§2.6).** A mandatory delay stands between a halt's m-of-n signing and its landing,
+during which any node may sever its trust edge and exit the domain — MakerDAO's GSM
+delay generalized into the consent model. This is what makes "consensual" mechanical
+rather than rhetorical at the moment it is tested: the first real halt will face a
+legitimacy crisis (every surveyed system's did), and the window converts "who elected
+these three?" into "you had your exit." Halts are pre-committed powers, never
+act-then-ratify (Arbitrum AIP-1's failure).
+
+- **Root validity minimum** (what makes *any* root a root, what the gate checks): the
+  self-loop carries at least `[infra:serve, infra:attest]` — a root serves and vouches,
+  or it is inert.
+- **The humanity accord's charter:** `[infra:attest, infra:serve, infra:store,
+  infra:transport]` — all four bare-verb infrastructure capabilities it will confer on
+  blessed nodes (a canonical *stores* the traces it receives; relays *transport*).
+- **Deliberately NOT in a root charter:** `infra:network_presence` and
+  `infra:hold_*_membership` — those flow from the **owner**, not the domain. Two
+  granters, cleanly split: the owner grants the node's *standing* (presence, seats);
+  the root blesses its *infrastructure role* (serve, store, transport, attest). Note
+  `infra:serve` appears in both chains: a personal node's serve authority roots to its
+  owner; a canonical's roots to the accord.
+
+  **Why presence is owner-only (load-bearing, not taxonomic).** "Presence"
+  decomposes four ways: (1) *raw reachability* (announce/listen) is permissionless at
+  the transport layer — no token can gate it, and claiming otherwise is a fiction;
+  (2) *presence as the owner's device* (`infra:network_presence` — binding a
+  `transport_destination` under the owner's standing) is attribution, grantable only
+  by the owner whose standing is bound; (3) *attested reachability of blessed
+  infrastructure* (the transport hints inside the scrub envelope, #172) is the root
+  **witnessing an address**, which rides the charter's `attest` — the root never
+  confers presence, it attests facts about it; (4) *extending others' presence*
+  (relay) is `infra:transport`, charter-grantable. The split is what makes **nuclear
+  un-trust recoverable**: an un-trusted node keeps its owner-granted presence, so it
+  can still announce, reach a new root, and ingest a genesis bundle. If presence
+  flowed from the root, deleting the trust edge would unplug the device — un-trust
+  would self-brick, and the consensual kill switch would silently escalate from
+  "halt agent capabilities" to "unperson the device." It must never be that.
+
+**Why serve+attest as the minimum, and why "observe" is deliberately unmarked (RC3).**
+The validity minimum is `[infra:serve, infra:attest]` — the two *outward* acts (serving
+touches others' data; attesting vouches to others). A trust root is *that which serves
+and vouches*.
+**There is no `infra:observe`, on purpose**: in the CC's model observation is the unmarked
+zero state — the Foreword's Listener precedes every grant ("an observer arrived… by
+noticing, kept the pattern"). What you may observe is governed by the **subject's consent**
+(cohort_scope, `key_grant` / observer-share), never by a capability the observer carries.
+Making `observe` a scope would invert consent. "We begin as an observer" is expressed by
+the base self-attestation existing at all. (This is also why `observer` was a phantom token
+in the substrate: the system never needed it.)
+
+**Membership vs. bestowed roles (the layering).** *Membership is standing, not
+stewardship.* A roster seat is capability-free presence — which is exactly why it is an
+`infra:` scope a node can hold. **Judgment roles** (steward, moderator, founder-authority)
+are bestowed *on the member* via their own attestations (member-role fields, the CC
+4.4.3.4.3.1 role-chain, `moderate|takedown|review` duty scopes) and are **never bestowable
+on a pure node** — CC 4.4.3.4.3's conformance rule (node-only keys carry only `infra:*`)
+makes CC 1.13.5 wire-checkable: the node holds your standing; you (or your agent) wield the
+judgment. Ladder: observer (unmarked) → member (standing) → server/attester (capability) →
+steward/moderator (judgment — requires a brain).
+
+**RC3 crystal scope vocabulary (no aliases, hard cut — pre-fleet).** Every `infra:` token
+must state *act/standing + object* on its face:
+
+| token | normative one-liner |
+|---|---|
+| `infra:network_presence` | be reachable on the mesh as the delegator's device (announce + `transport_destination`) |
+| `infra:hold_community_membership` | occupy a member seat on **community** rosters under the delegator's standing |
+| `infra:hold_family_membership` | occupy a member seat on **family** rosters under the delegator's standing |
+| `infra:serve` | answer reads / serve stored content and requests to authorized peers |
+| `infra:store` | hold the delegator's/cohort's data at rest |
+| `infra:transport` | relay ciphertext between peers |
+| `infra:attest` | sign infrastructure attestations (build manifests, self-reports, vouches) |
+
+`infra:membership` (server legacy) and `infra:join_communities` (CC RC2 / persist) are
+**both retired** — they were vague AND, because scope matching is exact-string, they never
+even matched each other on the wire (a live interop hole). `hold_` names the persistent
+standing (not the join ceremony, not grant/manage authority); the community/family split
+exists because they are distinct CEG objects in different sensitivity classes — a user can
+give a node community standing while keeping it out of the family.
+
 Trust roots are **pluggable** (the humanity accord is *a* valid root, not the only one).
 Un-trust is **nuclear but recoverable**: deleting a `delegates_to(user → root)` edge revokes
 that root's roles, score validity, vouching, **and** kill-switch authority at once — but the

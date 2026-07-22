@@ -88,10 +88,29 @@ impl std::fmt::Display for GenesisError {
 
 impl std::error::Error for GenesisError {}
 
-/// Does this record carry `infra:serve`? Read from the record's OWN signed roles —
-/// the accord-conferred capability, never a local assertion.
+/// Does this record carry `infra:serve`? Checks the **attested** surface first.
+///
+/// Verify materializes `ScrubTarget.roles` into the scrub-signed
+/// `registration_envelope` (v10.5.0 — "attested by this scrub"), so THAT is where an
+/// accord-conferred capability actually lives. persist does not yet lift those into
+/// the top-level `KeyRecord.roles` that `claims_role` reads (**CIRISPersist#486**),
+/// which is why a bundle holder must read the envelope directly rather than trusting
+/// `roles` — the top-level field is empty by design from the producer.
+///
+/// The `identity_type` set and top-level `roles` are also honored, so this stays
+/// correct once #486 lands and for records that express the claim either way.
 fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
-    rec.record.roles.iter().any(|r| r == INFRA_SERVE)
+    use ciris_persist::federation::types::identity_type;
+    let attested_in_envelope = rec
+        .record
+        .registration_envelope
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|r| r.as_str() == Some(INFRA_SERVE)));
+
+    attested_in_envelope
+        || identity_type::set_contains(&rec.record.identity_type, INFRA_SERVE)
+        || rec.record.roles.iter().any(|r| r == INFRA_SERVE)
 }
 
 /// **Verify a bundle against itself, offline.** No directory, no network: the
@@ -244,6 +263,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **CIRISPersist#486 guard.** The accord's conferral is attested INSIDE the
+    /// scrub-signed `registration_envelope`; persist does not yet lift it into the
+    /// top-level `KeyRecord.roles`, which the producer leaves empty by design. So a
+    /// serve-capability check MUST read the envelope. If someone "simplifies"
+    /// `carries_infra_serve` back to `record.roles` only, this fails — and the whole
+    /// trace plane silently goes dark again, which is exactly how we got here.
+    #[test]
+    fn envelope_attested_role_is_seen_though_top_level_roles_is_empty() {
+        let baked = ciris_persist::federation::genesis::canonical_genesis_records();
+        let Some(mut rec) = baked.first().cloned() else {
+            return; // no baked canonical in this build
+        };
+        // The producer leaves the top-level field empty by design…
+        assert!(
+            rec.record.roles.is_empty(),
+            "baked record should carry an empty top-level roles"
+        );
+        assert!(
+            !carries_infra_serve(&rec),
+            "an unblessed record must not read as serve-capable"
+        );
+        // …and an accord conferral lands in the SIGNED envelope.
+        rec.record
+            .registration_envelope
+            .as_object_mut()
+            .expect("registration_envelope is a JSON object")
+            .insert("roles".into(), serde_json::json!([INFRA_SERVE]));
+        assert!(
+            carries_infra_serve(&rec),
+            "envelope-attested infra:serve must be seen even with top-level roles empty"
+        );
     }
 
     #[test]

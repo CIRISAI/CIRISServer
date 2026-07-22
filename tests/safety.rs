@@ -283,7 +283,7 @@ async fn emit_owner_binding(engine: &Engine, owner: &LocalSigner, member: &str) 
     let envelope = ciris_server::auth::ownership::build_owner_binding_envelope(
         &owner_key_id,
         member,
-        &["infra:membership".to_string()],
+        &["infra:hold_community_membership".to_string()],
         &now.to_rfc3339(),
     )
     .expect("build owner-binding envelope");
@@ -959,10 +959,10 @@ async fn ceg_dx_owner_binding_readers_reachable_and_retraction_aware() {
     // reachable_under_scope — the user reaches the node under the granted scope.
     assert!(
         engine
-            .reachable_under_scope(&owner_id, node_key, "infra:membership", 4)
+            .reachable_under_scope(&owner_id, node_key, "infra:hold_community_membership", 4)
             .await
             .expect("reachable_under_scope reachable"),
-        "owner reaches node under infra:membership"
+        "owner reaches node under infra:hold_community_membership"
     );
     // The server's collapsed reader (now `owner_of`-backed, #162) agrees, and
     // the inverse projection lists the node under the owner.

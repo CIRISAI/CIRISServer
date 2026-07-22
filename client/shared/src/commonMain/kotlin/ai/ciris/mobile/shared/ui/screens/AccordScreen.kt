@@ -23,6 +23,7 @@ import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.components.ConfirmDestructive
 import ai.ciris.mobile.shared.ui.components.CosignSheet
 import ai.ciris.mobile.shared.ui.components.HardwareScrubSheet
+import ai.ciris.mobile.shared.ui.components.HolderSignInputs
 import ai.ciris.mobile.shared.ui.components.NewAttestationAction
 import ai.ciris.mobile.shared.ui.components.NewAttestationMenu
 import ai.ciris.mobile.shared.ui.components.ViewerAuthority
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -43,6 +45,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -74,6 +77,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
 /**
  * **Trust Root** — the HUMANITY_ACCORD constitutional surface (CIRISServer #41),
@@ -96,6 +100,8 @@ private sealed interface AccordSheet {
     data class AddCanonical(val replace: CanonicalServerDto?) : AccordSheet
     /** Batch-bless the substrate CI workers (default-populated one-click card). */
     data object BlessCiWorkers : AccordSheet
+    /** Re-mint the EXISTING trust root into a portable genesis (FSD/MESH_GENESIS.md). */
+    data object RemintTrustRoot : AccordSheet
     data object Drill : AccordSheet
     data object Halt : AccordSheet
     data object Announce : AccordSheet
@@ -186,6 +192,11 @@ fun AccordScreen(
                                 add(
                                     NewAttestationAction("bless_ci_workers", "mobile.accord_new_bless_ci_workers") {
                                         sheet = AccordSheet.BlessCiWorkers
+                                    },
+                                )
+                                add(
+                                    NewAttestationAction("remint_trust_root", "mobile.accord_new_remint_trust_root") {
+                                        sheet = AccordSheet.RemintTrustRoot
                                     },
                                 )
                                 add(
@@ -458,6 +469,7 @@ fun AccordScreen(
         is AccordSheet.AddCanonical ->
             AddCanonicalSheet(viewModel, holders, busy, s.replace) { sheet = null }
         is AccordSheet.BlessCiWorkers -> BlessCiWorkersSheet(viewModel, holders, busy) { sheet = null }
+        is AccordSheet.RemintTrustRoot -> RemintTrustRootSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Drill -> DrillSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Halt -> HaltSheet(viewModel, holders, busy) { sheet = null }
         is AccordSheet.Announce -> AnnounceSheet(viewModel, holders, busy) { sheet = null }
@@ -880,6 +892,405 @@ private fun BlessCiWorkersSheet(
             onDismiss()
         },
         onDismiss = onDismiss,
+    )
+}
+
+/**
+ * **Re-mint existing trust root** — the portable genesis flow (FSD/MESH_GENESIS.md).
+ * Re-mints the EXISTING accord + canonical into a portable, self-verifying
+ * `GenesisBundle`, pre-filled from `GET /v1/accord/genesis/remint-source` so nothing
+ * is retyped and no key material is invented. Three steps, one sheet:
+ *   1. **Propose (A1)** — the SAME m-of-n co-scrub as AddCanonicalSheet
+ *      (`AccordViewModel.proposeCanonical`), target pre-filled from the selected
+ *      canonical (key_id + pubkeys + ip hint). The re-mint confers `infra:serve`.
+ *   2. **Cosign (B1)** — the partial gossips; B1 cosigns from "Pending co-signs" on
+ *      their device, or pastes it here (`AccordViewModel.cosignCanonical`).
+ *   3. **Produce** — the completed record (verbatim) → the portable bundle, offered
+ *      Save (`mesh-genesis.json`) / Copy. No YubiKey — nothing is signed in step 3.
+ *
+ * Multi-step, so it embeds [HolderSignInputs] directly with inline step buttons
+ * rather than [HardwareScrubSheet]'s single submit. Every field stays editable.
+ */
+@Composable
+private fun RemintTrustRootSheet(
+    viewModel: AccordViewModel,
+    holders: List<AccordHolderDto>,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val source by viewModel.remintSource.collectAsState()
+    val bundleJson by viewModel.genesisBundleJson.collectAsState()
+    val lastCoscrubJson by viewModel.lastCoscrubJson.collectAsState()
+    val clipboard = LocalClipboardManager.current
+    val saveScope = rememberCoroutineScope()
+
+    // On open: pull the pre-fill roster (holders + canonicals + quorum).
+    LaunchedEffect(Unit) { viewModel.loadRemintSource() }
+
+    // Canonical selector — DEFAULTS to the first canonical (canonical-server-1).
+    var selectedKeyId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(source) {
+        if (selectedKeyId == null) selectedKeyId = source?.canonicals?.firstOrNull()?.keyId
+    }
+    val selected = source?.canonicals?.firstOrNull { it.keyId == selectedKeyId }
+
+    // The ip hint baked into the selected canonical's record — seeded, editable.
+    var ip by remember(selected?.keyId) {
+        mutableStateOf(selected?.transportHints?.firstOrNull { it.kind == "ip" }?.destination.orEmpty())
+    }
+    var transport by remember { mutableStateOf("ip") }
+
+    // The same YubiKey / hardware-scrub fields as AddCanonicalSheet.
+    var holderKeyId by remember { mutableStateOf("") }
+    var usbPath by remember { mutableStateOf("") }
+    var pin by remember { mutableStateOf("") }
+    var modulePath by remember { mutableStateOf("") }
+    val holderReady = holderKeyId.isNotBlank() && usbPath.isNotBlank() && pin.isNotBlank()
+
+    // Step 2: a pasted partial B1 cosigns ON THIS DEVICE (gossip-less fallback).
+    var cosignPaste by remember { mutableStateOf("") }
+    // Step 3: the completed record — pre-filled from the last propose / cosign
+    // response of THIS session (lastCoscrubJson), best-effort; always editable.
+    var completedRecord by remember { mutableStateOf("") }
+    LaunchedEffect(lastCoscrubJson) {
+        val json = lastCoscrubJson
+        if (completedRecord.isBlank() && !json.isNullOrBlank()) completedRecord = json
+    }
+
+    var canonicalMenu by remember { mutableStateOf(false) }
+    var bundleSaveDir by remember { mutableStateOf<String?>(null) }
+    // Resolve error strings in composable context — the click lambdas aren't @Composable.
+    val invalidJsonMsg = localizedString("mobile.accord_coscrub_paste_invalid")
+
+    val proposeReady = holderReady && selected != null &&
+        !selected.pubkeyMlDsa65Base64.isNullOrBlank() && !busy
+    val cosignReady = holderReady && cosignPaste.isNotBlank() && !busy
+    val produceReady = completedRecord.isNotBlank() && !busy
+
+    val doPropose = {
+        val sel = selected
+        val ml = sel?.pubkeyMlDsa65Base64
+        if (sel != null && !ml.isNullOrBlank()) {
+            // The SAME m-of-n co-scrub ceremony as AddCanonicalSheet — pre-filled.
+            viewModel.proposeCanonical(
+                holderKeyId, usbPath, sel.keyId, sel.pubkeyEd25519Base64, ml,
+                pin.ifBlank { null }, transport.ifBlank { null }, ip.ifBlank { null },
+                modulePath.ifBlank { null },
+            )
+        }
+    }
+    val doCosign = {
+        val partial = try {
+            Json.parseToJsonElement(cosignPaste.trim())
+        } catch (e: Exception) {
+            viewModel.showError(invalidJsonMsg)
+            null
+        }
+        if (partial != null) {
+            viewModel.cosignCanonical(
+                holderKeyId, usbPath, pin.ifBlank { null }, partial, modulePath.ifBlank { null },
+            )
+        }
+    }
+    val doProduce = {
+        val record = try {
+            Json.parseToJsonElement(completedRecord.trim())
+        } catch (e: Exception) {
+            viewModel.showError(invalidJsonMsg)
+            null
+        }
+        // The record rides VERBATIM; family_key_id defaults server-side (baked accord).
+        if (record != null) viewModel.produceGenesis(listOf(record))
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(localizedString("mobile.accord_remint_title")) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testable("sheet_remint_trust_root"),
+            ) {
+                Text(
+                    localizedString("mobile.accord_remint_desc"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+
+                // ── The holder roster (read-only; the FULL roster rides the genesis) ──
+                Text(
+                    localizedString("mobile.accord_remint_roster_title"),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                val roster = source?.holders.orEmpty()
+                if (roster.isEmpty()) {
+                    Text(
+                        localizedString("mobile.accord_remint_roster_empty"),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testable("remint_roster_empty"),
+                    )
+                } else {
+                    roster.forEach { h ->
+                        Text(
+                            h.keyId,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.testable("remint_holder_${h.keyId}"),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    localizedString("mobile.accord_remint_quorum_note", "quorum", source?.quorum ?: "2/3"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+
+                // ── Canonical selector (defaults to the first canonical) ──
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { canonicalMenu = true },
+                        modifier = Modifier.fillMaxWidth().testable("dd_remint_canonical"),
+                    ) {
+                        Text(selected?.keyId ?: localizedString("mobile.accord_remint_canonical_select"))
+                    }
+                    DropdownMenu(expanded = canonicalMenu, onDismissRequest = { canonicalMenu = false }) {
+                        val canonicals = source?.canonicals.orEmpty()
+                        if (canonicals.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text(localizedString("mobile.accord_remint_no_canonicals")) },
+                                onClick = { canonicalMenu = false },
+                            )
+                        }
+                        canonicals.forEach { c ->
+                            DropdownMenuItem(
+                                text = { Text(c.keyId, fontFamily = FontFamily.Monospace) },
+                                onClick = { selectedKeyId = c.keyId; canonicalMenu = false },
+                                modifier = Modifier.testableClickable("remint_canonical_${c.keyId}") {
+                                    selectedKeyId = c.keyId; canonicalMenu = false
+                                },
+                            )
+                        }
+                    }
+                }
+                selected?.let { sel ->
+                    Spacer(Modifier.height(4.dp))
+                    // The serve badge — `false` is exactly what this re-mint fixes.
+                    Text(
+                        localizedString(
+                            if (sel.confersInfraServe) "mobile.accord_remint_serve_ok"
+                            else "mobile.accord_remint_serve_missing",
+                        ),
+                        fontSize = 11.sp,
+                        color = if (sel.confersInfraServe) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testable("remint_serve_state_${sel.keyId}"),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = ip,
+                    onValueChange = { ip = it },
+                    singleLine = true,
+                    label = { Text(localizedString("mobile.accord_canonical_ip_label")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_remint_ip"),
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = transport,
+                    onValueChange = { transport = it },
+                    singleLine = true,
+                    label = { Text(localizedString("mobile.accord_canonical_transport_label")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_remint_transport_kind"),
+                )
+                Spacer(Modifier.height(10.dp))
+
+                // ── Sign as holder (identical to the HardwareScrubSheet fields) ──
+                HolderSignInputs(
+                    holders = holders,
+                    holderKeyId = holderKeyId,
+                    onHolder = { holderKeyId = it },
+                    usbPath = usbPath,
+                    onUsb = { usbPath = it },
+                    pin = pin,
+                    onPin = { pin = it },
+                    tagPrefix = "remint",
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = modulePath,
+                    onValueChange = { modulePath = it },
+                    singleLine = true,
+                    label = { Text(localizedString("mobile.accord_scrub_module_label")) },
+                    placeholder = { Text(localizedString("mobile.accord_scrub_module_hint")) },
+                    modifier = Modifier.fillMaxWidth().testable("input_scrub_module_remint"),
+                )
+                Spacer(Modifier.height(12.dp))
+
+                // ── Step 1 — Propose (A1) ──
+                Text(
+                    localizedString("mobile.accord_remint_step1_title"),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    localizedString("mobile.accord_remint_step1_desc"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = doPropose,
+                    enabled = proposeReady,
+                    modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_propose") {
+                        if (proposeReady) doPropose()
+                    },
+                ) {
+                    Text(
+                        if (busy) localizedString("mobile.accord_remint_propose_btn_busy")
+                        else localizedString("mobile.accord_remint_propose_btn"),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+
+                // ── Step 2 — Cosign (B1) ──
+                Text(
+                    localizedString("mobile.accord_remint_step2_title"),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    localizedString("mobile.accord_remint_step2_desc"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = cosignPaste,
+                    onValueChange = { cosignPaste = it },
+                    singleLine = false,
+                    label = { Text(localizedString("mobile.accord_remint_cosign_paste_label")) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 72.dp)
+                        .testable("input_remint_cosign_partial"),
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = doCosign,
+                    enabled = cosignReady,
+                    modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_cosign") {
+                        if (cosignReady) doCosign()
+                    },
+                ) {
+                    Text(
+                        if (busy) localizedString("mobile.accord_remint_cosign_btn_busy")
+                        else localizedString("mobile.accord_remint_cosign_btn"),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+
+                // ── Step 3 — Produce the portable genesis ──
+                Text(
+                    localizedString("mobile.accord_remint_step3_title"),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    localizedString("mobile.accord_remint_step3_desc"),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = completedRecord,
+                    onValueChange = { completedRecord = it },
+                    singleLine = false,
+                    label = { Text(localizedString("mobile.accord_remint_completed_label")) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 96.dp)
+                        .testable("input_remint_completed_record"),
+                )
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = doProduce,
+                    enabled = produceReady,
+                    modifier = Modifier.fillMaxWidth().testableClickable("btn_remint_produce") {
+                        if (produceReady) doProduce()
+                    },
+                ) {
+                    Text(
+                        if (busy) localizedString("mobile.accord_remint_produce_btn_busy")
+                        else localizedString("mobile.accord_remint_produce_btn"),
+                    )
+                }
+
+                // ── The produced bundle: Save (mesh-genesis.json) / Copy ──
+                bundleJson?.let { json ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        localizedString("mobile.accord_remint_bundle_ready"),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testable("remint_bundle_ready"),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { clipboard.setText(AnnotatedString(json)) },
+                            modifier = Modifier.testableClickable("btn_remint_copy_bundle") {
+                                clipboard.setText(AnnotatedString(json))
+                            },
+                        ) { Text(localizedString("mobile.accord_op_copy")) }
+                        TextButton(
+                            onClick = { bundleSaveDir = "" },
+                            modifier = Modifier.testableClickable("btn_remint_save_bundle") {
+                                bundleSaveDir = ""
+                            },
+                        ) { Text(localizedString("mobile.accord_remint_save_bundle")) }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testableClickable("btn_remint_close") { onDismiss() },
+            ) { Text(localizedString("mobile.accord_scrub_cancel")) }
+        },
+    )
+
+    // Save flow: pick a folder, then write the portable genesis bundle into it
+    // (mirrors the screen's co-scrub partial save).
+    DirectoryPickerDialog(
+        show = bundleSaveDir == "",
+        onDirectoryPicked = { dir ->
+            bundleSaveDir = null
+            val json = bundleJson
+            if (json != null) {
+                saveScope.launch {
+                    val ok = writeTextFile(dir, "mesh-genesis.json", json)
+                    viewModel.setExternalNotice(
+                        if (ok) "Saved the genesis bundle to $dir."
+                        else "Couldn't save to $dir (this platform may not support file writes).",
+                        error = !ok,
+                    )
+                }
+            }
+        },
+        onDismiss = { bundleSaveDir = null },
     )
 }
 

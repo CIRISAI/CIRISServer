@@ -3269,6 +3269,92 @@ class CIRISApiClient(
     }
 
     /**
+     * **Re-mint source** — `GET {nodeUrl}/v1/accord/genesis/remint-source`
+     * (FSD/MESH_GENESIS.md). Everything needed to PRE-FILL a "re-mint existing trust
+     * root" ceremony: the full accord holder roster (A1/B1/C1) + the existing
+     * canonical server(s) with their pubkeys, transport hints, and whether each
+     * record already confers `infra:serve`. C1 need not be present — the family is
+     * quorum:2/3, so its record rides here and the roster stays complete. Throws on
+     * failure (an empty roster would be misleading, unlike the fail-soft lists).
+     */
+    suspend fun getGenesisRemintSource(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.RemintSourceDto {
+        val method = "getGenesisRemintSource"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/accord/genesis/remint-source") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("remint source failed: ${response.status}: ${raw.take(220)}")
+            }
+            val parsed = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.RemintSourceDto.serializer(),
+                raw,
+            )
+            logInfo(method, "remint source holders=${parsed.holders.size} canonicals=${parsed.canonicals.size} quorum=${parsed.quorum}")
+            parsed
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw RuntimeException(e.message ?: "remint source failed", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Produce the portable genesis** — `POST {nodeUrl}/v1/accord/genesis/produce`
+     * (FSD/MESH_GENESIS.md). Takes the COMPLETED (m-of-n) re-mint `SignedKeyRecord`(s)
+     * — each rides VERBATIM as a raw [JsonElement], never re-encoded — and emits the
+     * portable, self-verifying `GenesisBundle` `{version, family_key_id, holders,
+     * serve_nodes, produced_at}`. The node REFUSES (400, clear error) a record that
+     * doesn't confer `infra:serve` — a dark mesh cannot be packaged. [familyKeyId]
+     * optionally overrides the baked HUMANITY_ACCORD family.
+     */
+    suspend fun produceGenesis(
+        serveRecords: List<JsonElement>,
+        familyKeyId: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.ProduceGenesisResult {
+        val method = "produceGenesis"
+        logInfo(method, "POST $nodeUrl/v1/accord/genesis/produce serve_records=${serveRecords.size}")
+        val client = federationHttpClient()
+        return try {
+            val bodyJson = buildJsonObject {
+                // The completed records VERBATIM — never re-encode the signed envelopes.
+                put("serve_records", JsonArray(serveRecords))
+                familyKeyId?.takeIf { it.isNotBlank() }?.let { put("family_key_id", JsonPrimitive(it.trim())) }
+            }
+            val response = client.post("$nodeUrl/v1/accord/genesis/produce") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyJson.toString())
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("produce genesis failed: ${response.status}: ${raw.take(220)}")
+            }
+            // The response IS the bundle: keep it verbatim, decode a display summary.
+            val bundle = jsonConfig.parseToJsonElement(raw)
+            val summary = jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.federation.GenesisBundleDto.serializer(),
+                raw,
+            )
+            logInfo(method, "produced genesis family=${summary.familyKeyId} holders=${summary.holders.size} serve_nodes=${summary.serveNodes.size}")
+            ai.ciris.mobile.shared.models.federation.ProduceGenesisResult(bundle = bundle, summary = summary)
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw RuntimeException(e.message ?: "produce genesis failed", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
      * **YubiKey readiness** — `GET {nodeUrl}/v1/accord/yubikey-status` (loopback).
      * Reports whether an inserted YubiKey is ready for accord provisioning (detected,
      * FIPS-approved, slot 9C key + certificate) + the PIN/PUK tries remaining, so the

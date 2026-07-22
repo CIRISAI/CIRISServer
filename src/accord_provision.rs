@@ -1270,6 +1270,16 @@ async fn admit_node_impl(
             pubkey_ed25519_base64: req.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.target.identity_type.trim().to_string(),
+            // Conferral rides `ScrubTarget.roles`, which verify materializes INTO the
+            // scrub-signed `registration_envelope` (v10.5.0 `:421` — "attested by this
+            // scrub"), readable back via `SignedKeyRecord::roles_in_envelope()`. This
+            // is the attested home for an accord-conferred capability.
+            //
+            // NOTE (CIRISPersist#486): persist does not yet lift the envelope-attested
+            // roles into the top-level `KeyRecord.roles` that `claims_role` reads, so
+            // the conferral is *attested but not yet visible* to `has_effective_role`.
+            // Consumers holding the SignedKeyRecord (e.g. `mesh_genesis`) read the
+            // envelope directly and see it today.
             roles: roles.to_vec(),
         },
         &valid_from,
@@ -1624,12 +1634,13 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
             pubkey_ed25519_base64: req.admit.target.pubkey_ed25519_base64.trim().to_string(),
             pubkey_ml_dsa_65_base64: req.admit.target.pubkey_ml_dsa_65_base64.trim().to_string(),
             identity_type: req.admit.target.identity_type.clone(),
-            // Confer `infra:serve` (CC 4.4.3.4.3 — "serve as infrastructure") INSIDE
-            // this scrub-signed envelope so the accord co-scrub (m-of-n) attests the
-            // role rather than the node self-claiming it (CIRISPersist#441). A node
-            // the trust root blesses with infra:serve is trusted-by-default as a
-            // trace recipient — the fail-closed gate (CIRISEdge#379 / CIRISServer#300)
-            // that, together with the peer's consent, decides whether traces arrive.
+            // Confer `infra:serve` (CC 4.4.3.4.3 — "serve as infrastructure"). Verify
+            // materializes `ScrubTarget.roles` into the scrub-signed envelope, so the
+            // accord co-scrub (m-of-n) ATTESTS the capability rather than the node
+            // self-claiming it (CIRISPersist#441). A node the trust root blesses with
+            // infra:serve is trusted-by-default as a trace recipient — CIRISEdge#386
+            // leg A — which together with the peer's consent decides whether traces
+            // arrive. (Visibility to `claims_role` awaits CIRISPersist#486.)
             roles: vec![
                 ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
             ],
@@ -2062,6 +2073,136 @@ async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Resp
         Json(serde_json::json!({ "results": results })),
     )
         .into_response()
+}
+
+// ─── Re-mint an existing trust root → a portable genesis (FSD/MESH_GENESIS.md) ──
+//
+// The operator flow this serves:
+//   1. GET  /v1/accord/genesis/remint-source  → pre-fill from the EXISTING accord +
+//      canonical. C1's record comes from here, so **C1 need not be present** — the
+//      family is quorum:2/3, so A1 + B1 alone can sign.
+//   2. POST /v1/accord/canonical/propose      (A1, pre-filled) → partial
+//   3. POST /v1/accord/canonical/cosign       (B1)             → completed record,
+//      now carrying `infra:serve` in the SIGNED identity_type set.
+//   4. POST /v1/accord/genesis/produce        (the completed record) → the portable,
+//      self-verifying genesis bundle.
+
+/// `GET /v1/accord/genesis/remint-source` — everything needed to PRE-FILL a
+/// "re-mint existing trust root" ceremony, so nothing is retyped and no key material
+/// is invented: the full accord holder roster (A1/B1/C1) and the existing canonical
+/// server(s) with their pubkeys + transport hints.
+///
+/// **Why the whole roster when only two sign:** the m-of-n is evaluated OVER the
+/// roster, so a genesis that shipped only the two signers would silently redefine
+/// 2-of-3 as 2-of-2 — narrowing the kill switch and breaking recovery if a signer is
+/// later lost. Two signers, three seats.
+async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
+    let holders: Vec<serde_json::Value> =
+        ciris_persist::federation::genesis::effective_accord_holder_records()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "key_id": h.record.key_id,
+                    "identity_type": h.record.identity_type,
+                    "pubkey_ed25519_base64": h.record.pubkey_ed25519_base64,
+                    "pubkey_ml_dsa_65_base64": h.record.pubkey_ml_dsa_65_base64,
+                })
+            })
+            .collect();
+    let canonicals = match st.engine.list_canonical_servers().await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "key_id": r.key_id,
+                    "identity_type": r.identity_type,
+                    "pubkey_ed25519_base64": r.pubkey_ed25519_base64,
+                    "pubkey_ml_dsa_65_base64": r.pubkey_ml_dsa_65_base64,
+                    "scrub_key_id": r.scrub_key_id,
+                    "transport_hints": r.registration_envelope.get("transport_hints")
+                        .cloned().unwrap_or(serde_json::Value::Null),
+                    // Does this record ALREADY confer serve? (identity_type ∪ roles —
+                    // the same surface `claims_role` reads.) `false` here is exactly
+                    // what the re-mint fixes.
+                    "confers_infra_serve": ciris_persist::federation::types::identity_type::set_contains(
+                        &r.identity_type,
+                        ciris_persist::federation::types::delegation_scope::INFRA_SERVE,
+                    ) || r.roles.iter().any(|x| x == ciris_persist::federation::types::delegation_scope::INFRA_SERVE),
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("list_canonical_servers: {e}"),
+            )
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "holders": holders,
+            "canonicals": canonicals,
+            "quorum": "2/3",
+            "note": "Select an existing accord + canonical to re-mint. Only 2 of the 3 \
+                     holders need be present to sign (quorum 2/3); the third's record is \
+                     carried from here so the roster stays complete. The re-mint confers \
+                     infra:serve in the SIGNED identity_type set.",
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ProduceGenesisRequest {
+    /// Completed (m-of-n) `SignedKeyRecord`s from the re-mint cosign — the serve
+    /// candidates. Records not conferring `infra:serve` are filtered, and if that
+    /// leaves none the produce REFUSES.
+    serve_records: Vec<serde_json::Value>,
+    /// Optional override; defaults to the baked HUMANITY_ACCORD family.
+    #[serde(default)]
+    family_key_id: Option<String>,
+}
+
+/// `POST /v1/accord/genesis/produce` — emit the portable, self-verifying genesis
+/// bundle from completed re-mint records.
+///
+/// Refuses a bundle with no `infra:serve`-conferring serve node, so a dark mesh
+/// cannot be packaged and handed to anyone (`FSD/MESH_GENESIS.md`).
+async fn genesis_produce(body: axum::body::Bytes) -> Response {
+    let req: ProduceGenesisRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("bad request: {e}")),
+    };
+    let mut serve: Vec<ciris_persist::federation::SignedKeyRecord> =
+        Vec::with_capacity(req.serve_records.len());
+    for v in req.serve_records {
+        match serde_json::from_value(v) {
+            Ok(r) => serve.push(r),
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("a serve_record is not a SignedKeyRecord: {e}"),
+                )
+            }
+        }
+    }
+    let family_key_id = req.family_key_id.unwrap_or_else(|| {
+        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    match crate::mesh_genesis::produce_genesis(&family_key_id, serve, &now) {
+        Ok(bundle) => {
+            tracing::info!(
+                family_key_id = %bundle.family_key_id,
+                holders = bundle.holders.len(),
+                serve_nodes = bundle.serve_nodes.len(),
+                "Trust Root: portable mesh genesis produced (trust root + serve node)"
+            );
+            (StatusCode::OK, Json(bundle)).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+    }
 }
 
 /// Persist a co-scrub partial/complete record to the predictable outbox (the artifact
@@ -2593,6 +2734,17 @@ pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
             "/v1/accord/ci-key/cosign",
             axum::routing::post(cosign_ci_key),
         )
+        // Re-mint an existing trust root into a portable genesis (FSD/MESH_GENESIS.md):
+        // pre-fill from the existing accord + canonical, then emit the bundle after
+        // the 2-of-3 re-mint. C1 need not be present; its record rides the roster.
+        .route(
+            "/v1/accord/genesis/remint-source",
+            axum::routing::get(genesis_remint_source),
+        )
+        .route(
+            "/v1/accord/genesis/produce",
+            axum::routing::post(genesis_produce),
+        )
         // The "Pending co-signs" list (partials below the family quorum), read by the client.
         .route(
             "/v1/accord/canonical/pending",
@@ -2907,6 +3059,7 @@ mod tests {
 
     // ─── add-canonical (the mesh-seed op, #164) ──────────────────────────────
 
+    #[test]
     #[test]
     fn ensure_canonical_role_adds_sorts_and_dedups() {
         assert_eq!(ensure_canonical_role("node"), "canonical,node");

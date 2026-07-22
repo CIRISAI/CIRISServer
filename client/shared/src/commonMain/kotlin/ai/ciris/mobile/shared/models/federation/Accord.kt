@@ -511,6 +511,99 @@ data class GenesisAssembleResponse(
     val message: String? = null,
 )
 
+// ─── Re-mint existing trust root → portable genesis (FSD/MESH_GENESIS.md) ─────
+//
+// The EXISTING accord + canonical are re-minted into a portable, self-verifying
+// genesis bundle (src/accord_provision.rs). The operator flow:
+//   1. GET  /v1/accord/genesis/remint-source  → pre-fill (holders + canonicals).
+//      C1 need not be present — quorum 2/3, so its record rides the roster.
+//   2. POST /v1/accord/canonical/propose      (A1, pre-filled)   → partial
+//   3. POST /v1/accord/canonical/cosign       (B1)               → completed record,
+//      now carrying `infra:serve` in the SIGNED identity_type set.
+//   4. POST /v1/accord/genesis/produce        (completed record) → the bundle.
+
+/**
+ * One accord holder of the re-mint roster — an entry of
+ * `GET /v1/accord/genesis/remint-source`. The FULL roster (A1/B1/C1) rides the
+ * genesis even when only two sign, so 2-of-3 never silently narrows to 2-of-2.
+ */
+@Serializable
+data class RemintHolderDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("identity_type")
+    val identityType: String? = null,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
+)
+
+/**
+ * One existing canonical server of the re-mint roster. [confersInfraServe] is
+ * whether the record ALREADY confers `infra:serve` (identity_type ∪ roles) —
+ * `false` is exactly what the re-mint fixes.
+ */
+@Serializable
+data class RemintCanonicalDto(
+    @SerialName("key_id")
+    val keyId: String,
+    @SerialName("identity_type")
+    val identityType: String,
+    @SerialName("pubkey_ed25519_base64")
+    val pubkeyEd25519Base64: String,
+    @SerialName("pubkey_ml_dsa_65_base64")
+    val pubkeyMlDsa65Base64: String? = null,
+    @SerialName("scrub_key_id")
+    val scrubKeyId: String? = null,
+    @SerialName("transport_hints")
+    val transportHints: List<TransportHintDto>? = null,
+    @SerialName("confers_infra_serve")
+    val confersInfraServe: Boolean = false,
+)
+
+/**
+ * `GET /v1/accord/genesis/remint-source` response — everything needed to PRE-FILL
+ * a "re-mint existing trust root" ceremony, so nothing is retyped and no key
+ * material is invented.
+ */
+@Serializable
+data class RemintSourceDto(
+    val holders: List<RemintHolderDto> = emptyList(),
+    val canonicals: List<RemintCanonicalDto> = emptyList(),
+    /** The family quorum, e.g. ``2/3``. */
+    val quorum: String = "2/3",
+    val note: String? = null,
+)
+
+/**
+ * The portable `GenesisBundle` decoded for DISPLAY — `POST /v1/accord/genesis/produce`
+ * returns the bundle itself. [holders] / [serveNodes] are opaque signed
+ * `SignedKeyRecord`s the app never inspects, so they ride as raw
+ * [kotlinx.serialization.json.JsonElement]s (counts only).
+ */
+@Serializable
+data class GenesisBundleDto(
+    val version: Int = 0,
+    @SerialName("family_key_id")
+    val familyKeyId: String = "",
+    val holders: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+    @SerialName("serve_nodes")
+    val serveNodes: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+    @SerialName("produced_at")
+    val producedAt: String? = null,
+)
+
+/**
+ * The parsed `POST /v1/accord/genesis/produce` result: [bundle] is the portable
+ * `GenesisBundle` JSON VERBATIM (the artifact the operator saves / shares);
+ * [summary] is the same bytes decoded for display.
+ */
+data class ProduceGenesisResult(
+    val bundle: kotlinx.serialization.json.JsonElement,
+    val summary: GenesisBundleDto,
+)
+
 /**
  * ``GET /v1/accord/yubikey-status`` — the inserted YubiKey's readiness for accord
  * provisioning, so the ceremony UI can show a clear banner + the PIN/PUK tries.

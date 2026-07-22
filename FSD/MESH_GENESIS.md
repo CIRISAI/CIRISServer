@@ -49,9 +49,20 @@ The object verifies **internally**, offline:
 - the serve node carries `roles:["infra:serve"]` in its signed envelope, so its
   trace-recipient authority is attested by the same holders, not self-claimed.
 
-A tampered or forged genesis fails these checks — the object is trustworthy because it
-proves its own m-of-n rooting, not because of where it came from. It is therefore safe to
-transfer over any channel (file, QR, device-to-device, USB).
+A tampered genesis fails these checks — so the object is **tamper-evident** over any
+channel (file, QR, device-to-device, USB).
+
+**What self-verification does NOT prove (prior-art lesson, `FSD/PRIOR_ART.md` §2.2).**
+An attacker's genesis bundle — with its own self-referential charter and its own
+holders — self-verifies *identically*. Internal consistency can never tell you which
+bundle is the right one; KERI concedes the same via OOBI (first contact is out-of-band,
+always). The TOFU moment is not eliminated — it moves to the **distribution channel**,
+which is therefore the attack surface. Consequently the attach flow (§4) MUST treat
+out-of-band fingerprint comparison as a first-class step: the bundle carries a short
+content-address fingerprint, and the UI presents it for comparison against a
+second channel (the person who handed it to you, a published value, another device)
+before the trust edge is offered for signing. Verification proves *untampered*;
+only the human's second channel proves *intended*.
 
 ## 3. Portability
 
