@@ -3060,7 +3060,6 @@ mod tests {
     // ─── add-canonical (the mesh-seed op, #164) ──────────────────────────────
 
     #[test]
-    #[test]
     fn ensure_canonical_role_adds_sorts_and_dedups() {
         assert_eq!(ensure_canonical_role("node"), "canonical,node");
         assert_eq!(ensure_canonical_role("canonical"), "canonical");
