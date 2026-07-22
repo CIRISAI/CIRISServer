@@ -52,6 +52,7 @@ use sha2::{Digest, Sha256};
 
 use ciris_persist::federation::admission::has_effective_role;
 use ciris_persist::federation::trust_root::{capability_roots_to_trusted_root, trust_root_valid};
+use ciris_persist::federation::trust_root::{pre_rotation_commitment, CHARTER_PRE_ROTATION_FIELD};
 use ciris_persist::federation::types::delegation_scope::{
     INFRA_ATTEST, INFRA_SERVE, INFRA_STORE, INFRA_TRANSPORT,
 };
@@ -71,6 +72,13 @@ use crate::mesh_genesis::{attach_genesis, produce_genesis, verify_bundle};
 /// The delegation-plane trust root: accord holder A1, keyed as the synthesized
 /// test-anchor roster id so the effective roster and our signer correspond.
 const ROOT: &str = "test-accord-holder-0";
+/// The full synthesized holder roster; `HOLDER_IDS[0]` is [`ROOT`]. B1/C1 are
+/// the keys the root charter pre-commits to as its successors (#488 delta 1).
+const HOLDER_IDS: [&str; 3] = [
+    "test-accord-holder-0",
+    "test-accord-holder-1",
+    "test-accord-holder-2",
+];
 /// The 2-of-3-scrubbed serve node.
 const CANONICAL: &str = "qa-canonical-1";
 /// The user who signs the `delegates_to(user → root)` trust edge.
@@ -205,6 +213,39 @@ async fn sign_row(
         tier: attestation_tier::FEDERATION.to_string(),
         promoted_at: None,
     }
+}
+
+/// A signed **charter** — the self-referential `delegates_to(root → root)`
+/// whose envelope `scope` is the domain's capability ceiling. persist
+/// v19.0.0 (#488 delta 1, the KERI lesson) REFUSES a charter that does not
+/// pre-commit to its successor key set: without it, compromise of the
+/// charter key is unrecoverable by construction — the attacker owns the
+/// tombstoning pen and a self-referential root has no superior to appeal
+/// to. `successors` are the keys pre-committed to rotate this charter (here
+/// the OTHER two accord holders — the m-of-n recovery shape).
+async fn signed_charter(
+    id: &str,
+    root: &HybridSigningIdentity,
+    root_key_id: &str,
+    scope: serde_json::Value,
+    successors: &[String],
+) -> Attestation {
+    let commitment = pre_rotation_commitment(successors).expect("pre-rotation commitment computes");
+    let envelope = serde_json::json!({
+        "references_attestation_id": id,
+        "scope": scope,
+        CHARTER_PRE_ROTATION_FIELD: commitment,
+    });
+    sign_row(
+        id,
+        root,
+        root_key_id,
+        attestation_type::DELEGATES_TO,
+        envelope,
+        chrono::Utc::now(),
+        None,
+    )
+    .await
 }
 
 /// A signed `delegates_to(granter → grantee)` carrying `scope` in the
@@ -389,12 +430,13 @@ async fn mint_portable_root() -> PortableRoot {
     // charter, root→canonical grant, user→root trust edge, fresh lifecycle.
     put_att(
         &dir,
-        signed_delegates_to(
+        signed_charter(
             "qa-charter",
             &holders[0],
             ROOT,
             serde_json::json!([INFRA_ATTEST, INFRA_SERVE, INFRA_STORE, INFRA_TRANSPORT]),
-            None,
+            // B1 + C1 pre-committed to rotate A1's charter (m-of-n recovery).
+            &[HOLDER_IDS[1].to_string(), HOLDER_IDS[2].to_string()],
         )
         .await,
     )
@@ -454,12 +496,12 @@ async fn add_vouch_only_root(fx: &PortableRoot) {
         .expect("vouch-root registers");
     put_att(
         &fx.dir,
-        signed_delegates_to(
+        signed_charter(
             "qa-vouch-charter",
             &vouch,
             VOUCH_ROOT,
             serde_json::json!([INFRA_ATTEST]),
-            None,
+            &[HOLDER_IDS[1].to_string(), HOLDER_IDS[2].to_string()],
         )
         .await,
     )
@@ -563,98 +605,13 @@ async fn qa_envelope_carries_the_conferral() {
 // FLIP red on the fixed-triple repin.
 // ────────────────────────────────────────────────────────────────────
 
-/// **GAP — CIRISPersist#486 (edge leg A blocked).** The accord conferral is
-/// attested inside the scrub-signed `registration_envelope`, but persist's
-/// `claims_role` / `has_effective_role` read only the top-level `roles` ∪
-/// `identity_type` surfaces — envelope roles are NEVER lifted. So the
-/// genuinely 2-of-3-conferred `infra:serve` resolves to **false** today and
-/// the trace-serve gate stays dark. When this test goes red the gap has
-/// closed: delete it and un-ignore [`qa_leg_a_serve_resolves`].
-#[tokio::test]
-async fn qa_gap_486_roles_not_lifted() {
-    let fx = mint_portable_root().await;
-    let effective = has_effective_role(&fx.dir, CANONICAL, INFRA_SERVE)
-        .await
-        .expect("has_effective_role walk");
-    assert!(
-        !effective,
-        "CIRISPersist#486 has LANDED: envelope-attested roles now resolve \
-         through has_effective_role — delete this gap test and un-ignore \
-         qa_leg_a_serve_resolves"
-    );
-}
-
-/// **GAP — CIRISPersist#488 (root minimum).** `trust_root_valid`'s
-/// self-declaration leg accepts `infra:attest` **OR** `infra:serve`, so a
-/// root that can only VOUCH — it could never serve anyone — still reads as a
-/// fully valid trust root today. The FSD minimum is attest AND serve. When
-/// this goes red the OR became AND: delete it and un-ignore
-/// [`qa_root_minimum_is_serve_and_attest`].
-#[tokio::test]
-async fn qa_gap_488_vouch_only_root_accepted() {
-    let fx = mint_portable_root().await;
-    add_vouch_only_root(&fx).await;
-    let v = trust_root_valid(&fx.dir, USER, VOUCH_ROOT)
-        .await
-        .expect("trust_root_valid walk");
-    assert!(
-        v.root_self_declares && v.valid,
-        "CIRISPersist#488 has LANDED: a vouch-only (infra:attest-only) root is \
-         now rejected — delete this gap test and un-ignore \
-         qa_root_minimum_is_serve_and_attest"
-    );
-}
-
-/// **GAP — CIRISPersist#488 (edge expiry ignored).** The trust-edge leg of
-/// `trust_root_valid` folds tombstones but never consults the attestation's
-/// own `expires_at`: an edge that expired 30 days ago still validates the
-/// root. (Expressible today because `Attestation.expires_at` is a first-class
-/// column and no write gate refuses a lapsed edge.) When this goes red the
-/// walk honors expiry — fold the assertion into the #488 acceptance gate.
-#[tokio::test]
-async fn qa_gap_488_expired_edge_still_live() {
-    let fx = mint_portable_root().await;
-
-    // A second user whose ONLY edge to the root is long-expired.
-    let user2 = seeded_identity("qa-user-2", qa_seed("user-2"));
-    let rec = produce_self_key_record(&user2, "user", VALID_FROM, &[])
-        .await
-        .expect("user-2 self record");
-    fx.dir
-        .put_public_key(to_persist(&rec))
-        .await
-        .expect("user-2 registers");
-    let asserted = chrono::Utc::now() - chrono::Duration::days(60);
-    let expired = chrono::Utc::now() - chrono::Duration::days(30);
-    let edge = sign_row(
-        "qa-trust-edge-expired",
-        &user2,
-        ROOT,
-        attestation_type::DELEGATES_TO,
-        serde_json::json!({
-            "references_attestation_id": "qa-trust-edge-expired",
-            "scope": [INFRA_ATTEST, INFRA_SERVE],
-        }),
-        asserted,
-        Some(expired),
-    )
-    .await;
-    put_att(&fx.dir, edge).await;
-
-    let v = trust_root_valid(&fx.dir, "qa-user-2", ROOT)
-        .await
-        .expect("trust_root_valid walk");
-    assert!(
-        v.edge_exists && v.valid,
-        "CIRISPersist#488 has LANDED: the walk now honors the trust edge's \
-         expires_at — delete this gap test (the acceptance gate covers it)"
-    );
-}
-
 // ────────────────────────────────────────────────────────────────────
-// Tier 3 — the acceptance gates for the next persist repin. Run with:
-//   cargo test --lib --features "extension-module test-anchor" \
-//     trust_root_qa -- --ignored
+// Tier 3 — the acceptance gates. GREEN as of the v13.13.0 triple
+// (edge v13.13.0 / persist v19.0.0 / verify v10.6.0): CIRISPersist#486
+// lifts envelope-attested roles, #488 landed charter pre-rotation, the
+// serve∧attest root minimum, and edge expiry in the walk. They ran
+// `#[ignore]`d until that repin; the gap tests that asserted the broken
+// behavior were deleted when they flipped red, exactly as designed.
 // ────────────────────────────────────────────────────────────────────
 
 /// **Acceptance (leg A) — CIRISPersist#486.** The envelope-attested
@@ -662,7 +619,6 @@ async fn qa_gap_488_expired_edge_still_live() {
 /// `has_effective_role`. Un-ignore on the fixed triple; until then it fails
 /// with `claims_role` never reading the envelope surface.
 #[tokio::test]
-#[ignore = "CIRISPersist#486"]
 async fn qa_leg_a_serve_resolves() {
     let fx = mint_portable_root().await;
     assert!(
@@ -678,7 +634,6 @@ async fn qa_leg_a_serve_resolves() {
 /// `infra:attest`) is REJECTED: the root minimum is attest AND serve. Until
 /// the fix, `trust_root_valid`'s OR accepts it.
 #[tokio::test]
-#[ignore = "CIRISPersist#488"]
 async fn qa_root_minimum_is_serve_and_attest() {
     let fx = mint_portable_root().await;
     add_vouch_only_root(&fx).await;
@@ -698,7 +653,6 @@ async fn qa_root_minimum_is_serve_and_attest() {
 /// `capability_roots_to_trusted_root(user, canonical, infra:serve)` — the
 /// state in which the trace plane would actually serve.
 #[tokio::test]
-#[ignore = "CIRISPersist#486+#488"]
 async fn qa_end_to_end_two_leg_gate() {
     let fx = mint_portable_root().await;
 
@@ -721,5 +675,47 @@ async fn qa_end_to_end_two_leg_gate() {
     assert!(
         grant.verdict.valid,
         "the winning root's verdict is all-green"
+    );
+}
+
+/// **Acceptance — CIRISPersist#488 (edge expiry).** A `delegates_to(user →
+/// root)` trust edge that expired 30 days ago no longer validates the root:
+/// the walk consults `expires_at`, not just tombstones. Expiry is what bounds
+/// any illicit cache and stops grants outliving their purpose (the OCSP /
+/// Ronin lesson, `FSD/PRIOR_ART.md` §2.4).
+#[tokio::test]
+async fn qa_expired_trust_edge_is_dead() {
+    let fx = mint_portable_root().await;
+
+    let user2 = seeded_identity("qa-user-2", qa_seed("user-2"));
+    let rec = produce_self_key_record(&user2, "user", VALID_FROM, &[])
+        .await
+        .expect("user-2 self record");
+    fx.dir
+        .put_public_key(to_persist(&rec))
+        .await
+        .expect("user-2 registers");
+    let edge = sign_row(
+        "qa-trust-edge-expired",
+        &user2,
+        ROOT,
+        attestation_type::DELEGATES_TO,
+        serde_json::json!({
+            "references_attestation_id": "qa-trust-edge-expired",
+            "scope": [INFRA_ATTEST, INFRA_SERVE],
+        }),
+        chrono::Utc::now() - chrono::Duration::days(60),
+        Some(chrono::Utc::now() - chrono::Duration::days(30)),
+    )
+    .await;
+    put_att(&fx.dir, edge).await;
+
+    let v = trust_root_valid(&fx.dir, "qa-user-2", ROOT)
+        .await
+        .expect("trust_root_valid walk");
+    assert!(
+        !v.edge_exists && !v.valid,
+        "acceptance: an expired trust edge must not validate the root \
+         (CIRISPersist#488 delta 3); verdict: {v:?}"
     );
 }
