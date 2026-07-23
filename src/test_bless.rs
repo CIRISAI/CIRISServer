@@ -76,7 +76,10 @@ pub(crate) fn mint_test_root() -> Result<ciris_verify_core::self_at_login::Hybri
 /// it, and adopt the blessed record — so the node roots under the
 /// `CIRIS_TEST_TRUST_ROOT` anchor. Loud no-op otherwise. Never engages in prod
 /// (the feature is absent there).
-pub(crate) async fn maybe_test_bless_self(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
+pub(crate) async fn maybe_test_bless_self(
+    engine: &std::sync::Arc<Engine>,
+    cfg: &ServerConfig,
+) -> Result<()> {
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         return Ok(());
     }
@@ -108,7 +111,7 @@ pub(crate) async fn maybe_test_bless_self(engine: &Engine, cfg: &ServerConfig) -
     // this key_id as a delivery target.
     let bless_canonical =
         std::env::var("CIRIS_TEST_BLESS_CANONICAL").ok().as_deref() == Some("true");
-    let rec = crate::compose::build_self_key_record(cfg).await?;
+    let rec = crate::compose::build_self_key_record(engine, cfg).await?;
     let target = ScrubTarget {
         key_id: rec.key_id.clone(),
         pubkey_ed25519_base64: rec.pubkey_ed25519_base64.clone(),

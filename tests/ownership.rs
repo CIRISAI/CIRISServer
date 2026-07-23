@@ -866,3 +866,85 @@ async fn promote_unowned_node_is_refused() {
             .expect_err("promote of an unowned node must fail");
     assert!(matches!(e, OwnershipError::Validation(_)));
 }
+
+// ─── (N) CIRISServer#315 REGRESSION — the node-self-identity fork ─────────────
+//
+// The 0.5.137 field failure: an OWNED node's own owner-op (PUT /v1/config/*)
+// returned 403 "no responsible party" while GET /v1/setup/owned-nodes reported
+// is_self:true, from the SAME session in the same breath. RCA: the node had two
+// names for itself — the owner claim / NodeCode / owned-nodes bound under the
+// COMPOSE-derived key (cfg.key_id, derived from the compose federation signer),
+// while the config gate resolved the node as `local_derived_key_id()` (the
+// ENGINE signer's derived key). In the embedded fold those two keys DIFFER.
+//
+// The fix makes cfg.key_id == local_derived_key_id() by construction. These
+// tests pin the invariant at the ownership plane: the binding is authored,
+// gated, and listed under the ONE identity (`local_derived_key_id()`), and
+// reading under ANY other spelling of "this node" (the raw signer alias, i.e.
+// the pre-derivation label — the class's classic base-vs-composed seam) does
+// NOT resolve — which is exactly why the fold 403'd.
+
+/// The node's ONE identity is `local_derived_key_id()`; the raw signer alias is
+/// a DIFFERENT string, and the ownership plane must key on the former only.
+#[tokio::test]
+async fn owner_binding_keys_on_local_derived_identity_not_the_base_alias() {
+    // Signer alias `qa-node` → derived id `qa-node-<fp>` (the "composed" key).
+    let engine = node("qa-node").await;
+    let derived = engine
+        .local_derived_key_id()
+        .await
+        .expect("derive the node's one federation identity");
+    assert_ne!(
+        derived, "qa-node",
+        "precondition: the derived identity differs from the base signer alias \
+         (this gap IS the fork's seam)"
+    );
+
+    // Register + bind under the DERIVED identity — what the fixed self-claim does
+    // (cfg.key_id == local_derived_key_id()).
+    register_node(&engine, &derived).await;
+    let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
+    emit_steward_binding(&engine, &owner, &derived, &infra_scopes())
+        .await
+        .expect("bind owner → node under the derived identity");
+
+    // The gate (require_owner_bound / is_steward_bound) resolves the node as
+    // local_derived_key_id() — it MUST find the binding.
+    assert_eq!(
+        is_steward_bound(&engine, &derived).await.as_deref(),
+        Some("owner-user"),
+        "the owner-op gate keys on local_derived_key_id() and finds the binding"
+    );
+
+    // Reading under the BASE ALIAS — the pre-derivation label a forked plane
+    // would use — must NOT resolve. This is the 403 the field hit, encoded: any
+    // plane that reads the node as its base label sees an UNOWNED node.
+    assert!(
+        is_steward_bound(&engine, "qa-node").await.is_none(),
+        "reading the node under the base alias finds NO binding — the fork's 403"
+    );
+}
+
+/// owned-nodes (`nodes_stewarded_by`) and the gate must agree on the identity:
+/// the listed node is exactly the one the gate would admit.
+#[tokio::test]
+async fn owned_nodes_listing_and_gate_agree_on_the_one_identity() {
+    let engine = node("qa-node").await;
+    let derived = engine.local_derived_key_id().await.expect("derived id");
+    register_node(&engine, &derived).await;
+    let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
+    emit_steward_binding(&engine, &owner, &derived, &infra_scopes())
+        .await
+        .expect("bind");
+
+    let stewarded = ciris_server::auth::ownership::nodes_stewarded_by(&engine, "owner-user").await;
+    assert!(
+        stewarded.contains(&derived),
+        "owned-nodes lists the node under local_derived_key_id() — the SAME id the \
+         gate admits, so is_self and the owner-op can never disagree"
+    );
+    assert!(
+        !stewarded.contains(&"qa-node".to_string()),
+        "owned-nodes never lists the base alias — one identity, one spelling"
+    );
+}

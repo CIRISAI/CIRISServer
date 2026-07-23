@@ -155,18 +155,32 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // AdapterContext.key_id, occurrence_id, edge announce id) carries the derived
     // value; the KEYSTORE alias stays the raw label (no re-key). This re-keys the
     // node's directory ROW vs. a prior bare-"ciris-server" deploy — intended (#27).
-    let ed_pub = signer
-        .public_key()
-        .await
-        .context("read node ed25519 pubkey for key_id derivation")?;
+    // CIRISServer#315/#312/#313 — ONE node self-identity. Derive `cfg.key_id`
+    // from the ENGINE's OWN signer (`local_derived_key_id()`), NOT the compose-path
+    // `signer`. The two are byte-identical on the standalone binary (the Engine is
+    // built FROM `signer`), so this is a no-op there. In the EMBEDDED FOLD they
+    // FORK: the reused agent Engine signs every CEG row as ITS identity, while the
+    // old code derived `cfg.key_id` from the compose federation signer — a
+    // DIFFERENT key. Result: the owner claim / NodeCode / owned-nodes bound under
+    // the compose-derived key, while config-gate / consent / trace authored under
+    // the engine key, so an OWNED node's own owner-op 403'd ("no responsible
+    // party") while `/v1/setup/owned-nodes` reported `is_self:true` — the same fork
+    // relocated. Deriving from the engine makes `cfg.key_id == local_derived_key_id()
+    // == emit_attestation_self's attester` by CONSTRUCTION, so every downstream
+    // surface that reads `cfg.key_id` (NodeCode, claim, owned-nodes, self-publish,
+    // seed graphs) realigns with the corpus identity at the source — the whole
+    // phantom-identity class, one derivation.
     let mut cfg = cfg;
-    cfg.key_id = ciris_verify_core::fedcode::derive_key_id(&cfg.keystore_alias, &ed_pub);
+    cfg.key_id = engine
+        .local_derived_key_id()
+        .await
+        .context("resolve the engine's derived federation key_id (the node's one identity)")?;
     cfg.occurrence_id = cfg.key_id.clone();
     let cfg = cfg;
     tracing::info!(
         key_id = %cfg.key_id,
         keystore_alias = %cfg.keystore_alias,
-        "derived node federation key_id (FSD-003 label-fingerprint; CIRISServer#27)"
+        "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
 
     // ── The ADAPTER SEAM's shared-core handle (mirror of the agent adapter's
@@ -307,7 +321,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (stable for the node's lifetime), served verbatim by
     // GET /v1/federation/self-key-record and the public record a peer registers
     // to admit this node's replicated rows.
-    let self_key_record_json = self_key_record_json(&cfg).await?;
+    let self_key_record_json = self_key_record_json(&engine, &cfg).await?;
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -322,7 +336,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     } else {
         initial_config.node_alias.clone()
     };
-    let node_code = node_self_code(&cfg, Some(node_alias)).await?;
+    let node_code = node_self_code(&engine, &cfg, Some(node_alias)).await?;
     let node_code_response_json = crate::federation_nodecode::render_response_json(&node_code)
         .map_err(|e| anyhow::anyhow!("render this node's NodeCode response: {e}"))?;
 
@@ -1274,9 +1288,8 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
 /// Best-effort (mirrors the transport publish): no Reticulum transport → debug no-op.
 /// THE AGENT DOES NOTHING — the node self-publishes its sealability, deleting the
 /// agent-side publish step entirely.
-async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &ServerConfig) {
+async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg: &ServerConfig) {
     use ciris_keyring::self_enc_keys::SelfEncKeys;
-    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
     use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
 
     let key_id = cfg.key_id.as_str();
@@ -1357,10 +1370,22 @@ async fn publish_self_identity_occurrence(engine: &Engine, edge: &Edge, cfg: &Se
     // attesting_key_id == identity_key_id == this node's registered key, so the
     // gate's signer_acts_for is satisfied by the identity's own key.
     let signed = async {
+        // NOTE (CIRISServer#313): the occurrence is deliberately NOT converted to
+        // the EngineSelfSigner here. Fixing only the signature would make the
+        // occurrence PUBLISH while still carrying PHANTOM `encryption_pubkeys`
+        // (from SelfEncKeys below), which the fold node cannot open content sealed
+        // to — a worse reverse-path failure than not publishing. The occurrence
+        // needs BOTH halves fixed together (engine signature + enc pubkeys derived
+        // from the engine seed), which requires a persist `engine.self_enc_pubkeys()`
+        // accessor. Until then this stays on the historical path.
         let ed: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
         let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
-        let identity = HardwareRootedIdentity::new(cfg.key_id.clone(), ed, pqc)
-            .map_err(|e| anyhow::anyhow!("node self-signer identity: {e}"))?;
+        let identity = ciris_verify_core::self_at_login::HardwareRootedIdentity::new(
+            cfg.key_id.clone(),
+            ed,
+            pqc,
+        )
+        .map_err(|e| anyhow::anyhow!("node self-signer identity: {e}"))?;
         let (signed_envelope, signature) = produce_signed_identity_occurrence(&identity, envelope)
             .await
             .map_err(|e| anyhow::anyhow!("produce signed identity occurrence: {e}"))?;
@@ -1962,11 +1987,11 @@ async fn build_engine(
 ///
 /// On success the (verified) record is **logged at info as JSON** so an operator
 /// can hand A's self-signed `SignedKeyRecord` to peer B — see [`build_self_key_record`].
-async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
+async fn register_self_key(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<()> {
     use ciris_persist::federation::Error as FederationError;
     use ciris_persist::federation::SignedKeyRecord;
 
-    let record = build_self_key_record(cfg).await?;
+    let record = build_self_key_record(engine, cfg).await?;
 
     // Export A's own signed record for the operator to hand to peer B (the
     // cross-repo peering contract: CIRIS_PEER_B_KEY_RECORD = the peer's
@@ -2024,9 +2049,9 @@ async fn register_self_key(engine: &Engine, cfg: &ServerConfig) -> Result<()> {
 /// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
 /// uses, so the GET output round-trips byte-identically through a peer's
 /// `register_federation_key`.
-async fn self_key_record_json(cfg: &ServerConfig) -> Result<String> {
+async fn self_key_record_json(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<String> {
     use ciris_persist::federation::SignedKeyRecord;
-    let record = build_self_key_record(cfg).await?;
+    let record = build_self_key_record(engine, cfg).await?;
     serde_json::to_string(&SignedKeyRecord { record })
         .context("serialize this node's self-signed SignedKeyRecord")
 }
@@ -2037,10 +2062,11 @@ async fn self_key_record_json(cfg: &ServerConfig) -> Result<String> {
 /// federation signing-key pubkey. The alias hint is the resolved config:*
 /// `node.alias` (Server 0.5 — no env). Built once at boot.
 async fn node_self_code(
+    engine: &Arc<Engine>,
     cfg: &ServerConfig,
     alias_hint: Option<String>,
 ) -> Result<crate::nodecode::NodeCode> {
-    let record = build_self_key_record(cfg).await?;
+    let record = build_self_key_record(engine, cfg).await?;
     Ok(crate::federation_nodecode::build_node_code(
         &record.key_id,
         &record.pubkey_ed25519_base64,
@@ -2066,21 +2092,92 @@ async fn node_self_code(
 /// round-trips the gate by construction.) The signed envelope binds the pubkeys +
 /// identity_type + validity, not just `{key_id}` — a strictly richer, harder-to-
 /// replay PoP than the prior hand-rolled minimal envelope.
+/// A verify [`SelfSigner`](ciris_verify_core::self_at_login::SelfSigner) backed by
+/// the running [`Engine`]'s OWN composed signer — the SAME key
+/// [`Engine::emit_attestation_self`] stamps as the attester on every CEG row this
+/// node authors.
+///
+/// CIRISServer#315 residual fork: [`build_self_key_record`] used to re-open
+/// `federation_signer(cfg)` (the compose-path seed) to sign the node's own
+/// self-key-record, stamping `cfg.key_id` (the engine identity) onto a record
+/// signed by a DIFFERENT key whenever the embedded fold's `cfg.identity_dir`
+/// didn't resolve to the agent engine's `ed25519.seed` — a silently-minted
+/// phantom key (or a boot-rejecting admission failure). Signing through the
+/// engine removes the seed-sameness deployment invariant entirely: the record is
+/// signed by, and carries the pubkeys of, the node's ONE identity, by
+/// construction, on every path.
+///
+/// `sign_bound` maps directly onto [`Engine::sign_hybrid`], whose `LocalSigner`
+/// produces the identical bound construction the trait specifies (Ed25519 over
+/// `bytes`, ML-DSA-65 over `bytes ‖ ed25519_sig`). The pubkeys are captured once
+/// from a probe signature so they are exactly the keys that sign.
+struct EngineSelfSigner {
+    engine: Arc<Engine>,
+    key_id: String,
+    ed_pub: Vec<u8>,
+    pqc_pub: Vec<u8>,
+}
+
+impl EngineSelfSigner {
+    async fn new(engine: &Arc<Engine>) -> Result<Self> {
+        let key_id = engine
+            .local_derived_key_id()
+            .await
+            .context("EngineSelfSigner: resolve the node's derived key_id")?;
+        // One probe sign captures BOTH pubkeys authoritatively — exactly the keys
+        // that will sign the self-record (never a re-opened seed that might differ).
+        let probe = engine
+            .sign_hybrid(b"ciris:self-signer:pubkey-probe:v1")
+            .await
+            .context("EngineSelfSigner: probe-sign to capture engine pubkeys")?;
+        Ok(Self {
+            engine: Arc::clone(engine),
+            key_id,
+            ed_pub: probe.classical.public_key,
+            pqc_pub: probe.pqc.public_key,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ciris_verify_core::self_at_login::SelfSigner for EngineSelfSigner {
+    fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    async fn ed25519_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
+        Ok(self.ed_pub.clone())
+    }
+    async fn mldsa65_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
+        Ok(self.pqc_pub.clone())
+    }
+    async fn sign_bound(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(String, String), ciris_verify_core::VerifyError> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let sig = self.engine.sign_hybrid(bytes).await.map_err(|e| {
+            ciris_verify_core::VerifyError::IntegrityError {
+                message: format!("EngineSelfSigner sign_hybrid: {e}"),
+            }
+        })?;
+        Ok((
+            B64.encode(&sig.classical.signature),
+            B64.encode(&sig.pqc.signature),
+        ))
+    }
+}
+
 pub(crate) async fn build_self_key_record(
-    cfg: &ServerConfig,
+    engine: &Arc<Engine>,
+    _cfg: &ServerConfig,
 ) -> Result<ciris_persist::federation::types::KeyRecord> {
     use ciris_verify_core::federation_self_record::produce_self_key_record;
-    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
-    // Wrap this node's OWN Ed25519 (hardware-sealed) + ML-DSA-65 signers — the same
-    // halves the Engine is composed from — as a verify `SelfSigner`. Re-opened here
-    // (boot-time, called ~3× while assembling the boot state); the software path is
-    // a cheap seal read, and the pkcs11 path mirrors accord_provision's admit-node
-    // ceremony which opens a fresh identity alongside the running engine.
-    let ed: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
-    let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
-    let identity = HardwareRootedIdentity::new(cfg.key_id.clone(), ed, pqc)
-        .map_err(|e| anyhow::anyhow!("build node self-signer identity: {e}"))?;
+    // Sign the node's own self-key-record with the ENGINE's identity (#315
+    // residual-fork fix) — NOT a re-opened compose-path seed. `key_id`, both
+    // pubkeys, and the PoP signature therefore all come from the ONE identity the
+    // node authors everything else under, with no seed-sameness dependency.
+    let identity = EngineSelfSigner::new(engine).await?;
 
     // CC 1.13.5 / CC 3.4.7.1: a fabric node is `node`-role (infrastructure, NO
     // agency) — NOT a trust-root steward. No transport hints in the node's own
@@ -2709,12 +2806,15 @@ async fn open_engine_for_cli(cfg: &ServerConfig) -> Result<(Arc<Engine>, ServerC
     let signer: Arc<dyn HardwareSigner> = Arc::from(federation_signer(cfg)?);
     let pqc: Arc<dyn PqcSigner> = federation_pqc_signer(cfg)?;
     let engine = build_engine(cfg, Arc::clone(&signer), Arc::clone(&pqc)).await?;
-    let ed_pub = signer
-        .public_key()
-        .await
-        .context("read node ed25519 pubkey for key_id derivation")?;
     let mut cfg = cfg.clone();
-    cfg.key_id = ciris_verify_core::fedcode::derive_key_id(&cfg.keystore_alias, &ed_pub);
+    // ONE derivation rule (#315): the node identity ALWAYS comes from the engine
+    // signer — no second `derive_key_id(keystore_alias, …)` site that could drift
+    // from the serve path. Equivalent here (CLI is never the fold), unified so the
+    // invariant `cfg.key_id == local_derived_key_id()` has zero exceptions.
+    cfg.key_id = engine
+        .local_derived_key_id()
+        .await
+        .context("resolve the engine's derived federation key_id")?;
     cfg.occurrence_id = cfg.key_id.clone();
     // The node key MUST be a federation_keys row before it can author the config
     // attestation (put_attestation FK). Idempotent (benign conflict on re-run).
@@ -2850,5 +2950,81 @@ mod bootstrap_hint_tests {
     #[test]
     fn empty_without_canonical_hints() {
         assert!(ip_addrs_from_hints(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod self_key_record_identity_tests {
+    use super::*;
+    use ciris_persist::prelude::{Engine, LocalSigner};
+
+    /// Build a software Engine whose signer alias is `alias` — so
+    /// `local_derived_key_id()` = `derive_key_id(alias, pubkey)` is a DIFFERENT
+    /// string than `alias` (the base-vs-derived gap that IS the fold's seam).
+    async fn engine_with_alias(alias: &str) -> Arc<Engine> {
+        use ciris_keyring::MlDsa65SoftwareSigner;
+        use ed25519_dalek::SigningKey;
+        let ed = SigningKey::from_bytes(&[0x5A; 32]);
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x5B; 32], format!("{alias}-pqc"))
+                .expect("pqc seed"),
+        );
+        let signer = Arc::new(LocalSigner::from_parts(
+            ed,
+            alias.to_string(),
+            Some(pqc),
+            Some(format!("{alias}-pqc")),
+        ));
+        Arc::new(
+            Engine::with_signer(signer, "sqlite::memory:")
+                .await
+                .expect("Engine::with_signer"),
+        )
+    }
+
+    /// **CIRISServer#315 residual-fork regression.** The node's self-key-record
+    /// must be signed by, and carry the pubkeys of, the ENGINE's identity — the
+    /// same key `local_derived_key_id()` names — with NO dependency on re-opening a
+    /// compose-path seed. Proven by having the REAL admission gate
+    /// (`register_federation_key`, the FSD-003 key_id⟷pubkey binding) accept the
+    /// record: if the label and the signing pubkey disagreed (the phantom-key
+    /// fork), the gate would reject and boot would fail.
+    #[tokio::test]
+    async fn self_key_record_is_engine_signed_and_admission_passes() {
+        let engine = engine_with_alias("qa-fold-node").await;
+        let derived = engine.local_derived_key_id().await.expect("derived id");
+        assert_ne!(derived, "qa-fold-node", "precondition: alias != derived id");
+
+        let cfg = crate::config::ServerConfig::defaults().expect("cfg");
+        let record = build_self_key_record(&engine, &cfg)
+            .await
+            .expect("build the node self-key-record via the engine");
+
+        // Label == the ONE identity.
+        assert_eq!(
+            record.key_id, derived,
+            "self-record key_id must be local_derived_key_id(), not the alias"
+        );
+        // The embedded pubkey is the ENGINE's actual ed pubkey — not a re-opened seed.
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let engine_ed = engine
+            .signer()
+            .public_key()
+            .await
+            .expect("engine ed pubkey");
+        assert_eq!(
+            record.pubkey_ed25519_base64,
+            B64.encode(&engine_ed),
+            "self-record must carry the engine's ed pubkey (the key that signs everything else)"
+        );
+        // The REAL admission gate accepts it — the FSD-003 binding holds, so a
+        // fold node boots (register_self_key would not `?`-fail) AND peers store
+        // the correct pubkey (no verify_unknown_key on this node's envelopes).
+        engine
+            .register_federation_key(ciris_persist::federation::SignedKeyRecord {
+                record: record.clone(),
+            })
+            .await
+            .expect("the engine-signed self-record passes the admission gate");
     }
 }
