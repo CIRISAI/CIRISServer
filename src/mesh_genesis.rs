@@ -618,57 +618,88 @@ where
 mod tests {
     use super::*;
 
-    /// The invariant, asserted: the baked seed cannot produce a genesis today,
-    /// because `canonical_seed.json` ships `roles: []` (CIRISPersist#480). When
-    /// that seed is fixed this test flips — and that flip is the signal the trace
-    /// plane can light up.
+    /// **The #480 landing, asserted.** Two invariants meet here, and their
+    /// interaction is the whole point:
+    ///
+    /// 1. CIRISPersist#480 baked `infra:serve` into `canonical_seed.json`, so the
+    ///    baked canonical is no longer a dark serve node — the baked path clears
+    ///    the `NoServeNode` refusal it used to hit (that darkened the trace plane).
+    /// 2. But a serve-capable seed is STILL not a trust root: `produce_genesis`
+    ///    refuses it with `NoCharter`, because a root must be minted by a QUORUM
+    ///    of holders through the seed ceremony (`/v1/accord/genesis/{propose,cosign}`)
+    ///    — never baked into a build. The baked path carries no delegation plane by
+    ///    design, so it cannot fabricate authority no one signed.
+    ///
+    /// If #480 ever regresses, this fails with `NoServeNode` (back to a dark seed).
+    /// If someone lets the baked path emit a chartered bundle, it stops being
+    /// `NoCharter` — and a build would be minting trust roots with no ceremony.
     #[test]
-    fn baked_seed_cannot_produce_a_dark_genesis() {
+    fn baked_seed_is_serve_capable_but_not_a_trust_root() {
         match produce_genesis_from_baked("2026-07-21T00:00:00Z") {
-            Err(GenesisError::NoServeNode) => { /* expected until #480 lands */ }
-            Err(e) => panic!("unexpected genesis error: {e}"),
-            Ok(b) => {
-                // If this passes, #480 baked a blessed canonical — assert the
-                // bundle is genuinely serve-capable rather than silently empty.
-                assert!(
-                    !b.serve_nodes.is_empty(),
-                    "a produced genesis must carry >=1 infra:serve node"
-                );
-                assert!(
-                    verify_bundle(&b).is_ok(),
-                    "produced genesis must self-verify"
-                );
+            Err(GenesisError::NoCharter) => {
+                // Correct: #480 gave the baked canonical infra:serve (past the
+                // NoServeNode gate), but only the ceremony mints a charter.
             }
+            Err(GenesisError::NoServeNode) => panic!(
+                "CIRISPersist#480 regressed: the baked canonical is dark again \
+                 (roles: []), which darkens the trace plane"
+            ),
+            Err(e) => panic!("unexpected genesis error: {e}"),
+            Ok(_) => panic!(
+                "the baked path produced a CHARTERED genesis — a build must never \
+                 mint a trust root; that is the quorum ceremony's job alone"
+            ),
         }
     }
 
-    /// **CIRISPersist#486 guard.** The accord's conferral is attested INSIDE the
-    /// scrub-signed `registration_envelope`; persist does not yet lift it into the
-    /// top-level `KeyRecord.roles`, which the producer leaves empty by design. So a
-    /// serve-capability check MUST read the envelope. If someone "simplifies"
-    /// `carries_infra_serve` back to `record.roles` only, this fails — and the whole
-    /// trace plane silently goes dark again, which is exactly how we got here.
+    /// **CIRISPersist#480 landed: the baked canonical is serve-capable.** The seed
+    /// that ships in the build now carries `infra:serve` — the fresh-canonical
+    /// darkness is closed at the source.
+    #[test]
+    fn baked_canonical_now_carries_infra_serve() {
+        let baked = ciris_persist::federation::genesis::canonical_genesis_records();
+        let Some(rec) = baked.first().cloned() else {
+            return; // no baked canonical in this build
+        };
+        assert!(
+            carries_infra_serve(&rec),
+            "CIRISPersist#480 landed — the baked canonical must read as serve-capable"
+        );
+    }
+
+    /// **CIRISPersist#486 guard (envelope-read).** The accord's conferral is
+    /// attested INSIDE the scrub-signed `registration_envelope`; the producer
+    /// leaves the top-level `KeyRecord.roles` empty. So a serve-capability check
+    /// MUST read the envelope. If someone "simplifies" `carries_infra_serve` back
+    /// to `record.roles` only, this fails — and the trace plane silently goes dark
+    /// again, which is exactly how we got here. Built from a synthetic UNBLESSED
+    /// record so it stays true regardless of what the baked seed carries.
     #[test]
     fn envelope_attested_role_is_seen_though_top_level_roles_is_empty() {
         let baked = ciris_persist::federation::genesis::canonical_genesis_records();
         let Some(mut rec) = baked.first().cloned() else {
             return; // no baked canonical in this build
         };
-        // The producer leaves the top-level field empty by design…
-        assert!(
-            rec.record.roles.is_empty(),
-            "baked record should carry an empty top-level roles"
-        );
+        // Strip every serve surface to get a genuinely UNBLESSED baseline.
+        rec.record.roles.clear();
+        rec.record.identity_type = "canonical,node".to_string();
+        if let Some(o) = rec.record.registration_envelope.as_object_mut() {
+            o.remove("roles");
+        }
         assert!(
             !carries_infra_serve(&rec),
-            "an unblessed record must not read as serve-capable"
+            "a record with no serve role on any surface must not read serve-capable"
         );
-        // …and an accord conferral lands in the SIGNED envelope.
+        // A conferral lands in the SIGNED envelope; top-level roles stays empty.
         rec.record
             .registration_envelope
             .as_object_mut()
             .expect("registration_envelope is a JSON object")
             .insert("roles".into(), serde_json::json!([INFRA_SERVE]));
+        assert!(
+            rec.record.roles.is_empty(),
+            "top-level roles stays empty — the ENVELOPE is what carries the claim"
+        );
         assert!(
             carries_infra_serve(&rec),
             "envelope-attested infra:serve must be seen even with top-level roles empty"
