@@ -92,8 +92,8 @@ async fn register_self(engine: &Engine) {
 }
 
 async fn set(engine: &Arc<Engine>, key: &str, value: ConfigValue) {
-    let nk = node_key_id(engine).await;
-    graph_config::set_config(engine, &nk, key, value, "owner", ConfigScope::Local)
+    // Post-#315 the config plane resolves its identity internally.
+    graph_config::set_config(engine, key, value, "owner", ConfigScope::Local)
         .await
         .unwrap_or_else(|e| panic!("set_config {key}: {e}"));
 }

@@ -74,7 +74,7 @@ pub async fn reconcile_once(
     // re-admitted with no operator action. This is consumer policy — we refuse to
     // CONSUME the arbitrager's corpus. Substrate admission of any individual
     // `withdraws` is untouched (CC 2.4.1.1 MUST-admit).
-    let policy = crate::withdraws_arbitrage::load_policy(engine, node_key_id).await;
+    let policy = crate::withdraws_arbitrage::load_policy(engine).await;
     let now = chrono::Utc::now();
 
     // Admission filter: only peers whose key is a verified federation_keys row

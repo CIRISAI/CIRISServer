@@ -603,33 +603,29 @@ async fn register_target_key(
 /// is boot-structural, so this takes effect on restart.
 async fn append_bootstrap_peer(
     engine: &Arc<Engine>,
-    node_key_id: &str,
+    _node_key_id: &str,
     addr: &str,
 ) -> Result<bool, String> {
     use crate::graph_config::{get_config, set_config, ConfigScope, ConfigValue};
 
-    let mut list: Vec<serde_json::Value> = match get_config(
-        engine,
-        node_key_id,
-        crate::config_reconcile::KEY_BOOTSTRAP_PEERS,
-    )
-    .await
-    .map_err(|e| e.to_string())?
-    {
-        Some(entry) => match entry.value {
-            ConfigValue::List(items) => items,
-            // Any non-list stored value: start a fresh list (don't clobber-panic).
-            _ => Vec::new(),
-        },
-        None => Vec::new(),
-    };
+    let mut list: Vec<serde_json::Value> =
+        match get_config(engine, crate::config_reconcile::KEY_BOOTSTRAP_PEERS)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(entry) => match entry.value {
+                ConfigValue::List(items) => items,
+                // Any non-list stored value: start a fresh list (don't clobber-panic).
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
     if list.iter().any(|v| v.as_str() == Some(addr)) {
         return Ok(false);
     }
     list.push(serde_json::Value::String(addr.to_string()));
     set_config(
         engine,
-        node_key_id,
         crate::config_reconcile::KEY_BOOTSTRAP_PEERS,
         ConfigValue::List(list),
         "claim-remote",
@@ -1030,7 +1026,6 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
     // once at transport construction).
     if let Err(e) = crate::graph_config::set_config(
         &st.engine,
-        &st.node_key_id,
         crate::config_reconcile::KEY_ANNOUNCE_OWNERSHIP,
         crate::graph_config::ConfigValue::Bool(true),
         &caller.wa_id,

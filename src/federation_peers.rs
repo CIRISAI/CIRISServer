@@ -244,7 +244,7 @@ fn sideband_config_key(key_id: &str) -> String {
 
 /// Read the sideband row for one peer (None if never written / tombstoned).
 async fn load_sideband(st: &PeersState, key_id: &str) -> Result<Option<PeerSideband>, Response> {
-    let entry = graph_config::get_config(&st.engine, &st.self_key_id, &sideband_config_key(key_id))
+    let entry = graph_config::get_config(&st.engine, &sideband_config_key(key_id))
         .await
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("sideband: {e}")))?;
     Ok(entry.and_then(|e| {
@@ -259,7 +259,7 @@ async fn load_sideband(st: &PeersState, key_id: &str) -> Result<Option<PeerSideb
 /// whole peer list — the directory rows are the load-bearing data.
 async fn load_all_sidebands(st: &PeersState) -> HashMap<String, PeerSideband> {
     let mut out = HashMap::new();
-    match graph_config::list_configs(&st.engine, &st.self_key_id, Some(SIDEBAND_KEY_PREFIX)).await {
+    match graph_config::list_configs(&st.engine, Some(SIDEBAND_KEY_PREFIX)).await {
         Ok(map) => {
             for (key, entry) in map {
                 let Some(peer_key_id) = key.strip_prefix(SIDEBAND_KEY_PREFIX) else {
@@ -298,7 +298,6 @@ async fn store_sideband(
     };
     graph_config::set_config(
         &st.engine,
-        &st.self_key_id,
         &sideband_config_key(key_id),
         value,
         updated_by,

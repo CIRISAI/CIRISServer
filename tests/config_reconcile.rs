@@ -100,8 +100,11 @@ async fn register_self(engine: &Engine) {
 }
 
 async fn set(engine: &Arc<Engine>, key: &str, value: ConfigValue) {
-    let nk = node_key_id(engine).await;
-    graph_config::set_config(engine, &nk, key, value, "owner", ConfigScope::Local)
+    // Post-#315: the config plane resolves its identity INTERNALLY from the
+    // engine signer — this test used to derive-and-pass the same id explicitly,
+    // which is exactly why it round-tripped while production callers (passing
+    // the config alias) read {} over their own writes.
+    graph_config::set_config(engine, key, value, "owner", ConfigScope::Local)
         .await
         .unwrap_or_else(|e| panic!("set_config {key}: {e}"));
 }
@@ -112,7 +115,7 @@ async fn resolve_empty_corpus_is_baked_defaults() {
     let engine = node().await;
     register_self(&engine).await;
 
-    let resolved = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
+    let resolved = config_reconcile::resolve(&engine).await;
     assert_eq!(
         resolved,
         ResolvedConfig::default(),
@@ -185,7 +188,7 @@ async fn resolve_reflects_overrides_per_key() {
     )
     .await;
 
-    let r = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
+    let r = config_reconcile::resolve(&engine).await;
     assert_eq!(r.scorer_cadence_secs, 7, "scorer.cadence_secs override");
     assert_eq!(r.scorer_window, 123);
     assert_eq!(r.scorer_sample_gate, 5);
@@ -234,7 +237,7 @@ async fn resolve_falls_back_on_bad_value_per_key() {
     )
     .await;
 
-    let r = config_reconcile::resolve(&engine, &node_key_id(&engine).await).await;
+    let r = config_reconcile::resolve(&engine).await;
     let d = ResolvedConfig::default();
     assert_eq!(
         r.scorer_cadence_secs, d.scorer_cadence_secs,

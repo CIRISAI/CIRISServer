@@ -161,10 +161,10 @@ impl Default for ArbitragePolicy {
 /// Resolve the policy from the node's signed config graph, falling back to the
 /// CC defaults for an absent / malformed / non-positive value (and warning — a
 /// bad config row must not silently disable the countermeasure).
-pub async fn load_policy(engine: &Arc<Engine>, node_key_id: &str) -> ArbitragePolicy {
+pub async fn load_policy(engine: &Arc<Engine>) -> ArbitragePolicy {
     let mut policy = ArbitragePolicy::default();
 
-    match graph_config::get_config(engine, node_key_id, RATIO_THRESHOLD_KEY).await {
+    match graph_config::get_config(engine, RATIO_THRESHOLD_KEY).await {
         Ok(Some(entry)) => match entry.value {
             ConfigValue::F64(v) if v > 0.0 && v.is_finite() => policy.ratio_threshold = v,
             ConfigValue::I64(v) if v > 0 => policy.ratio_threshold = v as f64,
@@ -183,7 +183,7 @@ pub async fn load_policy(engine: &Arc<Engine>, node_key_id: &str) -> ArbitragePo
         ),
     }
 
-    match graph_config::get_config(engine, node_key_id, WINDOW_DAYS_KEY).await {
+    match graph_config::get_config(engine, WINDOW_DAYS_KEY).await {
         Ok(Some(entry)) => match entry.value {
             ConfigValue::I64(v) if v > 0 => policy.window = Duration::days(v),
             other => tracing::warn!(

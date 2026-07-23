@@ -325,7 +325,6 @@ async fn declare(engine: &Arc<Engine>, tokens: &[&str]) {
     );
     set_config(
         engine,
-        &key_id,
         KEY_CONFORMANCE_PROFILES,
         list,
         &key_id,
