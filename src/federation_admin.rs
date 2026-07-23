@@ -217,12 +217,8 @@ async fn peering(
     // (`config:node.conformance_profiles`) does not claim all three, peering is
     // REFUSED (403) — before any key is admitted and before any grant is authored.
     // Fail-closed: an unreadable / invalid declaration claims NOTHING.
-    if let Some(resp) = crate::conformance::require_op(
-        &st.engine,
-        &st.node_key_id,
-        crate::auth::gate::CapabilityVerb::Peer,
-    )
-    .await
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::Peer).await
     {
         return resp;
     }
@@ -281,7 +277,7 @@ async fn peering(
     // replicating with, and whose behavior we have therefore observed, is judged on
     // that observed history). Fail closed: an unreadable ledger refuses too.
     {
-        let policy = crate::withdraws_arbitrage::load_policy(&st.engine, &st.node_key_id).await;
+        let policy = crate::withdraws_arbitrage::load_policy(&st.engine).await;
         if let Err(refusal) = crate::withdraws_arbitrage::enforce(
             &st.engine,
             &req.peer_key_id,
@@ -356,7 +352,7 @@ async fn peering(
                               v5.1.0, CIRISEdge#173 resolved)"
                 .to_owned(),
             negotiated_ceg_wire_version: negotiated.to_string(),
-            conformance: crate::conformance::declared(&st.engine, &st.node_key_id).await,
+            conformance: crate::conformance::declared(&st.engine).await,
         }),
     )
         .into_response()
@@ -379,7 +375,7 @@ async fn peering(
 /// declaration is public governance data (it carries no secret — only what this node
 /// claims to be), and a peer must be able to read it to bootstrap.
 async fn conformance(State(st): State<FederationAdminState>) -> Response {
-    let declared = crate::conformance::declared(&st.engine, &st.node_key_id).await;
+    let declared = crate::conformance::declared(&st.engine).await;
     (StatusCode::OK, Json(declared)).into_response()
 }
 

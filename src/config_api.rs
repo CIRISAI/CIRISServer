@@ -40,9 +40,6 @@ use crate::graph_config::{self, ConfigScope, ConfigValue};
 #[derive(Clone)]
 struct ConfigApiState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` (the `attesting_key_id` of every config row
-    /// it authors, and the owner-binding subject the gate checks).
-    node_key_id: String,
     /// Phase-2 config-reconciler nudge — fired after a successful write. `None`
     /// today (no reconciler wired yet); the signal is harmless when present.
     reconcile_notify: Option<Arc<tokio::sync::Notify>>,
@@ -89,7 +86,19 @@ async fn require_owner(
 /// The serve-only-floor gate (CC 3.2 / CC 1.13.5) — an owner-UNBOUND node refuses
 /// every config op. Mirrors the peering handler's `require_owner_bound` check.
 async fn require_owner_bound(st: &ConfigApiState) -> Result<(), Response> {
-    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+    // ONE identity (#312/#315): the owner-binding subject is the ENGINE's derived
+    // federation key — the id the delegates_to(owner→node) rows actually name —
+    // never a caller-passed alias.
+    let node_key_id = match crate::graph_config::self_key_id(&st.engine).await {
+        Ok(id) => id,
+        Err(e) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("resolve node identity: {e}").as_str(),
+            ))
+        }
+    };
+    if crate::auth::gate::require_owner_bound(&st.engine, &node_key_id)
         .await
         .is_err()
     {
@@ -140,16 +149,7 @@ async fn set_config(
     // the session's `wa_id` (the absorbed login identifier).
     let updated_by = caller.wa_id.clone();
 
-    match graph_config::set_config(
-        &st.engine,
-        &st.node_key_id,
-        &req.key,
-        req.value,
-        &updated_by,
-        req.scope,
-    )
-    .await
-    {
+    match graph_config::set_config(&st.engine, &req.key, req.value, &updated_by, req.scope).await {
         Ok(entry) => {
             // Phase-2 reconciler nudge (no-op today — None).
             if let Some(notify) = st.reconcile_notify.as_ref() {
@@ -182,7 +182,7 @@ async fn list_config(
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
     }
-    match graph_config::list_configs(&st.engine, &st.node_key_id, q.prefix.as_deref()).await {
+    match graph_config::list_configs(&st.engine, q.prefix.as_deref()).await {
         Ok(map) => (StatusCode::OK, Json(map)).into_response(),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -204,7 +204,7 @@ async fn get_config(
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
     }
-    match graph_config::get_config(&st.engine, &st.node_key_id, &key).await {
+    match graph_config::get_config(&st.engine, &key).await {
         Ok(Some(entry)) => (StatusCode::OK, Json(entry)).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, format!("no config for key {key:?}")),
         Err(e) => err(
@@ -250,7 +250,6 @@ async fn update_config(
     let updated_by = caller.wa_id.clone();
     match graph_config::set_config(
         &st.engine,
-        &st.node_key_id,
         &key,
         req.value,
         &updated_by,
@@ -291,7 +290,7 @@ async fn delete_config(
     if key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
     }
-    match graph_config::delete_config(&st.engine, &st.node_key_id, &key, &caller.wa_id).await {
+    match graph_config::delete_config(&st.engine, &key, &caller.wa_id).await {
         Ok(_) => {
             if let Some(notify) = st.reconcile_notify.as_ref() {
                 notify.notify_one();
@@ -314,14 +313,9 @@ async fn delete_config(
 ///
 /// `reconcile_notify` is the Phase-2 config-reconciler nudge: a successful write
 /// fires it (when `Some`). `compose.rs` passes `None` in Phase 1 (no reconciler).
-pub fn router(
-    engine: Arc<Engine>,
-    node_key_id: String,
-    reconcile_notify: Option<Arc<tokio::sync::Notify>>,
-) -> Router {
+pub fn router(engine: Arc<Engine>, reconcile_notify: Option<Arc<tokio::sync::Notify>>) -> Router {
     let state = ConfigApiState {
         engine,
-        node_key_id,
         reconcile_notify,
     };
     Router::new()

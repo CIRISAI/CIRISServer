@@ -124,10 +124,24 @@ impl ScorerConfig {
 /// `scorer.cadence_secs`: we recompute the interval whenever the cadence changes.
 pub fn spawn(
     engine: Arc<Engine>,
-    node_key_id: String,
-    config_rx: watch::Receiver<crate::config_reconcile::ResolvedConfig>,
+    mut config_rx: watch::Receiver<crate::config_reconcile::ResolvedConfig>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // ONE identity (#312/#315): the producer named INSIDE the capacity
+        // envelope must be the same identity `emit_attestation_self` stamps as
+        // the attester — the ENGINE signer's derived key, never a config alias
+        // (in the embedded fold they differ, and an alias here would make the
+        // envelope's producer disagree with the row's own attester).
+        let node_key_id = match engine.local_derived_key_id().await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "capacity scorer: cannot resolve the node identity — scorer NOT running"
+                );
+                return;
+            }
+        };
         // Track the cadence so we can rebuild the interval when it changes HOT.
         let mut cadence = ScorerConfig::from_resolved(&config_rx.borrow()).cadence;
         let mut tick = tokio::time::interval(cadence);
@@ -135,22 +149,51 @@ pub fn spawn(
         // empty just-booted corpus.
         tick.tick().await;
         loop {
-            tick.tick().await;
-            // Read the LIVE snapshot per cycle (hot) — cadence/window/gate/target.
-            let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
-            if cfg.cadence != cadence {
-                // Cadence changed via CEG — rebuild the interval so the new period
-                // takes effect immediately (skips the already-elapsed first tick).
-                cadence = cfg.cadence;
-                tick = tokio::time::interval(cadence);
-                tick.tick().await;
-                tracing::info!(
-                    cadence_secs = cadence.as_secs(),
-                    "capacity scorer cadence retuned from config:* (hot)"
-                );
-            }
-            if let Err(e) = run_pass(&engine, &node_key_id, &cfg).await {
-                tracing::warn!(error = %e, "capacity scorer pass failed (will retry next cadence)");
+            // CIRISServer#315 ask 2: select on the CONFIG WATCH as well as the
+            // tick, so a hot knob write re-arms the timer IMMEDIATELY instead of
+            // waiting out an in-flight full-cadence sleep (under the 3600s
+            // default, a mobile session ended long before a knob change was even
+            // noticed).
+            tokio::select! {
+                _ = tick.tick() => {
+                    // Read the LIVE snapshot per cycle — cadence/window/gate/target.
+                    let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
+                    if cfg.cadence != cadence {
+                        cadence = cfg.cadence;
+                        tick = tokio::time::interval(cadence);
+                        tick.tick().await;
+                        tracing::info!(
+                            cadence_secs = cadence.as_secs(),
+                            "capacity scorer cadence retuned from config:* (hot)"
+                        );
+                    }
+                    if let Err(e) = run_pass(&engine, &node_key_id, &cfg).await {
+                        tracing::warn!(
+                            error = %e,
+                            "capacity scorer pass failed (will retry next cadence)"
+                        );
+                    }
+                }
+                changed = config_rx.changed() => {
+                    if changed.is_err() {
+                        // Config sender dropped — the serve stack is tearing down.
+                        break;
+                    }
+                    let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
+                    if cfg.cadence != cadence {
+                        cadence = cfg.cadence;
+                        tick = tokio::time::interval(cadence);
+                        // Consume the interval's immediate first tick: the NEXT
+                        // pass runs one (new) cadence from NOW — so shortening
+                        // 3600s -> 30s takes effect in 30s, not in the remainder
+                        // of the old hour.
+                        tick.tick().await;
+                        tracing::info!(
+                            cadence_secs = cadence.as_secs(),
+                            "capacity scorer cadence retuned from config:* (hot, mid-sleep re-arm)"
+                        );
+                    }
+                }
             }
         }
     })

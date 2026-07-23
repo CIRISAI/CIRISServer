@@ -268,101 +268,99 @@ impl ResolvedConfig {
 /// A read error on any single key falls back to that key's default (a malformed /
 /// missing row must never wedge resolution); the overall call returns a complete
 /// [`ResolvedConfig`].
-pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig {
+pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
     let d = ResolvedConfig::default();
 
-    let transport_node = graph_config::get_bool(engine, node_key_id, KEY_TRANSPORT_NODE)
+    let transport_node = graph_config::get_bool(engine, KEY_TRANSPORT_NODE)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.transport_node);
-    let store_and_forward = graph_config::get_bool(engine, node_key_id, KEY_STORE_AND_FORWARD)
+    let store_and_forward = graph_config::get_bool(engine, KEY_STORE_AND_FORWARD)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.store_and_forward);
-    let scorer_cadence_secs = graph_config::get_i64(engine, node_key_id, KEY_SCORER_CADENCE_SECS)
+    let scorer_cadence_secs = graph_config::get_i64(engine, KEY_SCORER_CADENCE_SECS)
         .await
         .ok()
         .flatten()
         .filter(|s| *s > 0)
         .map(|s| s as u64)
         .unwrap_or(d.scorer_cadence_secs);
-    let scorer_window = graph_config::get_i64(engine, node_key_id, KEY_SCORER_WINDOW)
+    let scorer_window = graph_config::get_i64(engine, KEY_SCORER_WINDOW)
         .await
         .ok()
         .flatten()
         .filter(|w| (1..=10_000).contains(w))
         .unwrap_or(d.scorer_window);
-    let scorer_sample_gate = graph_config::get_i64(engine, node_key_id, KEY_SCORER_SAMPLE_GATE)
+    let scorer_sample_gate = graph_config::get_i64(engine, KEY_SCORER_SAMPLE_GATE)
         .await
         .ok()
         .flatten()
         .filter(|g| (0..=u32::MAX as i64).contains(g))
         .map(|g| g as u32)
         .unwrap_or(d.scorer_sample_gate);
-    let scorer_target_n_eff = graph_config::get_f64(engine, node_key_id, KEY_SCORER_TARGET_N_EFF)
+    let scorer_target_n_eff = graph_config::get_f64(engine, KEY_SCORER_TARGET_N_EFF)
         .await
         .ok()
         .flatten()
         .filter(|t| t.is_finite() && *t > 0.0)
         .unwrap_or(d.scorer_target_n_eff);
-    let replication_reconcile_secs =
-        graph_config::get_i64(engine, node_key_id, KEY_REPLICATION_RECONCILE_SECS)
-            .await
-            .ok()
-            .flatten()
-            .filter(|s| *s > 0)
-            .map(|s| s as u64)
-            .unwrap_or(d.replication_reconcile_secs);
-    let mode = graph_config::get_str(engine, node_key_id, KEY_MODE)
+    let replication_reconcile_secs = graph_config::get_i64(engine, KEY_REPLICATION_RECONCILE_SECS)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| *s > 0)
+        .map(|s| s as u64)
+        .unwrap_or(d.replication_reconcile_secs);
+    let mode = graph_config::get_str(engine, KEY_MODE)
         .await
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.mode);
-    let listen_addr = graph_config::get_str(engine, node_key_id, KEY_LISTEN_ADDR)
+    let listen_addr = graph_config::get_str(engine, KEY_LISTEN_ADDR)
         .await
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.listen_addr);
-    let bootstrap_peers = graph_config::get_str_list(engine, node_key_id, KEY_BOOTSTRAP_PEERS)
+    let bootstrap_peers = graph_config::get_str_list(engine, KEY_BOOTSTRAP_PEERS)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.bootstrap_peers);
-    let announce_ownership = graph_config::get_bool(engine, node_key_id, KEY_ANNOUNCE_OWNERSHIP)
+    let announce_ownership = graph_config::get_bool(engine, KEY_ANNOUNCE_OWNERSHIP)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.announce_ownership);
     // `node.alias` defaults to empty (the build site falls back to key_id).
-    let node_alias = graph_config::get_str(engine, node_key_id, KEY_NODE_ALIAS)
+    let node_alias = graph_config::get_str(engine, KEY_NODE_ALIAS)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.node_alias);
-    let admin_key_ids = graph_config::get_str_list(engine, node_key_id, KEY_ADMIN_KEY_IDS)
+    let admin_key_ids = graph_config::get_str_list(engine, KEY_ADMIN_KEY_IDS)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.admin_key_ids);
-    let oauth_callback_base_url =
-        graph_config::get_str(engine, node_key_id, KEY_OAUTH_CALLBACK_BASE_URL)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(d.oauth_callback_base_url);
+    let oauth_callback_base_url = graph_config::get_str(engine, KEY_OAUTH_CALLBACK_BASE_URL)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(d.oauth_callback_base_url);
     // net.radio.* — serial LoRa/RNode radio transport (boot-structural; the build
     // site attaches it on desktop only). Integers come in via get_i64 (the config
     // store's numeric shape) and are range-clamped into u32/u8.
-    let radio_enabled = graph_config::get_bool(engine, node_key_id, KEY_RADIO_ENABLED)
+    let radio_enabled = graph_config::get_bool(engine, KEY_RADIO_ENABLED)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.radio_enabled);
-    let radio_serial_port = graph_config::get_str(engine, node_key_id, KEY_RADIO_SERIAL_PORT)
+    let radio_serial_port = graph_config::get_str(engine, KEY_RADIO_SERIAL_PORT)
         .await
         .ok()
         .flatten()
@@ -377,35 +375,35 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
             .unwrap_or(dflt)
     };
     let radio_frequency_hz = radio_u32(
-        graph_config::get_i64(engine, node_key_id, KEY_RADIO_FREQUENCY)
+        graph_config::get_i64(engine, KEY_RADIO_FREQUENCY)
             .await
             .ok()
             .flatten(),
         d.radio_frequency_hz,
     );
     let radio_bandwidth_hz = radio_u32(
-        graph_config::get_i64(engine, node_key_id, KEY_RADIO_BANDWIDTH)
+        graph_config::get_i64(engine, KEY_RADIO_BANDWIDTH)
             .await
             .ok()
             .flatten(),
         d.radio_bandwidth_hz,
     );
     let radio_spreading_factor = radio_u8(
-        graph_config::get_i64(engine, node_key_id, KEY_RADIO_SF)
+        graph_config::get_i64(engine, KEY_RADIO_SF)
             .await
             .ok()
             .flatten(),
         d.radio_spreading_factor,
     );
     let radio_coding_rate = radio_u8(
-        graph_config::get_i64(engine, node_key_id, KEY_RADIO_CR)
+        graph_config::get_i64(engine, KEY_RADIO_CR)
             .await
             .ok()
             .flatten(),
         d.radio_coding_rate,
     );
     let radio_tx_power_dbm = radio_u8(
-        graph_config::get_i64(engine, node_key_id, KEY_RADIO_TXPOWER)
+        graph_config::get_i64(engine, KEY_RADIO_TXPOWER)
             .await
             .ok()
             .flatten(),
@@ -448,7 +446,6 @@ pub async fn resolve(engine: &Arc<Engine>, node_key_id: &str) -> ResolvedConfig 
 /// HOT per cycle). A change is logged at info.
 pub fn spawn(
     engine: Arc<Engine>,
-    node_key_id: String,
     tx: watch::Sender<ResolvedConfig>,
     notify: Arc<Notify>,
     mut shutdown: watch::Receiver<bool>,
@@ -482,7 +479,7 @@ pub fn spawn(
                 }
             }
 
-            let resolved = resolve(&engine, &node_key_id).await;
+            let resolved = resolve(&engine).await;
             tx.send_if_modified(|current| {
                 if *current != resolved {
                     tracing::info!(

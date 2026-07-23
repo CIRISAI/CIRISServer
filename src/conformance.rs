@@ -410,7 +410,7 @@ pub fn parse_declaration(tokens: &[String]) -> Result<Vec<ConformanceProfile>, S
 ///     rows) → the EMPTY set. A node that cannot establish what it claims claims
 ///     NOTHING, and every profile-gated wire op is refused until the operator fixes
 ///     the declaration. (Loud: the failure is logged at `error`.)
-pub async fn declared(engine: &Arc<Engine>, node_key_id: &str) -> DeclaredConformance {
+pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
     let build: Vec<ConformanceProfile> = BUILD_PROFILES.to_vec();
     let base = |profiles: Vec<ConformanceProfile>, declared_by_config: bool| DeclaredConformance {
         profiles,
@@ -419,7 +419,7 @@ pub async fn declared(engine: &Arc<Engine>, node_key_id: &str) -> DeclaredConfor
         wire_vocabulary_sha256: wire_vocabulary_sha256(),
         declared_by_config,
     };
-    match crate::graph_config::get_config(engine, node_key_id, KEY_CONFORMANCE_PROFILES).await {
+    match crate::graph_config::get_config(engine, KEY_CONFORMANCE_PROFILES).await {
         Ok(None) => base(build.clone(), false),
         Ok(Some(entry)) => {
             let Some(tokens) = entry.value.as_str_list() else {
@@ -523,10 +523,9 @@ pub struct ConformanceRefusal {
 #[must_use]
 pub async fn require_op(
     engine: &Arc<Engine>,
-    node_key_id: &str,
     verb: CapabilityVerb,
 ) -> Option<axum::response::Response> {
-    let declared = declared(engine, node_key_id).await;
+    let declared = declared(engine).await;
     refuse_if_unclaimed(&declared, verb).map(refusal_response)
 }
 

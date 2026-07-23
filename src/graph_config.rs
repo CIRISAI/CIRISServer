@@ -240,7 +240,26 @@ struct StoredRow {
 /// Read every LIVE (unrevoked) `config:v1` row this node authored, parsed into
 /// [`StoredRow`]s. Mirrors [`crate::peer::replication_peers_from_consent`]'s read
 /// (`list_attestations_by(node) → filter SCORES && dimension`).
-async fn live_config_rows(engine: &Arc<Engine>, node_key_id: &str) -> Result<Vec<StoredRow>> {
+/// The config plane's identity — resolved from the ONE authority (the engine's
+/// own signer), never caller-supplied. `set_config` emits via
+/// `Engine::emit_attestation_self`, which stamps the attester as the signer's
+/// DERIVED federation key_id; a caller-passed "node_key_id" on the READ side is
+/// therefore an invitation to the CIRISServer#312 disease — and in the embedded
+/// fold it accepted: callers passed the config ALIAS, every read filtered by an
+/// identity that authored nothing, and `GET /v1/config` returned `{}` over a
+/// corpus full of 200-OK signed writes (CIRISServer#315 finding 2). The write
+/// and the read now derive the SAME identity from the SAME source, so the fork
+/// is structurally unwritable.
+pub async fn self_key_id(engine: &Arc<Engine>) -> Result<String> {
+    engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve config-plane identity: {e}"))
+}
+
+async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
+    let node_key_id = self_key_id(engine).await?;
+    let node_key_id = node_key_id.as_str();
     let directory = engine.federation_directory();
     let rows = directory
         .list_attestations_by(node_key_id)
@@ -321,12 +340,8 @@ fn latest_for_key<'a>(rows: &'a [StoredRow], key: &str) -> Option<&'a StoredRow>
 /// Read the latest [`ConfigEntry`] for `key` (highest version, latest-wins), or
 /// `None` if the key has no live row. A recanted/withdrawn key reads as absent
 /// (see [`config_key_revoked`]).
-pub async fn get_config(
-    engine: &Arc<Engine>,
-    node_key_id: &str,
-    key: &str,
-) -> Result<Option<ConfigEntry>> {
-    let rows = live_config_rows(engine, node_key_id).await?;
+pub async fn get_config(engine: &Arc<Engine>, key: &str) -> Result<Option<ConfigEntry>> {
+    let rows = live_config_rows(engine).await?;
     Ok(latest_for_key(&rows, key)
         // A Null-valued latest is a tombstone (deleted) — reads as absent.
         .filter(|r| !matches!(r.entry.value, ConfigValue::Null))
@@ -337,10 +352,9 @@ pub async fn get_config(
 /// to keys starting with `prefix`. Returns a sorted [`BTreeMap`] keyed by config key.
 pub async fn list_configs(
     engine: &Arc<Engine>,
-    node_key_id: &str,
     prefix: Option<&str>,
 ) -> Result<BTreeMap<String, ConfigEntry>> {
-    let rows = live_config_rows(engine, node_key_id).await?;
+    let rows = live_config_rows(engine).await?;
 
     // Distinct keys (filtered by prefix), then latest-fold each.
     let mut out = BTreeMap::new();
@@ -375,14 +389,13 @@ pub async fn list_configs(
 /// directed the write (the authenticated owner/user identity).
 pub async fn set_config(
     engine: &Arc<Engine>,
-    node_key_id: &str,
     key: &str,
     value: ConfigValue,
     updated_by: &str,
     scope: ConfigScope,
 ) -> Result<ConfigEntry> {
     // Current latest (for version + previous_version chaining).
-    let rows = live_config_rows(engine, node_key_id).await?;
+    let rows = live_config_rows(engine).await?;
     let current = latest_for_key(&rows, key);
     let version = current.map(|r| r.entry.version + 1).unwrap_or(1);
     let previous_version = current.map(|r| r.attestation_id.clone());
@@ -397,7 +410,8 @@ pub async fn set_config(
     };
 
     let now = chrono::Utc::now();
-    let envelope = config_envelope(node_key_id, &entry, &now.to_rfc3339());
+    let node_key_id = self_key_id(engine).await?;
+    let envelope = config_envelope(&node_key_id, &entry, &now.to_rfc3339());
 
     // ── Emit (CIRISPersist#253 collapse) ─────────────────────────────────────
     // node-self emit over the engine's OWN composed signer: the hand-rolled
@@ -407,7 +421,7 @@ pub async fn set_config(
     // wire-preserving). The config key lives in the envelope; the subject is the
     // node itself; `weight = Some(1.0)` matches the prior row.
     let mut input = EmitAttestationInput::with_envelope(attestation_type::SCORES, envelope);
-    input.attested_key_id = Some(node_key_id.to_owned());
+    input.attested_key_id = Some(node_key_id.clone());
     input.subject_key_ids = vec![node_key_id.to_owned()];
     input.weight = Some(1.0);
     let attestation_id = engine
@@ -434,50 +448,41 @@ pub async fn set_config(
 /// Mirrors CIRISAgent's "set to None as deletion" — this Rust impl is the common one.
 pub async fn delete_config(
     engine: &Arc<Engine>,
-    node_key_id: &str,
     key: &str,
     updated_by: &str,
 ) -> Result<ConfigEntry> {
-    let scope = get_config(engine, node_key_id, key)
+    let scope = get_config(engine, key)
         .await?
         .map(|e| e.scope)
         .unwrap_or_default();
-    set_config(
-        engine,
-        node_key_id,
-        key,
-        ConfigValue::Null,
-        updated_by,
-        scope,
-    )
-    .await
+    set_config(engine, key, ConfigValue::Null, updated_by, scope).await
 }
 
 /// Typed convenience: the latest string value for `key` (iff it is a [`ConfigValue::Str`]).
-pub async fn get_str(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Result<Option<String>> {
-    Ok(get_config(engine, node_key_id, key)
+pub async fn get_str(engine: &Arc<Engine>, key: &str) -> Result<Option<String>> {
+    Ok(get_config(engine, key)
         .await?
         .and_then(|e| e.value.as_str().map(str::to_owned)))
 }
 
 /// Typed convenience: the latest integer value for `key` (iff it is a [`ConfigValue::I64`]).
-pub async fn get_i64(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Result<Option<i64>> {
-    Ok(get_config(engine, node_key_id, key)
+pub async fn get_i64(engine: &Arc<Engine>, key: &str) -> Result<Option<i64>> {
+    Ok(get_config(engine, key)
         .await?
         .and_then(|e| e.value.as_i64()))
 }
 
 /// Typed convenience: the latest float value for `key` (iff it is a [`ConfigValue::F64`]
 /// or an [`ConfigValue::I64`] widened).
-pub async fn get_f64(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Result<Option<f64>> {
-    Ok(get_config(engine, node_key_id, key)
+pub async fn get_f64(engine: &Arc<Engine>, key: &str) -> Result<Option<f64>> {
+    Ok(get_config(engine, key)
         .await?
         .and_then(|e| e.value.as_f64()))
 }
 
 /// Typed convenience: the latest boolean value for `key` (iff it is a [`ConfigValue::Bool`]).
-pub async fn get_bool(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Result<Option<bool>> {
-    Ok(get_config(engine, node_key_id, key)
+pub async fn get_bool(engine: &Arc<Engine>, key: &str) -> Result<Option<bool>> {
+    Ok(get_config(engine, key)
         .await?
         .and_then(|e| e.value.as_bool()))
 }
@@ -485,12 +490,8 @@ pub async fn get_bool(engine: &Arc<Engine>, node_key_id: &str, key: &str) -> Res
 /// Typed convenience: the latest list value for `key` as `Vec<String>` (iff it is
 /// a [`ConfigValue::List`]). Used by the boot reads for list-valued config:* keys
 /// (`net.bootstrap_peers`, `auth.admin_key_ids`).
-pub async fn get_str_list(
-    engine: &Arc<Engine>,
-    node_key_id: &str,
-    key: &str,
-) -> Result<Option<Vec<String>>> {
-    Ok(get_config(engine, node_key_id, key)
+pub async fn get_str_list(engine: &Arc<Engine>, key: &str) -> Result<Option<Vec<String>>> {
+    Ok(get_config(engine, key)
         .await?
         .and_then(|e| e.value.as_str_list()))
 }

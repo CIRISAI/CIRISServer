@@ -240,7 +240,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // once from this snapshot, reconcile on next boot (the value now lives in CEG,
     // not env). The config reconciler (spawned below) re-resolves + republishes on
     // its cadence + a `POST /v1/config` nudge.
-    let initial_config = crate::config_reconcile::resolve(&engine, &cfg.key_id).await;
+    let initial_config = crate::config_reconcile::resolve(&engine).await;
     tracing::info!(
         ?initial_config,
         "resolved initial config:* snapshot (Server 0.5 — knobs now live in CEG, not env)"
@@ -625,7 +625,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let (config_sd_tx, config_sd_rx) = watch::channel(false);
     let config_reconcile_join = crate::config_reconcile::spawn(
         Arc::clone(&engine),
-        cfg.key_id.clone(),
         config_tx,
         Arc::clone(&config_notify),
         config_sd_rx,
@@ -880,7 +879,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // touches the runtime — it writes CEG + nudges this loop).
                     .merge(crate::config_api::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
                         Some(Arc::clone(&config_notify)),
                     ))
                     // THIS node's public NodeCode (CEG §0.10): GET
@@ -1056,11 +1054,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             "capacity scorer spawned (score→emit; capacity:sustained_coherence:v1; \
              knobs HOT from config:* scorer.*)"
         );
-        Some(crate::scorer::spawn(
-            Arc::clone(&engine),
-            cfg.key_id.clone(),
-            config_rx.clone(),
-        ))
+        Some(crate::scorer::spawn(Arc::clone(&engine), config_rx.clone()))
     } else {
         None
     };
@@ -2784,10 +2778,9 @@ pub async fn run_config_set(
     value: crate::graph_config::ConfigValue,
     reason: &str,
 ) -> Result<crate::graph_config::ConfigEntry> {
-    let (engine, cfg) = open_engine_for_cli(&cfg).await?;
+    let (engine, _cfg) = open_engine_for_cli(&cfg).await?;
     crate::graph_config::set_config(
         &engine,
-        &cfg.key_id,
         key,
         value,
         reason,
@@ -2802,8 +2795,8 @@ pub async fn run_config_get(
     cfg: ServerConfig,
     key: &str,
 ) -> Result<Option<crate::graph_config::ConfigEntry>> {
-    let (engine, cfg) = open_engine_for_cli(&cfg).await?;
-    crate::graph_config::get_config(&engine, &cfg.key_id, key).await
+    let (engine, _cfg) = open_engine_for_cli(&cfg).await?;
+    crate::graph_config::get_config(&engine, key).await
 }
 
 /// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76). Attaches to

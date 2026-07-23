@@ -100,7 +100,6 @@ async fn register_self(engine: &Engine) {
 async fn each_value_variant_round_trips() {
     let engine = node().await;
     register_self(&engine).await;
-    let nk = node_key_id(&engine).await;
 
     let cases: Vec<(&str, ConfigValue)> = vec![
         ("k.str", ConfigValue::Str("hello".to_string())),
@@ -126,7 +125,6 @@ async fn each_value_variant_round_trips() {
     for (key, value) in &cases {
         let written = graph_config::set_config(
             &engine,
-            &nk,
             key,
             value.clone(),
             "owner-user",
@@ -140,7 +138,7 @@ async fn each_value_variant_round_trips() {
             "first write has no previous"
         );
 
-        let read = graph_config::get_config(&engine, &nk, key)
+        let read = graph_config::get_config(&engine, key)
             .await
             .expect("get_config")
             .expect("key present after write");
@@ -154,21 +152,19 @@ async fn each_value_variant_round_trips() {
 
     // Typed accessors.
     assert_eq!(
-        graph_config::get_str(&engine, &nk, "k.str").await.unwrap(),
+        graph_config::get_str(&engine, "k.str").await.unwrap(),
         Some("hello".to_string())
     );
     assert_eq!(
-        graph_config::get_i64(&engine, &nk, "k.i64").await.unwrap(),
+        graph_config::get_i64(&engine, "k.i64").await.unwrap(),
         Some(-42)
     );
     assert_eq!(
-        graph_config::get_f64(&engine, &nk, "k.f64").await.unwrap(),
+        graph_config::get_f64(&engine, "k.f64").await.unwrap(),
         Some(1.5)
     );
     assert_eq!(
-        graph_config::get_bool(&engine, &nk, "k.bool")
-            .await
-            .unwrap(),
+        graph_config::get_bool(&engine, "k.bool").await.unwrap(),
         Some(true)
     );
 }
@@ -179,11 +175,9 @@ async fn each_value_variant_round_trips() {
 async fn set_twice_increments_version_and_chains_previous() {
     let engine = node().await;
     register_self(&engine).await;
-    let nk = node_key_id(&engine).await;
 
     let v1 = graph_config::set_config(
         &engine,
-        &nk,
         "tunable.x",
         ConfigValue::I64(1),
         "owner",
@@ -196,7 +190,6 @@ async fn set_twice_increments_version_and_chains_previous() {
 
     let v2 = graph_config::set_config(
         &engine,
-        &nk,
         "tunable.x",
         ConfigValue::I64(2),
         "owner",
@@ -210,7 +203,7 @@ async fn set_twice_increments_version_and_chains_previous() {
         "second write chains previous_version to the prior row id"
     );
 
-    let latest = graph_config::get_config(&engine, &nk, "tunable.x")
+    let latest = graph_config::get_config(&engine, "tunable.x")
         .await
         .expect("get_config")
         .expect("key present");
@@ -228,12 +221,10 @@ async fn set_twice_increments_version_and_chains_previous() {
 async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     let engine = node().await;
     register_self(&engine).await;
-    let nk = node_key_id(&engine).await;
 
     // Two keys under "replication.", one outside.
     graph_config::set_config(
         &engine,
-        &nk,
         "replication.reconcile_secs",
         ConfigValue::I64(30),
         "owner",
@@ -244,7 +235,6 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     // Overwrite the first key — list must show the latest.
     graph_config::set_config(
         &engine,
-        &nk,
         "replication.reconcile_secs",
         ConfigValue::I64(60),
         "owner",
@@ -254,7 +244,6 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .unwrap();
     graph_config::set_config(
         &engine,
-        &nk,
         "replication.max_peers",
         ConfigValue::I64(8),
         "owner",
@@ -264,7 +253,6 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .unwrap();
     graph_config::set_config(
         &engine,
-        &nk,
         "safety.age_gate",
         ConfigValue::Bool(true),
         "owner",
@@ -273,7 +261,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     .await
     .unwrap();
 
-    let filtered = graph_config::list_configs(&engine, &nk, Some("replication."))
+    let filtered = graph_config::list_configs(&engine, Some("replication."))
         .await
         .expect("list_configs(prefix)");
     assert_eq!(
@@ -297,7 +285,7 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
     );
 
     // No prefix → all three distinct keys.
-    let all = graph_config::list_configs(&engine, &nk, None)
+    let all = graph_config::list_configs(&engine, None)
         .await
         .expect("list_configs(None)");
     assert_eq!(all.len(), 3, "all distinct keys, latest-per-key");
@@ -308,11 +296,9 @@ async fn list_configs_returns_latest_per_key_filtered_by_prefix() {
 async fn recanted_key_reads_as_absent() {
     let engine = node().await;
     register_self(&engine).await;
-    let nk = node_key_id(&engine).await;
 
     let written = graph_config::set_config(
         &engine,
-        &nk,
         "ephemeral.flag",
         ConfigValue::Bool(true),
         "owner",
@@ -323,7 +309,7 @@ async fn recanted_key_reads_as_absent() {
 
     // Present before recant.
     assert!(
-        graph_config::get_config(&engine, &nk, "ephemeral.flag")
+        graph_config::get_config(&engine, "ephemeral.flag")
             .await
             .unwrap()
             .is_some(),
@@ -335,15 +321,13 @@ async fn recanted_key_reads_as_absent() {
     // (written.version sanity)
     assert_eq!(written.version, 1);
 
-    let after = graph_config::get_config(&engine, &nk, "ephemeral.flag")
+    let after = graph_config::get_config(&engine, "ephemeral.flag")
         .await
         .expect("get_config after recant");
     assert!(after.is_none(), "a recanted key MUST read as absent");
 
     // And it drops out of the listing too.
-    let listed = graph_config::list_configs(&engine, &nk, None)
-        .await
-        .unwrap();
+    let listed = graph_config::list_configs(&engine, None).await.unwrap();
     assert!(
         !listed.contains_key("ephemeral.flag"),
         "recanted key is excluded from list_configs"

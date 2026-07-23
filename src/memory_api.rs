@@ -489,7 +489,7 @@ pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>, node_key_id: &str) 
     }
 
     // ── config:* values (config-as-CEG) ───────────────────────────────────────
-    match crate::graph_config::list_configs(engine, node_key_id, None).await {
+    match crate::graph_config::list_configs(engine, None).await {
         Ok(configs) => {
             for (key, entry) in configs {
                 let cid = format!("config/{key}");
