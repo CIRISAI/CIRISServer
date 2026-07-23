@@ -172,7 +172,7 @@ impl std::error::Error for GenesisError {}
 ///
 /// The `identity_type` set and top-level `roles` are also honored, so this stays
 /// correct once #486 lands and for records that express the claim either way.
-fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
+pub fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
     use ciris_persist::federation::types::identity_type;
     let attested_in_envelope = rec
         .record

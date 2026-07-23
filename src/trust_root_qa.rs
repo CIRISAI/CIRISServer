@@ -838,3 +838,161 @@ async fn qa_expired_trust_edge_is_dead() {
          (CIRISPersist#488 delta 3); verdict: {v:?}"
     );
 }
+
+/// **The re-bless path (the Mac failure).** A canonical admitted by an older
+/// server carries no `infra:serve` — `produce_genesis` refuses it (a dark mesh).
+/// The seed ceremony's fix: the SAME two holders who authorize the seed re-scrub
+/// the canonical with `infra:serve` inline (A1 scrubs, B1 completes the 2-of-3),
+/// exactly the sequence `propose_genesis`/`cosign_genesis` run with hardware.
+/// This proves that sequence end-to-end in software: an unblessed canonical is
+/// blessed, bundled, and on a fresh node BOTH trace-gate legs then resolve.
+#[tokio::test]
+async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
+    let fx = mint_portable_root().await;
+
+    // An UNBLESSED canonical: 2-of-3 co-scrubbed as `canonical`, but its envelope
+    // carries no infra:serve (roles: &[] in the ScrubTarget) — the pre-0.5.133
+    // record shape that darks the trace plane.
+    let unblessed_id = seeded_identity("qa-canonical-old", qa_seed("canonical-old"));
+    let target = ScrubTarget {
+        key_id: "qa-canonical-old".to_string(),
+        pubkey_ed25519_base64: B64
+            .encode(unblessed_id.ed25519_public_key().await.expect("ed pubkey")),
+        pubkey_ml_dsa_65_base64: B64
+            .encode(unblessed_id.mldsa65_public_key().await.expect("ml pubkey")),
+        identity_type: "canonical,node".to_string(),
+        roles: vec![], // <- the defect: no infra:serve conferred
+    };
+    let partial = produce_scrubbed_key_record(&fx.holders[0], target, VALID_FROM, &[])
+        .await
+        .expect("A1 scrub");
+    let old = to_persist(
+        &append_scrub(partial, &fx.holders[1])
+            .await
+            .expect("B1 scrub"),
+    );
+    assert!(
+        !crate::mesh_genesis::carries_infra_serve(&old),
+        "precondition: the old canonical carries no infra:serve"
+    );
+
+    // The ceremony's re-bless: A1 re-scrubs WITH infra:serve (mirrors
+    // propose_genesis), B1 appends (mirrors cosign_genesis) → 2-of-3 over the new
+    // envelope. Transport hints would ride here; none in this fixture.
+    let rebless_target = ScrubTarget {
+        key_id: "qa-canonical-old".to_string(),
+        pubkey_ed25519_base64: B64
+            .encode(unblessed_id.ed25519_public_key().await.expect("ed pubkey")),
+        pubkey_ml_dsa_65_base64: B64
+            .encode(unblessed_id.mldsa65_public_key().await.expect("ml pubkey")),
+        identity_type: "canonical,node".to_string(),
+        roles: vec![INFRA_SERVE.to_string()],
+    };
+    let rp = produce_scrubbed_key_record(&fx.holders[0], rebless_target, VALID_FROM, &[])
+        .await
+        .expect("A1 re-bless scrub");
+    let reblessed = to_persist(
+        &append_scrub(rp, &fx.holders[1])
+            .await
+            .expect("B1 completes"),
+    );
+    assert!(
+        crate::mesh_genesis::carries_infra_serve(&reblessed),
+        "the re-blessed canonical now carries infra:serve in its envelope"
+    );
+
+    // Bundle it (with a grant for THIS serve node) and attach onto a fresh node.
+    let family = ciris_persist::federation::genesis::accord_family_genesis_record();
+    let charter = SignedAttestation {
+        attestation: sign_row(
+            crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+            &fx.holders[0],
+            ROOT,
+            attestation_type::DELEGATES_TO,
+            crate::mesh_genesis::charter_envelope(&[
+                HOLDER_IDS[1].to_string(),
+                HOLDER_IDS[2].to_string(),
+            ])
+            .expect("charter envelope"),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
+    let grant = SignedAttestation {
+        attestation: sign_row(
+            &format!(
+                "{}:qa-canonical-old",
+                crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+            ),
+            &fx.holders[0],
+            "qa-canonical-old",
+            attestation_type::DELEGATES_TO,
+            crate::mesh_genesis::grant_envelope("qa-canonical-old"),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
+    let mut bundle = produce_genesis(
+        &family.family_key_id,
+        "quorum:2/3",
+        vec![reblessed],
+        vec![charter, grant],
+        Vec::new(),
+        "2026-07-22T00:00:00Z",
+    )
+    .expect("the re-blessed canonical produces a genesis");
+    for h in [&fx.holders[0], &fx.holders[1]] {
+        let digest =
+            crate::mesh_genesis::authorization_digest(&bundle).expect("authorization digest");
+        let (ed, pqc) = h.sign_bound(&digest).await.expect("authorize");
+        bundle
+            .authorizations
+            .push(crate::mesh_genesis::GenesisAuthorization {
+                holder_key_id: h.key_id().to_string(),
+                signature_classical: ed,
+                signature_pqc: pqc,
+            });
+    }
+
+    let dir2 = MemoryBackend::new();
+    attach_genesis(&dir2, &bundle).await.expect("attach");
+    dir2.put_public_key(to_persist(
+        &produce_self_key_record(&fx.user, "user", VALID_FROM, &[])
+            .await
+            .expect("user self record"),
+    ))
+    .await
+    .expect("user registers on the fresh node");
+    put_att(
+        &dir2,
+        signed_delegates_to(
+            "qa-edge-rebless",
+            &fx.user,
+            ROOT,
+            serde_json::json!([INFRA_ATTEST, INFRA_SERVE]),
+            None,
+        )
+        .await,
+    )
+    .await;
+    put_att(
+        &dir2,
+        signed_lifecycle("qa-lifecycle-rebless", &fx.holders[1], ROOT).await,
+    )
+    .await;
+
+    // Leg A on the re-blessed canonical resolves — the whole point.
+    assert!(
+        has_effective_role(&dir2, "qa-canonical-old", INFRA_SERVE)
+            .await
+            .expect("has_effective_role"),
+        "a canonical blessed BY THE SEED CEREMONY reads serve-capable after attach"
+    );
+    let grant = capability_roots_to_trusted_root(&dir2, USER, "qa-canonical-old", INFRA_SERVE)
+        .await
+        .expect("capability walk")
+        .expect("leg B resolves for the re-blessed canonical");
+    assert_eq!(grant.root_key_id, ROOT);
+}

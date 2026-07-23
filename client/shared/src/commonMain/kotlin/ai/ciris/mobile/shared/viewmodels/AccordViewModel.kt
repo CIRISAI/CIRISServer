@@ -1040,6 +1040,9 @@ class AccordViewModel(
             authorizedKeyIds = (previous + fromBundle + signedBy.trim())
                 .filter { it.isNotBlank() }
                 .distinct(),
+            // Sticky: once any step re-blessed the canonical, the whole ceremony did.
+            serveNodeReblessed = res.serveNodeReblessed ||
+                (_genesisSeed.value?.serveNodeReblessed ?: false),
         )
     }
 
