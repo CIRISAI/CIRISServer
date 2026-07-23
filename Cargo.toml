@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.134" # 0.5.134 = THE INLINE-REBLESS CUT — the seed ceremony blesses an unblessed canonical in place. Live-fire on Mac hit: propose_genesis refused with "genesis has no infra:serve-blessed serve node" because ciris-canonical-1 was co-scrubbed by a server OLDER than 0.5.133, before infra:serve conferral existed — so its scrub-signed envelope carries no serve role, and you cannot add one without re-scrubbing (the envelope is signed bytes). #486's lift_envelope_attested_roles can only lift a role the accord actually attested. Fix: the seed ceremony re-blesses inline. propose_genesis, when the chosen canonical lacks infra:serve, has A1 re-scrub it with roles:[infra:serve] (a 1-of-N partial, transport hints preserved from the existing signed envelope so it stays dialable); cosign_genesis has B1 append_scrub over the byte-identical envelope -> 2-of-3, then adopt_scrub_upgrade into local persist so the minting node's own leg A (has_effective_role) sees the canonical serve-capable. Same two holders, same two YubiKey taps that authorize the seed — no separate canonical ceremony. The response carries serve_node_reblessed and the card states it plainly ("this ceremony also blessed <canonical> as a trace server; un-bless with the canonical withdraw op"). trust_root_qa proves the whole sequence in software: an UNBLESSED canonical (roles:[] ScrubTarget) is re-scrubbed A1+B1, bundled, attached to a fresh node, and BOTH trace-gate legs then resolve. Quorum stays the family's entrenched M throughout (no hardcoded 2-of-3).
+version = "0.5.135" # 0.5.135 = THE #480 CLOSED CUT — adopt edge v13.14.0 / persist v19.1.0 / verify v10.6.0. The headline is CIRISPersist#480 CLOSED: canonical_seed.json now bakes infra:serve into the canonical, so a FRESH node roots to a canonical that is serve-capable at the source — the last piece of the fresh-canonical darkness (edge#379 fail-closed) is gone, and the trace gate passes for a genesis-baked canonical with no re-bless needed. The mesh_genesis tripwire flipped exactly as designed: baked_seed_cannot_produce_a_dark_genesis became baked_seed_is_serve_capable_but_not_a_trust_root — the baked path now CLEARS the NoServeNode gate (#480) but is refused at NoCharter, because a trust root must be minted by a QUORUM of holders through the seed ceremony (/v1/accord/genesis/{propose,cosign}) and can never be baked into a build. The #486 envelope-read guard was rebuilt from a synthetic unblessed record so it stays true regardless of the baked seed state, plus a new baked_canonical_now_carries_infra_serve asserts the #480 landing directly. Clean single-version co-resolution (edge 13.14.0 -> persist 19.1.0 -> verify 10.6.0), no diamond. release-gate TARGET pins updated. This is the substrate half of "trace plane bright"; the app half (the seed ceremony + inline re-bless) shipped in 0.5.133/0.5.134.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -129,8 +129,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.0.0", features = ["sqlite", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v13.13.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.1.0", features = ["sqlite", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v13.14.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -226,7 +226,7 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.0.0", features = ["postgres", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.1.0", features = ["postgres", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
@@ -301,13 +301,13 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v10.6.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v13.13.0", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v13.14.0", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_no_genesis_seed` yields a
 # clean engine with the baked HUMANITY_ACCORD family seed SKIPPED, so those tests can stand
 # up their OWN custom-holder family via the assemble ceremony. Dev/test ONLY — resolver-2
 # keeps this feature out of the shipped lib/bin/wheel (prod always seeds the baked family).
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.0.0", features = ["test-genesis-seam"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v19.1.0", features = ["test-genesis-seam"] }
 
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
