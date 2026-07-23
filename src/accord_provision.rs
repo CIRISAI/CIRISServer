@@ -2241,6 +2241,10 @@ async fn write_node_trust_edge(
 async fn genesis_ceremony_response(
     engine: &Engine,
     bundle: crate::mesh_genesis::GenesisBundle,
+    // True when this step re-blessed the serve node with infra:serve (the chosen
+    // canonical predated infra:serve conferral). Surfaced so the card can tell the
+    // operator plainly: "this ceremony also blesses <canonical> as a trace server."
+    serve_node_reblessed: bool,
 ) -> Response {
     let needed = match crate::mesh_genesis::authorizations_needed(&bundle) {
         Ok(n) => n,
@@ -2282,6 +2286,9 @@ async fn genesis_ceremony_response(
             "node_trusts_root": trusts_root,
             // Non-fatal: the seed is portable and valid regardless.
             "trust_edge_error": trust_edge_error,
+            // The chosen canonical was blessed with infra:serve as part of this
+            // ceremony (it predated the conferral) — the card says so plainly.
+            "serve_node_reblessed": serve_node_reblessed,
         })),
     )
         .into_response()
@@ -2360,14 +2367,78 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
             )
         }
     };
-    let serve_signed = ciris_persist::federation::SignedKeyRecord {
-        record: serve_rec.clone(),
-    };
     let serve_key_id = serve_rec.key_id.clone();
 
     let identity = match open_holder_identity(&root, &req.mldsa_usb_path, &req.pkcs11).await {
         Ok(i) => i,
         Err((code, msg)) => return err(code, &msg),
+    };
+
+    // If the chosen canonical already carries infra:serve, use it as-is. If NOT
+    // (it was blessed by a server older than 0.5.133, before infra:serve
+    // conferral existed), the seed ceremony BLESSES it inline: A1 re-scrubs it
+    // with infra:serve here (a 1-of-N partial), and B1 completes the co-scrub in
+    // cosign. This is not a separate ceremony — the same two holders who authorize
+    // the seed are the accord that confers the role, in the same two YubiKey taps.
+    let already_blessed =
+        crate::mesh_genesis::carries_infra_serve(&ciris_persist::federation::SignedKeyRecord {
+            record: serve_rec.clone(),
+        });
+    let (serve_signed, reblessed) = if already_blessed {
+        (
+            ciris_persist::federation::SignedKeyRecord {
+                record: serve_rec.clone(),
+            },
+            false,
+        )
+    } else {
+        use ciris_verify_core::federation_self_record::{produce_scrubbed_key_record, ScrubTarget};
+        let Some(ml) = serve_rec.pubkey_ml_dsa_65_base64.clone() else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("canonical {serve_key_id} has no ML-DSA-65 pubkey — cannot bless it"),
+            );
+        };
+        let hints = extract_transport_hints(&serve_rec);
+        let vf = chrono::Utc::now().to_rfc3339();
+        let partial = match produce_scrubbed_key_record(
+            &identity,
+            ScrubTarget {
+                key_id: serve_key_id.clone(),
+                pubkey_ed25519_base64: serve_rec.pubkey_ed25519_base64.clone(),
+                pubkey_ml_dsa_65_base64: ml,
+                // Preserve the canonical role AND confer infra:serve. Verify
+                // materializes ScrubTarget.roles into the scrub-signed envelope,
+                // so the accord co-scrub ATTESTS the capability (persist lifts it
+                // via #486); the transport hints ride the same signed envelope so
+                // the node stays dialable through the re-bless.
+                identity_type: ensure_canonical_role(&serve_rec.identity_type),
+                roles: vec![
+                    ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
+                ],
+            },
+            &vf,
+            &hints,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("re-bless scrub of {serve_key_id}: {e}"),
+                )
+            }
+        };
+        match to_persist_skr(&partial) {
+            Some(pr) => (pr, true),
+            None => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "re-bless: verify→persist record convert failed",
+                )
+            }
+        }
     };
 
     // Sign one attestation row (charter or grant) with the holder's hardware key.
@@ -2466,7 +2537,37 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         Ok(()) => {}
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
-    genesis_ceremony_response(&st.engine, bundle).await
+    genesis_ceremony_response(&st.engine, bundle, reblessed).await
+}
+
+/// Transport hints ride inside a canonical's scrub-signed `registration_envelope`
+/// (`transport_hints`); pull them so a re-bless preserves the node's reachability.
+#[cfg(feature = "pkcs11")]
+fn extract_transport_hints(
+    rec: &ciris_persist::federation::KeyRecord,
+) -> Vec<ciris_verify_core::federation_self_record::TransportHint> {
+    rec.registration_envelope
+        .get("transport_hints")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// verify `SignedKeyRecord` → persist `SignedKeyRecord` (serde-compatible shapes,
+/// the same round-trip `cosign_canonical` uses to adopt an advanced co-scrub).
+#[cfg(feature = "pkcs11")]
+fn to_persist_skr(
+    rec: &ciris_verify_core::federation_self_record::SignedKeyRecord,
+) -> Option<ciris_persist::federation::SignedKeyRecord> {
+    serde_json::from_value(serde_json::to_value(rec).ok()?).ok()
+}
+
+/// persist `SignedKeyRecord` → verify `SignedKeyRecord` (the reverse, so a serve
+/// node carried in the bundle can accept another holder's `append_scrub`).
+#[cfg(feature = "pkcs11")]
+fn to_verify_skr(
+    rec: &ciris_persist::federation::SignedKeyRecord,
+) -> Option<ciris_verify_core::federation_self_record::SignedKeyRecord> {
+    serde_json::from_value(serde_json::to_value(rec).ok()?).ok()
 }
 
 /// Append `signer`'s bound-hybrid signature over the bundle digest.
@@ -2550,7 +2651,50 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
     if let Err(e) = authorize_bundle(&identity, &mut bundle).await {
         return err(StatusCode::BAD_REQUEST, &e);
     }
-    genesis_ceremony_response(&st.engine, bundle).await
+
+    // If A1's propose re-blessed the serve node, it is a sub-quorum co-scrub that
+    // THIS holder must complete. Append B1's scrub over the byte-identical
+    // envelope (append_scrub rejects a duplicate anchor); once it reaches the
+    // family quorum, adopt it into this node's persist so the minting node's own
+    // trace gate (leg A: has_effective_role) sees the canonical as serve-capable.
+    let mut reblessed = false;
+    let needed = crate::mesh_genesis::authorizations_needed(&bundle).unwrap_or(usize::MAX);
+    if let Some(serve) = bundle.serve_nodes.first() {
+        if let Some(v) = to_verify_skr(serve) {
+            if v.record.distinct_scrub_count() < needed {
+                reblessed = true;
+                match ciris_verify_core::federation_self_record::append_scrub(v, &identity).await {
+                    Ok(advanced) => {
+                        if let Some(pr) = to_persist_skr(&advanced) {
+                            // Best-effort local adopt (persist's m-of-n gate is the
+                            // authority; a sub-quorum set stays a partial). Mirrors
+                            // cosign_canonical exactly.
+                            match st.engine.adopt_scrub_upgrade(pr.clone()).await {
+                                Ok(o) => tracing::info!(
+                                    canonical = %pr.record.key_id,
+                                    outcome = ?o,
+                                    "Trust Root: seed ceremony blessed the canonical with infra:serve"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    canonical = %pr.record.key_id,
+                                    error = %e,
+                                    "Trust Root: local adopt of the re-blessed canonical deferred (still valid in the seed)"
+                                ),
+                            }
+                            bundle.serve_nodes[0] = pr;
+                        }
+                    }
+                    Err(e) => {
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            &format!("append serve-node scrub failed: {e}"),
+                        )
+                    }
+                }
+            }
+        }
+    }
+    genesis_ceremony_response(&st.engine, bundle, reblessed).await
 }
 
 async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {

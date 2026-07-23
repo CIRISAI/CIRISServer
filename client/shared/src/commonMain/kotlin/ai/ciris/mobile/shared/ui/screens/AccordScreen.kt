@@ -1071,6 +1071,15 @@ private fun RemintTrustRootSheet(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.testable("remint_auth_tally"),
                             )
+                            if (s.serveNodeReblessed) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    localizedString("mobile.accord_remint_reblessed_note"),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testable("remint_reblessed_note"),
+                                )
+                            }
                         }
                         display?.let { d ->
                             Spacer(Modifier.height(6.dp))

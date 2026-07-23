@@ -660,6 +660,15 @@ data class GenesisSeedResponse(
     @SerialName("authorizations_needed")
     val authorizationsNeeded: Int = 0,
     val complete: Boolean = false,
+    /**
+     * The chosen canonical carried no `infra:serve` (it predated the conferral),
+     * so THIS ceremony blessed it as a trace server as part of minting the seed —
+     * the same two holders, the same two taps. Surface it so the operator knows a
+     * second thing happened: the canonical is now trusted-by-default to receive
+     * traces, and un-blessing it (the canonical withdraw op) reverses it.
+     */
+    @SerialName("serve_node_reblessed")
+    val serveNodeReblessed: Boolean = false,
 )
 
 /** A non-200 `{"error": …}` body from the seed ceremony — the node's refusal text. */
@@ -684,6 +693,8 @@ data class GenesisSeedState(
     val authorizationsNeeded: Int,
     val complete: Boolean,
     val authorizedKeyIds: List<String> = emptyList(),
+    /** Sticky once true across the ceremony: the canonical was blessed inline. */
+    val serveNodeReblessed: Boolean = false,
 )
 
 /**
