@@ -38,8 +38,6 @@ use ciris_edge::swarm::{FountainSwarmRuntime, SwarmRuntimeConfig};
 use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
 
-use crate::config::ServerConfig;
-
 /// Map a persist [`FountainHeldMeta`](ciris_persist::fountain::FountainHeldMeta)
 /// onto edge's [`HeldFountainContent`].
 ///
@@ -103,7 +101,6 @@ impl FountainHoldingsSource for EngineHoldingsSource {
 pub async fn install_swarm_runtime(
     engine: &Arc<Engine>,
     edge: &Edge,
-    cfg: &ServerConfig,
 ) -> Option<Arc<FountainSwarmRuntime>> {
     let Some(transport) = edge.reticulum_transport() else {
         tracing::warn!(
@@ -113,9 +110,32 @@ pub async fn install_swarm_runtime(
         return None;
     };
 
+    // ── Single composition (the CIRISServer#312 discipline, hunt-dual-owner F3).
+    // `edge.install_swarm_runtime` is a SET-ONCE install, but this runtime used to
+    // live in the serve stack frame and be rebuilt on every compose::serve — so a
+    // fold clean-restart (#276) left the edge's inbound-claim routing pointed at
+    // the FIRST (torn-down) runtime while a SECOND publisher advertised on the
+    // shared transport. One runtime per process, same idiom as the
+    // ReplicationRuntime: the first serve composes, later serves receive it.
+    static SWARM: tokio::sync::OnceCell<Arc<FountainSwarmRuntime>> =
+        tokio::sync::OnceCell::const_new();
+    if let Some(existing) = SWARM.get() {
+        tracing::info!(
+            "holonomic swarm runtime already composed — reusing the held runtime (single \
+             composition; the edge's set-once claim routing already points at it)"
+        );
+        return Some(Arc::clone(existing));
+    }
+
+    // ONE identity (#312): the publisher / consent-read / runtime identity is the
+    // edge's SIGNER key — never the config alias. Reading the consent cohort by
+    // the alias yields an EMPTY cohort in the embedded fold (the alias authored
+    // nothing), which is the exact #312 failure this plane inherited.
+    let node_key_id = edge.signer_key_id().to_string();
+
     let holdings: Arc<dyn FountainHoldingsSource> = Arc::new(EngineHoldingsSource {
         engine: Arc::clone(engine),
-        publisher_key_id: cfg.key_id.clone(),
+        publisher_key_id: node_key_id.clone(),
     });
     // edge v7.0.0: tier-evict + hard-delete are now methods on the persist
     // FederationDirectory the runtime holds — no per-trait shims.
@@ -130,7 +150,7 @@ pub async fn install_swarm_runtime(
     // replication reconciler's hot-add — comment kept so it's an
     // explicit, honest snapshot, not an oversight.
     let cohort_peers: Vec<String> =
-        match crate::peer::replication_peers_from_consent(engine, &cfg.key_id).await {
+        match crate::peer::replication_peers_from_consent(engine, &node_key_id).await {
             Ok(peers) => peers,
             Err(e) => {
                 tracing::warn!(
@@ -152,10 +172,24 @@ pub async fn install_swarm_runtime(
         directory,
         transport as Arc<dyn ciris_edge::transport::Transport>,
         cohort,
-        cfg.key_id.clone(),
+        node_key_id,
         None,
     );
     let runtime = Arc::new(runtime);
+    // Publish for later serves BEFORE the set-once edge install, so a concurrent
+    // second serve reuses this runtime rather than racing a doomed install.
+    let runtime = if SWARM.set(Arc::clone(&runtime)).is_ok() {
+        runtime
+    } else {
+        // Lost the composition race — adopt the winner's runtime (its
+        // publisher/converger are the live ones; ours drops unreferenced,
+        // its tasks never having been installed on the edge).
+        let held = SWARM.get().expect("set failed ⇒ already initialized");
+        tracing::info!(
+            "holonomic swarm runtime: lost the composition race — adopting the winner's runtime"
+        );
+        return Some(Arc::clone(held));
+    };
 
     // Set-once install: routes verified inbound FountainHoldingClaim
     // envelopes into the runtime's converger (CIRISEdge#184).

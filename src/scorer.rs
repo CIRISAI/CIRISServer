@@ -47,9 +47,8 @@ use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, Trace
 
 pub mod n_eff;
 
-/// CEG `scores` attestation type (matches
-/// `ciris_persist::federation::types::attestation_type::SCORES`).
-const ATTESTATION_TYPE_SCORES: &str = "scores";
+/// CEG `scores` attestation type — the shared constant, not a local copy.
+use ciris_persist::federation::types::attestation_type::SCORES as ATTESTATION_TYPE_SCORES;
 
 /// The capacity leaf this scorer emits. **Versioned** (`:v1`) to satisfy
 /// persist's `DimensionAdmissionPolicy { require_version_segment: true }`. We
@@ -266,7 +265,7 @@ async fn score_and_emit(
     // The hand-rolled canonicalize→hash→hybrid-sign→assemble→put recipe is now
     // `Engine::emit_attestation_self`: it signs with the engine's OWN composed
     // (hardware-hybrid) signer and derives the attester/scrub as the node's #247
-    // DERIVED federation key_id (`local_derived_key_id()` == `cfg.key_id` ==
+    // DERIVED federation key_id (the ENGINE signer's id — NOT cfg.key_id, which
     // `node_key_id` here — wire-preserving). `weight = Some(score)` (the v9.4.0
     // #252 surface) keeps the capacity band on the row so the replication trust
     // model reads the real score, not the `1.0` default.

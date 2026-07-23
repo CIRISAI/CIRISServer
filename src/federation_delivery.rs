@@ -27,10 +27,11 @@
 //!   2. Authors this node's directed `consent:replication` grant AT each admitted
 //!      canonical peer ([`crate::peer::emit_replication_consent`], idempotent) so
 //!      the reconcile loop keeps the canonical in the desired topology.
-//!   3. Starts the ONE `ReplicationRuntime` over the shared transport, seeding the
-//!      canonical key_ids as `extra_targets`
-//!      ([`crate::compose::start_replication_runtime`] — the SAME core the compose
-//!      boot path uses) and installs the inbound replication routing.
+//!   3. Starts (or, post-#312, receives the already-composed) ONE
+//!      `ReplicationRuntime` over the shared transport
+//!      ([`crate::compose::start_replication_runtime`] — the SAME core, single
+//!      composition per process). The canonical enters the topology purely via the
+//!      consent:replication grant step 2 authored — the hot path reads CEG alone.
 //!   4. Spawns the consent-topology reconcile loop
 //!      ([`crate::replication_reconcile::reconcile_once`] on `cadence_seconds`).
 //!   5. Spawns the announce logger over `edge.events()` so RNS rooting is visible.
@@ -578,16 +579,12 @@ pub async fn run_federation_delivery(
     //    post-restart reprime re-drives exactly this (CIRISServer#288).
     let admitted_targets = prime_canonicals(&engine, &edge, &node_key_id).await?;
 
-    // 4. Start the ONE ReplicationRuntime over the shared transport, seeding the
-    //    admitted canonical key_ids as extra_targets (belt-and-suspenders alongside
-    //    the consent grant above). Reuses the EXACT compose core.
-    let runtime = crate::compose::start_replication_runtime(
-        &engine,
-        &edge,
-        &node_key_id,
-        &admitted_targets,
-    )
-    .await?
+    // 4. Start (or receive — single composition, #312) the ONE ReplicationRuntime
+    //    over the shared transport. No seed set: the canonicals primed above are in
+    //    the topology because step 2-3b AUTHORED their consent:replication grants,
+    //    and the runtime's one hot path reads that CEG state back.
+    let runtime = crate::compose::start_replication_runtime(&engine, &edge, &node_key_id)
+        .await?
     .context(
         "federation delivery: the embedded Edge has no Reticulum transport — cannot deliver (boot \
          the edge with disable_reticulum=false)",

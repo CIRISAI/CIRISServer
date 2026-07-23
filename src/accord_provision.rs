@@ -2158,28 +2158,27 @@ async fn write_node_trust_edge(
     engine: &Engine,
     bundle: &crate::mesh_genesis::GenesisBundle,
 ) -> Result<String, String> {
-    use ciris_persist::federation::types::{
-        attestation_tier, attestation_type, Attestation, SignedAttestation,
-    };
-    use ciris_verify_core::self_at_login::{HardwareRootedIdentity, SelfSigner};
-    use sha2::Digest as _;
+    use ciris_persist::federation::types::attestation_type;
+    use ciris_persist::federation::EmitAttestationInput;
 
     let root = crate::mesh_genesis::charter_root_key_id(bundle)
         .ok_or_else(|| "genesis carries no charter — nothing to trust".to_string())?;
 
-    let cfg = crate::config::ServerConfig::defaults().map_err(|e| format!("server config: {e}"))?;
-    let node_key_id = cfg.key_id.clone();
+    // ONE identity (CIRISServer#312 / the identity-fork audit): the node is its
+    // ENGINE SIGNER's derived federation key — never `ServerConfig::defaults()`,
+    // whose key_id is the raw, un-derived alias. The first version of this fn
+    // authored the edge as "ciris-server", an identity with no federation_keys
+    // row, so the write failed the admission gate on EVERY node and the
+    // genesis-minting node's own trace gate had nothing to walk.
+    let node_key_id = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| format!("resolve node identity: {e}"))?;
     if node_key_id == root {
         // The node IS the root (single-box mesh): the self-loop charter already
         // says so, and `trust_root_valid` requires root != user.
         return Ok(String::new());
     }
-    let ed: std::sync::Arc<dyn ciris_keyring::HardwareSigner> =
-        std::sync::Arc::from(crate::compose::federation_signer(&cfg).map_err(|e| e.to_string())?);
-    let pqc: std::sync::Arc<dyn ciris_keyring::PqcSigner> =
-        crate::compose::federation_pqc_signer(&cfg).map_err(|e| e.to_string())?;
-    let identity = HardwareRootedIdentity::new(node_key_id.clone(), ed, pqc)
-        .map_err(|e| format!("node self-signer: {e}"))?;
 
     let id = format!("trust-edge:{node_key_id}:{root}");
     let envelope = serde_json::json!({
@@ -2191,40 +2190,15 @@ async fn write_node_trust_edge(
             ciris_persist::federation::trust_root::INFRA_SERVE_SCOPE,
         ],
     });
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize trust edge: {e}"))?;
-    let (sig_ed, sig_pqc) = identity
-        .sign_bound(&canonical)
-        .await
-        .map_err(|e| format!("sign trust edge: {e}"))?;
-    let now = chrono::Utc::now();
-    let row = SignedAttestation {
-        attestation: Attestation {
-            attestation_id: id.clone(),
-            attesting_key_id: node_key_id.clone(),
-            attested_key_id: root.clone(),
-            attestation_type: attestation_type::DELEGATES_TO.to_string(),
-            weight: Some(1.0),
-            asserted_at: now,
-            expires_at: None,
-            attestation_envelope: envelope,
-            original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
-            scrub_signature_classical: sig_ed,
-            scrub_signature_pqc: Some(sig_pqc),
-            scrub_key_id: node_key_id.clone(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            subject_key_ids: Vec::new(),
-            withdraws_admission_rule: None,
-            cohort_scope: "federation".to_string(),
-            tier: attestation_tier::FEDERATION.to_string(),
-            promoted_at: None,
-        },
-    };
+    // `emit_attestation_self` is the identity-authoritative primitive: it
+    // canonicalizes, hybrid-signs with the ENGINE's own signer, and stamps
+    // `attesting_key_id == scrub_key_id == <the signer's DERIVED key_id>` —
+    // derived internally, never a caller alias (persist#247). The row then rides
+    // the same admission gate as every other federation-tier emit.
+    let mut input = EmitAttestationInput::with_envelope(attestation_type::DELEGATES_TO, envelope);
+    input.attested_key_id = Some(root.clone());
     engine
-        .federation_directory()
-        .put_attestation(row)
+        .emit_attestation_self(input)
         .await
         .map_err(|e| format!("write trust edge: {e}"))?;
     tracing::info!(
