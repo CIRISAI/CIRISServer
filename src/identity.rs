@@ -479,7 +479,7 @@ pub async fn mint_user_identity(
     Ok(MintedUserIdentity {
         key_id: created.key_id,
         fedcode: created.code,
-        identity_type: "user".to_string(),
+        identity_type: ciris_persist::federation::types::identity_type::USER.to_string(),
         pubkey_ed25519_base64: b64.encode(&ed_pub),
         pubkey_ml_dsa_65_base64: b64.encode(&ml_pub),
         hardware_type,
@@ -679,7 +679,7 @@ pub async fn mint_portable_software_occurrence(
         key_id,
         alias: alias.to_string(),
         fedcode,
-        identity_type: "user".to_string(),
+        identity_type: ciris_persist::federation::types::identity_type::USER.to_string(),
         key_record,
         encryption_pubkeys,
         files_written: vec![

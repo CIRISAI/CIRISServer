@@ -467,7 +467,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // runtime's registry into the Edge's inbound dispatch (so B's replicated
     // health:liveness lands in A's corpus). The handle (an Arc) is held for the
     // node's lifetime AND shared with the CEG-driven reconcile loop below.
-    let replication = setup_peer_replication(&engine, &edge, &cfg).await?;
+    let replication = setup_peer_replication(&engine, &edge).await?;
 
     // ── CEG-native trusted-peer boot prime (CIRISServer#221 companion) ────────
     // An explicit-hash canonical (v7.0.0, Leviculum ExplicitHashCannotAnnounce)
@@ -520,7 +520,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // handle is bound for the node's lifetime so the publisher/converger tasks
     // are not dropped.
     let _swarm = if caps.lens_store {
-        crate::holonomic::install_swarm_runtime(&engine, &edge, &cfg).await
+        crate::holonomic::install_swarm_runtime(&engine, &edge).await
     } else {
         None
     };
@@ -531,7 +531,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // reconcile loop converges promptly instead of waiting for the next cadence
     // tick. When there is no runtime (no transport) the API still writes CEG; the
     // notify target is then `None`.
-    let reconcile_notify = Arc::new(tokio::sync::Notify::new());
+    // ONE Notify per consumer loop (hunt-dual-owner F1). A single shared Notify
+    // with two parked waiters + `notify_one()` writers misroutes ~half the
+    // wakeups (a peering write wakes the CONFIG loop and vice versa; the nudged
+    // loop finds no change, the intended loop waits out its full cadence). One
+    // signal per consumer keeps `notify_one`'s stored-permit semantics AND
+    // deterministic routing: the peering API nudges the replication reconciler,
+    // the config API nudges the config reconciler.
+    let replication_notify = Arc::new(tokio::sync::Notify::new());
+    let config_notify = Arc::new(tokio::sync::Notify::new());
 
     // ── Mesh control-plane relay, remote half (#128 Phase D — C3) ─────────────
     // Register the RNS control RESPONDER on the shared Edge BEFORE `edge.run()`
@@ -598,9 +606,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let reconcile_join = replication.as_ref().map(|runtime| {
         crate::replication_reconcile::spawn(
             Arc::clone(&engine),
-            cfg.key_id.clone(),
+            // The SAME signer identity as the runtime (#312) — never the alias.
+            edge.signer_key_id().to_string(),
             Arc::clone(runtime),
-            Arc::clone(&reconcile_notify),
+            Arc::clone(&replication_notify),
             config_rx.clone(),
             reconcile_sd_rx,
         )
@@ -609,7 +618,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     crate::compose_status::phase("config_reconcile_loop");
     // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
     // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
-    // own cadence + the SAME `reconcile_notify` the config API fires after a write,
+    // own cadence + its OWN `config_notify` the config API fires after a write,
     // and republishes the live `ResolvedConfig` on `config_tx`. Consumers (scorer,
     // replication reconciler) read the receiver: scorer knobs are hot; transport /
     // mode are boot-structural. ONE Notify is shared by config_api + this loop.
@@ -618,7 +627,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&engine),
         cfg.key_id.clone(),
         config_tx,
-        Arc::clone(&reconcile_notify),
+        Arc::clone(&config_notify),
         config_sd_rx,
     );
 
@@ -858,19 +867,21 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // Nudge the reconciler after a consent write (CEG changed)
                         // — but ONLY when a runtime exists to converge. The handler
                         // itself never touches the runtime; this is just a signal.
-                        replication.as_ref().map(|_| Arc::clone(&reconcile_notify)),
+                        replication
+                            .as_ref()
+                            .map(|_| Arc::clone(&replication_notify)),
                     ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
                     // the SAME way peering is (serve-only floor + SYSTEM_ADMIN owner
-                    // session). Phase 2 wires the SHARED reconcile_notify: a
+                    // session). Phase 2 wires the config loop's OWN notify: a
                     // successful write nudges the config reconciler so the live
                     // ResolvedConfig snapshot converges promptly (the API never
                     // touches the runtime — it writes CEG + nudges this loop).
                     .merge(crate::config_api::router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
-                        Some(Arc::clone(&reconcile_notify)),
+                        Some(Arc::clone(&config_notify)),
                     ))
                     // THIS node's public NodeCode (CEG §0.10): GET
                     // /v1/federation/node-code — the QR-able bootstrap handle an
@@ -2134,7 +2145,6 @@ pub(crate) async fn build_self_key_record(
 async fn setup_peer_replication(
     engine: &Arc<Engine>,
     edge: &Edge,
-    cfg: &ServerConfig,
 ) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
     // Server 0.5 (zero env): there is NO env peer-bootstrap branch. The replication
     // topology is owner-authored consent ONLY — a peer is admitted + a
@@ -2144,11 +2154,15 @@ async fn setup_peer_replication(
         "replication topology is owner-authored consent only (POST /v1/federation/peering) — \
          zero env (Server 0.5)"
     );
-    // Compose seeds NO extra targets: the boot topology is exactly the corpus's
-    // consent:replication set. The agent-embedded delivery controller
-    // (crate::federation_delivery) is the caller that seeds the baked canonical
-    // key_ids as extra_targets — the ONLY behavioural difference between the two.
-    start_replication_runtime(engine, edge, &cfg.key_id, &[]).await
+    // ONE identity (CIRISServer#312): the consent author / publish-own self /
+    // trace-gate "I" is the edge's SIGNER identity — the key the node actually
+    // signs and registers as. On the standalone path this equals cfg.key_id (the
+    // EdgeSigner is built from it); on the embedded fold the Edge's signer is the
+    // engine's real federation identity while cfg.key_id is a python-passed
+    // ALIAS — reading consent by the alias returned 0 peers from a corpus whose
+    // grants the signer identity authored, and the empty topology then clobbered
+    // the live one (envelopes_sent=0 under a fully green transport).
+    start_replication_runtime(engine, edge, edge.signer_key_id()).await
 }
 
 /// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
@@ -2192,15 +2206,19 @@ pub(crate) fn build_replication_peers(
 }
 
 /// Core replication-runtime bring-up, shared by the compose boot path
-/// ([`setup_peer_replication`], `extra_targets = &[]`) AND the agent-embedded
-/// federation-delivery controller ([`crate::federation_delivery`], `extra_targets`
-/// = the baked canonical `key_id`s). Factoring the body here keeps the two callers
-/// byte-identical except for the extra seed set, so compose's boot behaviour is
-/// unchanged when `extra_targets` is empty.
+/// ([`setup_peer_replication`]) AND the agent-embedded federation-delivery
+/// controller ([`crate::federation_delivery`]) — and since CIRISServer#312 the two
+/// callers are byte-identical: ONE runtime per process (the first composes, later
+/// calls receive it), ONE topology source (the corpus's consent:replication set,
+/// read by `replication_peers_from_consent` — the former `extra_targets` union is
+/// deleted), and ONE identity.
 ///
-/// `node_key_id` is the local federation signing key (the consent AUTHOR + the
-/// KERI publish-own selector); compose passes `cfg.key_id`, the delivery
-/// controller passes `edge.signer_key_id()`.
+/// `node_key_id` is the local federation signing key (the consent AUTHOR, the
+/// KERI publish-own selector, and the trace-gate leg-B "I"): BOTH callers pass
+/// `edge.signer_key_id()`. It must never be the config ALIAS — in the embedded
+/// fold the alias and the signer identity differ, and reading consent by the
+/// alias yields an empty topology from a corpus whose grants the signer wrote
+/// (the #312 field failure).
 ///
 /// Returns `Ok(None)` when the Edge carries no Reticulum transport — the read API
 /// still writes CEG (consent objects), there is just no runtime to converge.
@@ -2216,10 +2234,32 @@ pub(crate) async fn start_replication_runtime(
     engine: &Arc<Engine>,
     edge: &Edge,
     node_key_id: &str,
-    extra_targets: &[String],
 ) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
     use ciris_edge::replication::{ReplicationRuntime, ReplicationRuntimeConfig};
     use ciris_persist::federation::FederationDirectory;
+
+    // ── Single composition (CIRISServer#312) ────────────────────────────────
+    // ONE ReplicationRuntime per process. Both owners (compose boot + the
+    // agent-embedded delivery controller) call this; the first composes, every
+    // later call receives the SAME runtime. Two runtimes meant two schedulers
+    // whose reconcilers raced set_peers on the shared transport last-writer-wins
+    // — the empty topology shadowed the live one and the trace never shipped.
+    //
+    // `tokio::sync::OnceCell::get_or_try_init` — NOT a hand-rolled
+    // check-then-build-then-set: OnceCell runs exactly ONE initializer even under
+    // concurrent first calls (the loser awaits the winner instead of spawning a
+    // second scheduler that leaks when its Arc drops). DRY: the atomic idiom
+    // already exists; re-deriving it is how copies drift.
+    static RUNTIME: tokio::sync::OnceCell<Arc<ciris_edge::replication::ReplicationRuntime>> =
+        tokio::sync::OnceCell::const_new();
+    if let Some(existing) = RUNTIME.get() {
+        tracing::info!(
+            "replication runtime already composed — returning the held runtime (single \
+             composition, CIRISServer#312); this caller's reconciler converges the SAME \
+             runtime from the SAME CEG state"
+        );
+        return Ok(Some(Arc::clone(existing)));
+    }
 
     // Require a Reticulum transport to run replication at all. Without it the read
     // API still writes CEG (consent objects), there is just no runtime to converge.
@@ -2230,6 +2270,8 @@ pub(crate) async fn start_replication_runtime(
         );
         return Ok(None);
     };
+    let runtime = RUNTIME
+        .get_or_try_init(|| async {
     // CIRISServer#303: use the backend-agnostic `federation_directory()` (persist
     // v18.1.0) so a POSTGRES-backed canonical runs replication too. The former
     // `sqlite_backend()?` gate silently exempted postgres nodes from the ENTIRE
@@ -2237,17 +2279,14 @@ pub(crate) async fn start_replication_runtime(
     // matters directly: a postgres canonical would receive no traces at all.
     let directory: Arc<dyn FederationDirectory> = engine.federation_directory();
 
-    // 1. Desired Initiator set from CEG — admitted consent:replication subjects,
-    //    UNIONED with any caller-seeded `extra_targets` (the delivery controller's
-    //    baked canonical key_ids). Every candidate is admission-filtered against the
-    //    federation directory (an unknown key has no record to route/verify).
-    let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
-    let mut candidates: Vec<String> = consented;
-    for t in extra_targets {
-        if !candidates.contains(t) {
-            candidates.push(t.clone());
-        }
-    }
+    // 1. Desired Initiator set from CEG ALONE — admitted consent:replication
+    //    subjects, no side-channel seeds (#312: the former `extra_targets` union is
+    //    DELETED — the baked canonical enters the topology because the delivery
+    //    controller AUTHORS its consent:replication grant into the corpus, and this
+    //    one hot path reads it back; anything else is a finger on the scale). Every
+    //    candidate is admission-filtered against the federation directory (an
+    //    unknown key has no record to route/verify).
+    let candidates = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
     let mut desired: Vec<String> = Vec::with_capacity(candidates.len());
     for peer in candidates {
         match directory.lookup_public_key(&peer).await {
@@ -2330,7 +2369,10 @@ pub(crate) async fn start_replication_runtime(
          CIRISEdge#173 resolved)",
         desired.len(),
     );
-    Ok(Some(Arc::new(runtime)))
+    anyhow::Ok(Arc::new(runtime))
+        })
+        .await?;
+    Ok(Some(Arc::clone(runtime)))
 }
 
 /// The one shared **Reticulum** edge runtime over the Engine's `SqliteBackend`

@@ -104,11 +104,8 @@ pub const INFRA_SCOPE_PREFIX: &str = "infra:";
 
 /// The brain-only scope prefix — `agency:*` is FORBIDDEN on a pure `node`-role
 /// delegate (CC 1.13.5). A verifier MUST reject it on a node-key delegation.
-pub const AGENCY_SCOPE_PREFIX: &str = "agency:";
+pub use ciris_persist::federation::types::delegation_scope::AGENCY_PREFIX as AGENCY_SCOPE_PREFIX;
 
-/// `infra:network_presence` — announce/resolve the node's reachability (the
-/// CC 3.3.6.2 `transport_destination`) under the owner's authority.
-pub const INFRA_NETWORK_PRESENCE: &str = "infra:network_presence";
 /// `infra:hold_community_membership` — occupy a member seat on **community**
 /// rosters under the owner's standing. Membership is STANDING, not judgment:
 /// steward/moderator/founder roles are bestowed on the MEMBER (the user/agent)
@@ -119,15 +116,24 @@ pub const INFRA_NETWORK_PRESENCE: &str = "infra:network_presence";
 /// and `infra:join_communities` (CC RC2 / persist) — which, being exact-string
 /// matched, never even matched EACH OTHER on the wire. No aliases; pre-fleet,
 /// no backwards compat.
-pub const INFRA_HOLD_COMMUNITY_MEMBERSHIP: &str = "infra:hold_community_membership";
+///
+/// DRY (the split-surface audit, 2026-07-23): these are RE-EXPORTS of persist's
+/// `delegation_scope` constants, not local literals. Redeclared copies drift —
+/// verify's copy of this very vocabulary fell a whole RC behind (CIRISVerify#217)
+/// while the shared-import vocabularies (attestation_type / cohort_scope /
+/// identity_type) produced zero drift findings. One source; imports don't drift.
+pub use ciris_persist::federation::types::delegation_scope::INFRA_HOLD_COMMUNITY_MEMBERSHIP;
 /// `infra:hold_family_membership` — occupy a member seat on **family** rosters
 /// under the owner's standing. Split from the community twin because family and
 /// community are distinct CEG objects in different sensitivity classes — an
 /// owner can give a node community standing while keeping it out of the family.
-pub const INFRA_HOLD_FAMILY_MEMBERSHIP: &str = "infra:hold_family_membership";
+pub use ciris_persist::federation::types::delegation_scope::INFRA_HOLD_FAMILY_MEMBERSHIP;
+/// `infra:network_presence` — announce/resolve the node's reachability (the
+/// CC 3.3.6.2 `transport_destination`) under the owner's authority.
+pub use ciris_persist::federation::types::delegation_scope::INFRA_NETWORK_PRESENCE;
 /// `infra:serve` — serve reads / relay / store / transport (the serve-only
 /// floor an unowned node is limited to).
-pub const INFRA_SERVE: &str = "infra:serve";
+pub use ciris_persist::federation::types::delegation_scope::INFRA_SERVE;
 
 /// The canonical owner-binding scope set: identity + membership standing
 /// (community + family seats) + serve, all infra-class, in sorted (canonical)
