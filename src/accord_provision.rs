@@ -1278,7 +1278,7 @@ async fn admit_node_impl(
             //
             // NOTE (CIRISPersist#486): persist does not yet lift the envelope-attested
             // roles into the top-level `KeyRecord.roles` that `claims_role` reads, so
-            // the conferral is *attested but not yet visible* to `has_effective_role`.
+            // the conferral is *attested but not yet visible* to `has_accord_conferred_role`.
             // Consumers holding the SignedKeyRecord (e.g. `mesh_genesis`) read the
             // envelope directly and see it today.
             roles: roles.to_vec(),
@@ -2660,7 +2660,7 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
     // THIS holder must complete. Append B1's scrub over the byte-identical
     // envelope (append_scrub rejects a duplicate anchor); once it reaches the
     // family quorum, adopt it into this node's persist so the minting node's own
-    // trace gate (leg A: has_effective_role) sees the canonical as serve-capable.
+    // trace gate (leg A: has_accord_conferred_role) sees the canonical as serve-capable.
     let mut reblessed = false;
     let needed = crate::mesh_genesis::authorizations_needed(&bundle).unwrap_or(usize::MAX);
     if let Some(serve) = bundle.serve_nodes.first() {
@@ -2732,7 +2732,7 @@ async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
                     "confers_infra_serve": ciris_persist::federation::types::identity_type::set_contains(
                         &r.identity_type,
                         ciris_persist::federation::types::delegation_scope::INFRA_SERVE,
-                    ) || r.roles.iter().any(|x| x == ciris_persist::federation::types::delegation_scope::INFRA_SERVE),
+                    ) || r.capability_roles.iter().any(|x| x == ciris_persist::federation::types::delegation_scope::INFRA_SERVE),
                 })
             })
             .collect::<Vec<_>>(),

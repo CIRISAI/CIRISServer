@@ -714,7 +714,7 @@ async fn register_user_key(
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
-        roles: Vec::new(),
+        capability_roles: Vec::new(),
         attestation_evidence: None,
         // No Counter-RII consent role at registration (persist v13 #365):
         // None ⇔ the stored `unregistered` default; assigned later via

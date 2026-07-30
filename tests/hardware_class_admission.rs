@@ -133,7 +133,7 @@ impl Device {
             scrub_timestamp: now,
             pqc_completed_at: Some(now),
             persist_row_hash: String::new(),
-            roles: Vec::new(),
+            capability_roles: Vec::new(),
             attestation_evidence: evidence,
             consent_role: None,
             additional_scrubs: Vec::new(),

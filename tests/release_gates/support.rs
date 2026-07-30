@@ -49,14 +49,22 @@ use std::path::PathBuf;
 // caught on adoption: the test-anchor genesis synthesized `accord_holder` rows
 // persist's own `put_public_key` then refused as `malformed`. Verify still
 // unchanged at v10.6.3 — the whole bump is persist+edge.
+//
+// 0.5.140 — persist v22.0.1→**v23.0.0** (CIRISPersist#551, the NAMING cut) + edge
+// v15.4.2→**v15.5.0**. Forced renames: `has_effective_role`→`has_accord_conferred_role`
+// (clean break, no alias), `KeyRecord.roles`→`capability_roles`,
+// `ACCORD_LIFECYCLE_DIMENSION`→`ACCORD_HEARTBEAT_DIMENSION`,
+// `canonical_genesis_records()`→`canonical_genesis_bundle()`. The SEMANTIC change is
+// bigger than the renames: `lifecycle_active` is GONE from `trust_root_valid`, replaced
+// by a banded `drill_freshness` reported beside the verdict. A seed no longer expires.
 pub const TARGET_VERIFY: &str = "v10.6.3";
-pub const TARGET_PERSIST: &str = "v22.0.1";
-pub const TARGET_EDGE: &str = "v15.4.2";
+pub const TARGET_PERSIST: &str = "v23.0.0";
+pub const TARGET_EDGE: &str = "v15.5.0";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
 /// `canonical` role + single-owner admission gate for the mesh-seed release.)
-pub const TARGET_PERSIST_V10: &str = "v21";
+pub const TARGET_PERSIST_V10: &str = "v23";
 
 /// The canonical-seed transport key id Node A must carry (Stage 5).
 pub const CANONICAL_TRANSPORT_KEY_ID: &str = "ciris-canonical-1";

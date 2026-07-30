@@ -257,7 +257,7 @@ impl TrustSet {
     /// co-stewards. A co-steward is trusted by construction (pinning is
     /// implied) — an unpinned "co-steward" would be a contradiction.
     /// CIRISServer#253: RETIRED as a production path — `compose_for_key` now
-    /// resolves co-steward roles from the substrate (`has_effective_role`,
+    /// resolves co-steward roles from the substrate (`has_accord_conferred_role`,
     /// persist v17). Kept for unit tests, which compose over a synthetic
     /// corpus with no live accord roster to resolve against.
     pub fn pin_co_steward(&mut self, key_id: impl Into<String>, class: CoSteward) -> &mut Self {
@@ -609,12 +609,12 @@ impl Composer {
         // accord-conferred, self-authenticating semantics, so we resolve from the
         // substrate here and RETIRE the by-pin fallback in production.
         //
-        // `has_effective_role` is self-authenticating by design: a decorative
+        // `has_accord_conferred_role` is self-authenticating by design: a decorative
         // pre-17 self-claimed `roles=["registry"]` row reads `false` (its co-scrub
         // set must re-verify against the LIVE accord roster), so this read never
         // trusts write-gate history. Resolution happens in THIS async phase; the
         // pure `compose` stays synchronous (and the pin API remains, for tests).
-        use ciris_persist::federation::admission::has_effective_role;
+        use ciris_persist::federation::admission::has_accord_conferred_role;
         use ciris_persist::federation::types::identity_type::{REGISTRY, VERIFY};
         let mut trust = self.trust.clone();
         let mut resolved: BTreeMap<String, CoSteward> = BTreeMap::new();
@@ -626,14 +626,14 @@ impl Composer {
             if resolved.contains_key(k) {
                 continue;
             }
-            if has_effective_role(dir.as_ref(), k, REGISTRY)
+            if has_accord_conferred_role(dir.as_ref(), k, REGISTRY)
                 .await
-                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, registry): {e}"))?
+                .map_err(|e| anyhow::anyhow!("has_accord_conferred_role({k}, registry): {e}"))?
             {
                 resolved.insert(k.clone(), CoSteward::Registry);
-            } else if has_effective_role(dir.as_ref(), k, VERIFY)
+            } else if has_accord_conferred_role(dir.as_ref(), k, VERIFY)
                 .await
-                .map_err(|e| anyhow::anyhow!("has_effective_role({k}, verify): {e}"))?
+                .map_err(|e| anyhow::anyhow!("has_accord_conferred_role({k}, verify): {e}"))?
             {
                 resolved.insert(k.clone(), CoSteward::Verify);
             }

@@ -124,7 +124,7 @@ fn test_anchor_root_or_skip(
 /// Then performs the miniature trust-root ceremony
 /// ([`perform_trust_root_ceremony`]) — **leg B** of the CIRISEdge#386 trace-serve
 /// gate. Leg A (above) puts `infra:serve` on the scrubbed KEY RECORD so
-/// `has_effective_role` passes; leg B builds the `delegates_to` GRAPH the sender's
+/// `has_accord_conferred_role` passes; leg B builds the `delegates_to` GRAPH the sender's
 /// `capability_roots_to_trusted_root` walk demands (root charter + this node's
 /// trust edge + a lifecycle liveness score + — on the canonical — a replicating
 /// serve-capability grant). Without it the agent withholds every trace
@@ -495,7 +495,7 @@ async fn perform_trust_root_ceremony(
     use ciris_persist::federation::delegates_to_envelope;
     use ciris_persist::federation::envelope::paths;
     use ciris_persist::federation::trust_root::{
-        pre_rotation_commitment, ACCORD_LIFECYCLE_DIMENSION, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
+        pre_rotation_commitment, ACCORD_HEARTBEAT_DIMENSION, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
     };
 
     // The two identities the ceremony binds: the shared SW test root
@@ -552,10 +552,10 @@ async fn perform_trust_root_ceremony(
     }
 
     // ── (3) Lifecycle liveness: a fresh accord:lifecycle:v1 `scores` about root. ─
-    if !has_fresh_lifecycle(engine, &root_key_id).await? {
+    if !has_accord_heartbeat(engine, &root_key_id).await? {
         let envelope = serde_json::json!({
             "kind": "scores",
-            (paths::DIMENSION): ACCORD_LIFECYCLE_DIMENSION,
+            (paths::DIMENSION): ACCORD_HEARTBEAT_DIMENSION,
             // Liveness = alive. `trust_root_valid` reads only the dimension +
             // freshness window, never the value, but a `scores` row conventionally
             // carries one.
@@ -771,25 +771,24 @@ async fn has_live_charter(engine: &std::sync::Arc<Engine>, root_key_id: &str) ->
 /// Idempotency: is there already a FRESH `accord:lifecycle:v1` `scores` about the
 /// root (within the same freshness window `trust_root_valid` uses)? A stale one is
 /// treated as absent so a fresh liveness score is (re)minted.
-async fn has_fresh_lifecycle(engine: &std::sync::Arc<Engine>, root_key_id: &str) -> Result<bool> {
+async fn has_accord_heartbeat(engine: &std::sync::Arc<Engine>, root_key_id: &str) -> Result<bool> {
     use ciris_persist::federation::envelope::paths;
-    use ciris_persist::federation::trust_root::{
-        ACCORD_LIFECYCLE_DIMENSION, ACCORD_LIFECYCLE_FRESHNESS_DAYS,
-    };
+    use ciris_persist::federation::trust_root::ACCORD_HEARTBEAT_DIMENSION;
     let rows = engine
         .federation_directory()
         .list_attestations_for(root_key_id)
         .await
-        .map_err(|e| anyhow!("ceremony has_fresh_lifecycle: {e}"))?;
-    let now = chrono::Utc::now();
-    let window = chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS);
+        .map_err(|e| anyhow!("ceremony heartbeat probe: {e}"))?;
+    // PRESENCE only — no freshness window. persist v23 (CIRISPersist#551 item 4)
+    // dropped liveness from `valid`; `drill_freshness` is now a band reported
+    // beside the verdict. Re-minting a heartbeat that already exists would churn
+    // the row for no gain, and an OLD one is no longer a failure.
     Ok(rows.iter().any(|a| {
         a.attestation_type == attestation_type::SCORES
             && a.attestation_envelope
                 .get(paths::DIMENSION)
                 .and_then(|v| v.as_str())
-                == Some(ACCORD_LIFECYCLE_DIMENSION)
-            && now.signed_duration_since(a.asserted_at) <= window
+                == Some(ACCORD_HEARTBEAT_DIMENSION)
     }))
 }
 

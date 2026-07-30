@@ -205,7 +205,7 @@ async fn register(on: &Node, who: &Node, id_type: &str, roles: Vec<String>) {
         scrub_timestamp: now,
         pqc_completed_at: None,
         persist_row_hash: String::new(),
-        roles,
+        capability_roles: roles,
         attestation_evidence: None,
         consent_role: None,
         additional_scrubs: Vec::new(),
@@ -447,7 +447,7 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
             "LEG B WALK (expect false until #536 lands): {:?}",
             r.map(|o| o.is_some())
         );
-        let role = ciris_persist::federation::admission::has_effective_role(
+        let role = ciris_persist::federation::admission::has_accord_conferred_role(
             dir.as_ref(),
             &canonical.key_id,
             INFRA_SERVE,

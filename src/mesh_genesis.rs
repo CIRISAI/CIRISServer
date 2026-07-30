@@ -33,8 +33,8 @@
 
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::{
-    pre_rotation_commitment, ACCORD_LIFECYCLE_DIMENSION, ACCORD_LIFECYCLE_FRESHNESS_DAYS,
-    CHARTER_PRE_ROTATION_FIELD, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
+    pre_rotation_commitment, ACCORD_HEARTBEAT_DIMENSION, CHARTER_PRE_ROTATION_FIELD,
+    INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
 };
 use ciris_persist::federation::types::delegation_scope::INFRA_SERVE;
 use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
@@ -110,17 +110,6 @@ pub enum GenesisError {
     CharterInvalid(String),
     /// A serve node has no `infra:serve` grant from the charter root.
     ServeNodeUngranted(String),
-    /// No `accord:lifecycle:v1` liveness row about the charter root. Without it
-    /// `trust_root_valid` returns false on its FIFTH conjunct and the capability
-    /// gate stays shut — the bundle looks complete and is inert.
-    NoLifecycle,
-    /// The liveness row exists but is outside the freshness window, so it no
-    /// longer counts. Refused loudly rather than attached to produce a root that
-    /// silently fails the walk.
-    LifecycleStale {
-        asserted_at: String,
-        max_age_days: i64,
-    },
     /// Fewer holder authorizations than the family's entrenched M.
     QuorumNotMet {
         have: usize,
@@ -141,24 +130,6 @@ impl std::fmt::Display for GenesisError {
                  gate stays shut)"
             ),
             Self::CharterInvalid(d) => write!(f, "trust-root charter invalid: {d}"),
-            Self::NoLifecycle => write!(
-                f,
-                "genesis carries no accord:lifecycle:v1 liveness row about the charter root — \
-                 trust_root_valid needs edge_exists && root_self_declares && \
-                 charter_has_recovery && lifecycle_active && !halt_latched, and this bundle \
-                 satisfies only the first three. Attaching it would seed a root that every \
-                 capability walk silently rejects (CIRISPersist#483)"
-            ),
-            Self::LifecycleStale {
-                asserted_at,
-                max_age_days,
-            } => write!(
-                f,
-                "the accord:lifecycle:v1 liveness row is stale (asserted_at={asserted_at}, \
-                 window={max_age_days}d) — re-run the ceremony to mint a fresh one. A stale \
-                 row does not count toward lifecycle_active, so attaching this bundle would \
-                 produce an inert trust root"
-            ),
             Self::ServeNodeUngranted(k) => write!(
                 f,
                 "serve node {k} carries no infra:serve grant from the charter root — \
@@ -194,10 +165,10 @@ impl std::error::Error for GenesisError {}
 
 /// Does this record carry `infra:serve`? Checks the **attested** surface first.
 ///
-/// Verify materializes `ScrubTarget.roles` into the scrub-signed
+/// Verify materializes `ScrubTarget.roles` (materialized into `capability_roles`) into the scrub-signed
 /// `registration_envelope` (v10.5.0 — "attested by this scrub"), so THAT is where an
 /// accord-conferred capability actually lives. persist does not yet lift those into
-/// the top-level `KeyRecord.roles` that `claims_role` reads (**CIRISPersist#486**),
+/// the top-level `KeyRecord.capability_roles` that `claims_role` reads (**CIRISPersist#486**),
 /// which is why a bundle holder must read the envelope directly rather than trusting
 /// `roles` — the top-level field is empty by design from the producer.
 ///
@@ -214,7 +185,7 @@ pub fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
 
     attested_in_envelope
         || identity_type::set_contains(&rec.record.identity_type, INFRA_SERVE)
-        || rec.record.roles.iter().any(|r| r == INFRA_SERVE)
+        || rec.record.capability_roles.iter().any(|r| r == INFRA_SERVE)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,7 +308,7 @@ pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
 pub fn lifecycle_envelope() -> serde_json::Value {
     serde_json::json!({
         (paths::REFERENCES_ATTESTATION_ID): LIFECYCLE_ATTESTATION_ID,
-        (paths::DIMENSION): ACCORD_LIFECYCLE_DIMENSION,
+        (paths::DIMENSION): ACCORD_HEARTBEAT_DIMENSION,
     })
 }
 
@@ -354,7 +325,7 @@ fn lifecycle_of<'a>(bundle: &'a GenesisBundle, root: &str) -> Option<&'a Attesta
                 && a.attestation_envelope
                     .get(paths::DIMENSION)
                     .and_then(|v| v.as_str())
-                    == Some(ACCORD_LIFECYCLE_DIMENSION)
+                    == Some(ACCORD_HEARTBEAT_DIMENSION)
         })
 }
 
@@ -468,18 +439,30 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
         }
     }
 
-    // ── The fifth conjunct. A charter and grants make the root DECLARED; the
-    // liveness row makes it COUNT. Checked here rather than left to the walk,
-    // because the walk's failure mode is a silent `false` at the point of use —
-    // by which time the operator is debugging a dark trace plane, not a bad
-    // bundle. Refuse the artifact instead.
-    let lifecycle = lifecycle_of(bundle, root).ok_or(GenesisError::NoLifecycle)?;
-    let age = chrono::Utc::now().signed_duration_since(lifecycle.asserted_at);
-    if age > chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS) {
-        return Err(GenesisError::LifecycleStale {
-            asserted_at: lifecycle.asserted_at.to_rfc3339(),
-            max_age_days: ACCORD_LIFECYCLE_FRESHNESS_DAYS,
-        });
+    // ── The accord heartbeat: MINTED, but never a gate. ──────────────────────
+    //
+    // persist v23.0.0 (CIRISPersist#551 item 4) removed liveness from validity:
+    //
+    //     let valid = edge_exists && root_self_declares
+    //                 && charter_has_recovery && halt_latched != Some(true);
+    //
+    // `lifecycle_active: bool` became a banded `drill_freshness`, "reported
+    // beside the verdict, not enforced inside it". That is the right call and it
+    // is what makes a seed DURABLE: an artifact valid until revoked / withdrawn /
+    // superseded, rather than one that silently expires 90 days after the mint
+    // and takes every node with it.
+    //
+    // So we mint the heartbeat (it is a real trust signal — CIRISServer#332 asks
+    // the trust card to surface the band) and we DO NOT refuse a bundle for its
+    // absence or its age. A pre-v23 build of this file did refuse, which would
+    // now reject bundles persist considers perfectly valid.
+    if lifecycle_of(bundle, root).is_none() {
+        tracing::warn!(
+            root,
+            "genesis bundle carries no accord heartbeat about the trust root. NOT fatal — \
+             v23 reports liveness as a band beside the verdict rather than gating on it — but \
+             consumers will show this root's drill-freshness as unknown/red until one exists."
+        );
     }
 
     // ── The m-of-n proof. M comes from the family policy the bundle carries, but
@@ -622,7 +605,9 @@ pub fn produce_genesis(
 pub fn produce_genesis_from_baked(now_rfc3339: &str) -> Result<GenesisBundle, GenesisError> {
     let family = ciris_persist::federation::genesis::accord_family_genesis_record();
     let baked: Vec<SignedKeyRecord> =
-        ciris_persist::federation::genesis::canonical_genesis_records().to_vec();
+        ciris_persist::federation::genesis::canonical_genesis_bundle()
+            .serve_nodes
+            .clone();
     // No charter, no grants, no authorizations: the baked seed carries records
     // only. It therefore cannot produce a VALID genesis even once #480 blesses a
     // canonical — a trust root has to be minted by a quorum of holders through the
@@ -748,7 +733,9 @@ mod tests {
     /// darkness is closed at the source.
     #[test]
     fn baked_canonical_now_carries_infra_serve() {
-        let baked = ciris_persist::federation::genesis::canonical_genesis_records();
+        let baked = ciris_persist::federation::genesis::canonical_genesis_bundle()
+            .serve_nodes
+            .as_slice();
         let Some(rec) = baked.first().cloned() else {
             return; // no baked canonical in this build
         };
@@ -760,19 +747,21 @@ mod tests {
 
     /// **CIRISPersist#486 guard (envelope-read).** The accord's conferral is
     /// attested INSIDE the scrub-signed `registration_envelope`; the producer
-    /// leaves the top-level `KeyRecord.roles` empty. So a serve-capability check
+    /// leaves the top-level `KeyRecord.capability_roles` empty. So a serve-capability check
     /// MUST read the envelope. If someone "simplifies" `carries_infra_serve` back
     /// to `record.roles` only, this fails — and the trace plane silently goes dark
     /// again, which is exactly how we got here. Built from a synthetic UNBLESSED
     /// record so it stays true regardless of what the baked seed carries.
     #[test]
     fn envelope_attested_role_is_seen_though_top_level_roles_is_empty() {
-        let baked = ciris_persist::federation::genesis::canonical_genesis_records();
+        let baked = ciris_persist::federation::genesis::canonical_genesis_bundle()
+            .serve_nodes
+            .as_slice();
         let Some(mut rec) = baked.first().cloned() else {
             return; // no baked canonical in this build
         };
         // Strip every serve surface to get a genuinely UNBLESSED baseline.
-        rec.record.roles.clear();
+        rec.record.capability_roles.clear();
         rec.record.identity_type = "canonical,node".to_string();
         if let Some(o) = rec.record.registration_envelope.as_object_mut() {
             o.remove("roles");
@@ -788,7 +777,7 @@ mod tests {
             .expect("registration_envelope is a JSON object")
             .insert("roles".into(), serde_json::json!([INFRA_SERVE]));
         assert!(
-            rec.record.roles.is_empty(),
+            rec.record.capability_roles.is_empty(),
             "top-level roles stays empty — the ENVELOPE is what carries the claim"
         );
         assert!(
@@ -1062,31 +1051,43 @@ mod v2_tests {
         );
     }
 
-    /// THE FIFTH CONJUNCT. A bundle with a perfect charter and perfect grants is
-    /// still inert without a live `accord:lifecycle:v1` row: `trust_root_valid`
-    /// ANDs `lifecycle_active` in, so the walk returns false at the point of USE —
-    /// a dark trace plane, not a bad-bundle error. Refuse the artifact instead.
+    /// THE HEARTBEAT IS NOT A GATE — and this pin exists to keep it that way.
+    ///
+    /// A previous cut of this file refused a bundle with no `accord:lifecycle:v1`
+    /// row, and refused a stale one, because pre-v23 `trust_root_valid` ANDed
+    /// `lifecycle_active` into validity. persist v23.0.0 (CIRISPersist#551 item 4)
+    /// removed it:
+    ///
+    ///     let valid = edge_exists && root_self_declares
+    ///                 && charter_has_recovery && halt_latched != Some(true);
+    ///
+    /// `drill_freshness` is now a band "reported beside the verdict, not enforced
+    /// inside it". That is what makes a seed DURABLE — valid until revoked,
+    /// withdrawn or superseded, rather than silently expiring 90 days after the
+    /// mint and taking every node with it.
+    ///
+    /// So a heartbeat-less bundle must ATTACH. Re-introducing the refusal would
+    /// reject artifacts persist considers perfectly valid, and would put a shelf
+    /// life back on the production trust root.
     #[test]
-    fn a_bundle_without_a_liveness_row_is_refused() {
-        match verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant()])) {
-            Err(GenesisError::NoLifecycle) => {}
-            other => panic!("expected a missing-liveness refusal, got {other:?}"),
-        }
+    fn a_bundle_without_a_heartbeat_still_verifies() {
+        assert!(
+            verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant()])).is_ok(),
+            "the accord heartbeat is a SIGNAL, not a validity gate (v23) — a bundle without \
+             one must still verify, or a baked seed acquires a shelf life"
+        );
     }
 
-    /// The row EXPIRES. A bundle minted long ago carries a row that no longer
-    /// counts, so attaching it would produce a root that silently fails the walk.
+    /// Same property, from the other side: age is not a defect.
     #[test]
-    fn a_stale_liveness_row_is_refused() {
-        let mut stale = good_lifecycle();
-        stale.attestation.asserted_at =
-            chrono::Utc::now() - chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS + 1);
-        match verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant(), stale])) {
-            Err(GenesisError::LifecycleStale { max_age_days, .. }) => {
-                assert_eq!(max_age_days, ACCORD_LIFECYCLE_FRESHNESS_DAYS)
-            }
-            other => panic!("expected a stale-liveness refusal, got {other:?}"),
-        }
+    fn an_old_heartbeat_does_not_invalidate_a_bundle() {
+        let mut old = good_lifecycle();
+        old.attestation.asserted_at = chrono::Utc::now() - chrono::Duration::days(400);
+        assert!(
+            verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant(), old])).is_ok(),
+            "a 400-day-old heartbeat reports as stale drill_freshness; it must not make the \
+             bundle invalid"
+        );
     }
 
     /// A verifier must never GUESS the threshold.

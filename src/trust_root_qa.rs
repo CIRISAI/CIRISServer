@@ -50,7 +50,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
-use ciris_persist::federation::admission::has_effective_role;
+use ciris_persist::federation::admission::has_accord_conferred_role;
 use ciris_persist::federation::trust_root::{capability_roots_to_trusted_root, trust_root_valid};
 use ciris_persist::federation::trust_root::{pre_rotation_commitment, CHARTER_PRE_ROTATION_FIELD};
 use ciris_persist::federation::types::delegation_scope::{
@@ -283,7 +283,7 @@ async fn signed_lifecycle(
 ) -> Attestation {
     let envelope = serde_json::json!({
         "id": id,
-        "dimension": ciris_persist::federation::trust_root::ACCORD_LIFECYCLE_DIMENSION,
+        "dimension": ciris_persist::federation::trust_root::ACCORD_HEARTBEAT_DIMENSION,
         "score": 1.0,
         "confidence": 0.9,
     });
@@ -637,7 +637,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
         "the canonical is the serve set"
     );
     assert!(
-        bundle.serve_nodes[0].record.roles.is_empty(),
+        bundle.serve_nodes[0].record.capability_roles.is_empty(),
         "top-level roles is empty — the ENVELOPE is what carried the conferral"
     );
     verify_bundle(&bundle).expect("the produced genesis must self-verify offline");
@@ -696,9 +696,9 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     .await;
 
     assert!(
-        has_effective_role(&dir2, CANONICAL, INFRA_SERVE)
+        has_accord_conferred_role(&dir2, CANONICAL, INFRA_SERVE)
             .await
-            .expect("has_effective_role on the attached node"),
+            .expect("has_accord_conferred_role on the attached node"),
         "leg A must resolve on a node that only ever saw the seed"
     );
     let grant = capability_roots_to_trusted_root(&dir2, USER, CANONICAL, INFRA_SERVE)
@@ -733,7 +733,7 @@ async fn qa_envelope_carries_the_conferral() {
         "A1 + B1 — the 2-of-3 quorum the admission gate verified"
     );
     assert!(
-        fx.canonical.record.roles.is_empty(),
+        fx.canonical.record.capability_roles.is_empty(),
         "top-level roles is emitted empty by the producer — persist confers \
          (the lift is CIRISPersist#486, pending)"
     );
@@ -755,15 +755,15 @@ async fn qa_envelope_carries_the_conferral() {
 
 /// **Acceptance (leg A) — CIRISPersist#486.** The envelope-attested
 /// `infra:serve` on the 2-of-3-conferred canonical resolves through
-/// `has_effective_role`. Un-ignore on the fixed triple; until then it fails
+/// `has_accord_conferred_role`. Un-ignore on the fixed triple; until then it fails
 /// with `claims_role` never reading the envelope surface.
 #[tokio::test]
 async fn qa_leg_a_serve_resolves() {
     let fx = mint_portable_root().await;
     assert!(
-        has_effective_role(&fx.dir, CANONICAL, INFRA_SERVE)
+        has_accord_conferred_role(&fx.dir, CANONICAL, INFRA_SERVE)
             .await
-            .expect("has_effective_role walk"),
+            .expect("has_accord_conferred_role walk"),
         "acceptance: the accord-conferred (envelope-attested, 2-of-3) \
          infra:serve must read effective — CIRISPersist#486"
     );
@@ -788,7 +788,7 @@ async fn qa_root_minimum_is_serve_and_attest() {
 
 /// **Acceptance (end-to-end) — CIRISPersist#486 + #488.** Both legs of the
 /// edge trace-serve gate resolve against the minted portable root:
-/// leg A `has_effective_role(canonical, infra:serve)` AND leg B
+/// leg A `has_accord_conferred_role(canonical, infra:serve)` AND leg B
 /// `capability_roots_to_trusted_root(user, canonical, infra:serve)` — the
 /// state in which the trace plane would actually serve.
 #[tokio::test]
@@ -797,9 +797,9 @@ async fn qa_end_to_end_two_leg_gate() {
 
     // Leg A — the recipient's serve capability is accord-conferred.
     assert!(
-        has_effective_role(&fx.dir, CANONICAL, INFRA_SERVE)
+        has_accord_conferred_role(&fx.dir, CANONICAL, INFRA_SERVE)
             .await
-            .expect("has_effective_role walk"),
+            .expect("has_accord_conferred_role walk"),
         "leg A: the canonical's accord-conferred infra:serve must read \
          effective (CIRISPersist#486)"
     );
@@ -1019,9 +1019,9 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
 
     // Leg A on the re-blessed canonical resolves — the whole point.
     assert!(
-        has_effective_role(&dir2, "qa-canonical-old", INFRA_SERVE)
+        has_accord_conferred_role(&dir2, "qa-canonical-old", INFRA_SERVE)
             .await
-            .expect("has_effective_role"),
+            .expect("has_accord_conferred_role"),
         "a canonical blessed BY THE SEED CEREMONY reads serve-capable after attach"
     );
     let grant = capability_roots_to_trusted_root(&dir2, USER, "qa-canonical-old", INFRA_SERVE)
