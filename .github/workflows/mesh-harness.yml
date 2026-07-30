@@ -64,6 +64,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # BEFORE any tool install. The release build plus two docker images is tight
+      # on a stock runner, and an ENOSPC mid-run looks exactly like a harness
+      # failure. NOTE: do NOT delete $AGENT_TOOLSDIRECTORY — that is where the
+      # rust toolchain and sccache get installed, and removing it after setup
+      # makes the build fail with a bare "could not execute process `sccache`".
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift || true
+          df -h / | tail -1
+
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Set up sccache (compiler cache over GHA)
@@ -74,15 +86,6 @@ jobs:
           # Read-only from PRs; main populates. Matches ci.yml's posture.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: mesh-harness
-
-      - name: Free disk space
-        # The release build plus docker images is tight on a stock runner, and an
-        # ENOSPC mid-run looks exactly like a harness failure. Reclaim first so a
-        # red run means a real regression.
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h / | tail -1
 
       - name: Build the test-anchor wheel once
         run: |
