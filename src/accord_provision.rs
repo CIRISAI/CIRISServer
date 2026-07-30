@@ -1087,10 +1087,19 @@ fn default_admit_identity_type() -> String {
 /// `POST /v1/accord/admit-node` — the accord holder (A1) admits a node to the trust
 /// root by scrub-signing its registration on their own YubiKey+USB, AND emits their
 /// own self-signed `steward,accord_holder` **anchor** record. Both are written as
-/// the genesis **seed object** to `ceg_outbox()/accord_admit_node/{target}.json`
-/// (the predictable, persist-ingestable path the operator hands to CIRISPersist
-/// v12.0.2 to bake) and returned. **1-of-N bootstrap:** a single holder suffices —
-/// this is a trust EXTENSION, not the 2/3 kill-switch. Loopback + `pkcs11`-gated.
+/// **admission records** to `ceg_outbox()/accord_admit_node/{target}.json` and
+/// returned. **1-of-N bootstrap:** a single holder suffices — this is a trust
+/// EXTENSION, not the 2/3 kill-switch. Loopback + `pkcs11`-gated.
+///
+/// **These records are NOT the seed, and must not be handed to persist as one.**
+/// The seed is a `GenesisBundle` and that is the only shape (see
+/// `FSD/NAMING_THE_TRUST_ROOT.md`); a bare pair of key records does not parse as
+/// one. The seed is produced by the genesis ceremony and saved by the node itself
+/// to `<home>/mesh-genesis.json` (`save_seed_to_home`). This response field was
+/// called `seed_saved_to` through 0.5.140 (VOCAB-HISTORY) and the UI told the
+/// operator to "hand it
+/// to persist to bake" — vocabulary left over from the pre-bundle v12.0.2 model,
+/// naming the wrong artifact at exactly the moment it is most costly to confuse.
 async fn admit_node(State(st): State<ProvisionState>, body: axum::body::Bytes) -> Response {
     let req: AdmitNodeRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -1304,9 +1313,10 @@ async fn admit_node_impl(
         }
     };
 
-    // The genesis seed object persist v12.0.2 bakes: the holder anchor + the
-    // scrubbed node, both signed by the holder on hardware.
-    let seed = serde_json::json!({
+    // The ADMISSION RECORDS: the holder anchor + the scrubbed node, both signed by
+    // the holder on hardware. Records, not a bundle — deliberately not called a
+    // seed (see this handler's doc comment).
+    let admission_records = serde_json::json!({
         "holder_anchor": anchor,
         "scrubbed_node": scrubbed,
         "scrubber_key_id": key_id,
@@ -1314,8 +1324,9 @@ async fn admit_node_impl(
         "produced_at": valid_from,
     });
 
-    // Write to the predictable, persist-ingestable outbox path (same convention as
-    // provision-holder + genesis-assemble: `$CIRIS_HOME/ceg/outbox/...`).
+    // Write to the predictable outbox path (same convention as provision-holder +
+    // genesis-assemble: `$CIRIS_HOME/ceg/outbox/...`). This is the transport for a
+    // REMOTE target — the records travel to the node that will adopt them.
     let dir = ciris_verify_core::ceg_outbox::ceg_outbox().join("accord_admit_node");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return err(
@@ -1324,19 +1335,19 @@ async fn admit_node_impl(
         );
     }
     let out_path = dir.join(format!("{}.json", req.target.key_id.trim()));
-    let seed_pretty = match serde_json::to_string_pretty(&seed) {
+    let records_pretty = match serde_json::to_string_pretty(&admission_records) {
         Ok(s) => s,
         Err(e) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("serialize seed object: {e}"),
+                &format!("serialize admission records: {e}"),
             )
         }
     };
-    if let Err(e) = std::fs::write(&out_path, &seed_pretty) {
+    if let Err(e) = std::fs::write(&out_path, &records_pretty) {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("write seed to {}: {e}", out_path.display()),
+            &format!("write admission records to {}: {e}", out_path.display()),
         );
     }
 
@@ -1366,7 +1377,7 @@ async fn admit_node_impl(
                     target_key_id = %req.target.key_id.trim(),
                     error = %e,
                     "admit-node: scrubbed record NOT adopted locally (not this node's own \
-                     self-signed row?) — seed JSON saved for transport/bake"
+                     self-signed row?) — admission records saved for transport"
                 );
                 serde_json::json!({ "adopted": false, "reason": e.to_string() })
             }
@@ -1382,7 +1393,7 @@ async fn admit_node_impl(
         Json(serde_json::json!({
             "saved_to": out_path.display().to_string(),
             "applied": applied,
-            "seed": seed,
+            "admission_records": admission_records,
         })),
     )
         .into_response()
@@ -1527,11 +1538,15 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
     }
 
     // (2) Confirm the role took on the local row (adopt succeeded + gate admitted).
-    //     `false` for a remote target (its scrubbed record rides the seed JSON to be
-    //     adopted on the node itself) — not an error, just not locally confirmable.
+    //     `false` for a remote target (its scrubbed record rides the admission-records
+    //     JSON to be adopted on the node itself) — not an error, just not locally
+    //     confirmable.
     let is_canonical = engine.is_canonical(&target_key_id).await.unwrap_or(false);
 
-    let seed_path = ciris_verify_core::ceg_outbox::ceg_outbox()
+    // Where admit-node wrote the holder-signed admission records. NOT the seed —
+    // the seed is a GenesisBundle at `<home>/mesh-genesis.json`, written by the
+    // ceremony. See the `admit_node` doc comment.
+    let admission_records_path = ciris_verify_core::ceg_outbox::ceg_outbox()
         .join("accord_admit_node")
         .join(format!("{target_key_id}.json"));
     tracing::info!(
@@ -1547,7 +1562,7 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
             "is_canonical": is_canonical,
             // The hint(s) now embedded in the signed envelope (the bake artifact).
             "address": serde_json::to_value(&hints).unwrap_or(serde_json::Value::Null),
-            "seed_saved_to": seed_path.display().to_string(),
+            "admission_records_path": admission_records_path.display().to_string(),
         })),
     )
         .into_response()

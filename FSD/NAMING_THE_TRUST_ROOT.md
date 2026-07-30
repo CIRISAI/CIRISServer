@@ -28,6 +28,22 @@ verifies carries its own authority graph; a key record alone never could.
 **Never say "seed" for key material.** `CIRIS_TEST_TRUST_ROOT_PRIVATE_KEY` is 32
 bytes of Ed25519 private key. The bundle is an artifact. They are unrelated.
 
+**Never say "seed" for admission records.** `admit-node` and `canonical/add`
+write `ceg_outbox()/accord_admit_node/{target}.json` — a holder anchor plus a
+scrub-signed node record. That file is the **transport for a remote target**,
+which adopts the records itself. It is not a seed and does not parse as one.
+
+Through 0.5.140 it was called exactly that: `seed_saved_to`, "the genesis seed
+object", and in the UI — *"seed saved to $it. Hand it to persist to bake."* An
+operator following that instruction hands persist the wrong file, at the one
+moment being wrong is most expensive. The endpoint worked; only the words were
+wrong, which is why nothing caught it. `tests/seed_vocabulary.rs` now does.
+
+| artifact | what it is | where |
+|---|---|---|
+| **the seed** | a `GenesisBundle` | `<home>/mesh-genesis.json` |
+| **admission records** | holder anchor + scrubbed node record | `ceg_outbox()/accord_admit_node/{target}.json` |
+
 ---
 
 ## `delegates_to` does three jobs — always name which

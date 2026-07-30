@@ -230,16 +230,22 @@ data class AccordProvisionResponse(
 /**
  * ``POST /v1/accord/admit-node`` response (CIRISServer#140 / CIRISVerify#162) — the
  * accord holder (A1) scrub-signed a node's registration and emitted their own
- * `steward,accord_holder` anchor. Both are the **genesis seed object**, saved to a
- * predictable outbox path (`ceg_outbox()/accord_admit_node/{target}.json`) the
- * operator hands to CIRISPersist v12.0.2 to bake. `savedTo` is that path; `seed`
- * is the object verbatim (for display / copy).
+ * `steward,accord_holder` anchor. Both are the **admission records**, saved to a
+ * predictable outbox path (`ceg_outbox()/accord_admit_node/{target}.json`) so they
+ * can travel to a REMOTE target, which adopts them on its own node. [savedTo] is
+ * that path; [admissionRecords] is the object verbatim (for display / copy).
+ *
+ * **These are not the seed.** The seed is a `GenesisBundle` and that is the only
+ * shape (`FSD/NAMING_THE_TRUST_ROOT.md`); the genesis ceremony produces it and the
+ * node saves it to `<home>/mesh-genesis.json`. Through 0.5.140 this was documented
+ * as "the genesis seed object … hands to CIRISPersist v12.0.2 to bake". VOCAB-HISTORY
  */
 @Serializable
 data class AdmitNodeResponse(
     @SerialName("saved_to")
     val savedTo: String,
-    val seed: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("admission_records")
+    val admissionRecords: kotlinx.serialization.json.JsonElement? = null,
 )
 
 /**
@@ -334,10 +340,11 @@ data class CanonicalWithdrawalsResponse(
 
 /**
  * ``POST /v1/accord/canonical/add`` response (CIRISServer#164) — an accord holder
- * scrub-signed a target node's registration AND flagged it `canonical`, producing
- * the genesis **seed object** saved to a predictable outbox path ([seedSavedTo]).
- * 1-of-N: one holder's YubiKey + USB scrub suffices. If the holder supplied a
- * bootstrap transport the node also records the canonical server's [address].
+ * scrub-signed a target node's registration AND flagged it `canonical`, writing the
+ * holder-signed **admission records** to a predictable outbox path
+ * ([admissionRecordsPath]). 1-of-N: one holder's YubiKey + USB scrub suffices. If
+ * the holder supplied a bootstrap transport the node also records the canonical
+ * server's [address].
  */
 @Serializable
 data class AddCanonicalServerResponse(
@@ -347,8 +354,19 @@ data class AddCanonicalServerResponse(
     val isCanonical: Boolean = false,
     /** Opaque address record (transport_kind + destination) or null. */
     val address: kotlinx.serialization.json.JsonElement? = null,
-    @SerialName("seed_saved_to")
-    val seedSavedTo: String? = null,
+    /**
+     * Where the holder-signed admission records were written — the transport for a
+     * REMOTE target, which adopts them on its own node.
+     *
+     * **NOT the seed.** The seed is a `GenesisBundle`, and that is the only shape
+     * (`FSD/NAMING_THE_TRUST_ROOT.md`); a pair of key records does not parse as
+     * one. The seed comes out of the genesis ceremony and the node saves it to
+     * `<home>/mesh-genesis.json`. Through 0.5.140 this field was `seed_saved_to` (VOCAB-HISTORY)
+     * and the UI told the operator to "hand it to persist to bake" — pre-bundle
+     * v12.0.2 vocabulary, naming the wrong file at the one moment it matters.
+     */
+    @SerialName("admission_records_path")
+    val admissionRecordsPath: String? = null,
 )
 
 // ─── Cross-device m-of-n co-scrub (CIRISServer #174 / CIRISPersist#383) ───────

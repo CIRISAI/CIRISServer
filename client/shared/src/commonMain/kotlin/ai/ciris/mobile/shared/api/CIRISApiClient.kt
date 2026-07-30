@@ -2665,8 +2665,10 @@ class CIRISApiClient(
      * (loopback, CIRISServer#140 / CIRISVerify#162). The accord holder (A1) RE-OPENS
      * their YubiKey + USB-wrapped ML-DSA and **scrub-signs** the target node's
      * registration (+ emits their own `steward,accord_holder` anchor). The node
-     * writes the resulting **genesis seed object** to a predictable outbox path and
-     * returns it. The app holds NO keys — the touch on the YubiKey IS consent.
+     * writes the resulting **admission records** to a predictable outbox path and
+     * returns them — not the seed, which is the `GenesisBundle` the genesis ceremony
+     * saves to `<home>/mesh-genesis.json`.
+     * The app holds NO keys — the touch on the YubiKey IS consent.
      * 1-of-N bootstrap: a single holder suffices (a trust EXTENSION, not the 2/3
      * kill-switch). The target's pubkeys come from the node's self-key-record.
      */
@@ -2825,7 +2827,10 @@ class CIRISApiClient(
                 ai.ciris.mobile.shared.models.federation.AddCanonicalServerResponse.serializer(),
                 raw,
             )
-            logInfo(method, "added canonical=${parsed.canonicalKeyId} → seed saved to ${parsed.seedSavedTo}")
+            logInfo(
+                method,
+                "added canonical=${parsed.canonicalKeyId} → admission records at ${parsed.admissionRecordsPath}",
+            )
             parsed
         } catch (e: Exception) {
             val hint = if (e is io.ktor.client.plugins.HttpRequestTimeoutException) {

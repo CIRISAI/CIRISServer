@@ -376,9 +376,12 @@ class AccordViewModel(
      * **Admit a node to the trust root** (CIRISServer#140 / CIRISVerify#162). The
      * local accord holder RE-OPENS their YubiKey + USB-wrapped ML-DSA and
      * scrub-signs the target node's registration (+ emits their own
-     * `steward,accord_holder` anchor); the node writes the genesis **seed object**
-     * to a predictable outbox path (surfaced as [admitSavedTo]) the operator hands
-     * to CIRISPersist to bake. The app sends NO crypto — the YubiKey touch IS consent.
+     * `steward,accord_holder` anchor); the node writes the **admission records** to
+     * a predictable outbox path (surfaced as [admitSavedTo]) so they can travel to a
+     * REMOTE target, which adopts them itself. They are **not** the seed and must not
+     * be handed to persist as one — the seed is the `GenesisBundle` the genesis
+     * ceremony writes to `<home>/mesh-genesis.json`.
+     * The app sends NO crypto — the YubiKey touch IS consent.
      */
     fun admitNode(
         holderKeyId: String,
@@ -407,7 +410,7 @@ class AccordViewModel(
                 )
                 _admitSavedTo.value = res.savedTo
                 _notice.value =
-                    "Admitted $targetKeyId — seed saved to ${res.savedTo}. Hand it to persist to bake."
+                    "Admitted $targetKeyId — admission records saved to ${res.savedTo}."
                 refresh()
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[admitNode] ${e.message}")
@@ -602,9 +605,12 @@ class AccordViewModel(
     /**
      * **Add a canonical server** (CIRISServer#164). The local accord holder RE-OPENS
      * their YubiKey + USB-wrapped ML-DSA and scrub-signs the target node's
-     * registration, ALSO flagging it `canonical` so it becomes a mesh-seed anchor;
-     * the node writes the genesis **seed object** to a predictable outbox path
-     * (surfaced as [canonicalSavedTo]) the operator hands to CIRISPersist to bake.
+     * registration, ALSO flagging it `canonical` so it becomes a mesh anchor; the
+     * node writes the holder-signed **admission records** to a predictable outbox
+     * path (surfaced as [canonicalSavedTo]) — the transport for a REMOTE target,
+     * which adopts them itself. Those records are **not** the seed and must not be
+     * handed to persist as one: the seed is the `GenesisBundle` the genesis
+     * ceremony writes to `<home>/mesh-genesis.json`.
      * An OPTIONAL bootstrap transport ([transportKind] + [destination]) is recorded
      * as the canonical server's address. The app sends NO crypto — the touch IS consent.
      */
@@ -637,10 +643,14 @@ class AccordViewModel(
                     destination = destination?.takeIf { it.isNotBlank() },
                     modulePath = modulePath,
                 )
-                _canonicalSavedTo.value = res.seedSavedTo
+                // NOT the seed — these are the holder-signed admission records, the
+                // transport for a remote target. The seed is the GenesisBundle the
+                // ceremony writes to <home>/mesh-genesis.json. Telling the operator
+                // to "hand it to persist to bake" here pointed at the wrong file.
+                _canonicalSavedTo.value = res.admissionRecordsPath
                 _notice.value =
                     "Added canonical server ${res.canonicalKeyId}" +
-                        (res.seedSavedTo?.let { " — seed saved to $it. Hand it to persist to bake." } ?: ".")
+                        (res.admissionRecordsPath?.let { " — admission records saved to $it." } ?: ".")
                 refresh()
                 loadCanonicalServers()
             } catch (e: Exception) {
