@@ -2501,12 +2501,12 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
 
-    // THE FIFTH CONJUNCT (CIRISServer#307 follow-through). A charter + grants make
-    // the root DECLARED; `trust_root_valid` additionally requires a live
-    // `accord:lifecycle:v1` row ABOUT the root, or it returns false and every
-    // capability walk silently rejects the root — a bundle that looks complete and
-    // is inert. It is a `scores` row (not `delegates_to`), and the `accord:*`
-    // namespace requires an accord_holder attester, which the root is.
+    // The accord HEARTBEAT — a liveness signal about the trust root, not a
+    // validity gate (persist v23 reports it as a banded `drill_freshness` beside
+    // the verdict). Minted here because a fresh root should ship with a fresh
+    // drill signal; a bundle without one is still valid. It is a `scores` row (not
+    // `delegates_to`), and the `accord:*` namespace requires an accord_holder
+    // attester, which the root is.
     let lifecycle = match sign_att(
         &identity,
         crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,

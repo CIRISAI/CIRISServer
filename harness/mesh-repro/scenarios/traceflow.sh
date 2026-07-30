@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # scenarios/traceflow.sh — trace sealed on an agent must arrive at the canonical AND be scored there.
 #
-# THE carrier scenario. A trace sealed on an agent must reach the canonical and
-# be SCORED there by a distinct sovereign identity.
+# STAGES 2-3 of the happy path (FSD/GENESIS_TO_SCORE.md): peering, then seal →
+# serve gate → round → admit → materialize → summarize → SCORE, by a distinct
+# sovereign identity.
+#
+# It SUBSTITUTES for stage 1. The test-anchor fixture mints a trust root locally on
+# every node, standing in for "install the baked bundle, then accept the trust
+# root" — which has no implementation yet. So this scenario isolates stages 2-3 and
+# deliberately proves nothing about genesis; scenarios/genesis_seed.sh is the arm
+# that measures stage 1 honestly.
 #
 # Stage 7 is the whole point. Anything short of a capacity attestation authored
 # ABOUT the agent BY the canonical is not success: the constitution refuses

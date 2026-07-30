@@ -1,148 +1,136 @@
-# Naming the trust root — what confused me, and what would be Stupid Clear
+# The trust-root vocabulary
 
-Every item below is a name that produced a **real, traceable error** in one working session. This is not stylistic. Each entry lists the name, the mistake it caused, and the proposed replacement.
+The settled names, and the distinctions they exist to keep visible. Shipped in
+persist **v23.0.0** (CIRISPersist#551) and adopted here in **0.5.140**.
 
-The through-line: **several names carry two or three unrelated referents, and the code silently picks one.** That is the same "one name, two axes" class this project has been curing in data (CIRISPersist#532, #541, #547) — here it is in the vocabulary.
-
----
-
-## 1. "seed" — THREE unrelated things
-
-| what | today | what it actually is |
-|---|---|---|
-| the baked genesis artifact | `canonical_seed.json` | a list of `SignedKeyRecord` |
-| the ceremony's output | "the seed" (prose) | a `GenesisBundle` |
-| **32 bytes of Ed25519 private key material** | `CIRIS_TEST_TRUST_ROOT_SEED` | a cryptographic seed |
-
-**The error it caused:** "create a valid seed" was ambiguous across all three for an entire exchange. Worse, dropping `CIRIS_TEST_TRUST_ROOT_SEED` is how you disable the *ceremony* — so "no seed" means both "no key material" and "no trust root," and a compose overlay named `unblessed` silently did neither.
-
-**Stupid Clear:**
-- `canonical_seed.json` → **`trust_root_bundle.json`**
-- `CIRIS_TEST_TRUST_ROOT_SEED` → **`CIRIS_TEST_TRUST_ROOT_PRIVATE_KEY`**
-- retire the bare word "seed" in prose; say **bundle** (artifact) or **key material** (bytes)
+Read this before touching genesis, the serve gate, or the seed. Every distinction
+below was previously carried by context rather than by a name, and each one cost
+real debugging time when the context was missing.
 
 ---
 
-## 2. "root" — at least FOUR referents
+## The seed is a bundle, and it is the only shape
 
-- the **trust root** (a key that charters itself)
-- `let root = req.holder_key_id` — a *seated accord holder* acting as the trust root
-- the **ROOT user** (auth role: `WaRole::Root`, `bootstrap_if_needed`)
-- **"rooting"** in edge — *reachability*, not trust at all (`RootedPeer`, `rooting directory`, "peer roots")
-
-**The error it caused:** I repeatedly read edge's "rooted peer" (can I dial you) as "trust-rooted" (do I accept your authority). The codebase already warns `⚠️ ROOTING ≠ ROUTING` — it needs the same warning against *trust*-rooting, or better, a different word.
-
-**Stupid Clear:**
-- trust root → always **`trust_root`**, never bare `root`
-- the holder key that charters → **`charter_key`**
-- ROOT user → **`owner`**
-- edge's rooting → **`reachability`** / **`dialable_peer`**
-
----
-
-## 3. `delegates_to` — ONE type doing THREE opposite jobs
-
-| job | shape | meaning |
-|---|---|---|
-| **charter** | `delegates_to(R → R)` | "I am a trust root" |
-| **conferral** | `delegates_to(R → subject, scope)` | "I grant this subject a capability" |
-| **trust edge** | `delegates_to(node → R)` | "I accept R's authority over me" |
-
-Same `attestation_type`. The direction is the *only* discriminator, and the middle two point opposite ways.
-
-**The error it caused — the worst of the session.** I conflated the conferral with the trust edge and twice gave wrong guidance: first that the seed lacked authority (it has the conferral, as a co-scrub), then that the canonical must self-charter (it must not — the charter is on the accord holder). Both were "which `delegates_to` is this?" failures.
-
-**Stupid Clear** — name the job in the envelope dimension, even if the wire type stays `delegates_to`:
+There is exactly **one** artifact type. `canonical_seed.json` is a
+`GenesisBundle`:
 
 ```
-trust:charter:v1     R → R          the self-declaration
-trust:confers:v1     R → subject    the capability grant
-trust:accepts:v1     node → R       the deletable un-trust lever
+version · family_key_id · holders · serve_nodes · consensus_protocol
+        · attestations · authorizations · produced_at
 ```
 
-Then the predicates read as English: `root_self_declares` looks for `trust:charter`, candidates look for `trust:confers`, `edge_exists` looks for `trust:accepts`. No direction-arithmetic at any call site.
+persist owns the type; we produce it. A bare `[{record}]` file is **not a seed**
+and does not parse.
+
+"Valid seed" is therefore a type question, not a judgement call. A bundle that
+verifies carries its own authority graph; a key record alone never could.
+
+**Never say "seed" for key material.** `CIRIS_TEST_TRUST_ROOT_PRIVATE_KEY` is 32
+bytes of Ed25519 private key. The bundle is an artifact. They are unrelated.
 
 ---
 
-## 4. "leg A" / "leg B" — opaque, and they are really two CONFERRAL PLANES
+## `delegates_to` does three jobs — always name which
 
-`#379`/`#386` names them leg A and leg B. Nothing in either name says what it reads. In fact:
+One attestation type, three roles, distinguished by the envelope dimension:
 
-- **leg A** = *"did the accord bless this identity?"* — the **co-scrub** plane
-- **leg B** = *"did a trust root I accept confer this capability?"* — the **delegation** plane
-
-**The error it caused:** I could not hold which leg read which plane, and wrote a persist issue whose proposed remedy would have deleted the un-trust lever — because "leg B" told me nothing about what it consulted.
-
-**Stupid Clear:** persist v22.1.0 already invented the right vocabulary — `ConferralPlane::{AccordCoScrub, Delegation}`. Adopt it everywhere and **retire leg A / leg B**. The gate should log `conferral_plane=AccordCoScrub` rather than "leg A passed."
-
----
-
-## 5. `accord:lifecycle:v1` — sounds durable, is a heartbeat
-
-It is **freshness-windowed at 90 days**. "Lifecycle" reads like a durable state machine (created → active → retired), so I assumed a genesis artifact could carry one. It cannot: a baked heartbeat ages out and every node fails together, three months later, with no error at the point of use.
-
-**Stupid Clear:** **`accord:liveness_heartbeat:v1`**. A name that makes "bake this into a durable artifact" feel obviously wrong.
-
----
-
-## 6. `attach_genesis` — does not attach the thing you need
-
-It installs holders, serve nodes and attestations, and **deliberately refuses** to write the trust edge. That refusal is correct and completely invisible in the name.
-
-**Stupid Clear:** **`install_trust_root_records`** (what it does) plus a separate, obvious **`accept_trust_root`** (the deliberate act that writes `trust:accepts`). Two names, two acts, no surprise.
-
----
-
-## 7. `has_effective_role` vs `has_delegated_capability_role`
-
-Near-identical names, **different planes**: the first reads the co-scrub, the second reads the delegation graph. Nothing distinguishes them at a call site.
-
-**Stupid Clear:** **`has_accord_conferred_role`** and **`has_root_delegated_role`**.
-
----
-
-## 8. `roles` vs `identity_type` — the gate reads the one you don't expect
-
-Reserved prefixes (`age_assurance:`, `system:`, `detection:` …) gate on **`identity_type`**, via `required_identity_types` — *not* on `roles`.
-
-**The error it caused:** I asserted a Sybil could not mint reserved-prefix rows without roles. Wrong — `identity_type` is self-assertable, which is the whole of CIRISPersist#543 hole 3.
-
-**Stupid Clear:** rename the rule field to **`required_identity_types`** at every mention (it already is in code — the *prose* everywhere says "roles"), and rename `KeyRecord.roles` → **`capability_roles`** so the two are never read as synonyms.
-
----
-
-## 9. `bless` — identity scrub, or the whole ceremony?
-
-`test_bless` does both: it scrubs the key record (identity) **and** runs the trust-root ceremony (authority). "Blessed" then means either.
-
-**Stupid Clear:** **`scrub_identity`** (the record) and **`mint_trust_root`** (the ceremony). "Bless" retires.
-
----
-
-## THE STRUCTURAL ONE: there must be exactly ONE seed shape
-
-Today there are two, and that ambiguity *is* Δ3:
-
-| shape | where | contents |
+| dimension | shape | question it answers |
 |---|---|---|
-| bare record list | `canonical_seed.json` (baked) | `[{record}]` — identity only |
-| `GenesisBundle` | ceremony output | holders + serve nodes + charter + conferrals + m-of-n authorizations |
+| `trust:charter:v1` | `R → R` | *is R a trust root?* |
+| `trust:confers:v1` | `R → subject` | *did R grant this subject a capability?* |
+| `trust:accepts:v1` | `node → R` | *does this node accept R's authority?* |
 
-A node seeded with the first can never satisfy the delegation plane; only the second carries the authority graph. Having both means "is this node seeded?" has two answers.
+The middle two point **opposite ways**. Reading a conferral as a trust edge (or
+vice versa) is the single easiest mistake to make here, and direction alone is a
+poor guard — name the job.
 
-**Proposal: the portable trust root bundle is the only valid seed shape.**
-
-- `canonical_seed.json` becomes a **`TrustRootBundle`** — the same artifact the ceremony emits.
-- `canonical_genesis_records()` returns the bundle, not `&[SignedKeyRecord]`.
-- The bare-record path is **deleted**, not deprecated. A `[{record}]` file fails to parse rather than silently seeding an inert node.
-- Boot then has one job: install the bundle's records, and write `trust:accepts` to the bundle's trust root as default trust (deletable — the un-trust lever).
-
-That collapses Δ3 and Δ4 into "install the one artifact," and makes "valid seed" a type rather than a judgement call.
+`trust:accepts` is the **un-trust lever**: the operator deletes that one row and
+the whole cascade fails closed on its own — the walk returns `None`, the serve
+gate withholds, agent capabilities gate off, manifests stop. Nothing about that
+is special-cased, and nothing may replace it with a universal rule.
 
 ---
 
-## Why this is worth doing before minting
+## Two conferral planes, named
 
-The production trust root is minted once and lives a long time. Every ambiguity above is currently resolved by *reading the implementation* — which is how a session with full source access still produced four wrong statements about what the seed contains and who must sign what.
+A capability can be conferred two ways. Use `ConferralPlane`, never "leg A/leg B":
 
-An operator minting the real root will not read `trust_root.rs`. The names have to carry the meaning.
+| plane | question | evidence |
+|---|---|---|
+| `ConferralPlane::AccordCoScrub` | *did the accord bless this identity?* | m-of-n co-scrub on the key record (`registration_envelope.roles`) |
+| `ConferralPlane::Delegation` | *did a root I accept confer this capability?* | a `trust:confers` grant walked to a trusted root |
+
+`capability_roots_to_trusted_root` tries delegation first (cheap), then the
+co-scrub (a 2-of-3 hybrid verification). Either plane can supply the candidate;
+**both then require the asking node's own `trust:accepts` edge** via
+`trust_root_valid`. The planes differ in who conferred, never in whether you
+accepted.
+
+Readers:
+
+- `has_accord_conferred_role` — the co-scrub plane
+- `has_root_delegated_role` — the delegation plane
+
+---
+
+## Validity is four things. Liveness is not one of them.
+
+```rust
+let valid = edge_exists            // this node's trust:accepts edge
+         && root_self_declares     // the root's trust:charter
+         && charter_has_recovery   // its pre-rotation commitment
+         && halt_latched != Some(true);
+```
+
+The **accord heartbeat** (`ACCORD_HEARTBEAT_DIMENSION`) is a liveness *signal*,
+reported beside the verdict as a banded `drill_freshness` — green / yellow / red
+by age. It never gates.
+
+This is what makes a seed durable: **valid until revoked, withdrawn or
+superseded**, never until it expires. A validity gate on freshness would give
+every baked artifact a shelf life and take the whole mesh dark on the same day,
+with no error at the point of use.
+
+Surface the band, don't branch on it (CIRISServer#332).
+
+---
+
+## Capability roles vs identity type
+
+Two different fields, gating different things — they are not synonyms:
+
+- **`KeyRecord.capability_roles`** — capabilities the key claims (`infra:serve`, …)
+- **`identity_type`** — what the key *is* (`canonical`, `witness`, `accord_holder`, …)
+
+Reserved dimension prefixes (`age_assurance:`, `system:`, `detection:`, …) gate on
+**`identity_type`**, via `required_identity_types`. Not on `capability_roles`. Say
+`identity_type` when that is what the gate reads, because assuming otherwise leads
+directly to the wrong threat model.
+
+---
+
+## Words that mean one thing each
+
+| word | means | does **not** mean |
+|---|---|---|
+| **trust root** | a key with a `trust:charter` | an accord holder; the ROOT user; edge's "rooted peer" |
+| **charter key** | the holder key acting as a trust root | anything else called `root` |
+| **owner** | the ROOT user (auth) | a trust root |
+| **reachability** | edge's rooting — can I dial you | trust of any kind |
+| **bundle** | the genesis artifact | key material |
+| **heartbeat** | accord liveness signal | a lifecycle state machine; a gate |
+
+Edge's `RootedPeer` is about **dialling**, not trust. `⚠️ ROOTING ≠ ROUTING` is in
+the source already; it is also ≠ *trust*-rooting.
+
+---
+
+## Ours, by name
+
+- `install_trust_root_records` — installs a bundle's records. Deliberately does
+  **not** write `trust:accepts`; accepting a root is the node's own act.
+- `accept_trust_root` — writes `trust:accepts`. The deletable lever.
+- `mint_trust_root` — the ceremony.
+
+The split between the first two is the whole design: a bundle may seed records, and
+may never assign a stranger a trust root.

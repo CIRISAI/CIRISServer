@@ -286,25 +286,23 @@ pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     })
 }
 
-/// Build the `accord:lifecycle:v1` liveness envelope for the charter root — the
-/// FIFTH conjunct of `trust_root_valid`, and the one a v2 bundle was missing.
+/// Build the accord **heartbeat** envelope for the trust root.
 ///
-/// `trust_root_valid` is an AND over five things: `edge_exists`,
-/// `root_self_declares`, `charter_has_recovery`, **`lifecycle_active`**, and
-/// `!halt_latched`. A bundle can carry a perfect charter and perfect grants and
-/// still produce a root that every capability walk rejects, because a root with no
-/// live liveness row is indistinguishable from one nobody is attesting to.
+/// The heartbeat is a LIVENESS SIGNAL, never a validity gate. `trust_root_valid`
+/// is an AND over four things — `edge_exists`, `root_self_declares`,
+/// `charter_has_recovery`, `!halt_latched` — and liveness is not among them.
+/// persist reports it separately as a banded `drill_freshness`, so an old or
+/// absent heartbeat degrades a displayed signal rather than invalidating a root.
+/// That is what lets a seed be durable: valid until revoked, withdrawn or
+/// superseded.
 ///
 /// The row is a `scores` attestation ABOUT the root (`attested_key_id = root`)
 /// carrying this dimension, and persist requires an `accord_holder` attester for
 /// the `accord:*` namespace — so at genesis the root, itself a seated holder,
 /// scores itself.
 ///
-/// **It expires.** `ACCORD_LIFECYCLE_FRESHNESS_DAYS` is 90, so this is not a
-/// mint-once artifact: a bundle attached more than 90 days after it was produced
-/// carries a row that no longer counts, and the root goes inert with no error at
-/// the point of use. [`verify_bundle_structure`] refuses a stale bundle for that
-/// reason, and a long-lived mesh needs the row re-minted on a cadence.
+/// Mint it at ceremony time and re-mint it when a mesh wants a fresh drill
+/// signal. Nothing breaks if you do not: consumers show the band as stale.
 pub fn lifecycle_envelope() -> serde_json::Value {
     serde_json::json!({
         (paths::REFERENCES_ATTESTATION_ID): LIFECYCLE_ATTESTATION_ID,
@@ -312,8 +310,8 @@ pub fn lifecycle_envelope() -> serde_json::Value {
     })
 }
 
-/// The liveness row carried by a bundle, if any: a `scores` row about the root
-/// on the `accord:lifecycle:v1` dimension.
+/// The heartbeat carried by a bundle, if any: a `scores` row about the trust
+/// root on the accord-heartbeat dimension.
 fn lifecycle_of<'a>(bundle: &'a GenesisBundle, root: &str) -> Option<&'a Attestation> {
     bundle
         .attestations
@@ -918,7 +916,7 @@ mod v2_tests {
         }
     }
 
-    /// The fifth conjunct: a live `accord:lifecycle:v1` row about the root.
+    /// A heartbeat about the trust root (a signal, not a gate).
     fn good_lifecycle() -> SignedAttestation {
         scores_att(LIFECYCLE_ATTESTATION_ID, "A1", "A1", lifecycle_envelope())
     }

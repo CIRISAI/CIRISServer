@@ -577,11 +577,9 @@ async fn qa_mints_and_produces_a_portable_genesis() {
         .await,
     };
 
-    // THE FIFTH CONJUNCT. `trust_root_valid` ANDs `lifecycle_active` in, so a
-    // bundle with a perfect charter and perfect grants still yields a root every
-    // capability walk rejects. `accord:*` requires an accord_holder attester —
-    // which A1 is. Live `asserted_at`: the row is freshness-windowed (90d), so a
-    // frozen date would make this fixture rot.
+    // The accord HEARTBEAT — a liveness signal reported beside the verdict, not a
+    // conjunct of `trust_root_valid`. Minted so a fresh root ships with a fresh
+    // drill band. `accord:*` requires an accord_holder attester, which A1 is.
     let lifecycle = SignedAttestation {
         attestation: sign_row(
             crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
@@ -657,8 +655,8 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     assert_eq!(
         report.attestations_seeded, 3,
         "the charter + the serve grant + the accord:lifecycle:v1 liveness row must ALL be \
-         written on attach — trust_root_valid ANDs lifecycle_active in, so seeding only the \
-         first two lands a root that every capability walk silently rejects"
+         written on attach — seeding only the charter and the grant leaves the drill band \
+         unknown and loses the ceremony's liveness signal"
     );
     assert_eq!(
         report.trust_root_key_id, ROOT,
@@ -954,8 +952,8 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         )
         .await,
     };
-    // The fifth conjunct — see the note in the mint path above. A REBLESS needs it
-    // just as much as a fresh mint: the root is only as live as its liveness row.
+    // The heartbeat — see the mint path above. A rebless refreshes the drill band
+    // for the same reason a fresh mint sets it.
     let lifecycle = SignedAttestation {
         attestation: sign_row(
             crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,

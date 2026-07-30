@@ -40,7 +40,9 @@
 #   Δ4  edge_exists      nothing writes delegates_to(node → root) off the minting node
 #   Δ3  root_self_declares / charter_recovery   the bundle has no distribution path;
 #                                               canonical_seed.json is the key record ALONE
-#   Δ2  lifecycle_active accord:lifecycle is freshness-windowed (90d) — a baked row ages out
+#   (Δ2 RESOLVED in persist v23: liveness left `trust_root_valid` entirely and became a
+#    banded `drill_freshness` reported beside the verdict, so a seed no longer expires.
+#    The heartbeat stage below is retained as an OBSERVABILITY check, not a gate.)
 #   Δ1  quorum_survives  Attestation carries ONE scrub_key_id (no additional_scrubs), so a
 #                        3-key ceremony degrades to 1-of-n once the rows land. Tested
 #                        in-process, not here — see tests/genesis_quorum_pin.rs.
@@ -51,7 +53,7 @@ VERDICT_MODE="audit"
 SUCCESS_STAGE="leg_b"
 SUCCESS_MESSAGE="a node holding only the baked seed resolves leg B and serves traces — the portable trust root is operable."
 
-STAGES=(seed_admitted leg_a_role edge_exists root_self_declares charter_recovery lifecycle_active leg_b)
+STAGES=(seed_admitted leg_a_role edge_exists root_self_declares charter_recovery accord_heartbeat leg_b)
 
 # Probes run on the AGENT: it is the asker. `capability_roots_to_trusted_root` is
 # evaluated in the SENDER's directory, so what the canonical holds is irrelevant
@@ -92,7 +94,7 @@ stage_root_self_declares() {
   harness_db_count agent federation_attestations \
     "attestation_type = 'delegates_to' AND attesting_key_id = attested_key_id"
 }
-HINT_root_self_declares="Δ3 — no self-referential charter for the root reached this node. The ceremony mints one, but canonical_seed.json is the KEY RECORD ALONE and a GenesisBundle has no distribution path, so the charter never travels."
+HINT_root_self_declares="Δ3 — no self-referential charter for the root reached this node. The ceremony mints one, but the baked seed is bundle-SHAPED as of persist v23 but ships EMPTY (holders 0, attestations 0, authorizations 0) — the container exists, the ceremony has not yet filled it."
 EXIT_root_self_declares=23
 
 stage_charter_recovery() {
@@ -104,12 +106,12 @@ HINT_charter_recovery="Δ3 — the charter (if any) carries no pre-rotation comm
 EXIT_charter_recovery=24
 
 # ── 6. Δ2 — the liveness witness, and whether it has aged out ───────────────
-stage_lifecycle_active() {
+stage_accord_heartbeat() {
   harness_db_count agent federation_attestations \
     "attestation_type = 'scores' AND CAST(attestation_envelope AS TEXT) LIKE '%accord:lifecycle%'"
 }
-HINT_lifecycle_active="Δ2/Δ3 — no accord:lifecycle witness about the root reached this node. NOTE this stage counts the row's PRESENCE; persist additionally requires it within ACCORD_LIFECYCLE_FRESHNESS_DAYS (90). A baked witness therefore ages out and every node fails together, three months after the mint, with no error at the point of use — which is why presence alone is not sufficient and a seed carrying one has a shelf life."
-EXIT_lifecycle_active=25
+HINT_accord_heartbeat="Δ3 — no accord heartbeat about the trust root reached this node. NOT a validity failure: persist v23 reports liveness as a banded drill_freshness beside the verdict rather than gating on it. Consumers will show this root's drill band as unknown until a heartbeat arrives (CIRISServer#332)."
+EXIT_accord_heartbeat=25
 
 # ── 7. the actual question ──────────────────────────────────────────────────
 stage_leg_b() { harness_log_count agent "trace attestation permitted"; }
