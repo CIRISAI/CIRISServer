@@ -76,6 +76,20 @@ jobs:
                       /usr/share/swift || true
           df -h / | tail -1
 
+      # The release wheel keeps DEFAULT features, so `pkcs11` pulls libudev-sys and
+      # the TPM path pulls tss2 — both need system libs or the build dies in a
+      # build script with a pkg-config error that looks nothing like a harness
+      # failure. Same set (and the same Microsoft-repo workaround) as ci.yml.
+      - name: System deps for the release build
+        run: |
+          # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
+          # 403s and tanks apt-get update (its packages are not needed here).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/azure-cli.sources
+          sudo apt-get update
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
+
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Set up sccache (compiler cache over GHA)
