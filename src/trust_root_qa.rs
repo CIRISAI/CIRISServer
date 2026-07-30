@@ -577,11 +577,29 @@ async fn qa_mints_and_produces_a_portable_genesis() {
         .await,
     };
 
+    // THE FIFTH CONJUNCT. `trust_root_valid` ANDs `lifecycle_active` in, so a
+    // bundle with a perfect charter and perfect grants still yields a root every
+    // capability walk rejects. `accord:*` requires an accord_holder attester —
+    // which A1 is. Live `asserted_at`: the row is freshness-windowed (90d), so a
+    // frozen date would make this fixture rot.
+    let lifecycle = SignedAttestation {
+        attestation: sign_row(
+            crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
+            &fx.holders[0],
+            ROOT,
+            attestation_type::SCORES,
+            crate::mesh_genesis::lifecycle_envelope(),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
+
     let mut bundle = produce_genesis(
         &family.family_key_id,
         "quorum:2/3",
         vec![fx.canonical.clone()],
-        vec![charter, grant],
+        vec![charter, grant, lifecycle],
         Vec::new(),
         "2026-07-22T00:00:00Z",
     )
@@ -637,8 +655,10 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // The delegation plane must LAND, not just ride along. Seeding keys alone is
     // exactly what made a v1 genesis inert on arrival.
     assert_eq!(
-        report.attestations_seeded, 2,
-        "the charter + the serve grant must be written on attach"
+        report.attestations_seeded, 3,
+        "the charter + the serve grant + the accord:lifecycle:v1 liveness row must ALL be \
+         written on attach — trust_root_valid ANDs lifecycle_active in, so seeding only the \
+         first two lands a root that every capability walk silently rejects"
     );
     assert_eq!(
         report.trust_root_key_id, ROOT,
@@ -934,11 +954,25 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         )
         .await,
     };
+    // The fifth conjunct — see the note in the mint path above. A REBLESS needs it
+    // just as much as a fresh mint: the root is only as live as its liveness row.
+    let lifecycle = SignedAttestation {
+        attestation: sign_row(
+            crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
+            &fx.holders[0],
+            ROOT,
+            attestation_type::SCORES,
+            crate::mesh_genesis::lifecycle_envelope(),
+            chrono::Utc::now(),
+            None,
+        )
+        .await,
+    };
     let mut bundle = produce_genesis(
         &family.family_key_id,
         "quorum:2/3",
         vec![reblessed],
-        vec![charter, grant],
+        vec![charter, grant, lifecycle],
         Vec::new(),
         "2026-07-22T00:00:00Z",
     )
