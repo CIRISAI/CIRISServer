@@ -87,7 +87,7 @@ services:
       CIRIS_HARNESS_EMBEDDED_FOLD: "${CIRIS_HARNESS_EMBEDDED_FOLD:-false}"
       # Lifecycle probe: print [DELIVERY-STATUS] JSON each poll (run_lifecycle.sh).
       CIRIS_HARNESS_LIFECYCLE: "${CIRIS_HARNESS_LIFECYCLE:-false}"
-      RUST_LOG: "info,ciris_edge=debug,reticulum_core=debug"
+      RUST_LOG: "info,ciris_edge=debug,reticulum_core=debug,leviculum_core=debug,leviculum_std=debug"
     networks: [mesh]
     tmpfs:
       - /var/lib/ciris:mode=1777

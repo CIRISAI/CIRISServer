@@ -828,26 +828,180 @@ async fn test_admit_peer(
     };
     let blessed_json = serde_json::to_value(&blessed).unwrap_or_default();
 
-    match crate::hardware_attestation::register_attested_federation_key(&st.engine, blessed).await {
-        Ok(()) => {
+    // Admit the peer (bless-then-register). BOTH `Ok` and a benign `Conflict`
+    // mean the peer is now an admitted `federation_keys` row; only a hard error
+    // aborts. We fall through to the reciprocal-consent step in either case.
+    let conflict =
+        match crate::hardware_attestation::register_attested_federation_key(&st.engine, blessed)
+            .await
+        {
+            Ok(()) => {
+                tracing::warn!(
+                    peer = %key_id,
+                    "TEST-ANCHOR: peer BLESSED (SW test-root scrub) + admitted via unauthenticated \
+                     test-admit-peer (harness only) — announce will root as Rooted provenance"
+                );
+                false
+            }
+            Err(ciris_persist::federation::Error::Conflict(_)) => true,
+            Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, &format!("admission: {e}")),
+        };
+
+    // ── Reciprocal replication consent (CIRISEdge#396 item 1) ────────────────
+    // Consent is DIRECTIONAL. Edge's `resolve_attestation_recipient` funnels the
+    // WHOLE attestation plane through `list_consent_peers(local)` (persist's E7
+    // projection, `local` == THIS node): a peer absent from the sender's own
+    // send-set has *every* attestation withheld, fail-closed (proven by edge's
+    // `consent_membership_fan_out_bound`). The agent authoring a grant that names
+    // the canonical only opens agent→canonical; nothing crosses canonical→agent —
+    // including the leg-B candidate `delegates_to(root → canonical, infra:serve)`
+    // the agent's `capability_roots_to_trusted_root` walk needs — until the
+    // canonical authors the RECIPROCAL grant naming the agent. The bare agent mints
+    // its side via the `author_federation_consent` FFI at boot; the canonical never
+    // runs that path, so we mint its side HERE, at the same test-anchor admit door.
+    //
+    // PREFIX SET — security-critical, kept MINIMAL. The row that must cross is the
+    // leg-B candidate `delegates_to(root → self, infra:serve)`, dimension
+    // `self:delegates_to:v1` (`delegates_to_envelope` stamps it; verified). It is
+    // minted at `cohort_scope: federation`, so it is already federation-tier and
+    // crosses on send-set MEMBERSHIP alone — this grant's job is to put the peer in
+    // the set. We carry the single narrow trust-graph prefix `self:delegates_to:`
+    // (a `consent_grammar::covers` `starts_with` of that dimension) and NOTHING more:
+    //   • NOT `trace:` — `promote_consented_backlog` walks EVERY local-tier row (not
+    //     just our own) and promotes any dimension our egress grants `covers`. A
+    //     `trace:`-covering grant would promote a co-resident load agent's replicated
+    //     -in local-tier trace rows to federation, leaking agent B's traces to agent A
+    //     under `docker-compose.load.yml` (N agents / one canonical). Cross-agent leak.
+    //   • NOT `capacity:` / `default_attestation_prefixes()` — it would satisfy the
+    //     non-vacuous-prefix guard (peer enters the send-set) while covering nothing
+    //     the trust graph needs: the plane opens, the row still doesn't promote, and
+    //     the failure looks identical to today. A silent-false trap.
+    // If `self:delegates_to:` alone proves insufficient at runtime, the fix is to
+    // report the refused dimension — NOT to widen the set speculatively.
+    //
+    // TESTING-MODE FENCE. Even in a test-anchor build this auto-grant fires ONLY
+    // under `CIRIS_TESTING_MODE=true`, mirroring the agent's `author_consent_testing`
+    // posture: production consent is exclusively the owner-gated
+    // `POST /v1/federation/consent`. A self-attested admission proves key custody,
+    // not authorization to replicate — so auto-consent stays a fixture behavior.
+    if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+        tracing::warn!(
+            peer = %key_id,
+            "TEST-ANCHOR: peer admitted but CIRIS_TESTING_MODE!=true — NOT auto-authoring the \
+             reciprocal consent:replication grant (production consent is the owner-gated \
+             POST /v1/federation/consent); this node's plane toward the peer stays closed"
+        );
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "admitted": key_id,
+                "blessed": true,
+                "conflict": conflict,
+                "reciprocal_consent": serde_json::Value::Null,
+                "record": if conflict { serde_json::Value::Null } else { blessed_json },
+            })),
+        )
+            .into_response();
+    }
+
+    // `node_key_id` MUST be `engine.local_derived_key_id()` — the EXACT #247-derived
+    // attester `emit_attestation_self` stamps AND the value edge resolves its
+    // `local_key_id` send-set against; passing `st.self_key_id` (the composed
+    // `cfg.key_id`) risks a mismatch that would make the idempotency read miss and
+    // the grant land under the wrong granter (invisible to `list_consent_peers`).
+    let node_key_id = match st.engine.local_derived_key_id().await {
+        Ok(id) => id,
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("reciprocal consent: local_derived_key_id: {e}"),
+            )
+        }
+    };
+    // The single narrow trust-graph prefix — see the block comment above.
+    let consent_prefixes = ["self:delegates_to:".to_string()];
+    let consent = match crate::peer::emit_replication_consent(
+        &st.engine,
+        &node_key_id,
+        &key_id,
+        &consent_prefixes,
+    )
+    .await
+    {
+        Ok(g) => g,
+        // Loud, not silent: without this grant the canonical's whole attestation
+        // plane toward the agent stays dark, so surface the failure to the harness
+        // (which retries the admit) rather than 200-ing a half-open peering.
+        Err(e) => {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("reciprocal replication consent for {key_id}: {e}"),
+            )
+        }
+    };
+
+    // Assert on the PROJECTION, not the row (CIRISEdge#425 silent-false class). A
+    // `consent:replication:v1` attestation can EXIST yet be invisible to edge if its
+    // `consent_peer_set` projection was not maintained — edge reads the projection
+    // (`list_consent_peers`), never the raw table. `emit_replication_consent` uses
+    // `emit_attestation_self`, whose write maintains the projection transactionally,
+    // so this should always hold; we verify it anyway because a missing projection is
+    // exactly the failure that reads as "consented" in the table and darkens the
+    // plane. Read-back through the SAME projection edge resolves the send-set from.
+    match crate::peer::replication_peers_from_consent(&st.engine, &node_key_id).await {
+        Ok(peers) if peers.iter().any(|p| p == &key_id) => {
             tracing::warn!(
                 peer = %key_id,
-                "TEST-ANCHOR: peer BLESSED (SW test-root scrub) + admitted via unauthenticated \
-                 test-admit-peer (harness only) — announce will root as Rooted provenance"
+                grant = %consent.attestation_id,
+                freshly_emitted = consent.freshly_emitted,
+                "TEST-ANCHOR: canonical RECIPROCAL consent:replication VERIFIED in the \
+                 list_consent_peers projection (CIRISEdge#396 item 1) — the peer is now in this \
+                 node's attestation send-set, so its leg-B delegates_to(root→self, infra:serve) \
+                 candidate can cross (prefix self:delegates_to: only; no trace: promotion)"
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "admitted": key_id, "blessed": true, "record": blessed_json })),
-            )
-                .into_response()
         }
-        Err(ciris_persist::federation::Error::Conflict(_)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "admitted": key_id, "blessed": true, "conflict": true })),
-        )
-            .into_response(),
-        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &format!("admission: {e}")),
+        Ok(_) => {
+            // The grant emitted but the projection does NOT list the peer — the
+            // silent-false class made loud. Fail the admit so the harness sees it.
+            tracing::error!(
+                peer = %key_id,
+                grant = %consent.attestation_id,
+                "TEST-ANCHOR: reciprocal consent:replication row emitted but the peer is ABSENT \
+                 from list_consent_peers(self) — the consent_peer_set projection did not take; \
+                 edge will still withhold the plane (CIRISEdge#425 silent-false)"
+            );
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(
+                    "reciprocal consent grant {} for {key_id} is not in the list_consent_peers \
+                     projection — plane would stay dark",
+                    consent.attestation_id
+                ),
+            );
+        }
+        Err(e) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("reciprocal consent: verify list_consent_peers projection: {e}"),
+            )
+        }
     }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "admitted": key_id,
+            "blessed": true,
+            "conflict": conflict,
+            "reciprocal_consent": consent.attestation_id,
+            "consent_freshly_emitted": consent.freshly_emitted,
+            "consent_projection_verified": true,
+            // `record` preserved on a fresh admit (harness compat); null on a
+            // conflict re-admit, where the stored row is the authority.
+            "record": if conflict { serde_json::Value::Null } else { blessed_json },
+        })),
+    )
+        .into_response()
 }
 
 /// The federation-peers read router. `self_key_id` is the node's own derived

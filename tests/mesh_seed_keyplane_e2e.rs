@@ -197,12 +197,16 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
         Arc::new(move || vec![node_a_key.to_string()]),
         BridgeConfig::default(),
     );
+    // CIRISEdge#425 — `ApplyOutcome`, not a bool: a refusal now carries WHY, so a
+    // failure here names the gate instead of asserting `false`. CIRISEdge#426 —
+    // `source_peer`; `None` because this drives the bridge directly with no
+    // authenticated transport peer.
     let admitted = b_bridge
-        .apply_envelope_bytes(EnvelopeKind::Key, &bytes)
+        .apply_envelope_bytes(EnvelopeKind::Key, &bytes, None)
         .await;
     assert!(
-        admitted,
-        "B must admit A's anchored record (validates against seeded A1)"
+        admitted.is_admitted(),
+        "B must admit A's anchored record (validates against seeded A1) — got {admitted:?}"
     );
 
     // (5) ROOT — B now roots A at the accord anchor. THE SEED CLOSED.

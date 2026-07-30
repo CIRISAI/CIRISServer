@@ -35,6 +35,63 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 
 use ciris_server::scorer::{self, ScorerConfig};
 
+/// **CIRISConstitution#46 (persist v22.0.0) — CONSENT BEFORE SCORING.**
+///
+/// v22 inverts the RC2 default for `capacity:*`: a federation-tier capacity claim
+/// about subject S by attester P is REFUSED unless a live `analyze`-scoped consent
+/// from S covers P. Persist's framing: *"were you permitted to compute and publish
+/// this about me?"* — CC 3.4.5 previously let any registered key score any third
+/// party, which on a deliberately-cheap bootstrap means anyone.
+///
+/// The claim is the edge `P → S`; the consent is the **REVERSE** edge `S → P`.
+/// So the SUBJECT authors this, naming the attester as `attested_key_id`, with the
+/// envelope naming scope `analyze`. Resolved by `resolve_scoped_consent`, which
+/// reads federation-tier rows only — hence the promote.
+///
+/// Vocabulary is single-sourced from persist (`paths::DIMENSION`,
+/// `STATE_GRANTED_PREFIX`, `CAPACITY_CONSENT_SCOPE`); a hand-mirrored literal
+/// compiles and skews the wire.
+async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
+    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::consent::consent_dimension;
+    use ciris_persist::federation::envelope::paths;
+    use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
+
+    let envelope = serde_json::json!({
+        (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
+        "scope": CAPACITY_CONSENT_SCOPE,
+    });
+    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+        .expect("analyze-consent envelope");
+    let id = engine
+        .federation_directory()
+        .attestation_upsert_local(LocalAttestationInput {
+            attestation_id: None,
+            attesting_key_id: subject.to_string(),
+            attested_key_id: Some(attester.to_string()),
+            attestation_type: "consent".to_string(),
+            weight: None,
+            expires_at: None,
+            attestation_envelope: core,
+            // Empty on purpose: `subject_key_ids` confers revocation authority, and
+            // the subject already holds it as producer. Naming the attester would
+            // give the scorer a say over the consent that authorizes it.
+            subject_key_ids: Vec::new(),
+            cohort_scope: cohort_scope::SELF.to_string(),
+            scrub_signature_classical: None,
+            scrub_signature_pqc: None,
+        })
+        .await
+        .expect("seed analyze consent");
+    // `resolve_scoped_consent` reads via `list_attestations_for`, which is
+    // federation-tier only — a local row would be invisible and the gate would
+    // still refuse.
+    engine
+        .attestation_promote(&id, cohort_scope::FEDERATION)
+        .await
+        .expect("promote analyze consent to federation tier");
+}
+
 const NODE_KEY_ID: &str = "node-a";
 const AGENT_KEY_ID: &str = "agent-alpha";
 /// The agent's AV-9 identity hash on its traces — the subject the scorer
@@ -300,6 +357,16 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         sample_size_gate: 2,
         target_n_eff: 8.0,
     };
+    // CC#46: without the subject's `analyze` consent the scorer authors NOTHING
+    // (and the refusal is a WARN naming the missing scope, not a panic) — so this
+    // grant is part of the fixture's contract now, not incidental setup.
+    // The attester is the node's #247 DERIVED federation key_id — what
+    // `emit_attestation_self` stamps and what is registered above — NOT the bare
+    // `NODE_KEY_ID` alias. Consenting to the alias would leave the real attester
+    // unconsented and the gate would still refuse (the 0.5.138 derived-vs-alias
+    // identity-fork class, in miniature).
+    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+
     let emitted = scorer::run_pass(&node, &node_key_id, &cfg)
         .await
         .expect("scorer pass must succeed");

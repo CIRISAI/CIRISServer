@@ -19,6 +19,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
@@ -103,9 +104,19 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
     // The CEG consent envelope. MUST carry a `"dimension"` (the (occurrence,
     // dimension) upsert key + the local-tier gate read it).
     let envelope = serde_json::json!({
-        "dimension": req.dimension,
+        (paths::DIMENSION): req.dimension,
         "granted": req.granted,
     });
+    let attestation_envelope =
+        match ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope) {
+            Ok(c) => c,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("consent envelope: {e}"),
+                )
+            }
+        };
     let input = LocalAttestationInput {
         attestation_id: None,
         attesting_key_id: req.consenting_key_id,
@@ -113,7 +124,7 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         attestation_type: "consent".to_string(),
         weight: None,
         expires_at: None,
-        attestation_envelope: envelope,
+        attestation_envelope,
         subject_key_ids: req.subject_key_ids,
         cohort_scope: cohort_scope::SELF.to_string(),
         // Self-emitted producer-authority local row: sig deferred to promote
@@ -133,7 +144,11 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
     };
 
     let promoted = if req.promote {
-        match st.engine.attestation_promote(&attestation_id).await {
+        match st
+            .engine
+            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
+            .await
+        {
             Ok(p) => p,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("promote: {e}")),
         }

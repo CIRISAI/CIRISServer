@@ -1,0 +1,36 @@
+# traceflow overlay — the FULL local trace-flow E2E (CIRISServer#315 endgame,
+# the gate-#922 carrier question): the agent seals REAL traces through the
+# LensClient pipeline, and the probe watches whether any plane carries them to
+# the canonical AND whether the CANONICAL's scorer (distinct sovereign identity
+# → CEG §7.5 anti-Goodhart passes) authors a capacity attestation about the
+# agent. Run via run_traceflow.sh (compose -f docker-compose.yml -f this).
+services:
+  canonical:
+    environment:
+      # TEST-ANCHOR-FENCED scorer knobs (scorer.rs from_resolved): the harness
+      # canonical has no owner session to PUT config:v1, and the E2E cannot
+      # wait out the 3600s production cadence. Only read under
+      # CIRIS_TESTING_MODE=true.
+      CIRIS_TEST_SCORER_CADENCE_SECS: "20"
+      CIRIS_TEST_SCORER_SAMPLE_GATE: "1"
+      # The scorer + corpus tiers gate on disk_free >= 5GiB (compose host
+      # capabilities); size the tmpfs so lens_store=true.
+      RUST_LOG: "info,ciris_edge=debug,leviculum_core=debug,leviculum_std=debug"
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=12g
+
+  agent:
+    environment:
+      # Seal N synthetic traces on the agent node after the KEX gate resolves
+      # (agent_boot.emit_synthetic_traces — the REAL LensClient seal pipeline,
+      # payloads mirror the on-device accord emitter incl. flat summary
+      # aliases).
+      CIRIS_HARNESS_EMIT_TRACES: "3"
+      # Agent-side scorer knobs too: the agent's own scorer pass should SKIP
+      # (self ≡ node → anti-Goodhart) — we want to SEE that skip at test
+      # cadence, proving the fold-node self-skip semantics locally.
+      CIRIS_TEST_SCORER_CADENCE_SECS: "20"
+      CIRIS_TEST_SCORER_SAMPLE_GATE: "1"
+      CIRIS_HARNESS_LIFECYCLE: "true"
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=12g

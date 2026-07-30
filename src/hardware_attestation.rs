@@ -225,7 +225,33 @@ pub fn admit_hardware_class_against_root(
         })?;
 
     // ── Layer B: the cryptographic binding persist defers to the consumer. ──
-    let class = verify_class_binding(record, &evidence.platform_attestation, ese_root_der)?;
+    // persist v22.0.1 (CIRISPersist#545) made the evidence an explicit two-arm
+    // enum, so the software test marker is representable by construction instead
+    // of being a shape the parser could not express. Match it honestly:
+    //
+    //  * `Hardware`         → there IS a platform attestation; verify the chain
+    //                         and the key binding, and report the proven class.
+    //  * `SoftwareOnlyTest` → there is NO platform attestation to bind. Layer A
+    //                         (persist's policy) has already refused this arm
+    //                         unless a live test anchor is armed, so reaching
+    //                         here means the marker is legitimately admitted —
+    //                         but it is SOFTWARE, and Layer B must never invent a
+    //                         hardware class for it. `SoftwareUnattested` is the
+    //                         truthful verdict, and it is what every downstream
+    //                         hardware-class gate already fails closed against.
+    let class = match &evidence {
+        AttestationEvidence::Hardware(hw) => {
+            verify_class_binding(record, &hw.platform_attestation, ese_root_der)?
+        }
+        AttestationEvidence::SoftwareOnlyTest(_) => {
+            tracing::warn!(
+                key_id = %record.key_id,
+                identity_type = %record.identity_type,
+                "SoftwareOnly_TEST custody marker admitted (test anchor armed) — reporting                  SoftwareUnattested, NOT a hardware class. This MUST NOT appear in production."
+            );
+            return Ok(AdmittedHardwareClass::SoftwareUnattested);
+        }
+    };
 
     tracing::info!(
         key_id = %record.key_id,

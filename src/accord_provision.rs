@@ -67,6 +67,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::prelude::Engine;
 
 /// PKCS#11 / PIV knobs for opening the holder's already-provisioned YubiKey. All
@@ -2182,7 +2183,7 @@ async fn write_node_trust_edge(
 
     let id = format!("trust-edge:{node_key_id}:{root}");
     let envelope = serde_json::json!({
-        "references_attestation_id": id,
+        (paths::REFERENCES_ATTESTATION_ID): id,
         // The node trusts the root for exactly what a root is for. Attenuation
         // does the rest: the node can never exercise more than the charter holds.
         "scope": [
@@ -2195,7 +2196,14 @@ async fn write_node_trust_edge(
     // `attesting_key_id == scrub_key_id == <the signer's DERIVED key_id>` —
     // derived internally, never a caller alias (persist#247). The row then rides
     // the same admission gate as every other federation-tier emit.
-    let mut input = EmitAttestationInput::with_envelope(attestation_type::DELEGATES_TO, envelope);
+    let mut input = EmitAttestationInput::with_envelope(
+        attestation_type::DELEGATES_TO,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            .map_err(|e| e.to_string())?,
+        // node genesis delegation — federation-visible by construction (the
+        // mesh must be able to verify the node's accord anchoring).
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+    );
     input.attested_key_id = Some(root.clone());
     engine
         .emit_attestation_self(input)

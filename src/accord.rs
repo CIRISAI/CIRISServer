@@ -961,8 +961,22 @@ async fn genesis_assemble(
     // attestation — the signed AUTHORIZATION proof (the founder signatures) that the
     // family table itself does not carry. Audit + cold-start legitimacy of the
     // 2/3-founding.
-    let mut input =
-        EmitAttestationInput::with_envelope(ACCORD_FAMILY_GENESIS_KIND, genesis.body.clone());
+    let genesis_core =
+        match ciris_persist::federation::envelope::EnvelopeCore::from_value(genesis.body.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("genesis envelope: {e}"),
+                )
+            }
+        };
+    let mut input = EmitAttestationInput::with_envelope(
+        ACCORD_FAMILY_GENESIS_KIND,
+        genesis_core,
+        // accord-family genesis — federation-visible by construction.
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+    );
     input.subject_key_ids = member_ids.clone();
     if let Err(e) = st.engine.emit_attestation_self(input).await {
         return err(
@@ -2200,6 +2214,16 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
                 .unwrap_or(true),
             persist_row_hash: String::new(),
         },
+        // persist v21.0.0 (CIRISPersist#502 E4) added an authority scrub to
+        // `SignedFamily` for the *replicated* `put_family` gate. This record
+        // does not travel that gate: it is admitted by
+        // `supersede_family_with_quorum`, whose authority IS the ≥M prior-roster
+        // hybrid cosignatures (`req.signatures`, re-verified by persist over the
+        // change envelope). The single-authority scrub is unused on that path,
+        // so it is intentionally empty — the quorum is the gate, not a lone key.
+        authority_key_id: String::new(),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
     })
 }
 

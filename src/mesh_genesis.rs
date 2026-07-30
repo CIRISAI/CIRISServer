@@ -31,6 +31,7 @@
 //! deletable, nuclear-revocable act (`FSD/TRUST_ROOT_CAPABILITY_GATE.md` §1). The
 //! operator *chooses* a trust root; a bundle never assigns one.
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::{
     pre_rotation_commitment, CHARTER_PRE_ROTATION_FIELD, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
 };
@@ -265,7 +266,7 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
     let commitment = pre_rotation_commitment(successors)
         .map_err(|e| GenesisError::CharterInvalid(format!("pre-rotation commitment: {e}")))?;
     Ok(serde_json::json!({
-        "references_attestation_id": CHARTER_ATTESTATION_ID,
+        (paths::REFERENCES_ATTESTATION_ID): CHARTER_ATTESTATION_ID,
         "scope": CHARTER_SCOPES,
         CHARTER_PRE_ROTATION_FIELD: commitment,
         "successor_key_ids": successors,
@@ -276,7 +277,7 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
 /// trace gate: the capability that must root to a trusted root).
 pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "references_attestation_id": format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
+        (paths::REFERENCES_ATTESTATION_ID): format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
         "scope": [INFRA_SERVE_SCOPE],
     })
 }

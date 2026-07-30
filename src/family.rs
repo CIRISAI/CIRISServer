@@ -20,7 +20,7 @@
 //! these are the mechanism, the policy lives in the specialization.
 
 use ciris_persist::federation::cohort::{Cohort, RevokeSpec, RosterMember};
-use ciris_persist::federation::types::{Family, SignedFamily};
+use ciris_persist::federation::types::Family;
 use ciris_persist::federation::Error as FedError;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::threshold::ThresholdMember;
@@ -46,14 +46,20 @@ impl std::fmt::Display for RosterError {
     }
 }
 
-/// Create / entrench a family. `family.family_key_id` MUST already be a registered
-/// `federation_keys` identity (the FK). Idempotent on `family_key_id`. persist
-/// admits on value-validation (closed-set + `consensus_protocol` canonical form).
+/// Create / entrench a family via the **trusted-local** path
+/// ([`FederationDirectory::put_family_local`]). Idempotent on `family_key_id`.
+///
+/// persist v21.0.0 (CIRISPersist#502 E4) gates the *replicated* [`put_family`]
+/// behind a hybrid authority signature (`verify_family_admission`). This
+/// primitive's sole use is entrenching the **keyless-by-design** constitutional
+/// HUMANITY_ACCORD family (see [`crate::accord`]) — a `family_key_id` that has
+/// no private key to sign with by construction, normally already boot-seeded by
+/// persist. That is exactly the `put_family_local` contract (a *bake-what-exists*
+/// trusted-local declaration, never reachable from the replication/wire apply),
+/// so we take it rather than fabricate a node "authority" over a constitutional
+/// family the node does not own.
 pub async fn create_family(engine: &Engine, family: Family) -> Result<(), FedError> {
-    engine
-        .federation_directory()
-        .put_family(SignedFamily { family })
-        .await
+    engine.federation_directory().put_family_local(family).await
 }
 
 /// Fetch a family by `family_key_id` (full admitted record, no revocation filter).

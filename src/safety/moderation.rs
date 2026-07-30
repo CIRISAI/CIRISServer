@@ -41,6 +41,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::admission;
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
@@ -154,7 +155,7 @@ pub async fn emit_moderation_event(
     // `require_version_segment`, CEG §13.1).
     let dimension = format!("{MODERATION_DIMENSION_PREFIX}{allegation_type}:v1");
     let envelope = serde_json::json!({
-        "dimension": dimension,
+        (paths::DIMENSION): dimension,
         "community_id": community_key_id,
         "allegation_type": allegation_type,
         "payload": payload,
@@ -166,7 +167,10 @@ pub async fn emit_moderation_event(
         attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: envelope,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| e.to_string())?,
         subject_key_ids: target_key_ids.to_vec(),
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Self-emitted producer-authority local row: sig deferred to promote
@@ -181,7 +185,7 @@ pub async fn emit_moderation_event(
     // Promote to federation tier so the ModerationEvent is federation-visible
     // (the audit chain + the track-record signal read it across the federation).
     engine
-        .attestation_promote(&attestation_id)
+        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
         .await
         .map_err(|e| format!("promote moderation event: {e}"))?;
     Ok(attestation_id)
@@ -212,25 +216,61 @@ pub async fn read_track_record(
     };
     rows.into_iter()
         .filter(|r| {
-            if r.attestation_type != attestation_type::SCORES {
-                return false;
-            }
-            let Some(dimension) = r
-                .attestation_envelope
-                .get("dimension")
-                .and_then(|v| v.as_str())
-            else {
-                return false;
-            };
-            let is_mod_signal = dimension.starts_with(MODERATION_DIMENSION_PREFIX)
-                || dimension.starts_with(TRACK_RECORD_DIMENSION_PREFIX);
-            is_mod_signal
-                && r.attestation_envelope
-                    .get("community_id")
-                    .and_then(|v| v.as_str())
-                    == Some(community_key_id)
+            track_record_row_counts(
+                &r.attestation_type,
+                &r.attestation_envelope,
+                community_key_id,
+            )
         })
         .count() as u64
+}
+
+/// Does one of `member`'s authored rows COUNT toward its
+/// `moderation_track_record:{community}` (the auto-promotion ranking signal)?
+///
+/// A row counts iff it is a `scores` row on a `moderation:*` ModerationEvent or a
+/// `moderation_track_record:{community}` reputation dimension, scoped to
+/// `community_key_id`, **AND it is not self-witnessed.**
+///
+/// ## CC 6.2.3.1 / CC 2.1 — the self-witness anti-gaming exclusion
+///
+/// CC 2.1's anti-gaming guard (elaborated by CC 6.2.3.1) is that a member must not
+/// be able to inflate its own reputation basis by witnessing its own actions: a
+/// `witness_relation: "self"` row is the attester vouching for itself, so it does
+/// NOT count toward the track record that gates auto-promotion. Excluding it
+/// (rather than counting it) is the honest reading — a serial self-witness accrues
+/// zero promotion standing from those rows, exactly the loophole CC 2.1 closes.
+/// Per CC 2.6.1.2 `witness_relation` DEFAULTS to `external` when absent, so only an
+/// explicit `self` is dropped; external/peer-witnessed rows (the load-bearing
+/// signal) count. Mirrors the CC 3.4.7 `witness_relation: self` downweight in
+/// [`crate::compose_policy`] — the READ side of the same structural safeguard.
+fn track_record_row_counts(
+    attestation_type: &str,
+    envelope: &serde_json::Value,
+    community_key_id: &str,
+) -> bool {
+    if attestation_type != attestation_type::SCORES {
+        return false;
+    }
+    let Some(dimension) = envelope.get(paths::DIMENSION).and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let is_mod_signal = dimension.starts_with(MODERATION_DIMENSION_PREFIX)
+        || dimension.starts_with(TRACK_RECORD_DIMENSION_PREFIX);
+    if !is_mod_signal {
+        return false;
+    }
+    if envelope.get("community_id").and_then(|v| v.as_str()) != Some(community_key_id) {
+        return false;
+    }
+    // CC 6.2.3.1 / CC 2.1: a SELF-witnessed row does not count toward the member's
+    // track record. CC 2.6.1.2: `witness_relation` defaults to `external` when
+    // absent, so a bare (unwitnessed-field) row still counts.
+    let witness_relation = envelope
+        .get("witness_relation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("external");
+    witness_relation != "self"
 }
 
 // ─── HTTP surface ───────────────────────────────────────────────────────────
@@ -368,5 +408,57 @@ mod tests {
             assert_eq!(Duty::from_token(d.scope_token()), Some(d));
         }
         assert_eq!(Duty::from_token("bogus"), None);
+    }
+
+    /// CC 6.2.3.1 / CC 2.1 — a self-witnessed moderation row and a peer-witnessed
+    /// one must be weighted DIFFERENTLY by the track-record read: the peer row
+    /// counts, the self row does not. Two rows identical but for `witness_relation`
+    /// prove the anti-gaming exclusion is wired (was ignored before this fix).
+    #[test]
+    fn self_witnessed_track_record_row_is_excluded_peer_counts() {
+        const COMMUNITY: &str = "community-x";
+        let mod_dim = format!("{MODERATION_DIMENSION_PREFIX}harassment:v1");
+
+        // Peer/external-witnessed (explicit) — COUNTS.
+        let peer = serde_json::json!({
+            "dimension": mod_dim,
+            "community_id": COMMUNITY,
+            "witness_relation": "external",
+        });
+        assert!(
+            track_record_row_counts(attestation_type::SCORES, &peer, COMMUNITY),
+            "a peer/external-witnessed moderation row must count"
+        );
+
+        // Self-witnessed — EXCLUDED (the CC 2.1 anti-gaming guard).
+        let mut self_row = peer.clone();
+        self_row["witness_relation"] = serde_json::json!("self");
+        assert!(
+            !track_record_row_counts(attestation_type::SCORES, &self_row, COMMUNITY),
+            "a self-witnessed moderation row must NOT count (CC 6.2.3.1 / CC 2.1)"
+        );
+
+        // The two rows differ ONLY in witness_relation yet are weighted differently.
+        assert_ne!(
+            track_record_row_counts(attestation_type::SCORES, &peer, COMMUNITY),
+            track_record_row_counts(attestation_type::SCORES, &self_row, COMMUNITY),
+            "self vs peer witness must produce different track-record weight"
+        );
+
+        // CC 2.6.1.2: absent `witness_relation` defaults to `external` → COUNTS.
+        let bare = serde_json::json!({ "dimension": mod_dim, "community_id": COMMUNITY });
+        assert!(
+            track_record_row_counts(attestation_type::SCORES, &bare, COMMUNITY),
+            "a row with no witness_relation defaults to external and counts (CC 2.6.1.2)"
+        );
+
+        // Sanity: a self-witnessed row for a DIFFERENT community was never in scope.
+        assert!(!track_record_row_counts(
+            attestation_type::SCORES,
+            &self_row,
+            "other-community"
+        ));
+        // Sanity: a non-scores row never counts.
+        assert!(!track_record_row_counts("delegates_to", &peer, COMMUNITY));
     }
 }

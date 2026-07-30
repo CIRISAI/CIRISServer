@@ -31,6 +31,14 @@
 //!      ([`crate::peer::emit_replication_consent`]). Because this authorizes
 //!      CROSS-NODE DATA FLOW, it is gated on the highest authority the role model
 //!      exposes — see [`require_owner`].
+//!
+//!   3. `POST /v1/federation/consent` — owner-gated. The first-class, EXPLICIT
+//!      consent act: author THIS node's directed `consent:replication:v1` grant
+//!      at an ALREADY-ADMITTED peer (no key registration — that is `peering`),
+//!      carrying an explicit owner-chosen scope. Consent is ALWAYS an
+//!      owner-authored CEG claim, never auto-generated; the agent's setup wizard
+//!      calls this on owner opt-in (e.g. "Send traces to CIRIS L3C"). See
+//!      [`consent`].
 
 use std::sync::Arc;
 
@@ -358,6 +366,216 @@ async fn peering(
         .into_response()
 }
 
+// ─── POST /v1/federation/consent (owner-gated; the explicit consent act) ──────
+
+/// Request body for [`consent`].
+#[derive(Debug, Deserialize)]
+struct ConsentRequest {
+    /// The peer this node consents to replicate to. MUST already be an admitted
+    /// `federation_keys` row (e.g. the baked canonical). This route does NOT
+    /// register keys — that is [`peering`]'s job; here we only author consent to
+    /// a peer the node already knows.
+    peer_key_id: String,
+    /// The EXPLICIT replication scope — the attestation-dimension prefixes this
+    /// grant covers (e.g. `["capacity:"]`, `["trace:"]`). Consent is always
+    /// explicit about WHAT it covers: an empty set is refused (400).
+    #[serde(default)]
+    attestation_prefixes: Vec<String>,
+    /// Optional owner-chosen recipient cohort — one of the 7 closed
+    /// [`cohort_scope`](ciris_persist::federation::types::cohort_scope) values
+    /// (`self` / `family` / … / `federation`). Omitted ⇒ persist's default
+    /// (`federation`). A bad token is refused (400) — the owner narrows the
+    /// audience explicitly (#510 P2).
+    #[serde(default)]
+    audience: Option<String>,
+    /// Optional payload-declared expiry (RFC3339). Omitted ⇒ no expiry.
+    #[serde(default)]
+    valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional restrictions on the covered flow — parsed straight into persist's
+    /// OWN closed [`RestrictionOp`](ciris_persist::federation::consent_grammar::RestrictionOp)
+    /// enum (`{"op":"strip_field","path":…}` / `{"op":"recipient_capability",
+    /// "capability":…}`), so an unrecognized `op` fails deserialization of the whole
+    /// request (400) — the same fail-closed posture persist admission uses.
+    #[serde(default)]
+    restrictions: Vec<ciris_persist::federation::consent_grammar::RestrictionOp>,
+}
+
+/// Response body for [`consent`].
+#[derive(Debug, Serialize)]
+struct ConsentResponse {
+    consented: bool,
+    peer_key_id: String,
+    grant_attestation_id: String,
+    grant_content_hash: String,
+    freshly_emitted: bool,
+    attestation_prefixes: Vec<String>,
+    /// The recipient cohort the grant was authored with (echoes the resolved
+    /// audience — the owner-supplied value, or `federation` when omitted).
+    audience: String,
+    reconciler_note: &'static str,
+}
+
+/// `POST /v1/federation/consent` — author THIS node's directed
+/// `consent:replication:v1` grant at an ALREADY-ADMITTED peer, carrying an
+/// EXPLICIT caller-chosen scope.
+///
+/// This is the first-class, explicit consent act. **Consent is ALWAYS an
+/// owner-authored signed CEG claim — never auto-generated.** A pure server
+/// produces no traces, so it never has cause to auto-consent to replicate them;
+/// the boot path ([`crate::federation_delivery::prime_canonicals`]) therefore
+/// only establishes *reachability* (transport rooting) and authors NO consent.
+/// The agent's setup wizard calls this route when the owner opts into sharing
+/// (e.g. "Send traces to CIRIS L3C"), carrying the scope the owner chose — no
+/// env vars, no config-sniffing, just the CEG consent object authored by the
+/// responsible party.
+///
+/// Unlike [`peering`] it does NOT register a peer key: the peer must already be
+/// an admitted `federation_keys` row (the baked canonical is), so the wizard can
+/// author consent with nothing but the peer's `key_id` + the chosen prefixes.
+/// Owner-gated identically to peering (owner-binding + owner session + `Peer`
+/// verb + CC 2.2 conformance). Idempotent (re-consent is a no-op).
+async fn consent(
+    State(st): State<FederationAdminState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // Same owner-authority floor as `peering`: authoring cross-node data-flow
+    // consent requires a live responsible party bound to THIS node.
+    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+        .await
+        .is_err()
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this node has no responsible party (owner-binding) — consent refused; \
+             an unowned node authors no cross-node consent. Claim ownership first via \
+             POST /v1/setup/root.",
+        );
+    }
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) =
+                crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Peer)
+            {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+    // A node authors consent only for a role it CLAIMS to perform on the wire
+    // (CC 2.2) — same gate peering applies before writing a grant.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::Peer).await
+    {
+        return resp;
+    }
+
+    let req: ConsentRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+
+    // Consent is ALWAYS explicit about its scope — refuse an empty prefix set
+    // rather than silently defaulting (the whole point of this route).
+    let prefixes = crate::peer::normalize_prefixes(&req.attestation_prefixes);
+    if prefixes.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "consent must name an explicit scope: `attestation_prefixes` is empty \
+             (e.g. [\"capacity:\"] or [\"trace:\"])",
+        );
+    }
+
+    // Resolve + validate the owner-chosen recipient cohort here for a clean 400
+    // (peer::emit re-validates as a fail-closed producer floor). Omitted ⇒
+    // persist's default (`federation`).
+    let audience = req
+        .audience
+        .clone()
+        .unwrap_or_else(|| ciris_persist::federation::types::cohort_scope::FEDERATION.to_string());
+    if !ciris_persist::federation::types::cohort_scope::is_valid(&audience) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "audience {audience:?} is not one of the closed cohort_scope values \
+                 (self/family/community/affiliations/species/biosphere/federation)"
+            ),
+        );
+    }
+
+    // The peer must already be admitted — this route authors consent, it does
+    // NOT register keys (that is `peering`). Fail-closed on an unknown peer.
+    match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&req.peer_key_id)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "peer_key_id '{}' is not an admitted federation key — register it first \
+                     (POST /v1/federation/peering) before consenting to replicate to it",
+                    req.peer_key_id
+                ),
+            )
+        }
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+    }
+
+    // Author the FULL consent-transfer payload (#510 P2): the owner's chosen
+    // audience / expiry / restrictions ride the closed grammar via
+    // `emit_replication_consent_with_policy`. Restrictions are already typed
+    // through persist's closed `RestrictionOp` (an unknown op 400'd at parse).
+    let opts = crate::peer::ConsentGrantOptions {
+        audience: req.audience.clone(),
+        valid_until: req.valid_until,
+        restrictions: req.restrictions.clone(),
+    };
+    let grant = match crate::peer::emit_replication_consent_with_policy(
+        &st.engine,
+        &st.node_key_id,
+        &req.peer_key_id,
+        &req.attestation_prefixes,
+        &opts,
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("emit replication consent: {e}"),
+            )
+        }
+    };
+
+    // Nudge the CEG-driven reconciler (same as peering); the consent object is
+    // durable regardless — this only makes convergence prompt.
+    if let Some(notify) = st.reconcile_notify.as_ref() {
+        notify.notify_one();
+    }
+
+    (
+        StatusCode::OK,
+        Json(ConsentResponse {
+            consented: true,
+            peer_key_id: req.peer_key_id,
+            grant_attestation_id: grant.attestation_id,
+            grant_content_hash: grant.content_hash,
+            freshly_emitted: grant.freshly_emitted,
+            attestation_prefixes: prefixes,
+            audience,
+            reconciler_note: "consent:replication recorded; the reconcile loop converges the live \
+                              replication runtime to it — the peer becomes an active Initiator \
+                              target without restart",
+        }),
+    )
+        .into_response()
+}
+
 // ─── GET /v1/federation/conformance (unauthenticated; the peer-facing surface) ─
 
 /// `GET /v1/federation/conformance` — THIS node's **declared CC 2.2 conformance
@@ -491,6 +709,9 @@ pub fn router(
             axum::routing::get(self_key_record),
         )
         .route("/v1/federation/peering", axum::routing::post(peering))
+        // The explicit consent act — author a consent:replication grant at an
+        // already-admitted peer (the agent wizard calls this on owner opt-in).
+        .route("/v1/federation/consent", axum::routing::post(consent))
         // CC 2.2 / CC 2.6.4 (CIRISServer#159) — the peer-facing declaration.
         .route(
             "/v1/federation/conformance",

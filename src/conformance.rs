@@ -328,6 +328,126 @@ pub fn wire_vocabulary_sha256() -> String {
     hex::encode(ciris_edge::WIRE_VOCABULARY_HASH)
 }
 
+// ─── CC 2.6.4 — the persist-owned CEG contract-hash fingerprint (SRV-2) ──────
+//
+// CIRISServer#323. `wire_vocabulary_sha256` above is edge's hash of the *message
+// TYPE set*. persist v20.0.0 (#495) generalized that same "pin a canonical
+// manifest's SHA-256, gate it with a `computed == pinned` witness" discipline to
+// the CEG's *field/semantics* contracts, and v21 added two more. Each persist
+// contract ships a `pub const` PIN + a `pub fn` that RECOMPUTES the hash over the
+// live manifest, with an internal `*_is_pinned` test asserting the two agree.
+//
+// Two of these carry a doc line in persist that ALREADY asserts server behavior —
+// `ENVELOPE_VOCABULARY_SHA256` ("CIRISServer serves the hash on /v1/health,
+// consumers assert it") and `TRACE_SUMMARY_EXTRACTION_SHA256` ("served by
+// CIRISServer beside `wire_vocabulary_sha256`; asserted by the agent's emitter
+// contract test"). Before #323 that claim was FALSE: `/v1/health` served only
+// `wire_vocabulary_sha256`. [`contract_hashes`] makes the spec true, and extends
+// the surface to the two other PEER-FACING CEG-semantics contracts a consumer
+// must agree on to interpret the same wire bytes the same way — the consent
+// grammar and the transform algebra — so one health read fingerprints the whole
+// wire+semantics contract this build speaks.
+
+/// One persist-owned CEG contract this node fingerprints on `/v1/health`.
+struct ContractHash {
+    /// The stable snake_case key served under `conformance.contract_hashes`
+    /// (the `wire_vocabulary_sha256` naming convention; persist names two of the
+    /// consts `*_HASH`, but every one is a SHA-256 hex, so the wire key is `_sha256`).
+    key: &'static str,
+    /// persist's PINNED hash const — the value this build speaks and serves.
+    pinned: &'static str,
+    /// persist's recompute-from-live-manifest fn — the RHS of the boot
+    /// drift-witness ([`assert_contract_hashes_pinned`]).
+    recompute: fn() -> String,
+}
+
+/// The persist-owned CEG contracts whose hashes `/v1/health` publishes.
+///
+/// The replication APPLY-authority hash
+/// (`ciris_persist::federation::replication_policy::REPLICATION_POLICY_HASH`) is
+/// deliberately NOT here: it is the per-`EnvelopeKind` admission/projection policy,
+/// already pinned as a cross-repo build gate in `tests/replication_policy_gate.rs`
+/// (with edge's `SERVE_ADVERTISE_POLICY_HASH`). It governs how records are ADMITTED,
+/// not which wire vocabulary/semantics a bare-node liveness check fingerprints, so
+/// it stays on its dedicated gate rather than the public health surface.
+const CONTRACT_HASHES: &[ContractHash] = &[
+    // v20.0.0 #495 — persist's doc asserts /v1/health serves this. `federation/envelope.rs`.
+    ContractHash {
+        key: "envelope_vocabulary_sha256",
+        pinned: ciris_persist::federation::envelope::ENVELOPE_VOCABULARY_SHA256,
+        recompute: ciris_persist::federation::envelope::envelope_vocabulary_sha256,
+    },
+    // v20.0.0 #495 — persist's doc asserts /v1/health serves this; the Python
+    // trace emitter binds the same manifest. `trace_summary_contract.rs`.
+    ContractHash {
+        key: "trace_summary_extraction_sha256",
+        pinned: ciris_persist::trace_summary_contract::TRACE_SUMMARY_EXTRACTION_SHA256,
+        recompute: ciris_persist::trace_summary_contract::extraction_manifest_sha256,
+    },
+    // The consent grammar — how a `consent:*` envelope's directions/audiences/ops
+    // are interpreted. A peer that reads it differently diverges on the SAME bytes.
+    // `federation/consent_grammar.rs`.
+    ContractHash {
+        key: "consent_grammar_sha256",
+        pinned: ciris_persist::federation::consent_grammar::CONSENT_GRAMMAR_HASH,
+        recompute: ciris_persist::federation::consent_grammar::consent_grammar_sha256,
+    },
+    // The transform algebra — the strictly-total opcode set disclosure transforms
+    // compute in. Same-bytes-different-meaning risk as the grammar. `federation/transform.rs`.
+    ContractHash {
+        key: "transform_algebra_sha256",
+        pinned: ciris_persist::federation::transform::TRANSFORM_ALGEBRA_HASH,
+        recompute: ciris_persist::federation::transform::transform_algebra_sha256,
+    },
+];
+
+/// The `conformance.contract_hashes` object served on `/v1/health` beside
+/// [`wire_vocabulary_sha256`]: `{ <stable key>: <persist's pinned hash> }` for
+/// every [`CONTRACT_HASHES`] entry. A peer or the KMP client fetches this and
+/// asserts it against its own substrate; a vocabulary/grammar/algebra change on
+/// either side fails loudly on both (the CC 2.6.4 hash-pinned-artifact discipline).
+pub fn contract_hashes() -> serde_json::Value {
+    serde_json::Value::Object(
+        CONTRACT_HASHES
+            .iter()
+            .map(|c| {
+                (
+                    c.key.to_string(),
+                    serde_json::Value::String(c.pinned.to_string()),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// **Boot drift-witness** (CIRISServer#323). For every contract hash this node
+/// SERVES, persist's PINNED const must equal what persist RECOMPUTES over its live
+/// manifest IN THE BINARY WE LINKED. persist's own `*_is_pinned` tests prove this in
+/// persist's CI; re-running it at the server's boot proves the persist crate we
+/// actually link is self-consistent — so the fingerprint we publish is one the
+/// substrate can reproduce, never a stale or hand-patched const. A mismatch is a
+/// substrate-tier failure, not a warning (CC 2.6.4), so this PANICS: the node
+/// refuses to boot rather than serve a `/v1/health` contract it cannot stand behind.
+///
+/// This is the RUNTIME half. The cross-repo RATIFIED pin — the deliberate,
+/// reviewed re-pin a persist bump that changes a hash must travel with — is the
+/// BUILD-TIME half, gated in the `tests/` contract-drift suite alongside
+/// `tests/replication_policy_gate.rs` (mirroring that same `assert_eq!` witness).
+pub fn assert_contract_hashes_pinned() {
+    for c in CONTRACT_HASHES {
+        let recomputed = (c.recompute)();
+        assert_eq!(
+            c.pinned, recomputed,
+            "CEG contract-hash drift for `{}`: persist PINS {} but RECOMPUTES {} over its \
+             live manifest — the linked persist crate is internally inconsistent. This node \
+             will not serve a /v1/health fingerprint it cannot reproduce (CC 2.6.4: a hash \
+             mismatch is a substrate-tier failure, not a warning). Re-pin the persist const \
+             deliberately and re-adopt the substrate.",
+            c.key, c.pinned, recomputed,
+        );
+    }
+}
+
 // ─── The declaration ─────────────────────────────────────────────────────────
 
 /// THIS node's declared conformance + wire identity — the typed surface CC 2.2

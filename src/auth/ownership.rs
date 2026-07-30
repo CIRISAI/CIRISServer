@@ -87,6 +87,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{
     algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
     KeyRecord, SignedAttestation, SignedKeyRecord,
@@ -285,7 +286,7 @@ pub fn build_owner_binding_envelope(
 
     Ok(serde_json::json!({
         "kind": "delegates_to",
-        "dimension": DIMENSION_OWNER_BINDING,
+        (paths::DIMENSION): DIMENSION_OWNER_BINDING,
         "attesting_key_id": responsible_user_key_id,
         "node_key_id": node_key_id,
         "delegation_purpose": OWNER_BINDING_PURPOSE,

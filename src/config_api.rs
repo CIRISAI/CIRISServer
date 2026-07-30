@@ -83,6 +83,23 @@ async fn require_owner(
     }
 }
 
+/// **The config-write delegation-constraint gate** (`CapabilityVerb::ConfigWrite`).
+/// A config WRITE is an owner-authority act, so — exactly like peering
+/// ([`crate::federation_admin`] gates `CapabilityVerb::Peer`) — a DELEGATED caller
+/// may be bounded out of it by the owner's grant (`config_write` on the delegation
+/// deny-list, or absent from a set allow-list). An owner acting DIRECTLY
+/// (`actor.is_none()`) always passes. Returns the ready `403` to short-circuit, or
+/// `None` to proceed. Reads carry no delegatable verb, so this gate is WRITE-only.
+///
+/// Before this was wired, `config_api` ran only `require_owner_bound` +
+/// `require_owner` — the `ConfigWrite` verb existed (`auth::gate`) but nothing
+/// invoked it, so a constrained delegate wielding the owner's SYSTEM_ADMIN role
+/// could write config the owner's grant meant to forbid. This closes that gap and
+/// makes the module's stated "gated the SAME two ways peering is" actually hold.
+fn require_config_write(caller: &SessionCaller) -> Option<Response> {
+    crate::auth::gate::require_verb(caller, crate::auth::gate::CapabilityVerb::ConfigWrite)
+}
+
 /// The serve-only-floor gate (CC 3.2 / CC 1.13.5) — an owner-UNBOUND node refuses
 /// every config op. Mirrors the peering handler's `require_owner_bound` check.
 async fn require_owner_bound(st: &ConfigApiState) -> Result<(), Response> {
@@ -136,6 +153,10 @@ async fn set_config(
         Ok(c) => c,
         Err(resp) => return resp,
     };
+    // (3) delegation-constraint gate — a bounded delegate may be denied `config_write`.
+    if let Some(resp) = require_config_write(&caller) {
+        return resp;
+    }
 
     let req: SetConfigRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -240,6 +261,9 @@ async fn update_config(
         Ok(c) => c,
         Err(resp) => return resp,
     };
+    if let Some(resp) = require_config_write(&caller) {
+        return resp;
+    }
     if key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
     }
@@ -287,6 +311,9 @@ async fn delete_config(
         Ok(c) => c,
         Err(resp) => return resp,
     };
+    if let Some(resp) = require_config_write(&caller) {
+        return resp;
+    }
     if key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
     }
@@ -330,4 +357,85 @@ pub fn router(engine: Arc<Engine>, reconcile_notify: Option<Arc<tokio::sync::Not
                 .delete(delete_config),
         )
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::roles::permissions_for;
+    use crate::auth::session::DelegationConstraints;
+
+    /// Build a SessionCaller: `actor=Some` ⇒ delegated (constraints apply);
+    /// `actor=None` ⇒ the owner acting directly (unconstrained). Mirrors the
+    /// `auth::gate` test helper so the two gates are exercised the same way.
+    fn caller(actor: Option<&str>, constraints: Option<DelegationConstraints>) -> SessionCaller {
+        SessionCaller {
+            wa_id: "wa-owner".into(),
+            name: actor.unwrap_or("owner").into(),
+            role: UserRole::SystemAdmin,
+            permissions: permissions_for(UserRole::SystemAdmin),
+            constraints,
+            actor: actor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn owner_direct_config_write_passes() {
+        // The owner acting directly is never bounded by delegation constraints.
+        assert!(require_config_write(&caller(None, None)).is_none());
+    }
+
+    #[test]
+    fn delegated_default_grant_may_write_config() {
+        // `config_write` is NOT never-delegatable — an unconstrained delegated
+        // grant (legacy full grant) passes, exactly like `peer`.
+        let c = caller(Some("agent-1"), Some(DelegationConstraints::default()));
+        assert!(require_config_write(&c).is_none());
+    }
+
+    #[test]
+    fn delegated_config_write_on_deny_list_is_refused() {
+        // The owner put `config_write` on the delegate's deny-list → 403. This is
+        // the enforcement that was UNWIRED before the gate was added to the
+        // handlers: a constrained delegate could write config regardless.
+        let c = caller(
+            Some("agent-1"),
+            Some(DelegationConstraints {
+                actions_deny: vec!["config_write".into()],
+                ..Default::default()
+            }),
+        );
+        let resp =
+            require_config_write(&c).expect("a config_write-denied delegate MUST be refused");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn delegated_allow_list_omitting_config_write_is_refused() {
+        // A SET allow-list that omits `config_write` denies it (allow-list = the
+        // ONLY permitted verbs).
+        let c = caller(
+            Some("agent-1"),
+            Some(DelegationConstraints {
+                actions_allow: Some(vec!["announce".into()]),
+                ..Default::default()
+            }),
+        );
+        assert!(
+            require_config_write(&c).is_some(),
+            "config_write absent from a set allow-list must be refused"
+        );
+    }
+
+    #[test]
+    fn delegated_allow_list_including_config_write_passes() {
+        let c = caller(
+            Some("agent-1"),
+            Some(DelegationConstraints {
+                actions_allow: Some(vec!["config_write".into()]),
+                ..Default::default()
+            }),
+        );
+        assert!(require_config_write(&c).is_none());
+    }
 }

@@ -34,14 +34,20 @@ use std::path::PathBuf;
 // 0.5.80: the coordinated edge v9.0.0 + persist v13.0.0 lockstep (CC 1.0 RC1) —
 // KeyRecord.consent_role, the accord-conferred `canonical` identity_type role
 // (CIRISPersist#372), single-owner `owner_of` (#162), verify unchanged v8.7.0.
-pub const TARGET_VERIFY: &str = "v10.6.1";
-pub const TARGET_PERSIST: &str = "v19.1.1";
-pub const TARGET_EDGE: &str = "v13.14.1";
+// 0.5.139: the #519 ADOPTION co-bump — persist v21.4.0→v21.10.0 (the namespace
+// manifest as Registry-of-Record: attestation_promote now REQUIRES its cohort_scope,
+// hybrid-mandatory federation-tier admission, typed EnvelopeCore.delivery_mode,
+// promote_attestation_with_transforms, touch-claim storage/merge) + edge
+// v14.4.0→v15.0.0 (CIRISEdge#411/#410: delivery_mode reader, touch-claim producer,
+// field-conformance + evidence rows). Verify unchanged at v10.6.3.
+pub const TARGET_VERIFY: &str = "v10.6.3";
+pub const TARGET_PERSIST: &str = "v21.17.0";
+pub const TARGET_EDGE: &str = "v15.2.2";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
 /// `canonical` role + single-owner admission gate for the mesh-seed release.)
-pub const TARGET_PERSIST_V10: &str = "v19";
+pub const TARGET_PERSIST_V10: &str = "v21";
 
 /// The canonical-seed transport key id Node A must carry (Stage 5).
 pub const CANONICAL_TRANSPORT_KEY_ID: &str = "ciris-canonical-1";

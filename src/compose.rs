@@ -206,6 +206,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
+    // CIRISPersist#543 AV-77 (v22.0.0) — ARM the in-band peer de-admission gate.
+    // Until this node declares its OWN key id to persist, the gate is DORMANT:
+    // the `revocation:peer_admission:v1` refusal has no "me" to evaluate
+    // `attesting_key_id == self` against, so a de-admitted peer keeps writing.
+    // Called from BOTH composition entry points through one helper — see
+    // `arm_peer_deadmission_gate`.
+    arm_peer_deadmission_gate(&engine).await?;
     // TEST-ANCHOR-ONLY (CIRISServer#258): in a `test-anchor` build with
     // CIRIS_TESTING_MODE=true, self-bless with the SW test trust root so the
     // local harness canonical roots with no operator YubiKeys. No-op in prod.
@@ -1210,26 +1217,47 @@ async fn local_identity_json(
 ///
 /// Best-effort: a node without a Reticulum transport (relay-off / non-reticulum
 /// build) is a silent no-op, and a directory-write failure is logged, never fatal.
-async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id: &str) {
+pub(crate) async fn publish_self_transport_destination(
+    engine: &Arc<Engine>,
+    edge: &Edge,
+    key_id: &str,
+) {
     use base64::Engine as _;
-    let (Some(dest_hash), Some(transport_pubkey)) =
-        (edge.local_dest_hash(), edge.local_transport_pubkey())
+    use ciris_verify_core::self_at_login::SelfSigner;
+    use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
+    // The destination MUST be the EXACT hash edge announces on — `edge.local_named_dest_hash()`
+    // — because THAT is the value a peer stores as `RootedPeer.dest_hash` from our announce,
+    // and it is the key the peer's #393 item-2 gate (`hybrid_transport_binding_exists`) looks
+    // our signed route up by. Taking it straight from edge (NOT recomputing via
+    // `compute_destination_hash`) makes publish-key == lookup-key byte-identical by
+    // construction — closing the binding-lookup mismatch (CIRISEdge#406 final inch): a
+    // recompute could diverge from edge's own `Destination::new(...).hash()` by a byte and
+    // the gate would silently miss an admitted route.
+    let (Some(transport_pubkey), Some(named_dest_hash)) =
+        (edge.local_transport_pubkey(), edge.local_named_dest_hash())
     else {
         tracing::debug!(
             key_id,
-            "no Reticulum transport identity — skipping self transport-destination publish"
+            "no Reticulum transport identity / named dest — skipping self transport-destination publish"
         );
         return;
     };
-    let dest_hex = hex::encode(dest_hash);
-    // The transport identity is X25519(0..32) ‖ Ed25519(32..64). prime_peer wants
-    // the Ed25519 half (rooting/addressing); the X25519 half is the transport-tier
-    // KEX pubkey a peer needs to SEAL to this node (CIRISPersist#411 / CIRISEdge#299).
-    // Persist BOTH so this node's own binding is fully sealable after a peer's boot-load.
-    let transport_x25519_b64 =
-        base64::engine::general_purpose::STANDARD.encode(&transport_pubkey[0..32]);
-    let transport_ed25519_b64 =
-        base64::engine::general_purpose::STANDARD.encode(&transport_pubkey[32..64]);
+    // The transport identity is X25519(0..32) ‖ Ed25519(32..64): the Ed25519 half is
+    // rooting/addressing, the X25519 half is the transport-tier KEX pubkey a peer needs
+    // to SEAL to this node (CIRISPersist#411 / CIRISEdge#299). Persist BOTH.
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let transport_x25519_b64 = b64.encode(&transport_pubkey[0..32]);
+    let transport_ed25519_b64 = b64.encode(&transport_pubkey[32..64]);
+    let dest_hex = hex::encode(named_dest_hash);
+    // CIRISEdge#406 (server half) — publish this as a SIGNED transport-destination so a
+    // peer can PQ-attribute inbound frames (the #393 item-2 gate requires a stored
+    // `SignedTransportDestination` carrying an ML-DSA-65 signature; an unsigned announce-
+    // derived row never satisfies it). Build the route row FIRST, then sign its EXACT
+    // serde serialization (`serde_json::to_value(&record)`) — persist's own proven
+    // round-trip pattern (`list_signed_transport_destinations_since_507c`): the signature
+    // covers precisely the stored shape and `verify_signed_transport_destination` parses
+    // byte-identical fields, so producer/verifier coherence holds by construction rather
+    // than by a hand-mirrored envelope (the contract-drift class we've been closing).
     let record = ciris_persist::federation::TransportDestination {
         occurrence_key_id: key_id.to_string(),
         transport_kind: "reticulum".to_string(),
@@ -1242,20 +1270,58 @@ async fn publish_self_transport_destination(engine: &Engine, edge: &Edge, key_id
         epoch: 0,
         retired_at: None,
     };
+    let envelope = match serde_json::to_value(&record) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(key_id, error = %e,
+                "could not serialize the transport-destination envelope — skipping");
+            return;
+        }
+    };
+    // Sign with the ENGINE identity — `attesting_key_id`'s REGISTERED pubkeys ARE the
+    // engine signer's by construction (CIRISServer#315: cfg.key_id == local_derived_key_id());
+    // NOT `federation_signer`, whose re-opened seed can diverge in the fold (the phantom-key
+    // class #315 closed). signer_acts_for is satisfied: attesting == occurrence (self).
+    let signer = match EngineSelfSigner::new(engine).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(key_id, error = %e,
+                "could not build the engine self-signer for the signed transport-destination — skipping");
+            return;
+        }
+    };
+    let (signed_envelope, signature) =
+        match produce_signed_identity_occurrence(&signer, envelope).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(key_id, error = %e,
+                    "could not hybrid-sign the transport-destination envelope — skipping");
+                return;
+            }
+        };
+    let signed = ciris_persist::federation::self_at_login::SignedTransportDestination {
+        transport_destination: record,
+        attesting_key_id: signer.key_id().to_string(),
+        signed_envelope,
+        signature,
+    };
     match engine
         .federation_directory()
-        .put_transport_destination(&record)
+        .put_signed_transport_destination(&signed)
         .await
     {
-        Ok(()) => tracing::info!(
+        Ok(outcome) => tracing::info!(
             key_id,
             dest_hash = %dest_hex,
-            "published self reticulum transport-tier binding — peers can now prime_peer this node (#205 gap #2)"
+            ?outcome,
+            "published SIGNED self reticulum transport-tier binding — hybrid-verified, \
+             satisfies the #393 item-2 PQ attribution gate (CIRISEdge#406 server half)"
         ),
         Err(e) => tracing::warn!(
             key_id,
             error = %e,
-            "could not publish self transport-destination — peers cannot prime this node until it is asserted"
+            "could not publish SIGNED self transport-destination — peers cannot PQ-attribute \
+             this node until it is asserted"
         ),
     }
 }
@@ -1498,7 +1564,45 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
         }
     }
     let mut primed = 0usize;
+    let mut refused = 0usize;
+    let directory = engine.federation_directory();
     for (key_id, peer_dests) in &trusted {
+        // ── E6 hardening (CIRISServer#318) — do NOT dial-trust on the stored
+        //    `binding_provenance == Rooted` flag ALONE. `Rooted` is the
+        //    back-compat DEFAULT (an untagged / NULL-provenance row reads as
+        //    Rooted, persist BindingProvenance), and injecting a rooted transport
+        //    peer is a real authorization (it makes `key_id` a dialable delivery
+        //    target). So require that THIS node actually holds a verified identity
+        //    KeyRecord for the peer before priming: a Rooted transport row for a
+        //    key we have never admitted (a stray/defaulted/DB-injected row) is
+        //    refused, not silently rooted.
+        //
+        //    NOTE: the cryptographic transport↔identity binding is verified UPSTREAM
+        //    — edge sets `Rooted` only on a `Confirmed` announce verdict (the key
+        //    verified against `federation_keys`); the soundness of THAT verdict is
+        //    tracked in CIRISEdge#393 (E3). A prime-time re-anchoring of each peer
+        //    to the accord trust root (persist `root_binding`) is the stronger gate
+        //    but is not yet callable here — persist's `root_binding` is generic over
+        //    a concrete directory and this path holds only `Arc<dyn …>`; tracked as
+        //    a persist follow-up (a `&dyn`-friendly rooting entry).
+        match directory.lookup_public_key(key_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(
+                    peer = %key_id,
+                    "trusted-peer prime: Rooted transport row for a key with NO admitted \
+                     federation_keys record — REFUSING to root an unheld/unverified key (E6)"
+                );
+                refused += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(peer = %key_id, error = %e,
+                    "trusted-peer prime: key lookup failed — skip (fail-closed)");
+                refused += 1;
+                continue;
+            }
+        }
         match crate::federation_delivery::resolve_reticulum_prime_binding(peer_dests) {
             Ok(Some((dest_hash, ed25519))) => {
                 let before = transport.knows_peer(key_id).await;
@@ -1512,7 +1616,7 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
                     dest_hash = %hex::encode(dest_hash),
                     knows_peer_before = before,
                     knows_peer_after = after,
-                    "trusted-peer boot prime: rooted {key_id} (CEG-native, provenance=Rooted)"
+                    "trusted-peer boot prime: rooted {key_id} (provenance=Rooted + admitted key)"
                 );
             }
             Ok(None) => tracing::debug!(
@@ -1529,7 +1633,9 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     tracing::info!(
         trusted_peers = trusted.len(),
         primed,
-        "trusted-peer boot prime complete — trusted (explicit-hash) peers reachable-by-key_id with no announce"
+        refused,
+        "trusted-peer boot prime complete — rooted only peers with an admitted identity key \
+         (E6: no silent flag-trust; unheld-key rows refused)"
     );
 }
 
@@ -1985,6 +2091,66 @@ async fn build_engine(
 /// can be admitted: `put_attestation` requires the attesting key to exist as a
 /// `federation_keys` row.
 ///
+/// **Arm the CIRISPersist#543 AV-77 in-band peer de-admission gate (persist
+/// v22.0.0), and PROVE it is armed.**
+///
+/// Before v22 there was nothing between "ignore a hostile peer" and "halt the
+/// node": `moderation:*` records an event not a sanction, `slashing:*` has a
+/// verdict shape with no act, and `consent:*` withdrawal is send-side so it
+/// cannot stop inbound injection (the mesh receive plane is peer-blind by
+/// design — CIRISEdge#426). AV-77 supplies the missing middle: a revocable,
+/// third-party-scoped `scores` row at `revocation:peer_admission:v1` that
+/// persist's put-gates then refuse writes against.
+///
+/// It is inert until the node tells persist which key is "me", because the
+/// refusal predicate compares the writer against `self_key_id()`. persist
+/// shipped this wired on all three backends with a full `{gate} × {backend}`
+/// witness matrix — and **no host could turn it on**, because every witness
+/// configured the backend directly instead of going through the `Engine`. Their
+/// generalizable rule, which this function exists to honour: *a mitigation is
+/// shipped when a host can reach it AND observe that it is on.*
+///
+/// So this does not merely call the setter — it **reads the value back and
+/// fails boot on mismatch**, and logs the armed key id at `info` so a harness
+/// run can prove the gate is live from the log alone rather than by inference.
+/// Called from BOTH composition entry points (`serve_with_adapter` and
+/// `federation_delivery::start_and_hold`), because the embedded agent reaches
+/// delivery WITHOUT `serve_with_adapter` — wiring only the composed path would
+/// reproduce persist's own bug one layer up, leaving every agent node's gate
+/// dormant while the composed node's looked fine.
+pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .context("resolve the node's derived federation key_id to arm the AV-77 gate")?;
+    engine.set_self_key_id(Some(key_id.clone()));
+    // Prove it, do not assume it — this readback is the whole point.
+    match engine.self_key_id() {
+        Some(live) if live == key_id => {
+            tracing::info!(
+                self_key_id = %key_id,
+                "AV-77 peer de-admission gate ARMED (CIRISPersist#543) — a \
+                 `revocation:peer_admission:v1` row authored by this node now refuses \
+                 that peer's writes; readback confirms the gate is live"
+            );
+            Ok(())
+        }
+        other => {
+            // Loud and fatal: a silently-dormant sanction gate is strictly worse
+            // than no gate, because operators will believe de-admission works.
+            tracing::error!(
+                expected = %key_id,
+                readback = ?other,
+                "AV-77 peer de-admission gate FAILED TO ARM — set_self_key_id did not \
+                 stick, so de-admission is DORMANT and a de-admitted peer would keep \
+                 writing. Refusing to boot rather than serve with a sanction gate that \
+                 silently does nothing (CIRISPersist#543)"
+            );
+            anyhow::bail!("AV-77 arm failed: set_self_key_id({key_id}) read back as {other:?}")
+        }
+    }
+}
+
 /// On success the (verified) record is **logged at info as JSON** so an operator
 /// can hand A's self-signed `SignedKeyRecord` to peer B — see [`build_self_key_record`].
 async fn register_self_key(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<()> {
@@ -2257,7 +2423,7 @@ async fn setup_peer_replication(
 }
 
 /// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
-/// admitted peer `key_id`s. Three coordinators per peer:
+/// admitted peer `key_id`s. FOUR coordinators per peer:
 ///   - [`EnvelopeKind::Attestation`] — capacity:* / trace out, health:liveness in.
 ///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane
 ///     (verification + transport identity).
@@ -2265,9 +2431,14 @@ async fn setup_peer_replication(
 ///     occurrence carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
 ///     that `resolve_peer_kex_pubkeys` reads. Without this coordinator the plane is
 ///     never exchanged, so a peer's enc keys never reach the directory → sealing to it
-///     resolves `None` → 0 content delivery (the last trace-flow gap). Publish-own is
-///     the `occurrence_selector` in [`start_replication_runtime`]; this is the
-///     anti-entropy carriage.
+///     resolves `None` → 0 content delivery.
+///   - [`EnvelopeKind::TransportDestination`] (CIRISEdge#406) — the PQ transport-
+///     attribution plane: the occurrence says how to SEAL, this SIGNED route says how
+///     to REACH + carries the ML-DSA-65 sig the #393 item-2 gate requires. Publish-own
+///     via the same `self_provider`. Without this coordinator the signed TD is published
+///     locally (`publish_self_transport_destination`) but never transferred, so a peer's
+///     item-2 gate reads "no hybrid-verified TransportDestination" → inbound frames
+///     drop unattributed (the item-2 dead end).
 ///
 /// Pure (no I/O) so both the compose boot path and the agent-embedded delivery
 /// controller share ONE assembly, and it is unit-testable without an engine.
@@ -2290,6 +2461,16 @@ pub(crate) fn build_replication_peers(
                 ReplicationPeer {
                     peer_key_id: p.clone(),
                     kind: EnvelopeKind::IdentityOccurrence,
+                },
+                // CIRISEdge#406 — the TransportDestination plane: paired with the
+                // publish-own `self_provider`, this offers THIS node's own SIGNED
+                // transport-dest (put via `publish_self_transport_destination`) so a
+                // peer receives it and its #393 item-2 PQ attribution gate is
+                // satisfiable. Without a round for this kind the signed TD is
+                // published locally but never transferred (the item-2 dead end).
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::TransportDestination,
                 },
             ]
         })

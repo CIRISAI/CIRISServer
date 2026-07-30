@@ -51,6 +51,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::precedence::precedence_winner;
 use ciris_persist::federation::types::{attestation_type, identity_type, Attestation};
 use ciris_persist::prelude::Engine;
@@ -75,6 +76,24 @@ pub const DIM_CAPACITY: &str = "capacity:";
 pub const DIM_DETECTION: &str = "detection:";
 /// CC 4.4.2 — the other two median-aggregated detector families.
 pub const DIM_RATCHET_FLAG: &str = "ratchet:flag:";
+/// CC 3.1.1 / CC 1.13.2 — the `-1.0`-only, non-rollbackable entity-revocation
+/// prefix. The manifest (`revocation:{entity_type}:{reason}`) pins the polarity:
+/// *"defeating the -1-only/non-rollbackable polarity"* — it MUST NOT be averaged
+/// into a signed mean, or a spurious positive could erase a live revocation.
+pub const DIM_REVOCATION: &str = "revocation:";
+/// CC 3.1.10 — the CIRISBench HE-300 benchmark family. Manifest
+/// (`benchmark:he300:{category}:{version}`): *"composition MUST use PositiveOnly
+/// max aggregation, never Signed mean; no negative value valid."*
+pub const DIM_BENCHMARK_HE300: &str = "benchmark:he300:";
+/// CC 3.1.9.4 — the LLM-as-judge verdict family. Manifest
+/// (`judge_model:verdict:{model_id}`): *"boolean-via-score polarity: default
+/// aggregation is Min across attesters … any FAIL trumps PASS; not mean."*
+pub const DIM_JUDGE_MODEL: &str = "judge_model:";
+/// CC 4.5.1.1 — the partner-relationship-role family. Manifest
+/// (`partner_role:{role}`): *"Enumerated-polarity dimensions (incl.
+/// partner_role) compose by most-recent-by-signed_at … mean/average
+/// composition FORBIDDEN."*
+pub const DIM_PARTNER_ROLE: &str = "partner_role:";
 
 // ─── CC 4.4.2 — polarity-keyed aggregation defaults ──────────────────────────
 
@@ -129,25 +148,45 @@ pub fn polarity_for(dimension: &str) -> Polarity {
     }
     // `-1.0 only` (CC 3.1: "Score is always -1 (NEVER_ALLOWED) or -0.5
     // (REQUIRES_SEPARATE_MODULE); never positive") → min is conclusive.
-    if dimension.starts_with("prohibited:") {
+    // `revocation:*` (CC 3.1.1 / CC 1.13.2) rides the same fail-secure extremum:
+    // it is `-1.0`-only and non-rollbackable, so it MUST NOT fold into a signed
+    // mean where a spurious positive on the same (dimension, key) could dilute a
+    // live revocation toward zero.
+    if dimension.starts_with("prohibited:") || dimension.starts_with(DIM_REVOCATION) {
         return Polarity::NegativeOnly;
     }
     // `boolean-via-score` — fail-secure min. `attestation:l*` is the ladder
-    // (CC 4.4.3.6 Policy I); `slashing:*` / `witness_diversity:*` per CC 3.1.9.3.
+    // (CC 4.4.3.6 Policy I); `slashing:*` / `witness_diversity:*` per CC 3.1.9.3;
+    // `judge_model:*` (CC 3.1.9.4) — any FAIL verdict trumps PASS, never a mean
+    // (an open-vocabulary `model_id` string could otherwise mint fake multi-model
+    // agreement that a mean would wave through); `activity_tier:*` (CC 3.1.9.6) —
+    // any Below-Active attester trumps Active, never a mean.
     if dimension.starts_with("attestation:")
         || dimension.starts_with(DIM_SLASHING)
         || dimension.starts_with("witness_diversity:")
+        || dimension.starts_with(DIM_JUDGE_MODEL)
+        || dimension.starts_with("activity_tier:")
     {
         return Polarity::BooleanViaScore;
     }
     // `positive-only` — any positive is conclusive (CC 3.1.9.3 `need:*`).
-    if dimension.starts_with("need:") {
+    // `benchmark:he300:*` (CC 3.1.10) is positive-only: max is the best attested
+    // score, never a mean (a mean would let a low run drag a validated capability
+    // down, and no negative benchmark value is valid). `credits:*` (CC 4.4.2) is
+    // positive-only: composed via max, never sum/count/mean.
+    if dimension.starts_with("need:")
+        || dimension.starts_with(DIM_BENCHMARK_HE300)
+        || dimension.starts_with("credits:")
+    {
         return Polarity::PositiveOnly;
     }
     // `enumerated` — most-recent by signed_at (CC 3.3.12 media triple).
+    // `partner_role:*` (CC 4.5.1.1) is enumerated: a relationship role resolves to
+    // its most-recent authorized attestation, never an average of past roles.
     if dimension.starts_with("content_class:")
         || dimension.starts_with("cw_class:")
         || dimension.starts_with("age_assurance:")
+        || dimension.starts_with(DIM_PARTNER_ROLE)
     {
         return Polarity::Enumerated;
     }
@@ -383,6 +422,14 @@ pub enum RefusalReason {
     /// resolvable `evidence_refs` are **exclusively** `testimonial_witness:*`
     /// rows. *"`testimonial_witness:*` … never sole evidence for `slashing:*`"*.
     TestimonialSoleEvidenceForSlashing,
+    /// CC 3.1.6 (FSD-005 App.A:182) structural safeguard, the SIBLING of the
+    /// testimonial screen: a `slashing:*` attestation whose resolvable
+    /// `evidence_refs` are **exclusively** `detection:*` / `ratchet:flag:*`
+    /// detector rows. *"ratchet:flag:\* / detection:\* cannot be sole evidence
+    /// for slashing … unreachable from ratchet/detection alone."* The WA quorum
+    /// (a documented `moderation:*` antecedent or method-spoofing finding) is the
+    /// load-bearing gate; a raw detector signal is never sufficient on its own.
+    DetectorSoleEvidenceForSlashing,
     /// Not a `scores` row — the composition tier composes scores; structural
     /// composers (`supersedes` / `withdraws` / `recants`) are persist's
     /// precedence layer, not ours.
@@ -572,7 +619,7 @@ impl Composer {
         let mut trust = self.trust.clone();
         let mut resolved: BTreeMap<String, CoSteward> = BTreeMap::new();
         for att in &rows {
-            if !envelope_str(att, "dimension").is_some_and(|d| d.starts_with(DIM_LICENSURE)) {
+            if !envelope_str(att, paths::DIMENSION).is_some_and(|d| d.starts_with(DIM_LICENSURE)) {
                 continue;
             }
             let k = &att.attesting_key_id;
@@ -619,7 +666,7 @@ impl Composer {
                 Err(reason) => out.refusals.push(Refusal {
                     attestation_id: att.attestation_id.clone(),
                     attesting_key_id: att.attesting_key_id.clone(),
-                    dimension: envelope_str(att, "dimension"),
+                    dimension: envelope_str(att, paths::DIMENSION),
                     reason,
                 }),
             }
@@ -735,7 +782,7 @@ impl Composer {
         // CC 2.1 REQUIRED fields. `confidence` is REQUIRED ("yes" in the CC 2.1
         // table) — a missing one is malformed, NOT an implied 1.0. Defaulting it
         // would hand an attester full confidence for free.
-        let dimension = envelope_str(att, "dimension")
+        let dimension = envelope_str(att, paths::DIMENSION)
             .ok_or_else(|| RefusalReason::MalformedEnvelope("dimension".into()))?;
         let score = envelope_f64(att, "score")
             .ok_or_else(|| RefusalReason::MalformedEnvelope("score".into()))?;
@@ -769,6 +816,17 @@ impl Composer {
         // ordering CC 4.4.1 mandates.
         if dimension.starts_with(DIM_SLASHING) && testimonial_sole_evidence(att, corpus) {
             return Err(RefusalReason::TestimonialSoleEvidenceForSlashing);
+        }
+
+        // ── STRUCTURAL SAFEGUARD #1b (CC 3.1.6, FSD-005 App.A:182) ──────────
+        // The SIBLING of the testimonial screen, same SHAPE: "`ratchet:flag:*` /
+        // `detection:*` cannot be sole evidence for slashing … unreachable from
+        // ratchet/detection alone." A slashing row whose whole resolvable evidence
+        // base is detector emissions is refused — a raw detector signal is an
+        // alert, not a WA-quorum finding. Like its testimonial twin this is a
+        // SCREEN (contributes at NO weight), applied before any weighting.
+        if dimension.starts_with(DIM_SLASHING) && detector_sole_evidence(att, corpus) {
+            return Err(RefusalReason::DetectorSoleEvidenceForSlashing);
         }
 
         Ok(Row {
@@ -1249,11 +1307,44 @@ fn testimonial_sole_evidence(att: &Attestation, corpus: &[Attestation]) -> bool 
             continue;
         };
         resolved += 1;
-        if envelope_str(row, "dimension").is_some_and(|d| d.starts_with(DIM_TESTIMONIAL_WITNESS)) {
+        if envelope_str(row, paths::DIMENSION)
+            .is_some_and(|d| d.starts_with(DIM_TESTIMONIAL_WITNESS))
+        {
             testimonial += 1;
         }
     }
     resolved > 0 && resolved == testimonial
+}
+
+/// CC 3.1.6 (FSD-005 App.A:182) structural safeguard: true iff `att` is backed
+/// ONLY by detector evidence (`detection:*` / `ratchet:flag:*`).
+///
+/// The exact SHAPE of [`testimonial_sole_evidence`] — the manifest names it as
+/// *"same SHAPE as the testimonial screen"* — over the detector prefixes. A
+/// slashing row with resolvable evidence, ALL of which is `detection:*` or
+/// `ratchet:flag:*`, is "sole detector evidence" and is refused. Evidence we
+/// cannot resolve is not counted as corroboration (we cannot see it), and its
+/// mere presence does not rescue an otherwise all-detector base.
+fn detector_sole_evidence(att: &Attestation, corpus: &[Attestation]) -> bool {
+    let refs = match att.attestation_envelope.get("evidence_refs") {
+        Some(serde_json::Value::Array(a)) => a,
+        _ => return false, // no evidence_refs → this rule has nothing to say
+    };
+    let mut resolved = 0usize;
+    let mut detector = 0usize;
+    for r in refs {
+        let Some(id) = r.as_str() else { continue };
+        let Some(row) = corpus.iter().find(|a| a.attestation_id == id) else {
+            continue;
+        };
+        resolved += 1;
+        if envelope_str(row, paths::DIMENSION)
+            .is_some_and(|d| d.starts_with(DIM_DETECTION) || d.starts_with(DIM_RATCHET_FLAG))
+        {
+            detector += 1;
+        }
+    }
+    resolved > 0 && resolved == detector
 }
 
 #[cfg(test)]
@@ -1296,6 +1387,48 @@ mod tests {
         );
         // CC 3.4.9 co-stewarded prefix is `signed` (CC 3.1 table).
         assert_eq!(polarity_for("licensure:CA_medical_board"), Polarity::Signed);
+    }
+
+    /// The six manifest arms that previously fell through to [`Polarity::Signed`]
+    /// (the acknowledged GAP in `field_processor_matrix`). Each classification is
+    /// pinned to the `invariant_registry` entry that settles it.
+    #[test]
+    fn polarity_arms_match_manifest_invariants() {
+        // `revocation:{entity_type}:{reason}` — CC 3.1.1 / CC 1.13.2: `-1.0`-only,
+        // non-rollbackable → NegativeOnly (min), NOT a signed mean.
+        assert_eq!(
+            polarity_for("revocation:partner:bond_forfeit"),
+            Polarity::NegativeOnly,
+        );
+        // `benchmark:he300:{category}:{version}` — CC 3.1.10: *"MUST use
+        // PositiveOnly max aggregation, never Signed mean."*
+        assert_eq!(
+            polarity_for("benchmark:he300:reasoning:v2"),
+            Polarity::PositiveOnly,
+        );
+        // `judge_model:verdict:{model_id}` — CC 3.1.9.4 + CC 4.4.2:
+        // *"boolean-via-score … Min across attesters … not mean."*
+        assert_eq!(
+            polarity_for("judge_model:verdict:claude-opus"),
+            Polarity::BooleanViaScore,
+        );
+        // `partner_role:{role}` — CC 4.4.2: *"most-recent-by-signed_at …
+        // mean/average composition FORBIDDEN."*
+        assert_eq!(polarity_for("partner_role:reseller"), Polarity::Enumerated,);
+        // `activity_tier:{period}` — CC 3.1.9.6 + CC 4.4.2: boolean-via-score,
+        // *"MIN (any Below-Active trumps Active) — never a mean"* (verified live
+        // drift: previously fell through to Signed).
+        assert_eq!(
+            polarity_for("activity_tier:monthly"),
+            Polarity::BooleanViaScore,
+        );
+        // `credits:{domain}:{language}:{subject}` — CC 4.4.2: *"Positive-only
+        // polarity composes via MAX across attesters, not sum/count"* (verified
+        // live drift: previously fell through to Signed).
+        assert_eq!(
+            polarity_for("credits:medicine:en:cardiology"),
+            Polarity::PositiveOnly,
+        );
     }
 
     #[test]

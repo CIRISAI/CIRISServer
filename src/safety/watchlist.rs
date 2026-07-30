@@ -56,6 +56,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
@@ -175,7 +176,7 @@ pub async fn enable_watchlist(
         .sqlite_backend()
         .ok_or_else(|| "no SQLite federation directory".to_string())?;
     let envelope = serde_json::json!({
-        "dimension": enable.dimension(),
+        (paths::DIMENSION): enable.dimension(),
         "group_key_id": enable.group_key_id,
         "watchlist_id": enable.watchlist_id,
         "class": enable.class,
@@ -190,7 +191,10 @@ pub async fn enable_watchlist(
         attestation_type: WATCHLIST_CONFIG_TYPE.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: envelope,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| e.to_string())?,
         subject_key_ids: vec![enable.group_key_id.clone()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Self-emitted producer-authority local row: sig deferred to promote
@@ -206,7 +210,7 @@ pub async fn enable_watchlist(
     // agreement on "is a watchlist on for this group"). Attributed to the
     // enabling authority; node co-signs the promotion.
     engine
-        .attestation_promote(&attestation_id)
+        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
         .await
         .map_err(|e| format!("promote watchlist_config: {e}"))?;
     Ok(attestation_id)
@@ -226,7 +230,7 @@ pub async fn disable_watchlist(
         .ok_or_else(|| "no SQLite federation directory".to_string())?;
     let dimension = format!("{WATCHLIST_DIMENSION_PREFIX}{watchlist_id}");
     let envelope = serde_json::json!({
-        "dimension": dimension,
+        (paths::DIMENSION): dimension,
         "group_key_id": group_key_id,
         "watchlist_id": watchlist_id,
         "enabled": false,
@@ -238,7 +242,10 @@ pub async fn disable_watchlist(
         attestation_type: attestation_type::WITHDRAWS.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: envelope,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| e.to_string())?,
         subject_key_ids: vec![group_key_id.to_owned()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Producer-authority withdrawal of the watchlist config the signer
@@ -253,7 +260,7 @@ pub async fn disable_watchlist(
         .await
         .map_err(|e| format!("withdraw watchlist_config: {e}"))?;
     engine
-        .attestation_promote(&attestation_id)
+        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
         .await
         .map_err(|e| format!("promote watchlist withdraw: {e}"))?;
     Ok(attestation_id)

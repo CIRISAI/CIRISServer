@@ -51,6 +51,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::Engine;
@@ -61,6 +62,28 @@ use ciris_persist::prelude::Engine;
 /// reserved prefix, so a node-keyed self-attestation on it is admitted without a
 /// reserved-prefix role.
 pub const CONFIG_DIMENSION: &str = "config:v1";
+
+/// The `cohort_scope` EVERY config row is authored at (CIRISServer#324). `self` —
+/// a config row is a self-report about THIS node's own runtime, so it is normatively
+/// `cohort_scope::self` (CC 4.4.3.4.3; `FSD/namespace_supersets.json` `config:*`
+/// invariant): one of the two scopes persist's `cohort_scope::suppresses_holds_bytes`
+/// protects (`SELF | FAMILY`), making the row structurally invisible — no
+/// `holds_bytes:sha256:*` directory attestation, not cohort-replicable. `federation`
+/// (the pre-#324 assigned-but-wrong value) is the ONE scope that protection does NOT
+/// cover, which had left every node-local config key (`auth.admin_key_ids`,
+/// `net.bootstrap_peers`, `federation.peer_sideband.<peer>`, …) directory-advertised
+/// and replicable.
+///
+/// BOTH producer sites route through this ONE const so they cannot drift:
+/// [`config_envelope`]'s inline envelope JSON AND — load-bearingly —
+/// [`set_config`]'s typed `EmitAttestationInput::cohort_scope` (the field persist's
+/// admission, `suppresses_holds_bytes`, the DEK cascade, and the directory projection
+/// actually read; the envelope JSON alone lands in `EnvelopeCore::extra` and is never
+/// lifted onto the row, T3's #324 finding). Single source of truth so the §5
+/// conformance check ([`crate::field_conformance::check_config_cohort_scope_self`])
+/// asserts on the value this repo actually emits — repointing it at `federation`
+/// reds that check, exactly the regression it exists to catch.
+pub const CONFIG_COHORT_SCOPE: &str = cohort_scope::SELF;
 
 /// A typed config value — the Rust mirror of CIRISAgent's `GraphConfigService`
 /// discriminated value union. Serialized **untagged** so the envelope JSON
@@ -187,13 +210,14 @@ pub struct ConfigEntry {
 /// `score`, `cohort_scope`, `asserted_at`), plus the entry fields carried inline.
 fn config_envelope(node_key_id: &str, entry: &ConfigEntry, asserted_at: &str) -> serde_json::Value {
     serde_json::json!({
-        "dimension": CONFIG_DIMENSION,
+        (paths::DIMENSION): CONFIG_DIMENSION,
         "attesting_key_id": node_key_id,
         "score": 1.0,
-        // `federation` is the closed-set cohort the substrate admits for a
-        // federation-tier row; the config row is self-directed at THIS node (a
-        // node-local entry), with the key carried inline (NOT as a subject).
-        "cohort_scope": cohort_scope::FEDERATION,
+        // Config-class content is normatively self-scoped — see [`CONFIG_COHORT_SCOPE`]
+        // for why (structural invisibility, CC 4.4.3.4.3) and why BOTH this envelope
+        // field and `set_config`'s typed input route through the ONE const rather
+        // than repeating the literal.
+        "cohort_scope": CONFIG_COHORT_SCOPE,
         "witness_relation": "self",
         "asserted_at": asserted_at,
         // The config entry, carried inline so a read reconstructs it verbatim.
@@ -272,7 +296,7 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
             continue;
         }
         if a.attestation_envelope
-            .get("dimension")
+            .get(paths::DIMENSION)
             .and_then(|d| d.as_str())
             != Some(CONFIG_DIMENSION)
         {
@@ -420,10 +444,32 @@ pub async fn set_config(
     // federation key_id (`local_derived_key_id()` == `node_key_id` here —
     // wire-preserving). The config key lives in the envelope; the subject is the
     // node itself; `weight = Some(1.0)` matches the prior row.
-    let mut input = EmitAttestationInput::with_envelope(attestation_type::SCORES, envelope);
+    let mut input = EmitAttestationInput::with_envelope(
+        attestation_type::SCORES,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        // #324: node-local config is structurally invisible — SELF, never the
+        // old fail-open federation default. persist v21.11.0 (#527) made this a
+        // required argument precisely so it cannot be forgotten again.
+        CONFIG_COHORT_SCOPE,
+    );
     input.attested_key_id = Some(node_key_id.clone());
     input.subject_key_ids = vec![node_key_id.to_owned()];
     input.weight = Some(1.0);
+    // THE load-bearing scope fix (CIRISServer#324). The STORED, typed
+    // `Attestation.cohort_scope` — the value persist's admission,
+    // `cohort_scope::suppresses_holds_bytes`, the DEK cascade, and the directory
+    // projection actually read — is `EmitAttestationInput::cohort_scope`, NOT the
+    // envelope's inline `cohort_scope` JSON (which lands in `EnvelopeCore::extra`
+    // and is never lifted onto the row). `with_envelope` hardcodes this field to
+    // `federation`; left unset, `emit_attestation_assemble` stamps every config
+    // row `federation` — the ONE scope `suppresses_holds_bytes` (`SELF | FAMILY`)
+    // does NOT protect, so config was directory-advertised + cohort-replicable.
+    // Setting it to `self` (config is a self-report about THIS node's own runtime,
+    // CC 4.4.3.4.3) makes the row structurally invisible. UNIFORM across every
+    // config key; `check_write_cohort_scope` always permits SELF for the writer.
+    // This is the load-bearing half of the [`CONFIG_COHORT_SCOPE`] pair — the same
+    // const the envelope JSON above uses, so the two provenance points cannot drift.
+    input.cohort_scope = CONFIG_COHORT_SCOPE.to_string();
     let attestation_id = engine
         .emit_attestation_self(input)
         .await

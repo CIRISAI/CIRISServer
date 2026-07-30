@@ -1,0 +1,136 @@
+name: Mesh harness (E2E stage ladder)
+
+# The live two-node mesh E2E, run as a real gate rather than by hand.
+#
+# WHY THIS EXISTS AS CI, not just a local script: every stage of the carrier
+# chain (seal → consent → converge → ship → arrive → summarize → SCORE) failed
+# at least once while it was being built, and none of those failures were caught
+# by unit tests — they lived in the seams between two repos. The in-process round
+# harness (`tests/trace_round_e2e.rs`) uses a loopback transport and structurally
+# cannot reach the attribution layer, so it is not a substitute.
+#
+# NOT on every push: it builds a release wheel and runs docker compose, so it is
+# ~15-25 min. It runs on demand, nightly, and on PRs that touch the carrier path
+# or the substrate pins — which is where a regression would come from.
+#
+# SUCCESS means a capacity attestation was AUTHORED about the agent BY the
+# canonical. Arrival is not success: the constitution refuses self-attestation
+# (anti-Goodhart), so a distinct sovereign identity must have scored it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "scenario to run (see harness/mesh-repro/scenarios/)"
+        type: string
+        default: traceflow
+      window:
+        description: "ladder window in seconds"
+        type: string
+        default: "780"
+  schedule:
+    # Nightly 04:20 UTC — catches substrate drift without gating every PR.
+    - cron: "20 4 * * *"
+  pull_request:
+    paths:
+      - "Cargo.toml"           # the substrate pins
+      - "Cargo.lock"
+      - "src/compose.rs"
+      - "src/federation_delivery.rs"
+      - "src/federation_peers.rs"
+      - "src/test_bless.rs"
+      - "src/scorer.rs"
+      - "harness/mesh-repro/**"
+      - ".github/workflows/mesh-harness.yml"
+
+# A newer commit supersedes an in-flight run: a 25-minute job should never queue
+# behind a stale one.
+concurrency:
+  group: mesh-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ladder:
+    name: ${{ github.event.inputs.scenario || 'traceflow' }} ladder
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Read-only from PRs; main populates. Matches ci.yml's posture.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: mesh-harness
+
+      - name: Free disk space
+        # The release build plus docker images is tight on a stock runner, and an
+        # ENOSPC mid-run looks exactly like a harness failure. Reclaim first so a
+        # red run means a real regression.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h / | tail -1
+
+      - name: Build the test-anchor wheel once
+        run: |
+          cargo build --release --features test-anchor,python
+          python3 harness/mesh-repro/pack_wheel.py
+          ls -la harness/mesh-repro/wheels/
+
+      - name: Pre-pull base image
+        # Buildkit's DNS has flaked here before; a pre-pull with the daemon's
+        # resolver makes a genuine network failure distinguishable from a
+        # harness bug (and DOCKER_BUILDKIT=0 avoids the flaky path entirely).
+        run: docker pull python:3.12-slim
+
+      - name: Run the stage ladder
+        id: ladder
+        env:
+          DOCKER_BUILDKIT: "0"
+          SKIP_BUILD: "1"          # reuse the wheel built above
+        working-directory: harness/mesh-repro
+        run: |
+          ./run_scenario.sh "${{ github.event.inputs.scenario || 'traceflow' }}" \
+                            "${{ github.event.inputs.window || '780' }}"
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: harness/mesh-repro
+        run: |
+          for svc in canonical agent; do
+            echo "════════ $svc ════════"
+            docker compose -p "ciris-${{ github.event.inputs.scenario || 'traceflow' }}" \
+              -f docker-compose.yml -f docker-compose.traceflow.yml \
+              logs "$svc" 2>/dev/null | tail -400 || true
+          done > harness-logs.txt
+          tail -120 harness-logs.txt
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-harness-${{ github.event.inputs.scenario || 'traceflow' }}-logs
+          path: harness/mesh-repro/harness-logs.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Tear down
+        if: always()
+        working-directory: harness/mesh-repro
+        run: |
+          docker compose -p "ciris-${{ github.event.inputs.scenario || 'traceflow' }}" \
+            -f docker-compose.yml -f docker-compose.traceflow.yml \
+            down -v --remove-orphans || true

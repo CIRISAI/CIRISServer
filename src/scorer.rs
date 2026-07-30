@@ -41,6 +41,7 @@ use tokio::sync::watch;
 
 use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::cohort_scope;
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
@@ -103,12 +104,33 @@ impl ScorerConfig {
     /// env reads are deleted). The snapshot already validated each value against
     /// its baked default during [`crate::config_reconcile::resolve`].
     pub fn from_resolved(r: &crate::config_reconcile::ResolvedConfig) -> Self {
-        ScorerConfig {
+        let mut cfg = ScorerConfig {
             cadence: r.scorer_cadence(),
             window: r.scorer_window,
             sample_size_gate: r.scorer_sample_gate,
             target_n_eff: r.scorer_target_n_eff,
+        };
+        // TEST-ANCHOR-FENCED knob overrides (mesh-repro traceflow E2E,
+        // CIRISServer#315 / CIRISAgent#924): a harness canonical has no owner
+        // session to PUT config:v1 knobs, and the E2E must not wait out the
+        // 3600s production cadence. Honored ONLY under CIRIS_TESTING_MODE —
+        // the same fence as the announce-cadence override in compose.rs; a
+        // production node never reads these.
+        if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true") {
+            if let Some(secs) = std::env::var("CIRIS_TEST_SCORER_CADENCE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                cfg.cadence = std::time::Duration::from_secs(secs.max(1));
+            }
+            if let Some(gate) = std::env::var("CIRIS_TEST_SCORER_SAMPLE_GATE")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                cfg.sample_size_gate = gate;
+            }
         }
+        cfg
     }
 }
 
@@ -142,6 +164,31 @@ pub fn spawn(
                 return;
             }
         };
+        // ── RUNTIME-TOPOLOGY PROBE (#315 field diagnosis) ────────────────────
+        // On-device the tick loop never fired while the config-watch branch
+        // stayed alive — the signature of a task whose TIMER wakeups are dead
+        // (future deadlines need a driven time driver; watch wakeups and
+        // already-elapsed deadlines do not). Make the topology and timer
+        // health OBVIOUS in one glance: name the thread + runtime flavor this
+        // task actually landed on, then prove (or disprove) its timer with a
+        // 2s heartbeat BEFORE entering the loop. If the spawn line appears but
+        // the heartbeat never does, this task's runtime cannot deliver future
+        // timer deadlines — case closed, no theorizing.
+        let flavor = format!("{:?}", tokio::runtime::Handle::current().runtime_flavor());
+        tracing::info!(
+            thread = %std::thread::current().name().unwrap_or("<unnamed>"),
+            thread_id = ?std::thread::current().id(),
+            runtime_flavor = %flavor,
+            "capacity scorer task STARTED — timer heartbeat (2s) next; if no \
+             heartbeat line follows, THIS runtime's time driver is not delivering"
+        );
+        let hb = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tracing::info!(
+            elapsed_ms = hb.elapsed().as_millis() as u64,
+            "capacity scorer timer heartbeat OK — time driver delivers on this \
+             runtime; tick loop is live"
+        );
         // Track the cadence so we can rebuild the interval when it changes HOT.
         let mut cadence = ScorerConfig::from_resolved(&config_rx.borrow()).cadence;
         let mut tick = tokio::time::interval(cadence);
@@ -156,6 +203,13 @@ pub fn spawn(
             // noticed).
             tokio::select! {
                 _ = tick.tick() => {
+                    // Every tick is AUDIBLE (#315: never a silent zero) — this
+                    // line firing at the configured cadence is the proof the
+                    // timer path works end-to-end on this deployment.
+                    tracing::info!(
+                        cadence_secs = cadence.as_secs(),
+                        "capacity scorer TICK — running pass"
+                    );
                     // Read the LIVE snapshot per cycle — cadence/window/gate/target.
                     let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
                     if cfg.cadence != cadence {
@@ -228,20 +282,57 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         by_agent.entry(s.agent_id_hash.clone()).or_default().push(s);
     }
 
+    let n_summaries = page.items.len();
+    let n_agents = by_agent.len();
+    let mut empty_matrix_agents = 0usize;
+    let mut unregistered_agents = 0usize;
     let mut emitted = 0usize;
     for (agent_id_hash, traces) in by_agent {
-        // The attested key is the agent's federation identity. The only
-        // substrate-stable per-agent identifier on a trace summary is
-        // `agent_id_hash` (the AV-9 dedup-key prefix), which is exactly what
-        // `put_attestation`'s FK + identity lookup resolves against — so we
-        // attest ABOUT the agent_id_hash. (A future agent_name→key_id mapping
-        // could substitute a human-readable key_id; until that mapping is
-        // substrate-backed, the hash is the honest, FK-resolvable subject.)
-        let attested_key_id = agent_id_hash.clone();
+        // Attest ABOUT the agent's REGISTERED federation key_id (persist v20.1.0 /
+        // CIRISPersist#498): `TraceSummary.agent_key_id` is the `signing_key_id`
+        // resolved from `federation_keys` at verify time, so it is guaranteed to
+        // satisfy `federation_attestations.attested_key_id`'s FK AND to differ
+        // from the scorer's own key (anti-Goodhart). The AV-9 `agent_id_hash` was
+        // NEVER an FK-resolvable identity — attesting about it FK-failed on every
+        // real fold DB. When `agent_key_id` is absent (an unverified/legacy trace
+        // with no resolvable emitter identity) we CANNOT attest — skip LOUDLY
+        // rather than silently (no-silent-caps): a swallowed skip is exactly how
+        // the whole plane read as green while emitting nothing.
+        let Some(attested_key_id) = traces.iter().find_map(|t| t.agent_key_id.clone()) else {
+            unregistered_agents += 1;
+            tracing::warn!(
+                agent_id_hash = %agent_id_hash,
+                n_traces = traces.len(),
+                "capacity scorer: no registered agent_key_id on these traces (unverified/legacy \
+                 emitter) — cannot attest capacity about an unregistered subject; skipping"
+            );
+            continue;
+        };
 
         match score_and_emit(engine, node_key_id, &attested_key_id, &traces, cfg).await {
             Ok(true) => emitted += 1,
-            Ok(false) => {}
+            Ok(false) => {
+                // Scored-but-not-emitted: the agent had trace summaries but NO
+                // usable feature rows (feature_matrix empty). Visible per-agent so
+                // the window/feature-extraction semantics are never a silent zero.
+                empty_matrix_agents += 1;
+                // Under CIRIS_TESTING_MODE the per-agent skip is promoted to
+                // INFO so harness E2Es (mesh-repro traceflow) see WHY an agent
+                // was skipped without RUST_LOG=debug on the whole crate.
+                if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true") {
+                    tracing::info!(
+                        agent = %attested_key_id,
+                        n_traces = traces.len(),
+                        "capacity scorer: agent scored zero usable feature rows (skipped) [testing-mode verbose]"
+                    );
+                } else {
+                    tracing::debug!(
+                        agent = %attested_key_id,
+                        n_traces = traces.len(),
+                        "capacity scorer: agent scored zero usable feature rows (skipped)"
+                    );
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     agent = %attested_key_id,
@@ -250,6 +341,31 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 );
             }
         }
+    }
+    // The one line that decides the two field readings (CIRISServer#315):
+    //   n_summaries=0            → no traces in the window the scorer reads.
+    //   n_summaries>0, emitted=0 → traces present but every agent's feature
+    //                              matrix was empty (window/feature semantics).
+    //   emitted>0                → capacity rows authored → replication ships them.
+    if emitted == 0 {
+        tracing::warn!(
+            n_summaries,
+            n_agents,
+            empty_matrix_agents,
+            unregistered_agents,
+            window = cfg.window,
+            "capacity scorer pass emitted ZERO — no capacity attestation authored \
+             (n_summaries=0 ⇒ no traces in scope; >0 with empty matrices ⇒ \
+             feature-extraction semantics)"
+        );
+    } else {
+        tracing::info!(
+            n_summaries,
+            n_agents,
+            emitted,
+            unregistered_agents,
+            "capacity scorer pass complete (capacity attestations authored → replication)"
+        );
     }
     Ok(emitted)
 }
@@ -288,7 +404,7 @@ async fn score_and_emit(
     // The CEG `scores` envelope — the JCS canonical-signing payload (the same
     // shape ciris-status / lens-core emit; dimension is the versioned leaf).
     let envelope = serde_json::json!({
-        "dimension": CAPACITY_DIMENSION,
+        (paths::DIMENSION): CAPACITY_DIMENSION,
         "attestation_type": ATTESTATION_TYPE_SCORES,
         "attesting_key_id": anti_goodhart.attesting(),
         "attested_key_id": anti_goodhart.attested(),
@@ -312,7 +428,13 @@ async fn score_and_emit(
     // `node_key_id` here — wire-preserving). `weight = Some(score)` (the v9.4.0
     // #252 surface) keeps the capacity band on the row so the replication trust
     // model reads the real score, not the `1.0` default.
-    let mut input = EmitAttestationInput::with_envelope(ATTESTATION_TYPE_SCORES, envelope);
+    let mut input = EmitAttestationInput::with_envelope(
+        ATTESTATION_TYPE_SCORES,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        // capacity:* is a REPUTATIONAL claim about an agent, federation-visible
+        // by design (the whole point is that peers read it).
+        cohort_scope::FEDERATION,
+    );
     input.attested_key_id = Some(attested_key_id.to_owned());
     input.subject_key_ids = vec![attested_key_id.to_owned()];
     input.weight = Some(score);

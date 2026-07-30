@@ -24,8 +24,10 @@ use axum::{Json, Router};
 use ciris_persist::prelude::Engine;
 
 /// The node's **CC 2.2 / CC 2.6.4 wire identity** as health reports it
-/// (CIRISServer#159): the profiles this BUILD implements, the CEG wire version it
-/// speaks, and the `WIRE_VOCABULARY.md` SHA-256 it pinned at build.
+/// (CIRISServer#159, extended by CIRISServer#323): the profiles this BUILD
+/// implements, the CEG wire version it speaks, the `WIRE_VOCABULARY.md` SHA-256 it
+/// pinned at build, and the persist-owned CEG contract-hash fingerprint
+/// (`contract_hashes`).
 ///
 /// This is the BUILD-level (capability) view — the STATE-level view (what the node
 /// actually *declares*, which an operator may narrow via
@@ -33,6 +35,15 @@ use ciris_persist::prelude::Engine;
 /// `GET /v1/federation/conformance`, because it requires the Engine. Health is
 /// stateless and public, so it reports the honest ceiling + the wire identity a peer
 /// or LB needs to know it is even talking to a compatible node.
+///
+/// `contract_hashes` (CIRISServer#323 / SRV-2) publishes the persist-owned
+/// envelope-vocabulary, trace-summary-extraction, consent-grammar and
+/// transform-algebra hashes — making true the persist docs that already claim
+/// "CIRISServer serves the hash on /v1/health". `wire_vocabulary_sha256` keeps its
+/// top-level key unchanged (a published surface); the new hashes are ADDED beside
+/// it. See [`crate::conformance::contract_hashes`] for the exact set + rationale,
+/// and [`crate::conformance::assert_contract_hashes_pinned`] for the boot witness
+/// that keeps every served value reproducible from the linked substrate.
 fn build_conformance() -> serde_json::Value {
     serde_json::json!({
         "build_profiles": crate::conformance::BUILD_PROFILES
@@ -41,6 +52,7 @@ fn build_conformance() -> serde_json::Value {
             .collect::<Vec<_>>(),
         "ceg_wire_version": crate::conformance::CEG_WIRE_VERSION,
         "wire_vocabulary_sha256": crate::conformance::wire_vocabulary_sha256(),
+        "contract_hashes": crate::conformance::contract_hashes(),
         "declared_at": "/v1/federation/conformance",
     })
 }
@@ -72,7 +84,15 @@ async fn server_health() -> Json<serde_json::Value> {
 }
 
 /// The server-health routes, merged onto the read API. Stateless (liveness only).
+///
+/// This is the node's boot path for the health surface (compose merges it at
+/// startup), so it is where the CIRISServer#323 contract-hash **boot drift-witness**
+/// fires: before wiring the routes we assert every hash `/v1/health` will serve is
+/// reproducible from the linked substrate — a mismatch PANICS the boot rather than
+/// let the node publish a fingerprint it cannot stand behind (run once per process).
 pub fn router() -> Router {
+    static WITNESS: std::sync::Once = std::sync::Once::new();
+    WITNESS.call_once(crate::conformance::assert_contract_hashes_pinned);
     Router::new()
         .route("/health", get(plain_health))
         .route("/v1/health", get(server_health))
