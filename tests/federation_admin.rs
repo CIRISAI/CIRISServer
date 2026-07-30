@@ -808,3 +808,166 @@ fn accord_test_evidence() -> serde_json::Value {
         "nonce_captured_at": chrono::Utc::now().to_rfc3339(),
     })
 }
+
+// ─── POST /v1/federation/consent — the explicit, owner-authored consent act ───
+//
+// Consent is ALWAYS an owner-authored CEG claim (the boot path authors NONE —
+// see federation_delivery::prime_canonicals). This route is what the agent's
+// setup wizard calls (post owner-claim) when the owner opts into sharing. Unlike
+// peering it does NOT register a key: the peer must already be admitted.
+
+/// Admit `PEER_KEY_ID` directly (its self-signed PoP record) so the consent
+/// route — which authors consent but never registers keys — has a peer to
+/// consent to. In production the canonical is admitted via the baked seed.
+async fn admit_peer(engine: &Engine) {
+    engine
+        .register_federation_key(peer_signed_key_record().await)
+        .await
+        .expect("admit peer key via admission gate");
+}
+
+#[tokio::test]
+async fn owner_consent_authors_directed_grant_at_admitted_peer() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+
+    // Explicit scope, deliberately UNSORTED + duplicate + empty entry — proves the
+    // handler normalizes (sorts / dedupes / drops empty), like peering.
+    let body = serde_json::json!({
+        "peer_key_id": PEER_KEY_ID,
+        "attestation_prefixes": ["trace:", "capacity:", "capacity:", "  "],
+    });
+    let resp = client
+        .post(format!("{base}/v1/federation/consent"))
+        .bearer_auth(&owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST consent");
+    assert_eq!(
+        resp.status(),
+        200,
+        "owner consent to an admitted peer must succeed"
+    );
+    let json: serde_json::Value = resp.json().await.expect("consent response json");
+    assert_eq!(json["consented"], true);
+    assert_eq!(json["peer_key_id"], PEER_KEY_ID);
+    assert_eq!(json["freshly_emitted"], true);
+    assert_eq!(
+        json["attestation_prefixes"],
+        serde_json::json!(["capacity:", "trace:"]),
+        "explicit scope echoed sorted + deduped + empty-dropped"
+    );
+
+    // The node authored a directed consent:replication:v1 grant AT the peer.
+    let by_node = engine
+        .federation_directory()
+        .list_attestations_by(&node_a_key_id(&engine).await)
+        .await
+        .expect("list attestations by node");
+    let grant = by_node
+        .iter()
+        .find(|a| {
+            a.attestation_envelope
+                .get("dimension")
+                .and_then(|d| d.as_str())
+                == Some(CONSENT_DIMENSION)
+        })
+        .expect("node authored a consent:replication:v1 grant");
+    assert_eq!(grant.attestation_type, attestation_type::SCORES);
+    assert!(
+        grant.subject_key_ids.iter().any(|s| s == PEER_KEY_ID),
+        "the grant is directed at the peer"
+    );
+}
+
+#[tokio::test]
+async fn consent_with_empty_scope_is_refused() {
+    // Consent is always explicit about WHAT it covers — an empty scope is a 400,
+    // never a silent default.
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/federation/consent"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": [] }))
+        .send()
+        .await
+        .expect("POST consent");
+    assert_eq!(
+        resp.status(),
+        400,
+        "consent must name an explicit scope — empty is refused"
+    );
+}
+
+#[tokio::test]
+async fn consent_to_unadmitted_peer_is_refused() {
+    // This route authors consent, it does not register keys — an unknown peer is
+    // fail-closed (register via peering first).
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    // NOTE: peer deliberately NOT admitted.
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/federation/consent"))
+        .bearer_auth(&owner)
+        .json(
+            &serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": ["capacity:"] }),
+        )
+        .send()
+        .await
+        .expect("POST consent");
+    assert_eq!(
+        resp.status(),
+        400,
+        "consent to an unadmitted peer is refused (register it first)"
+    );
+}
+
+#[tokio::test]
+async fn consent_on_unowned_node_is_refused() {
+    // The route requires a live owner-binding — so the wizard can only author
+    // consent AFTER the owner claim (setup/root). Pre-claim it is a 403.
+    let engine = node().await;
+    register_self(&engine).await;
+    // NO bind_owner — the node has no responsible party yet.
+    admit_peer(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/federation/consent"))
+        .bearer_auth(&owner)
+        .json(
+            &serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": ["capacity:"] }),
+        )
+        .send()
+        .await
+        .expect("POST consent");
+    assert_eq!(
+        resp.status(),
+        403,
+        "an unowned node authors no cross-node consent — claim ownership first"
+    );
+}

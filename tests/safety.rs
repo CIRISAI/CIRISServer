@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, Community,
-    CommunityMember, KeyRecord, SignedAttestation, SignedCommunity, SignedKeyRecord,
+    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
+    Community, CommunityMember, KeyRecord, SignedAttestation, SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
@@ -379,10 +379,13 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
             attestation_type: attestation_type::SCORES.to_string(),
             weight: None,
             expires_at: None,
-            attestation_envelope: serde_json::json!({
-                "dimension": dimension,
-                "community_id": community,
-            }),
+            attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+                serde_json::json!({
+                    "dimension": dimension,
+                    "community_id": community,
+                }),
+            )
+            .expect("test envelope is a JSON object"),
             subject_key_ids: vec![member.to_string()],
             cohort_scope: "self".to_string(),
             scrub_signature_classical: None,
@@ -395,7 +398,7 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
             .expect("seed track record");
         // Promote so read_track_record (federation-tier reads) sees it.
         engine
-            .attestation_promote(&id)
+            .attestation_promote(&id, cohort_scope::FEDERATION)
             .await
             .expect("promote track record");
     }
@@ -407,7 +410,7 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
 /// federation key (a community has an identity) so attestations may name it as
 /// `attested_key_id` (the watchlist config is group-keyed).
 async fn put_community(engine: &Engine, community_id: &str, members: &[(&str, &str)]) {
-    register_party(engine, community_id, "community").await;
+    let authority = register_party(engine, community_id, "community").await;
     let now = chrono::Utc::now();
     let roster: Vec<CommunityMember> = members
         .iter()
@@ -427,9 +430,25 @@ async fn put_community(engine: &Engine, community_id: &str, members: &[(&str, &s
         policy_blob: None,
         persist_row_hash: String::new(),
     };
+    // persist v21.0.0 (#502 E4) — `put_community` now runs
+    // `verify_community_admission`: a hybrid signature over
+    // JCS(Community::signing_envelope()) by a REGISTERED authority key. No
+    // grandfathering, so the fixture signs as the community's own key (registered
+    // just above) rather than submitting an unsigned declaration.
+    let canonical =
+        ceg_produce_canonicalize(&community.signing_envelope()).expect("canonicalize community");
+    let sig = authority
+        .sign_hybrid(&canonical)
+        .await
+        .expect("sign community declaration");
     engine
         .federation_directory()
-        .put_community(SignedCommunity { community })
+        .put_community(SignedCommunity {
+            community,
+            authority_key_id: community_id.to_string(),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        })
         .await
         .expect("put_community");
 }

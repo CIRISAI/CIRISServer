@@ -185,10 +185,49 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
         1,
         "A publishes exactly its OWN record on the Key plane (selector-scoped), got {refs:?}"
     );
+    // ── CHARACTERIZATION PIN: CIRISPersist#547 ──────────────────────────────
+    // `adopt_scrub_upgrade` (above) mutates `federation_keys` IN PLACE but never
+    // maintains `signed_wire_index` — the index still holds only the PRE-adopt
+    // self-signed hash, while edge advertises the current row's hash. So A
+    // advertises a ref it CANNOT SERVE, and the point-read misses.
+    //
+    // Both halves are pinned deliberately, in the style of
+    // tests/capacity_self_revocation_pin.rs:
+    //
+    //   1. the miss is asserted, so this test documents the upstream defect
+    //      rather than hiding it, and starts FAILING the moment persist fixes it
+    //      (which is the signal to delete this block);
+    //   2. the post-rebuild success is asserted, proving the diagnosis is index
+    //      STALENESS and not a serialization skew — advertise and reload are
+    //      byte-identical, only the index key is missing.
+    //
+    // Deliberately NOT done: silently calling `rebuild_signed_wire_index()` before
+    // the fetch. That would turn the suite green while certifying a path that is
+    // broken in production — a node scrub-upgraded WHILE RUNNING advertises a Key
+    // record it cannot serve until its next restart (edge rebuilds the index once
+    // at replication-runtime startup). Green-by-concealment is the failure mode
+    // this whole arc has been curing.
+    assert!(
+        a_bridge
+            .fetch_envelope_bytes(EnvelopeKind::Key, &refs[0].envelope_hash)
+            .await
+            .is_none(),
+        "CIRISPersist#547 pin: the advertised hash should MISS the stale wire index. \
+         If this now resolves, persist has fixed adopt_scrub_upgrade — delete this \
+         block and restore the direct `.expect(\"A serves its own record bytes\")`."
+    );
+    engine_a
+        .federation_directory()
+        .rebuild_signed_wire_index()
+        .await
+        .expect("rebuild the wire index");
     let bytes = a_bridge
         .fetch_envelope_bytes(EnvelopeKind::Key, &refs[0].envelope_hash)
         .await
-        .expect("A serves its own record bytes");
+        .expect(
+            "after a rebuild the SAME advertised hash resolves — proving the miss was index \
+             staleness, not a hash/serialization skew",
+        );
 
     // (4) RECEIVE — B applies the exact wire bytes via its bridge (anti-entropy RX).
     let b_dir: Arc<dyn FederationDirectory> = engine_b.federation_directory();
@@ -197,12 +236,16 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
         Arc::new(move || vec![node_a_key.to_string()]),
         BridgeConfig::default(),
     );
+    // CIRISEdge#425 — `ApplyOutcome`, not a bool: a refusal now carries WHY, so a
+    // failure here names the gate instead of asserting `false`. CIRISEdge#426 —
+    // `source_peer`; `None` because this drives the bridge directly with no
+    // authenticated transport peer.
     let admitted = b_bridge
-        .apply_envelope_bytes(EnvelopeKind::Key, &bytes)
+        .apply_envelope_bytes(EnvelopeKind::Key, &bytes, None)
         .await;
     assert!(
-        admitted,
-        "B must admit A's anchored record (validates against seeded A1)"
+        admitted.is_admitted(),
+        "B must admit A's anchored record (validates against seeded A1) — got {admitted:?}"
     );
 
     // (5) ROOT — B now roots A at the accord anchor. THE SEED CLOSED.

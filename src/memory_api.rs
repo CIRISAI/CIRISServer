@@ -74,6 +74,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::graph::sqlite::SqliteGraphBackend;
 use ciris_persist::graph::types::{EdgeDirection, GraphScope, NodeFilter};
 use ciris_persist::graph::GraphService;
@@ -577,7 +578,7 @@ pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>, node_key_id: &str) 
             for a in atts {
                 let dim = a
                     .attestation_envelope
-                    .get("dimension")
+                    .get(paths::DIMENSION)
                     .and_then(|v| v.as_str());
                 // config:* rows are already projected as richer config nodes.
                 if a.attestation_type == attestation_type::SCORES

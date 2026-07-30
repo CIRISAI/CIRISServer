@@ -15,6 +15,10 @@ dist-wheel/
 
 # built wheels (release artifacts, not source)
 dist/
+# local/target-specific wheel output dirs (build artifacts, never source)
+dist-local/
+dist-android/
+dist-obs/
 
 # maturin develop artifact (built into the source tree)
 python/ciris_server/_native*.so

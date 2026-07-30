@@ -325,11 +325,12 @@ async fn signed_occurrence_custody_replication_and_seal() {
         .expect("fetch signed occurrence bytes");
     let bridge_a =
         FederationDirectoryReplicationBridge::new(Arc::clone(&dir_a), Arc::new(Vec::new));
+    let outcome = bridge_a
+        .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes, None)
+        .await;
     assert!(
-        bridge_a
-            .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes)
-            .await,
-        "A verifies + admits B's replicated SIGNED occurrence"
+        outcome.is_admitted(),
+        "A verifies + admits B's replicated SIGNED occurrence (got {outcome:?})"
     );
     let resolved = dir_a
         .resolve_encryption_keys(NODE_B_KEY_ID)
@@ -393,7 +394,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     );
     // Stale replay: re-apply the ORIGINAL replicated bytes → safe no-op.
     let _ = bridge_a
-        .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes)
+        .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes, None)
         .await;
     let after_replay = dir_a
         .resolve_encryption_keys(NODE_B_KEY_ID)

@@ -320,11 +320,19 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
 
 /// A non-`consent:replication` `scores` attestation authored by A (subject =
 /// `subject_key_id`) — proves the reader filters on the dimension, not just type.
+///
+/// The dimension is `health:liveness:v1` and NOT `capacity:*`, deliberately.
+/// persist v22 (CIRISConstitution#46) refuses a `capacity:*` claim about a subject
+/// unless a live `analyze` consent from that subject covers the attester, so a
+/// capacity row cannot be seeded here without ALSO authoring a consent row — which
+/// would inject consent state into the very reader this test is measuring. Any
+/// non-`consent:replication` dimension satisfies the test's actual intent.
+/// Do not "restore" capacity here; it will fail closed.
 async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
     let now = chrono::Utc::now();
     let nk = node_a_key_id(engine).await;
     let envelope = serde_json::json!({
-        "dimension": "capacity:sustained_coherence:v1",
+        "dimension": "health:liveness:v1",
         "attesting_key_id": nk,
         "subject_key_ids": [subject_key_id],
         "score": 0.9,

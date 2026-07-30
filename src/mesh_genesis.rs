@@ -31,8 +31,10 @@
 //! deletable, nuclear-revocable act (`FSD/TRUST_ROOT_CAPABILITY_GATE.md` §1). The
 //! operator *chooses* a trust root; a bundle never assigns one.
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::{
-    pre_rotation_commitment, CHARTER_PRE_ROTATION_FIELD, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
+    pre_rotation_commitment, ACCORD_LIFECYCLE_DIMENSION, ACCORD_LIFECYCLE_FRESHNESS_DAYS,
+    CHARTER_PRE_ROTATION_FIELD, INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE,
 };
 use ciris_persist::federation::types::delegation_scope::INFRA_SERVE;
 use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
@@ -108,6 +110,17 @@ pub enum GenesisError {
     CharterInvalid(String),
     /// A serve node has no `infra:serve` grant from the charter root.
     ServeNodeUngranted(String),
+    /// No `accord:lifecycle:v1` liveness row about the charter root. Without it
+    /// `trust_root_valid` returns false on its FIFTH conjunct and the capability
+    /// gate stays shut — the bundle looks complete and is inert.
+    NoLifecycle,
+    /// The liveness row exists but is outside the freshness window, so it no
+    /// longer counts. Refused loudly rather than attached to produce a root that
+    /// silently fails the walk.
+    LifecycleStale {
+        asserted_at: String,
+        max_age_days: i64,
+    },
     /// Fewer holder authorizations than the family's entrenched M.
     QuorumNotMet {
         have: usize,
@@ -128,6 +141,24 @@ impl std::fmt::Display for GenesisError {
                  gate stays shut)"
             ),
             Self::CharterInvalid(d) => write!(f, "trust-root charter invalid: {d}"),
+            Self::NoLifecycle => write!(
+                f,
+                "genesis carries no accord:lifecycle:v1 liveness row about the charter root — \
+                 trust_root_valid needs edge_exists && root_self_declares && \
+                 charter_has_recovery && lifecycle_active && !halt_latched, and this bundle \
+                 satisfies only the first three. Attaching it would seed a root that every \
+                 capability walk silently rejects (CIRISPersist#483)"
+            ),
+            Self::LifecycleStale {
+                asserted_at,
+                max_age_days,
+            } => write!(
+                f,
+                "the accord:lifecycle:v1 liveness row is stale (asserted_at={asserted_at}, \
+                 window={max_age_days}d) — re-run the ceremony to mint a fresh one. A stale \
+                 row does not count toward lifecycle_active, so attaching this bundle would \
+                 produce an inert trust root"
+            ),
             Self::ServeNodeUngranted(k) => write!(
                 f,
                 "serve node {k} carries no infra:serve grant from the charter root — \
@@ -195,6 +226,9 @@ pub fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
 pub const CHARTER_ATTESTATION_ID: &str = "genesis-charter";
 /// Prefix for the per-serve-node `infra:serve` grant ids.
 pub const GRANT_ATTESTATION_ID_PREFIX: &str = "genesis-grant-serve";
+
+/// The liveness row's attestation id — the FIFTH conjunct of `trust_root_valid`.
+pub const LIFECYCLE_ATTESTATION_ID: &str = "genesis-lifecycle";
 
 /// The scopes a genesis charter confers on the root. The accord's charter is its
 /// domain ceiling: because delegation is attenuation-bound, nothing downstream can
@@ -265,7 +299,7 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
     let commitment = pre_rotation_commitment(successors)
         .map_err(|e| GenesisError::CharterInvalid(format!("pre-rotation commitment: {e}")))?;
     Ok(serde_json::json!({
-        "references_attestation_id": CHARTER_ATTESTATION_ID,
+        (paths::REFERENCES_ATTESTATION_ID): CHARTER_ATTESTATION_ID,
         "scope": CHARTER_SCOPES,
         CHARTER_PRE_ROTATION_FIELD: commitment,
         "successor_key_ids": successors,
@@ -276,9 +310,52 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
 /// trace gate: the capability that must root to a trusted root).
 pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "references_attestation_id": format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
+        (paths::REFERENCES_ATTESTATION_ID): format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
         "scope": [INFRA_SERVE_SCOPE],
     })
+}
+
+/// Build the `accord:lifecycle:v1` liveness envelope for the charter root — the
+/// FIFTH conjunct of `trust_root_valid`, and the one a v2 bundle was missing.
+///
+/// `trust_root_valid` is an AND over five things: `edge_exists`,
+/// `root_self_declares`, `charter_has_recovery`, **`lifecycle_active`**, and
+/// `!halt_latched`. A bundle can carry a perfect charter and perfect grants and
+/// still produce a root that every capability walk rejects, because a root with no
+/// live liveness row is indistinguishable from one nobody is attesting to.
+///
+/// The row is a `scores` attestation ABOUT the root (`attested_key_id = root`)
+/// carrying this dimension, and persist requires an `accord_holder` attester for
+/// the `accord:*` namespace — so at genesis the root, itself a seated holder,
+/// scores itself.
+///
+/// **It expires.** `ACCORD_LIFECYCLE_FRESHNESS_DAYS` is 90, so this is not a
+/// mint-once artifact: a bundle attached more than 90 days after it was produced
+/// carries a row that no longer counts, and the root goes inert with no error at
+/// the point of use. [`verify_bundle_structure`] refuses a stale bundle for that
+/// reason, and a long-lived mesh needs the row re-minted on a cadence.
+pub fn lifecycle_envelope() -> serde_json::Value {
+    serde_json::json!({
+        (paths::REFERENCES_ATTESTATION_ID): LIFECYCLE_ATTESTATION_ID,
+        (paths::DIMENSION): ACCORD_LIFECYCLE_DIMENSION,
+    })
+}
+
+/// The liveness row carried by a bundle, if any: a `scores` row about the root
+/// on the `accord:lifecycle:v1` dimension.
+fn lifecycle_of<'a>(bundle: &'a GenesisBundle, root: &str) -> Option<&'a Attestation> {
+    bundle
+        .attestations
+        .iter()
+        .map(|a| &a.attestation)
+        .find(|a| {
+            a.attestation_type == attestation_type::SCORES
+                && a.attested_key_id == root
+                && a.attestation_envelope
+                    .get(paths::DIMENSION)
+                    .and_then(|v| v.as_str())
+                    == Some(ACCORD_LIFECYCLE_DIMENSION)
+        })
 }
 
 /// The key that chartered itself — the bundle's actual trust root, as opposed to
@@ -389,6 +466,20 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
         if !granted {
             return Err(GenesisError::ServeNodeUngranted(n.record.key_id.clone()));
         }
+    }
+
+    // ── The fifth conjunct. A charter and grants make the root DECLARED; the
+    // liveness row makes it COUNT. Checked here rather than left to the walk,
+    // because the walk's failure mode is a silent `false` at the point of use —
+    // by which time the operator is debugging a dark trace plane, not a bad
+    // bundle. Refuse the artifact instead.
+    let lifecycle = lifecycle_of(bundle, root).ok_or(GenesisError::NoLifecycle)?;
+    let age = chrono::Utc::now().signed_duration_since(lifecycle.asserted_at);
+    if age > chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS) {
+        return Err(GenesisError::LifecycleStale {
+            asserted_at: lifecycle.asserted_at.to_rfc3339(),
+            max_age_days: ACCORD_LIFECYCLE_FRESHNESS_DAYS,
+        });
     }
 
     // ── The m-of-n proof. M comes from the family policy the bundle carries, but
@@ -811,6 +902,38 @@ mod v2_tests {
         }
     }
 
+    /// A `scores` fixture. Separate from [`att`] because the liveness row is NOT a
+    /// `delegates_to`, and because its `asserted_at` must be LIVE: `lifecycle_active`
+    /// is freshness-windowed (90d), so a hard-coded date would turn every genesis
+    /// test into a time bomb that starts failing ~90 days after it was written.
+    fn scores_att(id: &str, from: &str, to: &str, env: serde_json::Value) -> SignedAttestation {
+        let now = chrono::Utc::now().to_rfc3339();
+        SignedAttestation {
+            attestation: serde_json::from_value(serde_json::json!({
+                "attestation_id": id,
+                "attesting_key_id": from,
+                "attested_key_id": to,
+                "attestation_type": attestation_type::SCORES,
+                "attestation_envelope": env,
+                "asserted_at": now,
+                "original_content_hash": "",
+                "scrub_signature_classical": "",
+                "scrub_key_id": from,
+                "scrub_timestamp": now,
+                "persist_row_hash": "",
+                "subject_key_ids": [],
+                "cohort_scope": "federation",
+                "tier": "federation",
+            }))
+            .expect("scores Attestation fixture"),
+        }
+    }
+
+    /// The fifth conjunct: a live `accord:lifecycle:v1` row about the root.
+    fn good_lifecycle() -> SignedAttestation {
+        scores_att(LIFECYCLE_ATTESTATION_ID, "A1", "A1", lifecycle_envelope())
+    }
+
     fn bundle_with(attestations: Vec<SignedAttestation>) -> GenesisBundle {
         GenesisBundle {
             version: GENESIS_VERSION,
@@ -915,7 +1038,7 @@ mod v2_tests {
     /// finished. `verify_bundle` is what "the seed is ready" means.
     #[test]
     fn a_structurally_sound_bundle_still_needs_the_quorum() {
-        let b = bundle_with(vec![good_charter(), good_grant()]);
+        let b = bundle_with(vec![good_charter(), good_grant(), good_lifecycle()]);
         assert!(verify_bundle_structure(&b).is_ok(), "structure holds");
         match verify_bundle(&b) {
             Err(GenesisError::QuorumNotMet { have, needed }) => {
@@ -939,10 +1062,37 @@ mod v2_tests {
         );
     }
 
+    /// THE FIFTH CONJUNCT. A bundle with a perfect charter and perfect grants is
+    /// still inert without a live `accord:lifecycle:v1` row: `trust_root_valid`
+    /// ANDs `lifecycle_active` in, so the walk returns false at the point of USE —
+    /// a dark trace plane, not a bad-bundle error. Refuse the artifact instead.
+    #[test]
+    fn a_bundle_without_a_liveness_row_is_refused() {
+        match verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant()])) {
+            Err(GenesisError::NoLifecycle) => {}
+            other => panic!("expected a missing-liveness refusal, got {other:?}"),
+        }
+    }
+
+    /// The row EXPIRES. A bundle minted long ago carries a row that no longer
+    /// counts, so attaching it would produce a root that silently fails the walk.
+    #[test]
+    fn a_stale_liveness_row_is_refused() {
+        let mut stale = good_lifecycle();
+        stale.attestation.asserted_at =
+            chrono::Utc::now() - chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS + 1);
+        match verify_bundle_structure(&bundle_with(vec![good_charter(), good_grant(), stale])) {
+            Err(GenesisError::LifecycleStale { max_age_days, .. }) => {
+                assert_eq!(max_age_days, ACCORD_LIFECYCLE_FRESHNESS_DAYS)
+            }
+            other => panic!("expected a stale-liveness refusal, got {other:?}"),
+        }
+    }
+
     /// A verifier must never GUESS the threshold.
     #[test]
     fn an_unparseable_policy_is_refused_not_defaulted() {
-        let mut b = bundle_with(vec![good_charter(), good_grant()]);
+        let mut b = bundle_with(vec![good_charter(), good_grant(), good_lifecycle()]);
         b.consensus_protocol = String::new();
         assert!(matches!(
             verify_bundle_structure(&b),

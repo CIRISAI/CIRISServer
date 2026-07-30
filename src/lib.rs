@@ -148,6 +148,7 @@ pub mod federation_peers;
 /// four routes the CIRISAgent wave-2 DRY purge deletes from Python that need
 /// the live `Arc<Edge>`. The deleted agent route files are the wire spec.
 pub mod federation_surface;
+pub mod field_conformance;
 /// **Config-as-CEG** (Server 0.5 Phase 1) — a signed, owner-gated GraphConfig
 /// service over the CEG, mirroring CIRISAgent's `GraphConfigService` but
 /// hybrid-signed + owner-gated. Config entries are self-attested `config:v1`
@@ -969,12 +970,39 @@ mod python {
         let run = || -> PyResult<()> {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            // ── RUNTIME-TOPOLOGY PROBE (#315 field diagnosis) ────────────────
+            // Prove the SERVE runtime's time driver independently of any task
+            // spawned onto it: if this heartbeat logs, timers work HERE; a
+            // timer-dead task elsewhere therefore lives on a DIFFERENT runtime.
+            // If this heartbeat itself never logs, the embedded-fold runtime is
+            // the broken one. One line decides the bisect.
+            tracing::info!(
+                thread = %std::thread::current().name().unwrap_or("<unnamed>"),
+                flavor = ?rt.handle().runtime_flavor(),
+                "serve runtime created (embedded entry) — 2s timer heartbeat armed"
+            );
+            rt.spawn(async {
+                let t0 = std::time::Instant::now();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "serve runtime timer heartbeat OK — time driver delivering"
+                );
+            });
             rt.block_on(fut)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         };
         if tokio::runtime::Handle::try_current().is_err() {
+            tracing::info!(
+                thread = %std::thread::current().name().unwrap_or("<unnamed>"),
+                "rt_block_on_reentrant: NO ambient runtime — serving directly on the calling thread (#315 probe)"
+            );
             return run();
         }
+        tracing::info!(
+            thread = %std::thread::current().name().unwrap_or("<unnamed>"),
+            "rt_block_on_reentrant: ambient runtime detected — hopping to dedicated 'ciris-serve-rt' thread (#264 shield, #315 probe)"
+        );
         eprintln!(
             "ciris-server: ambient tokio runtime detected on the calling thread — \
              hopping to a dedicated OS thread (embedded-fold reentrancy shield, #264)"
@@ -1180,12 +1208,17 @@ mod python {
     ///
     /// It drives the SAME delivery machinery ciris-server's compose node runs, but
     /// against the in-process embedded handles rather than a freshly-composed node:
-    /// grabs `current_rust_engine()` + `current_edge()`, seeds the baked canonical
-    /// key_ids as replication targets (reading their transport hints — subsumes
-    /// #204), authors this node's `consent:replication` grant at the canonical
-    /// peer, starts the `ReplicationRuntime` + the reconcile loop, and subscribes
-    /// the announce logger. Returns the number of admitted canonical targets
-    /// seeded. Idempotent per process (a second call is a no-op).
+    /// grabs `current_rust_engine()` + `current_edge()`, ROOTS the baked canonical
+    /// key_ids for reachability (reading their transport hints — subsumes #204),
+    /// starts the `ReplicationRuntime` + the reconcile loop, and subscribes the
+    /// announce logger. Returns the number of admitted canonical targets rooted.
+    /// Idempotent per process (a second call is a no-op).
+    ///
+    /// It authors NO consent: a canonical only enters the REPLICATION topology
+    /// once an owner has authored a `consent:replication` grant to it (explicit,
+    /// via `POST /v1/federation/consent`, which the agent wizard calls post-claim
+    /// on owner opt-in). Rooting makes the canonical dialable; it moves nothing
+    /// until that owner consent exists.
     ///
     /// The controller + its driving runtime are held in a process static, so the
     /// caller need not retain the return value for delivery to keep running.
@@ -1232,6 +1265,23 @@ mod python {
         d.set_item("first_write_ok", status.first_write_ok)?;
         d.set_item("log_path", status.log_path)?;
         Ok(d.into())
+    }
+
+    #[pyfunction]
+    /// TEST-ANCHOR-FENCED: `ciris_server.author_federation_consent(peer_key_id,
+    /// attestation_prefixes)` — harness-only consent author (mesh-repro
+    /// traceflow). Refused unless CIRIS_TESTING_MODE=true; production consent
+    /// is exclusively the owner-gated POST /v1/federation/consent.
+    #[pyo3(name = "author_federation_consent", signature = (peer_key_id, attestation_prefixes))]
+    fn py_author_federation_consent(
+        py: Python<'_>,
+        peer_key_id: String,
+        attestation_prefixes: Vec<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            crate::federation_delivery::author_consent_testing(&peer_key_id, &attestation_prefixes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
     }
 
     #[pyfunction]
@@ -1284,6 +1334,45 @@ mod python {
     #[pyo3(name = "delivery_status")]
     fn py_delivery_status(py: Python<'_>) -> String {
         py.detach(crate::federation_delivery::delivery_status_json)
+    }
+
+    /// **CIRISConstitution#46 — read the RESOLVED `analyze` stance** (CIRISServer#331
+    /// ask 2). Read-only: this NEVER authors.
+    ///
+    /// Returns one of `"granted"` / `"revoked"` / `"expired"` / `"unspecified"` —
+    /// the verdict of persist's ONE canonical scoped fold
+    /// (`resolve_scoped_consent`: latest-wins by `asserted_at`, expiry-aware, a
+    /// grant must name its scope exactly, a scope-less revocation is blanket).
+    ///
+    /// It exists because the agent's drift detector could resolve replication
+    /// through `list_consent_peers` (a projection) but had to report the analyze
+    /// stance as UNKNOWN — no py surface reached the fold. Reporting "unknown"
+    /// was the right call over guessing, and this closes the gap so the detector's
+    /// "aligned" verdict is complete rather than two-thirds.
+    ///
+    /// Callers MUST key off this, never off row existence: a `consent:state:granted`
+    /// row that folds to `unspecified` (wrong scope shape, wrong tier, superseded)
+    /// reads as consented while the gate still refuses — the silent-false this arc
+    /// keeps curing.
+    ///
+    /// `attester_key_id` is the party that would author `capacity:*` ABOUT
+    /// `subject_key_id`. The consent is the REVERSE edge (subject → attester), so
+    /// mind the direction: passing them swapped resolves a different question and
+    /// will answer `unspecified` for a perfectly consented pair.
+    #[pyfunction]
+    #[pyo3(name = "analyze_consent_stance", signature = (attester_key_id, subject_key_id=None))]
+    fn py_analyze_consent_stance(
+        py: Python<'_>,
+        attester_key_id: String,
+        subject_key_id: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            crate::federation_delivery::analyze_consent_stance(
+                &attester_key_id,
+                subject_key_id.as_deref(),
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
     }
 
     /// In-process accessor for the first-run ownership claim PIN (CIRISServer#277).
@@ -1412,6 +1501,8 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
+        m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;

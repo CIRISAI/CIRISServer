@@ -24,14 +24,18 @@
 //!      ([`Engine::canonical_bootstrap_hints`]) → the canonical `key_id`s (the
 //!      replication targets) + their dialable ip addresses (logged; see the
 //!      dial-set caveat below — subsumes #204).
-//!   2. Authors this node's directed `consent:replication` grant AT each admitted
-//!      canonical peer ([`crate::peer::emit_replication_consent`], idempotent) so
-//!      the reconcile loop keeps the canonical in the desired topology.
+//!   2. ROOTS each admitted canonical's transport binding (reachability only) so
+//!      `knows_peer(canonical)` is true. It authors NO consent:
+//!      `consent:replication` is an explicit owner act — the agent's setup wizard
+//!      POSTs `/v1/federation/consent` (owner-gated, so necessarily AFTER the
+//!      owner claim) when the owner opts into sharing. A pure server makes no
+//!      traces and never auto-consents to replicate them.
 //!   3. Starts (or, post-#312, receives the already-composed) ONE
 //!      `ReplicationRuntime` over the shared transport
 //!      ([`crate::compose::start_replication_runtime`] — the SAME core, single
-//!      composition per process). The canonical enters the topology purely via the
-//!      consent:replication grant step 2 authored — the hot path reads CEG alone.
+//!      composition per process). The canonical enters the REPLICATION topology
+//!      purely via an owner-authored consent:replication grant — the hot path
+//!      reads CEG alone; rooting alone dials but replicates nothing.
 //!   4. Spawns the consent-topology reconcile loop
 //!      ([`crate::replication_reconcile::reconcile_once`] on `cadence_seconds`).
 //!   5. Spawns the announce logger over `edge.events()` so RNS rooting is visible.
@@ -176,6 +180,37 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
         .thread_name("ciris-fed-delivery")
         .build()
         .context("build federation-delivery runtime")?;
+    // #393 item 2 / #406: publish THIS node's SIGNED transport destination
+    // before delivery rounds begin. compose::serve does this for served nodes;
+    // the BARE embedded topology (agent fold pre-serve, mesh-repro harness
+    // agent) reaches delivery only through here — without it the peer's PQ
+    // attribution gate refuses every non-bootstrap frame from us
+    // ("no hybrid-verified TransportDestination binds this transport
+    // identity") and traces can never ship. Same producer, every topology.
+    let node_key_id = edge.signer_key_id().to_string();
+    rt.block_on(crate::compose::publish_self_transport_destination(
+        &engine,
+        &edge,
+        &node_key_id,
+    ));
+    // CIRISPersist#543 AV-77 (v22.0.0) — arm the in-band peer de-admission gate on
+    // the DELIVERY path too. The embedded agent never runs `serve_with_adapter`, so
+    // arming only there would leave every agent node's sanction gate dormant while
+    // the composed node's looked armed — the same "wired but unreachable by any
+    // host" shape persist hit shipping it. Self-proving (reads the value back) and
+    // fatal on mismatch; see `compose::arm_peer_deadmission_gate`.
+    rt.block_on(crate::compose::arm_peer_deadmission_gate(&engine))?;
+    // TEST-ANCHOR-ONLY (CIRISEdge#386 leg B): the bare embedded agent reaches
+    // delivery ONLY through here — it never runs serve_with_adapter, where
+    // `maybe_test_bless_self` mints the leg-B trust-root graph. Without this, the
+    // agent's own directory holds no charter / trust edge / lifecycle, so
+    // `capability_roots_to_trusted_root` finds no trusted root and the agent
+    // withholds every trace attestation (the observed NO-CARRIER). Runs the SAME
+    // ceremony the composed node runs; a loud no-op unless CIRIS_TESTING_MODE=true
+    // + a seed; compiled out of production entirely (the `test-anchor` feature is
+    // absent there). Before `engine`/`edge` are moved into the controller below.
+    #[cfg(feature = "test-anchor")]
+    rt.block_on(crate::test_bless::maybe_test_bless_delivery_self(&engine))?;
     let controller = rt.block_on(run_federation_delivery(
         engine,
         edge,
@@ -193,8 +228,8 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
 /// [`start_and_hold`] is `is_started()`-guarded, so the canonical prime never
 /// re-fires — `knows_peer(canonical)` stays false and the sealed trace has no
 /// delivery peer (`peer_count_canonical: 0`). This re-drives ONLY the prime
-/// ([`prime_canonicals`]: read baked hints → author consent → re-root each
-/// canonical's transport binding) against the CURRENT handles, on the held
+/// ([`prime_canonicals`]: read baked hints → re-root each canonical's transport
+/// binding — reachability only, no consent) against the CURRENT handles, on the held
 /// runtime — the already-running reconcile loop then delivers on its next tick.
 ///
 /// It does NOT rebuild the [`ReplicationRuntime`]: the reused edge's
@@ -253,6 +288,224 @@ async fn gather_delivery_status(
             None => Vec::new(),
         },
     };
+    // ── The TRACE PLANE gate (CIRISServer#327 / CIRISPersist#509) ───────────
+    // A sealed trace only reaches a canonical if BOTH of these hold, and the
+    // whole #315 saga was spent discovering them one live run at a time:
+    //
+    //   1. a LIVE self-authored `consent:replication:v1` grant COVERS the
+    //      `trace:` dimension prefix — `promote_consented_backlog` only sweeps
+    //      rows a grant's `attestation_prefixes` cover, and the server's own
+    //      default is `["capacity:"]`, so a defaulted grant never promotes a
+    //      single trace no matter how many are sealed; and
+    //   2. that grant's `audience` is the cohort the payload inherits —
+    //      promotion stamps `cohort_scope` FROM the audience (#509's second
+    //      half), and the replication offer filter keys on `cohort_scope`, not
+    //      tier. A trace promoted to `tier=federation` while still
+    //      `cohort_scope=self` is invisible to the round: the empirically
+    //      settled differential (consent crossed at (federation, federation);
+    //      traces did not at (self, federation)).
+    //
+    // Both are read-only projections of already-verified state — no emit, no
+    // sweep, no side effects — so this is safe to poll from a harness.
+    let trace_plane = match &engine {
+        Some(eng) => {
+            let node = node_key_id.clone();
+            match eng
+                .federation_directory()
+                .list_live_consent_grants_by(&node)
+                .await
+            {
+                Ok(grants) => {
+                    let mut prefixes: Vec<String> = Vec::new();
+                    let mut audiences: Vec<String> = Vec::new();
+                    for g in &grants {
+                        for p in
+                            ciris_persist::federation::consent_grammar::grant_attestation_prefixes(
+                                &g.attestation_envelope,
+                            )
+                        {
+                            if !prefixes.contains(&p) {
+                                prefixes.push(p);
+                            }
+                        }
+                        // The audience the payload will inherit at promotion.
+                        // Absent ⇒ persist's `default_audience()` (federation).
+                        let aud = g
+                            .attestation_envelope
+                            .get("payload")
+                            .and_then(|p| p.get("audience"))
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("federation")
+                            .to_string();
+                        if !audiences.contains(&aud) {
+                            audiences.push(aud);
+                        }
+                    }
+                    // `covers` is persist's own prefix matcher — the SAME fn the
+                    // sweep uses, so this can never disagree with it (the
+                    // trailing colon is significant: `trace:` does not cover
+                    // `trace_summary:v1`).
+                    let covers_trace = ciris_persist::federation::consent_grammar::covers(
+                        &prefixes,
+                        "trace:complete:v1",
+                    );
+
+                    // ── ARMED-BUT-STRANDED (the tier this block originally
+                    // lacked, and which let it over-promise) ────────────────
+                    // The grant checks above answer "will FUTURE rows be swept
+                    // and to what audience?" — they say NOTHING about rows
+                    // ALREADY on disk. A row sealed or promoted before the
+                    // grant existed (or promoted through the tier-only path)
+                    // can sit at `(cohort_scope=self, tier=federation)`:
+                    // covered by the grant, past the tier gate, and STILL
+                    // never offered, because the replication offer filter keys
+                    // on `cohort_scope`. The plane is armed and the payload is
+                    // stranded — reported "armed" by the first version of this
+                    // diagnostic, which is precisely the over-promise the
+                    // agent-harness run caught (CIRISAgent#932).
+                    //
+                    // Cost note: `list_attestations_by` is unpaged, so this is
+                    // O(rows authored by this node). Fine for a node/harness
+                    // diagnostic; do not call it on a hot path.
+                    // The predicate below is edge's OWN advertise decision, not a
+                    // paraphrase of it. The first version of this block guessed
+                    // (`cohort_scope == "self"` ⇒ stranded) and reported
+                    // `stranded_covered_rows: 0` against three visibly stranded
+                    // rows (CIRISAgent#932) — a parallel predicate that drifted
+                    // from the one that actually decides, which is the same
+                    // one-name-two-processors defect this codebase has been
+                    // cataloguing. So: call the SAME persist fns edge's
+                    // `attestation_is_advertised` (bridge.rs) calls —
+                    // `authority_for` → `is_withdraw_or_revocation` →
+                    // `projection_for` — and reproduce its publish-own arm.
+                    //
+                    // NOTE the arm that broke the guess: `SelfOwn` is NOT
+                    // "never advertised". It is publish-YOUR-OWN (KERI shape) —
+                    // a `self`-scoped row IS advertised **by its own producer**.
+                    // So a `(self, federation)` row authored by THIS node is
+                    // offerable, and the strand (if any) lies elsewhere. That is
+                    // why this now reports the projection instead of asserting a
+                    // verdict it cannot support.
+                    use ciris_persist::federation::namespace as ns;
+                    let mut covered_rows = 0usize;
+                    let mut stranded = 0usize;
+                    let mut by_projection: std::collections::BTreeMap<String, usize> =
+                        std::collections::BTreeMap::new();
+                    if !grants.is_empty() {
+                        if let Ok(mine) =
+                            eng.federation_directory().list_attestations_by(&node).await
+                        {
+                            for a in &mine {
+                                let dim = a
+                                    .attestation_envelope
+                                    .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or_default();
+                                if dim.is_empty()
+                                    || !ciris_persist::federation::consent_grammar::covers(
+                                        &prefixes, dim,
+                                    )
+                                {
+                                    continue;
+                                }
+                                covered_rows += 1;
+                                let authority = ns::registry::authority_for(dim).class;
+                                let is_tombstone =
+                                    ns::is_withdraw_or_revocation(&a.attestation_type);
+                                let proj =
+                                    ns::projection_for(&a.cohort_scope, authority, is_tombstone);
+                                // Edge's publish-own arm: SelfOwn advertises iff
+                                // the producer is in the node's OWN self-set.
+                                // These rows came from `list_attestations_by(node)`,
+                                // so the producer IS this node — hence SelfOwn
+                                // here is ADVERTISED, not withheld.
+                                let advertised = match proj {
+                                    ns::Projection::Global | ns::Projection::Cohort => true,
+                                    ns::Projection::SelfOwn => a.attesting_key_id == node,
+                                };
+                                *by_projection
+                                    .entry(format!(
+                                        "{:?}/{}/{}",
+                                        proj,
+                                        a.cohort_scope,
+                                        if advertised { "offered" } else { "withheld" }
+                                    ))
+                                    .or_default() += 1;
+                                if !advertised {
+                                    stranded += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    let hint = if grants.is_empty() {
+                        "NO live self-authored consent:replication grant — nothing will ever be \
+                         promoted or offered. Author one (POST /v1/federation/consent) before \
+                         expecting any trace to cross."
+                    } else if !covers_trace {
+                        "grant(s) present but NONE cover `trace:` — promote_consented_backlog \
+                         will never sweep a trace row, so sealed traces stay local-tier forever. \
+                         The server's default prefix set is [\"capacity:\"]; re-author the grant \
+                         with `trace:` in attestation_prefixes."
+                    } else if audiences.iter().any(|a| a == "self") {
+                        "a covering grant's audience is `self` — promotion will stamp \
+                         cohort_scope=self and the replication offer filter (which keys on \
+                         cohort_scope, NOT tier) will never offer the row. Widen the grant's \
+                         audience."
+                    } else if stranded > 0 {
+                        // ARMED BUT STRANDED — the tier that stops this block
+                        // over-promising (CIRISAgent#932). The grant is correct
+                        // AND rows on disk are still unofferable.
+                        "ARMED BUT STRANDED: the grant is correct (covers `trace:`, non-self \
+                         audience) but `stranded_covered_rows` rows already on disk sit at \
+                         cohort_scope=self and will NEVER be offered — self/family project \
+                         SelfOwn (structurally invisible), so tier is irrelevant. Arming the \
+                         plane does NOT retroactively re-scope rows sealed or promoted before \
+                         the grant existed, or promoted via a tier-only path. Needs BOTH \
+                         halves: scope-aware seal-time promotion for NEW rows, and a repair \
+                         sweep to re-scope the EXISTING ones (the (a)+(c) pattern already \
+                         settled for the tier half in CIRISPersist#509)."
+                    } else if covered_rows == 0 {
+                        "trace plane armed, but this node holds NO rows covered by the grant \
+                         yet — nothing has been sealed (or nothing matches the covered \
+                         prefixes). Not a fault: emit first, then re-read."
+                    } else {
+                        "trace plane armed and every covered row is OFFERABLE by edge's own \
+                         advertise predicate (see rows_by_projection for the per-row \
+                         Projection/scope/verdict). NOTE `SelfOwn` is publish-YOUR-OWN, so a \
+                         self-scoped row authored by THIS node is offered, not withheld — do not \
+                         read `cohort_scope=self` as stranded on its own. If the round still \
+                         moves nothing, the gate is DOWNSTREAM of the offer filter (recipient \
+                         infra:serve, attester registration, or round servicing — see \
+                         round_diagnostics), not here."
+                    };
+                    json!({
+                        "live_self_grants": grants.len(),
+                        "covered_prefixes": prefixes,
+                        "covers_trace": covers_trace,
+                        "promotion_audiences": audiences,
+                        // Rows THIS node authored whose dimension the grant covers,
+                        // and how many of those are unofferable at cohort_scope=self.
+                        // `stranded > 0` with an otherwise-correct grant is the
+                        // armed-but-stranded interlock (CIRISAgent#932).
+                        "covered_rows": covered_rows,
+                        "stranded_covered_rows": stranded,
+                        // Per-row breakdown through edge's OWN advertise
+                        // predicate: "<Projection>/<cohort_scope>/<offered|withheld>".
+                        // Report the projection rather than a guessed verdict —
+                        // if the round still sees nothing while every row reads
+                        // `offered`, the gate is NOT the offer filter and the
+                        // next probe belongs downstream (CIRISAgent#932).
+                        "rows_by_projection": by_projection,
+                        "hint": hint,
+                    })
+                }
+                Err(e) => json!({ "error": format!("list_live_consent_grants_by: {e}") }),
+            }
+        }
+        None => json!({ "error": "no engine handle — trace-plane gate not readable" }),
+    };
+
     let mut peers = Vec::with_capacity(targets.len());
     for t in &targets {
         // knows_peer = transport-rooted (prime succeeded); kex_present =
@@ -352,6 +605,11 @@ async fn gather_delivery_status(
         "transport_present": edge.reticulum_transport().is_some(),
         "canonical_targets": targets,
         "peers": peers,
+        // The two preconditions a sealed trace must clear BEFORE the round is
+        // even asked (CIRISPersist#509): a live grant covering `trace:`, and a
+        // non-self audience for promotion to stamp. Read this FIRST when a
+        // trace does not cross — a defaulted grant is silent, not loud.
+        "trace_plane": trace_plane,
         // Round-servicing diagnostics — read these when a peer is knows_peer:true
         // but kex_present:false. `hint` names the layer + the doc to open.
         "round_diagnostics": {
@@ -377,6 +635,95 @@ async fn gather_delivery_status(
 /// snapshot of federation-delivery state so "why isn't the trace sailing for
 /// peer X?" is a single query, not log archaeology. Same in-process accessor
 /// pattern as `first_run_claim_pin()` / `compose_status()`. Never over the wire.
+/// TEST-ANCHOR-FENCED consent author (mesh-repro traceflow E2E): author this
+/// node's `consent:replication` grant for `peer_key_id` WITHOUT the HTTP owner
+/// gate. The harness agent is a bare embedded boot — no serve stack, no owner
+/// session — so it cannot reach the owner-gated `POST /v1/federation/consent`.
+/// REFUSED unless `CIRIS_TESTING_MODE=true`: production consent is exclusively
+/// the explicit owner act over HTTP. Returns the grant attestation_id.
+#[cfg(feature = "python")]
+/// **CIRISConstitution#46 — resolve the `analyze` stance** (CIRISServer#331 ask 2).
+/// READ-ONLY: never authors, in any mode. Unlike [`author_consent_testing`] this
+/// carries no testing-mode fence, because reading your own consent state is not a
+/// privileged act and the agent's drift detector needs it in production.
+///
+/// Returns `granted` / `revoked` / `expired` / `unspecified` — persist's ONE
+/// canonical scoped fold, so a caller can assert the RESOLVED STANCE instead of
+/// row existence (a row that folds to `unspecified` reads as consented while the
+/// gate still refuses).
+///
+/// `subject_key_id` defaults to THIS node — the common case is "may `attester`
+/// score me?".
+/// Gated on `python` like its neighbours: it reaches the persist pyo3 engine
+/// static and the [`HELD`] runtime, neither of which exists in the binary build.
+#[cfg(feature = "python")]
+pub fn analyze_consent_stance(
+    attester_key_id: &str,
+    subject_key_id: Option<&str>,
+) -> Result<String> {
+    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::hard_case::ConsentState;
+
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
+        .context("analyze_consent_stance: no in-process persist Engine")?;
+    let (rt, _controller) = HELD
+        .get()
+        .context("analyze_consent_stance: federation delivery not started")?;
+    let subject = match subject_key_id {
+        Some(s) => s.to_string(),
+        // The node's DERIVED federation key id — the attester `emit_attestation_self`
+        // stamps. Resolving against an alias asks a different question and answers
+        // `unspecified` for a perfectly consented pair (the 0.5.138 identity-fork
+        // class, in miniature).
+        None => rt.block_on(engine.local_derived_key_id())?,
+    };
+    let stance = rt.block_on(engine.federation_directory().resolve_scoped_consent(
+        attester_key_id,
+        &subject,
+        CAPACITY_CONSENT_SCOPE,
+        None,
+        chrono::Utc::now(),
+    ))?;
+    Ok(match stance {
+        ConsentState::Granted => "granted",
+        ConsentState::Revoked => "revoked",
+        ConsentState::Expired => "expired",
+        ConsentState::Unspecified => "unspecified",
+    }
+    .to_string())
+}
+
+#[cfg(feature = "python")]
+pub fn author_consent_testing(peer_key_id: &str, prefixes: &[String]) -> Result<String> {
+    if std::env::var("CIRIS_TESTING_MODE").as_deref() != Ok("true") {
+        anyhow::bail!(
+            "author_consent_testing refused: CIRIS_TESTING_MODE is not 'true' — production \
+             consent is the owner-gated POST /v1/federation/consent only"
+        );
+    }
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
+        .context("author_consent_testing: no in-process persist Engine")?;
+    let edge: Arc<Edge> = ciris_edge::current_edge()
+        .map_err(|e| anyhow::anyhow!("author_consent_testing: no embedded Edge: {e}"))?;
+    let node_key_id = edge.signer_key_id().to_string();
+    let (rt, _controller) = HELD
+        .get()
+        .context("author_consent_testing: federation delivery not started")?;
+    let grant = rt.block_on(crate::peer::emit_replication_consent(
+        &engine,
+        &node_key_id,
+        peer_key_id,
+        prefixes,
+    ))?;
+    tracing::info!(
+        peer_key_id,
+        attestation_id = %grant.attestation_id,
+        freshly_emitted = grant.freshly_emitted,
+        "consent:replication authored via TESTING-MODE harness entry (fenced; prod = HTTP owner gate)"
+    );
+    Ok(grant.attestation_id)
+}
+
 #[cfg(feature = "python")]
 pub fn delivery_status_json() -> String {
     let started = is_started();
@@ -424,9 +771,11 @@ pub const DEFAULT_DELIVERY_CADENCE_SECS: u64 =
 /// the persist pyo3 static) so the whole controller compiles + is checked in the
 /// default (non-`python`) build; the wheel wrapper [`start_and_hold`] supplies the
 /// process singletons.
-/// Prime the admitted canonical peers: read the baked canonical record(s),
-/// author the directed `consent:replication` grant (idempotent), and ROOT each
-/// admitted canonical's transport binding so `knows_peer(canonical)` is true.
+/// Prime the admitted canonical peers for REACHABILITY: read the baked canonical
+/// record(s) and ROOT each admitted canonical's transport binding so
+/// `knows_peer(canonical)` is true. Authors NO consent — `consent:replication`
+/// is an explicit owner act (`POST /v1/federation/consent`); rooting only makes
+/// the canonical dialable, it moves nothing until an owner consent grant exists.
 /// Returns the admitted canonical `key_id`s. Shared by first-boot start
 /// ([`run_federation_delivery`]) AND the post-restart reprime
 /// ([`reprime_and_hold`], CIRISServer#288): a restart re-drives THIS against the
@@ -457,42 +806,24 @@ async fn prime_canonicals(
          bootstrap_peers or reachable via an announce)"
     );
 
-    // 3. Author this node's directed consent:replication grant at each ADMITTED
-    //    canonical peer (idempotent) so the reconcile loop keeps it in the desired
-    //    topology. An unadmitted canonical (no federation_keys row) is skipped with
-    //    a warn — the baked genesis record is admitted, so this normally emits.
+    // 3. Determine which baked canonicals are ADMITTED (have a federation_keys
+    //    row) so step 3b can ROOT a transport path to them. This authors NO
+    //    consent. `consent:replication` is ALWAYS an explicit owner act — authored
+    //    via `POST /v1/federation/consent` by the agent's setup wizard when the
+    //    owner opts into sharing (e.g. "Send traces to CIRIS L3C"). A pure server
+    //    generates no traces and so never auto-consents to replicate them; rooting
+    //    here is pure REACHABILITY ("this node CAN dial the canonical") and moves
+    //    nothing until an owner-authored consent grant exists — the reconcile loop
+    //    reads that grant via `list_consent_peers` and converges the runtime to it.
     let directory = engine.federation_directory();
     let mut admitted_targets: Vec<String> = Vec::with_capacity(canonical_key_ids.len());
     for canonical in &canonical_key_ids {
         match directory.lookup_public_key(canonical).await {
-            Ok(Some(_)) => {
-                match crate::peer::emit_replication_consent(
-                    engine,
-                    node_key_id,
-                    canonical,
-                    crate::peer::DEFAULT_GRANT_ATTESTATION_PREFIXES,
-                )
-                .await
-                {
-                    Ok(grant) => {
-                        tracing::info!(
-                            canonical = %canonical,
-                            freshly_emitted = grant.freshly_emitted,
-                            "federation delivery: consent:replication grant authored at canonical peer"
-                        );
-                        admitted_targets.push(canonical.clone());
-                    }
-                    Err(e) => tracing::warn!(
-                        canonical = %canonical,
-                        error = %e,
-                        "federation delivery: emit consent:replication for canonical failed — skipping"
-                    ),
-                }
-            }
+            Ok(Some(_)) => admitted_targets.push(canonical.clone()),
             Ok(None) => tracing::warn!(
                 canonical = %canonical,
                 "federation delivery: baked canonical key is NOT an admitted federation_keys row — \
-                 skipping (nothing to route/verify)"
+                 skipping (nothing to root)"
             ),
             Err(e) => tracing::warn!(
                 canonical = %canonical,
@@ -574,15 +905,16 @@ pub async fn run_federation_delivery(
 ) -> Result<DeliveryController> {
     let node_key_id = edge.signer_key_id().to_string();
 
-    // 2-3b. Prime the admitted canonical peers (read baked hints → author
-    //    consent:replication → ROOT each canonical's transport binding). The
+    // 2-3b. Prime the admitted canonical peers (read baked hints → ROOT each
+    //    canonical's transport binding — reachability only, NO consent). The
     //    post-restart reprime re-drives exactly this (CIRISServer#288).
     let admitted_targets = prime_canonicals(&engine, &edge, &node_key_id).await?;
 
     // 4. Start (or receive — single composition, #312) the ONE ReplicationRuntime
-    //    over the shared transport. No seed set: the canonicals primed above are in
-    //    the topology because step 2-3b AUTHORED their consent:replication grants,
-    //    and the runtime's one hot path reads that CEG state back.
+    //    over the shared transport. No seed set: a canonical enters the REPLICATION
+    //    topology only once an owner has authored a consent:replication grant to it
+    //    (POST /v1/federation/consent, post-claim); rooting above just makes it
+    //    dialable. The runtime's one hot path reads that CEG consent state back.
     let runtime = crate::compose::start_replication_runtime(&engine, &edge, &node_key_id)
         .await?
     .context(
@@ -775,22 +1107,25 @@ mod tests {
     }
 
     #[test]
-    fn build_replication_peers_three_coordinators_per_target() {
+    fn build_replication_peers_four_coordinators_per_target() {
         use ciris_edge::replication::EnvelopeKind;
         // The delivery controller hands the admitted canonical targets to the SAME
         // peer-assembly the compose boot path uses: exactly Attestation + Key +
-        // IdentityOccurrence (CIRISEdge#305, the KEX plane) per target, in target order.
+        // IdentityOccurrence (CIRISEdge#305, KEX) + TransportDestination (CIRISEdge#406,
+        // the PQ transport-attribution plane) per target, in target order.
         let desired = vec!["canon-1".to_string(), "peer-b".to_string()];
         let peers = crate::compose::build_replication_peers(&desired);
-        assert_eq!(peers.len(), 6);
+        assert_eq!(peers.len(), 8);
         assert_eq!(peers[0].peer_key_id, "canon-1");
         assert!(matches!(peers[0].kind, EnvelopeKind::Attestation));
         assert!(matches!(peers[1].kind, EnvelopeKind::Key));
         assert!(matches!(peers[2].kind, EnvelopeKind::IdentityOccurrence));
-        assert_eq!(peers[3].peer_key_id, "peer-b");
-        assert!(matches!(peers[3].kind, EnvelopeKind::Attestation));
-        assert!(matches!(peers[4].kind, EnvelopeKind::Key));
-        assert!(matches!(peers[5].kind, EnvelopeKind::IdentityOccurrence));
+        assert!(matches!(peers[3].kind, EnvelopeKind::TransportDestination));
+        assert_eq!(peers[4].peer_key_id, "peer-b");
+        assert!(matches!(peers[4].kind, EnvelopeKind::Attestation));
+        assert!(matches!(peers[5].kind, EnvelopeKind::Key));
+        assert!(matches!(peers[6].kind, EnvelopeKind::IdentityOccurrence));
+        assert!(matches!(peers[7].kind, EnvelopeKind::TransportDestination));
     }
 
     #[test]

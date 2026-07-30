@@ -60,6 +60,50 @@ pub async fn reconcile_once(
     node_key_id: &str,
     runtime: &Arc<ReplicationRuntime>,
 ) -> anyhow::Result<usize> {
+    // ── The #530 REPAIR motion (persist v21.12.0) ───────────────────────────
+    // `promote_consented_backlog` is auto-fired at its own chokepoints, but it
+    // pages `WHERE tier = 'local'` — so a row that already reached
+    // `(cohort_scope = self|family, tier = federation)` is excluded from it BY
+    // CONSTRUCTION and no cadence of re-running ever revisits it. Such a row is
+    // past the tier gate, covered by a live grant, and still never offered.
+    // persist ships the second motion (`repair_stranded_scope_backlog`) but
+    // deliberately does NOT call it from the promote sweep, and nothing else
+    // called it either — leaving the (a)+(c) pair with only (a) wired.
+    //
+    // This loop is the right home: it is already the "converge the live runtime
+    // to the CEG" tick, and the repair is safe to run unconditionally —
+    // strictly WIDENING (a grant whose audience is itself suppressed means the
+    // row's invisibility MATCHES consent, so it is skipped, never narrowed),
+    // scoped to rows covered by a live grant, and a PURE placement correction
+    // (already federation-tier ⇒ no tier flip, no re-signing; `cohort_scope`
+    // lives outside the signed envelope so the scrub signature stays valid).
+    // Self-limiting like its sibling: a repaired row leaves the stranded set.
+    //
+    // Ordering matters — repair BEFORE computing the desired peer set, so a row
+    // corrected on this tick is offerable on this tick rather than the next.
+    match engine.repair_stranded_scope_backlog().await {
+        Ok(report) => {
+            if report.rescoped > 0 || report.skipped > 0 {
+                tracing::info!(
+                    rescoped = report.rescoped,
+                    skipped = report.skipped,
+                    "CIRISPersist#530 repair sweep: re-scoped {} stranded \
+                     (self|family, federation) row(s) to their covering grant's audience — \
+                     these were past the tier gate but never offered (the offer filter keys \
+                     on cohort_scope)",
+                    report.rescoped,
+                );
+            }
+        }
+        // Never fail the tick on the repair motion: the peer-set convergence
+        // below is the loop's primary duty and must still run.
+        Err(e) => tracing::warn!(
+            error = %e,
+            "CIRISPersist#530 repair sweep failed this tick — stranded rows (if any) stay \
+             unofferable until the next tick; peer convergence continues"
+        ),
+    }
+
     // Desired topology from the corpus (the consent objects ARE the topology).
     let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
 
@@ -82,7 +126,7 @@ pub async fn reconcile_once(
     // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
     // health:liveness in).
     let directory = engine.federation_directory();
-    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 3);
+    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 4);
     for peer in consented {
         // Fail closed: an over-threshold attester — or one whose behavioral ledger
         // we cannot read at all — is dropped from the desired set this tick.
@@ -119,8 +163,17 @@ pub async fn reconcile_once(
                     kind: EnvelopeKind::Key,
                 });
                 desired.push(ReplicationPeer {
-                    peer_key_id: peer,
+                    peer_key_id: peer.clone(),
                     kind: EnvelopeKind::IdentityOccurrence,
+                });
+                //  - TransportDestination (CIRISEdge#406): paired with the publish-own
+                //    self_provider, offers this node's OWN SIGNED transport-dest so a
+                //    peer receives it and can satisfy its #393 item-2 PQ attribution
+                //    gate. Without a round for this kind the signed TD is published
+                //    locally but never transferred (the item-2 dead end).
+                desired.push(ReplicationPeer {
+                    peer_key_id: peer,
+                    kind: EnvelopeKind::TransportDestination,
                 });
             }
             Ok(None) => tracing::warn!(

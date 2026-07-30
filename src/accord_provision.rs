@@ -67,6 +67,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::prelude::Engine;
 
 /// PKCS#11 / PIV knobs for opening the holder's already-provisioned YubiKey. All
@@ -2182,7 +2183,7 @@ async fn write_node_trust_edge(
 
     let id = format!("trust-edge:{node_key_id}:{root}");
     let envelope = serde_json::json!({
-        "references_attestation_id": id,
+        (paths::REFERENCES_ATTESTATION_ID): id,
         // The node trusts the root for exactly what a root is for. Attenuation
         // does the rest: the node can never exercise more than the charter holds.
         "scope": [
@@ -2195,7 +2196,14 @@ async fn write_node_trust_edge(
     // `attesting_key_id == scrub_key_id == <the signer's DERIVED key_id>` —
     // derived internally, never a caller alias (persist#247). The row then rides
     // the same admission gate as every other federation-tier emit.
-    let mut input = EmitAttestationInput::with_envelope(attestation_type::DELEGATES_TO, envelope);
+    let mut input = EmitAttestationInput::with_envelope(
+        attestation_type::DELEGATES_TO,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            .map_err(|e| e.to_string())?,
+        // node genesis delegation — federation-visible by construction (the
+        // mesh must be able to verify the node's accord anchoring).
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+    );
     input.attested_key_id = Some(root.clone());
     engine
         .emit_attestation_self(input)
@@ -2421,6 +2429,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         id: &str,
         attested_key_id: &str,
         envelope: serde_json::Value,
+        att_type: &str,
     ) -> Result<SignedAttestation, String> {
         use sha2::Digest as _;
         let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
@@ -2435,7 +2444,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
                 attestation_id: id.to_string(),
                 attesting_key_id: signer.key_id().to_string(),
                 attested_key_id: attested_key_id.to_string(),
-                attestation_type: attestation_type::DELEGATES_TO.to_string(),
+                attestation_type: att_type.to_string(),
                 weight: Some(1.0),
                 asserted_at: now,
                 // Deliberately no expiry on the charter/grant themselves: the
@@ -2468,6 +2477,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         crate::mesh_genesis::CHARTER_ATTESTATION_ID,
         &root,
         charter_env,
+        attestation_type::DELEGATES_TO,
     )
     .await
     {
@@ -2483,6 +2493,26 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         &grant_id,
         &serve_key_id,
         crate::mesh_genesis::grant_envelope(&serve_key_id),
+        attestation_type::DELEGATES_TO,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+
+    // THE FIFTH CONJUNCT (CIRISServer#307 follow-through). A charter + grants make
+    // the root DECLARED; `trust_root_valid` additionally requires a live
+    // `accord:lifecycle:v1` row ABOUT the root, or it returns false and every
+    // capability walk silently rejects the root — a bundle that looks complete and
+    // is inert. It is a `scores` row (not `delegates_to`), and the `accord:*`
+    // namespace requires an accord_holder attester, which the root is.
+    let lifecycle = match sign_att(
+        &identity,
+        crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
+        &root,
+        crate::mesh_genesis::lifecycle_envelope(),
+        attestation_type::SCORES,
     )
     .await
     {
@@ -2498,7 +2528,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         &family_key_id,
         &format!("quorum:{m}/{n}"),
         vec![serve_signed],
-        vec![charter, grant],
+        vec![charter, grant, lifecycle],
         Vec::new(),
         &now,
     ) {

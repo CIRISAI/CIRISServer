@@ -50,6 +50,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
@@ -275,7 +276,7 @@ pub async fn emit_age_assurance_signed(
     let subject = signer.key_id().to_string();
     let dimension = age_dimension(level, band);
     let envelope = serde_json::json!({
-        "dimension": dimension,
+        (paths::DIMENSION): dimension,
         "band": band.as_str(),
         "level": level.as_str(),
     });
@@ -304,7 +305,7 @@ async fn emit_age_assurance_inner(
         .ok_or_else(|| "no SQLite federation directory".to_string())?;
     let dimension = age_dimension(level, band);
     let envelope = serde_json::json!({
-        "dimension": dimension,
+        (paths::DIMENSION): dimension,
         "band": band.as_str(),
         "level": level.as_str(),
     });
@@ -315,7 +316,10 @@ async fn emit_age_assurance_inner(
         attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: envelope,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| e.to_string())?,
         subject_key_ids: vec![subject_key_id.to_owned()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Self-emitted producer-authority local row: sig deferred to promote
@@ -333,7 +337,7 @@ async fn emit_age_assurance_inner(
     // subject's — promotion is visibility, not authorship.
     if promote {
         engine
-            .attestation_promote(&attestation_id)
+            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
             .await
             .map_err(|e| format!("promote age_assurance: {e}"))?;
     }
@@ -360,7 +364,7 @@ pub async fn read_age_level(engine: &Engine, subject_key_id: &str) -> Option<Age
         }
         let Some(dimension) = row
             .attestation_envelope
-            .get("dimension")
+            .get(paths::DIMENSION)
             .and_then(|v| v.as_str())
         else {
             continue;

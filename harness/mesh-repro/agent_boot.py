@@ -38,6 +38,104 @@ def log(msg: str) -> None:
     print(f"[HARNESS-AGENT] {msg}", flush=True)
 
 
+def emit_synthetic_traces(engine, key_id: str, n: int) -> None:
+    """Seal `n` synthetic reasoning traces through the REAL trace pipeline
+    (ciris_server.LensClient → seal on ACTION_RESULT → receive_and_persist).
+
+    Component payloads mirror the shapes the CIRISAgent accord adapter emits
+    on-device (2026-07-24 fold DB), INCLUDING the flat summary aliases
+    (CIRISAgent 577e2bb39/dfea44cd3) that persist's trace-summary projection
+    extracts — so the sealed rows carry non-NULL essential feature dims and
+    the scorer's feature matrix is populated wherever these traces land.
+    Every capture outcome is logged verbatim: a consent_blocked / rejected /
+    error outcome is a visible next step, never a silent stall.
+    """
+    import datetime
+    import hashlib
+
+    import ciris_server
+
+    agent_id_hash = hashlib.sha256(key_id.encode()).hexdigest()[:16]
+    now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()  # noqa: E731
+
+    try:
+        client = ciris_server.LensClient(
+            now(),                      # consent timestamp (harness consent)
+            "generic",                  # the lowest tier every deployment ships
+            engine=engine,
+            deployment_profile={
+                # v20 typed EnvelopeCore sources these from the PROFILE dict
+                # (not the ctor kwargs). EXACT key set of the CIRISAgent
+                # adapter's _build_deployment_profile — the wire batch schema
+                # requires each of these fields present.
+                "agent_role": "mesh-repro",
+                "agent_template": "mesh-repro-harness",
+                "deployment_domain": "general",
+                "deployment_type": "production",
+                "deployment_region": None,
+                "deployment_trust_mode": "sovereign",
+            },
+            consent_attesting_key_id=key_id,
+            # v20 typed EnvelopeCore: agent_template/role/type are REQUIRED
+            # envelope fields (the 0.5.138 run failed ingest with
+            # schema_malformed_json: missing field `agent_template`). Mirror
+            # the kwargs the CIRISAgent accord adapter passes.
+            deployment_type="harness",
+            agent_role="mesh-repro",
+            agent_template="mesh-repro-harness",
+        )
+    except Exception as e:  # noqa: BLE001
+        log(f"TRACEFLOW: LensClient construction FAILED: {type(e).__name__}: {e}")
+        return
+
+    sealed = 0
+    for i in range(n):
+        tid = f"th_harness_{i:03d}"
+        components = [
+            ("THOUGHT_START", {"thought_type": "seed", "thought_depth": 1, "round_number": i, "task_priority": 0}),
+            ("DMA_RESULTS", {
+                "csdma": {"plausibility_score": 0.9}, "dsdma": {"domain_alignment": 0.8, "domain": "harness"},
+                "pdma": {"has_conflicts": False},
+                "csdma_plausibility_score": 0.9, "dsdma_domain_alignment": 0.8, "dsdma_domain": "harness",
+            }),
+            ("IDMA_RESULT", {
+                "k_eff": 2.0, "correlation_risk": 0.3, "fragility_flag": False, "phase": "healthy",
+                "idma_k_eff": 2.0, "idma_correlation_risk": 0.3, "idma_fragility_flag": False, "idma_phase": "healthy",
+            }),
+            ("CONSCIENCE_RESULT", {
+                "conscience_passed": True, "action_was_overridden": False,
+                "entropy_passed": True, "coherence_passed": True,
+                "optimization_veto_passed": True, "epistemic_humility_passed": True,
+            }),
+            ("ACTION_RESULT", {
+                "execution_success": True, "success": True, "action_executed": "speak",
+                "execution_time_ms": 12.5, "tokens_total": 100, "llm_calls": 1,
+                "has_execution_error": False, "has_positive_moment": False,
+            }),
+        ]
+        for ev_type, data in components:
+            comp = {
+                "event_type": ev_type,
+                "thought_id": tid,
+                "timestamp": now(),
+                "agent_id_hash": agent_id_hash,
+                "task_id": f"task_harness_{i:03d}",
+                "data": data,
+            }
+            try:
+                out = client.capture_event(comp)
+            except Exception as e:  # noqa: BLE001
+                log(f"TRACEFLOW: capture_event({ev_type}) ERROR: {type(e).__name__}: {e}")
+                out = None
+                break
+            if ev_type == "ACTION_RESULT":
+                log(f"TRACEFLOW: trace {tid} terminal outcome: {out}")
+                if isinstance(out, dict) and out.get("outcome") == "sealed_and_persisted":
+                    sealed += 1
+    log(f"TRACEFLOW: SEALED {sealed}/{n} synthetic traces on the agent node "
+        f"(agent_id_hash={agent_id_hash}) — watch the canonical for arrival + scoring")
+
+
 def setup_nat_sim(listen: str) -> None:
     """NAT-sim for the CIRISEdge#353 scenario: make this agent an
     **initiator-only** peer, exactly like the live Node A ↔ Android repro.
@@ -430,6 +528,61 @@ def main() -> int:
         ).start()
         log(f"NAT-REBIND: loop running (every {rebind_secs}s, {blackout_s}s blackout of "
             f"{canon_ip}) — models mobile NAT mapping expiry → the field link storm")
+
+    # ── EXPLICIT CONSENT (runbook §1): consent is no longer auto-authored ────
+    # Production wizards POST /v1/federation/consent (owner-gated HTTP). The
+    # bare harness boot has no serve stack/owner session, so it uses the
+    # TESTING-MODE-fenced author_federation_consent (refused outside
+    # CIRIS_TESTING_MODE). Without this grant the canonical never becomes a
+    # consent peer and traces cannot replicate — the runbook's §3 failure mode.
+    n_traces = int(os.environ.get("CIRIS_HARNESS_EMIT_TRACES", "0") or "0")
+    if n_traces > 0 and delivery_on:
+        author = getattr(ciris_server, "author_federation_consent", None)
+        if author is None:
+            log("CONSENT: wheel has no author_federation_consent — traces will NOT replicate")
+        else:
+            import json as _cj
+            canon_for_consent = None
+            for attempt in range(6):
+                try:
+                    canon = _cj.loads(engine.list_canonical_servers() or "[]")
+                    canon_for_consent = canon[0]["key_id"] if canon else None
+                except Exception as e:  # noqa: BLE001
+                    log(f"CONSENT: list_canonical_servers failed: {e}")
+                if canon_for_consent:
+                    try:
+                        gid = author(canon_for_consent, ["trace:", "capacity:"])
+                        log(f"CONSENT: consent:replication authored for {canon_for_consent} "
+                            f"(attestation_id={gid}) scope=trace:,capacity:")
+                        # #530 caveat 1: the bare embedded path may not run the
+                        # server reconcile that auto-fires the repair sweep —
+                        # invoke it directly (strictly widening; pure placement).
+                        rep = getattr(engine, "repair_stranded_scope_backlog", None)
+                        if rep is not None:
+                            try:
+                                fixed = rep()
+                                log(f"CONSENT: repair_stranded_scope_backlog -> {fixed}")
+                            except Exception as e:  # noqa: BLE001
+                                log(f"CONSENT: repair sweep failed (non-fatal): {type(e).__name__}: {e}")
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        log(f"CONSENT: author attempt {attempt + 1} failed: {type(e).__name__}: {e}")
+                time.sleep(10)
+            else:
+                log("CONSENT: FAILED to author after 6 attempts — traces will NOT replicate")
+
+    # ── TRACEFLOW E2E (CIRISServer#315 endgame / the gate-#922 carrier) ──────
+    # Seal REAL traces on the agent node through the exact pipeline the mobile
+    # brain uses (LensClient.capture_event → seal on ACTION_RESULT →
+    # Engine::receive_and_persist), then let the harness watch whether ANY
+    # plane carries them to the canonical — and whether the CANONICAL's scorer
+    # (a distinct sovereign identity, so CEG §7.5 anti-Goodhart PASSES there)
+    # authors a capacity attestation about this agent. This is the local
+    # 100%-confidence answer to "what must the next cut carry for the first
+    # mobile trace to land at Node A".
+    n_traces = int(os.environ.get("CIRIS_HARNESS_EMIT_TRACES", "0") or "0")
+    if n_traces > 0:
+        emit_synthetic_traces(engine, key_id, n_traces)
 
     # ── CIRISServer#260 trace gate (intermediate assert) ─────────────────────
     # Rounds completing is NECESSARY but not SUFFICIENT for trace delivery: the

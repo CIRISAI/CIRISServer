@@ -55,6 +55,7 @@ fn synthetic_trace(idx: usize) -> TraceSummary {
         thought_id: format!("bench-thought-{idx}"),
         task_id: None,
         agent_id_hash: "bench-agent".to_string(),
+        agent_key_id: Some("bench-agent-key".to_string()),
         agent_name: None,
         agent_role: None,
         deployment_domain: None,

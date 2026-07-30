@@ -105,6 +105,17 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
         }
     };
 
+    let attestation_envelope = match ciris_persist::federation::envelope::EnvelopeCore::from_value(
+        req.attestation_envelope,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("attestation_envelope: {e}"),
+            )
+        }
+    };
     let input = LocalAttestationInput {
         attestation_id: None,
         attesting_key_id: req.attesting_key_id,
@@ -112,7 +123,7 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
         attestation_type: req.attestation_type,
         weight: None,
         expires_at: None,
-        attestation_envelope: req.attestation_envelope,
+        attestation_envelope,
         subject_key_ids: req.subject_key_ids,
         cohort_scope: cohort_scope::SELF.to_string(), // local-tier rows MUST be `self`
         // Self-emitted producer-authority local row: signature deferred to
@@ -134,7 +145,11 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
     };
 
     let promoted = if req.promote {
-        match st.engine.attestation_promote(&attestation_id).await {
+        match st
+            .engine
+            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
+            .await
+        {
             Ok(p) => p,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("promote: {e}")),
         }

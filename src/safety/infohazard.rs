@@ -55,6 +55,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use ciris_persist::federation::consent::consent_dimension;
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::hard_case::ConsentState;
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::federation::{EmitAttestationInput, FederationDirectory};
@@ -69,11 +71,6 @@ use crate::auth::verify::{self, VerifyError};
 pub const CONTENT_CLASS_INFOHAZARD_PREFIX: &str = "content_class:infohazard";
 /// The substrate-reserved `content_class:reported` flag prefix.
 pub const CONTENT_CLASS_REPORTED_PREFIX: &str = "content_class:reported";
-/// The `consent:state:granted` dimension the viewer's consent-to-view carries.
-pub const CONSENT_STATE_GRANTED: &str = "consent:state:granted";
-/// The `consent:state:revoked` dimension a revocation carries (folded — a
-/// revoked consent does NOT satisfy the gate).
-pub const CONSENT_STATE_REVOKED: &str = "consent:state:revoked";
 /// The `consent:scope:view` scope the interstitial requires.
 pub const CONSENT_SCOPE_VIEW: &str = "consent:scope:view";
 /// The bare scope token persist's `resolve_scoped_consent` matches on — the
@@ -173,7 +170,7 @@ pub fn infohazard_reveal_decision(flag: Option<ContentFlag>, has_consent: bool) 
         Some(flag) => RevealDecision::Interstitial {
             flag,
             required: RequiredConsent {
-                state: CONSENT_STATE_GRANTED,
+                state: consent_dimension::STATE_GRANTED_PREFIX,
                 scope: CONSENT_SCOPE_VIEW,
                 content_class: flag.as_str().to_owned(),
             },
@@ -228,7 +225,7 @@ pub async fn subject_flag(
         }
         let Some(dimension) = row
             .attestation_envelope
-            .get("dimension")
+            .get(paths::DIMENSION)
             .and_then(|v| v.as_str())
         else {
             continue;
@@ -362,14 +359,17 @@ pub async fn emit_content_flag(
     // (plus `withdrawn: true` on a clear). SCORES is required — the reserved-
     // prefix gate only fires for `scores` rows.
     let dimension = format!("content_class:{class}:v1");
-    let mut envelope = serde_json::json!({ "dimension": dimension, "content_class": class });
+    let mut envelope = serde_json::json!({ (paths::DIMENSION): dimension, "content_class": class });
     if withdrawn {
         envelope["withdrawn"] = serde_json::Value::Bool(true);
     }
     let input = EmitAttestationInput {
         attestation_type: attestation_type::SCORES.to_owned(),
         attested_key_id: Some(subject_key_id.to_owned()),
-        attestation_envelope: envelope,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| e.to_string())?,
         subject_key_ids: vec![subject_key_id.to_owned()],
         cohort_scope: cohort_scope::FEDERATION.to_owned(),
         expires_at: None,

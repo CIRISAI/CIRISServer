@@ -1,154 +1,134 @@
-# CIRISServer — the fabric node
+# `ciris-server` — the fabric node
 
-> **The decentralized CEWP node/client.** `agent = fabric node + brain`.
-> CIRISServer is the federation's headless cohabitation runtime: the *same*
-> composition of cores that folds into a CIRISAgent, packaged **without a
-> reasoning brain**. Infrastructure must not have agency — so the fabric node
-> attests, stores, observes, reaches consensus, and transports, but it does
-> **not** reason, decide, or act.
+**The node of the CIRIS Epistemic Web ([CEWP](https://ciris.ai/cewp)).** One
+Rust crate that composes the federation's cores — `ciris-persist` (corpus +
+admission), `ciris-edge` (transport + replication), `ciris-verify` (hybrid
+post-quantum crypto) — into a runnable federation node, shipped as the headless
+`ciris-server` binary **and** the PyO3 abi3 wheel a
+[CIRISAgent](https://github.com/CIRISAI/CIRISAgent) embeds. The defining
+identity: **`agent = fabric node + brain`** — the same composition folds into an
+agent; packaged alone it attests, stores, replicates, scores, and serves, but it
+does **not** reason, decide, or act. Infrastructure must not have agency.
 
-It is the node software for **CEWP** — the decentralized network formed by
-[CEG](https://github.com/CIRISAI/CIRISRegistry/tree/main/FSD/CEG), the CIRIS
-Epistemic Grammar. Any operator can run one; no single instance is load-bearing.
+Server is built on two disciplines: **the API never touches the runtime — it
+writes CEG, and the runtime is CEG-driven** (every control surface authors a
+signed claim; controller loops converge the live node to the corpus, hot, no
+restart), and **zero environment variables** — a node's entire configuration is
+signed `config:*` CEG resolved at boot (`--home` + key identity, nothing else).
+The fabric IS the config, the same way the agent IS its graph.
 
-**Read [`MISSION.md`](MISSION.md) first** — the charter (why this exists, the
-separation-of-powers invariant, the apophatic bounds), written against the
-[CIRIS Accord](https://ciris.ai/ciris_accord.txt) (M-1), the
-[CEG §7.0.1 fabric-node discipline](https://github.com/CIRISAI/CIRISRegistry/blob/main/FSD/CEG/07_reserved.md),
-and [Mission Driven Development](https://github.com/CIRISAI/CIRISAgent/blob/main/FSD/MISSION_DRIVEN_DEVELOPMENT.md).
-The build plan + dependency GANTT live in [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
+> **📖 The model: [`FSD/CEG_REPLICATION_MODEL.md`](FSD/CEG_REPLICATION_MODEL.md)** —
+> the 3-gate replication model, the 14 EnvelopeKinds carrying all 95 CC-3.1
+> claim families, and the classical-edge audit. The per-family card/vocabulary
+> manifest lives in [`FSD/NAMESPACE_SUPERSETS.md`](FSD/NAMESPACE_SUPERSETS.md)
+> (versioned; regenerated against pinned constitution + registry revs). Start there.
 
-## What it is
-
-A thin composition crate — shipped as both the headless **`ciris-server`
-binary** and a **PyO3 abi3 wheel** that CIRISAgent (pure Python) links *instead
-of composing the cores itself* — linking the federation's cores as libraries
-over **one shared substrate**:
+## What ciris-server does
 
 ```
-ciris-server (the fabric node)
-  ├── ciris-registry-core   authority    — identity / license / revocation / steward attestation
-  ├── ciris-lens-core       observation  — Coherence Ratchet / Capacity Score (validated, not adjudicated)
-  ├── ciris-node-core       consensus    — deferral / voting / expertise / moderation        [folds in at 1.0]
-  ├── one shared ciris-persist Engine    — the durable corpus + federation directory
-  └── one shared ciris-edge runtime      — CEG/RET transport + the node's single federation identity
+rich clients (KMP app · CIRISAgent · status)          ┌─ owner ops: claim (NodeCode+PIN),
+    │ consume the control surface                     │  consent grants, config:*, trust roots
+    ▼                                                 │
+ciris-server ── writes CEG ── controller loops ───────┤  reconcile: consent topology → live
+    │  compose · identity · owner-binding · scorer    │  replication peers (4 planes/peer),
+    ▼  safety (age·moderation·watchlist) · genesis    │  config re-resolve, announce rooting
+ciris-edge ──── anti-entropy over Reticulum/HTTPS ────┘
+    ▼
+ciris-persist ── keys · attestations · trace · admission (Registry-of-Record)
 ```
 
-It authors no primitives; CEG and the cores own the grammar. CIRISServer is the
-wiring, the boot order, one unified identity endpoint (`/v1/identity`, the
-six-key `LocalIdentityAggregate`) — and the **control surface** below.
+One identity per node, **by construction** — `cfg.key_id` derives from the
+engine's own signing identity, so every plane (claim, NodeCode, owned-nodes,
+self-publish, edge signer) agrees on who this node is. Library composition, not
+sidecars: the agent links the same wheel instead of assembling cores itself.
 
-## A node *and* a client — the UX handles
+## Read in this order
 
-CIRISServer renders **no UI of its own**. It is also the **client control
-surface**: it exposes every fabric control handle upward, and rich UIs consume
-them. The handles (MISSION §3.4):
+1. **[`MISSION.md`](MISSION.md)** — the WHY. M-1 (sustainable adaptive coherence),
+   the fabric-node discipline, de-singletonized infrastructure, the stewardship
+   covenant ("the work belongs to whoever keeps it running").
+2. **[`FSD/CEG_REPLICATION_MODEL.md`](FSD/CEG_REPLICATION_MODEL.md)** — how state
+   moves: every flow gated by a verified signed claim; no copies, no outboxes.
+3. **[`FSD/THREAT_MODEL.md`](FSD/THREAT_MODEL.md)** — "ingest is open and cheap;
+   admission is the gate." **[`FSD/TRUST_ROOT_CAPABILITY_GATE.md`](FSD/TRUST_ROOT_CAPABILITY_GATE.md)** —
+   how `infra:serve` / `infra:attest` are conferred and why no root ⇒ no capability.
+4. **[`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md)** — the build plan on the
+   agent train (0.5 config-as-CEG → 0.6 +registry → 1.0 +node consensus).
 
-- **Substrate handles** — the node's federation identity (`/v1/identity`),
-  federation-directory reads, content fetch, replication / health.
-- **Fabric handles** — **federation-identity minting** (a hardware-rooted, YubiKey-
-  or TPM/SE-sealed user identity → a `CIRIS-V2-` *fedcode*), **node ownership**
-  (claim a node with its **NodeCode** + one-time PIN; the responsible owner-binding
-  is `infra:*`, never agency), the per-role × per-axis **trust/consent toggles**,
-  **trust-graph management** (untrust, re-root, create/join groups),
-  **canonical-group membership + voting**, **self/family occurrence attachment**,
-  and **consent-object** setup between peers (`consent:replication`).
+## The shape of the node (one-paragraph tour)
 
-Those handles are consumed by **rich clients**. Just like CIRISAgent, CIRISServer
-can run **fully headless** (the `ciris-server` binary + a CLI: e.g. `ciris-server
-identity create --backend pkcs11` mints a YubiKey-backed federation ID) **and** it
-exposes a **rich client** — **the same [CIRISAgent](https://github.com/CIRISAI/CIRISAgent)
-Kotlin-Multiplatform app, minus the agent (brain) cards.** The app *is a node*: it
-runs a local fabric node and drives it (all crypto stays in the substrate, never
-in the UI). It surfaces the **fabric cards** — create-your-federation-ID (mint the
-hardware-rooted ID from the desktop app), claim-a-node (NodeCode + PIN), the
-consent-objects card, the node switcher, and the holonomic scoreboard — **without**
-the reasoning/chat cards an agent adds. (Other rich clients:
-[CIRISPortal](https://github.com/CIRISAI/CIRISPortal),
-[CIRISNode](https://github.com/CIRISAI/CIRISNode).) The infrastructure that *holds*
-the audit corpus is the surface that *publishes* it (redacted PDMA logs / WBD
-tickets / attestation reads, per the Accord's transparency requirement).
+A node boots from the **baked genesis** — the canonical seed minted in a human
+co-scrub ceremony ships inside persist, so a fresh node starts **already rooted
+to a real trust root** — and resolves its config from signed `config:*` claims.
+An owner **claims** it (NodeCode + one-time PIN); ownership is an
+**owner-binding** (`delegates_to` + identity occurrence + cohort scope), never
+an auth role. The owner authors **`consent:replication:v1` grants** through the
+API — and those consent objects **ARE the replication topology**: a reconciler
+loop converges the live runtime to them (four anti-entropy planes per consented
+peer — Attestation, Key, IdentityOccurrence, TransportDestination), adds
+becoming active initiators at runtime, revocations stopping cold, no restart.
+Payloads follow the consent edge: promotion inherits the grant's full audience
+(tier **and** cohort scope). Serving is capability-gated — a canonical is, by
+definition, a node whose record carries accord-conferred
+`infra:serve`+`infra:attest` roles rooted to a root this node trusts: **being a
+server IS the consent to serve**. Consumer policy stays constitutional at
+runtime too (CC 4.1.4: a consent peer that turns `withdraws`-arbitrager is
+refused per-tick, and re-admitted when it mends). The scorer folds inbound
+traces into `capacity:*` attestations; the safety surfaces (age assurance,
+moderation, watchlist) emit their own signed, federation-visible claims. All of
+it hybrid Ed25519 + ML-DSA-65, and the replication/serve policy manifests are
+**drift-witnessed** — hash-pinned by gate tests that fail the build if policy
+moves without a deliberate cut.
 
-## What it replaces
+## A node *and* a client
 
-The three canonical nodes (`lens` + `registry-us` + `registry-eu`) become
-identical fabric nodes — the founding members of the `ciris-canonical` governed
-community, replicating via CEG over Reticulum (no Spock, no DNS).
-
-- **The CIRISRegistry singleton servers go away.** Each node handles its own key
-  the way the lens already does (per-node identity, no shared vault key); the
-  three per-node keys *are* the 2-of-3 registry-consensus quorum.
-- **The CIRISLens deployment goes away** — Python ingest + TimescaleDB + Grafana
-  retired. A central dashboard the whole federation reads is itself the singleton
-  this architecture forbids. The lens *function* lives as `ciris-lens-core`
-  inside every fabric node, over the shared substrate, queryable from any node.
-
-The *repos* (`ciris-registry-core`, `ciris-lens-core`, `ciris-node-core`) stay —
-they are the libraries this binary composes, the same cores that fold into
-CIRISAgent.
-
-## Install
+`ciris-server` renders no UI; it exposes the full control surface, and rich
+clients consume it. The vendored [`client/`](client/) — the same
+Kotlin-Multiplatform app as CIRISAgent's, minus the agent (brain) cards — mints
+hardware-rooted federation IDs (YubiKey / TPM / Secure Enclave, software
+fallback), claims nodes, manages trust roots and consent objects, and renders
+the CEG surfaces. Headless works too:
 
 ```sh
-pip install ciris-server      # the PyO3 abi3 wheel (or build the binary: cargo build --release)
-ciris-server                  # boots a zero-setup node — mode=server, trusts ciris-canonical, no wizard
-                              # on a fresh (unclaimed) node it prints its NodeCode + one-time claim PIN
-
-# Headless: mint a hardware-rooted federation ID (or do it from the desktop app)
-ciris-server identity create --backend pkcs11   # YubiKey-backed; --backend platform-sealed (TPM/SE) | software (dev)
-                                                # prints your CIRIS-V2- fedcode + key_id
+pip install ciris-server        # the abi3 wheel (or: cargo build --release)
+ciris-server                    # boots a zero-setup node; unclaimed → prints NodeCode + claim PIN
+ciris-server identity create --backend pkcs11   # YubiKey-backed CIRIS-V2- fedcode
 ```
 
-Defaults need no setup: data under `$CIRIS_HOME`, SQLite corpus (Postgres via
-`CIRIS_DB_URL`), identity minted-or-migrated on first boot, Reticulum transport
-up, the lens read API on `listen+1`. Migrating a deployed CIRISLens host? See
-[`FSD/LENS_TO_SERVER_MIGRATION.md`](FSD/LENS_TO_SERVER_MIGRATION.md) — the
-federation key and RNS address carry over byte-identically (no re-key).
-
-The same wheel gives CIRISAgent the lens drop-in: `from ciris_server import
-LensClient`.
+Data under `$CIRIS_HOME`, SQLite corpus (Postgres via config), Reticulum
+transport up by default. The same wheel is CIRISAgent's substrate: one PyO3
+registry, one shared engine, one edge runtime.
 
 ## Status
 
-**Shipped (0.3.0) — the integrated fabric node.** `ciris-server` boots a
-zero-setup node: relay ingest (CEG `AccordEventsBatch` over Reticulum/HTTP) + the
-seven frozen `GET /lens/api/v1/*` read endpoints + the six-key `GET /v1/identity`,
-over one shared persist Engine. Federation signatures are **100% hybrid
-post-quantum** (Ed25519 + ML-DSA-65, hard cut — no classical-only path); the
-sealed-Ed25519 federation seed and the RNS transport identity are TPM/SE/StrongBox
-sealed (software-encrypted fallback) and adopted byte-identically on a CIRISLens
-takeover (no re-key).
+**v0.5.x — the CEG-native node.** Config-as-CEG shipped (zero env vars,
+owner-authored, hot-reconciled). The federation trace arc is proven end-to-end
+across the substrate triple — seal → consent → converge → bootstrap → root →
+heal → publish → transfer → admit → attribute → serve — with each gate named,
+logged, and regression-pinned (the #315 saga). One-node-identity closed by
+construction (0.5.138). Substrate pins: **persist v21.4.0 / edge v14.4.0 /
+verify v10.6.3** — hybrid PQ throughout, Registry-of-Record admission,
+drift-witnessed policy hashes. `ciris-lens-core` is absorbed in-tree
+([`crates/ciris-lens-core`](crates/ciris-lens-core)); the standalone lens
+deployment is retired — a central dashboard the whole federation reads is
+itself the singleton this architecture forbids.
 
-0.3.0 adds the **auth subsystem** (`src/auth/`, CIRISServer#9) — the fabric is the
-single auth authority: one `x-ciris-*` hybrid request verifier, **self-at-login**
-(so consent/erasure are user-signed), OAuth + sessions + roles/perms + api-keys +
-user-signed consent + CEG-native erasure (GDPR Art. 17), all a byte-compatible
-port of the agent's `wa_cert`-backed auth — and the **one-wheel re-export**
-(CIRISServer#4) so CIRISAgent consumes a single `ciris_server` `.so` (one PyO3
-registry). Also shipped: legacy-trace import (`ciris-server import-traces`), the
-holonomic federation scoreboard (`ciris-server scoreboard`) + the interpreted
-capability page at <https://cirisai.github.io/CIRISServer/>, and the §19.7
-noise-floor compliance bench. Below the lens-store disk minimum the node degrades
-to a Reticulum relay node.
+Roadmap (the CIRISAgent train): **0.5** config-as-CEG (here) → **0.6**
++registry authority → **1.0** +node consensus, the complete fabric node.
 
-Substrate floor: **persist v13.3.0 / edge v9.1.3 / verify-family v8.9.0**
-(the 0.5.84 safe-mesh-seed cut; see `Cargo.toml`). `ciris-lens-core` is **absorbed in-tree** — the standalone
-CIRISLensCore library and the CIRISLens deployment (Grafana/TimescaleDB/Python
-ingest) retire. Cohabitation + CEG-profile conformance is gated by
-[CIRISConformance](https://github.com/CIRISAI/CIRISConformance) against the
-published wheels.
+## Sister repos
 
-Roadmap (driven by the CIRISAgent train):
-
-- **0.5** (config-as-CEG — **zero env vars**) — all node config is signed CEG
-  objects (owner-authored, runtime-reconciled, replicated); the fabric IS the
-  config, the same way the agent IS its graph.
-- **0.6** (+ registry authority) — agent **~2.9.8/9**. Prep:
-  [`FSD/REGISTRY_FOLD_DERISK.md`](FSD/REGISTRY_FOLD_DERISK.md), [#2](https://github.com/CIRISAI/CIRISServer/issues/2).
-- **1.0** (+ node consensus — the complete fabric node) — agent **~2.9.10**.
-
-The wiring needs **no core changes** — CIRISServer adapts to what's shipped.
-See [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
+- [`CIRISConstitution`](https://github.com/CIRISAI/CIRISConstitution) — the
+  canonical CEG spec; Part 3's namespace registry is vendored and hash-pinned
+  into persist.
+- [`CIRISPersist`](https://github.com/CIRISAI/CIRISPersist) — substrate: keys,
+  attestations, trace, admission; ships the baked genesis seed.
+- [`CIRISEdge`](https://github.com/CIRISAI/CIRISEdge) — transport + replication:
+  the 14 kinds over Reticulum/HTTPS/packet-radio; consent *is* routing.
+- [`CIRISVerify`](https://github.com/CIRISAI/CIRISVerify) — hybrid crypto
+  primitives (Ed25519 + ML-DSA-65, X-Wing), consumed via persist.
+- [`CIRISAgent`](https://github.com/CIRISAI/CIRISAgent) — the brain; embeds this
+  node via the one wheel and emits the signed traces it federates.
 
 ## License
 
