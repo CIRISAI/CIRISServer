@@ -1530,7 +1530,10 @@ async fn add_canonical_impl(engine: Arc<Engine>, mut req: AddCanonicalRequest) -
         engine.clone(),
         req.admit,
         &hints,
-        &[ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string()],
+        &crate::mesh_genesis::SERVE_NODE_SCOPES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>(),
     )
     .await;
     if resp.status() != StatusCode::OK {
@@ -1661,9 +1664,10 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
             // infra:serve is trusted-by-default as a trace recipient — CIRISEdge#386
             // leg A — which together with the peer's consent decides whether traces
             // arrive. (Visibility to `claims_role` awaits CIRISPersist#486.)
-            roles: vec![
-                ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
-            ],
+            roles: crate::mesh_genesis::SERVE_NODE_SCOPES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         },
         &valid_from,
         &hints,
@@ -2480,9 +2484,10 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
                 // via #486); the transport hints ride the same signed envelope so
                 // the node stays dialable through the re-bless.
                 identity_type: ensure_canonical_role(&serve_rec.identity_type),
-                roles: vec![
-                    ciris_persist::federation::types::delegation_scope::INFRA_SERVE.to_string(),
-                ],
+                roles: crate::mesh_genesis::SERVE_NODE_SCOPES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
             },
             &vf,
             &hints,

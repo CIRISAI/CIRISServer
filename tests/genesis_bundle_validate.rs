@@ -393,3 +393,151 @@ async fn the_baked_seed_makes_every_fresh_node_serve() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn baked_audit() {
+    let engine = fresh_node().await;
+    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
+        .await
+        .expect("stage 1");
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let dir = engine.federation_directory();
+
+    println!(
+        "\n── CO-SCRUB plane (has_accord_conferred_role, reads registration_envelope.roles) ──"
+    );
+    for n in &baked.serve_nodes {
+        for scope in ["infra:serve", "infra:attest"] {
+            let r = ciris_persist::federation::admission::has_accord_conferred_role(
+                dir.as_ref(),
+                &n.record.key_id,
+                scope,
+            )
+            .await;
+            println!("   {:14} {} -> {:?}", scope, n.record.key_id, r);
+        }
+    }
+
+    println!("\n── installed attestation rows: tier + cohort ──");
+    for a in &baked.attestations {
+        let at = &a.attestation;
+        println!(
+            "   {:44} type={} tier={:?}",
+            at.attestation_id, at.attestation_type, at.tier
+        );
+    }
+
+    println!("\n── holder records: scrub count ──");
+    for h in &baked.holders {
+        println!(
+            "   {:6} identity_type={:20} scrub={} additional={}",
+            h.record.key_id,
+            h.record.identity_type,
+            h.record.scrub_key_id,
+            h.record.additional_scrubs.len()
+        );
+    }
+    for n in &baked.serve_nodes {
+        println!(
+            "   {:6} identity_type={:20} scrub={} additional={} roles={:?}",
+            n.record.key_id,
+            n.record.identity_type,
+            n.record.scrub_key_id,
+            n.record.additional_scrubs.len(),
+            n.record.capability_roles
+        );
+    }
+}
+
+/// THE GATE THAT WAS MISSING — both planes, every required scope.
+///
+/// 0.5.141 shipped a baked root whose canonical could `infra:serve` and nothing
+/// else: `capability_roots_to_trusted_root(.., "infra:attest")` returned None
+/// and `has_accord_conferred_role(.., "infra:attest")` returned false. Nothing
+/// caught it because every test in the tree asked for `infra:serve` — edge's
+/// gate is hardcoded to SERVE_CAPABILITY, and this file's own validator looped
+/// the serve nodes asking for the literal "infra:serve". A suite that asks one
+/// question cannot fail the others, and it reads as a general verdict.
+///
+/// So this asserts the FULL required set on BOTH conferral planes:
+///
+///   * DELEGATION  — the grant's `scope`, walked by capability_roots_to_trusted_root
+///   * CO-SCRUB    — the key record's registration_envelope.roles, read by
+///                   has_accord_conferred_role
+///
+/// Both must carry every scope. A node that resolves a capability on one plane
+/// and not the other is the axis split that has cost this project an arc.
+#[ignore = "RED BY DESIGN until the re-mint: the currently-baked root (0.5.141) confers \
+infra:serve alone. This asserts the TARGET state. Remove #[ignore] the moment persist bakes \
+the re-minted bundle — do NOT delete the test, and do NOT weaken it to match the artifact."]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_baked_canonical_holds_every_scope_on_both_planes() {
+    let engine = fresh_node().await;
+    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
+        .await
+        .expect("stage 1");
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let node_key_id = engine.local_derived_key_id().await.expect("node identity");
+    let dir = engine.federation_directory();
+
+    let required = ciris_server::mesh_genesis::SERVE_NODE_SCOPES;
+    let mut missing: Vec<String> = Vec::new();
+
+    for n in &baked.serve_nodes {
+        let key = &n.record.key_id;
+        for scope in required {
+            let delegation =
+                ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
+                    dir.as_ref(),
+                    &node_key_id,
+                    key,
+                    scope,
+                )
+                .await
+                .expect("walk runs")
+                .is_some();
+            let coscrub = ciris_persist::federation::admission::has_accord_conferred_role(
+                dir.as_ref(),
+                key,
+                scope,
+            )
+            .await
+            .expect("co-scrub read runs");
+
+            println!(
+                "  {key} {scope:18} delegation={} co-scrub={}",
+                if delegation { "✓" } else { "✗" },
+                if coscrub { "✓" } else { "✗" },
+            );
+            if !delegation {
+                missing.push(format!(
+                    "{key}: {scope} does NOT resolve on the DELEGATION plane"
+                ));
+            }
+            if !coscrub {
+                missing.push(format!(
+                    "{key}: {scope} is NOT conferred on the CO-SCRUB plane"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        !baked.serve_nodes.is_empty(),
+        "the baked bundle has no serve nodes — nothing to check"
+    );
+    assert!(
+        missing.is_empty(),
+        "\nthe baked root does not confer every required scope on both planes:\n{}\n\n\
+         Required (mesh_genesis::SERVE_NODE_SCOPES): {:?}\n\
+         A canonical serves, vouches, stores and relays — see SERVE_NODE_SCOPES for what each is.\n\
+         This needs a re-mint: `scope` and `roles` are both inside signed envelopes, and \n\
+         `attestation_envelope` is covered by authorization_digest, so it cannot be patched.\n",
+        missing
+            .iter()
+            .map(|m| format!("  ✗ {m}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        required,
+    );
+}

@@ -170,8 +170,13 @@ pub fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
 /// Attestation id of the charter within a bundle (stable, content-independent —
 /// the bundle carries exactly one).
 pub const CHARTER_ATTESTATION_ID: &str = "genesis-charter";
-/// Prefix for the per-serve-node `infra:serve` grant ids.
-pub const GRANT_ATTESTATION_ID_PREFIX: &str = "genesis-grant-serve";
+/// Prefix for the per-serve-node capability grant ids.
+///
+/// Named `genesis-grant` and **not** `genesis-grant-serve`: the grant confers
+/// [`SERVE_NODE_SCOPES`], which is more than `serve`. An id that names one of
+/// the scopes it carries is the "one name, two things" trap — a reader greps
+/// `-serve` and concludes serve is all it grants.
+pub const GRANT_ATTESTATION_ID_PREFIX: &str = "genesis-grant";
 
 /// The liveness row's attestation id — the FIFTH conjunct of `trust_root_valid`.
 pub const LIFECYCLE_ATTESTATION_ID: &str = "genesis-lifecycle";
@@ -189,8 +194,51 @@ pub const LIFECYCLE_ATTESTATION_ID: &str = "genesis-lifecycle";
 pub const CHARTER_SCOPES: &[&str] = &[
     INFRA_ATTEST_SCOPE,
     INFRA_SERVE_SCOPE,
-    "infra:store",
-    "infra:transport",
+    INFRA_STORE_SCOPE,
+    INFRA_TRANSPORT_SCOPE,
+];
+
+/// `infra:store` — persist / store data as infrastructure.
+pub const INFRA_STORE_SCOPE: &str = ciris_persist::federation::types::delegation_scope::INFRA_STORE;
+/// `infra:transport` — relay / transport traffic as infrastructure.
+pub const INFRA_TRANSPORT_SCOPE: &str =
+    ciris_persist::federation::types::delegation_scope::INFRA_TRANSPORT;
+
+/// The scopes a genesis grant confers on a **canonical serve node** — the
+/// accord's own infrastructure, so it gets the full infra charter set.
+///
+/// Each is a DIFFERENT authority, and a canonical exercises all four at 1.0
+/// (registry + node folded in):
+///
+/// | scope | what it authorizes |
+/// |---|---|
+/// | `infra:serve` | answer requests — trace ingest, the API, handing out manifests and cards. Edge's trace gate (`SERVE_CAPABILITY`) keys on exactly this. |
+/// | `infra:attest` | **vouch.** The registry does not merely hand you a manifest, it attests the manifest is authentic. Serving bytes and standing behind them are separate authorities. |
+/// | `infra:store` | hold bulk content on behalf of the mesh (Wikipedia and friends) — custody of data that is not the node's own attestations. |
+/// | `infra:transport` | relay OTHER nodes' traffic. Load-bearing for a canonical specifically: it carries the `transport_hints` every new node dials, so it relays for peers that cannot reach each other directly. |
+///
+/// Equal to [`CHARTER_SCOPES`] today, and deliberately written as its own
+/// constant rather than aliased: the charter is the accord's *ceiling* and this
+/// is what one node is *granted*. They coincide for a canonical (accord-operated
+/// infrastructure) and must not for a personal node, which gets `infra:serve`
+/// alone. Fusing them would make "what may a root grant" and "what does this
+/// node get" one name answering two questions.
+///
+/// Deliberately ABSENT, same reason as the charter: `infra:network_presence` and
+/// the `hold_*_membership` scopes are owner-granted, never root-granted.
+///
+/// **Both conferral planes must carry this set.** The delegation plane reads the
+/// grant's `scope` ([`grant_envelope`]); the co-scrub plane reads the key
+/// record's `registration_envelope.roles` (`ScrubTarget.roles`, set in
+/// `accord_provision`). Through 0.5.141 both carried `[infra:serve]` alone, so
+/// `capability_roots_to_trusted_root(.., "infra:attest")` returned `None` and
+/// `has_accord_conferred_role(.., "infra:attest")` returned `false` on the real
+/// baked root — invisible because every test asked only for `infra:serve`.
+pub const SERVE_NODE_SCOPES: &[&str] = &[
+    INFRA_SERVE_SCOPE,
+    INFRA_ATTEST_SCOPE,
+    INFRA_STORE_SCOPE,
+    INFRA_TRANSPORT_SCOPE,
 ];
 
 /// concession). Rendered on the card for exactly that comparison.
@@ -217,12 +265,18 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
     }))
 }
 
-/// Build the `infra:serve` grant envelope for one serve node (leg B of the edge
-/// trace gate: the capability that must root to a trusted root).
+/// Build the capability grant envelope for one serve node — the DELEGATION
+/// plane (edge trace-gate leg B: the capability that must root to a trusted
+/// root).
+///
+/// Confers [`SERVE_NODE_SCOPES`], not `infra:serve` alone. The co-scrub plane
+/// must confer the SAME set via `ScrubTarget.roles`; a node that resolves a
+/// scope on one plane and not the other is the axis split this project keeps
+/// paying for.
 pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     serde_json::json!({
         (paths::REFERENCES_ATTESTATION_ID): format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
-        "scope": [INFRA_SERVE_SCOPE],
+        "scope": SERVE_NODE_SCOPES,
     })
 }
 
