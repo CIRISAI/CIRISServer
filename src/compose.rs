@@ -721,8 +721,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .filter(|a| **a != cfg.listen_addr)
                     .map(|a| format!("http://{a}"))
                     .collect();
-                let provision =
-                    crate::accord_provision::build(Arc::clone(&engine), accord_peers.clone());
+                let provision = crate::accord_provision::build(
+                    Arc::clone(&engine),
+                    accord_peers.clone(),
+                    cfg.home.clone(),
+                );
                 let r = identity_router(identity_json)
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the

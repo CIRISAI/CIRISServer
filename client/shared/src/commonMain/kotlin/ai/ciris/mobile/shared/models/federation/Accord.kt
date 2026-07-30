@@ -539,7 +539,7 @@ data class GenesisAssembleResponse(
 //   2. POST /v1/accord/canonical/propose      (A1, pre-filled)   → partial
 //   3. POST /v1/accord/canonical/cosign       (B1)               → completed record,
 //      now carrying `infra:serve` in the SIGNED identity_type set.
-//   4. POST /v1/accord/genesis/produce        (completed record) → the bundle.
+//   (There is no separate 'produce' step: `genesis/propose` mints the whole bundle.)
 
 /**
  * One accord holder of the re-mint roster — an entry of
@@ -607,7 +607,7 @@ data class RemintSourceDto(
 )
 
 /**
- * The portable `GenesisBundle` decoded for DISPLAY — `POST /v1/accord/genesis/produce`
+ * The portable `GenesisBundle` decoded for DISPLAY — `POST /v1/accord/genesis/propose`
  * returns the bundle itself. [holders] / [serveNodes] are opaque signed
  * `SignedKeyRecord`s the app never inspects, so they ride as raw
  * [kotlinx.serialization.json.JsonElement]s (counts only).
@@ -625,7 +625,7 @@ data class GenesisBundleDto(
 )
 
 /**
- * The parsed `POST /v1/accord/genesis/produce` result: [bundle] is the portable
+ * The parsed `POST /v1/accord/genesis/propose` result: [bundle] is the portable
  * `GenesisBundle` JSON VERBATIM (the artifact the operator saves / shares);
  * [summary] is the same bytes decoded for display.
  */

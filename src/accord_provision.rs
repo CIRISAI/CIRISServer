@@ -148,6 +148,10 @@ struct CosignFamilyRequest {
 #[derive(Clone)]
 struct ProvisionState {
     engine: Arc<Engine>,
+    /// The node's CIRIS home. The completed genesis seed is written here so the
+    /// operator never has to get a file off the device by hand — see
+    /// [`save_seed_to_home`].
+    home: std::path::PathBuf,
     /// Accord peer base URLs (`http://host:port`, self excluded) a co-scrub partial
     /// gossips to — the SAME set the accord kill-switch replicates over. Empty on a
     /// lone node (the ceremony still closes via the returned/saved partial + the paste
@@ -2082,11 +2086,17 @@ async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Resp
 //   1. GET  /v1/accord/genesis/remint-source  → pre-fill from the EXISTING accord +
 //      canonical. C1's record comes from here, so **C1 need not be present** — the
 //      family is quorum:2/3, so A1 + B1 alone can sign.
-//   2. POST /v1/accord/canonical/propose      (A1, pre-filled) → partial
-//   3. POST /v1/accord/canonical/cosign       (B1)             → completed record,
-//      now carrying `infra:serve` in the SIGNED identity_type set.
-//   4. POST /v1/accord/genesis/produce        (the completed record) → the portable,
-//      self-verifying genesis bundle.
+//   2. POST /v1/accord/genesis/propose        (A1, pre-filled) → bundle, 1 authorization
+//   3. POST /v1/accord/genesis/cosign         (B1)             → quorum met, COMPLETE
+//
+// TWO steps, not four. `propose` mints the whole portable bundle — charter,
+// conferral, heartbeat, and the canonical's `infra:serve` re-bless in flight — so
+// there is no separate "produce" call; an earlier 4-step flow had one and it is
+// gone. On completion the node writes the seed to `<home>/mesh-genesis.json`
+// itself (see `save_seed_to_home`) and returns the path.
+//
+// Re-mint is NOT a second implementation: it supplies A1/B1/C1 + the existing
+// canonical to this same mint.
 
 /// `GET /v1/accord/genesis/remint-source` — everything needed to PRE-FILL a
 /// "re-mint existing trust root" ceremony, so nothing is retyped and no key material
@@ -2218,10 +2228,40 @@ async fn write_node_trust_edge(
     Ok(root)
 }
 
+/// The completed seed's filename under the node home. One name, everywhere: the
+/// operator, the docs and the persist hand-off all say `mesh-genesis.json`.
+pub const SEED_FILENAME: &str = "mesh-genesis.json";
+
+/// Write a COMPLETED genesis bundle to `<home>/mesh-genesis.json`.
+///
+/// The node mints the seed and knows its own home, so it writes the file itself.
+/// Pushing the bytes back through the client to be saved was never robust: the
+/// desktop picker opens at USB mount roots, and `writeTextFile` is a hard `false`
+/// on Android and iOS — so on mobile the seed could be displayed and never saved
+/// (CIRISServer#310). Writing server-side works on every platform the node runs
+/// on, and it lands under the CONFIGURED home rather than a compiled-in
+/// `/var/lib/ciris` (CIRISServer#309).
+///
+/// Best-effort by design: the bundle is portable and valid whether or not this
+/// write succeeds, and the response carries the JSON regardless. A failure is
+/// reported, never fatal — losing a ceremony because a disk was full would be far
+/// worse than losing a convenience.
+pub fn save_seed_to_home(
+    home: &std::path::Path,
+    bundle: &crate::mesh_genesis::GenesisBundle,
+) -> Result<std::path::PathBuf, String> {
+    let json = serde_json::to_string_pretty(bundle).map_err(|e| format!("serialize seed: {e}"))?;
+    std::fs::create_dir_all(home).map_err(|e| format!("create {}: {e}", home.display()))?;
+    let path = home.join(SEED_FILENAME);
+    std::fs::write(&path, json.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// The ceremony's progress, identical from `propose` and `cosign` so the card can
 /// render one state machine.
 async fn genesis_ceremony_response(
     engine: &Engine,
+    home: &std::path::Path,
     bundle: crate::mesh_genesis::GenesisBundle,
     // True when this step re-blessed the serve node with infra:serve (the chosen
     // canonical predated infra:serve conferral). Surfaced so the card can tell the
@@ -2256,10 +2296,40 @@ async fn genesis_ceremony_response(
         have, needed, complete,
         "Trust Root: genesis ceremony progressed"
     );
+    // Save the COMPLETED seed under the node home so the operator never has to get a
+    // file off the device by hand. Only on completion: a partial is not a seed.
+    let (seed_path, seed_save_error) = if complete {
+        match save_seed_to_home(home, &bundle) {
+            Ok(p) => {
+                tracing::info!(
+                    path = %p.display(),
+                    fingerprint = %fingerprint,
+                    "Trust Root: genesis seed SAVED — hand this file to persist to bake it"
+                );
+                (Some(p.display().to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "genesis seed could not be written to the node home — the bundle is \
+                     still valid and is returned in this response; save it from the card"
+                );
+                (None, Some(e))
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "bundle": bundle,
+            // Where the node wrote the completed seed (absent until complete).
+            "seed_path": seed_path,
+            "seed_filename": SEED_FILENAME,
+            // Non-fatal: the bundle above is authoritative either way.
+            "seed_save_error": seed_save_error,
             "authorizations_have": have,
             "authorizations_needed": needed,
             "complete": complete,
@@ -2541,7 +2611,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         Ok(()) => {}
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
-    genesis_ceremony_response(&st.engine, bundle, reblessed).await
+    genesis_ceremony_response(&st.engine, &st.home, bundle, reblessed).await
 }
 
 /// Transport hints ride inside a canonical's scrub-signed `registration_envelope`
@@ -2698,7 +2768,7 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
             }
         }
     }
-    genesis_ceremony_response(&st.engine, bundle, reblessed).await
+    genesis_ceremony_response(&st.engine, &st.home, bundle, reblessed).await
 }
 
 async fn genesis_remint_source(State(st): State<ProvisionState>) -> Response {
@@ -3244,9 +3314,14 @@ pub struct ProvisionRouters {
 /// URL set (`http://host:port`, self excluded) co-scrub partials gossip to — pass the SAME
 /// set the accord kill-switch uses (empty is fine: the ceremony still closes via the
 /// returned/saved partial + the client's paste fallback).
-pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
+pub fn build(
+    engine: Arc<Engine>,
+    peers: Vec<String>,
+    home: std::path::PathBuf,
+) -> ProvisionRouters {
     let state = ProvisionState {
         engine,
+        home,
         peers,
         http: reqwest::Client::new(),
         pending: Arc::new(Mutex::new(Vec::new())),
@@ -3342,8 +3417,11 @@ pub fn build(engine: Arc<Engine>, peers: Vec<String>) -> ProvisionRouters {
 
 /// Back-compat convenience: just the loopback router with no gossip peers (used by tests
 /// that exercise the holder-device ops). Prefer [`build`] to also mount `/gossip-partial`.
-pub fn router(engine: Arc<Engine>) -> Router {
-    build(engine, Vec::new()).loopback
+///
+/// `home` is where a completed genesis seed would be written; tests that do not run a
+/// ceremony can pass any path.
+pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
+    build(engine, Vec::new(), home).loopback
 }
 
 #[cfg(test)]
@@ -3369,7 +3447,7 @@ mod tests {
         let engine = Engine::with_signer(signer, "sqlite::memory:")
             .await
             .expect("Engine::with_signer (sqlite::memory:) for provision tests");
-        super::router(Arc::new(engine))
+        super::router(Arc::new(engine), std::env::temp_dir())
     }
 
     /// The full provision surface (loopback ops + the OPEN `/gossip-partial`) merged, for
@@ -3385,7 +3463,7 @@ mod tests {
         let engine = Engine::with_signer(signer, "sqlite::memory:")
             .await
             .expect("Engine::with_signer for co-scrub tests");
-        let r = super::build(Arc::new(engine), Vec::new());
+        let r = super::build(Arc::new(engine), Vec::new(), std::env::temp_dir());
         r.loopback.merge(r.gossip)
     }
 

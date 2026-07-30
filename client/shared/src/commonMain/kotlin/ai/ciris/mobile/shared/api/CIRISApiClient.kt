@@ -3306,55 +3306,6 @@ class CIRISApiClient(
     }
 
     /**
-     * **Produce the portable genesis** — `POST {nodeUrl}/v1/accord/genesis/produce`
-     * (FSD/MESH_GENESIS.md). Takes the COMPLETED (m-of-n) re-mint `SignedKeyRecord`(s)
-     * — each rides VERBATIM as a raw [JsonElement], never re-encoded — and emits the
-     * portable, self-verifying `GenesisBundle` `{version, family_key_id, holders,
-     * serve_nodes, produced_at}`. The node REFUSES (400, clear error) a record that
-     * doesn't confer `infra:serve` — a dark mesh cannot be packaged. [familyKeyId]
-     * optionally overrides the baked HUMANITY_ACCORD family.
-     */
-    suspend fun produceGenesis(
-        serveRecords: List<JsonElement>,
-        familyKeyId: String? = null,
-        nodeUrl: String = LOCAL_NODE_URL,
-        token: String? = accessToken,
-    ): ai.ciris.mobile.shared.models.federation.ProduceGenesisResult {
-        val method = "produceGenesis"
-        logInfo(method, "POST $nodeUrl/v1/accord/genesis/produce serve_records=${serveRecords.size}")
-        val client = federationHttpClient()
-        return try {
-            val bodyJson = buildJsonObject {
-                // The completed records VERBATIM — never re-encode the signed envelopes.
-                put("serve_records", JsonArray(serveRecords))
-                familyKeyId?.takeIf { it.isNotBlank() }?.let { put("family_key_id", JsonPrimitive(it.trim())) }
-            }
-            val response = client.post("$nodeUrl/v1/accord/genesis/produce") {
-                token?.let { header("Authorization", "Bearer $it") }
-                contentType(ContentType.Application.Json)
-                setBody(bodyJson.toString())
-            }
-            val raw = response.bodyAsText()
-            if (!response.status.isSuccess()) {
-                throw RuntimeException("produce genesis failed: ${response.status}: ${raw.take(220)}")
-            }
-            // The response IS the bundle: keep it verbatim, decode a display summary.
-            val bundle = jsonConfig.parseToJsonElement(raw)
-            val summary = jsonConfig.decodeFromString(
-                ai.ciris.mobile.shared.models.federation.GenesisBundleDto.serializer(),
-                raw,
-            )
-            logInfo(method, "produced genesis family=${summary.familyKeyId} holders=${summary.holders.size} serve_nodes=${summary.serveNodes.size}")
-            ai.ciris.mobile.shared.models.federation.ProduceGenesisResult(bundle = bundle, summary = summary)
-        } catch (e: Exception) {
-            logException(method, e, "nodeUrl=$nodeUrl")
-            throw RuntimeException(e.message ?: "produce genesis failed", e)
-        } finally {
-            client.close()
-        }
-    }
-
-    /**
      * The seed ceremony's refusal text — a non-200 body is `{"error": …}`. Falls back
      * to the raw prefix when the body isn't that shape, so nothing is swallowed.
      */

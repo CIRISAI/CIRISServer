@@ -936,18 +936,6 @@ class AccordViewModel(
     private val _remintSource = MutableStateFlow<RemintSourceDto?>(null)
     val remintSource: StateFlow<RemintSourceDto?> = _remintSource.asStateFlow()
 
-    /**
-     * The pretty-printed portable `GenesisBundle` JSON from the LAST [produceGenesis]
-     * — surfaced so the sheet can offer Save / Copy (mirrors [lastCoscrubJson]).
-     * Null when nothing has been produced yet.
-     */
-    private val _genesisBundleJson = MutableStateFlow<String?>(null)
-    val genesisBundleJson: StateFlow<String?> = _genesisBundleJson.asStateFlow()
-
-    /** Dismiss the bundle export affordance after the operator is done with it. */
-    fun clearGenesisBundleJson() {
-        _genesisBundleJson.value = null
-    }
 
     /**
      * Load the re-mint pre-fill roster (called on sheet open): the full accord
@@ -961,45 +949,6 @@ class AccordViewModel(
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "[loadRemintSource] ${e.message}")
                 _error.value = "Couldn't load the re-mint source: ${e.message}"
-            }
-        }
-    }
-
-    /**
-     * **Produce the portable genesis** (re-mint step 3). Takes the COMPLETED
-     * (m-of-n co-signed) `SignedKeyRecord`(s) — each rides VERBATIM, never
-     * re-encoded — and emits the portable `GenesisBundle`, surfaced as pretty JSON
-     * via [genesisBundleJson] for Save / Copy. The node refuses (400, clear error)
-     * a record that doesn't confer `infra:serve`. No YubiKey — nothing is signed here.
-     */
-    fun produceGenesis(serveRecords: List<JsonElement>, familyKeyId: String? = null) {
-        if (_busy.value) return
-        if (serveRecords.isEmpty()) {
-            _error.value = "Paste the completed (co-signed) record JSON first."
-            return
-        }
-        _busy.value = true
-        _error.value = null
-        _notice.value = null
-        _genesisBundleJson.value = null
-        viewModelScope.launch {
-            try {
-                val res = apiClient.produceGenesis(serveRecords, familyKeyId)
-                _genesisBundleJson.value = prettyCoscrub(res.bundle)
-                _notice.value =
-                    "Produced the portable genesis for ${res.summary.familyKeyId} — " +
-                        "${res.summary.holders.size} holder(s), ${res.summary.serveNodes.size} serve node(s). " +
-                        "Save the bundle (mesh-genesis.json)."
-            } catch (e: Exception) {
-                PlatformLogger.w(TAG, "[produceGenesis] ${e.message}")
-                val msg = e.message.orEmpty()
-                _error.value = when {
-                    msg.contains("401") || msg.contains("403") ->
-                        "Sign in as the owner on this node first."
-                    else -> "Couldn't produce the genesis: ${e.message}"
-                }
-            } finally {
-                _busy.value = false
             }
         }
     }
