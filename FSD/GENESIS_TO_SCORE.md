@@ -102,20 +102,35 @@ sufficient.
 
 ---
 
-## What is not yet automatic
+## What remains
 
-Stage 0 is ready: the ceremony mints the full bundle and persist bakes a bundle
-shape. Stages 2 and 3 are proven end to end.
+All four stages have an implementation as of 0.5.140. One input is missing, and
+it is not code.
 
-**Stage 1 has no implementation.** Nothing installs a baked bundle at boot, and
-nothing writes `trust:accepts`. Today the only writer is `write_node_trust_edge`,
-on the *minting* node; `install_trust_root_records` deliberately refuses. So a
-node that did not mint has no trust edge and `edge_exists` is false.
+**The baked seed is bundle-shaped but empty** — `holders 0, attestations 0,
+authorizations 0`. The container ships; the ceremony has not yet filled it. So
+stage 1 runs and installs nothing, and stage 0 is the only step still done by
+hand, once, on hardware.
 
-That is why the harness fixture mints a trust root **locally on every node** — it
-substitutes for stage 1. Useful for exercising stages 2-3 in isolation, and it is
-not the happy path: it simulates a world where stage 1 already works.
+That is the honest state, and the harness is built to say so:
 
-Until stage 1 lands, `harness/mesh-repro/scenarios/genesis_seed.sh` is the honest
-measure — a node holding only the baked seed, auditing every precondition and
-reporting each unmet one rather than stopping at the first.
+| arm | scenario | what it proves |
+|---|---|---|
+| A | `traceflow` | the **carrier** — seal → serve gate → round → admit → score |
+| B | `genesis_seed` | the **seed** — a node holding *only* the baked bundle |
+
+Arm A keeps the test-anchor fixture, which mints a trust root **locally on every
+node**. That substitutes for stage 0+1 and is deliberately not the happy path: it
+simulates a world where the seed is already filled. Arm B sets
+`CIRIS_TEST_NO_CEREMONY=true`, removes the fixture entirely, and audits each
+precondition **independently** (`VERDICT_MODE=audit`) — reporting every unmet one
+rather than stopping at the first, because these are separate facts and reporting
+only the first zero is what once let four distinct defects look like one problem.
+
+Arm B is red until a real bundle is minted and baked. When it goes green, the
+portable trust root is operable and the scenario becomes a regression gate.
+
+**Known, unfiled:** `Attestation` carries one `scrub_key_id` and no
+`additional_scrubs`, so a 3-key ceremony degrades to 1-of-n once its rows land in
+the graph. The bundle's `authorizations` retain the m-of-n; the materialized rows
+do not.

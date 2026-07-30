@@ -36,10 +36,21 @@
 # green the portable trust root is operable and this scenario becomes a
 # regression gate. Until then, a RED here is the honest state of genesis.
 #
+# The remaining red is ONE missing input, not four missing implementations. As of
+# 0.5.140 stage 1 exists (install_trust_root_records + accept_trust_root, on both
+# boot paths) — but the baked bundle ships EMPTY (holders 0, attestations 0,
+# authorizations 0), so stage 1 runs and installs nothing. Every stage below is
+# downstream of that one fact. Bake a minted bundle and they resolve together;
+# that is the thesis this arm exists to test, and it must be measured, not assumed.
+#
 # Deltas under test (see CIRISPersist#548):
-#   Δ4  edge_exists      nothing writes delegates_to(node → root) off the minting node
-#   Δ3  root_self_declares / charter_recovery   the bundle has no distribution path;
-#                                               canonical_seed.json is the key record ALONE
+#   Δ4  edge_exists      RESOLVED in 0.5.140 — accept_trust_root writes the node's own
+#                        trust:accepts at boot. Retained: it is the un-trust lever and
+#                        must keep existing AND stay deletable. Red only while the
+#                        bundle it accepts is empty.
+#   Δ3  root_self_declares / charter_recovery   the bundle now HAS a distribution path
+#                                               (persist v23 bakes a GenesisBundle); it
+#                                               is simply not yet filled
 #   (Δ2 RESOLVED in persist v23: liveness left `trust_root_valid` entirely and became a
 #    banded `drill_freshness` reported beside the verdict, so a seed no longer expires.
 #    The heartbeat stage below is retained as an OBSERVABILITY check, not a gate.)
@@ -86,7 +97,7 @@ stage_edge_exists() {
   harness_db_count agent federation_attestations \
     "attestation_type = 'delegates_to' AND $SELF_LIKE AND attested_key_id <> attesting_key_id"
 }
-HINT_edge_exists="Δ4 — the agent has NOT authored delegates_to(self → root). Only write_node_trust_edge (accord_provision) writes this, and only on the MINTING node; attach_genesis deliberately refuses. So every node that did not mint has no trust edge and edge_exists is false. This row is also the operator's un-trust lever, so it must exist AND stay deletable — it cannot be replaced by a universal rule."
+HINT_edge_exists="Δ4 — the agent has NOT authored delegates_to(self → root). As of 0.5.140 accept_trust_root writes this at boot on every node, so the remaining cause is upstream: it accepts the BAKED bundle's charter root, and an empty bundle names none. install_trust_root_records still deliberately refuses to write it — accepting a root is the node's own signed act, never something a bundle may assign. This row is also the operator's un-trust lever, so it must exist AND stay deletable; it cannot be replaced by a universal rule."
 EXIT_edge_exists=22
 
 # ── 4/5. Δ3 — the charter and its recovery commitment ───────────────────────
