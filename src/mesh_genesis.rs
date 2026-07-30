@@ -473,7 +473,7 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
     // because the walk's failure mode is a silent `false` at the point of use —
     // by which time the operator is debugging a dark trace plane, not a bad
     // bundle. Refuse the artifact instead.
-    let lifecycle = lifecycle_of(bundle, &root).ok_or(GenesisError::NoLifecycle)?;
+    let lifecycle = lifecycle_of(bundle, root).ok_or(GenesisError::NoLifecycle)?;
     let age = chrono::Utc::now().signed_duration_since(lifecycle.asserted_at);
     if age > chrono::Duration::days(ACCORD_LIFECYCLE_FRESHNESS_DAYS) {
         return Err(GenesisError::LifecycleStale {

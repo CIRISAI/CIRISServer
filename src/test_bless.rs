@@ -252,6 +252,12 @@ pub(crate) async fn maybe_test_bless_self(
 /// (agent→canonical) leg A is evaluated on the RECIPIENT (canonical) record, not
 /// the agent's, and it needs the `ServerConfig` this bare path does not have.
 #[cfg(feature = "python")]
+/// Gated on `python` alongside its sole caller
+/// (`federation_delivery::start_and_hold`): the bare-agent delivery path exists
+/// only in the wheel build, so without that feature this and
+/// [`grant_analyze_consent_to_canonicals`] are genuinely unreachable — dead code,
+/// not code awaiting a caller. Gating says that; `allow(dead_code)` would hide it.
+#[cfg(feature = "python")]
 pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engine>) -> Result<()> {
     let Some(test_root) = test_anchor_root_or_skip("delivery-path leg-B ceremony")? else {
         return Ok(());
@@ -304,6 +310,7 @@ pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engin
 /// (persist rule 2), and this node authored the grant so it can already withdraw
 /// it as producer. Naming the canonical there would hand the scorer a say over
 /// the consent that authorizes it — the CIRISPersist#528 G2 shape.
+#[cfg(feature = "python")]
 async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) -> Result<()> {
     use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
@@ -333,7 +340,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
             continue; // never grant to ourselves
         }
         // Idempotent: skip when the canonical fold already resolves to a grant.
-        match engine
+        if let Ok(ConsentState::Granted) = engine
             .federation_directory()
             .resolve_scoped_consent(
                 &attester,
@@ -344,14 +351,11 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
             )
             .await
         {
-            Ok(ConsentState::Granted) => {
-                tracing::info!(
-                    attester = %attester,
-                    "TEST-ANCHOR: `analyze` consent already resolves to Granted — no-op"
-                );
-                continue;
-            }
-            _ => {}
+            tracing::info!(
+                attester = %attester,
+                "TEST-ANCHOR: `analyze` consent already resolves to Granted — no-op"
+            );
+            continue;
         }
         let envelope = serde_json::json!({
             (paths::DIMENSION): dimension,

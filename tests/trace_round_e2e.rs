@@ -228,16 +228,35 @@ fn bridge(n: &Node) -> Arc<FederationDirectoryReplicationBridge> {
 
 /// Pump messages between two sessions until both are done or the budget is spent.
 /// Returns how many envelopes the responder ADMITTED — the number that matters.
-fn drive_round(
-    initiator: &mut Session,
-    init_provider: &dyn StateProvider,
-    init_applier: &mut dyn StateApplier,
-    init_peer: &str,
-    responder: &mut Session,
-    resp_provider: &dyn StateProvider,
-    resp_applier: &mut dyn StateApplier,
-    resp_peer: &str,
-) -> usize {
+/// One side of a round: its session, its state access, and WHO IT IS.
+///
+/// Bundled rather than passed as eight positional arguments, and not merely to
+/// satisfy a lint: with two `(session, provider, applier, peer)` triples side by
+/// side, transposing the two peer ids is a silent mistake that resolves a
+/// different question and answers "unspecified" for a correctly-consented pair.
+/// Naming the side makes the direction explicit at every call site.
+struct RoundSide<'a> {
+    session: &'a mut Session,
+    provider: &'a dyn StateProvider,
+    applier: &'a mut dyn StateApplier,
+    /// This side's own key id — passed to the PEER's `on_message` as the
+    /// authenticated sender (CIRISEdge#426).
+    key_id: &'a str,
+}
+
+fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
+    let RoundSide {
+        session: initiator,
+        provider: init_provider,
+        applier: init_applier,
+        key_id: init_peer,
+    } = initiator;
+    let RoundSide {
+        session: responder,
+        provider: resp_provider,
+        applier: resp_applier,
+        key_id: resp_peer,
+    } = responder;
     let mut admitted_total = 0usize;
 
     let mut to_responder: Vec<ReplicationMessage> = match initiator.start_round(init_provider) {
@@ -472,14 +491,18 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         initiator.reset();
         responder.reset();
         admitted += drive_round(
-            &mut initiator,
-            &agent_provider,
-            &mut agent_applier,
-            &agent.key_id,
-            &mut responder,
-            &canon_provider,
-            &mut canon_applier,
-            &canonical.key_id,
+            RoundSide {
+                session: &mut initiator,
+                provider: &agent_provider,
+                applier: &mut agent_applier,
+                key_id: &agent.key_id,
+            },
+            RoundSide {
+                session: &mut responder,
+                provider: &canon_provider,
+                applier: &mut canon_applier,
+                key_id: &canonical.key_id,
+            },
         );
     }
 
@@ -621,7 +644,7 @@ async fn send_step(
     let msgs: &[ReplicationMessage] = match step {
         DriveStep::SendThenWait(m) => m,
         DriveStep::SendThenComplete(m, _) => m,
-        DriveStep::Complete(_) | DriveStep::Refused { .. } => &[],
+        DriveStep::Complete(_) | DriveStep::Refused => &[],
     };
     for m in msgs {
         coord.send_message(m).await.expect("send via loopback");
