@@ -642,6 +642,58 @@ async fn gather_delivery_status(
 /// REFUSED unless `CIRIS_TESTING_MODE=true`: production consent is exclusively
 /// the explicit owner act over HTTP. Returns the grant attestation_id.
 #[cfg(feature = "python")]
+/// **CIRISConstitution#46 — resolve the `analyze` stance** (CIRISServer#331 ask 2).
+/// READ-ONLY: never authors, in any mode. Unlike [`author_consent_testing`] this
+/// carries no testing-mode fence, because reading your own consent state is not a
+/// privileged act and the agent's drift detector needs it in production.
+///
+/// Returns `granted` / `revoked` / `expired` / `unspecified` — persist's ONE
+/// canonical scoped fold, so a caller can assert the RESOLVED STANCE instead of
+/// row existence (a row that folds to `unspecified` reads as consented while the
+/// gate still refuses).
+///
+/// `subject_key_id` defaults to THIS node — the common case is "may `attester`
+/// score me?".
+/// Gated on `python` like its neighbours: it reaches the persist pyo3 engine
+/// static and the [`HELD`] runtime, neither of which exists in the binary build.
+#[cfg(feature = "python")]
+pub fn analyze_consent_stance(
+    attester_key_id: &str,
+    subject_key_id: Option<&str>,
+) -> Result<String> {
+    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::hard_case::ConsentState;
+
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
+        .context("analyze_consent_stance: no in-process persist Engine")?;
+    let (rt, _controller) = HELD
+        .get()
+        .context("analyze_consent_stance: federation delivery not started")?;
+    let subject = match subject_key_id {
+        Some(s) => s.to_string(),
+        // The node's DERIVED federation key id — the attester `emit_attestation_self`
+        // stamps. Resolving against an alias asks a different question and answers
+        // `unspecified` for a perfectly consented pair (the 0.5.138 identity-fork
+        // class, in miniature).
+        None => rt.block_on(engine.local_derived_key_id())?,
+    };
+    let stance = rt.block_on(engine.federation_directory().resolve_scoped_consent(
+        attester_key_id,
+        &subject,
+        CAPACITY_CONSENT_SCOPE,
+        None,
+        chrono::Utc::now(),
+    ))?;
+    Ok(match stance {
+        ConsentState::Granted => "granted",
+        ConsentState::Revoked => "revoked",
+        ConsentState::Expired => "expired",
+        ConsentState::Unspecified => "unspecified",
+    }
+    .to_string())
+}
+
+#[cfg(feature = "python")]
 pub fn author_consent_testing(peer_key_id: &str, prefixes: &[String]) -> Result<String> {
     if std::env::var("CIRIS_TESTING_MODE").as_deref() != Ok("true") {
         anyhow::bail!(

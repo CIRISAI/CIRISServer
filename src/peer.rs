@@ -35,6 +35,109 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use crate::config::PeerB;
 
+/// **CIRISConstitution#46 — the production producer for the `analyze` grant.**
+///
+/// v22 refuses a `capacity:*` claim about subject S from attester P unless a live
+/// `analyze`-scoped consent from S covers P. Before this, the ONLY producer of
+/// that row was the test-anchor harness, so **capacity scoring was structurally
+/// dead in every real deployment** — the scorer would run, see the traces, and
+/// author nothing (CIRISServer#331).
+///
+/// The claim is the edge `P → S`; the consent is the **REVERSE** edge `S → P`:
+/// this node (the subject) attests, naming the attester, with the envelope naming
+/// scope `analyze`.
+///
+/// Four details that are load-bearing, each one a trap the DX doc names:
+///
+/// 1. **`cohort_scope: federation`, not `self`.** The row is read on the SCORING
+///    node, so it must replicate. A self-scoped grant resolves locally, looks
+///    right in your own DB, and is invisible where it is actually consulted.
+/// 2. **Vocabulary single-sourced from persist** — a hand-mirrored dimension or
+///    scope literal compiles and skews the wire.
+/// 3. **`subject_key_ids` left EMPTY.** It confers revocation authority, and this
+///    node already holds that as producer; naming the attester there would hand
+///    the scorer a say over the consent that authorizes it (the #528 G2 shape).
+/// 4. **Idempotent on the RESOLVED STANCE, not on row existence** — a row that
+///    exists but folds to `Unspecified` is the silent-false this whole arc keeps
+///    curing.
+///
+/// Returns the grant's `attestation_id`, or `Ok(None)` when a live grant already
+/// resolves (nothing to do).
+pub async fn emit_analyze_consent(
+    engine: &Engine,
+    subject_key_id: &str,
+    attester_key_id: &str,
+) -> Result<Option<String>> {
+    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::consent::consent_dimension;
+    use ciris_persist::federation::hard_case::ConsentState;
+
+    let now = chrono::Utc::now();
+    if matches!(
+        engine
+            .federation_directory()
+            .resolve_scoped_consent(
+                attester_key_id,
+                subject_key_id,
+                CAPACITY_CONSENT_SCOPE,
+                None,
+                now,
+            )
+            .await?,
+        ConsentState::Granted
+    ) {
+        return Ok(None);
+    }
+
+    let envelope = serde_json::json!({
+        (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
+        "scope": CAPACITY_CONSENT_SCOPE,
+    });
+    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+        .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
+    let mut input = EmitAttestationInput::with_envelope(
+        "consent",
+        core,
+        // See (1): read on the scoring node, so it MUST replicate.
+        cohort_scope::FEDERATION,
+    );
+    input.attested_key_id = Some(attester_key_id.to_string());
+    let id = engine.emit_attestation_self(input).await?;
+
+    // Assert the FOLD, not the row (4). A grant that does not resolve is worse
+    // than no grant: it reads as consented while the gate still refuses.
+    match engine
+        .federation_directory()
+        .resolve_scoped_consent(
+            attester_key_id,
+            subject_key_id,
+            CAPACITY_CONSENT_SCOPE,
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+    {
+        Ok(ConsentState::Granted) => tracing::info!(
+            subject = %subject_key_id,
+            attester = %attester_key_id,
+            scope = CAPACITY_CONSENT_SCOPE,
+            attestation_id = %id,
+            "CC#46 `analyze` consent authored and RESOLVED — the attester may now author \
+             capacity:* about this node"
+        ),
+        Ok(other) => tracing::error!(
+            subject = %subject_key_id,
+            attester = %attester_key_id,
+            resolved = ?other,
+            "CC#46 `analyze` consent row authored but the scoped fold does NOT resolve to \
+             Granted — capacity:* will still be refused. Check the envelope scope shape and \
+             the row's tier/cohort_scope"
+        ),
+        Err(e) => tracing::error!(error = %e, "analyze consent: resolve_scoped_consent failed"),
+    }
+    Ok(Some(id))
+}
+
 /// The directed-consent dimension the A<->B replication grant rides on.
 /// **Versioned** (`:v1`) to satisfy persist's
 /// `DimensionAdmissionPolicy { require_version_segment: true }`. Open-vocab

@@ -398,6 +398,22 @@ struct ConsentRequest {
     /// request (400) — the same fail-closed posture persist admission uses.
     #[serde(default)]
     restrictions: Vec<ciris_persist::federation::consent_grammar::RestrictionOp>,
+    /// **CIRISConstitution#46 — consent to BE SCORED.** When true, this route also
+    /// authors the `analyze`-scoped grant that lets `peer_key_id` author
+    /// `capacity:*` claims about this node.
+    ///
+    /// Why it rides the same request: v22 refuses a `capacity:*` claim about a
+    /// subject unless a live `analyze` consent from that subject covers the
+    /// attester. Until now NOTHING in production could author that row — the only
+    /// producer was the test-anchor harness — so capacity scoring was structurally
+    /// dead in every real deployment (CIRISServer#331). It belongs here because it
+    /// matches the owner's actual mental model: "send my traces to X" already
+    /// means "X may score them" — being scored is *why* the traces are sent.
+    ///
+    /// Still explicit, never implied: default `false`, and the two grants are
+    /// distinct CEG objects that can be withdrawn independently.
+    #[serde(default)]
+    analyze: bool,
 }
 
 /// Response body for [`consent`].
@@ -412,6 +428,9 @@ struct ConsentResponse {
     /// The recipient cohort the grant was authored with (echoes the resolved
     /// audience — the owner-supplied value, or `federation` when omitted).
     audience: String,
+    /// The `analyze` grant's attestation id when one was authored (CC#46), else
+    /// `None`. Distinct from the replication grant: two objects, two lifetimes.
+    analyze_grant_attestation_id: Option<String>,
     reconciler_note: &'static str,
 }
 
@@ -552,6 +571,34 @@ async fn consent(
         }
     };
 
+    // CIRISConstitution#46 (CIRISServer#331 ask 1) — author the `analyze` grant
+    // ATOMICALLY with the replication grant when the owner asked for it. One
+    // consent action, complete set: "send my traces to X" already means "X may
+    // score them", which is the whole reason the traces are being sent.
+    //
+    // NON-FATAL by design: the replication grant is already durable at this point,
+    // and failing the whole request would discard a valid consent the owner just
+    // gave. The failure is logged loudly and reported as a null id in the response
+    // so the caller can see the set is incomplete rather than assume success.
+    let analyze_grant_attestation_id = if req.analyze {
+        match crate::peer::emit_analyze_consent(&st.engine, &st.node_key_id, &req.peer_key_id).await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(
+                    peer_key_id = %req.peer_key_id,
+                    error = %e,
+                    "replication consent authored but the CC#46 `analyze` grant FAILED — this \
+                     peer can receive traces from us and may NOT score them; capacity scoring \
+                     stays dead until it is re-authored"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Nudge the CEG-driven reconciler (same as peering); the consent object is
     // durable regardless — this only makes convergence prompt.
     if let Some(notify) = st.reconcile_notify.as_ref() {
@@ -561,6 +608,7 @@ async fn consent(
     (
         StatusCode::OK,
         Json(ConsentResponse {
+            analyze_grant_attestation_id,
             consented: true,
             peer_key_id: req.peer_key_id,
             grant_attestation_id: grant.attestation_id,

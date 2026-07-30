@@ -1336,6 +1336,45 @@ mod python {
         py.detach(crate::federation_delivery::delivery_status_json)
     }
 
+    /// **CIRISConstitution#46 — read the RESOLVED `analyze` stance** (CIRISServer#331
+    /// ask 2). Read-only: this NEVER authors.
+    ///
+    /// Returns one of `"granted"` / `"revoked"` / `"expired"` / `"unspecified"` —
+    /// the verdict of persist's ONE canonical scoped fold
+    /// (`resolve_scoped_consent`: latest-wins by `asserted_at`, expiry-aware, a
+    /// grant must name its scope exactly, a scope-less revocation is blanket).
+    ///
+    /// It exists because the agent's drift detector could resolve replication
+    /// through `list_consent_peers` (a projection) but had to report the analyze
+    /// stance as UNKNOWN — no py surface reached the fold. Reporting "unknown"
+    /// was the right call over guessing, and this closes the gap so the detector's
+    /// "aligned" verdict is complete rather than two-thirds.
+    ///
+    /// Callers MUST key off this, never off row existence: a `consent:state:granted`
+    /// row that folds to `unspecified` (wrong scope shape, wrong tier, superseded)
+    /// reads as consented while the gate still refuses — the silent-false this arc
+    /// keeps curing.
+    ///
+    /// `attester_key_id` is the party that would author `capacity:*` ABOUT
+    /// `subject_key_id`. The consent is the REVERSE edge (subject → attester), so
+    /// mind the direction: passing them swapped resolves a different question and
+    /// will answer `unspecified` for a perfectly consented pair.
+    #[pyfunction]
+    #[pyo3(name = "analyze_consent_stance", signature = (attester_key_id, subject_key_id=None))]
+    fn py_analyze_consent_stance(
+        py: Python<'_>,
+        attester_key_id: String,
+        subject_key_id: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            crate::federation_delivery::analyze_consent_stance(
+                &attester_key_id,
+                subject_key_id.as_deref(),
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
     /// In-process accessor for the first-run ownership claim PIN (CIRISServer#277).
     ///
     /// On the agent-embedded (fold) topology the embedding process IS the console:
@@ -1462,6 +1501,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;

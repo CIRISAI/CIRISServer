@@ -40,9 +40,18 @@ use std::path::PathBuf;
 // promote_attestation_with_transforms, touch-claim storage/merge) + edge
 // v14.4.0→v15.0.0 (CIRISEdge#411/#410: delivery_mode reader, touch-claim producer,
 // field-conformance + evidence rows). Verify unchanged at v10.6.3.
+//
+// 0.5.139 — persist v21.17.0→**v22.0.1** ("safe mesh genesis": the #543
+// bootstrap/Sybil admission audit — AV-75 conferral model, AV-77 in-band peer
+// de-admission, AV-78 tier actually persisted, CC#46 consent-before-scoring) +
+// edge v15.2.2→**v15.4.2** (#425's ApplyOutcome choke point, #426's `source_peer`
+// on the apply path). v22.0.1 over v22.0.0 carries CIRISPersist#545, which we
+// caught on adoption: the test-anchor genesis synthesized `accord_holder` rows
+// persist's own `put_public_key` then refused as `malformed`. Verify still
+// unchanged at v10.6.3 — the whole bump is persist+edge.
 pub const TARGET_VERIFY: &str = "v10.6.3";
-pub const TARGET_PERSIST: &str = "v21.17.0";
-pub const TARGET_EDGE: &str = "v15.2.2";
+pub const TARGET_PERSIST: &str = "v22.0.1";
+pub const TARGET_EDGE: &str = "v15.4.2";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
