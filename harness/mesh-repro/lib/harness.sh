@@ -162,10 +162,41 @@ harness_verdict() {
   echo
   echo "═══ ${SCENARIO_NAME:-scenario} STAGE-LADDER VERDICT ═══"
   harness_print_ladder
-  if [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ]; then
+  # NOTE the ordering: the audit branch must be evaluated BEFORE the
+  # success-stage short-circuit. Otherwise a scenario whose success stage happens
+  # to be positive reports SUCCESS while independent preconditions are still
+  # unmet — which is precisely the false green this mode exists to prevent.
+  if [ "${VERDICT_MODE:-monotonic}" != "audit" ] && [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ]; then
     echo "  → SUCCESS: ${SUCCESS_MESSAGE:-full chain green}"
     exit 0
   fi
+  # AUDIT MODE (VERDICT_MODE=audit): report EVERY failing stage, not just the
+  # first. A monotonic "first break" verdict is right for a CARRIER scenario —
+  # one pipeline, one blockage. It is wrong for an AUDIT scenario, where the
+  # question is "which of these independent preconditions hold?" and stopping at
+  # the first zero hides the rest. That difference is exactly how a fixture can
+  # pass four deltas at once and look like one problem.
+  if [ "${VERDICT_MODE:-monotonic}" = "audit" ]; then
+    local failed=0 s hint code first_code=0
+    for s in "${STAGES[@]}"; do
+      if [ "${COUNT[$s]:-0}" -le 0 ]; then
+        hint="HINT_$s"; code="EXIT_$s"
+        echo "  ✗ $s — ${!hint:-no hint recorded}"
+        if declare -F "DIAG_$s" >/dev/null; then "DIAG_$s" || true; fi
+        failed=$((failed+1))
+        [ "$first_code" -eq 0 ] && first_code="${!code:-1}"
+      else
+        echo "  ✓ $s"
+      fi
+    done
+    if [ "$failed" -eq 0 ]; then
+      echo "  → SUCCESS: ${SUCCESS_MESSAGE:-every precondition holds}"
+      exit 0
+    fi
+    echo "  → $failed PRECONDITION(S) UNMET — see each ✗ above. Exit code names the FIRST."
+    exit "$first_code"
+  fi
+
   # MONOTONIC LADDER: find the furthest stage with positive evidence. Everything
   # at or before it is PROVEN regardless of its own probe — a later stage cannot
   # have happened without the earlier ones. Only stages after the high-water mark

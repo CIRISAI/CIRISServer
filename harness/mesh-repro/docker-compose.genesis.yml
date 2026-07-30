@@ -1,0 +1,25 @@
+# Genesis A/B — ARM B overlay. Layer LAST:
+#   -f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis.yml
+#
+# Models the PRODUCTION genesis shape: a node holding only the baked canonical
+# key record, with NO locally-minted trust root.
+#
+# It uses an explicit code-honoured flag rather than dropping
+# CIRIS_TEST_TRUST_ROOT_SEED. Dropping the seed is the obvious approach and it is
+# a TRAP: compose's `!reset null` is silently re-materialized by the merge (we
+# verified `SEED=SET` on the agent after layering docker-compose.unblessed.yml),
+# so the agent self-blesses, arm B runs arm A, and the audit reports green
+# against a node that minted everything locally. docker-compose.field.yml
+# documents this exact failure — "the agent silently self-blessed and the run
+# tested the wrong topology" — and we reproduced it anyway.
+#
+# CIRIS_TEST_NO_CEREMONY is checked inside `test_anchor_root_or_skip`, so no merge
+# ordering can undo it, and the skip is logged loudly.
+#
+# The CANONICAL keeps its ceremony: in production the canonical IS accord-blessed
+# (that is what the baked seed represents). The question under test is whether an
+# AGENT that minted nothing can resolve leg B from the seed alone.
+services:
+  agent:
+    environment:
+      CIRIS_TEST_NO_CEREMONY: "true"

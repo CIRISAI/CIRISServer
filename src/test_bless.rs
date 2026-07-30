@@ -87,6 +87,23 @@ fn test_anchor_root_or_skip(
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         return Ok(None);
     }
+    // EXPLICIT opt-out for the genesis A/B (harness/mesh-repro/scenarios/genesis_seed.sh).
+    // Arm B must model a node that received ONLY the baked seed — no locally-minted
+    // charter, lifecycle, or trust edge. The obvious way to get that is to drop
+    // CIRIS_TEST_TRUST_ROOT_SEED via a compose overlay, and that is a TRAP: the
+    // `!reset null` is silently re-materialized by the merge, the agent self-blesses
+    // anyway, and the run tests the wrong topology while looking green
+    // (docker-compose.field.yml documents the same trap; we then hit it again).
+    // A flag the code itself honours cannot be undone by merge semantics.
+    if std::env::var("CIRIS_TEST_NO_CEREMONY").ok().as_deref() == Some("true") {
+        tracing::warn!(
+            context,
+            "CIRIS_TEST_NO_CEREMONY=true — SKIPPING the leg-B trust-root ceremony. This node \
+             now holds only what it was SEEDED or SENT, which is the production genesis shape. \
+             Never set this outside the genesis A/B."
+        );
+        return Ok(None);
+    }
     if std::env::var("CIRIS_TEST_TRUST_ROOT_SEED").is_err() {
         tracing::warn!(
             context,
