@@ -193,6 +193,17 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
         &edge,
         &node_key_id,
     ));
+    // STAGE 1 on the DELIVERY path too. The embedded agent never runs
+    // serve_with_adapter, so wiring this only in compose would leave every agent
+    // node without a trust root while the composed node looked fine — the same
+    // shape as the AV-77 arming split below.
+    rt.block_on(async {
+        if let Err(e) = crate::mesh_genesis::install_baked_trust_root(&engine).await {
+            tracing::error!(error = %e, "stage 1 (baked trust root) FAILED on the delivery \
+                                         path — this node will withhold every trace:* row");
+        }
+    });
+
     // CIRISPersist#543 AV-77 (v22.0.0) — arm the in-band peer de-admission gate on
     // the DELIVERY path too. The embedded agent never runs `serve_with_adapter`, so
     // arming only there would leave every agent node's sanction gate dormant while

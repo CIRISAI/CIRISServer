@@ -2149,7 +2149,7 @@ struct CosignGenesisRequest {
 /// it *is* one: a quorum of seated holders just signed this charter into existence
 /// on their own hardware. Making them then answer "do you trust this root?" would
 /// be theater — they are the accord. What must stay deliberate is the RECEIVING
-/// side, which is why [`crate::mesh_genesis::attach_genesis`] still refuses to
+/// side, which is why [`crate::mesh_genesis::install_trust_root_records`] still refuses to
 /// write this edge: a bundle must never assign a stranger a trust root.
 ///
 /// The edge is the node's own signed, deletable, nuclear-revocable act (un-trust =

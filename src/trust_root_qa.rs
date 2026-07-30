@@ -67,7 +67,7 @@ use ciris_verify_core::federation_self_record::{
 };
 use ciris_verify_core::self_at_login::{HybridSigningIdentity, SelfSigner};
 
-use crate::mesh_genesis::{attach_genesis, produce_genesis, verify_bundle};
+use crate::mesh_genesis::{install_trust_root_records, produce_genesis, verify_bundle};
 
 /// The delegation-plane trust root: accord holder A1, keyed as the synthesized
 /// test-anchor roster id so the effective roster and our signer correspond.
@@ -645,7 +645,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // admission gate re-verifies the co-scrub against the freshly seeded
     // holder rows.
     let dir2 = MemoryBackend::new();
-    let report = attach_genesis(&dir2, &bundle)
+    let report = install_trust_root_records(&dir2, &bundle)
         .await
         .expect("attach onto a fresh directory");
     assert_eq!(report.holders_seeded, 3);
@@ -989,7 +989,9 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
     }
 
     let dir2 = MemoryBackend::new();
-    attach_genesis(&dir2, &bundle).await.expect("attach");
+    install_trust_root_records(&dir2, &bundle)
+        .await
+        .expect("attach");
     dir2.put_public_key(to_persist(
         &produce_self_key_record(&fx.user, "user", VALID_FROM, &[])
             .await

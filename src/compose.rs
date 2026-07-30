@@ -206,6 +206,21 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
+    // STAGE 1 (FSD/GENESIS_TO_SCORE.md) — install the baked trust root and accept
+    // it. Two acts on purpose: installing records makes the root KNOWN; accepting
+    // it is this node's own signed `trust:accepts` edge, and the one row an
+    // operator deletes to un-trust. A bundle may seed records; it may never assign
+    // a stranger a trust root.
+    //
+    // Non-fatal: an unminted mesh ships a bundle-shaped seed with no charter, and
+    // a node booting against that is a legitimate state — it simply cannot serve
+    // traces yet. `install_baked_trust_root` says so once, loudly, at boot rather
+    // than leaving it to be inferred from withheld frames later.
+    if let Err(e) = crate::mesh_genesis::install_baked_trust_root(&engine).await {
+        tracing::error!(error = %e, "stage 1 (baked trust root) FAILED — this node has no \
+                                     trust root and will withhold every trace:* row");
+    }
+
     // CIRISPersist#543 AV-77 (v22.0.0) — ARM the in-band peer de-admission gate.
     // Until this node declares its OWN key id to persist, the gate is DORMANT:
     // the `revocation:peer_admission:v1` refusal has no "me" to evaluate

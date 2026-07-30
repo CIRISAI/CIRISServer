@@ -51,47 +51,22 @@ use sha2::Digest as _;
 /// the m-of-n holder authorizations that prove a quorum minted it.
 pub const GENESIS_VERSION: u32 = 2;
 
-/// A portable, self-verifying mesh genesis: the trust root + ≥1 serve node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenesisBundle {
-    pub version: u32,
-    /// The trust root's family identifier (grouping; authority lives in `holders`).
-    pub family_key_id: String,
-    /// The accord holders: the pinned anchor pubkeys every chain terminates in.
-    pub holders: Vec<SignedKeyRecord>,
-    /// **≥1** `infra:serve`-blessed node, so the mesh can actually serve on attach.
-    pub serve_nodes: Vec<SignedKeyRecord>,
-    /// The family's **entrenched** `quorum:M/N` as it stood at production. Carried,
-    /// never assumed — a verifier must not guess how many holders authorized this.
-    /// Anti-downgrade: [`verify_bundle`] additionally requires M to be at least a
-    /// strict majority of the holders the bundle carries, so a tampered policy
-    /// string cannot talk the threshold down to 1.
-    #[serde(default)]
-    pub consensus_protocol: String,
-    /// The **delegation plane**: the self-referential charter (`delegates_to(root →
-    /// root)`, carrying its pre-rotation commitment) plus one `infra:serve` grant
-    /// per serve node. Without these the bundle is inert — keys and no authority.
-    #[serde(default)]
-    pub attestations: Vec<SignedAttestation>,
-    /// The m-of-n proof: holder signatures over [`authorization_digest`], which
-    /// binds the whole artifact (charter, grants, holders, serve nodes). This is
-    /// what makes minting a trust root a quorum act rather than one holder's
-    /// unilateral decision.
-    #[serde(default)]
-    pub authorizations: Vec<GenesisAuthorization>,
-    pub produced_at: String,
-}
-
-/// One holder's authorization of a genesis bundle — a bound-hybrid signature over
-/// [`authorization_digest`]. Distinct from the charter's own signature: the charter
-/// says "this root declares itself"; an authorization says "I, a seated holder,
-/// concur that this artifact should exist".
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenesisAuthorization {
-    pub holder_key_id: String,
-    pub signature_classical: String,
-    pub signature_pqc: String,
-}
+// ── ONE bundle type, ONE digest. ────────────────────────────────────────────
+//
+// persist v23.0.0 owns `GenesisBundle`, `GenesisAuthorization` and
+// `authorization_digest` — its doc credits "producer's construction (CIRISServer
+// mesh_genesis)", i.e. it adopted the shape we produced. We re-export rather than
+// redeclare.
+//
+// This is not tidiness. A duplicated bundle type is two field lists that must
+// agree, and a duplicated `authorization_digest` is worse: the m-of-n holder
+// signatures are taken OVER that digest, so two implementations drifting by a
+// byte silently invalidates a ceremony's quorum. That is the same
+// two-things-that-must-agree class as CIRISPersist#541 (preserve set vs verified
+// set) and #547 (advertised hash vs indexed hash), and the cure is the same —
+// have one.
+pub use ciris_persist::federation::genesis::bundle::authorization_digest;
+pub use ciris_persist::federation::genesis::{GenesisAuthorization, GenesisBundle};
 
 #[derive(Debug)]
 pub enum GenesisError {
@@ -218,45 +193,10 @@ pub const CHARTER_SCOPES: &[&str] = &[
     "infra:transport",
 ];
 
-/// The bytes every holder authorization signs: a canonical digest binding the
-/// bundle's identity, its holder set, its serve set, and its whole delegation
-/// plane. Signing this means "I concur with THIS artifact" — a co-signer cannot
-/// be replayed onto a bundle with a swapped serve node or a widened charter.
-///
-/// Deliberately excludes `authorizations` (they are what is being accumulated)
-/// and `produced_at` is included so two ceremonies are distinguishable.
-pub fn authorization_digest(bundle: &GenesisBundle) -> Result<Vec<u8>, GenesisError> {
-    let preimage = serde_json::json!({
-        "version": bundle.version,
-        "family_key_id": bundle.family_key_id,
-        "consensus_protocol": bundle.consensus_protocol,
-        "produced_at": bundle.produced_at,
-        "holders": bundle.holders.iter().map(|h| &h.record.key_id).collect::<Vec<_>>(),
-        "serve_nodes": bundle.serve_nodes.iter().map(|n| &n.record.key_id).collect::<Vec<_>>(),
-        "attestations": bundle
-            .attestations
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "attestation_id": a.attestation.attestation_id,
-                    "attesting_key_id": a.attestation.attesting_key_id,
-                    "attested_key_id": a.attestation.attested_key_id,
-                    "attestation_type": a.attestation.attestation_type,
-                    "attestation_envelope": a.attestation.attestation_envelope,
-                })
-            })
-            .collect::<Vec<_>>(),
-    });
-    ciris_persist::verify::canonical::ceg_produce_canonicalize(&preimage)
-        .map_err(|e| GenesisError::CharterInvalid(format!("digest canonicalize: {e}")))
-}
-
-/// The bundle's short content fingerprint — the value an operator compares
-/// **out of band** before attaching. Self-verification proves untampered; only a
-/// second channel proves *intended* (`FSD/MESH_GENESIS.md` §2, the KERI/OOBI
 /// concession). Rendered on the card for exactly that comparison.
 pub fn fingerprint(bundle: &GenesisBundle) -> Result<String, GenesisError> {
-    let d = authorization_digest(bundle)?;
+    let d = authorization_digest(bundle)
+        .map_err(|e| GenesisError::CharterInvalid(format!("digest: {e}")))?;
     Ok(hex::encode(sha2::Sha256::digest(&d))[..16].to_string())
 }
 
@@ -476,7 +416,8 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
     let _ = carried_m; // the COUNT gate lives in `verify_bundle`; parse here only
                        // so a bundle with an unreadable policy fails early.
 
-    let digest = authorization_digest(bundle)?;
+    let digest = authorization_digest(bundle)
+        .map_err(|e| GenesisError::CharterInvalid(format!("digest: {e}")))?;
     let mut seen: Vec<&str> = Vec::new();
     for auth in &bundle.authorizations {
         let holder = bundle
@@ -635,13 +576,143 @@ pub struct AttachReport {
     pub trust_root_key_id: String,
 }
 
-/// **Attach** a genesis: verify it, then seed its records into the directory.
+/// **Stage 1b** — write this node's `trust:accepts` edge to a bundle's trust root.
 ///
-/// Deliberately does NOT write the `delegates_to(user → root)` trust edge — that is
-/// the user's own signed act (the 2-phase user-signed path that mirrors the
-/// owner-binding claim). Attaching makes the root and its serve node KNOWN; trusting
-/// them stays an explicit, revocable choice.
-pub async fn attach_genesis<D>(
+/// This is the node's OWN signed act, and the whole reason stage 1 is two steps.
+/// It cannot ride in the bundle: the row's `attesting_key_id` is this node, whose
+/// key does not exist when a seed is baked. Recognition can be shipped;
+/// acceptance can only be signed.
+///
+/// It is **default trust, not consent** — the constitution already says a fresh
+/// node trusts `ciris-canonical` — so boot performs it without asking. What makes
+/// that safe is that it stays one deletable row:
+///
+/// > delete it → `trust_root_valid` false → the walk returns `None` → the serve
+/// > gate withholds → agent capabilities gate off → manifests stop.
+///
+/// Every one of those is emergent. None is special-cased, and nothing may replace
+/// this row with a universal rule, or un-trust stops being expressible.
+///
+/// Idempotent, and a no-op when this node IS the root (a self-loop charter already
+/// says so, and `trust_root_valid` requires `root != user`).
+///
+/// Returns the accepted root's `key_id`, or `None` when there was nothing to
+/// accept.
+pub async fn accept_trust_root(
+    engine: &ciris_persist::prelude::Engine,
+    bundle: &GenesisBundle,
+) -> Result<Option<String>, GenesisError> {
+    use ciris_persist::federation::types::cohort_scope;
+    use ciris_persist::federation::EmitAttestationInput;
+
+    let Some(root) = charter_root_key_id(bundle) else {
+        return Ok(None);
+    };
+    let node_key_id = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+    if node_key_id == root {
+        return Ok(None);
+    }
+    if node_trusts_root(engine, &node_key_id, &root).await? {
+        tracing::debug!(root, "trust root already accepted — no-op");
+        return Ok(Some(root));
+    }
+
+    let id = format!("trust-edge:{node_key_id}:{root}");
+    let envelope = serde_json::json!({
+        (paths::REFERENCES_ATTESTATION_ID): id,
+        // Trust the root for exactly what a root is for. Attenuation does the
+        // rest: the node can never exercise more than the charter holds.
+        "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
+    });
+    let mut input = EmitAttestationInput::with_envelope(
+        attestation_type::DELEGATES_TO,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
+        // Federation-visible: the mesh must be able to verify this node's anchoring.
+        cohort_scope::FEDERATION,
+    );
+    input.attested_key_id = Some(root.clone());
+    engine
+        .emit_attestation_self(input)
+        .await
+        .map_err(|e| GenesisError::Directory(format!("write trust:accepts: {e}")))?;
+    tracing::info!(
+        node_key_id = %node_key_id,
+        trust_root = %root,
+        "trust root ACCEPTED — this node now accepts the root's authority. Delete this \
+         attestation to un-trust (the capability cascade then fails closed on its own)."
+    );
+    Ok(Some(root))
+}
+
+/// Has this node already accepted `root`? Idempotency for [`accept_trust_root`].
+async fn node_trusts_root(
+    engine: &ciris_persist::prelude::Engine,
+    node_key_id: &str,
+    root: &str,
+) -> Result<bool, GenesisError> {
+    use ciris_persist::federation::FederationDirectory as _;
+    let rows = engine
+        .federation_directory()
+        .list_attestations_by(node_key_id)
+        .await
+        .map_err(|e| GenesisError::Directory(e.to_string()))?;
+    Ok(rows
+        .iter()
+        .any(|a| a.attestation_type == attestation_type::DELEGATES_TO && a.attested_key_id == root))
+}
+
+/// **Stage 1** — install the BAKED trust root and accept it. Called at boot.
+///
+/// The full happy-path stage 1 (`FSD/GENESIS_TO_SCORE.md`): a node ships with the
+/// baked bundle, installs its records, and accepts its root. After this
+/// `trust_root_valid` holds and the serve gate can resolve.
+///
+/// A bundle with no charter is a clean, LOUD skip rather than an error: persist
+/// ships a bundle-shaped seed that is empty until a ceremony fills it, and a node
+/// booting against an unminted mesh is a legitimate state — it simply cannot serve
+/// traces yet, and should say so once at boot rather than fail 200 frames later.
+pub async fn install_baked_trust_root(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> Result<(), GenesisError> {
+    let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    if charter_root_key_id(bundle).is_none() {
+        tracing::warn!(
+            serve_nodes = bundle.serve_nodes.len(),
+            holders = bundle.holders.len(),
+            attestations = bundle.attestations.len(),
+            "baked trust-root bundle carries NO charter — nothing to install. This node has \
+             no trust root, so `capability_roots_to_trusted_root` cannot resolve and it will \
+             withhold every trace:* row. Expected on an unminted mesh; run the genesis \
+             ceremony (FSD/GENESIS_TO_SCORE.md stage 0)."
+        );
+        return Ok(());
+    }
+    let report = install_trust_root_records(engine.federation_directory().as_ref(), bundle).await?;
+    let accepted = accept_trust_root(engine, bundle).await?;
+    tracing::info!(
+        holders_seeded = report.holders_seeded,
+        serve_nodes_seeded = report.serve_nodes_seeded,
+        attestations_seeded = report.attestations_seeded,
+        accepted_root = ?accepted,
+        "stage 1 complete — baked trust root installed and accepted"
+    );
+    Ok(())
+}
+
+/// **Stage 1a** — verify a bundle and install its records into the directory.
+///
+/// Installs holders, serve nodes, and the delegation plane (`trust:charter` +
+/// `trust:confers`). After this the trust root and its serve nodes are KNOWN.
+///
+/// Deliberately does NOT write this node's `trust:accepts` edge — see
+/// [`accept_trust_root`]. A bundle may seed records; it may never assign a
+/// stranger a trust root. Knowing a root and accepting it are separate acts, and
+/// keeping them separate is what leaves the operator a lever to delete.
+pub async fn install_trust_root_records<D>(
     dir: &D,
     bundle: &GenesisBundle,
 ) -> Result<AttachReport, GenesisError>
