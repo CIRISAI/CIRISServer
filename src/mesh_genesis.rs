@@ -39,7 +39,7 @@ use ciris_persist::federation::trust_root::{
 use ciris_persist::federation::types::delegation_scope::INFRA_SERVE;
 use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
 use ciris_persist::federation::{FederationDirectory, SignedKeyRecord};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::Digest as _;
 
 /// Wire version of the genesis bundle. Bump on any breaking shape change.
@@ -654,7 +654,6 @@ async fn node_trusts_root(
     node_key_id: &str,
     root: &str,
 ) -> Result<bool, GenesisError> {
-    use ciris_persist::federation::FederationDirectory as _;
     let rows = engine
         .federation_directory()
         .list_attestations_by(node_key_id)
