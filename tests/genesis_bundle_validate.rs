@@ -333,3 +333,63 @@ async fn the_delegation_plane_alone_resolves_the_serve_gate() {
     }
     println!("\n  => the holder attestation_evidence refusal is the SOLE blocker.\n");
 }
+
+/// THE PRODUCTION ASSERTION — no env var, no external artifact.
+///
+/// persist v23.1.0 bakes the real ceremony bundle as `canonical_seed.json`, so
+/// every wheel now ships it and every fresh node installs it at boot. This runs
+/// that exact path — `install_baked_trust_root`, the same call both boot paths
+/// make — and asserts the node ends up able to serve.
+///
+/// This is the test that could not exist until today: before the bake the baked
+/// bundle was empty, so stage 1 correctly did nothing and there was no end state
+/// to assert. It is now a standing regression gate on the whole of stage 0+1 —
+/// if a future substrate bump breaks the seed, the ceremony, or the walk, this
+/// goes red in ~1s instead of surfacing as silently withheld traces in the field.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_baked_seed_makes_every_fresh_node_serve() {
+    let engine = fresh_node().await;
+
+    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
+        .await
+        .expect("stage 1 installs the baked trust root");
+
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    assert!(
+        !baked.holders.is_empty() && !baked.attestations.is_empty(),
+        "the BAKED bundle is empty (holders={}, attestations={}) — stage 1 ran and installed \
+         nothing. Every node would withhold every trace:* row.",
+        baked.holders.len(),
+        baked.attestations.len()
+    );
+
+    let node_key_id = engine.local_derived_key_id().await.expect("node identity");
+    let dir = engine.federation_directory();
+
+    for n in &baked.serve_nodes {
+        let serve_key = &n.record.key_id;
+        let grant = ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
+            dir.as_ref(),
+            &node_key_id,
+            serve_key,
+            "infra:serve",
+        )
+        .await
+        .expect("walk runs");
+        let grant = grant.unwrap_or_else(|| {
+            panic!(
+                "a fresh node holding the BAKED seed cannot serve {serve_key} — \
+                 capability_roots_to_trusted_root returned None"
+            )
+        });
+        assert!(
+            grant.verdict.valid,
+            "trust_root_valid is false for {serve_key}: {:?}",
+            grant.verdict
+        );
+        println!(
+            "  baked seed: infra:serve for {serve_key} -> root {} via {:?} (drill {:?})",
+            grant.root_key_id, grant.conferral_plane, grant.verdict.drill_freshness
+        );
+    }
+}

@@ -239,9 +239,73 @@ pub fn admit_hardware_class_against_root(
     //                         hardware class for it. `SoftwareUnattested` is the
     //                         truthful verdict, and it is what every downstream
     //                         hardware-class gate already fails closed against.
+    //  * `GenerationCustody` → attestation-at-GENERATION (persist v23.1.0 /
+    //                         CIRISPersist#554). THIS is where the chain walk
+    //                         belongs — see below.
     let class = match &evidence {
         AttestationEvidence::Hardware(hw) => {
             verify_class_binding(record, &hw.platform_attestation, ese_root_der)?
+        }
+        // The real YubiKey PIV custody attestation the accord ceremony produces.
+        // The device attests once, at key generation, so there is no nonce and
+        // nothing to age — a ceremony run in June is still the custody proof in
+        // December.
+        //
+        // Persist verifies the contract identity, the holder binding, the tier
+        // allowlist and the sha256 certificate commitments, and DELIBERATELY
+        // defers four things to us, saying so in
+        // `HardwareAttestationPolicy::check_generation_custody`: the holder's
+        // hybrid signature over the envelope, the `9c → f9 → pinned Yubico root`
+        // path, that the attested key IS the holder's federation Ed25519, and the
+        // FIPS / touch-policy floor. It defers them because it holds neither the
+        // directory-resolved holder pubkeys nor a pinned root — "verify provides
+        // the verification, not the trust root" — and it refused to fake the
+        // depth. This node holds BOTH, so the deferral lands exactly here.
+        //
+        // The holder member is built from the RECORD's own pubkeys — the key
+        // being admitted — NOT from the pubkey inside the envelope. That is the
+        // whole point: checking the envelope against itself would prove internal
+        // consistency, not that this custody object belongs to this key. A real
+        // YubiKey attestation lifted onto someone else's record fails here.
+        AttestationEvidence::GenerationCustody(att) => {
+            let obj: ciris_verify_core::ceg_outbox::SignedCegObject =
+                serde_json::to_value(att.as_ref())
+                    .and_then(serde_json::from_value)
+                    .map_err(|e| {
+                        FederationError::InvalidArgument(format!(
+                            "hardware_class claim for {} REFUSED (CC 4.2.2.1): its \
+                             GenerationCustody evidence is not a well-formed signed CEG object: {e}",
+                            record.key_id
+                        ))
+                    })?;
+            let holder_member = ciris_verify_core::threshold::ThresholdMember {
+                member_id: record.key_id.clone(),
+                ed25519_public_key_base64: record.pubkey_ed25519_base64.clone(),
+                mldsa65_public_key_base64: record.pubkey_ml_dsa_65_base64.clone(),
+                role: None,
+            };
+            let verdict =
+                ciris_verify_core::accord_custody_attestation::verify_accord_custody_attestation(
+                    &obj,
+                    &holder_member,
+                    ese_root_der,
+                )
+                .map_err(|e| {
+                    FederationError::InvalidArgument(format!(
+                        "hardware_class claim for {} REFUSED (CC 4.2.2.1): its YubiKey PIV custody \
+                         attestation does not verify against the pinned Yubico Attestation Root 1, \
+                         does not meet the FIPS + touch-always floor, or is not bound to this \
+                         key: {e:?}",
+                        record.key_id
+                    ))
+                })?;
+            tracing::info!(
+                key_id = %record.key_id,
+                custody_tier = %verdict.custody_tier,
+                "CC 4.2.2.1: attestation-at-generation custody VERIFIED — PIV chain walked to the \
+                 pinned Yubico Attestation Root 1 and bound to this record's Ed25519 key"
+            );
+            HardwareType::ExternalSecureElement
         }
         AttestationEvidence::SoftwareOnlyTest(_) => {
             tracing::warn!(
