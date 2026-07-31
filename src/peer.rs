@@ -146,12 +146,33 @@ pub async fn emit_analyze_consent(
 pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 
 /// What A consents to replicate to B by **default** (boot-env peering, when the
-/// caller supplies no explicit set) — the `capacity:*` attestation family A
-/// produces (the scorer's `capacity:sustained_coherence:v1` and any future
-/// `capacity:*` leaves). The grant payload carries these as the JCS array of
-/// namespace-prefix strings (trailing ":" significant), **sorted ascending +
-/// deduplicated** (see [`normalize_prefixes`]) so consumers agree byte-for-byte.
-pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:"];
+/// caller supplies no explicit set). The grant payload carries these as the JCS
+/// array of namespace-prefix strings (trailing ":" significant), **sorted
+/// ascending + deduplicated** (see [`normalize_prefixes`]) so consumers agree
+/// byte-for-byte.
+///
+/// # `trace:` is here because it is the whole point of the grant
+///
+/// This was `["capacity:"]` alone, which had the direction backwards: a node
+/// does not author `capacity:*` ABOUT ITSELF — the canonical does, and sends it
+/// back. What a node replicates UPSTREAM is its traces. So the default granted
+/// the one family that barely flows in this direction and withheld the one that
+/// matters.
+///
+/// The consequence was total and silent. `promote_consented_backlog` only sweeps
+/// rows whose dimension a live grant's `attestation_prefixes` COVER, so every
+/// `trace:complete:v1` row stayed at `(cohort_scope=self, tier=local)`, the offer
+/// filter (which keys on `cohort_scope`) never saw it, and the node reported
+/// "converged to 1 consent peers" while shipping nothing. Measured in the field:
+/// ZERO trace_events had ever reached the production canonical, from any node.
+///
+/// It survived because the mesh-repro harness passes its prefixes EXPLICITLY
+/// (`author_federation_consent(peer, ["trace:","capacity:"])`, lib.rs) and so
+/// never exercised this default — the green traceflow run reports
+/// `covered_prefixes: ["capacity:","trace:"]`. A fixture that supplies the value
+/// production defaults cannot prove the default; it proved a path production
+/// could not take. `default_covers_the_trace_plane` below is the gate.
+pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:", "trace:"];
 
 /// `consent:replication` payload `subject_kind` (CEG 1.0-RC29 §4.2.2.3): a
 /// payload member (NOT an envelope field) declaring the grant's subject shape.
@@ -551,4 +572,56 @@ pub async fn replication_peers_from_consent(
         .list_consent_peers(node_key_id)
         .await
         .map_err(|e| anyhow::anyhow!("list consent peers for {node_key_id}: {e}"))
+}
+
+#[cfg(test)]
+mod default_prefix_gate {
+    use super::*;
+
+    /// The DEFAULT grant must cover the trace plane — the thing a node actually
+    /// replicates upstream.
+    ///
+    /// Asserted against persist's own `covers` (the same matcher
+    /// `promote_consented_backlog` uses to decide which rows to sweep), not
+    /// against the literal, so this cannot pass on a string that merely looks
+    /// right. The trailing colon is significant: `trace:` does not cover
+    /// `trace_summary:v1`.
+    ///
+    /// This exists because the default was `["capacity:"]` and nothing caught
+    /// it: the mesh-repro harness supplies its prefixes EXPLICITLY, so the green
+    /// end-to-end run proved a path production could not take. Zero traces had
+    /// ever reached the production canonical, from any node, while the harness
+    /// was green.
+    #[test]
+    fn default_covers_the_trace_plane() {
+        let prefixes = default_attestation_prefixes();
+        for dimension in ["trace:complete:v1", "capacity:sustained_coherence:v1"] {
+            assert!(
+                ciris_persist::federation::consent_grammar::covers(&prefixes, dimension),
+                "the default replication grant does not cover {dimension} — \
+                 promote_consented_backlog will skip every such row, leaving it at \
+                 (cohort_scope=self, tier=local) and never offered. Default is {prefixes:?}"
+            );
+        }
+    }
+
+    /// The harness must not be able to drift from the default it is meant to
+    /// exercise: whatever the default covers, a harness-authored grant with the
+    /// SAME set covers too. Cheap, but it pins the two together so the next
+    /// person changing one sees the other.
+    #[test]
+    fn default_is_normalized_and_stable() {
+        let p = default_attestation_prefixes();
+        let mut sorted = p.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            p, sorted,
+            "default prefixes must be sorted + deduped (JCS byte-agreement)"
+        );
+        assert!(
+            p.iter().all(|s| s.ends_with(':')),
+            "every prefix needs its trailing colon — `trace` would cover trace_summary:v1 too"
+        );
+    }
 }

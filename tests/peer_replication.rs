@@ -404,10 +404,16 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
         .iter()
         .map(|v| v.as_str().expect("prefix is a string").to_string())
         .collect();
+    // The DEFAULT set, which now covers the trace plane as well as capacity.
+    // Asserted against `default_attestation_prefixes()` rather than a literal, so
+    // this test tracks the default instead of freezing a copy of it — the literal
+    // `["capacity:"]` here was one of three divergent copies of this list, and it
+    // is exactly how the capacity:-only default survived: every assertion agreed
+    // with it because every assertion restated it.
     assert_eq!(
         prefixes,
-        vec!["capacity:".to_string()],
-        "attestation_prefixes carries A's replicated namespace prefixes (trailing ':')"
+        ciris_server::peer::default_attestation_prefixes(),
+        "attestation_prefixes carries A's DEFAULT replicated namespace prefixes (trailing ':')"
     );
     let mut sorted_dedup = prefixes.clone();
     sorted_dedup.sort();

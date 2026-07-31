@@ -977,18 +977,29 @@ async fn peering_consent_covers_traces_and_trace_syncs_a_to_b() {
         .await
         .expect("register B peer key");
 
-    // (a) The DEFAULT consent covers ONLY capacity: — NOT traces. This is why the
-    //     seed must widen the prefixes (the gap this whole exercise closes).
+    // (a) The DEFAULT consent NOW covers traces too.
+    //
+    // This assertion used to pin the opposite — "the default replication consent
+    // is capacity:-only" — and called that a gap "the seed must widen". Nothing
+    // widened it on the boot path. The boot-authored grant used the default, so
+    // `promote_consented_backlog` skipped every trace:* row, each stayed at
+    // (cohort_scope=self, tier=local), the offer filter never saw it, and nodes
+    // reported "converged to 1 consent peers" while shipping nothing. Measured in
+    // the field: ZERO trace_events had ever reached the production canonical.
+    //
+    // A test that pins a defect as expected behaviour makes the defect permanent
+    // and the suite green. It also masked the harness divergence — mesh-repro
+    // passes ["trace:","capacity:"] EXPLICITLY, so the green traceflow proved a
+    // path production could not take.
     let default_prefixes = peer::default_attestation_prefixes();
-    assert_eq!(
-        default_prefixes,
-        vec![CAPACITY_PREFIX.to_string()],
-        "the default replication consent is capacity:-only"
+    assert!(
+        prefix_set_covers(&default_prefixes, TRACE_NAMESPACE),
+        "the default replication consent must cover traces ({TRACE_NAMESPACE}) — otherwise a \
+         plain peering converges to a peer and ships nothing. Default is {default_prefixes:?}"
     );
     assert!(
-        !prefix_set_covers(&default_prefixes, TRACE_NAMESPACE),
-        "the capacity:-only default does NOT cover traces ({TRACE_NAMESPACE}) — a naive \
-         peering would never start trace sync"
+        prefix_set_covers(&default_prefixes, CAPACITY_PREFIX),
+        "the default must still cover capacity: — the canonical's score has to replicate back"
     );
 
     // (b) The SEED peering emits a consent whose prefixes cover BOTH capacity: and
