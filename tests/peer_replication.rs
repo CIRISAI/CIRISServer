@@ -195,6 +195,7 @@ impl NodeB {
             scrub_signature_classical: BASE64.encode(ed_sig),
             scrub_signature_pqc: Some(BASE64.encode(pqc_sig)),
             scrub_key_id: NODE_B_KEY_ID.to_string(),
+            additional_scrubs: Vec::new(),
             scrub_timestamp: now,
             pqc_completed_at: Some(now),
             persist_row_hash: String::new(),

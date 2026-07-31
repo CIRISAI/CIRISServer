@@ -238,6 +238,7 @@ async fn hybrid_pending_federation_tier_row_is_refused() {
         // The defect under test: the classical half only, PQC deferred.
         scrub_signature_pqc: None,
         scrub_key_id: node_key_id.clone(),
+        additional_scrubs: Vec::new(),
         scrub_timestamp: now,
         pqc_completed_at: None,
         persist_row_hash: String::new(),

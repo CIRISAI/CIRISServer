@@ -331,6 +331,7 @@ async fn emit_withdraws(engine: &Engine, granter: &LocalSigner, target: &str) {
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
         scrub_key_id: granter_key_id.clone(),
+        additional_scrubs: Vec::new(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),

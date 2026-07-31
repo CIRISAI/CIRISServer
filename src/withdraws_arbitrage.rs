@@ -438,6 +438,7 @@ mod tests {
             scrub_signature_classical: String::new(),
             scrub_signature_pqc: None,
             scrub_key_id: attester.to_owned(),
+            additional_scrubs: Vec::new(),
             scrub_timestamp: now,
             pqc_completed_at: None,
             persist_row_hash: String::new(),

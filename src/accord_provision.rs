@@ -2546,6 +2546,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
                 scrub_signature_classical: ed,
                 scrub_signature_pqc: Some(pqc),
                 scrub_key_id: signer.key_id().to_string(),
+                additional_scrubs: Vec::new(),
                 scrub_timestamp: now,
                 pqc_completed_at: Some(now),
                 persist_row_hash: String::new(),
@@ -2745,6 +2746,69 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
     if let Err(e) = authorize_bundle(&identity, &mut bundle).await {
         return err(StatusCode::BAD_REQUEST, &e);
     }
+
+    use ciris_verify_core::self_at_login::SelfSigner as _;
+    // CO-SCRUB THE ATTESTATIONS (persist v24.0.0 / CIRISPersist#556 — our issue).
+    //
+    // Until v24 an `Attestation` carried ONE `scrub_key_id` and had no field for
+    // co-signatures, so the charter that makes the root a root, and the grant
+    // that lets the canonical serve, each reduced to a SINGLE holder's signature
+    // the moment they landed in the graph — even though 2-of-3 authorized the
+    // bundle. The bundle-level `authorizations` proved the quorum at install and
+    // then became unrecoverable: a peer receiving the charter row by replication
+    // could verify exactly one signature and could not answer "did 2-of-3 charter
+    // this root?".
+    //
+    // Every scrub is over the SAME canonical bytes as scrub #1 — JCS of the
+    // attestation envelope, which is what `original_content_hash` already
+    // commits to — so a 1-scrub and a 2-scrub attestation canonicalize
+    // identically and the authorization digest is untouched (it covers
+    // attestation_envelope, never the scrub set).
+    for a in &mut bundle.attestations {
+        if a.attestation
+            .scrubs()
+            .iter()
+            .any(|s| s.scrub_key_id == key_id)
+        {
+            continue; // already carries this holder's scrub — idempotent re-cosign
+        }
+        let canonical = match ciris_persist::verify::canonical::ceg_produce_canonicalize(
+            &a.attestation.attestation_envelope,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "canonicalize {} for co-scrub: {e}",
+                        a.attestation.attestation_id
+                    ),
+                )
+            }
+        };
+        match identity.sign_bound(&canonical).await {
+            Ok((ed, pqc)) => {
+                a.attestation
+                    .additional_scrubs
+                    .push(ciris_persist::federation::types::ScrubSig {
+                        scrub_key_id: key_id.to_string(),
+                        scrub_signature_classical: ed,
+                        scrub_signature_pqc: Some(pqc),
+                    })
+            }
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("co-scrub {}: {e}", a.attestation.attestation_id),
+                )
+            }
+        }
+    }
+    tracing::info!(
+        holder = %key_id,
+        attestations = bundle.attestations.len(),
+        "Trust Root: co-scrubbed every genesis attestation — the quorum now survives into the graph"
+    );
 
     // If A1's propose re-blessed the serve node, it is a sub-quorum co-scrub that
     // THIS holder must complete. Append B1's scrub over the byte-identical

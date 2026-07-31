@@ -355,6 +355,7 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
         scrub_signature_classical: BASE64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
         scrub_key_id: nk.clone(),
+        additional_scrubs: Vec::new(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),

@@ -58,6 +58,7 @@ fn att(
         scrub_signature_classical: "sig".to_string(),
         scrub_signature_pqc: Some("pqc".to_string()),
         scrub_key_id: attester.to_string(),
+        additional_scrubs: Vec::new(),
         scrub_timestamp: Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
         pqc_completed_at: None,
         persist_row_hash: format!("row-{id}"),
