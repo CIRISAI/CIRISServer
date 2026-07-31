@@ -218,7 +218,60 @@ pub struct ConsentGrantOptions {
     /// closed [`RestrictionOp`] enum, so an unknown `op` cannot be authored (edge
     /// honors these at serve; persist applies `StripField` at promotion).
     pub restrictions: Vec<RestrictionOp>,
+    /// Which envelope KINDS the grant covers. `None` ⇒ `["Attestation"]`.
+    /// Every entry must name a real `EnvelopeKind` that is `Consentable`;
+    /// a structural-plane kind rejects the whole grant at admission.
+    pub kinds: Option<Vec<String>>,
+    /// Flow direction. `None` ⇒ `egress` (what this node SENDS).
+    pub direction: Option<String>,
+    /// The Nissenbaum transmission principle. `None` ⇒ `share`.
+    pub principle: Option<String>,
+    /// Free-text human-readable purpose. Unvalidated, but it is what an operator
+    /// reads back when auditing why a flow exists — worth filling in.
+    pub purpose: Option<String>,
 }
+
+/// A consent grant, stated exhaustively.
+///
+/// # Why every field is emitted, even at its default
+///
+/// A consent object is a contextual-integrity tuple: WHAT flows, to WHICH
+/// recipient cohort, under WHAT principle, with WHAT restrictions, for HOW LONG.
+/// Omitting a member means the answer comes from persist's `#[serde(default)]`
+/// instead of from the owner — so the grant records a policy nobody stated, and
+/// the recorded policy silently changes if a default ever moves.
+///
+/// That is not hypothetical here: `attestation_prefixes` defaulted to
+/// `["capacity:"]` for eight releases, no consent object said so, and ZERO traces
+/// reached the production canonical from any node while every gate stayed green.
+///
+/// So the producer writes the FULL tuple. Defaults still exist — they are how a
+/// caller says "I have no opinion" — but the value they resolve to is written
+/// into the object at authoring time, where it can be audited and where a
+/// downstream default change cannot rewrite what the owner agreed to.
+///
+/// # The recipient is a CLASS, not a list of keys
+///
+/// `audience` is a cohort, not an enumerated peer set — "the federation", not
+/// "these three key ids". `subject_key_ids` names the directed counterparty for
+/// this row, but the POLICY is the cohort. That is what makes the grant
+/// exhaustive: it answers for recipients the owner has never met.
+///
+/// The second half of "…to canonicals blessed by a trust root I trust" is NOT in
+/// this object, and deliberately so. Consent says what may flow and to which
+/// cohort; the serve gate independently requires
+/// `capability_roots_to_trusted_root(me, recipient, infra:serve)` — the recipient
+/// must hold the capability from a root THIS node accepts. Two conditions, both
+/// required, neither able to satisfy the other. Folding the trust predicate into
+/// the consent payload would let a grant assert a trust relationship it cannot
+/// verify.
+///
+/// The same shape carries any policy of this form — "medical data to providers I
+/// trust, and that my providers trust" is `attestation_prefixes: ["medical:"]`
+/// with the cohort as audience, the onward-transfer question answered by
+/// `principle` + `restrictions`, and the trust predicate answered by the gate.
+#[derive(Debug, Clone)]
+pub struct ExhaustiveConsent;
 
 /// Normalize a caller-supplied (or default) prefix set into the byte-for-byte
 /// form that goes into the grant payload so every consumer (and B's mirror)
@@ -467,14 +520,53 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
              (self/family/community/affiliations/species/biosphere/federation)"
         ));
     }
+    // THE EXHAUSTIVE TUPLE. Every member is written, at its resolved value,
+    // including the ones a caller left to default — see [`ExhaustiveConsent`].
+    // A default that lives only in persist is a policy nobody stated and that a
+    // downstream change can silently rewrite; `attestation_prefixes` defaulting
+    // to ["capacity:"] for eight releases, with no consent object recording it,
+    // is exactly how zero traces reached production while every gate was green.
+    let kinds = opts
+        .kinds
+        .clone()
+        .unwrap_or_else(|| vec!["Attestation".to_string()]);
+    let direction = opts
+        .direction
+        .clone()
+        .unwrap_or_else(|| "egress".to_string());
+    let principle = opts
+        .principle
+        .clone()
+        .unwrap_or_else(|| "share".to_string());
     let mut payload = serde_json::json!({
+        // "replication" is the legacy spelling persist still accepts alongside
+        // "transfer"; kept so an in-flight grant does not change shape mid-cut.
         "grants": "replication",
-        "audience": audience,
+        "direction": direction,
+        "kinds": kinds,
         "attestation_prefixes": prefixes,
+        "principle": principle,
+        "audience": audience,
         "restrictions": opts.restrictions,
     });
+    if let Some(purpose) = opts.purpose.as_deref() {
+        payload["purpose"] = serde_json::json!(purpose);
+    }
     if let Some(valid_until) = opts.valid_until {
         payload["valid_until"] = serde_json::json!(valid_until);
+    }
+    // Fail at the PRODUCER, not at admission: parse our own payload through
+    // persist's one strict parser before signing it. `deny_unknown_fields` means
+    // a member we spell wrong — or one persist later removes — is caught here,
+    // with the field named, instead of surfacing as a refused row on a peer.
+    {
+        let probe = serde_json::json!({ "payload": payload });
+        ciris_persist::federation::consent_grammar::parse_grant_payload(&probe).map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to author a consent grant persist would reject: {e}. Payload: {}",
+                serde_json::to_string(&payload).unwrap_or_default()
+            )
+        })?;
     }
     let envelope = serde_json::json!({
         (paths::DIMENSION): CONSENT_DIMENSION,

@@ -704,6 +704,87 @@ pub fn analyze_consent_stance(
     .to_string())
 }
 
+/// Author this node's directed `consent:replication` grant from the EMBEDDED
+/// host — the fold's only path to consent.
+///
+/// # Why this is not test-only any more
+///
+/// "The substrate trusts, the server (user) consents." 0.5.146 stopped the
+/// substrate boot-authoring a replication grant, which is right — a node must not
+/// consent on its owner's behalf. But the owner-gated route that replaces it,
+/// `POST /v1/federation/consent` (`federation_admin.rs`), is mounted at
+/// `compose.rs` inside `serve_with_adapter`, and the embedded agent boots through
+/// `start_and_hold`, which mounts NO HTTP router. So in the fold there was no
+/// path by which consent could exist AT ALL: every trace stayed at
+/// `(cohort_scope=self, tier=local)` because nothing had ever consented.
+///
+/// Measured, not inferred: on 0.5.146 a fold node shows `consent:replication`
+/// rows = 0, while `consent:community_trust:v1` promoted cleanly to
+/// federation/federation — so the promoter works and the traces are stranded for
+/// exactly one reason, nobody consented.
+///
+/// # The gate
+///
+/// The HTTP route's owner gate exists because HTTP is a REMOTE surface. This is
+/// not remote: the caller is the node's own host process, already holding the
+/// Engine and the signing key. Gating it on a session it cannot have would be
+/// theatre.
+///
+/// What it CAN check, and does, is that the node has been **claimed** — a ROOT
+/// owner exists. On an unclaimed node there is no owner to consent for, so this
+/// refuses. That is the same authority the HTTP route resolves to, established at
+/// claim time rather than per-request. The harness fence remains as an
+/// alternative for `CIRIS_TESTING_MODE`, which runs on unclaimed nodes.
+#[cfg(feature = "python")]
+pub fn author_consent_embedded(peer_key_id: &str, prefixes: &[String]) -> Result<String> {
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
+        .context("author_federation_consent: no in-process persist Engine")?;
+
+    // Claimed-node gate. `CIRIS_TESTING_MODE` is the harness's alternative — it
+    // runs on unclaimed nodes with no owner to claim them.
+    let testing = std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true");
+    if !testing {
+        let (rt_probe, _c) = HELD
+            .get()
+            .context("author_federation_consent: federation delivery not started")?;
+        let claimed = rt_probe.block_on(crate::auth::store::list_by_role(
+            &engine,
+            ciris_persist::wa_cert::WaRole::Root,
+            1,
+        ));
+        let has_owner = matches!(claimed, Ok(ref v) if !v.is_empty());
+        if !has_owner {
+            anyhow::bail!(
+                "author_federation_consent refused: this node has no ROOT owner — it has not \
+                 been claimed, so there is no owner on whose behalf to consent. Claim the node \
+                 first (POST /v1/setup/root), or set CIRIS_TESTING_MODE for the harness."
+            );
+        }
+    }
+
+    let edge: Arc<Edge> = ciris_edge::current_edge()
+        .map_err(|e| anyhow::anyhow!("author_federation_consent: no embedded Edge: {e}"))?;
+    let node_key_id = edge.signer_key_id().to_string();
+    let (rt, _controller) = HELD
+        .get()
+        .context("author_federation_consent: federation delivery not started")?;
+    let grant = rt.block_on(crate::peer::emit_replication_consent(
+        &engine,
+        &node_key_id,
+        peer_key_id,
+        prefixes,
+    ))?;
+    tracing::info!(
+        peer_key_id,
+        attestation_id = %grant.attestation_id,
+        freshly_emitted = grant.freshly_emitted,
+        prefixes = ?prefixes,
+        owner_claimed = !testing,
+        "consent:replication authored from the embedded host (the fold's consent path)"
+    );
+    Ok(grant.attestation_id)
+}
+
 #[cfg(feature = "python")]
 pub fn author_consent_testing(peer_key_id: &str, prefixes: &[String]) -> Result<String> {
     if std::env::var("CIRIS_TESTING_MODE").as_deref() != Ok("true") {

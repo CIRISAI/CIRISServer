@@ -1295,7 +1295,10 @@ mod python {
         attestation_prefixes: Vec<String>,
     ) -> PyResult<String> {
         py.detach(|| {
-            crate::federation_delivery::author_consent_testing(&peer_key_id, &attestation_prefixes)
+            // The fold's consent path. Refuses on an unclaimed node (no ROOT
+            // owner to consent for) unless CIRIS_TESTING_MODE — see
+            // federation_delivery::author_consent_embedded.
+            crate::federation_delivery::author_consent_embedded(&peer_key_id, &attestation_prefixes)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
     }

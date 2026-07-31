@@ -521,3 +521,81 @@ async fn forged_peer_record_is_rejected_and_not_stored() {
         "a rejected (forged) registration must leave NO directory row"
     );
 }
+
+/// A consent grant must state its WHOLE contextual-integrity tuple — every
+/// member of persist's closed grammar, written at its resolved value, even the
+/// ones the caller left to default.
+///
+/// # Why this is a gate and not a style preference
+///
+/// A member omitted from the payload is answered by persist's
+/// `#[serde(default)]` instead of by the owner. So the object records a policy
+/// nobody stated, and the recorded policy silently changes if a default moves.
+///
+/// That is not hypothetical. `attestation_prefixes` defaulted to `["capacity:"]`
+/// for eight releases; no consent object said so; every trace row stayed at
+/// `(cohort_scope=self, tier=local)` because `promote_consented_backlog` only
+/// sweeps dimensions a grant COVERS; and ZERO traces reached the production
+/// canonical from any node while every gate stayed green.
+///
+/// Asserted field-by-field against the grammar, so ADDING a member to
+/// `ConsentTransferPolicy` without emitting it here fails rather than silently
+/// defaulting in production.
+#[tokio::test(flavor = "multi_thread")]
+async fn consent_grant_states_its_whole_tuple() {
+    let engine = node_a().await;
+    register_self(&engine).await;
+    let nk = node_a_key_id(&engine).await;
+    let node_b = NodeB::new();
+    peer::register_peer_key(&engine, &node_b.peer_config().await)
+        .await
+        .expect("register B");
+
+    let grant = peer::emit_replication_consent(
+        &engine,
+        &nk,
+        NODE_B_KEY_ID,
+        &peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("emit consent");
+
+    let by_a = engine
+        .federation_directory()
+        .list_attestations_by(&nk)
+        .await
+        .expect("list A's attestations");
+    let row = by_a
+        .iter()
+        .find(|a| a.attestation_id == grant.attestation_id)
+        .expect("the grant row exists");
+    let payload = row
+        .attestation_envelope
+        .get("payload")
+        .expect("payload present")
+        .clone();
+
+    // Every member of the closed grammar, present and explicit.
+    for field in [
+        "grants",
+        "direction",
+        "kinds",
+        "attestation_prefixes",
+        "principle",
+        "audience",
+        "restrictions",
+    ] {
+        assert!(
+            payload.get(field).is_some(),
+            "consent payload omits `{field}` — it would be answered by persist's default \
+             instead of by the owner, and a default change would rewrite what was agreed. \
+             Payload: {payload}"
+        );
+    }
+
+    // And persist's own strict parser accepts what we wrote (deny_unknown_fields,
+    // so a member we spell wrong is caught here rather than on a peer).
+    let probe = serde_json::json!({ "payload": payload });
+    ciris_persist::federation::consent_grammar::parse_grant_payload(&probe)
+        .expect("the grant we author must parse through persist's one strict parser");
+}

@@ -552,6 +552,12 @@ async fn consent(
         audience: req.audience.clone(),
         valid_until: req.valid_until,
         restrictions: req.restrictions.clone(),
+        // Route callers do not yet expose these; None ⇒ the resolved default is
+        // still WRITTEN into the payload (see peer::ExhaustiveConsent).
+        kinds: None,
+        direction: None,
+        principle: None,
+        purpose: None,
     };
     let grant = match crate::peer::emit_replication_consent_with_policy(
         &st.engine,
