@@ -2136,6 +2136,15 @@ async fn build_engine(
 /// delivery WITHOUT `serve_with_adapter` — wiring only the composed path would
 /// reproduce persist's own bug one layer up, leaving every agent node's gate
 /// dormant while the composed node's looked fine.
+/// Is this announce-event message the "not one of ours" case — a neighbour on the
+/// shared Reticulum interface whose app-data is not a CIRIS attestation?
+///
+/// Matched on the message because the event carries no structured outcome. A false
+/// negative just logs at INFO as before, which is the safe direction.
+fn is_ignored_announce(message: &str) -> bool {
+    message.contains("announce ignored") || message.contains("is not a CIRIS attestation")
+}
+
 pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
     let key_id = engine
         .local_derived_key_id()
@@ -2693,6 +2702,27 @@ pub(crate) fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
                         "RNS announce not rooted: {}",
                         ev.message
                     ),
+                    // An IGNORED announce is not a rooted peer. Reticulum is a
+                    // SHARED network — every neighbour on the same interface
+                    // announces, and most of them are not CIRIS nodes, so their
+                    // app-data does not parse as an attestation. That is normal
+                    // traffic, not an event about us.
+                    //
+                    // Logging it at INFO under the text "announce rooted (peer now
+                    // reachable by key_id)" was doubly wrong: it fired every few
+                    // seconds forever, and the headline contradicted its own
+                    // payload ("...rooted (peer now reachable): announce IGNORED:
+                    // app-data is not a CIRIS attestation"). An operator reading
+                    // that reasonably concludes something is broken, or that peers
+                    // are being rooted when none are.
+                    EventSeverity::Info if is_ignored_announce(&ev.message) => {
+                        tracing::debug!(
+                            peer = ?ev.peer_key_id,
+                            "RNS announce from a non-CIRIS neighbour ignored (normal on a shared \
+                             Reticulum interface): {}",
+                            ev.message
+                        );
+                    }
                     EventSeverity::Info => tracing::info!(
                         peer = ?ev.peer_key_id,
                         "RNS announce rooted (peer now reachable by key_id): {}",

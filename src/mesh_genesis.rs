@@ -389,6 +389,15 @@ fn charter_of(bundle: &GenesisBundle) -> Option<&Attestation> {
         })
 }
 
+/// Is this directory error "the row is already there", as opposed to a real
+/// failure? Matched on the message because persist returns a stringly-typed
+/// conflict here; a false negative degrades to the old fail-loud behaviour, which
+/// is the safe direction.
+fn is_already_exists(e: &impl std::fmt::Display) -> bool {
+    let m = e.to_string();
+    m.contains("already exists") || m.contains("conflicts with existing row")
+}
+
 fn scope_has(env: &serde_json::Value, want: &str) -> bool {
     match env.get("scope") {
         Some(serde_json::Value::String(s)) => s == want,
@@ -429,10 +438,17 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
     // seeds keys with no authority. Reject it rather than hand anyone an artifact
     // that silently fails to unlock anything.
     let charter = charter_of(bundle).ok_or(GenesisError::NoCharter)?;
-    let root = charter.attesting_key_id.as_str();
-    if !holder_ids.contains(&root) {
+    // TWO different questions, and under family rooting they have two different
+    // answers — so two names. `root` answered both and was the ATTESTER, which
+    // made the heartbeat check look for a drill about A1 while the drill is about
+    // the family: a false "carries no accord heartbeat" warning on a bundle whose
+    // heartbeat is exactly right. Third instance of attester-vs-attested in this
+    // file; the first two were charter_of and charter_root_key_id.
+    let charter_signer = charter.attesting_key_id.as_str(); // WHO signed the charter
+    let trust_root = charter.attested_key_id.as_str(); // WHAT the charter charters
+    if !holder_ids.contains(&charter_signer) {
         return Err(GenesisError::CharterInvalid(format!(
-            "charter root {root} is not a holder carried in this bundle"
+            "charter signer {charter_signer} is not a holder carried in this bundle"
         )));
     }
     // The RC3 validity minimum: a root serves AND vouches, or it is inert.
@@ -458,12 +474,18 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
         )));
     }
 
-    // Every serve node needs an infra:serve grant FROM the charter root, or its
-    // capability does not root to the trust root (edge trace-gate leg B).
+    // Every serve node needs an infra:serve grant, or its capability does not root
+    // to the trust root (edge trace-gate leg B).
+    //
+    // Matched on the charter's SIGNER, not on the trust root: persist v24 keeps the
+    // grant as `holder -> subject` and DERIVES the family from the verified signer
+    // set, because a keyless family cannot sign and a granter field naming it would
+    // be attribution-by-claim. So the grant is signed by a seated holder; reaching
+    // the threshold is what makes it the family's act.
     for n in &bundle.serve_nodes {
         let granted = bundle.attestations.iter().map(|a| &a.attestation).any(|a| {
             a.attestation_type == attestation_type::DELEGATES_TO
-                && a.attesting_key_id == root
+                && a.attesting_key_id == charter_signer
                 && a.attested_key_id == n.record.key_id
                 && scope_has(&a.attestation_envelope, INFRA_SERVE_SCOPE)
         });
@@ -489,9 +511,9 @@ pub fn verify_bundle_structure(bundle: &GenesisBundle) -> Result<(), GenesisErro
     // the trust card to surface the band) and we DO NOT refuse a bundle for its
     // absence or its age. A pre-v23 build of this file did refuse, which would
     // now reject bundles persist considers perfectly valid.
-    if lifecycle_of(bundle, root).is_none() {
+    if lifecycle_of(bundle, trust_root).is_none() {
         tracing::warn!(
-            root,
+            trust_root,
             "genesis bundle carries no accord heartbeat about the trust root. NOT fatal — \
              v23 reports liveness as a band beside the verdict rather than gating on it — but \
              consumers will show this root's drill-freshness as unknown/red until one exists."
@@ -834,15 +856,44 @@ where
 {
     verify_bundle(bundle)?;
 
-    for h in &bundle.holders {
-        dir.put_public_key(h.clone())
-            .await
-            .map_err(|e| GenesisError::Directory(e.to_string()))?;
+    // A key record that ALREADY EXISTS is not a reason to abandon the install.
+    //
+    // Engine construction seeds the baked genesis, so on any node that has booted
+    // before, the holder and canonical rows are already present. When a re-minted
+    // bundle re-blesses the canonical, its record differs from the seeded one (new
+    // roles inside the scrub-signed envelope) and persist rightly refuses to
+    // replace an anchored row — `put_public_key` returns a conflict.
+    //
+    // That conflict used to be `?`-propagated, so ONE pre-existing record aborted
+    // the WHOLE of stage 1: the charter and the grants — the entire delegation
+    // plane, the part that is genuinely new — never got installed, and the node
+    // came up with no trust root at all. Seen in the field as
+    // "stage 1 (baked trust root) FAILED ... key_id <canonical> already exists with
+    // different content", on a node whose only problem was that it had booted
+    // before.
+    //
+    // The identity plane is idempotent-or-already-correct; the delegation plane is
+    // what stage 1 exists to install. So a conflict is reported and stepped over,
+    // and any OTHER directory error still fails loudly.
+    let mut identity_conflicts: Vec<String> = Vec::new();
+    for rec in bundle.holders.iter().chain(bundle.serve_nodes.iter()) {
+        match dir.put_public_key(rec.clone()).await {
+            Ok(()) => {}
+            Err(e) if is_already_exists(&e) => {
+                identity_conflicts.push(rec.record.key_id.clone());
+            }
+            Err(e) => return Err(GenesisError::Directory(e.to_string())),
+        }
     }
-    for n in &bundle.serve_nodes {
-        dir.put_public_key(n.clone())
-            .await
-            .map_err(|e| GenesisError::Directory(e.to_string()))?;
+    if !identity_conflicts.is_empty() {
+        tracing::warn!(
+            records = ?identity_conflicts,
+            "genesis install: these key records already exist with different content and were \
+             NOT replaced (persist refuses to replace an anchored row). The delegation plane \
+             below still installs. If this bundle re-blessed a canonical, that node keeps its \
+             OLDER capability roles on the CO-SCRUB plane until the new record is the baked one \
+             — the delegation plane carries the new scopes either way."
+        );
     }
 
     // The delegation plane — the whole point of a v2 bundle. Seeding the KEYS

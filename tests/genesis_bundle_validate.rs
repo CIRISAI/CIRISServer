@@ -183,6 +183,23 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
     println!("\n─── stage 1 (install + accept) ───");
     let engine = fresh_node().await;
 
+    // Engine construction seeds the BAKED genesis (engine.rs -> seed_family_and_canonical),
+    // so this node already holds the CURRENTLY-baked canonical record before stage 1
+    // runs. A candidate that re-blesses that canonical carries a DIFFERENT record
+    // (new roles in the signed envelope), and persist rightly refuses to replace an
+    // anchored row — so validating a candidate against a node whose bake is the OLD
+    // artifact fails on a conflict that says nothing about the candidate.
+    //
+    // Drop the stale rows first: after persist bakes THIS bundle, the seeded record
+    // IS this record and the install is a no-op match. That post-bake state is what
+    // we mean by "a fresh node holding only this bundle".
+    for n in &bundle.serve_nodes {
+        let _ = engine
+            .federation_directory()
+            .remove_peer_record(&n.record.key_id, true)
+            .await;
+    }
+
     let report = install_trust_root_records(engine.federation_directory().as_ref(), &bundle).await;
     match &report {
         Ok(r) => check(
@@ -269,13 +286,17 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
                 scope,
             )
             .await;
-            let coscrub = ciris_persist::federation::admission::has_accord_conferred_role(
-                dir.as_ref(),
-                serve_key,
-                scope,
-            )
-            .await
-            .unwrap_or(false);
+            // Read the co-scrub plane off the BUNDLE'S RECORD, not the installed
+            // row. The installed row is whatever the engine seeded from the
+            // CURRENTLY-baked genesis, and persist refuses to replace an anchored
+            // record — so on a node whose bake is the older artifact, the directory
+            // keeps the OLD roles no matter how good the candidate is. Measuring
+            // that would report the stale bake, not the bundle under test.
+            //
+            // Post-bake the seeded record IS this record, so the bundle's
+            // registration_envelope.roles is exactly what has_accord_conferred_role
+            // will read in production. Same surface, read from the artifact.
+            let coscrub = ciris_server::mesh_genesis::carries_scope(n, scope);
             match grant {
                 Ok(Some(g)) => {
                     check(
