@@ -438,10 +438,6 @@ async fn the_delegation_plane_alone_resolves_the_serve_gate() {
 /// to assert. It is now a standing regression gate on the whole of stage 0+1 —
 /// if a future substrate bump breaks the seed, the ceremony, or the walk, this
 /// goes red in ~1s instead of surfacing as silently withheld traces in the field.
-#[ignore = "RED BY DESIGN until the re-mint: the currently-baked seed is the pre-#557 \
-single-key bundle (A1 -> A1, root_kind Key). This asserts the TARGET — family-chartered, \
-FamilyQuorum-conferred. Remove #[ignore] when persist bakes the re-minted bundle; do NOT \
-weaken the root_kind/plane assertions to match the old artifact."]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_baked_seed_makes_every_fresh_node_serve() {
     let engine = fresh_node().await;
@@ -589,9 +585,6 @@ async fn baked_audit() {
 ///
 /// Both must carry every scope. A node that resolves a capability on one plane
 /// and not the other is the axis split that has cost this project an arc.
-#[ignore = "RED BY DESIGN until the re-mint: the currently-baked root (0.5.141) confers \
-infra:serve alone. This asserts the TARGET state. Remove #[ignore] the moment persist bakes \
-the re-minted bundle — do NOT delete the test, and do NOT weaken it to match the artifact."]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_baked_canonical_holds_every_scope_on_both_planes() {
     let engine = fresh_node().await;
