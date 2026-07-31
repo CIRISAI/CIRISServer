@@ -146,6 +146,20 @@ jobs:
       - name: clippy (python surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --lib --features python -- -D warnings
+      # The test-anchor surface. NOT covered by the two clippy runs above, which
+      # build default + python only — so a struct-shape change that breaks
+      # `--features test-anchor` compiled green here and shipped, and the break
+      # only surfaced when someone built the QA wheel. A cut that does not
+      # compile under test-anchor breaks the mesh harness for every downstream
+      # consumer, which is exactly the audience least able to diagnose it.
+      #
+      # Caught in the wild: v24.0.0 added `Attestation.additional_scrubs`, and
+      # the one initializer behind this feature gate was invisible to CI. The
+      # agent team hit it building their harness wheel and flagged it before we
+      # tagged. Build, not clippy: compilation is the failure mode.
+      - name: build (test-anchor surface, Linux)
+        if: runner.os == 'Linux'
+        run: cargo build --lib --features test-anchor
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the

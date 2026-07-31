@@ -721,6 +721,7 @@ async fn put_root_signed_attestation(
         scrub_signature_classical: ed_sig_b64,
         scrub_signature_pqc: Some(pqc_sig_b64),
         scrub_key_id: root_key_id,
+        additional_scrubs: Vec::new(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
