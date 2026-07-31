@@ -54,9 +54,22 @@
 #   (Δ2 RESOLVED in persist v23: liveness left `trust_root_valid` entirely and became a
 #    banded `drill_freshness` reported beside the verdict, so a seed no longer expires.
 #    The heartbeat stage below is retained as an OBSERVABILITY check, not a gate.)
-#   Δ1  quorum_survives  Attestation carries ONE scrub_key_id (no additional_scrubs), so a
-#                        3-key ceremony degrades to 1-of-n once the rows land. Tested
-#                        in-process, not here — see tests/genesis_quorum_pin.rs.
+#   Δ1  RESOLVED in persist v24.0.0 (CIRISPersist#556, our issue): Attestation gained
+#                        `additional_scrubs`, and our cosign step now populates it, so the
+#                        2-of-3 that authorized the bundle SURVIVES into the graph instead
+#                        of collapsing to whichever holder signed first.
+#   Δ0  RESOLVED in persist v24.0.0 (CIRISPersist#557, our issue): the root is a THRESHOLD,
+#                        not a seat. The charter attests the keyless FAMILY
+#                        (`A1 -> humanity-accord`) and counts only once its verified scrub
+#                        set reaches the family threshold; the grant stays `A1 -> canonical`
+#                        and the family is DERIVED from the verified signer set, never named
+#                        (attribution-by-signature — a keyless attester field would be
+#                        attribution-by-claim). A1 alone roots to A1; A1+B1 roots to the family.
+#
+# WATCH THE SILENT-SUCCESS ARM. persist keeps solo 1-of-1 roots valid on purpose, so a
+# mis-shaped family charter — or an unseeded family row — does NOT error: it yields a
+# WORKING single-key root pointing at A1. `family_row` and `family_quorum` below exist
+# because a green trace plane is NOT evidence the family arm engaged.
 
 SCENARIO_NAME="genesis_seed"
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis.yml"
@@ -64,7 +77,7 @@ VERDICT_MODE="audit"
 SUCCESS_STAGE="leg_b"
 SUCCESS_MESSAGE="a node holding only the baked seed resolves leg B and serves traces — the portable trust root is operable."
 
-STAGES=(seed_admitted leg_a_role edge_exists root_self_declares charter_recovery accord_heartbeat leg_b)
+STAGES=(seed_admitted family_row leg_a_role edge_exists root_self_declares charter_recovery family_quorum accord_heartbeat leg_b)
 
 # Probes run on the AGENT: it is the asker. `capability_roots_to_trusted_root` is
 # evaluated in the SENDER's directory, so what the canonical holds is irrelevant
@@ -101,16 +114,20 @@ HINT_edge_exists="Δ4 — the agent has NOT authored delegates_to(self → root)
 EXIT_edge_exists=22
 
 # ── 4/5. Δ3 — the charter and its recovery commitment ───────────────────────
+# NOT a self-loop match. A family charter is `A1 -> humanity-accord`, so keying
+# on `attesting_key_id = attested_key_id` silently stops finding the charter the
+# moment the root becomes a threshold — and "no charter" reads as an unminted
+# mesh rather than a mis-shaped one. Match the charter's stable ID instead.
 stage_root_self_declares() {
   harness_db_count agent federation_attestations \
-    "attestation_type = 'delegates_to' AND attesting_key_id = attested_key_id"
+    "attestation_type = 'delegates_to' AND attestation_id = 'genesis-charter'"
 }
 HINT_root_self_declares="Δ3 — no self-referential charter for the root reached this node. The ceremony mints one, but the baked seed is bundle-SHAPED as of persist v23 but ships EMPTY (holders 0, attestations 0, authorizations 0) — the container exists, the ceremony has not yet filled it."
 EXIT_root_self_declares=23
 
 stage_charter_recovery() {
   harness_db_count agent federation_attestations \
-    "attestation_type = 'delegates_to' AND attesting_key_id = attested_key_id \
+    "attestation_type = 'delegates_to' AND attestation_id = 'genesis-charter' \
      AND CAST(attestation_envelope AS TEXT) LIKE '%pre_rotation%'"
 }
 HINT_charter_recovery="Δ3 — the charter (if any) carries no pre-rotation commitment, so charter_has_recovery is false. persist refuses a charter without one, which means a charter that arrives WITHOUT it is unrecoverable by construction."
@@ -151,3 +168,42 @@ for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
             print("   ", r)
     except Exception: pass' 2>/dev/null || true
 }
+
+# ── the family row (persist #386 seed_accord_family) ────────────────────────
+# Nothing in CIRISServer called seed_accord_family until 0.5.141. Without this
+# row lookup_family returns None, resolve_family_root yields None, and
+# trust_root_valid reports RootKind::Key — the family arm never engages and the
+# mesh silently roots to one seat.
+stage_family_row() {
+  compose exec -T agent python -c 'import glob,sqlite3
+n=0
+for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
+    if d.endswith(("-wal","-shm")): continue
+    try:
+        for r in sqlite3.connect(d).execute("SELECT COUNT(*) FROM federation_families WHERE family_key_id LIKE %s" % "'"'"'humanity-accord'"'"'"):
+            n += r[0]
+    except Exception: pass
+print(n)' 2>/dev/null | tail -1
+}
+HINT_family_row="the HUMANITY_ACCORD family row is absent — seed_accord_family never ran, so lookup_family('humanity-accord') returns None and trust_root_valid can only ever report RootKind::Key. A family-chartered bundle would degrade SILENTLY to a single-seat root here (persist keeps 1-of-1 valid on purpose)."
+EXIT_family_row=27
+
+# ── the charter's quorum: does 2-of-3 survive into the graph? ───────────────
+# Δ1/#556. The charter counts as a family charter only when its verified scrub
+# set reaches the threshold. One scrub = a valid root pointing at A1, which is
+# indistinguishable from success unless you count.
+stage_family_quorum() {
+  compose exec -T agent python -c 'import glob,sqlite3,json
+n=0
+for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
+    if d.endswith(("-wal","-shm")): continue
+    try:
+        for r in sqlite3.connect(d).execute("SELECT additional_scrubs FROM federation_attestations WHERE attestation_type=%s" % "'"'"'delegates_to'"'"'"):
+            try:
+                if r[0] and len(json.loads(r[0])) >= 1: n += 1
+            except Exception: pass
+    except Exception: pass
+print(n)' 2>/dev/null | tail -1
+}
+HINT_family_quorum="no delegates_to row carries additional_scrubs — the 2-of-3 that authorized the bundle did NOT survive into the graph, so the charter is 1-of-1 in the directory and the grant roots to a single seat. Pre-v24 this was structurally impossible (CIRISPersist#556); if it is still 0 on v24 the COSIGN step did not co-scrub."
+EXIT_family_quorum=28

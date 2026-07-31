@@ -321,10 +321,18 @@ fn lifecycle_of<'a>(bundle: &'a GenesisBundle, root: &str) -> Option<&'a Attesta
         })
 }
 
-/// The key that chartered itself — the bundle's actual trust root, as opposed to
-/// `family_key_id` (a grouping identifier that carries no authority).
+/// The bundle's trust root — what a node writes its `trust:accepts` edge to.
+///
+/// v24.0.0 (CIRISPersist#557): this is the charter's **attested** subject, not
+/// its attester. A family charter is `delegates_to(holder -> family)` carried in
+/// the ABOUT set, so the root is the family id (`humanity-accord`) and the
+/// signing holder is merely one seat of the roster that chartered it.
+///
+/// A solo 1-of-1 root remains legitimate and self-loops (`A1 -> A1`), so reading
+/// `attested_key_id` is correct for BOTH arms — it is the attester only in the
+/// degenerate case where they coincide.
 pub fn charter_root_key_id(bundle: &GenesisBundle) -> Option<String> {
-    charter_of(bundle).map(|c| c.attesting_key_id.clone())
+    charter_of(bundle).map(|c| c.attested_key_id.clone())
 }
 
 /// Parse `quorum:M/N` into M. Returns `None` when absent/unparseable — callers
@@ -338,13 +346,18 @@ fn policy_m(consensus_protocol: &str) -> Option<usize> {
 
 /// The charter carried by a bundle, if any: the self-loop `delegates_to`.
 fn charter_of(bundle: &GenesisBundle) -> Option<&Attestation> {
+    // Identified by its ATTESTATION ID, not by a self-loop. Through 0.5.141 this
+    // matched `attesting_key_id == attested_key_id`, which silently stops finding
+    // the charter the moment it is family-shaped (`A1 -> humanity-accord`) — and
+    // "no charter" is a LOUD SKIP at boot, so the failure would have looked like
+    // an unminted mesh rather than a mis-shaped one.
     bundle
         .attestations
         .iter()
         .map(|a| &a.attestation)
         .find(|a| {
             a.attestation_type == attestation_type::DELEGATES_TO
-                && a.attesting_key_id == a.attested_key_id
+                && a.attestation_id == CHARTER_ATTESTATION_ID
         })
 }
 
@@ -744,7 +757,26 @@ pub async fn install_baked_trust_root(
         );
         return Ok(());
     }
-    let report = install_trust_root_records(engine.federation_directory().as_ref(), bundle).await?;
+    // ORDERING CONTRACT (persist v24.0.0 / CIRISPersist#557, #386): holders ->
+    // family -> everything else. `seed_accord_family` installs the keyless
+    // HUMANITY_ACCORD family row from the compiled genesis constants; it is
+    // idempotent and FK-references the holder rows, so it must run before the
+    // charter that attests the family.
+    //
+    // Nothing called it before now. Without the row, `lookup_family` returns
+    // None, `resolve_family_root` yields None, and `trust_root_valid` reports
+    // RootKind::Key — so a correctly family-chartered bundle would degrade
+    // SILENTLY to a single-seat root instead of erroring. That is exactly the
+    // transition risk we flagged on #557, and it was live in our own boot path.
+    let dir = engine.federation_directory();
+    ciris_persist::federation::genesis::seed_accord_family(dir.as_ref())
+        .await
+        .map_err(GenesisError::Directory)?;
+    ciris_persist::federation::genesis::verify_family_seeded(dir.as_ref())
+        .await
+        .map_err(GenesisError::Directory)?;
+
+    let report = install_trust_root_records(dir.as_ref(), bundle).await?;
     let accepted = accept_trust_root(engine, bundle).await?;
     tracing::info!(
         holders_seeded = report.holders_seeded,

@@ -346,6 +346,10 @@ async fn the_delegation_plane_alone_resolves_the_serve_gate() {
 /// to assert. It is now a standing regression gate on the whole of stage 0+1 —
 /// if a future substrate bump breaks the seed, the ceremony, or the walk, this
 /// goes red in ~1s instead of surfacing as silently withheld traces in the field.
+#[ignore = "RED BY DESIGN until the re-mint: the currently-baked seed is the pre-#557 \
+single-key bundle (A1 -> A1, root_kind Key). This asserts the TARGET — family-chartered, \
+FamilyQuorum-conferred. Remove #[ignore] when persist bakes the re-minted bundle; do NOT \
+weaken the root_kind/plane assertions to match the old artifact."]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_baked_seed_makes_every_fresh_node_serve() {
     let engine = fresh_node().await;
@@ -388,8 +392,34 @@ async fn the_baked_seed_makes_every_fresh_node_serve() {
             grant.verdict
         );
         println!(
-            "  baked seed: infra:serve for {serve_key} -> root {} via {:?} (drill {:?})",
-            grant.root_key_id, grant.conferral_plane, grant.verdict.drill_freshness
+            "  baked seed: infra:serve for {serve_key} -> root {} via {:?} (drill {:?}, kind {:?})",
+            grant.root_key_id,
+            grant.conferral_plane,
+            grant.verdict.drill_freshness,
+            grant.verdict.root_kind,
+        );
+        // #557 acceptance: the root must be the FAMILY, reached by quorum.
+        //
+        // Asserted explicitly because a subtly-wrong family shape does NOT error
+        // — persist keeps solo 1-of-1 roots valid on purpose, so a mis-shaped
+        // charter or a grant with only one seated signer yields a WORKING
+        // single-key root pointing at A1. Silent success is the failure mode
+        // here, so intent is declared in the test rather than inferred from a
+        // green walk.
+        assert_eq!(
+            grant.verdict.root_kind,
+            ciris_persist::federation::trust_root::RootKind::Family,
+            "root_kind is {:?}, not Family — the charter is not family-shaped, or the \
+             family row was never seeded, so this degraded to a single-seat root at {}",
+            grant.verdict.root_kind,
+            grant.root_key_id,
+        );
+        assert_eq!(
+            grant.conferral_plane,
+            ciris_persist::federation::trust_root::ConferralPlane::FamilyQuorum,
+            "conferral_plane is {:?}, not FamilyQuorum — the grant's verified signer set \
+             did not reach the family threshold, so it roots to one seat",
+            grant.conferral_plane,
         );
     }
 }

@@ -2559,14 +2559,25 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         })
     }
 
+    let family_key_id =
+        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id;
+
     let charter_env = match crate::mesh_genesis::charter_envelope(&successors) {
         Ok(e) => e,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
+    // v24.0.0 (CIRISPersist#557) — the charter attests the FAMILY, not the
+    // signing holder. `delegates_to(A1 -> humanity-accord)` carried in the ABOUT
+    // set: "the roster charters the family", so no single seat can declare itself
+    // the mesh's root. It counts as a charter only once its full scrub set
+    // (base + additional_scrubs, all over the same canonical bytes), intersected
+    // with the reading node's OWN active roster, reaches the family threshold —
+    // which is why the cosign step co-scrubs it. A1 alone would still produce a
+    // valid 1-of-1 root pointing at A1; the quorum is what makes it the family's.
     let charter = match sign_att(
         &identity,
         crate::mesh_genesis::CHARTER_ATTESTATION_ID,
-        &root,
+        &family_key_id,
         charter_env,
         attestation_type::DELEGATES_TO,
     )
@@ -2612,8 +2623,6 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     };
 
     let (m, n) = family_quorum(&st.engine, holders.len()).await;
-    let family_key_id =
-        ciris_persist::federation::genesis::accord_family_genesis_record().family_key_id;
     let now = chrono::Utc::now().to_rfc3339();
     let mut bundle = match crate::mesh_genesis::produce_genesis(
         &family_key_id,
