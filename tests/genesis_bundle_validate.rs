@@ -206,8 +206,21 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
         Err(e) => check("accept trust root", false, e.to_string()),
     }
 
+    // ── 3b. did the quorum survive into the ROWS? (#556) ────────────────────
+    println!("\n─── quorum in the graph (#556) ───");
+    for sa in &bundle.attestations {
+        let at = &sa.attestation;
+        let n = at.distinct_scrub_count();
+        let who: Vec<String> = at.scrubs().iter().map(|x| x.scrub_key_id.clone()).collect();
+        check(
+            &format!("scrubs on {}", at.attestation_id),
+            n >= 2,
+            format!("{n} distinct {who:?}"),
+        );
+    }
+
     // ── 4. the question ─────────────────────────────────────────────────────
-    println!("\n─── the serve gate ───");
+    println!("\n─── the serve gate: EVERY scope, BOTH planes ───");
     let node_key_id = engine
         .local_derived_key_id()
         .await
@@ -222,31 +235,63 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
     let dir = engine.federation_directory();
     for n in &bundle.serve_nodes {
         let serve_key = &n.record.key_id;
-        let resolved = ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
-            dir.as_ref(),
-            &node_key_id,
-            serve_key,
-            "infra:serve",
-        )
-        .await;
-        match resolved {
-            Ok(Some(r)) => check(
-                &format!("infra:serve for {serve_key}"),
-                true,
-                format!("roots to {r:?}"),
-            ),
-            Ok(None) => check(
-                &format!("infra:serve for {serve_key}"),
-                false,
-                "capability_roots_to_trusted_root returned None — this node would WITHHOLD \
-                 every trace:* row to it"
-                    .into(),
-            ),
-            Err(e) => check(
-                &format!("infra:serve for {serve_key}"),
-                false,
-                e.to_string(),
-            ),
+        for scope in ciris_server::mesh_genesis::SERVE_NODE_SCOPES {
+            let grant = ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
+                dir.as_ref(),
+                &node_key_id,
+                serve_key,
+                scope,
+            )
+            .await;
+            let coscrub = ciris_persist::federation::admission::has_accord_conferred_role(
+                dir.as_ref(),
+                serve_key,
+                scope,
+            )
+            .await
+            .unwrap_or(false);
+            match grant {
+                Ok(Some(g)) => {
+                    check(
+                        &format!("{scope:16} delegation"),
+                        true,
+                        format!(
+                            "root {} kind {:?} plane {:?}",
+                            g.root_key_id, g.verdict.root_kind, g.conferral_plane
+                        ),
+                    );
+                    // #557 acceptance. A mis-shaped family charter does NOT error —
+                    // solo 1-of-1 roots stay valid on purpose — so it yields a
+                    // WORKING single-key root. Assert the axis explicitly.
+                    check(
+                        &format!("{scope:16} root_kind=Family"),
+                        g.verdict.root_kind
+                            == ciris_persist::federation::trust_root::RootKind::Family,
+                        format!("{:?}", g.verdict.root_kind),
+                    );
+                    check(
+                        &format!("{scope:16} plane=FamilyQuorum"),
+                        g.conferral_plane
+                            == ciris_persist::federation::trust_root::ConferralPlane::FamilyQuorum,
+                        format!("{:?}", g.conferral_plane),
+                    );
+                }
+                Ok(None) => check(
+                    &format!("{scope:16} delegation"),
+                    false,
+                    "None — capability does not root to a trusted root".into(),
+                ),
+                Err(e) => check(&format!("{scope:16} delegation"), false, e.to_string()),
+            }
+            check(
+                &format!("{scope:16} co-scrub"),
+                coscrub,
+                if coscrub {
+                    String::new()
+                } else {
+                    "absent from registration_envelope.roles".into()
+                },
+            );
         }
     }
 

@@ -2451,10 +2451,17 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     // with infra:serve here (a 1-of-N partial), and B1 completes the co-scrub in
     // cosign. This is not a separate ceremony — the same two holders who authorize
     // the seed are the accord that confers the role, in the same two YubiKey taps.
-    let already_blessed =
-        crate::mesh_genesis::carries_infra_serve(&ciris_persist::federation::SignedKeyRecord {
+    // ALL the scopes, not just infra:serve. A record blessed by an older ceremony
+    // carries infra:serve alone; asking only about that scope declares it already
+    // blessed and reuses it verbatim, and since `roles` lives inside the
+    // scrub-SIGNED envelope the other three can never get in. That is how the
+    // genesis_3 candidate came out with all four scopes on the delegation plane
+    // and one on the co-scrub plane.
+    let already_blessed = crate::mesh_genesis::carries_all_serve_scopes(
+        &ciris_persist::federation::SignedKeyRecord {
             record: serve_rec.clone(),
-        });
+        },
+    );
     let (serve_signed, reblessed) = if already_blessed {
         (
             ciris_persist::federation::SignedKeyRecord {

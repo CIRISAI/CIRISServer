@@ -163,6 +163,34 @@ pub fn carries_infra_serve(rec: &SignedKeyRecord) -> bool {
         || rec.record.capability_roles.iter().any(|r| r == INFRA_SERVE)
 }
 
+/// Does this record carry ONE named scope on the co-scrub plane?
+///
+/// Generalization of [`carries_infra_serve`], reading the same three surfaces.
+pub fn carries_scope(rec: &SignedKeyRecord, scope: &str) -> bool {
+    use ciris_persist::federation::types::identity_type;
+    rec.record
+        .registration_envelope
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|r| r.as_str() == Some(scope)))
+        || identity_type::set_contains(&rec.record.identity_type, scope)
+        || rec.record.capability_roles.iter().any(|r| r == scope)
+}
+
+/// Does this record already confer EVERY scope a canonical needs?
+///
+/// The re-bless predicate. It must ask about the whole set, not one member:
+/// through 0.5.141 the ceremony asked `carries_infra_serve`, so a record already
+/// carrying `infra:serve` was treated as fully blessed and reused VERBATIM — and
+/// because `roles` lives inside the scrub-SIGNED `registration_envelope`, the
+/// three new scopes could never enter it. The delegation plane got all four
+/// (it is minted fresh each ceremony) while the co-scrub plane silently kept
+/// one. Exactly the axis split [`SERVE_NODE_SCOPES`] exists to prevent, caught
+/// on the genesis_3 candidate by the both-planes gate.
+pub fn carries_all_serve_scopes(rec: &SignedKeyRecord) -> bool {
+    SERVE_NODE_SCOPES.iter().all(|s| carries_scope(rec, s))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The delegation plane: charter, grants, and the m-of-n authorization digest.
 // ─────────────────────────────────────────────────────────────────────────────
