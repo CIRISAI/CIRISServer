@@ -656,3 +656,45 @@ async fn the_baked_canonical_holds_every_scope_on_both_planes() {
         required,
     );
 }
+
+/// Stage 1 must be IDEMPOTENT. Running it twice is the normal case — every boot
+/// after the first re-installs a bundle whose rows are already present.
+///
+/// It was not. Genesis attestation ids are stable (`genesis-charter`,
+/// `genesis-grant:<node>`, `genesis-lifecycle`), so the second run hit
+/// `UNIQUE constraint failed: federation_attestations.attestation_id`, aborted,
+/// and the caller logged "this node has no trust root and will withhold every
+/// trace:* row" — while the charter, grant, trust edge and heartbeat were all
+/// present and correct. Observed on the production canonical; it sent three
+/// people hunting a delivery bug that did not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn stage_one_is_idempotent_across_reboots() {
+    let engine = fresh_node().await;
+
+    for run in 1..=3 {
+        ciris_server::mesh_genesis::install_baked_trust_root(&engine)
+            .await
+            .unwrap_or_else(|e| panic!("stage 1 run {run} failed: {e} — it must be idempotent"));
+    }
+
+    // And the trust root is still good after the repeats, not merely un-errored.
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let node_key_id = engine.local_derived_key_id().await.expect("node identity");
+    let dir = engine.federation_directory();
+    for n in &baked.serve_nodes {
+        let grant = ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
+            dir.as_ref(),
+            &node_key_id,
+            &n.record.key_id,
+            "infra:serve",
+        )
+        .await
+        .expect("walk runs")
+        .expect("infra:serve still resolves after three stage-1 runs");
+        assert!(
+            grant.verdict.valid,
+            "verdict after repeats: {:?}",
+            grant.verdict
+        );
+    }
+}

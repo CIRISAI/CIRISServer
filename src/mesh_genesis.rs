@@ -395,7 +395,11 @@ fn charter_of(bundle: &GenesisBundle) -> Option<&Attestation> {
 /// is the safe direction.
 fn is_already_exists(e: &impl std::fmt::Display) -> bool {
     let m = e.to_string();
-    m.contains("already exists") || m.contains("conflicts with existing row")
+    m.contains("already exists")
+        || m.contains("conflicts with existing row")
+        // sqlite / postgres surface a duplicate attestation_id this way
+        || m.contains("UNIQUE constraint failed")
+        || m.contains("duplicate key value")
 }
 
 fn scope_has(env: &serde_json::Value, want: &str) -> bool {
@@ -828,13 +832,46 @@ pub async fn install_baked_trust_root(
 
     let report = install_trust_root_records(dir.as_ref(), bundle).await?;
     let accepted = accept_trust_root(engine, bundle).await?;
-    tracing::info!(
-        holders_seeded = report.holders_seeded,
-        serve_nodes_seeded = report.serve_nodes_seeded,
-        attestations_seeded = report.attestations_seeded,
-        accepted_root = ?accepted,
-        "stage 1 complete — baked trust root installed and accepted"
-    );
+
+    // VERIFY THE CLAIM. The caller's failure path says "this node has no trust
+    // root and will withhold every trace:* row" — a consequence, asserted without
+    // ever being checked. On the production canonical that fired while the
+    // charter, grant, trust edge and heartbeat were all present and correct.
+    //
+    // `trust_root_valid` is the same predicate the serve gate consults, so this is
+    // the honest answer to "can this node serve?" rather than one inferred from
+    // whether an idempotent install returned Ok.
+    let verdict = match (&accepted, engine.local_derived_key_id().await) {
+        (Some(root), Ok(node)) => ciris_persist::federation::trust_root::trust_root_valid(
+            engine.federation_directory().as_ref(),
+            &node,
+            root,
+        )
+        .await
+        .ok(),
+        _ => None,
+    };
+    match &verdict {
+        Some(v) if v.valid => tracing::info!(
+            holders_seeded = report.holders_seeded,
+            serve_nodes_seeded = report.serve_nodes_seeded,
+            attestations_seeded = report.attestations_seeded,
+            accepted_root = ?accepted,
+            root_kind = ?v.root_kind,
+            drill = ?v.drill_freshness,
+            "stage 1 complete — trust root installed, accepted, and VERIFIED valid"
+        ),
+        Some(v) => tracing::error!(
+            accepted_root = ?accepted,
+            verdict = ?v,
+            "stage 1 ran but the trust root is NOT valid — this node WILL withhold every \
+             trace:* row. The verdict names which conjunct failed."
+        ),
+        None => tracing::warn!(
+            accepted_root = ?accepted,
+            "stage 1 ran but the trust root could not be evaluated — serve-gate state unknown"
+        ),
+    }
     Ok(())
 }
 
@@ -902,10 +939,34 @@ where
     // capability root to it (edge trace-gate leg B). Writing these goes through
     // persist's real ingest gate, so a tampered charter is rejected HERE too,
     // independently of `verify_bundle` — defense in depth on the attach path.
+    // Same tolerance as the identity plane above, and for a stronger reason:
+    // genesis attestation ids are STABLE (`genesis-charter`,
+    // `genesis-grant:<node>`, `genesis-lifecycle`), so the SECOND boot of any node
+    // re-inserts rows it already has and hits
+    // `UNIQUE constraint failed: federation_attestations.attestation_id`.
+    //
+    // That aborted stage 1 on EVERY reboot after the first successful install, and
+    // the caller then logged "this node has no trust root and will withhold every
+    // trace:* row" — a consequence it never checked. Observed on the production
+    // canonical, whose charter, grant, trust edge and heartbeat were all present
+    // and correct. It sent people hunting a delivery bug that did not exist.
+    let mut attestation_conflicts: Vec<String> = Vec::new();
     for a in &bundle.attestations {
-        dir.put_attestation(a.clone())
-            .await
-            .map_err(|e| GenesisError::Directory(e.to_string()))?;
+        match dir.put_attestation(a.clone()).await {
+            Ok(()) => {}
+            Err(e) if is_already_exists(&e) => {
+                attestation_conflicts.push(a.attestation.attestation_id.clone());
+            }
+            Err(e) => return Err(GenesisError::Directory(e.to_string())),
+        }
+    }
+    if !attestation_conflicts.is_empty() {
+        tracing::debug!(
+            attestations = ?attestation_conflicts,
+            "genesis install: already present (normal on any boot after the first — genesis \
+             attestation ids are stable). Not replaced; persist refuses to overwrite. If this \
+             bundle SUPERSEDES an older bake, the node keeps the older rows until superseded."
+        );
     }
 
     // The root is the charter's ATTESTED subject, matching `charter_root_key_id`
