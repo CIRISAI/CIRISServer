@@ -204,6 +204,7 @@ async fn sign_row(
         scrub_signature_classical: ed_b64,
         scrub_signature_pqc: Some(pqc_b64),
         scrub_key_id: attester.key_id().to_string(),
+        additional_scrubs: Vec::new(),
         scrub_timestamp: asserted_at,
         pqc_completed_at: Some(asserted_at),
         persist_row_hash: String::new(),
