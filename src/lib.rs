@@ -1268,6 +1268,22 @@ mod python {
     }
 
     #[pyfunction]
+    /// `ciris_server.default_attestation_prefixes()` — the PRODUCTION default
+    /// replication-grant prefix set, as the server itself computes it.
+    ///
+    /// Exists so the harness can exercise the DEFAULT rather than restate it.
+    /// mesh-repro used to pass `["trace:","capacity:"]` explicitly and log
+    /// `scope=trace:,capacity:` from a hardcoded string, so it never exercised
+    /// the default and its log asserted a value it had not read. The default was
+    /// `["capacity:"]` for that entire period: every trace row stayed
+    /// (cohort_scope=self, tier=local), and ZERO traces reached the production
+    /// canonical from any node while the harness ran green.
+    #[pyo3(name = "default_attestation_prefixes")]
+    fn py_default_attestation_prefixes() -> Vec<String> {
+        crate::peer::default_attestation_prefixes()
+    }
+
+    #[pyfunction]
     /// TEST-ANCHOR-FENCED: `ciris_server.author_federation_consent(peer_key_id,
     /// attestation_prefixes)` — harness-only consent author (mesh-repro
     /// traceflow). Refused unless CIRIS_TESTING_MODE=true; production consent
@@ -1502,6 +1518,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
+        m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;

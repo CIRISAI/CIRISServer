@@ -59,7 +59,7 @@ use std::path::PathBuf;
 // by a banded `drill_freshness` reported beside the verdict. A seed no longer expires.
 pub const TARGET_VERIFY: &str = "v10.6.3";
 pub const TARGET_PERSIST: &str = "v24.1.0";
-pub const TARGET_EDGE: &str = "v15.6.1";
+pub const TARGET_EDGE: &str = "v15.6.2";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred

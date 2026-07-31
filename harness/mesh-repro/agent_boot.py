@@ -551,9 +551,29 @@ def main() -> int:
                     log(f"CONSENT: list_canonical_servers failed: {e}")
                 if canon_for_consent:
                     try:
-                        gid = author(canon_for_consent, ["trace:", "capacity:"])
+                        # USE THE PRODUCTION DEFAULT, do not restate it.
+                        #
+                        # This passed ["trace:", "capacity:"] explicitly and logged
+                        # scope=trace:,capacity: from a hardcoded string. So the
+                        # harness never exercised the default AND its log asserted a
+                        # value it had not read. The default was ["capacity:"] the
+                        # whole time: promote_consented_backlog skipped every
+                        # trace:* row, they stayed (cohort_scope=self, tier=local),
+                        # and ZERO traces reached the production canonical from any
+                        # node — while this harness ran green end to end.
+                        #
+                        # A fixture that supplies the value production defaults
+                        # cannot prove the default. Read it from the wheel.
+                        _defaults = getattr(
+                            ciris_server, "default_attestation_prefixes", None)
+                        prefixes = list(_defaults()) if _defaults else ["trace:", "capacity:"]
+                        if _defaults is None:
+                            log("CONSENT: wheel predates default_attestation_prefixes() — "
+                                "falling back to an explicit set; this run does NOT prove "
+                                "the production default")
+                        gid = author(canon_for_consent, prefixes)
                         log(f"CONSENT: consent:replication authored for {canon_for_consent} "
-                            f"(attestation_id={gid}) scope=trace:,capacity:")
+                            f"(attestation_id={gid}) scope={','.join(prefixes)}")
                         # #530 caveat 1: the bare embedded path may not run the
                         # server reconcile that auto-fires the repair sweep —
                         # invoke it directly (strictly widening; pure placement).
