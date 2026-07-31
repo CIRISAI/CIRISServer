@@ -66,6 +66,16 @@
 #                        (attribution-by-signature — a keyless attester field would be
 #                        attribution-by-claim). A1 alone roots to A1; A1+B1 roots to the family.
 #
+# WHAT THIS ARM DOES NOT COVER: the cosign co-scrub path. Every stage below reads
+# the BAKED artifact, which predates #557/v24 and cannot carry additional_scrubs
+# no matter what the cosigner does today. The co-scrub is exercised only by a
+# freshly minted candidate — validate that with
+# `CIRIS_GENESIS_BUNDLE=<candidate> cargo test --test genesis_bundle_validate`,
+# which asserts root_kind: Family and conferral_plane: FamilyQuorum. Flagged by
+# the agent team on the 0e98ada run; the hint below said "if it is still 0 on v24
+# the COSIGN step did not co-scrub", which reads as a cosigner defect on a v24
+# tree when it is in fact the correct reading of a stale artifact.
+#
 # WATCH THE SILENT-SUCCESS ARM. persist keeps solo 1-of-1 roots valid on purpose, so a
 # mis-shaped family charter — or an unseeded family row — does NOT error: it yields a
 # WORKING single-key root pointing at A1. `family_row` and `family_quorum` below exist
@@ -205,5 +215,5 @@ for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
     except Exception: pass
 print(n)' 2>/dev/null | tail -1
 }
-HINT_family_quorum="no delegates_to row carries additional_scrubs — the 2-of-3 that authorized the bundle did NOT survive into the graph, so the charter is 1-of-1 in the directory and the grant roots to a single seat. Pre-v24 this was structurally impossible (CIRISPersist#556); if it is still 0 on v24 the COSIGN step did not co-scrub."
+HINT_family_quorum="no delegates_to row carries additional_scrubs — the 2-of-3 that authorized the bundle did NOT survive into the graph, so the charter is 1-of-1 in the directory and the grant roots to a single seat. THIS ARM TESTS THE ARTIFACT, NOT THE COSIGNER: the baked bundle was minted before #557/v24 and cannot gain additional_scrubs retroactively, so 0 is the CORRECT reading here on any tree, v24 or not — do not read it as a cosigner defect. The co-scrub path is exercised only by a FRESHLY MINTED bundle; validate that with tests/genesis_bundle_validate.rs (CIRIS_GENESIS_BUNDLE=<candidate>), which asserts root_kind: Family + conferral_plane: FamilyQuorum. If a fresh mint shows 0 here, THEN the cosigner did not co-scrub."
 EXIT_family_quorum=28
