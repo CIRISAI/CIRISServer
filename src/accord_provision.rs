@@ -2616,10 +2616,22 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     // drill signal; a bundle without one is still valid. It is a `scores` row (not
     // `delegates_to`), and the `accord:*` namespace requires an accord_holder
     // attester, which the root is.
+    // ABOUT THE FAMILY, not the signing holder. The drill leg reads
+    // `list_attestations_for(root)` and the root is now the family, so a
+    // heartbeat naming A1 is "a drill about A1", never a drill about the accord
+    // — persist says exactly that at trust_root.rs ~864. Attested by a holder
+    // (the accord:* namespace requires an accord_holder attester); ABOUT the
+    // family.
+    //
+    // Caught by the persist team's dry run of the genesis_3 candidate:
+    // drill_freshness Red / last_drill_at None on an otherwise-passing bundle,
+    // because the row was A1 -> A1. It gates nothing (liveness left validity in
+    // v23), but the production trust root would have been born reading
+    // "never drilled" — the bad birth announcement this arc started from.
     let lifecycle = match sign_att(
         &identity,
         crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
-        &root,
+        &family_key_id,
         crate::mesh_genesis::lifecycle_envelope(),
         attestation_type::SCORES,
     )

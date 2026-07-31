@@ -857,10 +857,16 @@ where
             .map_err(|e| GenesisError::Directory(e.to_string()))?;
     }
 
-    // The trust root is the key that CHARTERED itself — not the family grouping
-    // id, which carries no authority and cannot be delegated to.
+    // The root is the charter's ATTESTED subject, matching `charter_root_key_id`
+    // and the `trust:accepts` edge. Under family rooting that is the family id;
+    // for a solo root the charter self-loops, so the two coincide.
+    //
+    // Was `attesting_key_id` through 0.5.141, which reported the SIGNING HOLDER
+    // as the trust root — so the install log said `root=A1` on a bundle whose
+    // root is `humanity-accord`, and this report is what an operator reads to
+    // confirm what they just installed.
     let trust_root_key_id = charter_of(bundle)
-        .map(|c| c.attesting_key_id.clone())
+        .map(|c| c.attested_key_id.clone())
         .ok_or(GenesisError::NoCharter)?;
 
     Ok(AttachReport {

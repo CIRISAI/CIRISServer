@@ -219,6 +219,32 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
         );
     }
 
+    // ── 3c. is the drill ABOUT THE ROOT? (born Green, not Red) ──────────────
+    // The drill leg reads attestations ABOUT the root, and under family rooting
+    // the root is the family. A heartbeat naming a holder is a drill about that
+    // holder — persist, trust_root.rs ~864. It gates nothing, but a root born
+    // reading "never drilled" is a bad birth announcement for a production trust
+    // root, and it is free to get right at mint time.
+    if let Some(root_id) = &root {
+        let hb = bundle
+            .attestations
+            .iter()
+            .map(|a| &a.attestation)
+            .find(|a| a.attestation_id == ciris_server::mesh_genesis::LIFECYCLE_ATTESTATION_ID);
+        match hb {
+            Some(h) => check(
+                "heartbeat is about the root",
+                &h.attested_key_id == root_id,
+                format!("attested {} (root is {root_id})", h.attested_key_id),
+            ),
+            None => check(
+                "heartbeat is about the root",
+                false,
+                "no genesis-lifecycle row — the root is born with drill_freshness Red".into(),
+            ),
+        }
+    }
+
     // ── 4. the question ─────────────────────────────────────────────────────
     println!("\n─── the serve gate: EVERY scope, BOTH planes ───");
     let node_key_id = engine
