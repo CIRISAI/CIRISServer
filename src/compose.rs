@@ -1729,8 +1729,68 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
         };
         let mut fed_ed = [0u8; 32];
         fed_ed.copy_from_slice(&ed_bytes);
-        let dest_hash =
-            ciris_edge::transport::addressing::reticulum_destination_for_pubkey(&fed_ed);
+
+        // THE DESTINATION MUST BE THE NAMED HASH, AND WE CANNOT DERIVE IT.
+        //
+        // This used to inject `reticulum_destination_for_pubkey(&fed_ed)` — the
+        // BASE hash, `sha256(fed_pubkey)[..16]`. compose.rs's own publish-side
+        // comment says exactly why that is wrong: the address a peer must use is
+        // `local_named_dest_hash()`, computed over the node's TRANSPORT keypair,
+        // "NOT `local_dest_hash()` … that mismatches the gate's recompute
+        // (DestinationHashMismatch) and blocks inbound sealing". CIRISEdge#406
+        // fixed the publish side; this consume side kept deriving the base hash.
+        //
+        // Measured on the live canonical (CIRISServer#335):
+        //     listening   dest       = 1fc232535ada89fb20a5fbd52d2ced12   (base)
+        //                 named_dest = 81cabcf78a6ee16f197ba7e530a2f6db   (named)
+        //     published signed binding = 81cabcf78a…                      (named)
+        //     canonical boot prime     = 1fc232535a…                      (WRONG)
+        //
+        // Every node primed the canonical at an address it does not serve
+        // federation traffic on, then reported knows_peer=true, provenance=Rooted,
+        // primed=1, refused=0. All green, peer unaddressable, and ZERO traces ever
+        // reached the canonical from anyone.
+        //
+        // Worse than useless: the false rooting is what PREVENTS recovery. The
+        // announce carries the real named dest, but the node already believes it
+        // knows this peer, so it never learns the right address.
+        //
+        // The named hash is over the TRANSPORT keypair, which a KeyRecord does not
+        // carry — so it cannot be derived here, only looked up. Prime from the
+        // peer's published transport binding when we have one; otherwise DO NOT
+        // PRIME. Waiting one announce interval for a correct address beats rooting
+        // a wrong one forever.
+        let published = engine
+            .federation_directory()
+            .list_transport_destinations_for(key_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|d| d.transport_kind == "reticulum" && d.retired_at.is_none());
+        let dest_hash = match published {
+            Some(b) => match hex::decode(b.destination.trim()) {
+                Ok(raw) if raw.len() == 16 => {
+                    let mut h = [0u8; 16];
+                    h.copy_from_slice(&raw);
+                    h
+                }
+                _ => {
+                    tracing::warn!(
+                        canonical = %key_id,
+                        destination = %b.destination,
+                        "canonical prime: published reticulum binding is not a 16-byte hex destination — NOT priming (a wrong address blocks announce-rooting)"
+                    );
+                    continue;
+                }
+            },
+            None => {
+                tracing::info!(
+                    canonical = %key_id,
+                    "canonical prime: no published reticulum transport binding yet — NOT priming. The named destination is computed over the peer's TRANSPORT keypair and cannot be derived from its KeyRecord, so this node waits for the peer's announce rather than rooting a derived base hash it cannot reach. See CIRISServer#335."
+                );
+                continue;
+            }
+        };
         let before = transport.knows_peer(key_id).await;
         transport
             .inject_rooted_peer_for_test(key_id, dest_hash, fed_ed)
