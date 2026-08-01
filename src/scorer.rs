@@ -348,15 +348,61 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     //                              matrix was empty (window/feature semantics).
     //   emitted>0                → capacity rows authored → replication ships them.
     if emitted == 0 {
+        // A ZERO MUST NAME ITS OWN CAUSE.
+        //
+        // The previous version reported `n_summaries=0` and left the reader to
+        // guess which of three narrowings produced it. On the production
+        // canonical that cost a night: 56 trace_events sat in the corpus, all
+        // `cohort_scope=federation`, grouping cleanly into 4 trace_ids when the
+        // scorer's own query was run by hand — and the scorer logged
+        // `n_summaries=0` on every pass. Scope, projection and filter were each
+        // excluded by measurement, one at a time, from the outside.
+        //
+        // So the zero path now probes the plane BELOW its own read and reports
+        // the narrowing, turning "no traces in scope" from a conclusion into a
+        // measurement. The three states are distinguishable at a glance:
+        //
+        //   raw_trace_events == 0            → nothing arrived. Delivery problem,
+        //                                      upstream of the scorer entirely.
+        //   raw > 0, n_summaries == 0        → THE READ IS NARROWING. Rows are in
+        //                                      the corpus and the summary read
+        //                                      cannot see them — scope gate,
+        //                                      filter, or backend handle.
+        //   n_summaries > 0, emitted == 0    → feature semantics (empty matrices,
+        //                                      the sample gate, or CC#46 consent).
+        //
+        // This is the same inversion asked of the substrate in CIRISEdge#433 and
+        // CIRISPersist#565: an absence is an event, and the instrument that
+        // reports it must say which branch produced it.
+        let raw_trace_events = backend
+            .list_trace_summaries(
+                TraceFilter::default(),
+                None,
+                cfg.window,
+                CallerScope::Unauthenticated,
+            )
+            .await
+            .map(|p| p.items.len())
+            .unwrap_or(usize::MAX);
+        let narrowing = if raw_trace_events == usize::MAX {
+            "read FAILED — the summary read itself errored; the scorer cannot see the corpus"
+        } else if raw_trace_events == 0 {
+            "nothing arrived — the corpus has no traces this scorer can read (delivery, not scoring)"
+        } else if n_summaries == 0 {
+            "THE READ IS NARROWING — rows exist in the corpus but this pass saw none.              Compare the scope gate (Unauthenticated admits affiliations/species/biosphere/             federation), the filter, and whether this backend handle is the one replication              writes through"
+        } else {
+            "feature semantics — summaries present but no capacity authored (empty matrices,              the sample gate, or CC#46 analyze consent)"
+        };
         tracing::warn!(
             n_summaries,
             n_agents,
             empty_matrix_agents,
             unregistered_agents,
             window = cfg.window,
-            "capacity scorer pass emitted ZERO — no capacity attestation authored \
-             (n_summaries=0 ⇒ no traces in scope; >0 with empty matrices ⇒ \
-             feature-extraction semantics)"
+            raw_trace_events,
+            sample_size_gate = cfg.sample_size_gate,
+            narrowing,
+            "capacity scorer pass emitted ZERO — see `narrowing` for which plane stopped it"
         );
     } else {
         tracing::info!(
