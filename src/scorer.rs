@@ -83,9 +83,12 @@ pub struct ScorerConfig {
 impl Default for ScorerConfig {
     fn default() -> Self {
         ScorerConfig {
-            // Hourly — long enough that the score→emit pass is negligible load,
-            // short enough that a fresh corpus produces a capacity row promptly.
-            cadence: Duration::from_secs(3600),
+            // ONE source for this number. This used to be a second literal
+            // (3600) beside `config_reconcile::DEFAULT_SCORER_CADENCE_SECS` —
+            // two copies of one default, maintained separately, which is the
+            // class that shipped ["capacity:"] against a harness passing
+            // ["trace:","capacity:"] and cost a week. Reference it.
+            cadence: Duration::from_secs(crate::config_reconcile::DEFAULT_SCORER_CADENCE_SECS),
             // The measure_n_eff.py default window cap.
             window: 500,
             // measure_n_eff.py refuses fewer than 20 surviving rows; mirror that

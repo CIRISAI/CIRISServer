@@ -56,7 +56,25 @@ pub const DEFAULT_TRANSPORT_NODE: bool = true;
 pub const DEFAULT_STORE_AND_FORWARD: bool = true;
 /// Default for `scorer.cadence_secs` — hourly (the score→emit pass is negligible
 /// load, short enough that a fresh corpus produces a capacity row promptly).
-pub const DEFAULT_SCORER_CADENCE_SECS: u64 = 3600;
+/// How often the capacity scorer sweeps the corpus.
+///
+/// **60s, not the previous 3600.** The old value carried a rationale that
+/// contradicted itself — "short enough that a fresh corpus produces a capacity
+/// row promptly" — while making a first-run agent wait up to an hour to see any
+/// score at all. That is not a happy path; it is a happy path with an hour-long
+/// hole in the middle, and it made every trace-delivery investigation slower
+/// because "no score yet" and "no score ever" looked identical for 60 minutes.
+///
+/// A pass is cheap and BOUNDED regardless of corpus size: one `LIMIT
+/// scorer_window` (500) paged read, grouped by `trace_id`, with feature
+/// extraction over those rows only. It does not walk the corpus. So the cadence
+/// was never the thing protecting load — `scorer_window` is.
+///
+/// Noise is prevented by the SAMPLE GATE, not by the clock: `capacity()` returns
+/// 0.0 at or below `scorer_sample_gate` (20) surviving rows, so sweeping more
+/// often cannot manufacture signal from a thin corpus. It only shortens the wait
+/// once a corpus is genuinely scoreable.
+pub const DEFAULT_SCORER_CADENCE_SECS: u64 = 60;
 /// Default for `scorer.window` — the measure_n_eff.py default window cap.
 pub const DEFAULT_SCORER_WINDOW: i64 = 500;
 /// Default for `scorer.sample_gate` — measure_n_eff.py refuses fewer than 20 rows.

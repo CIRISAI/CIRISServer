@@ -812,23 +812,27 @@ pub async fn install_baked_trust_root(
         return Ok(());
     }
     // ORDERING CONTRACT (persist v24.0.0 / CIRISPersist#557, #386): holders ->
-    // family -> everything else. `seed_accord_family` installs the keyless
-    // HUMANITY_ACCORD family row from the compiled genesis constants; it is
-    // idempotent and FK-references the holder rows, so it must run before the
-    // charter that attests the family.
+    // family -> everything else. The keyless HUMANITY_ACCORD family row must
+    // exist before the charter that attests it, or `lookup_family` returns None,
+    // `resolve_family_root` yields None, and `trust_root_valid` reports
+    // RootKind::Key — a correctly family-chartered bundle would degrade SILENTLY
+    // to a single-seat root rather than erroring.
     //
-    // Nothing called it before now. Without the row, `lookup_family` returns
-    // None, `resolve_family_root` yields None, and `trust_root_valid` reports
-    // RootKind::Key — so a correctly family-chartered bundle would degrade
-    // SILENTLY to a single-seat root instead of erroring. That is exactly the
-    // transition risk we flagged on #557, and it was live in our own boot path.
+    // PERSIST ALREADY GUARANTEES IT. `seed_family_and_canonical` calls
+    // `seed_accord_family` + `verify_family_seeded` (genesis/mod.rs:588), and
+    // Engine construction calls that (engine.rs:6250 pg / 6303 sqlite). Stage 1
+    // takes an `&Arc<Engine>`, so the Engine — and therefore the family row —
+    // provably exists before we get here. No call is needed.
+    //
+    // 0.5.144 added one anyway, with a comment claiming "nothing called it before
+    // now". That was false, and the grep that produced it excluded the file
+    // holding the answer: `grep seed_accord_family --include=*.rs src/ | grep -v
+    // genesis/mod.rs`. The call site is IN genesis/mod.rs. Same shape as the
+    // `*.log` glob that skipped a rotated file and returned a zero read as
+    // evidence of absence — see FSD/RCA_TRACE_PLANE_2026-07-31.md heuristic 1.
+    // Removed rather than left redundant-but-harmless: a call carrying a false
+    // justification is worse than no call, because the next reader trusts it.
     let dir = engine.federation_directory();
-    ciris_persist::federation::genesis::seed_accord_family(dir.as_ref())
-        .await
-        .map_err(GenesisError::Directory)?;
-    ciris_persist::federation::genesis::verify_family_seeded(dir.as_ref())
-        .await
-        .map_err(GenesisError::Directory)?;
 
     let report = install_trust_root_records(dir.as_ref(), bundle).await?;
     let accepted = accept_trust_root(engine, bundle).await?;

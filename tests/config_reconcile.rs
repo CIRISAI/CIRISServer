@@ -125,7 +125,13 @@ async fn resolve_empty_corpus_is_baked_defaults() {
     // Spot-check the documented defaults explicitly.
     assert!(resolved.transport_node);
     assert!(resolved.store_and_forward);
-    assert_eq!(resolved.scorer_cadence_secs, 3600);
+    // Against the CONSTANT, not a frozen copy of it — this literal was a THIRD
+    // copy of the cadence default (config_reconcile, scorer.rs, here), and a
+    // spot-check that restates the value it checks can only ever agree with it.
+    assert_eq!(
+        resolved.scorer_cadence_secs,
+        ciris_server::config_reconcile::DEFAULT_SCORER_CADENCE_SECS
+    );
     assert_eq!(resolved.scorer_window, 500);
     assert_eq!(resolved.scorer_sample_gate, 20);
     assert_eq!(resolved.scorer_target_n_eff, 8.0);
