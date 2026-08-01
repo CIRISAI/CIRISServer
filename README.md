@@ -101,12 +101,19 @@ registry, one shared engine, one edge runtime.
 
 ## Status
 
-**v0.5.x — the CEG-native node, rooted.** Config-as-CEG shipped (zero env
-vars, owner-authored, hot-reconciled). The federation trace arc is proven end to
-end across the substrate triple — seal → consent → converge → bootstrap → root →
-heal → publish → transfer → admit → attribute → serve — with each gate named,
-logged, and regression-pinned (the #315 saga). One-node-identity closed by
-construction (0.5.138).
+**v0.5.x — the CEG-native node, rooted, and carrying live traffic.**
+Config-as-CEG shipped (zero env vars, owner-authored, hot-reconciled). The
+federation trace arc is proven end to end across the substrate triple — seal →
+consent → converge → bootstrap → root → heal → publish → transfer → admit →
+attribute → serve — with each gate named, logged, and regression-pinned (the
+#315 saga). One-node-identity closed by construction (0.5.138).
+
+**Traces are flowing on the production mesh (2026-07-31).** A real agent's
+signed traces now reach the canonical over Reticulum and materialize into its
+corpus — sealed on one node, consented, replicated, attributed, and admitted on
+another, with no HTTP anywhere in the path. The trace is a CEG object that
+replicates because consent and trust say it may; nothing pushes it. Scoring is
+the next link and is not yet closed.
 
 **The production trust root is minted and baked (2026-07-31).** A hardware
 ceremony on three YubiKeys produced the genesis bundle persist now ships as
