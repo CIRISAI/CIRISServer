@@ -30,6 +30,7 @@ seal → carrier row → consent → promote → offer → send → attribute �
 |---|---|---|---|
 | 1 | consent | `DEFAULT_GRANT_ATTESTATION_PREFIXES = ["capacity:"]` — never covered `trace:`, so `promote_consented_backlog` skipped every trace row | 0.5.146 |
 | 2 | consent | the fold had **no route to author consent at all** — the owner-gated POST is mounted in `serve_with_adapter`, the embedded agent boots via `start_and_hold`, which mounts no router | 0.5.147 |
+| 2b | consent | …and the wizard **still 404'd two releases later**, because the pyo3 docstring for the new path still read *"production consent is exclusively the owner-gated POST"*. The code was fixed in 0.5.147; the sentence telling callers so was not | 0.5.150 |
 | 3 | send | `canonical_boot_prime` rooted the canonical at the **base** dest hash, not the **named** one; reported `primed=1, refused=0` while the peer was unaddressable | 0.5.145 |
 | 4 | stage 1 | not idempotent — `UNIQUE constraint` on every boot after the first, then claimed "this node has no trust root" **without evaluating it** | 0.5.145 |
 | 5 | attribute | the live peers map never upgraded Advisory→Rooted after boot; persist held `rooted`, the resolver said `Advisory` | CIRISEdge#432 |
@@ -129,6 +130,52 @@ That is the instrument this RCA is about, applied to our own code.
 
 ---
 
+## The sixth instrument: a stale doc
+
+Fault 2 was fixed in 0.5.147. A production wizard hit the **same 404** on
+0.5.149, because the docstring on the replacement path still said the replaced
+thing was the only one. It was not stale by neglect — it was written true, and
+the change that falsified it did not touch the line.
+
+This is the RCA's own thesis pointed at prose: **a doc is an instrument, and it
+reports a branch.** It had every property the five code instruments had — it was
+confident, specific, and wrong in the direction that reads as "you are holding it
+wrong."
+
+Two things make it durable rather than a one-off correction:
+
+- **the reason travels with the instruction.** `tests/fold_consent_surface.rs`
+  requires the doc to say *why* HTTP cannot work in the fold (`start_and_hold`
+  mounts no router ⇒ 404 by construction), not merely *what to call instead*. A
+  caller told only "call this" reads a 404 as a transient and retries; a caller
+  told "that route does not exist here" stops.
+- **the false sentence is banned by name**, so it cannot come back on the next
+  edit that copies a neighbouring docstring.
+
+## What we did NOT ship, and why
+
+A `consent_to_canonicals()` one-call convenience — write it, and the fold's
+consent step becomes a single unmissable call. It was written, and reverted.
+
+It decided **which** peers ("all canonicals") and **what** policy ("our
+defaults"). Neither is the substrate's to decide. The exhaustive consent form
+belongs to the agent — *"traces to canonicals blessed by a trust root I trust"*,
+*"medical data to medical providers my providers trust"* — and it changes per
+deployment. A caller whose policy is anything else gets no help from the
+convenience and composes by hand anyway, now working around a function shaped
+for someone else's case.
+
+The DX fix that survives that objection is **smaller**: make
+`attestation_prefixes` optional, so omitting it means *this build's production
+default* rather than a set the caller must restate. That is where the actual
+defect lived — a restated default forks silently, and did, for eight releases.
+Peer selection stays where it belongs.
+
+    enumerate (your predicate) → filter (your policy) → author per peer
+
+Two calls when our default suits you, three when it does not. Nothing in the
+middle is baked.
+
 ## Heuristics worth keeping
 
 1. **A zero is not evidence unless the instrument can fail.** Verify every gate
@@ -144,3 +191,9 @@ That is the instrument this RCA is about, applied to our own code.
    answering two questions.** `root` meant both "the signing holder" and "the
    trust root"; `carries_infra_serve` asked about one scope of four.
 5. **Prefer receiver-side evidence.** See the delivery rule above.
+6. **A docstring is an instrument.** It survives the change that falsifies it,
+   because nothing compiles against prose. Pin the sentences whose falsity
+   already cost you something — and pin the *reason*, not just the instruction.
+7. **A convenience that bakes a policy is a defect with good ergonomics.** Ask
+   which of the caller's decisions it is making. If the answer includes one that
+   varies per deployment, ship the primitives and a good default instead.

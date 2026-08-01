@@ -1284,16 +1284,41 @@ mod python {
     }
 
     #[pyfunction]
-    /// TEST-ANCHOR-FENCED: `ciris_server.author_federation_consent(peer_key_id,
-    /// attestation_prefixes)` — harness-only consent author (mesh-repro
-    /// traceflow). Refused unless CIRIS_TESTING_MODE=true; production consent
-    /// is exclusively the owner-gated POST /v1/federation/consent.
-    #[pyo3(name = "author_federation_consent", signature = (peer_key_id, attestation_prefixes))]
+    /// `ciris_server.author_federation_consent(peer_key_id, attestation_prefixes=None)`
+    /// — author a replication grant to one peer, in-process.
+    ///
+    /// **This is the fold's production consent path**, not a test hook. The
+    /// embedded agent boots through `start_and_hold`, which mounts NO HTTP
+    /// router, so `POST /v1/federation/consent` (and every other owner-gated
+    /// route) 404s there by construction — those are mounted in
+    /// `serve_with_adapter`, the compose path. A wizard running inside the fold
+    /// must call this.
+    ///
+    /// Authorised by the node being CLAIMED — a ROOT owner exists to consent for
+    /// — rather than by an HTTP session the fold cannot have. Unclaimed nodes are
+    /// refused unless `CIRIS_TESTING_MODE=true`.
+    ///
+    /// `attestation_prefixes` omitted ⇒ this build's production default.
+    #[pyo3(name = "author_federation_consent", signature = (peer_key_id, attestation_prefixes = None))]
     fn py_author_federation_consent(
         py: Python<'_>,
         peer_key_id: String,
-        attestation_prefixes: Vec<String>,
+        attestation_prefixes: Option<Vec<String>>,
     ) -> PyResult<String> {
+        // Omitting the prefixes means "whatever this build ships as the
+        // production default" — NOT a fixed list. A caller with its own policy
+        // passes one; a caller without one must not have to restate ours, because
+        // a restated default is a default that can silently diverge. mesh-repro
+        // passed ["trace:","capacity:"] as a literal and stayed green for eight
+        // releases while production shipped ["capacity:"] and moved zero traces.
+        //
+        // Peer selection is deliberately NOT part of this call. Who to consent to
+        // is the agent's policy — "canonicals blessed by a trust root I trust",
+        // "medical providers my providers trust" — and it changes per deployment.
+        // Enumerate with `engine.list_canonical_servers()` or any other predicate,
+        // filter on your own terms, then call this per peer.
+        let attestation_prefixes =
+            attestation_prefixes.unwrap_or_else(crate::peer::default_attestation_prefixes);
         py.detach(|| {
             // The fold's consent path. Refuses on an unclaimed node (no ROOT
             // owner to consent for) unless CIRIS_TESTING_MODE — see

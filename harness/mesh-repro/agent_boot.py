@@ -530,11 +530,14 @@ def main() -> int:
             f"{canon_ip}) — models mobile NAT mapping expiry → the field link storm")
 
     # ── EXPLICIT CONSENT (runbook §1): consent is no longer auto-authored ────
-    # Production wizards POST /v1/federation/consent (owner-gated HTTP). The
-    # bare harness boot has no serve stack/owner session, so it uses the
-    # TESTING-MODE-fenced author_federation_consent (refused outside
-    # CIRIS_TESTING_MODE). Without this grant the canonical never becomes a
-    # consent peer and traces cannot replicate — the runbook's §3 failure mode.
+    # This is the SAME call a production in-fold wizard makes. It is not a test
+    # hook: the embedded agent boots via start_and_hold, which mounts no HTTP
+    # router, so POST /v1/federation/consent 404s inside the fold by
+    # construction — those routes live in serve_with_adapter (compose). A wizard
+    # that reaches for HTTP here gets a 404 and authors nothing.
+    #
+    # Without this grant the canonical never becomes a consent peer and traces
+    # cannot replicate — the runbook's §3 failure mode.
     n_traces = int(os.environ.get("CIRIS_HARNESS_EMIT_TRACES", "0") or "0")
     if n_traces > 0 and delivery_on:
         author = getattr(ciris_server, "author_federation_consent", None)
@@ -564,16 +567,16 @@ def main() -> int:
                         #
                         # A fixture that supplies the value production defaults
                         # cannot prove the default. Read it from the wheel.
+                        # OMIT the prefixes. Passing even the correct set makes
+                        # this a test of argument-passing; omitting makes it a
+                        # test of the production default, which is the thing that
+                        # was wrong. Read them back only to LOG what was used.
+                        gid = author(canon_for_consent)
                         _defaults = getattr(
                             ciris_server, "default_attestation_prefixes", None)
-                        prefixes = list(_defaults()) if _defaults else ["trace:", "capacity:"]
-                        if _defaults is None:
-                            log("CONSENT: wheel predates default_attestation_prefixes() — "
-                                "falling back to an explicit set; this run does NOT prove "
-                                "the production default")
-                        gid = author(canon_for_consent, prefixes)
+                        used = ",".join(_defaults()) if _defaults else "<unreadable>"
                         log(f"CONSENT: consent:replication authored for {canon_for_consent} "
-                            f"(attestation_id={gid}) scope={','.join(prefixes)}")
+                            f"(attestation_id={gid}) scope={used}")
                         # #530 caveat 1: the bare embedded path may not run the
                         # server reconcile that auto-fires the repair sweep —
                         # invoke it directly (strictly widening; pure placement).

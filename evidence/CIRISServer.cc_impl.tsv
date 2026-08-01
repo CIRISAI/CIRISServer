@@ -6,7 +6,7 @@
 # field_conformance::evidence_tsv_matches_emitted — a drift is a build failure.
 # Vendored by CIRISConstitution/tools/check_evidence.py.
 # Columns: cc_section <TAB> clm <TAB> repo <TAB> path#symbol <TAB> crate@version
-3.1	CLM-nsproc-dimension	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.149
-4.4.2	CLM-nsproc-aggregation-policy	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.149
-4.4.3.4.3	CLM-nsproc-cohort-scope	CIRISServer	src/graph_config.rs#set_config	ciris-server@v0.5.149
-4.2.2.1	CLM-nsproc-attestation-evidence	CIRISServer	src/hardware_attestation.rs#admit_hardware_class_against_root	ciris-server@v0.5.149
+3.1	CLM-nsproc-dimension	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.150
+4.4.2	CLM-nsproc-aggregation-policy	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.150
+4.4.3.4.3	CLM-nsproc-cohort-scope	CIRISServer	src/graph_config.rs#set_config	ciris-server@v0.5.150
+4.2.2.1	CLM-nsproc-attestation-evidence	CIRISServer	src/hardware_attestation.rs#admit_hardware_class_against_root	ciris-server@v0.5.150
