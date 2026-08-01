@@ -1268,6 +1268,25 @@ mod python {
     }
 
     #[pyfunction]
+    /// `ciris_server.consent_disclosure()` — **the copy a setup wizard SHOWS the
+    /// operator**, as JSON, single-sourced from the substrate.
+    ///
+    /// Render this; do not compose your own. It carries the two grants and which
+    /// is optional, the three costs of declining `analyze`, and the announce
+    /// requirement. Every time something here was restated instead of read it
+    /// forked — the harness restated the prefixes and hid a dead trace plane for
+    /// eight releases; a docstring restated the consent route and sent an in-fold
+    /// wizard to a 404.
+    ///
+    /// Shape: `{grants: [{id, required, title, permits, dimension, …}],
+    /// independent, declining_analyze: {allowed, summary, costs: [..]},
+    /// announce_requirement}`.
+    #[pyo3(name = "consent_disclosure")]
+    fn py_consent_disclosure() -> String {
+        crate::peer::consent_disclosure_json()
+    }
+
+    #[pyfunction]
     /// `ciris_server.default_attestation_prefixes()` — the PRODUCTION default
     /// replication-grant prefix set, as the server itself computes it.
     ///
@@ -1299,11 +1318,39 @@ mod python {
     /// refused unless `CIRIS_TESTING_MODE=true`.
     ///
     /// `attestation_prefixes` omitted ⇒ this build's production default.
-    #[pyo3(name = "author_federation_consent", signature = (peer_key_id, attestation_prefixes = None))]
+    ///
+    /// **There are TWO consents, and they are different edges.**
+    ///
+    /// | | grant | what it permits |
+    /// |---|---|---|
+    /// | send traces | `consent:replication:v1` (this call) | the peer may **hold** our traces |
+    /// | be scored | `consent:state:granted:v1` scope `analyze` (`analyze=True`) | the peer may **score** them |
+    ///
+    /// Authoring one implies nothing about the other — different dimension,
+    /// opposite edge direction. `check_capacity_consent_admission` refuses a
+    /// `capacity:*` claim about S from P unless a live `analyze` consent S → P
+    /// sits in **P's own** corpus.
+    ///
+    /// **You MAY send traces without consenting to be analyzed.** It is allowed
+    /// and traces flow. What it costs:
+    ///
+    ///   1. **no reputation** — every `capacity:*` claim about you is refused, so
+    ///      none can ever exist;
+    ///   2. **no capability-gated streams or services** — anything requiring a
+    ///      third-party capability attestation is closed to you, because you have
+    ///      none;
+    ///   3. **some peers may refuse to interact with you at all.**
+    ///
+    /// Default `False` matches `POST /v1/federation/consent` and CC's
+    /// explicit-never-implied posture. Omitting it logs a WARN naming all three
+    /// costs, because on the production mesh 240 peers reached that state by
+    /// silence rather than by choice.
+    #[pyo3(name = "author_federation_consent", signature = (peer_key_id, attestation_prefixes = None, analyze = false))]
     fn py_author_federation_consent(
         py: Python<'_>,
         peer_key_id: String,
         attestation_prefixes: Option<Vec<String>>,
+        analyze: bool,
     ) -> PyResult<String> {
         // Omitting the prefixes means "whatever this build ships as the
         // production default" — NOT a fixed list. A caller with its own policy
@@ -1323,8 +1370,12 @@ mod python {
             // The fold's consent path. Refuses on an unclaimed node (no ROOT
             // owner to consent for) unless CIRIS_TESTING_MODE — see
             // federation_delivery::author_consent_embedded.
-            crate::federation_delivery::author_consent_embedded(&peer_key_id, &attestation_prefixes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            crate::federation_delivery::author_consent_embedded(
+                &peer_key_id,
+                &attestation_prefixes,
+                analyze,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
     }
 
@@ -1546,6 +1597,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
+        m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;

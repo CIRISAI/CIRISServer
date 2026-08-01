@@ -174,6 +174,196 @@ pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 /// could not take. `default_covers_the_trace_plane` below is the gate.
 pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:", "trace:"];
 
+/// **The operator-facing consent disclosure — the copy a setup wizard SHOWS.**
+///
+/// # Why this ships from the wheel instead of living in the wizard
+///
+/// Everything a wizard needs to explain the consent choice is already knowable
+/// here: which grants exist, which is optional, and exactly what declining the
+/// optional one costs. A wizard that writes its own version of that paragraph
+/// drifts from the substrate the moment either changes — and every time
+/// something in this system was restated rather than read, it forked:
+///
+///   * the harness restated `["trace:","capacity:"]` and stayed green for eight
+///     releases while production shipped `["capacity:"]` and moved zero traces;
+///   * a docstring restated the consent route and sent an in-fold wizard to an
+///     HTTP path that 404s by construction.
+///
+/// So the wizard renders this. It does not compose it.
+///
+/// # Localization
+///
+/// Every human-readable string is `{"id": …, "text": …}`. `id` is a **stable
+/// message key**; `text` is the English source. A wizard resolves `id` against
+/// its catalogue and falls back to `text` when there is no translation yet — so
+/// a locale that lags a release degrades to English rather than to a blank
+/// screen or a stale translation of different content.
+///
+/// **The ids are wire-stable.** Renaming one silently un-translates that string
+/// in every locale, which reads exactly like a missing translation and not at
+/// all like a rename. If the MEANING changes, mint a new id (`…:v2`) rather than
+/// editing the text under the old one — a catalogue cannot tell that the English
+/// moved, and a stale translation asserting the old meaning is worse than
+/// English. `tests/fold_consent_surface.rs` pins the id set.
+pub fn consent_disclosure_json() -> String {
+    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::consent::consent_dimension;
+    use ciris_persist::federation::envelope::paths;
+
+    /// One localizable string: a stable key plus its English source.
+    fn m(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({ "id": id, "text": text })
+    }
+
+    serde_json::json!({
+        // The locale THIS build's `text` fields are written in. A wizard that
+        // resolves every id needs none of them; one that falls back needs to
+        // know what it is falling back TO, so it can mark it rather than
+        // present English as if it were the user's language.
+        "source_locale": "en",
+        // The screen is ONE primary action with the detail expandable beneath
+        // it. An operator who expands nothing still gave a real consent, so the
+        // button's own label has to name the whole bundle rather than the first
+        // item in it.
+        "primary_action": m(
+            "consent.mesh_participation.action",
+            "Consent to CIRIS Mesh Participation"
+        ),
+        "details_expandable": true,
+        "grants": [
+            {
+                "id": "replication",
+                "required": true,
+                "title": m("consent.grant.replication.title", "Send traces"),
+                "permits": m(
+                    "consent.grant.replication.permits",
+                    "The peer may HOLD your traces."
+                ),
+                (paths::DIMENSION): "consent:replication:v1",
+                "covers": default_attestation_prefixes(),
+            },
+            {
+                "id": "analyze",
+                "required": false,
+                "title": m("consent.grant.analyze.title", "Be scored"),
+                "permits": m(
+                    "consent.grant.analyze.permits",
+                    "The peer may SCORE your traces — this is what builds reputation."
+                ),
+                (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
+                "scope": CAPACITY_CONSENT_SCOPE,
+                "parameter": "analyze=True",
+            },
+        ],
+        // Two grants, two edges, opposite directions. Authoring one implies
+        // NOTHING about the other — say so, because the natural reading of
+        // "share my traces" is that scoring comes with it, and it does not.
+        "independent": m(
+            "consent.grants.independent",
+            "These are separate consents on opposite edges. Granting one does not grant the \
+             other, and either can be withdrawn without the other."
+        ),
+        "declining_analyze": {
+            "allowed": true,
+            "summary": m(
+                "consent.decline_analyze.summary",
+                "You may send traces without consenting to be analyzed. Traces will still flow."
+            ),
+            "costs": [
+                m(
+                    "consent.decline_analyze.cost.no_reputation",
+                    "You build NO reputation — every capacity:* claim about you is refused, so \
+                     none can ever exist."
+                ),
+                m(
+                    "consent.decline_analyze.cost.no_capability_services",
+                    "You cannot use streams or services that require third-party capability \
+                     attestations, because you will not have any."
+                ),
+                m(
+                    "consent.decline_analyze.cost.peers_may_refuse",
+                    "Some peers may refuse to interact with you at all."
+                ),
+            ],
+        },
+        // ── Location: the H3 cell on the envelope ───────────────────────────
+        //
+        // ONE representation, used by everything — server, agent, every
+        // producer. CEG 0.8 §0.8 makes it a signed `LocationProof` carrying an
+        // H3 `cell_id` + `cell_resolution`. There is no second location format
+        // anywhere in the system, and a producer that ships raw coordinates
+        // instead is non-conformant rather than merely different.
+        //
+        // **What it is FOR: reporting patterns across regions.** A coarse cell is
+        // what lets regional patterns be reported at all, and it is what makes
+        // regional community participation possible:
+        // `communities_containing(cell_id)` matches the geographic communities
+        // (`cohort_subkind = "geographic"`) whose own constraint cell CONTAINS
+        // yours, and `member_in_geographic_constraint` admits a member only on an
+        // in-force, unexpired contained proof. With no cell there is nothing to
+        // compare, so there is no membership.
+        //
+        // It is ALSO an optional gate on visibility — a geographic community may
+        // restrict items destined for IT to members inside its region. That gate
+        // is scoped to that community's own traffic; it is not a general
+        // restriction on your traces, which the replication consent decides.
+        // Saying "location never affects visibility" would be the simpler line
+        // and it would be false.
+        //
+        // §0.8.1 rough-only is enforced by the SUBSTRATE, not by this copy:
+        // `validate_location_cell` refuses `cell_resolution > 7` at admission,
+        // and resolution-redundancy means a producer cannot assert a coarse
+        // resolution while shipping a fine cell. "Rough region only" is a
+        // property of the wire format rather than a promise a UI is making on a
+        // client's behalf — which is the whole reason it can be trusted.
+        "location": {
+            "kind": "envelope_field",
+            "required": false,
+            "title": m("location.title", "Share your approximate region"),
+            "permits": m(
+                "location.permits",
+                "Attaches a coarse H3 cell to your envelope so patterns can be reported across \
+                 regions. The substrate refuses anything finer than resolution 7, so it \
+                 identifies a rough region — never your specific locality or address."
+            ),
+            "purpose": m(
+                "location.purpose",
+                "Regional pattern reporting, and taking part in regional communities. A \
+                 community may also use it as an OPTIONAL visibility gate, restricting items \
+                 destined for that community to members whose region falls inside it. It is \
+                 not a general restriction on your traces — that is decided by the consents \
+                 above."
+            ),
+            "carrier": "location_proof",
+            "cell_format": "h3",
+            "max_resolution": ciris_persist::federation::location::MAX_LOCATION_PROOF_RESOLUTION,
+            "declining": {
+                "allowed": true,
+                "costs": [
+                    m(
+                        "location.cost.no_regional_reporting",
+                        "Your activity cannot contribute to regional pattern reporting."
+                    ),
+                    m(
+                        "location.cost.no_regional_community",
+                        "You cannot take part in any regional community. Membership is decided \
+                         by whether your cell falls inside the community's own region, so \
+                         without a cell there is nothing to compare."
+                    ),
+                ],
+            },
+        },
+        // Rule 1. Not a consent choice — the floor for being served at all.
+        "announce_requirement": m(
+            "mesh.announce_requirement",
+            "A node that does not announce gets no service access on the mesh and no agent \
+             services. The accord's kill switch is only meaningful against a node it can reach, \
+             so an unreachable node is never served in the first place."
+        ),
+    })
+    .to_string()
+}
+
 /// `consent:replication` payload `subject_kind` (CEG 1.0-RC29 §4.2.2.3): a
 /// payload member (NOT an envelope field) declaring the grant's subject shape.
 const SUBJECT_KIND_CONSENT_REPLICATION: &str = "consent_replication";

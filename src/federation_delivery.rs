@@ -736,7 +736,11 @@ pub fn analyze_consent_stance(
 /// claim time rather than per-request. The harness fence remains as an
 /// alternative for `CIRIS_TESTING_MODE`, which runs on unclaimed nodes.
 #[cfg(feature = "python")]
-pub fn author_consent_embedded(peer_key_id: &str, prefixes: &[String]) -> Result<String> {
+pub fn author_consent_embedded(
+    peer_key_id: &str,
+    prefixes: &[String],
+    analyze: bool,
+) -> Result<String> {
     let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
         .context("author_federation_consent: no in-process persist Engine")?;
 
@@ -774,12 +778,66 @@ pub fn author_consent_embedded(peer_key_id: &str, prefixes: &[String]) -> Result
         peer_key_id,
         prefixes,
     ))?;
+
+    // ── CIRISConstitution#46 — the `analyze` grant, the SECOND half ──────────
+    //
+    // Without this the peer may HOLD our traces and may never SCORE them:
+    // `check_capacity_consent_admission` refuses a federation-tier `capacity:*`
+    // row about S from P unless a live `analyze` consent S -> P sits in the
+    // SCORING node's own corpus. The grant this function just authored does not
+    // supply it — different dimension, different edge direction.
+    //
+    // This mirrors `POST /v1/federation/consent`, which has taken an `analyze`
+    // flag since #331 ask 1. Until now the fold could not author the row under
+    // ANY argument, because the parameter did not exist here — so the two
+    // consent paths were asymmetric, and the one every embedded agent must use
+    // was the incomplete one. Measured on the production canonical: 240
+    // `consent:replication:v1` rows replicated in from 240 distinct peers, and
+    // ZERO `consent:state:*` rows of any kind. Every one of those peers
+    // consented to send; not one could consent to be scored.
+    //
+    // NON-FATAL, as on the HTTP route: the replication grant is already durable,
+    // and failing here would discard a consent the owner actually gave.
+    let analyze_id = if analyze {
+        match rt.block_on(crate::peer::emit_analyze_consent(
+            &engine,
+            &node_key_id,
+            peer_key_id,
+        )) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(
+                    peer_key_id,
+                    error = %e,
+                    "replication consent authored but the CC#46 `analyze` grant FAILED — this                      peer can receive our traces and may NOT score them; capacity scoring stays                      dead for this node until it is re-authored"
+                );
+                None
+            }
+        }
+    } else {
+        // A LEGITIMATE configuration, not an error: you MAY send traces without
+        // consenting to be analyzed. Degraded, not refused — and it is the shape
+        // 240 production peers are in by SILENCE rather than by choice, so name
+        // all three costs at the moment of the decision.
+        tracing::warn!(
+            peer_key_id,
+            "consent:replication authored WITHOUT the CC#46 `analyze` grant. This is ALLOWED — \
+             traces will flow. What it costs: (1) you build NO reputation, because every \
+             capacity:* claim about you is refused, so none can ever exist; (2) you cannot use \
+             streams or services that require third-party capability attestations, since you \
+             will have none; (3) some peers may refuse to interact with you at all. Pass \
+             analyze=True if being scored is why the traces are being sent."
+        );
+        None
+    };
+
     tracing::info!(
         peer_key_id,
         attestation_id = %grant.attestation_id,
         freshly_emitted = grant.freshly_emitted,
         prefixes = ?prefixes,
         owner_claimed = !testing,
+        analyze_grant = ?analyze_id,
         "consent:replication authored from the embedded host (the fold's consent path)"
     );
     Ok(grant.attestation_id)

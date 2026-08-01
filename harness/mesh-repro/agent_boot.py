@@ -571,12 +571,30 @@ def main() -> int:
                         # this a test of argument-passing; omitting makes it a
                         # test of the production default, which is the thing that
                         # was wrong. Read them back only to LOG what was used.
-                        gid = author(canon_for_consent)
+                        # analyze=True — the CC#46 half. The replication grant
+                        # lets the canonical HOLD our traces; only this lets it
+                        # SCORE them. A harness that authors one and not the
+                        # other proves a path on which capacity scoring is dead,
+                        # which is the production mesh's actual state: 240
+                        # replication grants, zero analyze grants.
+                        gid = author(canon_for_consent, None, True)
                         _defaults = getattr(
                             ciris_server, "default_attestation_prefixes", None)
                         used = ",".join(_defaults()) if _defaults else "<unreadable>"
                         log(f"CONSENT: consent:replication authored for {canon_for_consent} "
                             f"(attestation_id={gid}) scope={used}")
+                        # Assert the RESOLVED STANCE, not that the call returned.
+                        # A row that exists but folds to `unspecified` reads as
+                        # consented while the gate still refuses — the silent-false
+                        # this whole arc keeps curing.
+                        _stance = getattr(ciris_server, "analyze_consent_stance", None)
+                        if _stance is not None:
+                            st = _stance(canon_for_consent)
+                            log(f"CONSENT: CC#46 analyze stance for {canon_for_consent} -> {st}")
+                            if st != "granted":
+                                log("CONSENT: *** analyze stance is NOT granted — the canonical "
+                                    "may hold our traces but every capacity:* claim about us "
+                                    "will be REFUSED ***")
                         # #530 caveat 1: the bare embedded path may not run the
                         # server reconcile that auto-fires the repair sweep —
                         # invoke it directly (strictly widening; pure placement).

@@ -42,6 +42,56 @@ engine's own signing identity, so every plane (claim, NodeCode, owned-nodes,
 self-publish, edge signer) agrees on who this node is. Library composition, not
 sidecars: the agent links the same wheel instead of assembling cores itself.
 
+## Joining the mesh — the two rules
+
+Anyone can stand up a server and contribute capability. Two rules govern what
+you get back. Both are worth reading before you deploy.
+
+### 1. Announce, or you get nothing
+
+**A node that does not announce gets no service access on the mesh and no agent
+services.** This is not a throttle or a penalty tier — it is the floor.
+
+The reason is the kill switch. The accord's halt is only meaningful against a
+node it can *reach*; an unreachable node cannot be stopped, so it is never
+served in the first place. Every canonical record carries both halves for
+exactly this reason: its **trust** (the `canonical` role) and its
+**reachability** (the signed envelope transport hint). Baking canonical records
+was gated on the kill switch being enforceable *first*.
+
+So reachability is not an operational detail here. It is the price of admission,
+and it is charged up front.
+
+### 2. There are TWO consents, and they are different edges
+
+|  | grant | what it permits |
+|---|---|---|
+| **send traces** | `consent:replication:v1` | a peer may **hold** your traces |
+| **be scored** | `consent:state:granted:v1`, scope `analyze` | a peer may **score** them |
+
+Authoring one implies **nothing** about the other. They are distinct CEG objects
+on opposite edge directions, separately withdrawable. `capacity:*` claims about
+you are refused unless a live `analyze` consent from you covers the attester, in
+*that attester's own corpus* (CIRISConstitution#46).
+
+**You may send traces without consenting to be analyzed.** That is a legitimate
+choice and traces will flow. What it costs:
+
+1. **You build no reputation.** Every `capacity:*` claim about you is refused, so
+   none can ever exist.
+2. **You cannot use streams or services that require third-party capability
+   attestations** — you will not have any.
+3. **Some peers may refuse to interact with you at all.**
+
+Being scored is normally *why* the traces are sent. If that is your intent, both
+grants are required — say so explicitly, because neither is implied.
+
+> Measured on the production canonical, 2026-08-01: **240** replication grants
+> replicated in from **240 distinct** peers, and **zero** `analyze` grants
+> mesh-wide. Until 0.5.151 the in-fold consent path could not author the second
+> grant under any argument, so every one of those nodes reached rule 2's degraded
+> state by silence rather than by choice.
+
 ## Read in this order
 
 1. **[`MISSION.md`](MISSION.md)** — the WHY. M-1 (sustainable adaptive coherence),
