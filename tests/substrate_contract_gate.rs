@@ -176,3 +176,52 @@ fn already_pinned_elsewhere_still_exist() {
     let _ = ciris_persist::federation::replication_policy::REPLICATION_POLICY_HASH;
     let _ = ciris_edge::replication::serve_policy::SERVE_ADVERTISE_POLICY_HASH;
 }
+
+/// The README states the substrate pins, and the README **is** the public site
+/// (`https://cirisai.github.io/CIRISServer/` renders `main:/README.md`). So a
+/// stale line there is a wrong answer served to everyone who asks what this node
+/// runs on.
+///
+/// It had drifted to `persist v21.4.0 / edge v14.4.0` while the tree was on
+/// v24.1.0 / v15.7.1 — three majors on persist. Nothing noticed, because a
+/// human-written sentence and a machine-read manifest are two lists of the same
+/// fact maintained separately, which is the defect class this project keeps
+/// paying for.
+///
+/// Asserted against `Cargo.toml` rather than a literal, so the gate tracks the
+/// pin instead of freezing a third copy of it.
+#[test]
+fn readme_substrate_pins_match_cargo_toml() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cargo = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+
+    // The pin as the build actually resolves it.
+    let pin_of = |repo: &str| -> String {
+        let needle = format!("{repo}\", tag = \"");
+        let i = cargo.find(&needle).unwrap_or_else(|| {
+            panic!("no `{repo}` git tag pin found in Cargo.toml — did the dependency move?")
+        }) + needle.len();
+        cargo[i..]
+            .split('"')
+            .next()
+            .expect("tag literal")
+            .to_string()
+    };
+
+    for (repo, label) in [
+        ("CIRISPersist", "persist"),
+        ("CIRISEdge", "edge"),
+        ("CIRISVerify", "verify"),
+    ] {
+        let pin = pin_of(repo);
+        let claim = format!("{label} {pin}");
+        assert!(
+            readme.contains(&claim),
+            "README.md does not state the real {label} pin.\n  Cargo.toml resolves: {pin}\n  \
+             expected the README to contain: {claim:?}\n\n\
+             README.md is served as the public site, so a stale pin there is a wrong answer \
+             given to every reader. Update the Status section's substrate line."
+        );
+    }
+}

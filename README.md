@@ -101,14 +101,30 @@ registry, one shared engine, one edge runtime.
 
 ## Status
 
-**v0.5.x — the CEG-native node.** Config-as-CEG shipped (zero env vars,
-owner-authored, hot-reconciled). The federation trace arc is proven end-to-end
-across the substrate triple — seal → consent → converge → bootstrap → root →
+**v0.5.x — the CEG-native node, rooted.** Config-as-CEG shipped (zero env
+vars, owner-authored, hot-reconciled). The federation trace arc is proven end to
+end across the substrate triple — seal → consent → converge → bootstrap → root →
 heal → publish → transfer → admit → attribute → serve — with each gate named,
 logged, and regression-pinned (the #315 saga). One-node-identity closed by
-construction (0.5.138). Substrate pins: **persist v21.4.0 / edge v14.4.0 /
-verify v10.6.3** — hybrid PQ throughout, Registry-of-Record admission,
-drift-witnessed policy hashes. `ciris-lens-core` is absorbed in-tree
+construction (0.5.138).
+
+**The production trust root is minted and baked (2026-07-31).** A hardware
+ceremony on three YubiKeys produced the genesis bundle persist now ships as
+`canonical_seed.json`, so every node boots rooted with no operator step. The
+root is the **keyless family, not a seat**: one holder alone roots only to
+itself, while a quorum roots to `humanity-accord`. The charter is 2-of-2 over a
+3-seat roster, and every genesis attestation carries its quorum *into the graph*
+— a replicated row proves its own m-of-n rather than deferring to the bundle it
+arrived in. Two humans to halt, two to legitimize.
+
+Substrate pins: **persist v24.1.0 / edge v15.7.1 / verify v10.6.3** — hybrid PQ
+throughout, Registry-of-Record admission, drift-witnessed policy hashes. Edge
+v15.7.x adds the realtime A/V spine (MLS X-Wing epoch keys, signed Welcome,
+fragment ARQ); the server exercises publisher → relay → subscriber
+glass-to-glass against the public API from outside the crate, so the surface is
+proven consumable rather than only internally green.
+
+`ciris-lens-core` is absorbed in-tree
 ([`crates/ciris-lens-core`](crates/ciris-lens-core)); the standalone lens
 deployment is retired — a central dashboard the whole federation reads is
 itself the singleton this architecture forbids.
