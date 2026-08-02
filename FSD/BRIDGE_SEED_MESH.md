@@ -220,7 +220,7 @@ curl -sS -X POST http://127.0.0.1:4243/v1/federation/peering \
   -d '{
         "peer_key_id": "<B key_id, e.g. ciris-status-1-<fp>>",
         "peer_key_record": { …B's self-signed SignedKeyRecord JSON from B's boot log… },
-        "attestation_prefixes": ["scores:", "capacity:"]
+        "attestation_prefixes": ["capacity:", "trace:"]
       }'
 # …then the SYMMETRIC call on B toward A (paste A's SignedKeyRecord).
 ```
@@ -229,11 +229,36 @@ namespace set THIS node consents to replicate to the peer (trailing ":" signific
 The CEG-driven replication reconciler converges the live `set_peers` with no restart
 (CIRISEdge#173). A is in-group, B is out-of-group; each owns its own corpus.
 
+The set above is the shipped production default,
+`peer::DEFAULT_GRANT_ATTESTATION_PREFIXES`. Two warnings, both learned the hard
+way:
+
+- **`trace:` is not optional.** `promote_consented_backlog` sweeps only rows whose
+  dimension a live grant's prefixes COVER, so a grant omitting `trace:` leaves every
+  sealed trace at `(cohort_scope=self, tier=local)` forever. This example said
+  `["scores:", "capacity:"]` until 2026-08-02; the server's own default was
+  `["capacity:"]` until 0.5.146, and the measured consequence was that ZERO
+  trace_events had ever reached the production canonical, from any node.
+- **`scores:` grants nothing.** It is the CC 2.4.2 `attestation_type` NAME, not a
+  dimension prefix — no dimension is prefixed `scores:`. `normalize_prefixes` does not
+  reject it (CIRISServer#326 defect b), so it signs cleanly into a durable grant that
+  is authoritative-looking and empty.
+
 ### 6. Node A is the canonical seed
-For 0.5.x, `CANONICAL_BOOTSTRAP_PEERS` is empty by design (`src/config_reconcile.rs`): the
-mesh grows from A. Other nodes reach A operationally by setting `net.bootstrap_peers`
-(a `config:*` key, owner-authored via `PUT /v1/config`) to A's Reticulum entry
-`host:port`. This const is baked to `[A, registry1, registry2]` at Server 0.6.
+The mesh grows from A. A fresh node learns the entry addresses from the BAKED canonical
+servers' **signed envelope transport hints** (CIRISPersist#381): each canonical
+`KeyRecord` carries its `ip` hint inside the same accord-scrubbed
+`registration_envelope` that establishes its trust, so who + where arrive together with
+no invented IP in the binary. `compose::canonical_bootstrap_addrs` unions those into the
+dial set at boot.
+
+`net.bootstrap_peers` (a `config:*` key, owner-authored via `PUT /v1/config`, empty
+default) remains as an optional break-glass override pointing at A's Reticulum
+`host:port`.
+
+> The hardcoded `CANONICAL_BOOTSTRAP_PEERS` const this section used to describe was
+> **retired in 0.5.81** — see the note at `src/config_reconcile.rs:96`. It is not empty
+> by design; it does not exist, and grepping for it finds nothing.
 
 ## Verify
 ```sh
