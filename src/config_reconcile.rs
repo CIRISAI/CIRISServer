@@ -23,6 +23,11 @@
 //!   - **replication.reconcile_secs** — HOT-ish: the replication reconciler reads
 //!     the live snapshot to compute its sleep, so a change applies on the next
 //!     tick (no restart).
+//!   - **retention.{cadence_secs,max_age_days,max_disk_gb,audit_log_max_age_days}**
+//!     — fully HOT: [`crate::retention_loop`] reads the live snapshot each pass
+//!     and re-arms its timer mid-sleep when the cadence changes, so tightening a
+//!     bound on a node that is filling its disk takes effect without a restart
+//!     (which is the only moment anyone will ever touch these).
 //!   - **transport.{node,store_and_forward}** — BOOT-STRUCTURAL: the Reticulum
 //!     transport is built once at boot from the resolved snapshot. Changing these
 //!     in CEG takes effect on the next boot (the value now lives in CEG, not env).
@@ -85,6 +90,61 @@ pub const DEFAULT_SCORER_TARGET_N_EFF: f64 = 8.0;
 /// Default for `replication.reconcile_secs`. Was
 /// `CIRIS_SERVER_REPLICATION_RECONCILE_SECS`.
 pub const DEFAULT_REPLICATION_RECONCILE_SECS: u64 = 30;
+
+// ── Retention / eviction (CIRISServer#348) ────────────────────────────────────
+
+/// Default for `retention.cadence_secs` — how often the retention loop enforces
+/// the policy. HOURLY.
+///
+/// Eviction is a COARSE clock. Its finest configurable bound is a day
+/// (`retention.max_age_days`), so anything faster than hourly is re-asking a
+/// question whose answer cannot have changed, against a table scan. And unlike
+/// the scorer there is no detection latency to buy: nobody is waiting to see an
+/// eviction happen.
+pub const DEFAULT_RETENTION_CADENCE_SECS: u64 = 3600;
+
+/// Default for `retention.max_age_days` — the global trace age cap. **90 days.**
+///
+/// lens-core's own [`RetentionPolicy::default`](ciris_lens_core::RetentionPolicy)
+/// is all-`None`, i.e. keep everything forever, and that is the right default for
+/// a LIBRARY: it cannot know whether its embedder is a sovereign archive or a Pi.
+/// A NODE can. A node with no time bound grows monotonically until the disk fills
+/// — measured on the production canonical at 9,811 rows of a single dimension —
+/// and the failure mode of an unbounded store is not a slow query, it is a node
+/// that stops.
+///
+/// 90 days is deliberately far wider than any consumer of this data needs: the
+/// scorer reads a `scorer.window` (500) row page and never looks at age, and a
+/// capacity assertion is valid for 7 days. The bound is here to stop pathological
+/// growth, NOT to express a privacy posture — an operator wanting a privacy
+/// posture sets a much shorter one, and one wanting a sovereign archive sets
+/// `retention.max_age_days = 0` (see [`ResolvedConfig::retention_max_age_days`]).
+pub const DEFAULT_RETENTION_MAX_AGE_DAYS: u32 = 90;
+
+/// Default for `retention.max_disk_gb` — **0, meaning no disk cap** (opt-in).
+///
+/// Not a shrug: disk-pressure eviction is unsafe to bake on SQLite, which is what
+/// a node actually runs. The pressure signal is `PRAGMA page_count * page_size`,
+/// and SQLite does not return pages to the OS on DELETE — freed pages go on the
+/// freelist and `page_count` stays put. So the signal that TRIGGERED the eviction
+/// cannot be cleared BY the eviction: once over the cap, every pass would cut to
+/// the remaining trace window's midpoint, halving it again and again until the
+/// table is empty, and the operator's first symptom would be a node with no
+/// traces at all. Time-bound eviction has no such feedback path — it removes
+/// exactly what is older than the cutoff and then stops.
+///
+/// The knob stays live for Postgres deployments (where `pg_relation_size` does
+/// fall after a delete) and for operators who accept the SQLite behaviour.
+pub const DEFAULT_RETENTION_MAX_DISK_GB: u64 = 0;
+
+/// Default for `retention.audit_log_max_age_days` — **0, meaning never** (opt-in).
+///
+/// The audit hash chain MUST stay unbroken, so eviction there is "archive +
+/// truncate", never delete — and lens-core's executor cannot yet run the archive
+/// (its `cirisaudit` passthrough is off). Baking a default would plan an action
+/// on every pass that the executor then declines to perform, which is a standing
+/// lie in the log.
+pub const DEFAULT_RETENTION_AUDIT_LOG_MAX_AGE_DAYS: u32 = 0;
 /// Default for `mode`. Was `CIRIS_SERVER_MODE` / `AGENT_MODE`. CIRISServer is a
 /// server: installing the server means a server.
 pub const DEFAULT_MODE: &str = "server";
@@ -124,6 +184,14 @@ pub const KEY_SCORER_SAMPLE_GATE: &str = "scorer.sample_gate";
 pub const KEY_SCORER_TARGET_N_EFF: &str = "scorer.target_n_eff";
 /// `replication.reconcile_secs` — the replication reconciler cadence.
 pub const KEY_REPLICATION_RECONCILE_SECS: &str = "replication.reconcile_secs";
+/// `retention.cadence_secs` — how often the retention/eviction loop runs.
+pub const KEY_RETENTION_CADENCE_SECS: &str = "retention.cadence_secs";
+/// `retention.max_age_days` — global trace age cap (`0` = keep forever).
+pub const KEY_RETENTION_MAX_AGE_DAYS: &str = "retention.max_age_days";
+/// `retention.max_disk_gb` — soft disk cap (`0` = no disk-pressure eviction).
+pub const KEY_RETENTION_MAX_DISK_GB: &str = "retention.max_disk_gb";
+/// `retention.audit_log_max_age_days` — audit archival cap (`0` = never).
+pub const KEY_RETENTION_AUDIT_LOG_MAX_AGE_DAYS: &str = "retention.audit_log_max_age_days";
 /// `mode` — the node transport posture (client/proxy/server).
 pub const KEY_MODE: &str = "mode";
 /// `net.listen_addr` — the Reticulum node listen address (boot-structural).
@@ -181,6 +249,23 @@ pub struct ResolvedConfig {
     pub scorer_target_n_eff: f64,
     /// `replication.reconcile_secs` (HOT-ish — applies next reconcile tick).
     pub replication_reconcile_secs: u64,
+    /// `retention.cadence_secs` (HOT). How often the retention loop enforces the
+    /// policy; the loop re-arms its timer when this changes.
+    pub retention_cadence_secs: u64,
+    /// `retention.max_age_days` (HOT). Global trace age cap.
+    ///
+    /// **`0` means "no time bound"** — the encoding, not a sentinel picked for
+    /// convenience. The config store's numeric shape is `i64`; there is no way to
+    /// write `null` through it, so "keep forever" needs a value. Zero is the only
+    /// one that cannot also be a legitimate cap (a 0-day cap would delete every
+    /// trace the instant it lands, which no operator means). It is projected to
+    /// `RetentionPolicy::max_age_days = None`.
+    pub retention_max_age_days: u32,
+    /// `retention.max_disk_gb` (HOT). Soft disk cap; `0` = no disk-pressure
+    /// eviction (same zero-means-unbounded encoding as above).
+    pub retention_max_disk_gb: u64,
+    /// `retention.audit_log_max_age_days` (HOT). Audit archival cap; `0` = never.
+    pub retention_audit_log_max_age_days: u32,
     /// `mode` (boot-structural). The node transport posture string.
     pub mode: String,
     /// `net.listen_addr` (boot-structural). The Reticulum node listen address
@@ -234,6 +319,10 @@ impl Default for ResolvedConfig {
             scorer_sample_gate: DEFAULT_SCORER_SAMPLE_GATE,
             scorer_target_n_eff: DEFAULT_SCORER_TARGET_N_EFF,
             replication_reconcile_secs: DEFAULT_REPLICATION_RECONCILE_SECS,
+            retention_cadence_secs: DEFAULT_RETENTION_CADENCE_SECS,
+            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+            retention_max_disk_gb: DEFAULT_RETENTION_MAX_DISK_GB,
+            retention_audit_log_max_age_days: DEFAULT_RETENTION_AUDIT_LOG_MAX_AGE_DAYS,
             mode: DEFAULT_MODE.to_owned(),
             listen_addr: DEFAULT_LISTEN_ADDR.to_owned(),
             // No baked default — reachability is sourced from the baked canonical
@@ -273,6 +362,24 @@ impl ResolvedConfig {
             DEFAULT_SCORER_CADENCE_SECS
         } else {
             self.scorer_cadence_secs
+        };
+        Duration::from_secs(secs)
+    }
+
+    /// The retention loop's cadence as a [`Duration`], with `0` clamped to the
+    /// default (a zero-period interval would busy-spin).
+    ///
+    /// Note that `0` means the OPPOSITE thing here than it does for the age /
+    /// disk BOUNDS: an unbounded cadence is not a coherent request, so zero can
+    /// only be a mistake and falls back; an unbounded age cap IS coherent, so
+    /// zero is honoured there. Same literal, two different questions — which is
+    /// exactly why each one is decoded in its own named accessor rather than by
+    /// a shared "0 means off" helper.
+    pub fn retention_cadence(&self) -> Duration {
+        let secs = if self.retention_cadence_secs == 0 {
+            DEFAULT_RETENTION_CADENCE_SECS
+        } else {
+            self.retention_cadence_secs
         };
         Duration::from_secs(secs)
     }
@@ -332,6 +439,39 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         .filter(|s| *s > 0)
         .map(|s| s as u64)
         .unwrap_or(d.replication_reconcile_secs);
+    let retention_cadence_secs = graph_config::get_i64(engine, KEY_RETENTION_CADENCE_SECS)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| *s > 0)
+        .map(|s| s as u64)
+        .unwrap_or(d.retention_cadence_secs);
+    // The retention BOUNDS accept `0` (= unbounded) — so the filter is `>= 0`,
+    // not `> 0`. Using the cadence's `> 0` filter here would silently fall back
+    // to the 90-day default on the one write an operator makes to turn eviction
+    // OFF, and their sovereign archive would quietly start deleting.
+    let retention_max_age_days = graph_config::get_i64(engine, KEY_RETENTION_MAX_AGE_DAYS)
+        .await
+        .ok()
+        .flatten()
+        .filter(|days| (0..=u32::MAX as i64).contains(days))
+        .map(|days| days as u32)
+        .unwrap_or(d.retention_max_age_days);
+    let retention_max_disk_gb = graph_config::get_i64(engine, KEY_RETENTION_MAX_DISK_GB)
+        .await
+        .ok()
+        .flatten()
+        .filter(|g| *g >= 0)
+        .map(|g| g as u64)
+        .unwrap_or(d.retention_max_disk_gb);
+    let retention_audit_log_max_age_days =
+        graph_config::get_i64(engine, KEY_RETENTION_AUDIT_LOG_MAX_AGE_DAYS)
+            .await
+            .ok()
+            .flatten()
+            .filter(|days| (0..=u32::MAX as i64).contains(days))
+            .map(|days| days as u32)
+            .unwrap_or(d.retention_audit_log_max_age_days);
     let mode = graph_config::get_str(engine, KEY_MODE)
         .await
         .ok()
@@ -436,6 +576,10 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         scorer_sample_gate,
         scorer_target_n_eff,
         replication_reconcile_secs,
+        retention_cadence_secs,
+        retention_max_age_days,
+        retention_max_disk_gb,
+        retention_audit_log_max_age_days,
         mode,
         listen_addr,
         bootstrap_peers,

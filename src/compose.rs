@@ -1098,6 +1098,34 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         None
     };
 
+    // ── Retention / eviction loop (CIRISServer#348) — the periodic pass that
+    //    enforces `config:* retention.*` against the local store. lens-core has
+    //    shipped `plan_eviction` / `execute_plan` / `evict_per_retention_policy`
+    //    since v0.4 and nothing has ever called them, so the store's only bound
+    //    was the disk (a production canonical reached 9,811 rows of one dimension
+    //    in a 21 MB DB with a 9.5 MB WAL).
+    //
+    //    UNGATED by `caps.lens_store`, unlike the scorer/holonomic/replication
+    //    tiers above. Those are corpus-GROWTH tiers and it is right to switch
+    //    them off on a low-disk host. This is the opposite: it is the thing that
+    //    SHRINKS the corpus, and a low-disk host is precisely where it earns its
+    //    keep. Gating the disk-protector on having enough disk would disable it
+    //    exactly when it matters — the shape of gate that produced #279's
+    //    silently-absent listener. ────────────────────────────────────────────
+    crate::compose_status::phase("retention_loop");
+    let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
+    let retention_join = {
+        let cfg = crate::retention_loop::RetentionConfig::from_resolved(&initial_config);
+        tracing::info!(
+            cadence_secs = cfg.cadence.as_secs(),
+            max_age_days = ?cfg.policy.max_age_days,
+            max_disk_gb = ?cfg.policy.max_disk_gb,
+            audit_log_max_age_days = ?cfg.policy.audit_log_max_age_days,
+            "retention loop spawned (local-store eviction; bounds HOT from config:* retention.*)"
+        );
+        crate::retention_loop::spawn(Arc::clone(&engine), config_rx.clone(), retention_sd_rx)
+    };
+
     // ── ADAPTER SEAM (start + run_lifecycle) ──────────────────────────────────
     // Mirror of the agent adapter contract: `start()` is the one-shot setup run
     // BEFORE the long-running lifecycle, then `run_lifecycle(agent_task)` runs as
@@ -1156,6 +1184,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if let Some(join) = reconcile_join {
         let _ = join.await;
     }
+    // Tear down the retention loop (CIRISServer#348). Before the config
+    // reconciler: the loop selects on the config watch, and dropping the sender
+    // first would race its shutdown branch against a `changed()` error break.
+    let _ = retention_sd_tx.send(true);
+    let _ = retention_join.await;
     // Tear down the CEG-driven config reconcile loop (Server 0.5 Phase 2).
     let _ = config_sd_tx.send(true);
     let _ = config_reconcile_join.await;

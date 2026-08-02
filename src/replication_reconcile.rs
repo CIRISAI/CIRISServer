@@ -104,6 +104,61 @@ pub async fn reconcile_once(
         ),
     }
 
+    // ── The #227 CONSENT-DECAY sweep (CIRISServer#337) ──────────────────────
+    // The second of the pair #337 asked for, and the one that was still
+    // uncalled: `repair_stranded_scope_backlog` above landed; this did not.
+    //
+    // It is the TIME-driven twin of the disk-pressure sweeper. A content unit
+    // admitted under a TEMPORARY (14-day) or pattern (90-day) consent class is
+    // supposed to shed symbols down its tier schedule as that window elapses —
+    // that decay IS the consent, and it is what makes "temporary" mean anything
+    // to the person who granted it. Nothing drives that clock but this call, so
+    // until now every unit stayed at Full tier indefinitely: the schedule was
+    // computed, tested, and never once advanced on a live node. An expiry that
+    // no clock enforces is not an expiry.
+    //
+    // Disk-INDEPENDENT by design (no watermark, no free-bytes gate) — the
+    // promise was made in days, not in bytes, so a node with plenty of disk must
+    // still honour it. Safe to run unconditionally: idempotent (the eviction
+    // only removes symbols down to a keep-count, so re-running at the same
+    // instant evicts nothing further), fail-safe for units that declare no decay
+    // class (left untouched — silence is not consent to delete), and manifests
+    // are never touched (the always-retained provenance).
+    //
+    // This loop is the right home for the same reason the repair sweep is: it is
+    // already the tick that converges the node to what consent says, and the
+    // decay schedule is consent with a clock on it.
+    match engine.sweep_consent_decay_once(chrono::Utc::now()).await {
+        Ok(report) => {
+            // Only speak when the clock actually moved something. A node holding
+            // no fountain content — still the common case — would otherwise log
+            // an identical zero every cadence forever, and the one pass that
+            // DOES decay something would be indistinguishable from it.
+            if report.content_decayed > 0 || report.symbols_evicted > 0 {
+                tracing::info!(
+                    content_scanned = report.content_scanned,
+                    content_with_decay_class = report.content_with_decay_class,
+                    content_decayed = report.content_decayed,
+                    symbols_evicted = report.symbols_evicted,
+                    "CIRISPersist#227 consent-decay sweep: {} content unit(s) crossed a decay \
+                     breakpoint and shed {} symbol(s) — the TEMPORARY/pattern consent windows \
+                     are being honoured on the clock, not just at admission",
+                    report.content_decayed,
+                    report.symbols_evicted,
+                );
+            }
+        }
+        // Never fail the tick on the decay sweep, for the same reason as the
+        // repair above: peer convergence is this loop's primary duty. A missed
+        // sweep costs latency on a decay boundary, and the next tick re-derives
+        // the target tier from the wall clock — nothing is lost by skipping one.
+        Err(e) => tracing::warn!(
+            error = %e,
+            "CIRISPersist#227 consent-decay sweep failed this tick — content past a decay \
+             breakpoint keeps its symbols until the next tick; peer convergence continues"
+        ),
+    }
+
     // Desired topology from the corpus (the consent objects ARE the topology).
     let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
 

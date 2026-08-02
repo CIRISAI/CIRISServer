@@ -265,6 +265,14 @@ pub mod radio;
 /// the runtime — it writes CEG and nudges this loop. Public so the integration
 /// test (`tests/replication_reconcile.rs`) can drive `reconcile_once` directly.
 pub mod replication_reconcile;
+/// The **retention / eviction control loop** (CIRISServer#348) — the periodic
+/// pass that enforces the node's `RetentionPolicy` against the local store.
+/// lens-core has shipped the eviction stack (`plan_eviction` / `execute_plan` /
+/// `evict_per_retention_policy`) since v0.4 with nothing calling it, so the store's
+/// only bound was the disk. Bounds + cadence are HOT from `config:* retention.*`.
+/// Public so the integration test (`tests/retention_loop.rs`) can drive a single
+/// deterministic pass.
+pub mod retention_loop;
 /// The substrate **safety foundation** (CIRISServer#20) — moderation +
 /// child-safety as first-class fabric primitives, built AHEAD of content
 /// features: age-assurance + the protective age-gate, moderation as a delegable

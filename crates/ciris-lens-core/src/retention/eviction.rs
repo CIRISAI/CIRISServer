@@ -17,7 +17,11 @@ pub const DEFAULT_TRACE_BATCH_SIZE: usize = 1_000;
 /// Disk-pressure threshold — eviction triggers at this fraction of
 /// `max_disk_gb` reached. FSD §8.2: "Soft cap; triggers eviction
 /// once 90% reached."
-const DISK_EVICTION_THRESHOLD: f64 = 0.9;
+///
+/// `pub` so a driver (ciris-server's retention loop) can say in its
+/// pass line WHY a configured disk cap did not fire yet, without
+/// writing a second `0.9` next to this one.
+pub const DISK_EVICTION_THRESHOLD: f64 = 0.9;
 
 /// Errors from [`evict_per_retention_policy`] / [`execute_plan`].
 #[derive(Debug, thiserror::Error)]

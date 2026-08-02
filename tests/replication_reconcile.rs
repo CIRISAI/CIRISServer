@@ -49,6 +49,9 @@ use ciris_server::peer;
 use ciris_server::replication_reconcile;
 use ciris_server::PeerB;
 
+#[path = "support/log_capture.rs"]
+mod log_capture;
+
 const NODE_A_KEY_ID: &str = "ciris-server";
 
 // ── Node A: in-memory hybrid-signed Engine (mirrors peer_replication.rs) ──────
@@ -467,5 +470,151 @@ async fn reconcile_only_registers_admitted_consent_subjects() {
         attestation_keys(&runtime).await,
         vec!["peer-ok".to_string()],
         "an admitted consent subject becomes a live Initiator at runtime"
+    );
+}
+
+// ── Test 4: the consent-decay sweep is wired into the tick (CIRISServer#337) ──
+
+/// Strip Rust comments so a source gate matches CODE and only code.
+///
+/// A gate that greps raw source matches its own explanatory prose — the comment
+/// naming the thing is indistinguishable from the call doing it. That has
+/// shipped here twice, and both times the gate stayed green across a mutation
+/// that deleted the call and left the paragraph explaining it behind.
+fn code_only(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    let mut in_block = false;
+    while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('/', Some('/')) => {
+                // Line comment — covers `//`, `///` and `//!` alike.
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                in_block = true;
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `reconcile_once`'s body, comments removed.
+fn reconcile_once_code() -> String {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replication_reconcile.rs"),
+    )
+    .expect("readable");
+    let code = code_only(&src);
+    let body = code
+        .split_once("pub async fn reconcile_once")
+        .expect("reconcile_once must exist")
+        .1;
+    // Up to the next top-level `pub fn` — the `spawn` that follows it.
+    body.split_once("\npub fn ")
+        .map(|(before, _)| before.to_string())
+        .unwrap_or_else(|| body.to_string())
+}
+
+/// **CIRISServer#337, the half that was still uncalled.**
+///
+/// `repair_stranded_scope_backlog` landed in this tick; `sweep_consent_decay_once`
+/// did not, and persist exposes it with zero callers anywhere in `src/`. Nothing
+/// else drives the TEMPORARY (14-day) / pattern (90-day) consent-decay clock, so
+/// without this call every content unit stays at Full tier forever and a consent
+/// window granted in days simply never elapses. An expiry no clock enforces is
+/// not an expiry.
+///
+/// A source gate rather than a behavioural one, for a reason worth recording:
+/// `admitted_at` is stamped by persist at admission and the first decay
+/// breakpoint is 25% of 14 days, so driving this end-to-end through
+/// `reconcile_once` — which passes wall-clock `now` — would need a fixture that
+/// waits three and a half days. The CALL SITE is the part that can be pinned.
+#[test]
+fn the_consent_decay_sweep_is_called_from_the_reconcile_tick() {
+    let code = reconcile_once_code();
+    assert!(
+        code.contains("sweep_consent_decay_once"),
+        "`reconcile_once` no longer calls `sweep_consent_decay_once`. persist ships the sweep and \
+         nothing else calls it, so the consent-decay clock stops dead: every fountain unit keeps \
+         every symbol past its declared window, and the node silently over-retains content \
+         somebody consented to only temporarily.\n\ncode:\n{code}"
+    );
+}
+
+/// The sweep must never fail the tick.
+///
+/// Peer convergence is this loop's primary duty and the one with a deadline. A
+/// `?` here would let a transient substrate error on a MAINTENANCE sweep stop
+/// the node converging to its consent topology — trading the loop's whole
+/// purpose for a sweep whose next run re-derives the same answer from the wall
+/// clock anyway. The sibling #530 repair sweep above it is handled the same way.
+#[test]
+fn a_failing_decay_sweep_does_not_fail_the_reconcile_tick() {
+    let code = reconcile_once_code();
+    let at = code
+        .find("sweep_consent_decay_once")
+        .expect("the call must exist (see the gate above)");
+    let after = &code[at..];
+    let awaited = after.find(".await").expect("the sweep is awaited") + ".await".len();
+    assert!(
+        !after[awaited..].trim_start().starts_with('?'),
+        "the consent-decay sweep propagates its error with `?`, so a transient substrate failure \
+         on a maintenance sweep aborts the tick before the peer set is converged. Handle it the \
+         way the #530 repair sweep directly above it is handled: match, warn, carry on."
+    );
+}
+
+/// **The steady state is not an alarm.**
+///
+/// The overwhelmingly common node holds no fountain content at all, so the decay
+/// sweep scans nothing and evicts nothing on every tick — every 30 seconds,
+/// forever. Logged unconditionally that is ~2,880 identical lines a day saying
+/// nothing happened, and the one tick that DID decay something would be
+/// invisible inside them. 0.5.152 shipped exactly this shape on the scorer and
+/// 0.5.153 removed it.
+#[tokio::test]
+async fn a_tick_with_nothing_to_decay_raises_no_alarm() {
+    let engine = node_a().await;
+    register_self(&engine).await;
+    let nk = node_a_key_id(&engine).await;
+    let runtime = runtime_for(&engine, vec![]).await;
+
+    let (result, log) = log_capture::capture(replication_reconcile::reconcile_once(
+        &engine, &nk, &runtime,
+    ))
+    .await;
+    result.expect("reconcile_once must not error on a clean node");
+
+    assert!(
+        log.alarms().is_empty(),
+        "a reconcile tick on a node with no fountain content and no consent peers raised {} \
+         alarm(s). Every healthy node ticks this way every 30 seconds; an alarm here is 2,880 \
+         unactionable lines a day, and the operator who learns to skip them is the one who \
+         misses the real one.\n{}",
+        log.alarms().len(),
+        log.render()
+    );
+    assert!(
+        log.events()
+            .iter()
+            .all(|e| !e.message.contains("consent-decay")),
+        "the decay sweep spoke on a tick where it did nothing. Reserve the line for a tick that \
+         actually crossed a breakpoint — otherwise the two are the same observation.\n{}",
+        log.render()
     );
 }
