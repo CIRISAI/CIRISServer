@@ -807,17 +807,30 @@ async fn structured_and_known_plaintext_stay_below_floor() {
 // against that blob is true-by-construction and proves NOTHING about erasure —
 // any independent blob passes. A faithful aggregation-erasure MEASUREMENT needs
 // the composite computed FROM the members via a real N→1 resampling/composite
-// operator, which does NOT exist in edge today (grep-confirmed) — filed
-// CIRISEdge#266. persist is codec-free; the codec (edge codec-fountain) has no
-// N→1 fold. Until #266 lands this stays #[ignore] as a WAITING ACCEPTANCE TEST:
+// operator. That operator NOW EXISTS: `aggregate_symbols`, in the pinned edge at
+// `src/transport/realtime_av_codec/fountain.rs:429`, shipped in v9.0.0.
+//
+// This comment previously read "does NOT exist in edge today (grep-confirmed)"
+// and cited CIRISEdge#266 as the blocker. That was true when written and false
+// for many releases after, and the evidence language ("grep-confirmed") is what
+// made it costly: a triager reads it, concludes the test is correctly waiting on
+// upstream, and moves on. It is not blocked. It is UNWRITTEN.
+//
+// That is this repository's signature defect — a claim that outruns its
+// measurement — living inside the suite that measures that defect. See
+// CONTRIBUTING.md §"a design doc is not an implementation".
+//
+// So this stays #[ignore] as a WAITING ACCEPTANCE TEST, but waiting on US:
 // the member-storage + hard-delete + composite-survives scaffolding is real, but
 // the fabricated fidelity assertion is REMOVED. When #266 ships, replace the
 // gist construction with `edge::compose(members)` and assert per-member residual
 // fidelity ≤ max(ε, 1/N_eff) — then drop the #[ignore].
 // ════════════════════════════════════════════════════════════════════
 #[tokio::test]
-#[ignore = "faithful N→1 aggregation-erasure measurement needs edge's resampling/composite operator (CIRISEdge#266); \
-            a fabricated independent composite makes residual_fidelity < 1/N true-by-construction — not a proof"]
+#[ignore = "UNWRITTEN, NOT BLOCKED: edge's N→1 operator (aggregate_symbols, \
+            realtime_av_codec/fountain.rs) has shipped since v9.0.0. What is missing is this test \
+            calling it — a fabricated independent composite makes residual_fidelity < 1/N \
+            true-by-construction, which is not a proof. See CIRISServer#239"]
 async fn aggregation_collapse_erases_the_individual_pending_ciris_edge_266() {
     let backend = migrated_sqlite().await;
     let cfg = codec_config();
