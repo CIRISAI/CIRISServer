@@ -45,5 +45,7 @@
 pub mod eviction;
 pub mod summary;
 
-pub use eviction::{evict_per_retention_policy, execute_plan, plan_eviction, EvictionError};
+pub use eviction::{
+    evict_per_retention_policy, execute_plan, plan_eviction, EvictionError, DISK_EVICTION_THRESHOLD,
+};
 pub use summary::{EvictionPlan, EvictionSummary};

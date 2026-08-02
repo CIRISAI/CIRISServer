@@ -83,6 +83,57 @@ impl RetentionPolicy {
     pub fn indefinite() -> Self {
         Self::default()
     }
+
+    // ── Bound setters (CIRISServer#348) ─────────────────────────────────────
+    //
+    // The struct is `#[non_exhaustive]`, so a caller in ANOTHER crate — e.g.
+    // ciris-server's retention loop, which projects the node's `config:*`
+    // knobs onto a policy — cannot use a struct literal and cannot use
+    // `..Default::default()` either. The remaining shape is
+    // `let mut p = default(); p.field = ..;`, which clippy rejects
+    // (`field_reassign_with_default`), so the only lint-clean way to build a
+    // bounded policy from outside was to not build one at all. These exist so
+    // the policy type is CONSTRUCTIBLE by its consumers.
+    //
+    // Named setters rather than a positional `bounded(a, b, c)` ctor on
+    // purpose: three `Option<integer>` bounds in a row is exactly the shape
+    // where two arguments swap silently and the compiler agrees.
+
+    /// Set the global trace age cap (`None` = no time bound).
+    pub fn with_max_age_days(mut self, days: Option<u32>) -> Self {
+        self.max_age_days = days;
+        self
+    }
+
+    /// Set the soft disk-usage cap in GB (`None` = no disk-pressure eviction).
+    pub fn with_max_disk_gb(mut self, gb: Option<u64>) -> Self {
+        self.max_disk_gb = gb;
+        self
+    }
+
+    /// Set the audit-log age cap (`None` = never archive).
+    pub fn with_audit_log_max_age_days(mut self, days: Option<u32>) -> Self {
+        self.audit_log_max_age_days = days;
+        self
+    }
+
+    /// Whether this policy bounds ANYTHING. A policy that bounds nothing is a
+    /// legitimate operator choice (the sovereign anchor keeps everything) and
+    /// also the state in which the local store grows until the disk fills — so
+    /// the retention loop reports it as its own named outcome rather than
+    /// running a sweep that provably cannot act.
+    ///
+    /// Counts exactly the three ✅ rows of the [`crate::retention`]
+    /// enforcement table. `per_level_max_age` and
+    /// `detection_events_max_age_days` are the ⏸ rows — configured but with no
+    /// enforcement path — and counting them would let a node report itself
+    /// bounded while nothing whatsoever bounds it, which is the more dangerous
+    /// of the two wrong answers.
+    pub fn is_bounded(&self) -> bool {
+        self.max_disk_gb.is_some()
+            || self.max_age_days.is_some()
+            || self.audit_log_max_age_days.is_some()
+    }
 }
 
 #[cfg(test)]

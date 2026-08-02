@@ -109,7 +109,10 @@ pub use config::{
 };
 pub use detector::CoherenceRatchetDetector;
 pub use pipeline::lifecycle::{LensCore, Outcome};
-pub use retention::{evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary};
+pub use retention::{
+    evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary,
+    DISK_EVICTION_THRESHOLD,
+};
 pub use role::{
     CalibrationBundleResponse, LensCoreHandler, LensQueryError, ManifoldAggregateResponse,
     NodeError, NodeHandle, RelayError, RelayHandle, RetRelayHandle, ScoreListResponse,
