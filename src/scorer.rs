@@ -534,6 +534,63 @@ fn coalesce_bucket(unchanged_for: chrono::Duration) -> chrono::Duration {
     chrono::Duration::seconds(secs)
 }
 
+/// Page size for the capacity-plane read. Bounds the scan; the working set for
+/// one subject's capacity history is far smaller.
+const CAPACITY_READ_LIMIT: i64 = 512;
+
+/// This subject's live `capacity:*` rows, filtered IN THE QUERY.
+///
+/// # Why (CIRISServer#343)
+///
+/// `standing_assertion` and `unchanged_for` were each doing
+/// `list_attestations_for(subject)` — every attestation about that subject —
+/// and then filtering by dimension in Rust. Two full scans per agent per
+/// 60-second pass. On a canonical with twenty agents that is forty scans a
+/// minute, growing with every row anyone ever writes about anyone.
+///
+/// I added both of those helpers one cut before writing this, while fixing a
+/// different unbounded-growth defect. The measured instance was elsewhere
+/// (`graph_config`, 9,824 rows scanned fifteen times to read twelve values,
+/// a 152-second boot phase) — but the shape was the same, and the reason it
+/// went unnoticed in review is that `list_attestations_for(x)` reads as a
+/// narrow query. It is not; the narrowing is the caller's `.filter()`.
+async fn live_capacity_rows(
+    engine: &Engine,
+    attested_key_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<ciris_persist::federation::Attestation> {
+    use ciris_persist::ceg::list::federation::AttestationFilter;
+
+    let mut filter = AttestationFilter::default();
+    filter.attested_key_id = Some(attested_key_id.to_owned());
+    filter.attestation_type = Some(ATTESTATION_TYPE_SCORES.to_owned());
+    // Prefix derived from the dimension constant, never a second literal.
+    filter.dimension_prefixes = vec![CAPACITY_DIMENSION
+        .split_once(':')
+        .map(|(fam, _)| format!("{fam}:"))
+        .unwrap_or_else(|| CAPACITY_DIMENSION.to_owned())];
+
+    let Ok(page) = engine
+        .list_attestations(
+            filter,
+            None,
+            CAPACITY_READ_LIMIT,
+            ciris_persist::prelude::CallerScope::Unauthenticated,
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    page.items
+        .into_iter()
+        .filter(|a| {
+            ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
+                .is_some_and(|d| d == CAPACITY_DIMENSION)
+        })
+        .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        .collect()
+}
+
 /// The already-standing assertion for `(subject, capacity dimension)`, if the
 /// corpus already says exactly this.
 ///
@@ -555,17 +612,9 @@ async fn standing_assertion(
     bucket_start: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    let rows = engine
-        .federation_directory()
-        .list_attestations_for(attested_key_id)
+    live_capacity_rows(engine, attested_key_id, now)
         .await
-        .ok()?;
-    rows.iter()
-        .filter(|a| {
-            ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
-                .is_some_and(|d| d == CAPACITY_DIMENSION)
-        })
-        .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        .iter()
         // Same measurement: the band we would author, already authored.
         .filter(|a| a.weight.is_some_and(|w| (w - score).abs() < f64::EPSILON))
         .map(|a| a.asserted_at)
@@ -585,19 +634,9 @@ async fn unchanged_for(
     score: f64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> chrono::Duration {
-    let Ok(rows) = engine
-        .federation_directory()
-        .list_attestations_for(attested_key_id)
+    live_capacity_rows(engine, attested_key_id, now)
         .await
-    else {
-        return chrono::Duration::zero();
-    };
-    rows.iter()
-        .filter(|a| {
-            ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
-                .is_some_and(|d| d == CAPACITY_DIMENSION)
-        })
-        .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        .iter()
         .filter(|a| a.weight.is_some_and(|w| (w - score).abs() < f64::EPSILON))
         .map(|a| a.asserted_at)
         .min()
