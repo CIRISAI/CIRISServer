@@ -114,6 +114,12 @@ pub mod conformance;
 /// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
+/// **Same-key equivocation detection** (CIRISServer#350, CC 6.1.1 N4) — the
+/// periodic pass that compares the rows this node holds and emits a
+/// `hard_case:attestation_equivocation` when ONE key has signed two different
+/// claims about one subject at one signed instant. Local detection only: no
+/// consensus, and no automatic penalty on a signal that can be manufactured.
+pub mod equivocation;
 /// Generic CEWP **family operations** over persist's family CEG DX
 /// (`federation_families` + membership revocations) — create / add / live-roster /
 /// swap, NOT accord-aware. The HUMANITY_ACCORD kill-switch is one specialization.

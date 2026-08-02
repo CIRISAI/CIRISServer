@@ -1126,6 +1126,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         crate::retention_loop::spawn(Arc::clone(&engine), config_rx.clone(), retention_sd_rx)
     };
 
+    // ── SAME-KEY EQUIVOCATION DETECTOR (CIRISServer#350, CC 6.1.1 N4) ────────
+    // Compares the live rows this node already holds and emits the `hard_case`
+    // N4 specifies when ONE key signed two different claims about one subject at
+    // one signed instant. NOT gated on `lens_store`: it reads the federation
+    // corpus every node carries, not the trace corpus. Detection only — no
+    // consensus, no automatic penalty (see the module doc).
+    let _equivocation = crate::equivocation::spawn(
+        Arc::clone(&engine),
+        crate::equivocation::DetectorConfig::default(),
+    );
+
     // ── ADAPTER SEAM (start + run_lifecycle) ──────────────────────────────────
     // Mirror of the agent adapter contract: `start()` is the one-shot setup run
     // BEFORE the long-running lifecycle, then `run_lifecycle(agent_task)` runs as
