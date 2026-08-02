@@ -370,6 +370,17 @@ async fn peering(
 
 /// Request body for [`consent`].
 #[derive(Debug, Deserialize)]
+struct EraseTracesRequest {
+    /// The agent whose trace corpus is erased — hash, not a key id: erasure
+    /// covers ALL of that agent's signing keys (persist keys on agent_id_hash
+    /// alone for exactly this reason).
+    agent_id_hash: String,
+    /// MANDATORY. Recorded in the log line beside the counts. An erasure with
+    /// no stated reason cannot be told from an unauthorized one afterwards.
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConsentRequest {
     /// The peer this node consents to replicate to. MUST already be an admitted
     /// `federation_keys` row (e.g. the baked canonical). This route does NOT
@@ -432,6 +443,117 @@ struct ConsentResponse {
     /// `None`. Distinct from the replication grant: two objects, two lifetimes.
     analyze_grant_attestation_id: Option<String>,
     reconciler_note: &'static str,
+}
+
+/// `POST /v1/federation/erase-agent-traces` — GDPR Art. 17 / DSAR full erasure
+/// of one agent's trace corpus, keyed on `agent_id_hash`.
+///
+/// # Why this route exists
+///
+/// `Engine::delete_traces_for_agent_id_hash` has shipped in persist since
+/// v6.9.0 (#222) and had NO caller anywhere in this repo. The erasure primitive
+/// was built, atomic, tombstoning and audited — and unreachable. An operator
+/// facing a deletion demand had the capability and no way to invoke it.
+///
+/// Persist does the hard part in one transaction: hard-deletes `trace_events` +
+/// `trace_llm_calls`, TOMBSTONES the derived `detection_events` (NULLs the PII
+/// linkage, stamps `erased_at` — the analytics survive, the subject linkage is
+/// severed), and emits a `hard_case:trace_erasure` audit row. Idempotent: a
+/// second call returns all-zero counts rather than an error.
+///
+/// # Scope — what this deliberately does NOT reach
+///
+/// TRACES ONLY. A payload can hide in any of six arbitrary-payload fields
+/// (`attestation_envelope`, `registration_envelope`, `attestation_evidence`
+/// (raw bytes), `policy_blob` x2, `HardCaseEvent.detail`), and every erasure
+/// primitive persist exposes is keyed by a ROLE — agent, actor, content_id,
+/// tier — never by OBJECT. There is no `(table, row_id)` erasure at all.
+/// Filed as CIRISPersist#573. Until that lands, the only lever for a payload
+/// outside the trace corpus is `evict_actor` on the whole key, which is the
+/// CA-distrust problem: a tool so blunt it never gets pulled.
+///
+/// Owner-gated identically to consent/peering: owner-binding, owner session,
+/// and the `Peer` verb. Erasure is not a routine read.
+async fn erase_agent_traces(
+    State(st): State<FederationAdminState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+        .await
+        .is_err()
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this node has no responsible party (owner-binding) — erasure refused; \
+             an unowned node performs no erasure on anyone's behalf.",
+        );
+    }
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) =
+                crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Peer)
+            {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+
+    let req: EraseTracesRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+    };
+    if req.agent_id_hash.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "agent_id_hash is required — erasure is never inferred from context",
+        );
+    }
+    if req.reason.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "reason is required — an erasure that does not record why it happened is \
+             indistinguishable from an unauthorized one once the actor is gone",
+        );
+    }
+
+    match st
+        .engine
+        .delete_traces_for_agent_id_hash(&req.agent_id_hash)
+        .await
+    {
+        Ok(sum) => {
+            tracing::warn!(
+                agent_id_hash = %req.agent_id_hash,
+                reason = %req.reason,
+                trace_events = sum.trace_events,
+                trace_llm_calls = sum.trace_llm_calls,
+                detection_events_tombstoned = sum.detection_events_tombstoned,
+                "ERASURE performed (GDPR Art. 17 / DSAR) — traces hard-deleted, detection \
+                 linkage tombstoned, hard_case:trace_erasure emitted by persist"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "erased": true,
+                    "agent_id_hash": req.agent_id_hash,
+                    "trace_events": sum.trace_events,
+                    "trace_llm_calls": sum.trace_llm_calls,
+                    "detection_events_tombstoned": sum.detection_events_tombstoned,
+                    "erased_at": sum.erased_at.to_rfc3339(),
+                    "scope_note": "traces only — payloads in attestation/registration envelopes, \
+                                   attestation_evidence, policy_blob or hard_case detail are NOT \
+                                   reached by any erasure primitive (CIRISPersist#573)",
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("erasure failed: {e}"),
+        ),
+    }
 }
 
 /// `POST /v1/federation/consent` — author THIS node's directed
@@ -766,6 +888,10 @@ pub fn router(
         // The explicit consent act — author a consent:replication grant at an
         // already-admitted peer (the agent wizard calls this on owner opt-in).
         .route("/v1/federation/consent", axum::routing::post(consent))
+        .route(
+            "/v1/federation/erase-agent-traces",
+            axum::routing::post(erase_agent_traces),
+        )
         // CC 2.2 / CC 2.6.4 (CIRISServer#159) — the peer-facing declaration.
         .route(
             "/v1/federation/conformance",
