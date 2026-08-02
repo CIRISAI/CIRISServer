@@ -200,6 +200,12 @@ mod import;
 /// signature is the auth, so it is unauthenticated like the relay. Public so the
 /// integration test (`tests/ingest_http.rs`) can drive the router directly.
 pub mod ingest_http;
+/// Directed-consent federation peering (CIRISServer federation Round 2): mutual
+/// key registration + the `consent:replication:v1` grant that authorizes
+/// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
+/// Public so the integration test (`tests/peer_replication.rs`) can drive the
+/// admission + consent-emit logic directly.
+pub mod location;
 /// **Memory READ surface** — agent-compat Memory + GraphMemory card endpoints
 /// (`GET /v1/memory/stats`, `GET /v1/memory/timeline`, `POST /v1/memory/query`,
 /// `GET /v1/memory/{node_id}`, `GET /v1/memory/{node_id}/edges`). Projects the
@@ -223,11 +229,6 @@ pub mod node_control;
 /// byte-identically with the agent so a code shared from one app decodes on the
 /// other. Public so the node-code endpoint + the founder's client can use it.
 pub mod nodecode;
-/// Directed-consent federation peering (CIRISServer federation Round 2): mutual
-/// key registration + the `consent:replication:v1` grant that authorizes
-/// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
-/// Public so the integration test (`tests/peer_replication.rs`) can drive the
-/// admission + consent-emit logic directly.
 pub mod peer;
 /// Mount-by-proxy router (CIRISServer#80) — reverse-proxy a path prefix to a
 /// sibling service's upstream base URL, so an out-of-process brain folds onto the
@@ -1268,6 +1269,51 @@ mod python {
     }
 
     #[pyfunction]
+    /// `ciris_server.mint_location_proof(latitude, longitude, resolution=None)`
+    /// — mint, sign and store this node's H3 `location_proof`. Returns the
+    /// signed proof as JSON.
+    ///
+    /// **This exists because the agent cannot do it.** Minting an H3 cell in
+    /// Python needs the `h3` package, which publishes no Android wheel and is a
+    /// C extension, so Chaquopy cannot load it. `ciris-server` ships Android
+    /// wheels for all three ABIs and persist already implements H3 — including
+    /// the resolution bound (CIRISServer#341).
+    ///
+    /// `resolution` omitted ⇒ this build's default, read from persist's
+    /// `MAX_LOCATION_PROOF_RESOLUTION`. Do not restate the bound; a caller that
+    /// hardcodes 7 has made a copy that can silently disagree with the
+    /// substrate. Read it from `consent_disclosure()["location"]["max_resolution"]`
+    /// if you need to display it, and pass `None` if you just want the default.
+    ///
+    /// Anything finer than the bound is refused by `validate_location_cell` —
+    /// the substrate is the second line of defence after client UI gating, so a
+    /// producer cannot over-share precise location even when the client fails.
+    #[pyo3(name = "mint_location_proof", signature = (latitude, longitude, resolution = None))]
+    fn py_mint_location_proof(
+        py: Python<'_>,
+        latitude: f64,
+        longitude: f64,
+        resolution: Option<u8>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "mint_location_proof: no in-process persist Engine",
+                )
+            })?;
+            let (rt, _c) = crate::federation_delivery::held().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "mint_location_proof: federation delivery not started",
+                )
+            })?;
+            rt.block_on(crate::location::mint_location_proof(
+                &engine, latitude, longitude, resolution,
+            ))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyfunction]
     /// `ciris_server.consent_disclosure()` — **the copy a setup wizard SHOWS the
     /// operator**, as JSON, single-sourced from the substrate.
     ///
@@ -1597,6 +1643,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
+        m.add_function(wrap_pyfunction!(py_mint_location_proof, m)?)?;
         m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;

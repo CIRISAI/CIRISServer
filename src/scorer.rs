@@ -288,6 +288,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     let n_summaries = page.items.len();
     let n_agents = by_agent.len();
     let mut empty_matrix_agents = 0usize;
+    let mut unchanged_agents = 0usize;
     let mut unregistered_agents = 0usize;
     let mut emitted = 0usize;
     for (agent_id_hash, traces) in by_agent {
@@ -313,8 +314,23 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         };
 
         match score_and_emit(engine, node_key_id, &attested_key_id, &traces, cfg).await {
-            Ok(true) => emitted += 1,
-            Ok(false) => {
+            Ok(ScoreOutcome::Emitted) => emitted += 1,
+            // Unchanged is the STEADY STATE on a healthy node, not a problem.
+            // Counted separately so the pass line distinguishes "nothing to say"
+            // from "nothing to say it with".
+            Ok(ScoreOutcome::Unchanged {
+                standing_since,
+                bucket_secs,
+            }) => {
+                unchanged_agents += 1;
+                tracing::debug!(
+                    agent = %attested_key_id,
+                    %standing_since,
+                    bucket_secs,
+                    "capacity scorer: score unchanged and already standing — not re-authoring"
+                );
+            }
+            Ok(ScoreOutcome::NoFeatureRows) => {
                 // Scored-but-not-emitted: the agent had trace summaries but NO
                 // usable feature rows (feature_matrix empty). Visible per-agent so
                 // the window/feature-extraction semantics are never a silent zero.
@@ -396,22 +412,51 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         } else {
             "feature semantics — summaries present but no capacity authored (empty matrices,              the sample gate, or CC#46 analyze consent)"
         };
-        tracing::warn!(
-            n_summaries,
-            n_agents,
-            empty_matrix_agents,
-            unregistered_agents,
-            window = cfg.window,
-            raw_trace_events,
-            sample_size_gate = cfg.sample_size_gate,
-            narrowing,
-            "capacity scorer pass emitted ZERO — see `narrowing` for which plane stopped it"
-        );
+        // Coalescing changed what a zero MEANS, and this instrument predates it.
+        //
+        // Before 0.5.152 every pass authored a row, so `emitted == 0` could only
+        // be a fault and the WARN above was right to shout. Now the steady state
+        // on a perfectly healthy node is zero emissions — every score already
+        // stands, asserted within its bucket, and there is nothing new to say.
+        // Left alone this would WARN "feature semantics" once a minute forever,
+        // and an operator would correctly learn to ignore it. An alarm that
+        // fires on the happy path trains people to miss the real one.
+        //
+        // So account for the agents first: if every agent this pass is either
+        // already-standing, feature-less, or unregistered, the zero is EXPLAINED
+        // and it is not a fault.
+        let accounted = unchanged_agents + empty_matrix_agents + unregistered_agents;
+        if unchanged_agents > 0 && accounted >= n_agents {
+            tracing::info!(
+                n_summaries,
+                n_agents,
+                unchanged_agents,
+                empty_matrix_agents,
+                unregistered_agents,
+                "capacity scorer pass authored nothing — every score already stands within its \
+                 coalescing bucket (steady state, not a fault)"
+            );
+        } else {
+            tracing::warn!(
+                n_summaries,
+                n_agents,
+                unchanged_agents,
+                empty_matrix_agents,
+                unregistered_agents,
+                window = cfg.window,
+                raw_trace_events,
+                sample_size_gate = cfg.sample_size_gate,
+                narrowing,
+                "capacity scorer pass emitted ZERO and the agents do not account for it — see \
+                 `narrowing` for which plane stopped it"
+            );
+        }
     } else {
         tracing::info!(
             n_summaries,
             n_agents,
             emitted,
+            unchanged_agents,
             unregistered_agents,
             "capacity scorer pass complete (capacity attestations authored → replication)"
         );
@@ -419,20 +464,201 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     Ok(emitted)
 }
 
+// ── Re-assertion coalescing (CIRISPersist#519 item 2a-iii) ──────────────────
+
+/// The base bucket the assertion instant is floored to — the **hourly floor**.
+///
+/// # Why a bucket at all
+///
+/// The scorer runs every [`config_reconcile::DEFAULT_SCORER_CADENCE_SECS`] (60s)
+/// so a CHANGED score is visible within a minute. That is a detection property
+/// and it is worth keeping. But 0.5.151 authored a new signed row on every pass:
+/// 12 rows, 12 attestation_ids, 12 distinct content hashes in 12 minutes, all
+/// asserting `score 0.0, sample_size 3` — identical measurements differing only
+/// in `asserted_at`, which is inside the signed envelope. Against a 7-day
+/// `valid_until` that is ~10,000 simultaneously-live rows per agent per
+/// dimension, all saying the same thing.
+///
+/// Persist named the cure and we had not adopted it. `freshness.rs`:
+///
+/// > a producer SHOULD round `fresh_as_of` to a bucket boundary before emitting,
+/// > so repeated touches within the same bucket dedupe on the wire (identical
+/// > `fresh_as_of` ⇒ identical signed envelope ⇒ identical content hash)
+///
+/// Flooring the instant makes repeated identical measurements produce
+/// byte-identical envelopes, which is what makes them recognisable as the same
+/// assertion rather than a stream of new ones.
+const SCORE_COALESCE_BASE: i64 = 3600;
+
+/// The widest the bucket may attenuate to for a score that will not move.
+///
+/// Bounded by the validity window, not by taste: at 24h against a 7-day
+/// `valid_until` a live score is re-asserted seven times before it could expire.
+/// A bucket approaching the window would let a still-true score age out silently,
+/// and "stopped being true" and "stopped being measured" would become the same
+/// observation — the confirmed-vs-unverified ambiguity this codebase keeps
+/// paying for.
+const SCORE_COALESCE_MAX: i64 = 86_400;
+
+/// Attenuate the bucket by how long this exact score has already held.
+///
+/// Stateless BY CONSTRUCTION — derived from the stored rows, never from a cache.
+/// A process restart, a replica, and a backfill all compute the same width from
+/// the same corpus, so there is no local state to diverge from the graph. (A
+/// cached "last emitted" would be a second source of truth for a question the
+/// rows already answer.)
+///
+/// Widening is safe in the direction it moves: `merge_floor` is a monotonic max,
+/// so a coarser floor can never roll an assertion backwards.
+fn coalesce_bucket(unchanged_for: chrono::Duration) -> chrono::Duration {
+    let secs = match unchanged_for.num_hours() {
+        h if h >= 24 => SCORE_COALESCE_MAX,
+        h if h >= 6 => 6 * SCORE_COALESCE_BASE,
+        _ => SCORE_COALESCE_BASE,
+    };
+    chrono::Duration::seconds(secs)
+}
+
+/// The already-standing assertion for `(subject, capacity dimension)`, if the
+/// corpus already says exactly this.
+///
+/// Returns `Some(prev_asserted_at)` when a live row already carries this score
+/// with an assertion instant at or after `bucket_start` — i.e. we have already
+/// said this, in this bucket, and saying it again would add a signed row
+/// carrying no new information.
+///
+/// Compares the row's OWN stored `asserted_at` and `weight` rather than
+/// recomputing persist's canonical hash. Reproducing the canonicalization here
+/// would be a second implementation of persist's content-addressing, and a
+/// divergence would fail SILENTLY — the check would simply never match and the
+/// duplication would return, green. The stored fields cannot drift from
+/// themselves.
+async fn standing_assertion(
+    engine: &Engine,
+    attested_key_id: &str,
+    score: f64,
+    bucket_start: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let rows = engine
+        .federation_directory()
+        .list_attestations_for(attested_key_id)
+        .await
+        .ok()?;
+    rows.iter()
+        .filter(|a| {
+            ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
+                .is_some_and(|d| d == CAPACITY_DIMENSION)
+        })
+        .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        // Same measurement: the band we would author, already authored.
+        .filter(|a| a.weight.is_some_and(|w| (w - score).abs() < f64::EPSILON))
+        .map(|a| a.asserted_at)
+        .filter(|t| *t >= bucket_start)
+        .max()
+}
+
+/// How long this score has held unbroken, for [`coalesce_bucket`].
+///
+/// The span from the OLDEST live row still carrying this score to now. A score
+/// that just changed has no such run and gets the base bucket, so a moving score
+/// is never coarsened — attenuation only ever slows down the restatement of
+/// something that is not moving.
+async fn unchanged_for(
+    engine: &Engine,
+    attested_key_id: &str,
+    score: f64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::Duration {
+    let Ok(rows) = engine
+        .federation_directory()
+        .list_attestations_for(attested_key_id)
+        .await
+    else {
+        return chrono::Duration::zero();
+    };
+    rows.iter()
+        .filter(|a| {
+            ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
+                .is_some_and(|d| d == CAPACITY_DIMENSION)
+        })
+        .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        .filter(|a| a.weight.is_some_and(|w| (w - score).abs() < f64::EPSILON))
+        .map(|a| a.asserted_at)
+        .min()
+        .map(|oldest| now - oldest)
+        .unwrap_or_else(chrono::Duration::zero)
+}
+
+/// How long a capacity assertion stays live once made.
+const SCORE_VALIDITY_DAYS: i64 = 7;
+
+/// The `(asserted_at, valid_until)` pair one emission should carry.
+///
+/// Extracted so the CALL SITE is testable, not just persist's pure function
+/// underneath it. The first version of these tests asserted that
+/// `coalesce_touch_ts` floors — which was never in doubt — and a mutation adding
+/// `+ bucket` at the call site sailed through every one of them. A test that
+/// exercises the dependency instead of the code under test is the same shape as
+/// a harness supplying the value production defaults.
+///
+/// Both instants derive from the COALESCED one. Deriving `valid_until` from raw
+/// `now` would leave it varying every pass, the envelope would differ anyway,
+/// and the coalescing would be real and entirely ineffective.
+fn coalesced_assertion(
+    now: chrono::DateTime<chrono::Utc>,
+    bucket: chrono::Duration,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    let asserted_at = ciris_persist::federation::freshness::coalesce_touch_ts(now, bucket);
+    (
+        asserted_at,
+        asserted_at + chrono::Duration::days(SCORE_VALIDITY_DAYS),
+    )
+}
+
+/// What one agent's scoring pass actually did.
+///
+/// This was a `bool`, and coalescing gave the `false` arm a SECOND meaning:
+/// "no usable feature rows" and "unchanged, deliberately not re-authored" are
+/// opposite conditions — one is a gap in the data, the other is the system
+/// working — and they were about to share a return value, a counter, and a log
+/// line reading "agent scored zero usable feature rows". On a healthy node with
+/// stable scores that line would have been printed for every agent, every pass.
+///
+/// One name answering two questions is the defect class this codebase has paid
+/// for repeatedly (`root` meaning both signing holder and trust root;
+/// `carries_infra_serve` asking about one scope of four). Naming the outcomes
+/// costs one enum.
+#[derive(Debug)]
+enum ScoreOutcome {
+    /// A new capacity row was authored.
+    Emitted,
+    /// The agent had trace summaries but no usable feature rows — a real gap in
+    /// the corpus, worth surfacing per-agent.
+    NoFeatureRows,
+    /// The score is unchanged and already stands, asserted within the current
+    /// coalescing bucket. Nothing to say; saying it anyway would cost a
+    /// permanent, replicated row carrying no new information.
+    Unchanged {
+        standing_since: chrono::DateTime<chrono::Utc>,
+        bucket_secs: i64,
+    },
+}
+
 /// Score one agent and emit its `capacity:sustained_coherence:v1` attestation.
-/// Returns `Ok(true)` if a row was emitted, `Ok(false)` if the agent had no
-/// usable feature rows (skipped).
+/// See [`ScoreOutcome`] for what the arms mean — they are NOT interchangeable
+/// "did not emit" cases.
 async fn score_and_emit(
     engine: &Engine,
     node_key_id: &str,
     attested_key_id: &str,
     traces: &[&TraceSummary],
     cfg: &ScorerConfig,
-) -> Result<bool> {
+) -> Result<ScoreOutcome> {
     // Build the feature matrix (rows = traces, cols = lens constraint dims).
     let matrix = n_eff::feature_matrix(traces);
     if matrix.is_empty() {
-        return Ok(false); // no feature rows for this agent
+        return Ok(ScoreOutcome::NoFeatureRows);
     }
 
     // Faithful N_eff port — participation ratio (measure_n_eff.py n_eff_pr).
@@ -448,7 +674,40 @@ async fn score_and_emit(
         .context("capacity attestation violates CEG §7.5 anti-Goodhart")?;
 
     let now = chrono::Utc::now();
-    let valid_until = now + chrono::Duration::days(7);
+
+    // ── Coalesce the assertion instant (CIRISPersist#519 item 2a-iii) ────────
+    //
+    // FLOOR, never ceiling or round-to-nearest. Persist's `coalesce_touch_ts`
+    // spells out why, and the reason inverts the usual instinct: this is a LOWER
+    // bound, so rounding UP could assert an instant past the real `now()` and
+    // trip the future-skew guard on a legitimate, just-unlucky emission.
+    // Flooring can only make the assertion more conservative, never less true.
+    // (An upper bound like `valid_until` would round the other way, for exactly
+    // the same reason — same operation, opposite direction, because the bound
+    // points the other way.)
+    let bucket = coalesce_bucket(unchanged_for(engine, attested_key_id, score, now).await);
+    let (asserted_at, valid_until) = coalesced_assertion(now, bucket);
+    // Derive validity from the COALESCED instant, not from raw `now`. Deriving
+    // it from `now` would leave `valid_until` varying every pass and the envelope
+    // would differ anyway — the coalescing would be real and completely
+    // ineffective, which is the worst of both.
+
+    // Already said this, in this bucket? Then there is nothing new to assert,
+    // and a signed row carrying no new information is pure cost: it is permanent,
+    // it replicates, and it dilutes the corpus a reader has to fold.
+    if let Some(prev) = standing_assertion(engine, attested_key_id, score, asserted_at, now).await {
+        tracing::debug!(
+            attested = %attested_key_id,
+            score,
+            bucket_secs = bucket.num_seconds(),
+            standing_since = %prev,
+            "capacity unchanged within the coalescing bucket — not re-authoring"
+        );
+        return Ok(ScoreOutcome::Unchanged {
+            standing_since: prev,
+            bucket_secs: bucket.num_seconds(),
+        });
+    }
 
     // The CEG `scores` envelope — the JCS canonical-signing payload (the same
     // shape ciris-status / lens-core emit; dimension is the versioned leaf).
@@ -464,7 +723,7 @@ async fn score_and_emit(
         "feature_dim": derivation.feature_dim,
         "sample_size_gate": cfg.sample_size_gate,
         "target_n_eff": cfg.target_n_eff,
-        "asserted_at": now.to_rfc3339(),
+        "asserted_at": asserted_at.to_rfc3339(),
         "valid_until": valid_until.to_rfc3339(),
         "cohort_scope": cohort_scope::FEDERATION,
     });
@@ -501,5 +760,136 @@ async fn score_and_emit(
         dim = derivation.feature_dim,
         "emitted capacity:sustained_coherence:v1 attestation",
     );
-    Ok(true)
+    Ok(ScoreOutcome::Emitted)
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+    use ciris_persist::federation::freshness::coalesce_touch_ts;
+
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    /// **Flooring, never ceiling** — the safety property, and the one whose
+    /// reasoning inverts the instinct.
+    ///
+    /// `asserted_at` is a temporal LOWER bound. Rounding up (or to nearest)
+    /// could push it past the real `now()` and trip the future-skew guard on a
+    /// legitimate, just-unlucky emission. Flooring can only make the assertion
+    /// more conservative, never less true. An upper bound like `valid_until`
+    /// would round the OTHER way for the same reason.
+    #[test]
+    fn the_coalesced_instant_never_moves_into_the_future() {
+        let bucket = chrono::Duration::seconds(SCORE_COALESCE_BASE);
+        // Exercise the CALL SITE, not persist's pure function underneath it.
+        for iso in [
+            "2026-08-01T17:00:00Z",
+            "2026-08-01T17:42:25Z",
+            "2026-08-01T17:59:59Z",
+        ] {
+            let now = t(iso);
+            let (asserted, valid_until) = coalesced_assertion(now, bucket);
+            assert!(
+                asserted <= now,
+                "{iso}: the emit path asserts liveness at {asserted}, AFTER now. A lower bound \
+                 may only ever understate; the future-skew guard refuses this."
+            );
+            assert_eq!(
+                valid_until,
+                asserted + chrono::Duration::days(SCORE_VALIDITY_DAYS),
+                "{iso}: validity must derive from the COALESCED instant. Derived from raw now it \
+                 varies every pass, the envelope differs anyway, and the coalescing does nothing."
+            );
+        }
+        for iso in [
+            "2026-08-01T17:00:00Z", // exactly on a boundary
+            "2026-08-01T17:00:01Z", // just after
+            "2026-08-01T17:59:59Z", // just before the next
+            "2026-08-01T17:42:25Z", // the observed production instant
+        ] {
+            let now = t(iso);
+            let coalesced = coalesce_touch_ts(now, bucket);
+            assert!(
+                coalesced <= now,
+                "{iso}: coalescing moved the assertion FORWARD to {coalesced}. For a lower bound \
+                 that asserts liveness we did not have, and the future-skew guard refuses it."
+            );
+            assert!(
+                now - coalesced < bucket,
+                "{iso}: coalescing dropped more than a full bucket ({coalesced}) — the assertion \
+                 would be needlessly stale"
+            );
+        }
+    }
+
+    /// The dedup property this exists for: two passes inside one bucket, same
+    /// score, must produce the SAME assertion instant — which is what makes the
+    /// signed envelopes identical rather than merely similar.
+    #[test]
+    fn passes_within_one_bucket_share_an_assertion_instant() {
+        let bucket = chrono::Duration::seconds(SCORE_COALESCE_BASE);
+        // The eleven observed production passes, 17:32:25 .. 17:42:25.
+        let instants: Vec<_> = (32..=42)
+            .map(|m| t(&format!("2026-08-01T17:{m:02}:25Z")))
+            .map(|n| coalesce_touch_ts(n, bucket))
+            .collect();
+        assert!(
+            instants.windows(2).all(|w| w[0] == w[1]),
+            "eleven passes inside one hour produced {} distinct instants — each one is a distinct \
+             signed envelope, a distinct content hash, and a permanent row. That is exactly the \
+             0.5.151 behaviour this replaces.",
+            instants
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        );
+    }
+
+    /// Attenuation only ever slows the restatement of something that is NOT
+    /// moving. A score that just changed must get the base bucket, so a moving
+    /// score is never coarsened.
+    #[test]
+    fn attenuation_is_monotonic_and_a_fresh_score_is_never_coarsened() {
+        let base = coalesce_bucket(chrono::Duration::zero());
+        assert_eq!(
+            base.num_seconds(),
+            SCORE_COALESCE_BASE,
+            "a score with no unbroken run must get the base bucket — otherwise a score that just \
+             moved would be restated more slowly than one that never moves"
+        );
+        let widths: Vec<i64> = [0i64, 1, 5, 6, 12, 23, 24, 72, 24 * 30]
+            .iter()
+            .map(|h| coalesce_bucket(chrono::Duration::hours(*h)).num_seconds())
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] <= w[1]),
+            "attenuation must be monotonic in the unchanged run: {widths:?}"
+        );
+        assert_eq!(
+            *widths.last().unwrap(),
+            SCORE_COALESCE_MAX,
+            "a very old unchanged score must saturate at the cap, not keep widening"
+        );
+    }
+
+    /// **The cap is bounded by the validity window, not by taste.**
+    ///
+    /// A bucket approaching `valid_until` would let a still-true score age out
+    /// silently, and "stopped being true" and "stopped being measured" would
+    /// become the same observation from outside. That is the confirmed-vs-
+    /// unverified ambiguity the trace-plane RCA is about, and it is worse here
+    /// because the row is what peers read.
+    #[test]
+    fn the_widest_bucket_re_asserts_well_inside_the_validity_window() {
+        let validity = chrono::Duration::days(7).num_seconds();
+        let re_assertions = validity / SCORE_COALESCE_MAX;
+        assert!(
+            re_assertions >= 4,
+            "at the widest bucket a live score is re-asserted only {re_assertions}x before it \
+             expires. Fewer than a handful and one missed pass silently ages out a score that is \
+             still true. Narrow SCORE_COALESCE_MAX or widen the validity — deliberately, together."
+        );
+    }
 }

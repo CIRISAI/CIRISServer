@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.151"
+version = "0.5.152"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1018,6 +1018,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "h3o",
  "hex",
  "http-body-util",
  "jsonwebtoken",

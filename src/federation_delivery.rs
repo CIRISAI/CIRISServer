@@ -110,6 +110,17 @@ impl Drop for DeliveryController {
 #[cfg(feature = "python")]
 static HELD: OnceLock<(tokio::runtime::Runtime, Arc<DeliveryController>)> = OnceLock::new();
 
+/// The held runtime + controller, for in-process callers outside this module.
+///
+/// The fold has exactly ONE runtime and every in-process entry point must use
+/// it. A second `Runtime::new()` inside a pyo3 call would block on a different
+/// reactor than the one holding the Edge and the delivery loop — the class of
+/// bug that produced the fold-boot panics (#264 reentrancy shield, verify #204).
+#[cfg(feature = "python")]
+pub(crate) fn held() -> Option<&'static (tokio::runtime::Runtime, Arc<DeliveryController>)> {
+    HELD.get()
+}
+
 /// Whether [`start_and_hold`] has already installed a controller in this process.
 #[cfg(feature = "python")]
 pub fn is_started() -> bool {
