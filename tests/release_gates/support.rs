@@ -57,6 +57,19 @@ use std::path::PathBuf;
 // `canonical_genesis_records()`→`canonical_genesis_bundle()`. The SEMANTIC change is
 // bigger than the renames: `lifecycle_active` is GONE from `trust_root_valid`, replaced
 // by a banded `drill_freshness` reported beside the verdict. A seed no longer expires.
+// CIRISServer#340 — verify STAYS v10.6.3, and the reason is not inertia.
+// Upstream is at v11.0.0 and we carry none of v10.7.0 (the presenter binding),
+// v10.8.0 (Android Key Attestation validation), v10.9.0 (the CoTS trust-anchor
+// store) or v10.11.0 (the baked Google/Apple roots). We cannot: persist v24.2.0
+// and edge v15.9.1 — the latest tag of each — both pin verify at
+// `tag = "v10.6.3"`, and a cargo git tag is part of the SOURCE ID. Moving this
+// constant alone forks ciris_keyring/ciris_verify_core into two crates with two
+// incompatible `HardwareType`/`PlatformAttestation` (measured 2026-08-02: 19 lib
+// + 24 lib-test type errors), and cargo 1.97 refuses a same-repo `[patch]` that
+// would re-unify them. So this is a SUBSTRATE-side move: it advances when
+// persist and edge cut tags on a newer verify, never on its own. The upstream
+// delta is purely additive (v10.6.3..v10.11.0 = 2936 insertions, 0 deletions),
+// so nothing is being held back for compatibility reasons — only for pin ones.
 pub const TARGET_VERIFY: &str = "v10.6.3";
 pub const TARGET_PERSIST: &str = "v24.2.0";
 pub const TARGET_EDGE: &str = "v15.9.1";
