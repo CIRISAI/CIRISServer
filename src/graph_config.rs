@@ -358,6 +358,12 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
         .await
         .map_err(|e| anyhow::anyhow!("list config attestations for {node_key_id}: {e}"))?;
 
+    // ONE read for every retraction this node authored, hoisted out of the loop.
+    // This was called PER SURVIVING ROW — twelve config rows meant twelve more
+    // full scans, so pushing the config filter down only took the pass from
+    // fifteen scans to thirteen. The nested N+1 was the larger half.
+    let revoked = revoked_config_rows(engine, node_key_id).await;
+
     let mut out = Vec::new();
     for a in page.items {
         // `dimension_prefixes` matches a PREFIX; this plane wants the exact
@@ -371,7 +377,10 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
             continue;
         }
         // Revocation: a recanted/withdrawn config row reads as absent.
-        if config_key_revoked(engine, node_key_id, &a.attestation_id).await {
+        // Membership test against the HOISTED set — see `revoked_config_rows`.
+        if revoked.contains(a.attestation_id.as_str())
+            || config_row_revoked_externally(engine, &a.attestation_id).await
+        {
             continue;
         }
         if let Some(entry) = entry_from_envelope(&a.attestation_envelope) {
@@ -385,37 +394,70 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
     Ok(out)
 }
 
-/// True iff a config row (`attestation_id`) authored by `node_key_id` has been
-/// revoked — by a `withdraws`/`recants` the node authored against it, or by a
-/// `revocations_for` row. Same shape as
-/// `crate::auth::ownership`'s `delegation_revoked`, scoped to the config row id.
+/// Every config row id this node has retracted, in ONE pass.
 ///
-/// NOTE (flagged): the substrate has no `supersede`-aware federation-tier reader
-/// yet, so partial-narrowing supersede (RC29 §5.6.8.15) is NOT honored — only
-/// explicit withdraws/recants/revocation. For the common last-write-wins path the
-/// version-fold already supersedes prior values.
-async fn config_key_revoked(engine: &Arc<Engine>, node_key_id: &str, attestation_id: &str) -> bool {
-    let directory = engine.federation_directory();
-    if let Ok(by_node) = directory.list_attestations_by(node_key_id).await {
-        for a in by_node {
-            let is_retraction = a.attestation_type == attestation_type::WITHDRAWS
-                || a.attestation_type == attestation_type::RECANTS;
-            // A retraction can target the row either via attested_key_id or via
-            // its subject_key_ids carrying the row id.
-            if is_retraction
-                && (a.attested_key_id == attestation_id
-                    || a.subject_key_ids.iter().any(|s| s == attestation_id))
-            {
-                return true;
+/// # Why hoisted (CIRISServer#343, the second half)
+///
+/// This logic used to live in a per-row `config_key_revoked`, each call doing
+/// its own `list_attestations_by(self)`. With twelve config rows that was twelve
+/// full scans of every attestation the node ever authored — on the production
+/// status node, 9,824 rows each time. Pushing the config filter into the query
+/// fixed the outer scan and left this one, so the pass went from fifteen scans
+/// to thirteen: a real fix that measured as almost nothing.
+///
+/// Two filtered reads (withdraws, recants) replace all of them. Both return only
+/// retraction rows, which are rare, so the cost is bounded by retractions rather
+/// than by corpus size.
+async fn revoked_config_rows(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+) -> std::collections::HashSet<String> {
+    use ciris_persist::ceg::list::federation::AttestationFilter;
+
+    let mut out = std::collections::HashSet::new();
+    let Ok(admission) =
+        ciris_persist::scope::build_caller_admission(engine, &node_key_id.to_owned()).await
+    else {
+        return out;
+    };
+    for kind in [attestation_type::WITHDRAWS, attestation_type::RECANTS] {
+        let mut filter = AttestationFilter::default();
+        filter.attesting_key_id = Some(node_key_id.to_owned());
+        filter.attestation_type = Some(kind.to_owned());
+        let Ok(page) = engine
+            .list_attestations(
+                filter,
+                None,
+                CONFIG_READ_LIMIT,
+                CallerScope::Authenticated {
+                    admission: admission.clone(),
+                },
+            )
+            .await
+        else {
+            continue;
+        };
+        for a in page.items {
+            // A retraction targets the row either via attested_key_id or via its
+            // subject_key_ids carrying the row id.
+            out.insert(a.attested_key_id.clone());
+            for s in a.subject_key_ids {
+                out.insert(s);
             }
         }
     }
-    if let Ok(revs) = directory.revocations_for(attestation_id).await {
-        if !revs.is_empty() {
-            return true;
-        }
-    }
-    false
+    out
+}
+
+/// A revocation authored by SOMEONE ELSE against this config row.
+///
+/// Kept per-row because `revocations_for` is a targeted lookup by the row id,
+/// not a scan — the thing the hoist above was curing.
+async fn config_row_revoked_externally(engine: &Arc<Engine>, attestation_id: &str) -> bool {
+    matches!(
+        engine.federation_directory().revocations_for(attestation_id).await,
+        Ok(revs) if !revs.is_empty()
+    )
 }
 
 /// Fold a key's rows to the latest-wins [`ConfigEntry`] + its row id: highest
