@@ -8,43 +8,81 @@ them.
 
 ---
 
-## 0. What the audit changed
+## 0. The baseline: what actually killed the others
 
-Six enumerator lenses over real federated-system failures produced 344 issues,
-311 unique. Verdicts against the shipped code: 12 structurally-immune, 16
-handled, 186 partial, 97 unhandled. A second pass classified 228 of those
-against eight proposed resolutions; 206 survived.
+Three audits over 344 enumerated failures from real federated systems. The most
+useful output was not a defect list — it was the observation that the same four
+**preconditions** appear in every death.
 
-Five things in the prior FSDs were wrong.
+| system | died of | precondition required |
+|---|---|---|
+| Usenet | spam → forged cancels → cancel wars | propagate-by-default, no authority |
+| SMTP | spam economics | accept-from-anyone |
+| SKS keyservers | certificate poisoning | obligation to accept + **no removal primitive at all** |
+| IPFS / Freenet | unwanted content, permanently | permanence with no authority |
+| Fediverse | harassment waves, admin burnout | federation-on-by-default, moderation as unpaid human labour |
+| XMPP | fragmentation, embrace-extend | optional extensions, one dominant implementer |
+| CA / PKI | DigiNotar, Symantec | monolithic trust + revocation that never arrives |
+| Blockchains | 51%, DAO fork, block-size war | **one global state to fight over** |
+| SSB | feed fork = identity death | single-writer log, no recovery |
 
-**1. The adversarial framing was mis-aimed.** Nine of the top twelve kill risks
-have no adversary. The prior taxonomy was organized around attack because attack
-is what one thinks about; the failure data is dominated by succession, funding,
-adoption, operational neglect and legal duty. The largest family — 107 issues,
-58 of them mesh-killing — had no home in the six families at all.
+**Deliver-by-default · one shared namespace · human-bound labour · no honest
+removal.** Every one of them, over and over.
 
-**2. "Consent routing makes spam unrepresentable" is false.** `consent_grammar`
-carries no rate, volume, byte or purpose term. **Consent bounds WHO, never HOW
-MUCH.** A consented peer can flood freely. Consent is also SEND-only — the
-receive plane is peer-blind, and CC 3.3.7 ratifies that in terms ("admission is
-by key registration; consent is the governance record"). The claim was stretched
-past what the code supports.
+### What is structurally different here
 
-**3. Illegal content was routed to the wrong tier.** The prior ladder sent it to
-tier 2 (quarantine — *"withhold from serving, retain locally"*) and tier 3
-(forced descent, which preserves the blur by design). Retain-locally is knowing
-possession. Illegal content is not a moderation problem with a proportionate
-response; see §4.
+Not "better" — *different in a way that removes a precondition*.
 
-**4. Governability was confused with compellability.** The audit priced
-"unsatisfiable global deletion" as a permanent cost. It is not. See §2 — this is
-the correction that most changes the legal posture.
+1. **Consent-directed replication** removes deliver-by-default. There is no open
+   relay because there is no relay: bytes move only along a signed directed
+   grant. (It does NOT bound volume — see §1.)
+2. **Multi-polar roots** remove the single shared namespace. Schism becomes a
+   routing change rather than an existential fight. See §2.
+3. **Agents** remove human-bound labour. Every prior system's fatal costs —
+   moderation triage, configuration, onboarding, ops — were labour costs, and
+   none of those systems had anything that could do the labour.
+4. **Descent** removes the no-honest-removal problem. One pressure operator where
+   hard-delete is simply the fastest descent, so erasure and durability share a
+   mechanism instead of contradicting.
 
-**5. The tier ladder addressed a third of the failure space.** 200 of 311 issues
-carry no tier at all. The ladder also asserted reversibility for tiers 1/2/4 and
-provided no reversal route, gated its only irreversible op more weakly than its
-reversible one, and lost NoCeM's actual property (per-reader authority) on every
-rung except tier 0.
+A fifth has no historical analogue at all: **the CEG makes automated action
+accountable.** Every prior attempt at automated moderation was opaque; here an
+action is a signed object carrying its own authority and reason, previewable and
+reversible. That is what makes (3) safe rather than alarming.
+
+### The proportion rule
+
+An audit graded against perfection returns everything. Findings are only
+architectural if they are **inherited by any mesh built this way**. Everything
+else is an operations concern — real, schedulable, and not a property of
+federating.
+
+> "The package registry could be unavailable" is true of Linux and Postgres.
+> It is not a mesh-design finding.
+
+Applying that rule, four findings survive as genuinely architectural, and §§4–6
+address them:
+
+- **the receive plane has no subject** — any admitted key writes signed rows
+  *naming anyone*; subject-side consent exists for `capacity:*` alone (CC#46)
+- **equivocation is free** — a key can sign contradictory claims to different
+  peers at the same `asserted_at`; both verify; nothing compares them
+- **every removal is an append on a pull-only plane** — revoke, purge, erase,
+  de-admit and halt alike; unreached holders never learn
+- **authority propagates automatically; recovery does not** — the halt latch
+
+### Corrections to earlier drafts of this document
+
+1. *"Consent routing makes spam unrepresentable"* — **false**. Consent bounds
+   WHO, never HOW MUCH; and it is SEND-only.
+2. Illegal content was routed to tiers 2/3. Retain-locally is possession; the
+   blur must not survive. See §4.
+3. Governability was confused with compellability — and then over-corrected into
+   dismissing delivery. Authority is per-mesh; **delivery is not**. See §2.
+4. Tier 5 was described as reversible. It is the least reversible op in the
+   system. See §3.
+5. The ladder addressed a third of the failure space and claimed reversibility it
+   did not implement.
 
 ---
 
@@ -77,40 +115,44 @@ consented to look.
 
 ---
 
-## 2. Governability is per-mesh; ungovernability is only of the set
+## 2. Multi-polar roots are the design, not the escape hatch
 
-The prior design treated "no party can compel deletion" as a feature and the
-audit priced it as an irreducible cost. **Both were wrong, for the same reason:
-they conflated one ungovernable mesh with many governable ones.**
+Every federated system that died had **one shared trust anchor**: one CA root
+store, one set of Tor directory authorities, one chain state, one Usenet
+namespace, one instance you happened to be on. That single anchor is why every
+governance dispute in their histories was existential — the block-size war, the
+DAO fork, XMPP extension fragmentation, the CA distrust wind-downs. **When there
+is one namespace, schism is death.**
 
-A CIRIS mesh **is** governed. The accord trio hold decisive authority over
-theirs — halt, purge, de-admit, erase. What prevents that authority becoming
-tyranny is **not** that it is weak. It is that trust roots are pluggable and
-exit is cheap: anyone can mint a root and take their cohort with them.
+CIRIS is built for many roots coexisting *from the start*. A root is a family of
+keys; a node trusts one by holding an attestation and un-trusts it by deleting
+one. Schism is a routing change.
 
-```
-one ungovernable mesh      →  nobody can fix anything; abuse is permanent;
-                              a court gets contempt; the criticism is fair
-many governable meshes     →  each has an authority that can act decisively;
-                              the check on that authority is exit, not impotence
-```
+Two consequences that the earlier drafts got backwards:
 
-Consequences that follow directly:
+**Decisive authority is affordable *because* roots are plural.** An accord holds
+halt/purge authority over its own mesh. That is not a compromise of
+decentralization — it is what plural roots buy you. A single-root system cannot
+afford a decisive authority, because there is nowhere to go; a multi-polar one
+can, because the check is exit rather than impotence.
 
-- **Deletion is satisfiable within a mesh.** A court order is met by the accord
-  purging its own mesh. That is compliance, not contempt.
-- **It is not satisfiable across all meshes** — but neither is it for the web,
-  email, or BitTorrent. That is a property of information existing in more than
-  one place, not a CIRIS liability.
-- **Decisive authority is legitimate here** precisely because it is escapable.
-  A design that made the accord weak would buy nothing and cost the ability to
-  respond.
+**"Anyone can mint a root" is a design property, not a consolation prize.** It
+is the reason a failing steward, a captured accord, and a legitimate
+disagreement all have the same remedy, and why none of them is fatal to the
+model.
 
-This is also why the fundraising and legal asks are ordinary rather than
-apologetic: an operator with full purge authority, an audit trail, and a
-documented removal SLA is answering a normal question.
+### What this does NOT excuse
 
----
+The prior draft used per-mesh governability to dismiss the deletion question.
+That was wrong on delivery, and the correction matters:
+
+> **Authority is per-mesh. Delivery is not.**
+
+A purge is an accord-signed row on the same pull-only plane as everything else.
+A holder that is offline, forked, de-admitted, or joins later never receives it.
+*"We emitted a purge"* is not *"the bytes are gone"*, and cannot be evidenced as
+such. Any legal or safety posture that rests on purge must state what it does
+about unreached holders — see §4 and the delivery-receipt ask.
 
 ## 3. The operations ladder, v2
 
@@ -123,11 +165,19 @@ Every op remains a signed, attributed CEG object. What changes is the rungs.
 | 2 | **quarantine** — withhold from serving, retain locally | row set | **`un-quarantine`** | `moderate` |
 | 3 | **force descent** — CC 6.1.2 pressure; blur + tombstone remain | row set | no, by design | `slash` + **quorum** |
 | 4 | **de-admit** — key may no longer write | key | **`re-admit`** | `slash` |
-| 5 | **halt** — kill switch | node | accord | accord quorum |
+| 5 | **halt** — kill switch | node | **NO — see below** | accord quorum |
 | **S** | **self-directed** — shed my own load, stop accepting, descend my own corpus, declare legal compulsion | **self** | yes | owner |
 | **R** | **subject-side** — a reader's own accept/refuse policy over others' judgements | **the reader's view** | yes | reader |
 
-Four corrections embedded there:
+**Tier 5 is not reversible, and the prior draft said it was.** `accord_halt.rs`
+replicates the halt to all known peers, latches it to disk, and `exit(42)`s;
+`check_halt_gate` then refuses boot. A halted node is not running, so the un-halt
+cannot be delivered to it. Recovery is O(nodes) manual physical acts. Until a
+halt carries an expiry or a locally-verifiable release token, tier 5 is the most
+irreversible operation in the system — not the most reversible — and it must be
+gated and previewed accordingly.
+
+Four further corrections embedded there:
 
 **Reversal ops exist.** The prior ladder claimed reversibility and shipped no
 route that reverses anything.
