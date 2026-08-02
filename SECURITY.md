@@ -2,12 +2,20 @@
 
 ## Reporting a vulnerability
 
-**Email `eric@ciris.ai`.** Put `SECURITY` in the subject line.
+Two private channels, either is fine:
 
-Do not open a public issue for anything you believe is exploitable. GitHub
-private vulnerability reporting is **not enabled** on these repositories today,
-so email is the only private channel that exists. If that changes this file will
-say so.
+- **GitHub private vulnerability reporting** — the *Security* tab on any of the
+  repositories in scope below. Enabled on all of them.
+- **Email `info@ciris.ai`** — put `SECURITY` in the subject line. This is the
+  same address CIRISAgent's policy uses, so a reporter who finds either
+  repository first lands in the same place.
+
+Do not open a public issue for anything you believe is exploitable.
+
+**Disclosure:** we ask for two weeks before public disclosure, to patch and
+notify users — matching CIRISAgent's published policy. If two weeks is not
+enough for a fix we will say so and agree a date with you rather than let it
+slide silently.
 
 There is no published PGP key. If you need one before sending details, say so in
 a one-line email and one will be minted and published rather than exchanged in
@@ -151,7 +159,6 @@ waste time assuming otherwise:
 - No `cargo-audit` or `cargo-deny` job in `.github/workflows/`.
 - Dependabot security updates: **disabled**.
 - Secret scanning and push protection: **disabled**.
-- GitHub private vulnerability reporting: **disabled**.
 - No reproducible builds. A wheel cannot currently be rebuilt bit-for-bit and
   compared to the published one.
 - No security-response rota, no on-call, no second responder
