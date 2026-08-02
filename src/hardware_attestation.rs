@@ -85,19 +85,64 @@
 //! Android (Play Integrity + key-attestation chain to a Google root), iOS
 //! (App Attest / DeviceCheck to an Apple root) and TPM (EK cert to a vendor root)
 //! are all *structurally* checkable by Layer A but **not** cryptographically
-//! verifiable here: this node pins no Google/Apple/TPM-vendor root, and Verify's
-//! device-attestation chain validators have not shipped — **tracked at
-//! CIRISVerify#199**. (An earlier draft cited "CIRISVerify#32 Ask 5"; that issue
-//! is CLOSED and was a stale pointer. #199 is the live tracker.) Under
-//! CC 4.2.2.1 an unverifiable class claim is exactly the thing that must NOT be
-//! credited, so [`server_policy`] **tightens** persist's accepted set — which
-//! persist explicitly invites ("deployments tighten further by overriding") — to
-//! the classes this node can actually prove. A device whose class we cannot check
-//! is not locked out of the mesh: it registers with no `attestation_evidence` and
-//! joins honestly as software-class. It just cannot *claim* hardware it cannot
-//! prove. When a chain validator for the other classes lands, add the class here
-//! and add its verifier to [`verify_class_binding`] — in that order, never one
-//! without the other.
+//! verifiable here. Under CC 4.2.2.1 an unverifiable class claim is exactly the
+//! thing that must NOT be credited, so [`server_policy`] **tightens** persist's
+//! accepted set — which persist explicitly invites ("deployments tighten further
+//! by overriding") — to the classes this node can actually prove. A device whose
+//! class we cannot check is not locked out of the mesh: it registers with no
+//! `attestation_evidence` and joins honestly as software-class. It just cannot
+//! *claim* hardware it cannot prove. When a chain validator for the other classes
+//! lands, add the class here and add its verifier to [`verify_class_binding`] —
+//! in that order, never one without the other.
+//!
+//! ## Android: the validator SHIPPED, and the gate still cannot use it
+//!
+//! This paragraph used to say Verify's device-attestation chain validators "have
+//! not shipped". That sentence is **dead** — CIRISVerify v10.8.0 shipped
+//! `ciris_verify_core::device_attestation::verify_android_key_attestation`, and
+//! v10.9.0 added the CoTS trust-anchor store (#227) that resolves the root by
+//! (purpose, environment). Both were read at the tag, not taken from a release
+//! note. The API is exactly the right shape: a measurement, an explicit
+//! anti-lift binding to the record's own key, and `refutes(claimed_class)` as
+//! the decisive direction. CIRISServer#339 and CIRISPersist#568 both correctly
+//! flagged the stale claim.
+//!
+//! Widening the gate to Android is still **refused**, for two reasons that
+//! survive the correction. Neither is "verify hasn't built it":
+//!
+//! **1. The validator is unreachable from here (CIRISServer#340).** persist
+//! v24.2.0 and edge v15.9.1 — the latest tag of each — pin verify at
+//! `tag = "v10.6.3"`. A cargo git tag is part of the source id, so repinning the
+//! server alone does not upgrade verify, it forks it into two crates with two
+//! incompatible `HardwareType`/`PlatformAttestation` types (measured: 19 lib +
+//! 24 lib-test errors; `[patch]` on the same repo URL is rejected outright by
+//! cargo). The module simply is not in this build. See the pin note in
+//! `Cargo.toml`.
+//!
+//! **2. Even reachable, this node cannot supply `expected_challenge`.** The
+//! validator's step 4 is anti-replay: the `attestationChallenge` inside the
+//! leaf's `KeyDescription` must equal the nonce **the verifier issued**. The
+//! server issues none — there is no attestation-challenge channel on any
+//! admission path — and persist's wire shape cannot carry one back either:
+//! `HardwareCustodyEvidence` is `{ platform_attestation, nonce_captured_at }`,
+//! a *timestamp* recording when Verify captured a nonce, never the nonce
+//! **value**; and `ciris_keyring::AndroidAttestation` is
+//! `{ key_attestation_chain, play_integrity_token, strongbox_backed }` — no
+//! challenge field. So the only argument available is the challenge read out of
+//! the attestation itself, which would be checking the envelope against itself:
+//! the same tautology this module already refuses for a lifted YubiKey chain,
+//! and the same class of defect as crediting a self-report. Verified against
+//! CIRISVerify v11.0.0 as well — `expected_challenge` is not a v10.9.0 artifact.
+//!
+//! There is also a lesser, genuinely fixable gap: verify baked no Google root
+//! until v10.11.0 (#227), so at v10.9.0 the caller must pin it — the same
+//! discipline as [`crate::accord::YUBICO_ATTESTATION_ROOT_1_DER`]. That one is
+//! only work. The challenge gap is a **missing wire field**, and it belongs
+//! upstream: persist's `AttestationEvidence` needs to carry the issued nonce, or
+//! Android custody needs to ride the `GenerationCustody` arm (attest-at-
+//! generation, no nonce to replay) the way YubiKey PIV does. Widening
+//! `server_policy` before then would credit a hardware claim whose freshness
+//! nothing checks — which is precisely what CC 4.2.2.1 exists to refuse.
 
 use chrono::{DateTime, Utc};
 use ciris_keyring::{HardwareType, PlatformAttestation};
@@ -141,15 +186,33 @@ pub enum AdmittedHardwareClass {
 /// peer's self-report"). The build half is tracked (#181 -> CIRISPersist#415 ->
 /// CIRISEdge#303 -> CIRISServer#219); the DEVICE half had no tracker at all,
 /// which is how a fail-closed gap quietly becomes "we refuse it because we never
-/// built it". CIRISVerify#199 now tracks pinning the Google / Apple / TPM-vendor
+/// built it". CIRISVerify#199 tracks pinning the Google / Apple / TPM-vendor
 /// roots and exposing their chain validators (each of which MUST also assert the
 /// attested SPKI equals the record's own Ed25519 — the check that refuses a
 /// LIFTED attestation replayed under an attacker's key; without it the validator
 /// is theatre).
 ///
-/// When #199 lands, widen `accepted_hardware_types` here to the classes verify
-/// can then prove, and flip the `unverifiable_hardware_class_is_refused` test
-/// from "refused" to "valid chain admits / forged + lifted chain refused".
+/// ## Do NOT widen this on "#199 landed" alone (CIRISServer#339/#340)
+///
+/// The Android leg of #199 HAS landed — verify v10.8.0's
+/// `verify_android_key_attestation`, read at the tag. This doc used to say
+/// "when #199 lands, widen"; followed literally today that would open the gate
+/// on a check this node cannot complete. The module doc records the two live
+/// blockers in full (the substrate verify-pin ceiling, and the absent
+/// `expected_challenge`). The honest precondition for widening is BOTH:
+///
+/// 1. `ciris_verify_core::device_attestation` is actually in the build — i.e.
+///    persist and edge have repinned verify past v10.8.0 and we followed; and
+/// 2. an issued nonce reaches this gate, so the validator's anti-replay leg is
+///    a real check rather than the attestation quoting itself back at us.
+///
+/// Only then widen `accepted_hardware_types`, add the Android arm to
+/// [`verify_class_binding`] in the SAME change, and flip
+/// `unverifiable_hardware_class_is_refused` from "refused" to "valid chain
+/// admits at the MEASURED class / forged + lifted + over-claimed refused".
+/// Refuse on `AndroidAttestationVerdict::refutes`, never on absence: verify's
+/// own doc is emphatic that a missing attestation is not a failure, and this
+/// gate already agrees (no evidence ⇒ `SoftwareUnattested`, admitted).
 #[must_use]
 pub fn server_policy() -> HardwareAttestationPolicy {
     let mut policy = HardwareAttestationPolicy::default();

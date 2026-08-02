@@ -145,6 +145,29 @@ ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v15.9
 # types. v6.6.1 (CIRISVerify#89) adds the create_federation_identity `seal_alias`
 # arg the #247 user-key-derived fix consumes. (6.4–6.6 are HUMANITY_ACCORD + STH
 # stack — the accord-genesis surface CIRISServer#41 consumes.)
+#
+# ── THIS PIN IS NOT OURS TO MOVE (CIRISServer#340, measured 2026-08-02) ──────
+# The LOCKSTEP note above is stronger than it reads: it is not advice, it is a
+# CEILING. persist v24.2.0 and edge v15.9.1 — the LATEST tag of each — both pin
+# verify at `tag = "v10.6.3"`, and a cargo git `tag` is part of the SOURCE ID,
+# not a semver range. Bumping the verify pins (seven here, three more in
+# crates/ciris-lens-core) to v10.9.0 therefore does not upgrade verify; it FORKS
+# it — one of them alone is enough. The graph carries two `ciris_keyring` +
+# `ciris_verify_core` crates, and every substrate type that crosses the seam
+# (`HardwareType`, `PlatformAttestation`, `ThresholdMember`, `SignedCegObject`)
+# becomes two incompatible types. Measured: 19 lib + 24 lib-test type-mismatch
+# errors, all of the form "expected `ciris_keyring::types::HardwareType`, found
+# `ciris_keyring::HardwareType`".
+#
+# There is no in-repo escape. `[patch."https://github.com/CIRISAI/CIRISVerify"]`
+# is rejected by cargo 1.97 — "patches must point to different sources" — for
+# ANY entry on the same canonical URL, `tag` or `rev` alike (probed, not
+# assumed). `[replace]` requires an identical version and 10.9.0 != 10.6.3. The
+# only honest fixes are upstream: persist and edge repin verify, then we follow.
+# Until then this line moves ONLY as part of a persist+edge co-bump.
+#
+# What that ceiling costs us is recorded where it bites, not here:
+# src/hardware_attestation.rs (CIRISServer#339 / CIRISVerify#199).
 ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v10.6.3" }
 # The hybrid crypto primitives (Ed25519 + ML-DSA-65 software signers) — used by
 # the portable software identity occurrence to build a `HybridSigningIdentity`
