@@ -1,12 +1,66 @@
 # CIRIS evidence registry — impl: tier (CIRISServer#327 / CIRISConstitution#17)
-# Server's namespace-processor evidence rows, resolving the Constitution's
-# CLM-nsproc-* namespace-processing claims. GENERATED from
-# tests/field_conformance.rs#SERVER_FIELD_CONFORMANCE (the live, tested processor
-# table); regenerate on version bump. Kept in sync with the code by the test
-# field_conformance::evidence_tsv_matches_emitted — a drift is a build failure.
-# Vendored by CIRISConstitution/tools/check_evidence.py.
+# Server's evidence rows. GENERATED from src/field_conformance.rs —
+# SERVER_FIELD_CONFORMANCE (manifest-field processors, the CLM-nsproc-* family)
+# plus SERVER_CLAIM_EVIDENCE (claims with a live symbol and no manifest field).
+# Kept in sync with the code by field_conformance::evidence_tsv_matches_emitted —
+# a drift is a build failure. Vendored by CIRISConstitution/tools/check_claims.py.
 # Columns: cc_section <TAB> clm <TAB> repo <TAB> path#symbol <TAB> crate@version
+#          crate@version == "open" marks a DECLARED GAP (see below).
+#
+# ─── RESOLVED ──────────────────────────────────────────────────────────────────
 3.1	CLM-nsproc-dimension	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.152
 4.4.2	CLM-nsproc-aggregation-policy	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.152
 4.4.3.4.3	CLM-nsproc-cohort-scope	CIRISServer	src/graph_config.rs#set_config	ciris-server@v0.5.152
 4.2.2.1	CLM-nsproc-attestation-evidence	CIRISServer	src/hardware_attestation.rs#admit_hardware_class_against_root	ciris-server@v0.5.152
+2.6.6.1	CLM-location	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.152
+2.6.6	CLM-canonicalization-cell	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.152
+3.4.5	CLM-capacity-score	CIRISServer	src/scorer.rs#score_and_emit	ciris-server@v0.5.152
+3.3.7	CLM-consent-directed	CIRISServer	src/peer.rs#emit_replication_consent	ciris-server@v0.5.152
+#
+# ─── DECLARED GAPS ─────────────────────────────────────────────────────────────
+# Controls the Constitution attributes to this repo that are NOT enforced here.
+# Stated as rows so silence cannot be read as coverage. Each points at a tracked
+# issue and carries "open" in the version column, which check_claims.py reads as
+# unresolved.
+#
+# All four are currently `established` in claims.tsv on the strength of
+# `impl:CIRISServer#155`. #155 is CLOSED, and its title is "Evidence registry:
+# expose a CC-section -> implementation-symbol map for the impl: tier" — the
+# issue that asked for symbol-level evidence, cited as though it were that
+# evidence. A pointer at an issue and a pointer at a symbol are not the same
+# kind of object, and only one of them goes stale silently.
+6.1.2	CLM-noise-classify	CIRISServer	CIRISServer#239	open
+6.1.2.3	CLM-noise-ejection	CIRISServer	CIRISServer#239	open
+6.1.2	CLM-noise-descent	CIRISServer	CIRISServer#239	open
+4.2.6	CLM-accord-livequorum	CIRISServer	CIRISServer#122	open
+#
+# ─── VERIFIED POINTERS AWAITING A CLAIM ID ─────────────────────────────────────
+# Controls that ship in 0.5.152 with real, fail-closed enforcement and a
+# production call site, for which CIRISConstitution defines no claim (checked
+# against all 149 rows of claims.tsv). Listed as comments, not rows, because
+# inventing a claim_id to make them resolvable is precisely the overclaim this
+# registry guards against. Flip each to a live row the moment an id exists.
+#
+#   consent before scoring   src/peer.rs#emit_analyze_consent
+#                            CIRISConstitution#46 is enforced by persist's
+#                            check_capacity_consent_admission; this is the
+#                            PRODUCER, and until 0.5.151 the in-fold path could
+#                            not author it at all (240 peers consented to send,
+#                            zero could consent to be scored)
+#   in-fold consent path     src/federation_delivery.rs#author_consent_embedded
+#                            authorised by the node being CLAIMED rather than by
+#                            an HTTP session the fold cannot have; refuses on an
+#                            unclaimed node
+#   re-assertion coalescing  src/scorer.rs#coalesced_assertion
+#                            persist #519 item 2a-iii's producer half — floors
+#                            the assertion instant so repeated identical
+#                            measurements sign byte-identical envelopes instead
+#                            of accumulating ~10,000 live rows per agent
+#   sample-size gate on wire src/scorer.rs#score_and_emit
+#                            emits sample_size AND sample_size_gate in the
+#                            envelope, so a gated zero is distinguishable from a
+#                            measured zero by any reader (LC-AV-18)
+#   default-prefix single-   src/peer.rs#default_attestation_prefixes
+#   sourcing                 the production default is READ, never restated —
+#                            a restated default forked for eight releases while
+#                            zero traces moved

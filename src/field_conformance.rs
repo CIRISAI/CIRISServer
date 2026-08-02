@@ -491,6 +491,144 @@ pub const DEFERRED_PENDING_PLANE: &[(&str, &str)] = &[
 /// can never drift from the code. The vendored `evidence/CIRISServer.cc_impl.tsv`
 /// is regenerated from this and pinned in sync by the gate file's
 /// `evidence_tsv_matches_emitted`.
+/// One CC claim the server substantiates with a live symbol, where the claim is
+/// NOT a manifest-field processor.
+///
+/// # Why this exists beside [`SERVER_FIELD_CONFORMANCE`]
+///
+/// That table is keyed by manifest FIELD — every row's `field` is matched
+/// against `field_processor_matrix`, which is what makes the `CLM-nsproc-*`
+/// family verifiable. Most of the Constitution's claims about this repo are not
+/// field-processing claims: rough-only location enforcement, capacity
+/// self-emission rejection, directed replication consent. They have live,
+/// tested symbols and no manifest field to hang them on.
+///
+/// Without this table those claims sit in `claims.tsv` as
+/// `impl:CIRISServer#155` — a pointer to the CLOSED issue whose own title is
+/// *"Evidence registry: expose a CC-section → implementation-symbol map for the
+/// impl: tier"*. That is circular: the claim cites the issue that asked for the
+/// evidence as though it were the evidence. Nine claims are `established` on
+/// that basis today.
+///
+/// A pointer at an issue is not the same kind of object as a pointer at a
+/// symbol, and only one of them can go stale silently.
+pub struct ClaimEvidence {
+    /// The CC section (`cc_section` column).
+    pub cc: &'static str,
+    /// The `CLM-*` claim id this row resolves — MUST exist in the
+    /// Constitution's `claims.tsv`. Inventing one to make a control resolvable
+    /// is the precise overclaim this registry guards against; a shipped control
+    /// with no claim belongs in the awaiting-a-claim-id comments instead.
+    pub clm: &'static str,
+    /// `path#symbol` — the live symbol, in THIS repo or a crate it owns.
+    pub evidence: &'static str,
+    /// What the symbol actually enforces. Not emitted; it is here so a reviewer
+    /// can judge whether the pointer substantiates the claim rather than merely
+    /// sitting near it.
+    pub substantiates: &'static str,
+}
+
+/// Claim-keyed evidence: live symbols for CC claims that are not field
+/// processors. Every `clm` here is verified to exist in `claims.tsv`.
+pub const SERVER_CLAIM_EVIDENCE: &[ClaimEvidence] = &[
+    ClaimEvidence {
+        cc: "2.6.6.1",
+        clm: "CLM-location",
+        evidence: "src/location.rs#mint_location_proof",
+        substantiates: "every minted cell passes persist's validate_location_cell BEFORE it is \
+                        signed, so §0.8.1 rough-only (cell_resolution <= 7) is enforced at \
+                        production time rather than promised by UI copy; the bound is read from \
+                        MAX_LOCATION_PROOF_RESOLUTION, never restated",
+    },
+    ClaimEvidence {
+        cc: "2.6.6",
+        clm: "CLM-canonicalization-cell",
+        evidence: "src/location.rs#mint_location_proof",
+        substantiates: "cells are emitted lowercase-hex canonical, and validate_location_cell's \
+                        resolution-redundancy check means a producer cannot assert a coarse \
+                        resolution while shipping a fine cell",
+    },
+    ClaimEvidence {
+        cc: "3.4.5",
+        clm: "CLM-capacity-score",
+        evidence: "src/scorer.rs#score_and_emit",
+        substantiates: "CapacityAttestation::new (ciris-lens-core) refuses attesting_key_id == \
+                        attested_key_id, so a self-emitted capacity score cannot be constructed, \
+                        let alone reach put_attestation",
+    },
+    ClaimEvidence {
+        cc: "3.3.7",
+        clm: "CLM-consent-directed",
+        evidence: "src/peer.rs#emit_replication_consent",
+        substantiates: "authors the directed consent:replication:v1 grant and self-validates its \
+                        own payload through persist's parse_grant_payload before signing, so a \
+                        grant this node cannot itself parse is never emitted",
+    },
+];
+
+/// A control the Constitution attributes to this repo that this repo does NOT
+/// enforce.
+///
+/// Declared in code, and therefore generated into the vendored TSV and gated by
+/// `evidence_tsv_matches_emitted`, for the same reason the resolved rows are:
+/// a hand-maintained gap list decays into a stale one, and a stale gap list is
+/// worse than none — it reads as a considered position while describing a
+/// codebase that has moved.
+///
+/// Emitted with `open` in the version column, which `check_claims.py` reads as
+/// unresolved. Stating the gap is the point: silence would be read as coverage.
+pub struct DeclaredGap {
+    /// CC section.
+    pub cc: &'static str,
+    /// The `CLM-*` claim that is NOT substantiated here.
+    pub clm: &'static str,
+    /// The tracked issue, in `Repo#N` form — this is a pointer at WORK, which is
+    /// what an issue legitimately is. The failure mode being corrected is the
+    /// reverse: an issue pointer standing in for a symbol in a RESOLVED row.
+    pub tracked_at: &'static str,
+    /// Why it is not enforced, so a reader need not open the issue to judge it.
+    pub reason: &'static str,
+}
+
+/// Gaps declared against claims currently marked `established` in `claims.tsv`
+/// on the strength of `impl:CIRISServer#155`.
+///
+/// #155 is CLOSED and its title is *"Evidence registry: expose a CC-section →
+/// implementation-symbol map for the `impl:` tier"* — the issue that asked for
+/// symbol-level evidence, cited as though it were that evidence. Each row below
+/// is a claim whose server-side symbol does not exist.
+pub const SERVER_DECLARED_GAPS: &[DeclaredGap] = &[
+    DeclaredGap {
+        cc: "6.1.2",
+        clm: "CLM-noise-classify",
+        tracked_at: "CIRISServer#239",
+        reason: "no noise-floor classifier ships in src/ or ciris-lens-core — the only \
+                 noise_floor code in this repo is tests/noise_floor.rs, which is test-tier and \
+                 cannot substantiate an impl-tier claim",
+    },
+    DeclaredGap {
+        cc: "6.1.2.3",
+        clm: "CLM-noise-ejection",
+        tracked_at: "CIRISServer#239",
+        reason: "EjectionVerdict routing exists only in tests/noise_floor_verdicts.rs; no \
+                 production symbol routes Keep/EjectToTier/AggregatedTierOnly/HardDelete",
+    },
+    DeclaredGap {
+        cc: "6.1.2",
+        clm: "CLM-noise-descent",
+        tracked_at: "CIRISServer#239",
+        reason: "the retirement operator (revocation/eviction/aging as pressure-driven descent) \
+                 has no production implementation here",
+    },
+    DeclaredGap {
+        cc: "4.2.6",
+        clm: "CLM-accord-livequorum",
+        tracked_at: "CIRISServer#122",
+        reason: "the FSD-004 live-quorum runtime is not adopted — CIRISServer#122 is open and \
+                 says so; no live_quorum symbol exists in src/",
+    },
+];
+
 pub fn server_evidence_rows() -> Vec<String> {
     SERVER_FIELD_CONFORMANCE
         .iter()
@@ -503,6 +641,20 @@ pub fn server_evidence_rows() -> Vec<String> {
                 env!("CARGO_PKG_VERSION"),
             )
         })
+        .chain(SERVER_CLAIM_EVIDENCE.iter().map(|c| {
+            format!(
+                "{}\t{}\tCIRISServer\t{}\tciris-server@v{}",
+                c.cc,
+                c.clm,
+                c.evidence,
+                env!("CARGO_PKG_VERSION"),
+            )
+        }))
+        .chain(
+            SERVER_DECLARED_GAPS
+                .iter()
+                .map(|g| format!("{}\t{}\tCIRISServer\t{}\topen", g.cc, g.clm, g.tracked_at,)),
+        )
         .collect()
 }
 
