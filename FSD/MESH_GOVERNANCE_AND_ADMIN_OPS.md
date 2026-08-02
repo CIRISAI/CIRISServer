@@ -276,10 +276,32 @@ than discretionary.
 
 ## 6. Rate, quota, and the censorship trap
 
-There is **zero rate limiting, zero quota, zero write price anywhere** — and
-`DEFAULT_OPERATIONAL_PAGE_LIMIT` is `u32::MAX`. Volume has no constitutional
-standing: CC bounds WHO may send, WHAT scope a row carries, and HOW MANY BYTES
-may rest, but never RATE.
+**Correction to an earlier draft of this section**, which said there is "zero
+rate limiting anywhere". That was false, and it is the kind of claim this project
+keeps having to unlearn: `PeerWriteQuota`
+(`federation::replication::admission`, v22.0.0/AV-76) ships, is constructed in
+all three backends, and LEADS the check chain in `put_attestation` — it consults
+no shared state, so it also bounds the recursive directory walk the trust scorer
+runs.
+
+What is actually true is narrower and more useful:
+
+```
+PER_PEER_ATTESTATION_WRITES_PER_WINDOW = 600      // 864,000 rows/day/peer
+PER_PEER_ATTESTATION_WRITE_WINDOW      = 60s
+PER_PEER_QUOTA_TRACKED_PEERS_CAP       = 4096
+buckets: Mutex<HashMap<..>>                       // per-backend-instance, in-memory
+```
+
+It is a **runaway-loop backstop, not an abuse control**: 600/min permits a flood
+indefinitely, the buckets reset on restart, only `put_attestation` is guarded,
+bytes are not counted at all, and the 4096-peer cap evicts honest peers' buckets
+under Sybil pressure — so the limiter's own memory bound favours the attacker.
+`DEFAULT_OPERATIONAL_PAGE_LIMIT` is `u32::MAX`, so the read plane is unbounded.
+
+Volume still has no *constitutional* standing: CC bounds WHO may send, WHAT scope
+a row carries, and HOW MANY BYTES may rest, but never RATE. Filed as
+CIRISPersist#575.
 
 Heuristic response is wanted — *X takedowns in Y period*, inauthentic storage
 patterns — and the substrate has to carry the primitives:
