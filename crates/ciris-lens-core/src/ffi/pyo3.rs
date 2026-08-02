@@ -344,28 +344,32 @@ fn process_one<'py>(
 
     // Sign via engine — lens-core never holds keys.
     let canonical_pybytes = PyBytes::new(py, &prepared.canonical_bytes);
-    let ed25519_obj = engine
-        .call_method1("local_sign", (canonical_pybytes,))
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_sign: {e}")))?;
-    let ed25519_sig: Vec<u8> = ed25519_obj.cast::<PyBytes>()?.as_bytes().to_vec();
-
-    // Hybrid binding: PQC signs (canonical_bytes ++ ed25519_sig).
-    // Replicates LocalSigner::sign_hybrid's internal construction
-    // so verify_hybrid_via_directory (invoked inside
-    // engine.put_detection_event) recognizes it.
-    // CRYPTO-DRY (CIRISServer#283 finding 3): this hand-composition can only be
-    // retired once the Engine PyO3 boundary exposes a hybrid-sign verb —
-    // tracked as CIRISPersist#470. The Engine here is a Python object exposing
-    // only `local_sign`/`local_pqc_sign` (the raw halves), so until #470 lands
-    // this is the one remaining site that must mirror the binding rule.
-    let mut bound_msg = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
-    bound_msg.extend_from_slice(&prepared.canonical_bytes);
-    bound_msg.extend_from_slice(&ed25519_sig);
-    let bound_pybytes = PyBytes::new(py, &bound_msg);
-    let pqc_obj = engine
-        .call_method1("local_pqc_sign", (bound_pybytes,))
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_pqc_sign: {e}")))?;
-    let ml_dsa_65_sig: Vec<u8> = pqc_obj.cast::<PyBytes>()?.as_bytes().to_vec();
+    // ONE hybrid-sign call. This site used to fetch the two raw halves and
+    // hand-compose the bound preimage (canonical_bytes ++ ed25519_sig) itself,
+    // because the Engine PyO3 boundary exposed only `local_sign` /
+    // `local_pqc_sign`. That was the last surviving copy of the binding rule in
+    // this repo (CIRISServer#283 finding 3) and it was correct — but a correct
+    // second copy is still a second copy: it can only ever drift silently, and
+    // the drift would surface as signatures every peer refuses.
+    //
+    // `local_sign_hybrid` is exported as of 0.5.151 and persist pins it against
+    // the rlib path (`local_sign_hybrid_matches_rlib_sign_hybrid`), so the
+    // binding rule now has exactly one implementation and it is upstream's.
+    let sig_dict = engine
+        .call_method1("local_sign_hybrid", (canonical_pybytes,))
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_sign_hybrid: {e}")))?;
+    let ed25519_sig: Vec<u8> = sig_dict
+        .get_item("classical_sig")
+        .map_err(|e| PyRuntimeError::new_err(format!("local_sign_hybrid classical_sig: {e}")))?
+        .cast::<PyBytes>()?
+        .as_bytes()
+        .to_vec();
+    let ml_dsa_65_sig: Vec<u8> = sig_dict
+        .get_item("pqc_sig")
+        .map_err(|e| PyRuntimeError::new_err(format!("local_sign_hybrid pqc_sig: {e}")))?
+        .cast::<PyBytes>()?
+        .as_bytes()
+        .to_vec();
 
     let (event, _summary) = assemble_event(
         &inputs,
