@@ -289,6 +289,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     let n_agents = by_agent.len();
     let mut empty_matrix_agents = 0usize;
     let mut unchanged_agents = 0usize;
+    let mut not_consented_agents = 0usize;
     let mut unregistered_agents = 0usize;
     let mut emitted = 0usize;
     for (agent_id_hash, traces) in by_agent {
@@ -318,6 +319,16 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             // Unchanged is the STEADY STATE on a healthy node, not a problem.
             // Counted separately so the pass line distinguishes "nothing to say"
             // from "nothing to say it with".
+            // Declining to be scored is a permanent, legitimate choice. Count
+            // it; do not alarm on it.
+            Ok(ScoreOutcome::NotConsented) => {
+                not_consented_agents += 1;
+                tracing::debug!(
+                    agent = %attested_key_id,
+                    "capacity scorer: no live CC#46 `analyze` consent from this subject — \
+                     skipping (an allowed choice, not a fault)"
+                );
+            }
             Ok(ScoreOutcome::Unchanged {
                 standing_since,
                 bucket_secs,
@@ -425,12 +436,14 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         // So account for the agents first: if every agent this pass is either
         // already-standing, feature-less, or unregistered, the zero is EXPLAINED
         // and it is not a fault.
-        let accounted = unchanged_agents + empty_matrix_agents + unregistered_agents;
-        if unchanged_agents > 0 && accounted >= n_agents {
+        let accounted =
+            unchanged_agents + not_consented_agents + empty_matrix_agents + unregistered_agents;
+        if (unchanged_agents > 0 || not_consented_agents > 0) && accounted >= n_agents {
             tracing::info!(
                 n_summaries,
                 n_agents,
                 unchanged_agents,
+                not_consented_agents,
                 empty_matrix_agents,
                 unregistered_agents,
                 "capacity scorer pass authored nothing — every score already stands within its \
@@ -441,6 +454,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 n_summaries,
                 n_agents,
                 unchanged_agents,
+                not_consented_agents,
                 empty_matrix_agents,
                 unregistered_agents,
                 window = cfg.window,
@@ -457,6 +471,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             n_agents,
             emitted,
             unchanged_agents,
+            not_consented_agents,
             unregistered_agents,
             "capacity scorer pass complete (capacity attestations authored → replication)"
         );
@@ -636,6 +651,17 @@ enum ScoreOutcome {
     /// The agent had trace summaries but no usable feature rows — a real gap in
     /// the corpus, worth surfacing per-agent.
     NoFeatureRows,
+    /// The subject has not granted this attester the `analyze` scope, so
+    /// CIRISConstitution#46 forbids a `capacity:*` claim about them.
+    ///
+    /// A PERMANENT, LEGITIMATE state — declining to be scored is an allowed
+    /// choice, not a fault — and therefore never an error. It was one: persist
+    /// refused at `put_attestation` and the refusal surfaced as `Err`, so every
+    /// unconsented agent produced a WARN on every pass. Measured on the
+    /// production canonical: 17 of 20 agents, 51 WARN lines every three minutes,
+    /// roughly 24,500 a day, none of them actionable. An alarm that fires on a
+    /// legitimate steady state trains people to ignore the log.
+    NotConsented,
     /// The score is unchanged and already stands, asserted within the current
     /// coalescing bucket. Nothing to say; saying it anyway would cost a
     /// permanent, replicated row carrying no new information.
@@ -691,6 +717,31 @@ async fn score_and_emit(
     // it from `now` would leave `valid_until` varying every pass and the envelope
     // would differ anyway — the coalescing would be real and completely
     // ineffective, which is the worst of both.
+
+    // ── CIRISConstitution#46, asked BEFORE the work ─────────────────────────
+    //
+    // persist enforces this at put_attestation; asking first is not a second
+    // implementation of the rule, it is the same canonical fold
+    // (`resolve_scoped_consent`) consulted early. Two things follow: an
+    // unconsented subject costs no hybrid signature, and — the reason this
+    // exists — declining is reported as the ordinary state it is rather than as
+    // a refused write.
+    let stance = engine
+        .federation_directory()
+        .resolve_scoped_consent(
+            node_key_id,
+            attested_key_id,
+            ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE,
+            None,
+            now,
+        )
+        .await;
+    if !matches!(
+        stance,
+        Ok(ciris_persist::federation::hard_case::ConsentState::Granted)
+    ) {
+        return Ok(ScoreOutcome::NotConsented);
+    }
 
     // Already said this, in this bucket? Then there is nothing new to assert,
     // and a signed row carrying no new information is pure cost: it is permanent,
@@ -761,6 +812,53 @@ async fn score_and_emit(
         "emitted capacity:sustained_coherence:v1 attestation",
     );
     Ok(ScoreOutcome::Emitted)
+}
+
+#[cfg(test)]
+mod outcome_accounting_tests {
+    /// **A legitimate steady state must never be an alarm.**
+    ///
+    /// Every arm of [`super::ScoreOutcome`] except `Emitted` must be counted
+    /// into the zero-path accounting, or the pass WARNs that "the agents do not
+    /// account for" a zero it can perfectly well account for.
+    ///
+    /// Measured before this was fixed: 17 of 20 agents on the production
+    /// canonical had not granted CC#46 `analyze` consent — a permanent, allowed
+    /// choice — and each produced a WARN on every 60s pass. 51 lines every three
+    /// minutes, ~24,500 a day, none actionable. The zero was fully explained the
+    /// whole time; nothing was counting the explanation.
+    ///
+    /// This asserts the SOURCE, because the condition is a property of the
+    /// accounting expression rather than of any value it produces.
+    #[test]
+    fn every_non_emitting_outcome_is_counted_into_the_accounting() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scorer.rs"),
+        )
+        .expect("readable");
+        let code = src.split("#[cfg(test)]").next().expect("code");
+        let accounted = code
+            .split_once("let accounted =")
+            .expect("the zero-path accounting must exist")
+            .1
+            .split(';')
+            .next()
+            .unwrap_or("");
+        for counter in [
+            "unchanged_agents",
+            "not_consented_agents",
+            "empty_matrix_agents",
+            "unregistered_agents",
+        ] {
+            assert!(
+                accounted.contains(counter),
+                "`{counter}` is not in the zero-path accounting, so a pass explained entirely by \
+                 it still WARNs. Every non-emitting outcome is a reason the zero is EXPLAINED; \
+                 an alarm that fires on an explained zero is noise, and noise is how a real one \
+                 gets missed.\naccounting: {accounted}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
