@@ -958,10 +958,19 @@ pub async fn emit_signed_attestation(
 /// rather than silently picking one off a sorted set. The single-owner admission
 /// gate (`NodeAlreadyOwned`) makes the ambiguous state unreachable going forward;
 /// this read is the fail-closed backstop for any legacy multi-owner row.
+///
+/// ## `revoked_after` (CIRISServer#355 / CIRISPersist#570 ask 4)
+///
+/// `owner_of` folds liveness, retraction, expiry and role — it does NOT fold
+/// the revocation plane, and it cannot: it returns a bare granter key_id with
+/// no row and no instant, so there is nothing left to date against a bound.
+/// The bound is checked HERE, where the node's inbound edges are reachable, by
+/// [`owner_binding_stands`].
 pub async fn is_steward_bound(engine: &Engine, node_key_id: &str) -> Option<String> {
     use ciris_persist::federation::admission;
-    match admission::owner_of(engine.federation_directory().as_ref(), node_key_id).await {
-        Ok(owner) => owner, // Some(owner) if owned, None if unowned
+    let owner = match admission::owner_of(engine.federation_directory().as_ref(), node_key_id).await
+    {
+        Ok(owner) => owner?, // Some(owner) if owned, None if unowned
         Err(e) => {
             // Ambiguous / unresolvable single owner ⇒ no `self` boundary. Fail closed.
             tracing::warn!(
@@ -969,9 +978,123 @@ pub async fn is_steward_bound(engine: &Engine, node_key_id: &str) -> Option<Stri
                 error = %e,
                 "owner_of: unresolvable single owner — treating node as unowned (fail closed)"
             );
-            None
+            return None;
         }
+    };
+    if owner_binding_stands(engine, node_key_id, &owner).await {
+        Some(owner)
+    } else {
+        None
     }
+}
+
+/// Does the owner-binding that made `node_key_id` owned still stand, given the
+/// revocations this node holds against `owner` (CIRISServer#355)?
+///
+/// # Why the cheap path comes first
+///
+/// `is_steward_bound` runs on every owner-gated request (`auth::gate`'s
+/// `may_join_resolved` / `require_owner_bound`, the bootstrap, the memory API,
+/// the mesh relay). A key with NO revocations against it — every key, on every
+/// healthy node — costs exactly one targeted indexed lookup here and stops. The
+/// second read (the node's inbound edges, to date the binding) happens only
+/// once a revocation actually exists, which is the moment its cost is worth
+/// paying.
+///
+/// # Fail-closed, in both of the two ways this can go wrong
+///
+/// A backend failure on either read ⇒ `false`. An owner that `owner_of`
+/// resolved but whose owner-binding edge cannot be found ⇒ `false`: if the
+/// binding cannot be DATED it cannot be shown to predate the bound, and
+/// "unmeasurable" must not read as "fine" (the same choice
+/// [`crate::key_standing::UNDATED_STATEMENT_AT`] makes one level down).
+///
+/// # Any surviving edge is enough
+///
+/// An owner may hold several live owner-binding rows (a refresh authors a new
+/// one). The relation stands if ANY of them was signed at or before the bound —
+/// the ownership was established before the compromise, and that is exactly the
+/// case `revoked_after` exists to preserve.
+async fn owner_binding_stands(engine: &Engine, node_key_id: &str, owner: &str) -> bool {
+    use ciris_persist::federation::admission::is_owner_binding_envelope;
+    use ciris_persist::federation::types::attestation_type;
+
+    let held = match crate::key_standing::HeldRevocations::for_keys(engine, [owner.to_owned()])
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                node = %node_key_id,
+                owner = %owner,
+                error = %e,
+                "revoked_after: could not read revocations for the owner — treating the node as \
+                 unowned (fail closed)"
+            );
+            return false;
+        }
+    };
+    if held.is_empty() {
+        return true;
+    }
+
+    let rows = match engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                node = %node_key_id,
+                owner = %owner,
+                error = %e,
+                "revoked_after: the owner is revoked and this node's owner-binding edges could \
+                 not be read to date it — treating the node as unowned (fail closed)"
+            );
+            return false;
+        }
+    };
+
+    // `is_owner_binding_envelope` is persist's own predicate — the one
+    // `owner_of` and the single-owner admission gate both key on. Re-deriving
+    // "what an owner-binding IS" here would put this check and the resolver on
+    // two definitions of one relation.
+    let now = chrono::Utc::now();
+    let bindings: Vec<&Attestation> = rows
+        .iter()
+        .filter(|a| {
+            a.attesting_key_id == owner
+                && a.attestation_type == attestation_type::DELEGATES_TO
+                && is_owner_binding_envelope(&a.attestation_envelope)
+        })
+        .collect();
+
+    if bindings.is_empty() {
+        tracing::warn!(
+            node = %node_key_id,
+            owner = %owner,
+            "revoked_after: the owner is revoked and no owner-binding edge is readable to date \
+             against the bound — treating the node as unowned (fail closed)"
+        );
+        return false;
+    }
+
+    if let Some(surviving) = bindings.iter().find(|a| !held.suspects(a, now)) {
+        tracing::debug!(
+            node = %node_key_id,
+            owner = %owner,
+            attestation_id = %surviving.attestation_id,
+            "revoked_after: the owner's key is revoked, but this owner-binding was signed at or \
+             before the history bound — ownership stands"
+        );
+        return true;
+    }
+
+    for a in &bindings {
+        crate::key_standing::warn_suspect("auth::ownership", a, &held.statement_standing(a, now));
+    }
+    false
 }
 
 /// **CEG projection — "nodes owned by this fed ID".** The inverse of

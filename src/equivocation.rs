@@ -79,6 +79,22 @@
 //! non-repudiable. N4 says never silently reconcile, and folding a retraction in
 //! here would be exactly that.
 //!
+//! ## Except one fold, and why it is not the same thing (CIRISServer#355)
+//!
+//! A row whose attester's statements are revoked *from an instant* covering it
+//! (`revoked_after`, [`crate::key_standing`]) is dropped before comparison and
+//! counted as [`DetectorReport::suspect_rows`].
+//!
+//! That is not the retraction fold refused above. A `withdraws` is the attester
+//! saying "ignore what I said" — accepting it would let an equivocator retire
+//! its own proof, which is precisely the silent reconciliation N4 forbids. A
+//! revocation is a *third party with revocation authority* saying "this key's
+//! word stopped counting at T", and refusing to honour it would make this
+//! detector build the attack it exists to expose: steal a key, sign two
+//! contradictory rows at one instant, and the victim equivocates on every node
+//! holding both. The bound is the instrument that says the thief's rows are not
+//! the victim's statements. Retraction is self-serving; revocation is not.
+//!
 //! ## The first thing it finds is ours
 //!
 //! On a node running the capacity scorer, this fires on the scorer's OWN rows.
@@ -107,12 +123,13 @@ use ciris_persist::prelude::{CallerScope, Engine};
 /// `witness::WITNESS_EQUIVOCATION` so the two N4 emitters read as one family.
 pub const HARD_CASE_KIND: &str = "attestation_equivocation";
 
-/// The envelope field naming the instant the attester CLAIMS (as opposed to
-/// [`Attestation::asserted_at`], the local write column — see the module doc).
-/// Not a persist-owned key: `envelope::paths` has no constant for it, so this
-/// is the server's one spelling of a producer convention rather than a mirror
-/// of someone else's vocabulary.
-const ENVELOPE_ASSERTED_AT: &str = "asserted_at";
+// The envelope field naming the instant the attester CLAIMS (as opposed to
+// `Attestation::asserted_at`, the local write column — see the module doc), and
+// the reader for it, now live in `crate::key_standing`. They started here, and
+// CIRISServer#355 needed the same instant on four more read paths: a second
+// spelling of the key is how two consumers end up asking different questions
+// about one field, which is the defect class this module was built to detect.
+use crate::key_standing::{self, signed_instant, HeldRevocations};
 
 /// Detector configuration. Deliberately not a `config:*` knob: unlike the
 /// scorer's gates, nothing about this pass is a calibration choice a deployment
@@ -167,15 +184,6 @@ pub enum PairVerdict {
     /// Same signed instant, different content. Nothing orders these two and
     /// both are validly signed by one key: the CC 6.1.1 N4 case.
     Contradiction,
-}
-
-/// The signed assertion instant an envelope claims, if it declares one.
-fn signed_instant(envelope: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    envelope
-        .get(ENVELOPE_ASSERTED_AT)
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
 /// The dimension a row claims under, or `None` for an undimensioned row
@@ -340,6 +348,12 @@ pub struct DetectorReport {
     pub superseded: usize,
     /// [`PairVerdict::NoSignedInstant`] count — the coverage hole, measured.
     pub no_signed_instant: usize,
+    /// CIRISServer#355 — live rows this pass DROPPED before comparing because
+    /// a revocation this node holds covers the instant their attester signed
+    /// for (`revoked_after`). Counted, never silent: a pass that compared
+    /// fewer rows than the corpus holds must say so, or `rows_scanned` starts
+    /// meaning two things.
+    pub suspect_rows: usize,
     /// The contradictions, in a stable order.
     pub contradictions: Vec<Contradiction>,
     /// The `max_rows` ceiling was hit: this pass did NOT see the whole live
@@ -475,11 +489,33 @@ pub async fn run_pass(
     let (rows, truncated) = live_rows(engine, node_key_id, cfg)
         .await
         .context("equivocation detector: read live rows")?;
-    let refs: Vec<&Attestation> = rows.iter().collect();
-    let mut report = detect(&refs);
-    report.truncated = truncated;
 
+    // ── CIRISServer#355 / CIRISPersist#570 ask 4: `revoked_after` ───────────
+    //
+    // A row whose attester's statements are revoked from an instant is not
+    // evidence, and here that is not a nicety — it is the attack this detector
+    // would otherwise BUILD. Steal a key, sign two contradictory rows at one
+    // instant, and the victim's key equivocates on every node that holds both;
+    // a bounded revocation is exactly the instrument that says "nothing it
+    // signed after Tuesday counts", and a detector that ignored it would keep
+    // manufacturing hard_cases out of the thief's rows.
+    //
+    // Dropped rows are COUNTED (`suspect_rows`), never silently absent — a
+    // smaller `rows_scanned` with no explanation is the truncation defect one
+    // field over.
     let now = chrono::Utc::now();
+    let held = HeldRevocations::for_keys(engine, key_standing::attesting_keys(&rows))
+        .await
+        .context("equivocation detector: read held revocations")?;
+    let (standing, suspect): (Vec<&Attestation>, Vec<&Attestation>) =
+        rows.iter().partition(|a| !held.suspects(a, now));
+    for a in &suspect {
+        key_standing::warn_suspect("equivocation", a, &held.statement_standing(a, now));
+    }
+
+    let mut report = detect(&standing);
+    report.truncated = truncated;
+    report.suspect_rows = suspect.len();
     for c in &report.contradictions {
         // A pair that fails to record is NOT dropped from the report — the
         // contradiction was observed either way, and a failed write must not be
@@ -505,6 +541,7 @@ pub async fn run_pass(
             same_statement = report.same_statement,
             superseded = report.superseded,
             no_signed_instant = report.no_signed_instant,
+            suspect_rows = report.suspect_rows,
             truncated = report.truncated,
             "equivocation detector: no same-key contradictions in the live corpus"
         );

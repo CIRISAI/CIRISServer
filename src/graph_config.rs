@@ -364,6 +364,22 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
     // fifteen scans to thirteen. The nested N+1 was the larger half.
     let revoked = revoked_config_rows(engine, node_key_id).await;
 
+    // ── `revoked_after` (CIRISServer#355 / CIRISPersist#570 ask 4) ──────────
+    //
+    // Every row this read returns was authored by THIS node's key, so one
+    // targeted `revocations_for` covers the whole page — hoisted, like
+    // `revoked_config_rows` above and for the same reason.
+    //
+    // What it buys: a node whose key is revoked from an instant stops reading
+    // its own post-bound configuration and falls back to the baked defaults,
+    // while the configuration it wrote before the compromise keeps resolving.
+    // Without the bound the only expressible answer was all-or-nothing, and
+    // "all" was what the config plane silently chose.
+    let held = crate::key_standing::HeldRevocations::for_keys(engine, [node_key_id.to_owned()])
+        .await
+        .map_err(|e| anyhow::anyhow!("read revocations for the config-plane author: {e}"))?;
+    let now = chrono::Utc::now();
+
     let mut out = Vec::new();
     for a in page.items {
         // `dimension_prefixes` matches a PREFIX; this plane wants the exact
@@ -382,6 +398,14 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
             || config_row_revoked_externally(engine, &a.attestation_id).await
         {
             continue;
+        }
+        // The author's key was revoked from an instant this row falls after.
+        {
+            let fold = held.statement_standing(&a, now);
+            if fold.standing.is_suspect() {
+                crate::key_standing::warn_suspect("graph_config", &a, &fold);
+                continue;
+            }
         }
         if let Some(entry) = entry_from_envelope(&a.attestation_envelope) {
             out.push(StoredRow {
@@ -453,6 +477,22 @@ async fn revoked_config_rows(
 ///
 /// Kept per-row because `revocations_for` is a targeted lookup by the row id,
 /// not a scan — the thing the hoist above was curing.
+///
+/// # This gate is inert, and saying so is the point (CIRISServer#355)
+///
+/// `revocations_for` takes a **`revoked_key_id`**. The revocation plane revokes
+/// KEYS, never attestation rows — `federation_revocations` has no column naming
+/// a row — so passing an `attestation_id` here can only ever match a key whose
+/// id happens to equal a row id, i.e. never. This has therefore always returned
+/// `false`, and it reads as a revocation check while being none: the exact
+/// present-but-unread shape #355 was filed about, one plane over.
+///
+/// It is left in place rather than deleted because the intent behind it is
+/// real — "someone else revoked this row" — and the substrate does not express
+/// it yet; deleting it would erase the ask along with the defect. The check
+/// that DOES bite now is the `revoked_after` fold in [`live_config_rows`],
+/// which asks the question the revocation plane can actually answer: was this
+/// row's author's key revoked from an instant this row falls after.
 async fn config_row_revoked_externally(engine: &Arc<Engine>, attestation_id: &str) -> bool {
     matches!(
         engine.federation_directory().revocations_for(attestation_id).await,

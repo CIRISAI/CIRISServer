@@ -212,6 +212,12 @@ mod import;
 /// signature is the auth, so it is unauthenticated like the relay. Public so the
 /// integration test (`tests/ingest_http.rs`) can drive the router directly.
 pub mod ingest_http;
+/// **`revoked_after` enforcement** (CIRISServer#355) — the consumer-side read of
+/// persist's time-bounded de-admission. One place decides whether a key's claim
+/// still stands, dated by the SIGNED envelope instant rather than the unsigned
+/// row column, so the five read paths that ask the question cannot answer it
+/// differently. Public so the gate tests can drive the fold directly.
+pub mod key_standing;
 /// Directed-consent federation peering (CIRISServer federation Round 2): mutual
 /// key registration + the `consent:replication:v1` grant that authorizes
 /// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).

@@ -35,6 +35,9 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 
 use ciris_server::scorer::{self, ScorerConfig};
 
+#[path = "support/revocation.rs"]
+mod revocation;
+
 /// **CIRISConstitution#46 (persist v22.0.0) — CONSENT BEFORE SCORING.**
 ///
 /// v22 inverts the RC2 default for `capacity:*`: a federation-tier capacity claim
@@ -435,4 +438,146 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         .scrub_signature_pqc
         .as_ref()
         .is_some_and(|s| !s.is_empty()));
+}
+
+// ─── `revoked_after` on the capacity plane (CIRISServer#355) ─────────────────
+
+/// **A revoked key's post-bound `capacity:*` row must not suppress honest
+/// scoring** (CIRISServer#355 / CIRISPersist#570 ask 4).
+///
+/// Everything downstream of `scorer::live_capacity_rows` is a SUPPRESSION
+/// decision: if a live row already carries this score in this coalescing
+/// bucket, the pass authors nothing, and `unchanged_for` widens the bucket the
+/// longer the score has apparently held. So a single row from a compromised key
+/// can silence honest scoring of a subject for up to a day — with no error, no
+/// warning, and a perfectly healthy-looking "unchanged".
+///
+/// The gate drives the real pass three times:
+///
+///   1. cold corpus → emits (the baseline);
+///   2. immediately again → emits NOTHING, because the row it just wrote stands
+///      (this is the suppression the attack borrows);
+///   3. after a revocation of the authoring key bounded BEFORE that row's
+///      signed instant → emits again, because the standing row stopped
+///      standing.
+///
+/// Step 2 is load-bearing: without it, step 3 proves nothing — a pass that
+/// always emits would satisfy step 3 for the wrong reason.
+#[tokio::test]
+async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
+    use ciris_keyring::PqcSigner as _;
+
+    let (node, node_ed_pub_b64, node_mldsa_pub_b64) = node_a_with_keys().await;
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
+    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+
+    let node_key_id = node
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id");
+    register_key_hybrid(
+        &node,
+        &node_key_id,
+        &node_ed_pub_b64,
+        Some(&node_mldsa_pub_b64),
+        identity_type::NODE,
+    )
+    .await;
+    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+
+    for i in 0..30usize {
+        node.receive_and_persist(&build_trace_batch(&agent_sk, &mldsa, i), &NullScrubber)
+            .await
+            .expect("ingest synthetic trace");
+    }
+    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+
+    let cfg = ScorerConfig {
+        cadence: std::time::Duration::from_secs(3600),
+        window: 500,
+        sample_size_gate: 2,
+        target_n_eff: 8.0,
+    };
+
+    // (1) baseline — the pass authors the subject's capacity row.
+    assert_eq!(
+        scorer::run_pass(&node, &node_key_id, &cfg)
+            .await
+            .expect("first pass"),
+        1,
+        "cold corpus: the scorer must author one capacity row"
+    );
+
+    // The signed instant of the row that now stands. NOT `asserted_at` (the
+    // unsigned write column) — the scorer floors the ENVELOPE instant to an
+    // hour bucket, so the two differ by up to an hour and only one of them is
+    // what a bound is compared against.
+    let standing = node
+        .federation_directory()
+        .list_attestations_for(AGENT_KEY_ID)
+        .await
+        .expect("read the standing capacity row")
+        .into_iter()
+        .find(|a| a.attestation_type == "scores")
+        .expect("one capacity row");
+    let signed_at: chrono::DateTime<chrono::Utc> = standing.attestation_envelope["asserted_at"]
+        .as_str()
+        .expect("signed asserted_at")
+        .parse()
+        .expect("rfc3339");
+
+    // (2) the suppression is real — nothing new to say, so nothing is said.
+    assert_eq!(
+        scorer::run_pass(&node, &node_key_id, &cfg)
+            .await
+            .expect("second pass"),
+        0,
+        "the score is unchanged inside the bucket, so the standing row suppresses re-emission \
+         — this is the behaviour a forged row borrows"
+    );
+
+    // (3) revoke the authoring key from an instant BEFORE that row was signed.
+    let authority = {
+        let signing_key = SigningKey::from_bytes(&[0xD1; 32]);
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0xD2; 32], "revocation-authority-pqc")
+                .expect("authority ML-DSA-65 seed"),
+        );
+        let ed_pub = BASE64.encode(signing_key.verifying_key().to_bytes());
+        let mldsa_pub = BASE64.encode(pqc.public_key().await.expect("authority pubkey"));
+        register_key_hybrid(
+            &node,
+            "revocation-authority",
+            &ed_pub,
+            Some(&mldsa_pub),
+            identity_type::STEWARD,
+        )
+        .await;
+        LocalSigner::from_parts(
+            signing_key,
+            "revocation-authority".to_string(),
+            Some(pqc),
+            Some("revocation-authority-pqc".to_string()),
+        )
+    };
+    revocation::revoke(
+        &node,
+        &authority,
+        &node_key_id,
+        chrono::Utc::now(),
+        Some(signed_at - chrono::Duration::seconds(1)),
+    )
+    .await;
+
+    // (4) the standing row no longer stands, so the honest measurement is made
+    // and published again.
+    assert_eq!(
+        scorer::run_pass(&node, &node_key_id, &cfg)
+            .await
+            .expect("third pass"),
+        1,
+        "a capacity row whose author's statements are revoked from an earlier instant must \
+         not count as a standing assertion — otherwise one forged row silences the scorer"
+    );
 }
