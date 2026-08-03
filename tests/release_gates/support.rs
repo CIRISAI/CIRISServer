@@ -70,14 +70,14 @@ use std::path::PathBuf;
 // mesh-wide ceiling to verify v11.0.0, and edge v15.11.0 adopted it in the same
 // wave. Kept as a note rather than deleted because the failure mode recurs — any
 // dependency a sibling also pins by tag is a ceiling, not a choice.
-pub const TARGET_VERIFY: &str = "v12.0.0";
-pub const TARGET_PERSIST: &str = "v25.1.0";
-pub const TARGET_EDGE: &str = "v15.13.0";
+pub const TARGET_VERIFY: &str = "v12.1.0";
+pub const TARGET_PERSIST: &str = "v26.0.0";
+pub const TARGET_EDGE: &str = "v15.14.0";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
 /// `canonical` role + single-owner admission gate for the mesh-seed release.)
-pub const TARGET_PERSIST_V10: &str = "v25";
+pub const TARGET_PERSIST_V10: &str = "v26";
 
 /// The canonical-seed transport key id Node A must carry (Stage 5).
 pub const CANONICAL_TRANSPORT_KEY_ID: &str = "ciris-canonical-1";

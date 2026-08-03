@@ -814,8 +814,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "12.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.0.0#4dedf088a657b8240d2b70bfae8a328d15907e34"
+version = "12.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.1.0#6f533c5b27077372f023de4f215df3b6b326fcc7"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "15.13.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v15.13.0#8dcbf1698c5f2a175f8a57be8572fd26085f487d"
+version = "15.14.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v15.14.0#a4ee4871141a3a67b51e07e3009009dc3ee35e65"
 dependencies = [
  "async-trait",
  "axum",
@@ -895,8 +895,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "12.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.0.0#4dedf088a657b8240d2b70bfae8a328d15907e34"
+version = "12.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.1.0#6f533c5b27077372f023de4f215df3b6b326fcc7"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -961,8 +961,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "25.1.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v25.1.0#54dd1908f539c256b71bb0380f77d37c6554cc0c"
+version = "26.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v26.0.0#4b7e59fbe1b12ce6f0675fd61572051c52d5f819"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1044,8 +1044,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "12.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.0.0#4dedf088a657b8240d2b70bfae8a328d15907e34"
+version = "12.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.1.0#6f533c5b27077372f023de4f215df3b6b326fcc7"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1086,8 +1086,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "12.0.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.0.0#4dedf088a657b8240d2b70bfae8a328d15907e34"
+version = "12.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v12.1.0#6f533c5b27077372f023de4f215df3b6b326fcc7"
 dependencies = [
  "aes-gcm",
  "android_logger",

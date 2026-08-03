@@ -29,10 +29,25 @@ const PEER_KEY_ID: &str = "peer-scorer";
 const SUBJECT_KEY_ID: &str = "agent-subject";
 
 /// A dimension whose CLAIM VALUE lives in the envelope payload — the shape the
-/// detector can compare. (`capacity:*`, the issue's headline case, is the same
-/// shape but is refused at the local tier by CEG §7.5 anti-Goodhart, so it
-/// cannot be seeded through the local-write→promote route.)
-const DIM: &str = "moderation:conduct:v1";
+/// detector can compare.
+///
+/// NOT `capacity:*` (the issue's headline case): same shape, but refused at the
+/// local tier by CEG §7.5 anti-Goodhart, so it cannot be seeded through the
+/// local-write→promote route these fixtures use.
+///
+/// NOT `moderation:*` either, which this originally used. persist v26.0.0
+/// (#589) closed a real hole: `attestation_promote` had been re-signing and
+/// flipping `tier` WITHOUT re-running the admission stack, so promotion was a
+/// path to launder an unauthorized row into federation tier. It now faces the
+/// full stack — and `moderation:`/`slashing:` are duty-gated
+/// (`check_moderation_admission`), so seeding one requires the signer to be a
+/// duty-holder or reach one through a scoped delegation chain.
+///
+/// The fixture was exercising the hole. It is fixed here rather than worked
+/// around: the detector is indifferent to WHICH dimension it compares — it keys
+/// on (attester, subject, dimension, signed instant) — so the honest fixture
+/// uses a family that needs no duty, and the gate stays intact.
+const DIM: &str = "trust:community_standing:v1";
 
 /// Node A: in-memory sqlite substrate keyed by a hybrid node-identity signer.
 /// Mirrors `tests/capacity_self_revocation_pin.rs`.

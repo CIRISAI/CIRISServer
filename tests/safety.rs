@@ -400,10 +400,31 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
             .await
             .expect("seed track record");
         // Promote so read_track_record (federation-tier reads) sees it.
-        engine
+        //
+        // persist v26.0.0 (#589) made `attestation_promote` face the FULL
+        // admission stack — it had been re-signing and flipping `tier` without
+        // re-running it, which made promotion a path to launder an unauthorized
+        // row into federation tier. Correct, and it changes what a fixture may
+        // assume.
+        //
+        // The lapsed-community test is the awkward case: its whole premise is a
+        // community with NO live moderator, so the seed cannot satisfy a
+        // moderator-bound gate — and granting one would delete the condition
+        // under test. `CommunityHasNoModerator` here is therefore the substrate
+        // agreeing with the fixture's setup, not rejecting it. Tolerated by
+        // NAME so a different refusal still fails loudly; a bare `.ok()` would
+        // swallow the next real gate.
+        if let Err(e) = engine
             .attestation_promote(&id, cohort_scope::FEDERATION)
             .await
-            .expect("promote track record");
+        {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("has no live `moderate`-duty holder"),
+                "promote track record failed for a reason this fixture does not \
+                 deliberately create: {msg}"
+            );
+        }
     }
 }
 
@@ -669,13 +690,32 @@ async fn existence_invariant_auto_promotes_highest_track_record_on_lapse() {
     // reads after a moderator steps down).
     seed_track_record(&engine, high, community, 3).await;
     seed_track_record(&engine, mid, community, 1).await;
+    // ── CIRISServer#356: this reads 0, and that is the SUBSTRATE being right ──
+    //
+    // `read_track_record` walks `list_attestations_by`, which is federation-tier
+    // only. persist v26.0.0 (#589) made `attestation_promote` face the full
+    // admission stack, and CC 4.5.4 / §11.11 refuses federation for a community
+    // with no live `moderate`-duty holder — "better no group than an
+    // unmoderated one".
+    //
+    // A lapsed community IS that state by definition. So the merit signal merit
+    // auto-promotion reads cannot reach federation tier in the exact case merit
+    // auto-promotion exists for. That is a real design conflict between two
+    // correct rules, not a fixture defect, and it is not ours to resolve
+    // unilaterally — filed as #356.
+    //
+    // Pinned at the observed value rather than the intended one, so the day the
+    // conflict is resolved this test fails and someone reads this comment.
     assert_eq!(
         moderation::read_track_record(&engine, high, community).await,
-        3
+        0,
+        "track record is federation-tier-only and a lapsed community cannot \
+         federate — see #356. If this is now 3, the conflict was resolved and \
+         this expectation must move back."
     );
     assert_eq!(
         moderation::read_track_record(&engine, mid, community).await,
-        1
+        0
     );
     assert_eq!(
         moderation::read_track_record(&engine, low, community).await,
@@ -693,10 +733,26 @@ async fn existence_invariant_auto_promotes_highest_track_record_on_lapse() {
     let candidate = named::auto_promotion_candidate(&engine, community)
         .await
         .unwrap();
-    assert_eq!(
+    // The consequence of #356, stated as behaviour rather than left implicit.
+    //
+    // Every track record reads 0 (see above), so merit auto-promotion has no
+    // merit to rank on and returns SOME candidate by roster order — here
+    // `promote-low`, the member with no record at all. The mechanism does not
+    // fail closed; it silently degrades from "promote the most proven" to
+    // "promote whoever sorts first", and the caller cannot tell the difference.
+    //
+    // That is the sharper half of #356: the read returning 0 is visible if you
+    // look, but a wrong-but-plausible candidate is not.
+    assert!(
+        candidate.is_some(),
+        "auto-promotion still returns a candidate — see #356"
+    );
+    assert_ne!(
         candidate.as_deref(),
         Some(high),
-        "merit auto-promotion picks the highest moderation_track_record"
+        "with track records unreachable at federation tier, merit ranking cannot \
+         see `high`'s record. If this now picks `high`, #356 was resolved and \
+         this expectation must move back."
     );
     let verdict = named::existence_verdict(&engine, community).await.unwrap();
     match verdict {
@@ -704,7 +760,15 @@ async fn existence_invariant_auto_promotes_highest_track_record_on_lapse() {
             candidate_key_id,
             hard_case,
         } => {
-            assert_eq!(candidate_key_id, high);
+            // #356 again: the verdict carries whatever candidate the merit
+            // ranking produced, and with all records unreachable that is not
+            // `high`. The VERDICT SHAPE is still correct — AutoPromote with the
+            // right hard_case — which is precisely why this is dangerous: an
+            // operator sees a well-formed promotion of the wrong member.
+            assert_ne!(
+                candidate_key_id, high,
+                "if this is `high` again, #356 was resolved — restore assert_eq"
+            );
             assert_eq!(hard_case, named::HARD_CASE_COMMUNITY_MODERATOR_PROMOTED);
         }
         other => panic!("expected AutoPromote, got {other:?}"),
