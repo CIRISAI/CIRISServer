@@ -72,7 +72,7 @@ use std::path::PathBuf;
 // dependency a sibling also pins by tag is a ceiling, not a choice.
 pub const TARGET_VERIFY: &str = "v11.0.0";
 pub const TARGET_PERSIST: &str = "v25.0.0";
-pub const TARGET_EDGE: &str = "v15.11.0";
+pub const TARGET_EDGE: &str = "v15.12.0";
 /// Stage 6/7: the persist MAJOR family that bakes the canonical genesis seed.
 /// (Name is historical — the seed-bake family moved v10 → v12 → **v13**: the v12.0
 /// genesis-mesh rooting anchor persisted, v13.0.0 adds the accord-conferred
