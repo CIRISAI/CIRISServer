@@ -49,17 +49,17 @@ use ciris_server::scorer::{self, ScorerConfig};
 /// reads federation-tier rows only — hence the promote.
 ///
 /// Vocabulary is single-sourced from persist (`paths::DIMENSION`,
-/// `STATE_GRANTED_PREFIX`, `CAPACITY_CONSENT_SCOPE`); a hand-mirrored literal
+/// `STATE_GRANTED_PREFIX`, `ANALYZE_CONSENT_SCOPE`); a hand-mirrored literal
 /// compiles and skews the wire.
 async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
     use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
 
     let envelope = serde_json::json!({
         (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
-        "scope": CAPACITY_CONSENT_SCOPE,
+        "scope": ANALYZE_CONSENT_SCOPE,
     });
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
         .expect("analyze-consent envelope");

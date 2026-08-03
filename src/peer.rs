@@ -68,7 +68,7 @@ pub async fn emit_analyze_consent(
     subject_key_id: &str,
     attester_key_id: &str,
 ) -> Result<Option<String>> {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::hard_case::ConsentState;
 
@@ -79,7 +79,7 @@ pub async fn emit_analyze_consent(
             .resolve_scoped_consent(
                 attester_key_id,
                 subject_key_id,
-                CAPACITY_CONSENT_SCOPE,
+                ANALYZE_CONSENT_SCOPE,
                 None,
                 now,
             )
@@ -91,7 +91,7 @@ pub async fn emit_analyze_consent(
 
     let envelope = serde_json::json!({
         (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
-        "scope": CAPACITY_CONSENT_SCOPE,
+        "scope": ANALYZE_CONSENT_SCOPE,
     });
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
         .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
@@ -111,7 +111,7 @@ pub async fn emit_analyze_consent(
         .resolve_scoped_consent(
             attester_key_id,
             subject_key_id,
-            CAPACITY_CONSENT_SCOPE,
+            ANALYZE_CONSENT_SCOPE,
             None,
             chrono::Utc::now(),
         )
@@ -120,7 +120,7 @@ pub async fn emit_analyze_consent(
         Ok(ConsentState::Granted) => tracing::info!(
             subject = %subject_key_id,
             attester = %attester_key_id,
-            scope = CAPACITY_CONSENT_SCOPE,
+            scope = ANALYZE_CONSENT_SCOPE,
             attestation_id = %id,
             "CC#46 `analyze` consent authored and RESOLVED — the attester may now author \
              capacity:* about this node"
@@ -206,7 +206,7 @@ pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:", "trace:"]
 /// moved, and a stale translation asserting the old meaning is worse than
 /// English. `tests/fold_consent_surface.rs` pins the id set.
 pub fn consent_disclosure_json() -> String {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
 
@@ -251,7 +251,7 @@ pub fn consent_disclosure_json() -> String {
                     "The peer may SCORE your traces — this is what builds reputation."
                 ),
                 (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
-                "scope": CAPACITY_CONSENT_SCOPE,
+                "scope": ANALYZE_CONSENT_SCOPE,
                 "parameter": "analyze=True",
             },
         ],

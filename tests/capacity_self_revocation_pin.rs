@@ -69,14 +69,14 @@ const AGENT_KEY_ID: &str = "agent-alpha";
 /// `resolve_scoped_consent` reads through `list_attestations_for`, which is
 /// tier-filtered. Vocabulary single-sourced from persist, never hand-mirrored.
 async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
     use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
 
     let envelope = serde_json::json!({
         (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
-        "scope": CAPACITY_CONSENT_SCOPE,
+        "scope": ANALYZE_CONSENT_SCOPE,
     });
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
         .expect("analyze-consent envelope");

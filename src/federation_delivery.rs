@@ -683,7 +683,7 @@ pub fn analyze_consent_stance(
     attester_key_id: &str,
     subject_key_id: Option<&str>,
 ) -> Result<String> {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::hard_case::ConsentState;
 
     let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
@@ -702,7 +702,7 @@ pub fn analyze_consent_stance(
     let stance = rt.block_on(engine.federation_directory().resolve_scoped_consent(
         attester_key_id,
         &subject,
-        CAPACITY_CONSENT_SCOPE,
+        ANALYZE_CONSENT_SCOPE,
         None,
         chrono::Utc::now(),
     ))?;

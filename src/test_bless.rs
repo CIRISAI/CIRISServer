@@ -299,7 +299,7 @@ pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engin
 ///
 /// v22 inverts the RC2 default for one family: a federation-tier `capacity:*`
 /// claim about subject S by attester P is REFUSED unless a live
-/// [`CAPACITY_CONSENT_SCOPE`] consent from S covering P exists in the scoring
+/// [`ANALYZE_CONSENT_SCOPE`] consent from S covering P exists in the scoring
 /// node's corpus. Persist's words for why: *"were you permitted to compute and
 /// publish this about me?"* — and CC 3.4.5 previously let **any** registered key
 /// score any third party, which on a deliberately-cheap bootstrap means anyone.
@@ -315,7 +315,7 @@ pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engin
 /// actually read, which is the "accepted but not projected" class.
 ///
 /// Vocabulary is single-sourced from persist (`paths::DIMENSION`,
-/// `consent_dimension::STATE_GRANTED_PREFIX`, `CAPACITY_CONSENT_SCOPE`) — never
+/// `consent_dimension::STATE_GRANTED_PREFIX`, `ANALYZE_CONSENT_SCOPE`) — never
 /// hand-mirrored, because a mirrored literal compiles and skews the wire.
 ///
 /// **Harness-only, deliberately.** Consenting to be analysed is the subject's
@@ -329,7 +329,7 @@ pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engin
 /// the consent that authorizes it — the CIRISPersist#528 G2 shape.
 #[cfg(feature = "python")]
 async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) -> Result<()> {
-    use ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE;
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
     use ciris_persist::federation::hard_case::ConsentState;
@@ -362,7 +362,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
             .resolve_scoped_consent(
                 &attester,
                 &self_key_id,
-                CAPACITY_CONSENT_SCOPE,
+                ANALYZE_CONSENT_SCOPE,
                 None,
                 chrono::Utc::now(),
             )
@@ -376,7 +376,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
         }
         let envelope = serde_json::json!({
             (paths::DIMENSION): dimension,
-            "scope": CAPACITY_CONSENT_SCOPE,
+            "scope": ANALYZE_CONSENT_SCOPE,
         });
         let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
             "consent",
@@ -397,7 +397,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
             .resolve_scoped_consent(
                 &attester,
                 &self_key_id,
-                CAPACITY_CONSENT_SCOPE,
+                ANALYZE_CONSENT_SCOPE,
                 None,
                 chrono::Utc::now(),
             )
@@ -406,7 +406,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
             Ok(ConsentState::Granted) => tracing::warn!(
                 subject = %self_key_id,
                 attester = %attester,
-                scope = CAPACITY_CONSENT_SCOPE,
+                scope = ANALYZE_CONSENT_SCOPE,
                 "TEST-ANCHOR: `analyze` consent GRANTED and RESOLVED (CIRISConstitution#46) — \
                  the canonical may now author capacity:* about this node"
             ),

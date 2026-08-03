@@ -770,7 +770,7 @@ async fn score_and_emit(
         .resolve_scoped_consent(
             node_key_id,
             attested_key_id,
-            ciris_persist::federation::admission::CAPACITY_CONSENT_SCOPE,
+            ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
             None,
             now,
         )
