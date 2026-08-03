@@ -206,6 +206,39 @@ Two properties on every tier ≥ 1, unchanged and load-bearing:
   mandatory reason, in the tombstone. An action that does not carry its own
   authority cannot be told from an unauthorized one once the actor is gone.
 
+### Corrections the implementation forced (tiers 0–4, `src/admin_ops.rs`)
+
+Building the routes against persist v28.2.0 falsified four things this table
+said. They are corrected here rather than in the code alone, because a design
+doc that keeps asserting them is how the next reader inherits them.
+
+1. **Tier 2 is `slash`, not `moderate`.** `check_delegated_duty_scores_admission`
+   gates the quarantine dimension arm on `slash` — *"a quarantine marker takes
+   something away… there is no laxer path for the harsher op"*. A route
+   advertising `moderate` would advertise an authority the substrate refuses at
+   its own door.
+2. **Tier 1 has no substrate at all.** There is no recipient-authored per-key
+   admission budget; `PeerWriteQuota` is a fixed runaway-loop backstop, not a
+   policy surface a throttle can key on. `throttle` / `un-throttle` are
+   attributed judgements and nothing more, and the route says so in its
+   response. This is §6's ask, restated as a shipped gap.
+3. **Tier 4 is NOT reversible.** Revocations are append-only,
+   `fold_key_statement_standing` composes restrictions and never leniencies, and
+   no layer exposes an un-revoke. `re-admit` exists and records an attributed
+   reversal; the revocation row survives and every reader still folds it. Of the
+   three reversals only tier 2's reaches the substrate.
+4. **The time bound lives on tier 4, not tier 3.** `Revocation::revoked_after`
+   is the only time-bounded removal persist implements. Tier 3 accepts `after:`
+   as a selection window and records it, but refuses to drive the unbounded
+   actor eviction from a bounded judgement — that is the DigiNotar error, and
+   the coherent op is a bounded de-admission.
+
+And one that is not a correction but a wall: **no primitive descends an
+attestation row set.** Every payload carrier is sealed inside its own signature
+(`erasable` decides erasability at mint, and nothing minted today is erasable),
+so tier 3 reaches the actor's blob corpus and nothing else. §4's object-keyed
+erasure ask is what closes it.
+
 ---
 
 ## 4. Content classes: retirement is not removal
@@ -354,5 +387,13 @@ threatened by a backlog.
 | rate/quota plane with reserved admission class | persist | to file |
 | mesh-config consumption, ConfigRelief, quarantine-aware offers | edge | #440 |
 | per-row delivery receipts | edge | to file |
-| four-tab card, graded routes, preview hash | server | #346 |
+| four-tab card, graded routes, preview hash | server | #346 — tiers 0–4 landed as `src/admin_ops.rs` |
 | consensus engine (`consensus_protocol` is a stored label) | server | #111, open |
+
+Three further asks the tier 0–4 implementation surfaced, all persist:
+
+| ask | why |
+|---|---|
+| `list_attestations` must honour `AttestationFilter::window` | the v17.4.0 window / tier / attester_filter axes are read only by the `list_scores` / `resolve_scores` handles; the general read silently ignores them. Same silent-narrowing class `dimension_exact` was in until v17.5.2 (#461) — a caller sets a predicate and gets rows that do not satisfy it. `src/admin_ops.rs` enforces `after:` in-process and labels the response `window_enforced: "application"` rather than hand an operator a hash over twice the blast radius they ratified. |
+| an assemble-only companion to `emit_attestation_self` | `record_quarantine_marker` takes an already-signed `Attestation`, and every sanctioned emit helper canonicalizes-signs-assembles **and puts**. The one door built for tier 2 cannot be reached through the chokepoint built to stop hand-rolled rows. |
+| export a "does THIS delegation row carry scope S" predicate | `delegation_scope_set` is `pub(crate)`, so the only public authority question is `reachable_under_scope(issuer → actor, S)` — which is true the moment the issuer granted S by ANY edge. On its own that lets a `review` delegation be *recorded* as the authority for a `slash` act. |

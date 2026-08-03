@@ -52,6 +52,12 @@ pub mod accord_reactivate;
 /// "ciris-server + an adapter": it contributes HTTP routes + a background
 /// lifecycle to the SAME shared core, instead of re-composing the substrate.
 pub mod adapter;
+/// The **graded admin-op ladder, tiers 0–4** (CIRISServer#346) — owner-gated
+/// `POST /v1/admin/{preview,annotate,throttle,quarantine,descend,deadmit}` (+
+/// the three reversals) over persist's removal primitives, every mutating call
+/// committing the hash its preview returned. Public so the integration test
+/// (`tests/admin_ops.rs`) can drive the router directly.
+pub mod admin_ops;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
 /// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
 /// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), the

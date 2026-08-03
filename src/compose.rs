@@ -909,6 +909,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             .as_ref()
                             .map(|_| Arc::clone(&replication_notify)),
                     ))
+                    // The graded admin-op ladder (CIRISServer#346, tiers 0–4):
+                    // preview → annotate / throttle / quarantine / descend /
+                    // de-admit, each committing the hash its preview returned.
+                    // Owner-gated on the same spine as peering, and gated a
+                    // second time on a persist-side delegation scope
+                    // (`review` / `moderate` / `slash`) re-walked from this
+                    // node's own verified state.
+                    .merge(crate::admin_ops::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                    ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
                     // the SAME way peering is (serve-only floor + SYSTEM_ADMIN owner
