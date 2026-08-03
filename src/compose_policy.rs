@@ -26,6 +26,7 @@
 //! | 3.4.9 | `licensure:*` single-source `confidence ≤ 0.5` cap | `Composer::licensure_cap` |
 //! | 3.4.5 | `capacity:*` self-emission rejection (consumer re-check) | `Composer::screen` |
 //! | 3.1.9.3 | `testimonial_witness:*` is never sole evidence for `slashing:*` | `Composer::screen` |
+//! | — | `revoked_after` (CIRISServer#355): a revoked key's post-bound statements do not compose | `Composer::screen` via [`crate::key_standing`] |
 //!
 //! ## Fail-closed
 //!
@@ -54,9 +55,12 @@ use chrono::{DateTime, Utc};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::precedence::precedence_winner;
 use ciris_persist::federation::types::{attestation_type, identity_type, Attestation};
+use ciris_persist::federation::KeyStatementStanding;
 use ciris_persist::prelude::Engine;
 use ciris_verify_core::infrastructure_community::InfrastructureCommunity;
 use serde::Serialize;
+
+use crate::key_standing::{self, HeldRevocations};
 
 // ─── Dimension prefixes the composition tier is normatively sensitive to ─────
 
@@ -434,6 +438,18 @@ pub enum RefusalReason {
     /// composers (`supersedes` / `withdraws` / `recants`) are persist's
     /// precedence layer, not ours.
     NotAScore,
+    /// CIRISServer#355 / CIRISPersist#570 ask 4 — a revocation this node holds
+    /// covers the instant the attester SIGNED for. The attached
+    /// [`KeyStatementStanding`] says which kind: `SuspectAfterBound` means the
+    /// key was revoked with a history bound and this statement falls after it
+    /// (the key's earlier statements still compose); `SuspectUnbounded` means
+    /// the revocation scoped nothing and the whole corpus is in doubt.
+    ///
+    /// Distinct from [`Self::NotInTrustSet`] on purpose: a pinned, trusted key
+    /// whose statements were revoked from an instant is a different fact from a
+    /// key that was never trusted, and an operator reading the refusal list
+    /// needs to be able to tell them apart.
+    KeyStatementSuspect(KeyStatementStanding),
 }
 
 /// A refused attestation, with the reason. Surfaced so an operator can see
@@ -557,6 +573,15 @@ struct Row<'a> {
 pub struct Composer {
     trust: TrustSet,
     cfg: PolicyConfig,
+    /// CIRISServer#355 — the revocations this node holds against the corpus's
+    /// attesting keys, fetched ONCE by [`Composer::compose_for_key`] so the
+    /// pure [`Composer::compose`] can honour `revoked_after` without doing I/O.
+    ///
+    /// Empty by default, which folds to `Stands` for every key: a node holding
+    /// no revocations composes exactly as it did before, and a caller driving
+    /// the pure composer over a hand-built corpus (every test in this repo)
+    /// does not need a substrate to do it.
+    revocations: HeldRevocations,
 }
 
 impl Composer {
@@ -566,12 +591,22 @@ impl Composer {
         Self {
             trust,
             cfg: PolicyConfig::default(),
+            revocations: HeldRevocations::default(),
         }
     }
 
     /// Override the CONSUMER-POLICY knobs (see [`PolicyConfig`]).
     pub fn with_config(mut self, cfg: PolicyConfig) -> Self {
         self.cfg = cfg;
+        self
+    }
+
+    /// Supply the held revocations the CC 4.4 screen folds against
+    /// (CIRISServer#355). [`Composer::compose_for_key`] does this from the
+    /// substrate; a test supplies them directly.
+    #[must_use]
+    pub fn with_revocations(mut self, revocations: HeldRevocations) -> Self {
+        self.revocations = revocations;
         self
     }
 
@@ -641,9 +676,19 @@ impl Composer {
         for (k, class) in resolved {
             trust.pin_co_steward(k, class);
         }
+
+        // CIRISServer#355 — `revoked_after`, resolved in THIS async phase for
+        // the same reason the co-steward roles are: the fold below stays pure.
+        // One `revocations_for` per DISTINCT attesting key in the corpus, and
+        // the key set is derived from the corpus itself so no row can be
+        // screened against revocations that were never read.
+        let revocations =
+            HeldRevocations::for_keys(engine, key_standing::attesting_keys(&rows)).await?;
+
         let composer = Composer {
             trust,
             cfg: self.cfg.clone(),
+            revocations,
         };
         Ok(composer.compose(&rows))
     }
@@ -761,6 +806,24 @@ impl Composer {
         // recorded as untrusted.
         if !self.trust.contains(&att.attesting_key_id) {
             return Err(RefusalReason::NotInTrustSet);
+        }
+
+        // ── CIRISServer#355 / CIRISPersist#570 ask 4: `revoked_after` ───────
+        //
+        // Asked HERE, immediately after Policy A, because it is the same kind
+        // of question: may this key's word count. It is not a staleness check
+        // and it is not an envelope check — a well-formed, unexpired,
+        // trust-pinned row from a key whose statements were revoked from an
+        // instant must not compose, and it must be visible in the refusal list
+        // as that rather than as anything else.
+        //
+        // The instant compared is the SIGNED one (`key_standing::signed_instant`
+        // reads the envelope, not `att.asserted_at` — see that module's doc and
+        // CIRISServer#350). Fold and clock both come from persist.
+        let fold = self.revocations.statement_standing(att, now);
+        if fold.standing.is_suspect() {
+            key_standing::warn_suspect("compose_policy", att, &fold);
+            return Err(RefusalReason::KeyStatementSuspect(fold.standing));
         }
 
         // Staleness — the row's `expires_at` (persist mirrors CC 2.1

@@ -46,6 +46,8 @@ use ciris_persist::federation::types::cohort_scope;
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
 
+use crate::key_standing;
+
 pub mod n_eff;
 
 /// CEG `scores` attestation type — the shared constant, not a local copy.
@@ -554,6 +556,24 @@ const CAPACITY_READ_LIMIT: i64 = 512;
 /// a 152-second boot phase) — but the shape was the same, and the reason it
 /// went unnoticed in review is that `list_attestations_for(x)` reads as a
 /// narrow query. It is not; the narrowing is the caller's `.filter()`.
+///
+/// # `revoked_after` (CIRISServer#355 / CIRISPersist#570 ask 4)
+///
+/// A row whose attester's statements are revoked from an instant covering it
+/// does not count as live here, and the reason is a live attack rather than
+/// tidiness. Everything downstream of this read is a SUPPRESSION decision: if
+/// the corpus already carries this score in this bucket, the scorer authors
+/// nothing ([`ScoreOutcome::Unchanged`]), and [`unchanged_for`] widens the
+/// coalescing bucket the longer the score has apparently held. So a single
+/// forged `capacity:*` row from a compromised key can silence honest scoring
+/// of that subject for a day — no error, no warning, a perfectly healthy-
+/// looking "unchanged". Honouring the bound is what makes the forged row stop
+/// counting while the key's pre-compromise measurements keep doing so.
+///
+/// A revocation read that FAILS returns an empty row set, like every other
+/// failure in this function. That direction is safe: an empty set means "no
+/// standing assertion", so the scorer re-measures and re-emits. The unsafe
+/// direction would be returning the rows unfiltered.
 async fn live_capacity_rows(
     engine: &Engine,
     attested_key_id: &str,
@@ -581,13 +601,35 @@ async fn live_capacity_rows(
     else {
         return Vec::new();
     };
-    page.items
+    let rows: Vec<ciris_persist::federation::Attestation> = page
+        .items
         .into_iter()
         .filter(|a| {
             ciris_persist::federation::admission::envelope_dimension(&a.attestation_envelope)
                 .is_some_and(|d| d == CAPACITY_DIMENSION)
         })
         .filter(|a| a.expires_at.is_none_or(|exp| exp > now))
+        .collect();
+
+    // `revoked_after` — one `revocations_for` per DISTINCT attester in the
+    // page (in the steady state that is one key, this node's), never per row.
+    let Ok(held) =
+        key_standing::HeldRevocations::for_keys(engine, key_standing::attesting_keys(&rows)).await
+    else {
+        return Vec::new();
+    };
+    if held.is_empty() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|a| {
+            let fold = held.statement_standing(a, now);
+            if fold.standing.is_suspect() {
+                key_standing::warn_suspect("scorer", a, &fold);
+                return false;
+            }
+            true
+        })
         .collect()
 }
 
