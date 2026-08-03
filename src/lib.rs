@@ -288,11 +288,12 @@ pub mod retention_loop;
 /// hook (the matcher defers to the NodeCore content seam). Public so the
 /// integration test (`tests/safety.rs`) can drive the modules + routers directly.
 pub mod safety;
+pub mod scorer;
 /// The capacity score→emit pipeline — a periodic task that derives per-agent
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
 /// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
-pub mod scorer;
+pub mod sign_object;
 pub mod system_data;
 pub mod telemetry_logs;
 #[cfg(feature = "test-anchor")]
@@ -1283,6 +1284,92 @@ mod python {
     }
 
     #[pyfunction]
+    /// `ciris_server.sign_object(path, label="")` — hybrid-sign any file with
+    /// this node's key. Returns the detached signature document as a JSON
+    /// string; writes NOTHING to the graph.
+    ///
+    /// For the research harness: `tools/qa_runner/server.py` writes the full
+    /// trace — components, prompts, the reasoning under test — to
+    /// `trace_{task}_{hash}.json`, and that file is deliberately NOT a CEG
+    /// trace. The CEG carries the structural summary; the dump carries the
+    /// material a reviewer needs and a subject may not want federated. Signing
+    /// makes it attestable without replicating it.
+    ///
+    /// `label` rides INSIDE the signed manifest, so a dump cannot be relabelled
+    /// after the fact — put the run id and arm there. For a campaign with hidden
+    /// and visible arms that is the property that matters most.
+    ///
+    /// It signs BYTES and claims only: this key saw exactly these bytes at this
+    /// instant. Not that the artifact is true, complete, or conformant.
+    /// Provenance, not warrant.
+    ///
+    /// Verify with `ciris_server.verify_object(path, signature_json)`.
+    #[pyo3(name = "sign_object", signature = (path, label = ""))]
+    fn py_sign_object(py: Python<'_>, path: String, label: &str) -> PyResult<String> {
+        let label = label.to_owned();
+        py.detach(move || {
+            let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "sign_object: no in-process persist Engine",
+                )
+            })?;
+            let (rt, _c) = crate::federation_delivery::held().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "sign_object: federation delivery not started",
+                )
+            })?;
+            let bytes = std::fs::read(&path).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("sign_object: read {path}: {e}"))
+            })?;
+            let doc = rt
+                .block_on(crate::sign_object::sign_object_bytes(
+                    &engine, &bytes, &label,
+                ))
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            serde_json::to_string(&doc)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyfunction]
+    /// `ciris_server.verify_object(path, signature_json)` — does this signature
+    /// document cover exactly these bytes, and does it verify against the named
+    /// key's REGISTERED pubkeys?
+    ///
+    /// `False` is an honest mismatch (the artifact changed, or the signature is
+    /// bad). An exception means the check could not be PERFORMED — a verifier
+    /// that cannot tell "forged" from "I could not look" admits both.
+    #[pyo3(name = "verify_object", signature = (path, signature_json))]
+    fn py_verify_object(py: Python<'_>, path: String, signature_json: String) -> PyResult<bool> {
+        py.detach(move || {
+            let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "verify_object: no in-process persist Engine",
+                )
+            })?;
+            let (rt, _c) = crate::federation_delivery::held().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "verify_object: federation delivery not started",
+                )
+            })?;
+            let bytes = std::fs::read(&path).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "verify_object: read {path}: {e}"
+                ))
+            })?;
+            let doc: serde_json::Value = serde_json::from_str(&signature_json).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "verify_object: bad signature json: {e}"
+                ))
+            })?;
+            rt.block_on(crate::sign_object::verify_object_bytes(
+                &engine, &bytes, &doc,
+            ))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyfunction]
     /// `ciris_server.mint_location_proof(latitude, longitude, resolution=None)`
     /// — mint, sign and store this node's H3 `location_proof`. Returns the
     /// signed proof as JSON.
@@ -1657,6 +1744,8 @@ mod python {
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
+        m.add_function(wrap_pyfunction!(py_sign_object, m)?)?;
+        m.add_function(wrap_pyfunction!(py_verify_object, m)?)?;
         m.add_function(wrap_pyfunction!(py_mint_location_proof, m)?)?;
         m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
