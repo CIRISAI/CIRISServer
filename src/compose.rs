@@ -920,6 +920,21 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                     ))
+                    // THE MESH CONFIGURATION SURFACE (CIRISServer#346, the
+                    // fourth tab): GET /v1/mesh-config (effective values,
+                    // provenance, counting-down TTLs, the closed key registry)
+                    // + GET /v1/mesh-config/history + the two write paths,
+                    // POST /v1/mesh-config/durable and
+                    // POST /v1/mesh-config/relief. The key registry, the
+                    // emergency TTL bound and the durability ruling are all
+                    // read from persist; this node restates none of them, so a
+                    // substrate reversal needs no edit here. Reads are gated on
+                    // the delegatable `read_node_state` verb; writes on the
+                    // never-delegatable `wipe` verb, as the graded ladder is.
+                    .merge(crate::mesh_config_surface::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                    ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
                     // the SAME way peering is (serve-only floor + SYSTEM_ADMIN owner

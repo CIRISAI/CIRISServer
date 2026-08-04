@@ -230,6 +230,13 @@ pub mod location;
 /// `cirisgraph_nodes` / `cirisgraph_edges` SQLite tables onto the client's
 /// wire contract so both cards work in server mode.
 pub mod memory_api;
+/// CIRISServer#346 — **the Mesh Configuration surface** (the fourth tab): the
+/// owner-gated read of persist's `mesh_config:{key}` plane (effective values,
+/// provenance, counting-down TTLs, full signed history) plus the two write
+/// paths, durable and emergency relief. The key registry, the emergency TTL
+/// bound and the durability ruling are all READ from the substrate — none is
+/// restated here.
+pub mod mesh_config_surface;
 pub mod mesh_genesis;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
