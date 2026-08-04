@@ -1008,6 +1008,22 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         cfg.key_id.clone(),
                         Arc::clone(&edge),
                     ))
+                    // THE OPERATOR SURFACE (CIRISServer#356): GET /v1/node/state
+                    // — one owner-gated read composing persist's node-state
+                    // signals (trust root + drill freshness, key standing,
+                    // quarantine, consent SLA, peer quota) with edge's carriage
+                    // counters (the withhold ledger, apply refusals). Both
+                    // sources already existed and nothing called them. Every
+                    // zero on it names its own cause: an idle node and a
+                    // withholding one do not render alike, and "could not read"
+                    // is never "nothing to report". Read-only on every arm —
+                    // persist's fold uses the read-only overdue query, so a
+                    // dashboard may poll it at any rate without writing a row.
+                    .merge(crate::operator_surface::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                        Some(edge.metrics()),
+                    ))
                     // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
                     // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
                     // GET /v1/memory/{node_id}, GET /v1/memory/{node_id}/edges. Projects

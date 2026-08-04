@@ -611,7 +611,16 @@ pub fn required_profiles(verb: CapabilityVerb) -> &'static [ConformanceProfile] 
         CapabilityVerb::AccordHalt => &[Producer],
         // Local-tier / custody ops — no federation-wire role is exercised, so no
         // CC 2.2 profile is required (they remain owner-gated).
-        CapabilityVerb::ConfigWrite | CapabilityVerb::SetAge | CapabilityVerb::Wipe => &[],
+        //
+        // CIRISServer#356: the operator surface is a pure READ of state this
+        // node already holds — it puts nothing on the wire and admits nothing
+        // from it, so it exercises no profile. Conformance-gating a gauge would
+        // make a node that cannot declare its profiles also unable to say WHY,
+        // which is the failure mode the surface exists to remove.
+        CapabilityVerb::ConfigWrite
+        | CapabilityVerb::SetAge
+        | CapabilityVerb::Wipe
+        | CapabilityVerb::ReadNodeState => &[],
     }
 }
 
