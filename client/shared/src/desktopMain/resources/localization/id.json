@@ -2321,7 +2321,80 @@
     "accord_cosign_paste_label": "Parsial (JSON SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Itu bukan JSON yang valid — tempel catatan parsial (SignedKeyRecord) lengkap.",
     "accord_halt_raise_desc": "AKTIFKAN sakelar pemutus konstitusional 2-dari-3. Tanda tangan tunggal Anda TIDAK langsung berlaku — tanda tangan itu disebarkan kepada pemegang accord lainnya, yang harus menyetujui hingga 2-dari-3 agar penghentian dapat terkunci. Aplikasi tidak menyimpan kunci apa pun; sentuhan YubiKey adalah persetujuan Anda.",
-    "accord_raise_halt": "Aktifkan penghentian"
+    "accord_raise_halt": "Aktifkan penghentian",
+    "accord_bless_ci_desc": "Scrub sekaligus kunci CI worker substrat (pipeline build + steward agen) dalam satu upacara. Masing-masing adalah kunci node infra:attest — peran ditetapkan di sisi server, jadi tempelkan kunci publiknya saja. Kolom sudah terisi sebelumnya; tempelkan kunci publik ML-DSA-65 setiap repo dari artefak export-job-nya. Aplikasi tidak menyimpan kunci — sentuhan YubiKey adalah persetujuan Anda.",
+    "accord_bless_ci_ed25519_label": "Kunci publik Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Kunci publik ML-DSA-65 (base64) — tempelkan dari export job",
+    "accord_bless_ci_submit": "Restui CI worker — sentuh YubiKey Anda",
+    "accord_bless_ci_submit_busy": "Merestui — sentuh YubiKey Anda…",
+    "accord_bless_ci_title": "Restui CI worker",
+    "accord_coscrub_export_hint": "Serahkan berkas parsial ini kepada pemegang berikutnya:",
+    "accord_coscrub_export_save": "Simpan ke berkas",
+    "accord_new_bless_ci_workers": "Restui CI worker",
+    "accord_new_remint_trust_root": "Cetak ulang trust root yang ada",
+    "accord_op_copy": "Salin",
+    "accord_remint_auth_tally": "{have} dari {needed} otorisasi.",
+    "accord_remint_back_btn": "Kembali",
+    "accord_remint_bundle_ready": "Seed portabel sudah siap — simpan atau salin (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Pilih server kanonik untuk dicetak ulang…",
+    "accord_remint_close_btn": "Tutup",
+    "accord_remint_completed_label": "Rekaman lengkap (SignedKeyRecord JSON)",
+    "accord_remint_continue_btn": "Lanjut ke pengusulan",
+    "accord_remint_cosign_all_signed": "Setiap pemegang dalam daftar ini sudah mengotorisasi seed ini.",
+    "accord_remint_cosign_btn": "Tanda tangani bersama seed ini — sentuh YubiKey Anda",
+    "accord_remint_cosign_btn_busy": "Menandatangani bersama — sentuh YubiKey Anda…",
+    "accord_remint_cosign_desc": "Serahkan perangkat kepada pemegang berikutnya. Mereka mengotorisasi seed yang SAMA dengan YubiKey mereka sendiri dan PIN mereka sendiri. Ulangi sampai node melaporkan seed telah lengkap.",
+    "accord_remint_cosign_paste_label": "Berkas parsial untuk ditandatangani bersama (SignedKeyRecord JSON)",
+    "accord_remint_cosign_title": "Langkah 3 — Tanda tangan bersama (pemegang kedua)",
+    "accord_remint_desc": "Ubah daftar pemegang accord yang SUDAH ADA dan satu node serve kanonik menjadi seed trust-root yang portabel. Dua pemegang accord mengotorisasinya, masing-masing dengan satu YubiKey. Tidak ada yang perlu diketik ulang: daftar, kunci publik, dan alamat terisi otomatis dari node ini. Aplikasi tidak menyimpan kunci — sentuhan YubiKey adalah persetujuan Anda.",
+    "accord_remint_done_desc": "Simpan, jaga tetap offline, dan serahkan seperti Anda menyerahkan sebuah kunci — siapa pun yang memegangnya dapat mendirikan mesh di atas trust root ini.",
+    "accord_remint_done_family": "Kunci keluarga: {key}",
+    "accord_remint_done_fingerprint": "Sidik jari: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Bandingkan sidik jari ini melalui jalur terpisah — secara langsung atau lewat panggilan yang kalian berdua kenali — sebelum ada yang memasang seed ini.",
+    "accord_remint_done_holders": "Pemegang yang dibawa: {count}",
+    "accord_remint_done_serve_nodes": "Node serve yang dibawa: {count}",
+    "accord_remint_done_title": "Seed telah diotorisasi",
+    "accord_remint_no_canonicals": "Tidak ada server kanonik dalam sumber cetak ulang.",
+    "accord_remint_produce_btn": "Hasilkan genesis portabel",
+    "accord_remint_produce_btn_busy": "Menghasilkan…",
+    "accord_remint_propose_btn": "Usulkan seed — sentuh YubiKey Anda",
+    "accord_remint_propose_btn_busy": "Mengusulkan — sentuh YubiKey Anda…",
+    "accord_remint_propose_desc": "Pemegang pertama mencetak dan menandatangani piagam serta hibah dari seed ini dengan YubiKey miliknya sendiri. Aplikasi tidak menyimpan kunci apa pun — sentuhan itulah persetujuannya.",
+    "accord_remint_propose_title": "Langkah 2 — Ajukan (pemegang pertama)",
+    "accord_remint_quorum_line": "Kuorum: {m} dari {n} pemegang accord harus mengotorisasi seed.",
+    "accord_remint_quorum_note": "Kuorum {quorum} — hanya dua pemegang yang perlu hadir; catatan pemegang ketiga ikut terbawa dalam daftar.",
+    "accord_remint_reblessed_note": "Upacara ini juga memberkati server canonical terpilih sebagai server trace (infra:serve) — sebelumnya ia tidak punya. Kini ia dipercaya secara bawaan untuk menerima trace; cabut berkatnya kapan saja dengan operasi penarikan canonical.",
+    "accord_remint_review_title": "Langkah 1 — Tinjau apa yang akan dibawa seed",
+    "accord_remint_roster_empty": "Belum ada pemegang accord di sumber pencetakan ulang.",
+    "accord_remint_roster_title": "Pemegang accord (seluruh daftar ikut terbawa dalam seed)",
+    "accord_remint_save_bundle": "Simpan bundel genesis",
+    "accord_remint_seed_scope": "Seed membawa trust root — seluruh daftar pemegang accord ini — dan node serve yang dipilih di bawah. Tidak ada yang ditandatangani pada langkah ini.",
+    "accord_remint_serve_missing": "belum diberkati untuk melayani — pencetakan ulang ini memperbaikinya",
+    "accord_remint_serve_node_line": "Node serve: {key}",
+    "accord_remint_serve_ok": "memberikan infra:serve ✓",
+    "accord_remint_start_over_btn": "Mulai seed lain",
+    "accord_remint_step1_desc": "Pemegang pertama menandatangani (scrub-sign) canonical yang dipilih (key_id + pubkey + alamat sudah terisi otomatis). Partial dengan 1 scrub belum memberikan apa pun — ia disebarkan ke pemegang lain untuk ditandatangani bersama.",
+    "accord_remint_step1_title": "Langkah 1 — Ajukan (A1)",
+    "accord_remint_step2_desc": "Partial disebarkan ke perangkat pemegang lain — pemegang kedua menandatanganinya bersama dari daftar Tanda tangan bersama tertunda (atau menempelkannya di bawah untuk menandatangani di perangkat ini). Saat kuorum family tercapai, catatan pun diberikan.",
+    "accord_remint_step2_title": "Langkah 2 — Tanda tangan bersama (B1)",
+    "accord_remint_step3_desc": "Tempelkan catatan yang sudah lengkap (ditandatangani bersama) — ia terbawa apa adanya, tidak pernah dikodekan ulang. Node menolak catatan yang tidak memberikan infra:serve.",
+    "accord_remint_step3_title": "Langkah 3 — Hasilkan genesis portabel",
+    "accord_remint_step_done": "Selesai — seed telah diotorisasi",
+    "accord_remint_step_of": "Langkah {step} dari {total}",
+    "accord_remint_title": "Cetak ulang trust root yang ada",
+    "accord_scrub_module_hint": "Biarkan kosong — node akan memakai bawaan OS (libykcs11)",
+    "accord_scrub_module_label": "Jalur modul PKCS#11 (lanjutan)",
+    "add_fedid_confirm": "Tambahkan Federation ID",
+    "add_fedid_intro": "Anda sudah masuk — ini menambahkan federation ID ke akun Anda yang sudah ada tanpa membuatnya ulang. Login Anda tetap dipertahankan.",
+    "add_fedid_label_heading": "Beri nama federation ID Anda",
+    "add_fedid_title": "Tambahkan Federation ID",
+    "announce_decision_body_off": "NONAKTIF (disarankan): sepenuhnya privat. Node Anda tetap bercakupan diri sendiri — semuanya berjalan secara lokal dan tersinkron di antara perangkat Anda sendiri, tetapi komunitas tidak dapat melihat atau menjangkaunya. Aktifkan ini untuk mengirim trace dan bergabung dengan komunitas.",
+    "announce_decision_body_on": "AKTIF: node Anda menjadi terlihat oleh federasi. Inilah yang memungkinkan Anda mengirim trace penalaran ke grup server canonical tepercaya dan bergabung dengan komunitas begitu mereka aktif. Anda dapat menonaktifkannya nanti.",
+    "announce_decision_title": "Bergabung dengan federasi?",
+    "announce_decision_toggle_label": "Jadikan node saya terlihat oleh federasi",
+    "announce_decision_trace_desc": "Bagikan skor kualitas penalaran dan pola keputusan (tanpa isi pesan) dengan grup server canonical tepercaya.",
+    "announce_decision_trace_locked": "Aktifkan pengumuman di atas untuk memungkinkan pengiriman trace penalaran dan bergabung dengan komunitas.",
+    "announce_decision_trace_title": "Kirim trace penalaran"
   },
   "conscience": {
     "ponder_attempted": "Saya mencoba untuk {action}",
@@ -2926,7 +2999,8 @@
       "commons_layers": "Ranah Bersama",
       "federation": "Federasi",
       "client": "Klien",
-      "safety": "Keamanan"
+      "safety": "Keamanan",
+      "node": "Node"
     },
     "surface": {
       "sessions": "Sesi",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Sediakan Pemegang",
       "accord_ceremony": "Upacara Genesis",
       "identity_management": "Identitas Saya",
-      "transport": "Transport"
+      "transport": "Transport",
+      "contacts": "Kontak"
     }
   },
   "setup_validation_select_provider": "Pilih penyedia LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + radio · node ini",
     "title": "Transport",
     "unavailable": "Informasi transport tidak tersedia (node bermasalah?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Penilaian yang dibatasi waktu tidak dapat memicu penghapusan tanpa batas. Satu-satunya penurunan berbasis kunci aktor pada substrat ini mengambil seluruh korpus, yang akan menghancurkan riwayat yang sengaja dibiarkan berdiri oleh batas ini. Penghapusan berbatas waktu yang MEMANG tersedia adalah pencabutan penerimaan dengan batas riwayat.",
+      "not_reached": "Baris atestasi yang dipilih itu sendiri tidak diturunkan. Setiap pembawa muatan pada substrat ini tersegel di dalam tanda tangannya sendiri, sehingga byte-nya tidak dapat dibuang tanpa membuat baris itu terbaca sebagai palsu; kemampuan penghapusan ditentukan saat pencetakan, dan tidak ada yang dicetak hari ini yang dapat dihapus."
+    },
+    "enforcement": {
+      "annotate": "Penilaian bertanda tangan yang tidak berefek apa pun sampai ada pembaca yang menghormatinya. Tidak ada yang ditahan, dibatasi, atau dihapus.",
+      "deadmit": "Pencabutan bertanda tangan pada bidang append-only biasa. Ini adalah bukti yang dilipat oleh pembaca, bukan pintu yang dibanting: verifikasi tanda tangan, kursor replikasi, dan penerimaan baris semuanya sengaja tetap berjalan, karena menolak baris-baris lama dari kunci yang telah dikompromikan justru akan menghancurkan bukti yang dibutuhkan untuk mengadili kompromi itu.",
+      "descend": "Tidak dapat dibatalkan berdasarkan rancangannya. Penurunan tidak pernah berakhir di nol — kaburan dan nisan tetap ada — tetapi apa yang telah dilepas tidak akan kembali.",
+      "quarantine": "Sebuah penanda bertanda tangan, bukan perintah: tidak ada yang dihapus dan tidak ada yang ditulis ulang. Jalur penyajian node ini berhenti menyerahkan baris dan blob milik kunci yang disebut kepada peer; peer yang melipatnya secara berbeda cukup tidak menerimanya dari kami.",
+      "re_admit": "Dicatat sebagai pembalikan yang beratribusi. Baris pencabutan tetap ada dan setiap pembaca masih melipatnya: pembatasan saling menumpuk sedangkan kelonggaran tidak, dan tidak ada lapisan substrat ini yang menyediakan pembatalan pencabutan.",
+      "throttle": "Dicatat hanya sebagai penilaian yang beratribusi. Substrat ini tidak memiliki anggaran penerimaan per kunci yang ditetapkan oleh penerima: kuota tulis peer adalah pengaman tetap terhadap loop liar, bukan permukaan kebijakan yang bisa dijadikan acuan pembatasan. Tidak ada yang berubah pada apa yang diterima node ini dari kunci-kunci tersebut."
+    },
+    "preview": {
+      "note": "Inilah persis yang akan dikenai tindakan oleh commit. Sertakan hash seleksi bersama commit; jika seleksi telah berubah, commit akan menolak.",
+      "window_in_application": "Jendela waktu diterapkan oleh node ini, bukan oleh kueri substrat: pembacaan atestasi umum tidak menghormati sumbu jendela. Batas halaman diterapkan lebih dulu, sehingga seleksi berjendela bisa kembali dengan hasil yang kurang."
+    },
+    "quarantine": {
+      "not_withheld": "Kunci ini saat ini tidak sedang ditahan di sini, jadi tidak ada yang bisa dilepaskan."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Apa yang Anda pratinjau bukanlah apa yang akan dieksekusi — seleksi telah berubah sejak pratinjau. Jalankan ulang pratinjau dan sahkan hash yang baru.",
+      "quorum_insufficient": "Operasi ini tidak dapat dibatalkan dan memerlukan kuorum dari otoritas yang berbeda, bukan satu rantai delegasi. Dua rantai dari akar yang sama adalah satu otoritas yang mengenakan dua topi."
+    },
+    "reversal": {
+      "evidence_only": "Baris aslinya tetap ada dan masih dilipat oleh setiap pembaca. Pembalikan ini adalah bukti yang tercatat, bukan pembatalan — substrat tidak menyediakan pembatalan pencabutan.",
+      "substrate": "Keadaan substrat dibalik: node ini berhenti menahan baris-baris milik kunci tersebut.",
+      "symmetric": "Tidak ada yang dibalik di dalam substrat karena tidak ada bagian substrat yang menegakkan penilaian aslinya. Kedua tindakan tercatat sebagai bukti."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Anda tidak dapat menggunakan aliran atau layanan yang memerlukan atestasi kapabilitas pihak ketiga, karena Anda tidak akan memilikinya.",
+        "no_reputation": "Anda TIDAK membangun reputasi — setiap klaim capacity:* tentang Anda ditolak, sehingga tidak satu pun dapat ada.",
+        "peers_may_refuse": "Sebagian peer mungkin menolak berinteraksi dengan Anda sama sekali."
+      },
+      "summary": "Anda boleh mengirim jejak tanpa menyetujui untuk dianalisis. Jejak tetap akan mengalir."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Peer boleh MENILAI jejak Anda — inilah yang membangun reputasi.",
+        "title": "Dinilai"
+      },
+      "replication": {
+        "permits": "Peer boleh MENYIMPAN jejak Anda.",
+        "title": "Kirim jejak"
+      }
+    },
+    "grants": {
+      "independent": "Ini adalah dua persetujuan terpisah pada sisi yang berlawanan. Memberikan yang satu tidak berarti memberikan yang lain, dan masing-masing dapat ditarik tanpa yang lain."
+    },
+    "mesh_participation": {
+      "action": "Setujui Partisipasi dalam CIRIS Mesh"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Anda tidak dapat mengikuti komunitas regional mana pun. Keanggotaan ditentukan oleh apakah sel Anda berada di dalam wilayah komunitas itu sendiri, jadi tanpa sel tidak ada yang bisa dibandingkan.",
+      "no_regional_reporting": "Aktivitas Anda tidak dapat berkontribusi pada pelaporan pola regional."
+    },
+    "permits": "Melampirkan sel H3 kasar ke envelope Anda sehingga pola dapat dilaporkan lintas wilayah. Substrat menolak apa pun yang lebih halus dari resolusi 7, jadi ini hanya menunjukkan wilayah kasar — tidak pernah lokasi atau alamat spesifik Anda.",
+    "purpose": "Pelaporan pola regional, dan keikutsertaan dalam komunitas regional. Sebuah komunitas juga dapat menggunakannya sebagai gerbang visibilitas OPSIONAL, membatasi item yang ditujukan untuk komunitas tersebut hanya kepada anggota yang wilayahnya berada di dalamnya. Ini bukan pembatasan umum atas jejak Anda — hal itu ditentukan oleh persetujuan di atas.",
+    "title": "Bagikan perkiraan wilayah Anda"
+  },
+  "mesh": {
+    "announce_requirement": "Node yang tidak mengumumkan diri tidak mendapat akses layanan di mesh dan tidak mendapat layanan agen. Sakelar pemutus accord hanya bermakna terhadap node yang dapat dijangkaunya, jadi node yang tak terjangkau memang tidak pernah dilayani sejak awal."
+  },
+  "mesh_config": {
+    "dry_run": "Tidak ada yang ditandatangani dan tidak ada yang dikirim. Ini adalah byte kanonis persis yang harus ditandatangani seorang co-signer agar scrub mereka dihitung pada pengiriman yang sebenarnya.",
+    "durability": {
+      "substrate_decides": "Tindakan mana yang layak mendapat setelan tahan lama adalah keputusan substrat, dibaca ulang pada setiap panggilan dan dilaporkan lewat token penolakannya sendiri. Node ini tidak mengkodekan aturan ketahanan miliknya sendiri."
+    },
+    "emergency": {
+      "bound": "Kelonggaran darurat kedaluwarsa secara rancangan. Jendela maksimum adalah milik substrat, dibawa ke sini agar formulir dapat membatasi masukannya; substrat menolak apa pun yang lebih lama di pintunya sendiri."
+    },
+    "history": {
+      "empty": "Setiap akar yang dilanggani telah dibaca dan tidak satu pun pernah mengajukan baris mesh-config.",
+      "no_subscription": "Node ini tidak memiliki edge trust-root yang aktif, sehingga tidak ada akar yang pernah dapat mengajukan baris mesh-config di sini.",
+      "partial": "Sebagian akar yang dilanggani tidak dapat dibaca, sehingga riwayat ini tidak lengkap. Akar yang gagal disebutkan namanya.",
+      "present": "Setiap baris mesh-config yang dipegang node ini, terbaru lebih dulu.",
+      "truncated": "Halaman ini dipotong pada batasnya. Total di bawah menghitung setiap baris yang dibaca.",
+      "unreadable": "Riwayat mesh-config tidak dapat dibaca di sini. Ini BUKAN pernyataan bahwa tidak ada baris yang pernah diajukan."
+    },
+    "outcome": {
+      "admitted": "Substrat menerima baris ini. Ini adalah PENANDA, bukan perintah: tidak ada yang berubah karena kedatangannya, dan efeknya sepenuhnya adalah lipatan saat-baca yang boleh dihormati oleh konsumen."
+    },
+    "plane": {
+      "configured": "Setidaknya satu kunci digeser dari baseline pemilik oleh akar yang dilanggani.",
+      "no_rows_held": "Node ini berlangganan setidaknya satu trust root dan tidak memegang baris mesh-config dari satu pun di antaranya. Setiap kunci berjalan pada baseline pemiliknya sendiri.",
+      "no_subscription": "Node ini tidak memiliki edge trust-root yang aktif, sehingga tidak ada akar yang boleh mengonfigurasinya. Langganan ITULAH edge kepercayaan.",
+      "none_binding": "Baris mesh-config tersimpan, tetapi tidak ada satu pun yang mengikat: masing-masing sudah kedaluwarsa, dibatasi oleh persetujuan pemilik, atau meminta nilai dasar yang memang sudah berlaku.",
+      "unreadable": "Bidang mesh-config tidak dapat dibaca di sini. Ini BUKAN pernyataan bahwa tidak ada yang disetel — nilai di bawah ini tidak diketahui, bukan nilai bawaan."
+    },
+    "provenance": {
+      "baseline_not_moved": "Root yang dilanggan memiliki baris aktif untuk kunci ini dan tidak ada satu pun yang mengubahnya: masing-masing dibatasi oleh persetujuan pemilik atau meminta nilai yang memang sudah berlaku.",
+      "baseline_unspoken": "Tidak ada root yang dilanggan yang memiliki baris aktif untuk kunci ini, sehingga node menjalankan nilai yang disetujui pemiliknya.",
+      "root": "Baris bertanda tangan dari sebuah root yang dilanggan menetapkan nilai ini. Baris tersebut, penulisnya, dan delegasi yang mendasarinya disebutkan di sampingnya."
+    },
+    "ttl": {
+      "expired": "Jendela waktu baris ini telah tertutup. Proses fold membuang baris yang kedaluwarsa saat dibaca, sehingga tidak diperlukan pencabutan maupun penulis yang dapat dihubungi.",
+      "running": "Jendela waktu baris ini terbuka dan akan tertutup pada waktu yang disebutkan.",
+      "unbounded": "Baris ini tidak memiliki masa kedaluwarsa. Berlaku sampai digantikan."
+    }
   }
 }

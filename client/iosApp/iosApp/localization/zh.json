@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "部分签名（SignedKeyRecord JSON）",
     "accord_coscrub_paste_invalid": "那不是有效的 JSON——请粘贴完整的部分签名（SignedKeyRecord）记录。",
     "accord_halt_raise_desc": "发起一个 2/3 宪法性紧急停止开关。您的单个签名不会立即生效——它会被传播给其他协定持有人，必须达到 2/3 一致同意，停止才会锁定。本应用不持有任何密钥；YubiKey 触碰即为您的同意。",
-    "accord_raise_halt": "发起停止"
+    "accord_raise_halt": "发起停止",
+    "accord_bless_ci_desc": "在一次仪式中批量 scrub 底座的 CI 工作机密钥（构建流水线 + 代理管家）。每一个都是 infra:attest 节点密钥——角色由服务端设定，因此只需粘贴公钥。字段已预填；请从各仓库导出作业的产物中粘贴其 ML-DSA-65 公钥。本应用不持有任何密钥——触碰 YubiKey 即为同意。",
+    "accord_bless_ci_ed25519_label": "Ed25519 公钥（base64）",
+    "accord_bless_ci_mldsa_label": "ML-DSA-65 公钥（base64）——从导出作业中粘贴",
+    "accord_bless_ci_submit": "为 CI 工作机赐福——触碰你的 YubiKey",
+    "accord_bless_ci_submit_busy": "正在赐福——请触碰你的 YubiKey…",
+    "accord_bless_ci_title": "为 CI 工作机赐福",
+    "accord_coscrub_export_hint": "将这份部分签名交给下一位持有人：",
+    "accord_coscrub_export_save": "保存到文件",
+    "accord_new_bless_ci_workers": "为 CI 工作机赐福",
+    "accord_new_remint_trust_root": "重铸现有信任根",
+    "accord_op_copy": "复制",
+    "accord_remint_auth_tally": "已授权 {have}/{needed}。",
+    "accord_remint_back_btn": "返回",
+    "accord_remint_bundle_ready": "可移植种子已就绪——请保存或复制（mesh-genesis.json）：",
+    "accord_remint_canonical_select": "选择要重铸的规范服务器…",
+    "accord_remint_close_btn": "关闭",
+    "accord_remint_completed_label": "已完成的记录（SignedKeyRecord JSON）",
+    "accord_remint_continue_btn": "继续以发起提议",
+    "accord_remint_cosign_all_signed": "该名册上的每位持有人都已授权此种子。",
+    "accord_remint_cosign_btn": "联署此种子——触碰你的 YubiKey",
+    "accord_remint_cosign_btn_busy": "正在联署——请触碰你的 YubiKey…",
+    "accord_remint_cosign_desc": "把设备交给下一位持有人。他们用自己的 YubiKey 和自己的 PIN 授权同一份种子。重复此步骤，直到节点报告种子已完成。",
+    "accord_remint_cosign_paste_label": "待联署的部分签名（SignedKeyRecord JSON）",
+    "accord_remint_cosign_title": "第 3 步——联署（第二位持有人）",
+    "accord_remint_desc": "把现有的合约名册和一台规范服务节点变成一份可移植的信任根种子。需两位合约持有人授权，各自触碰一次 YubiKey。无需重新输入任何内容：名册、公钥与地址均由本节点预填。本应用不持有任何密钥——触碰 YubiKey 即为同意。",
+    "accord_remint_done_desc": "保存好它，离线保管，并像交付钥匙一样交给他人——任何持有它的人都能在这一信任根上建立网格。",
+    "accord_remint_done_family": "族密钥：{key}",
+    "accord_remint_done_fingerprint": "指纹：{fingerprint}",
+    "accord_remint_done_fingerprint_caption": "在任何人附加此种子之前，请通过带外方式核对该指纹——当面核对，或在双方都能确认身份的通话中核对。",
+    "accord_remint_done_holders": "携带的持有人：{count}",
+    "accord_remint_done_serve_nodes": "携带的服务节点：{count}",
+    "accord_remint_done_title": "种子已获授权",
+    "accord_remint_no_canonicals": "重铸来源中没有规范服务器。",
+    "accord_remint_produce_btn": "生成可移植创世包",
+    "accord_remint_produce_btn_busy": "正在生成…",
+    "accord_remint_propose_btn": "提议此种子——触碰你的 YubiKey",
+    "accord_remint_propose_btn_busy": "正在提议——请触碰你的 YubiKey…",
+    "accord_remint_propose_desc": "第一位持有者在自己的 YubiKey 上铸造并签署种子的章程与授权。应用不保存任何密钥——触碰即为同意。",
+    "accord_remint_propose_title": "第 2 步 — 发起提案（第一位持有者）",
+    "accord_remint_quorum_line": "法定人数：{n} 位协定持有者中须有 {m} 位授权该种子。",
+    "accord_remint_quorum_note": "法定人数 {quorum} — 只需两位持有者在场；第三位的记录随名册一并携带。",
+    "accord_remint_reblessed_note": "本次仪式还将所选规范节点加持为追踪服务器（infra:serve）——此前它并无该角色。它现在默认受信任以接收追踪；可随时通过规范撤回操作取消加持。",
+    "accord_remint_review_title": "第 1 步 — 查看种子将携带的内容",
+    "accord_remint_roster_empty": "重铸来源中尚无协定持有者。",
+    "accord_remint_roster_title": "协定持有者（完整名册随种子携带）",
+    "accord_remint_save_bundle": "保存创世包",
+    "accord_remint_seed_scope": "该种子携带信任根——本协定的完整持有者名册——以及下方选定的服务节点。此步骤不会签署任何内容。",
+    "accord_remint_serve_missing": "尚未加持为服务节点 — 本次重铸将予以修正",
+    "accord_remint_serve_node_line": "服务节点：{key}",
+    "accord_remint_serve_ok": "授予 infra:serve ✓",
+    "accord_remint_start_over_btn": "再铸一个种子",
+    "accord_remint_step1_desc": "第一位持有者对所选规范节点进行擦洗签名（已预填 key_id、公钥与地址）。仅有 1 次擦洗的部分签名尚不生效——它会传播给其他持有者以便会签。",
+    "accord_remint_step1_title": "第 1 步 — 发起提案（A1）",
+    "accord_remint_step2_desc": "部分签名会传播到其他持有者的设备——第二位持有者可从“待会签”中会签（或将其粘贴到下方，在本设备上会签）。达到家族法定人数后，该记录即告生效。",
+    "accord_remint_step2_title": "第 2 步 — 会签（B1）",
+    "accord_remint_step3_desc": "粘贴已完成（已会签）的记录——它将原样携带，绝不重新编码。若记录未授予 infra:serve，节点将予以拒绝。",
+    "accord_remint_step3_title": "第 3 步 — 生成可携带的创世文件",
+    "accord_remint_step_done": "完成 — 种子已获授权",
+    "accord_remint_step_of": "第 {step} 步，共 {total} 步",
+    "accord_remint_title": "重铸现有信任根",
+    "accord_scrub_module_hint": "请留空 — 节点会选用操作系统默认模块（libykcs11）",
+    "accord_scrub_module_label": "PKCS#11 模块路径（高级）",
+    "add_fedid_confirm": "添加联邦 ID",
+    "add_fedid_intro": "你已登录——此操作会为你的现有账户添加一个联邦 ID，而不会重新创建账户。你的登录状态将保留。",
+    "add_fedid_label_heading": "为你的联邦 ID 命名",
+    "add_fedid_title": "添加联邦 ID",
+    "announce_decision_body_off": "关闭（推荐）：完全私密。你的节点保持自我作用域——一切都在本地运行并在你自己的设备间同步，但社区无法看到或访问它。开启后即可发送追踪并加入社区。",
+    "announce_decision_body_on": "开启：你的节点将对联邦可见。这样你才能向受信任的规范服务器组发送推理追踪，并在社区上线时加入它们。你之后可以随时关闭。",
+    "announce_decision_title": "加入联邦？",
+    "announce_decision_toggle_label": "让我的节点对联邦可见",
+    "announce_decision_trace_desc": "与受信任的规范服务器组共享推理质量评分和决策模式（不含消息内容）。",
+    "announce_decision_trace_locked": "请先在上方开启公告，才能发送推理追踪并加入社区。",
+    "announce_decision_trace_title": "发送推理追踪"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "公域",
       "federation": "联邦",
       "client": "客户端",
-      "safety": "安全"
+      "safety": "安全",
+      "node": "节点"
     },
     "surface": {
       "sessions": "会话",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "配置持有者",
       "accord_ceremony": "创世仪式",
       "identity_management": "我的身份",
-      "transport": "传输"
+      "transport": "传输",
+      "contacts": "联系人"
     }
   },
   "setup_validation_select_provider": "请选择一个 LLM 提供商",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + 无线电 · 此节点",
     "title": "传输",
     "unavailable": "无法获取传输信息（节点已降级？）。"
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "有时间范围的裁定无法驱动无边界的清除。本基底上唯一按行为主体密钥进行的下沉会取走整个语料库，那将摧毁这一时间范围有意保留下来的历史。真正已实现的、有时间范围的移除，是带历史边界的撤销准入。",
+      "not_reached": "所选的证明行本身不会被下沉。本基底上的每一个载荷载体都封存在自身的签名之内，因此无法在不使该行被读作伪造的前提下丢弃其字节；可擦除性在铸造时即已确定，而今天铸造的一切都不可擦除。"
+    },
+    "enforcement": {
+      "annotate": "一份已签名的裁定，在读取方遵从它之前不产生任何效果。不会扣留、限流或移除任何内容。",
+      "deadmit": "在普通的仅追加平面上的一份已签名撤销。它是读取方折叠的证据，而不是一扇砰然关上的门：签名验证、复制游标和行摄取都刻意继续工作，因为拒绝一个已失陷密钥的旧行，会摧毁裁断该次失陷所需的证据。",
+      "descend": "按设计不可逆。下沉永远不会归零——模糊值与墓碑会保留下来——但已剥离的内容不会回来。",
+      "quarantine": "一个已签名的标记，而非一条命令：不删除任何内容，也不重写任何内容。本节点的服务路径将停止把指定密钥的行与二进制块交给对等方；折叠方式不同的对等方，只是不会从我们这里收到它们。",
+      "re_admit": "记录为一次署名的撤回。撤销行仍然存在，每个读取方仍会折叠它：限制会叠加，宽免不会，而本基底的任何一层都不提供“取消撤销”。",
+      "throttle": "仅记录为一次署名的裁定。本基底没有由接收方编写的按密钥准入配额：对等方写入限额是一个固定的失控循环兜底机制，而不是限流可以依据的策略面。本节点从指定密钥接受的内容不会有任何变化。"
+    },
+    "preview": {
+      "note": "这正是提交将要作用的对象。提交时请一并出示选择哈希；若选择已发生变化，提交将被拒绝。",
+      "window_in_application": "时间窗口由本节点施加，而非由基底查询施加：通用的证明读取并不遵从窗口维度。分页上限会先行生效，因此带窗口的选择可能返回不全。"
+    },
+    "quarantine": {
+      "not_withheld": "该密钥目前未在此处被扣留，因此没有可解除的内容。"
+    },
+    "refusal": {
+      "preview_hash_mismatch": "你所预览的内容与将要执行的内容并不一致——自预览以来选择已发生变化。请重新运行预览，并确认新的哈希。",
+      "quorum_insufficient": "此操作不可逆，需要由多个彼此独立的权威构成法定人数，而不是一条委托链。源自同一个根的两条链，只是同一个权威戴着两顶帽子。"
+    },
+    "reversal": {
+      "evidence_only": "原始行仍然存在，并且仍被每个读取方折叠。此次撤回是被记录下来的证据，而不是一次撤销操作——基底不提供“取消撤销”。",
+      "substrate": "基底状态已被撤回：本节点停止扣留该密钥的行。",
+      "symmetric": "基底中没有任何内容被撤回，因为基底中本就没有任何内容执行过原始裁定。两次行为都是被记录下来的证据。"
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "你将无法使用需要第三方能力证明的流或服务，因为你不会拥有任何此类证明。",
+        "no_reputation": "你不会积累任何声誉——关于你的每一条 capacity:* 声明都会被拒绝，因此这类声明永远不会存在。",
+        "peers_may_refuse": "有些对等方可能会完全拒绝与你交互。"
+      },
+      "summary": "你可以在不同意被分析的情况下发送轨迹。轨迹仍会照常传输。"
+    },
+    "grant": {
+      "analyze": {
+        "permits": "对等方可以对你的轨迹进行评分——这正是声誉的来源。",
+        "title": "接受评分"
+      },
+      "replication": {
+        "permits": "对等方可以保存你的轨迹。",
+        "title": "发送轨迹"
+      }
+    },
+    "grants": {
+      "independent": "这是位于相反方向边上的两份独立同意。授予其中一项并不等于授予另一项，任一项都可以在不影响另一项的情况下撤回。"
+    },
+    "mesh_participation": {
+      "action": "同意参与 CIRIS 网格"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "你无法参与任何区域社区。成员资格取决于你的网格单元是否落在该社区自身的区域之内，因此没有网格单元就无从比较。",
+      "no_regional_reporting": "你的活动无法为区域模式报告作出贡献。"
+    },
+    "permits": "在你的信封上附加一个粗粒度的 H3 网格单元，以便跨区域报告模式。基底会拒绝任何比 7 级分辨率更精细的粒度，因此它只标识一个大致区域——绝不会标识你的具体地点或地址。",
+    "purpose": "用于区域模式报告，以及参与区域社区。社区还可以将其用作可选的可见性门禁，把发往该社区的内容限制给区域落在其范围之内的成员。这并不是对你轨迹的通用限制——那由上面的各项同意决定。",
+    "title": "共享你的大致区域"
+  },
+  "mesh": {
+    "announce_requirement": "不进行通告的节点在网格上得不到服务访问权，也得不到任何代理服务。协约的终止开关只有对它能够触及的节点才有意义，因此无法触及的节点从一开始就不会被服务。"
+  },
+  "mesh_config": {
+    "dry_run": "没有签署任何内容，也没有提交任何内容。这些正是联署人必须签署的规范字节，唯有如此，其擦洗签名才能在真实提交中计入。",
+    "durability": {
+      "substrate_decides": "哪些行为能够获得持久化设置，由基底裁定；每次调用都会重新读取，并由基底自己的拒绝令牌给出说明。本节点不编码任何自有的持久化规则。"
+    },
+    "emergency": {
+      "bound": "紧急豁免在构造上必然会到期。最大窗口由基底规定，在此携带只是为了让表单能够限定输入；超出该时长的请求会在基底自己的门口被拒绝。"
+    },
+    "history": {
+      "empty": "每一个已订阅的根都已读取，其中没有任何一个提交过网格配置行。",
+      "no_subscription": "本节点没有持有任何有效的信任根边，因此从未有任何根能够在此提交网格配置行。",
+      "partial": "部分已订阅的根无法读取，因此这份历史并不完整。读取失败的根已具名列出。",
+      "present": "本节点持有的每一条网格配置行，最新的在前。",
+      "truncated": "本页已在上限处截断。下方的总数统计了读取到的所有行。",
+      "unreadable": "此处无法读取网格配置历史。这并不表示从未提交过任何行。"
+    },
+    "outcome": {
+      "admitted": "基底已准入此行。它是一个标记，而不是一条命令：它的到达不改变任何内容，其效果完全在于消费方在读取时可能遵从的折叠。"
+    },
+    "plane": {
+      "configured": "至少有一个键被某个已订阅的根从所有者的基线值上移开。",
+      "no_rows_held": "本节点至少订阅了一个信任根，但未持有其中任何一个的网格配置行。每个键都运行在所有者自己的基线值上。",
+      "no_subscription": "本节点没有持有任何有效的信任根边，因此没有根可以配置它。订阅本身就是那条信任边。",
+      "none_binding": "本节点持有 mesh-config 行，但没有一行生效：它们或已过期、或被所有者的同意收紧、或请求的正是当前已生效的基线值。",
+      "unreadable": "此处无法读取 mesh-config 平面。这并不表示未设置任何内容——下方的值是未知，而非默认值。"
+    },
+    "provenance": {
+      "baseline_not_moved": "已订阅的信任根持有该键的有效行，但没有一行改变它：每一行或被所有者的同意收紧，或请求的正是当前已生效的值。",
+      "baseline_unspoken": "没有任何已订阅的信任根为该键持有有效行，因此本节点运行其所有者同意的值。",
+      "root": "某个已订阅信任根的签名行设定了该值。该行、其作者以及所依据的委派均列于其旁。"
+    },
+    "ttl": {
+      "expired": "该行的时间窗已关闭。折叠会在读取时丢弃已过期的行，因此无需撤销，也无需作者可达。",
+      "running": "该行的时间窗处于开启状态，将在所示时刻关闭。",
+      "unbounded": "该行不带有效期，在被取代之前一直适用。"
+    }
   }
 }

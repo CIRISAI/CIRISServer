@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "Sehemu (JSON ya SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Hiyo si JSON halali — bandika rekodi kamili ya sehemu (SignedKeyRecord).",
     "accord_halt_raise_desc": "PANDISHA swichi ya kuzima ya kikatiba ya 2-kati-ya-3. Saini yako moja HAIANZI kutumika — inasambazwa kwa washikaji wengine wa mkataba, ambao lazima wakubaliane hadi 2-kati-ya-3 ili kuzima kushikamane. Programu haishiki funguo yoyote; kugusa YubiKey ndiyo ridhaa yako.",
-    "accord_raise_halt": "Pandisha kuzima"
+    "accord_raise_halt": "Pandisha kuzima",
+    "accord_bless_ci_desc": "Fanya scrub ya funguo za wafanyakazi wa CI wa substrate (mabomba ya ujenzi + msimamizi wa wakala) kwa mkupuo mmoja katika sherehe moja. Kila mmoja ni ufunguo wa nodi wa infra:attest — majukumu huwekwa upande wa seva, kwa hivyo bandika funguo za umma pekee. Sehemu zimejazwa mapema; bandika ufunguo wa umma wa ML-DSA-65 wa kila repo kutoka kwa artifact ya kazi ya export. Programu haishikilii funguo yoyote — kugusa YubiKey ndiyo ridhaa.",
+    "accord_bless_ci_ed25519_label": "Ufunguo wa umma wa Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Ufunguo wa umma wa ML-DSA-65 (base64) — bandika kutoka kwa kazi ya export",
+    "accord_bless_ci_submit": "Bariki wafanyakazi wa CI — gusa YubiKey yako",
+    "accord_bless_ci_submit_busy": "Inabariki — gusa YubiKey yako…",
+    "accord_bless_ci_title": "Bariki wafanyakazi wa CI",
+    "accord_coscrub_export_hint": "Kabidhi rekodi hii isiyokamilika kwa mshikaji anayefuata:",
+    "accord_coscrub_export_save": "Hifadhi kwenye faili",
+    "accord_new_bless_ci_workers": "Bariki wafanyakazi wa CI",
+    "accord_new_remint_trust_root": "Tengeneza upya mzizi wa uaminifu uliopo",
+    "accord_op_copy": "Nakili",
+    "accord_remint_auth_tally": "Idhini {have} kati ya {needed}.",
+    "accord_remint_back_btn": "Rudi",
+    "accord_remint_bundle_ready": "Mbegu inayobebeka iko tayari — ihifadhi au inakili (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Chagua seva kanuni ya kutengenezwa upya…",
+    "accord_remint_close_btn": "Funga",
+    "accord_remint_completed_label": "Rekodi iliyokamilika (SignedKeyRecord JSON)",
+    "accord_remint_continue_btn": "Endelea kupendekeza",
+    "accord_remint_cosign_all_signed": "Kila mshikaji katika orodha hii tayari ameidhinisha mbegu hii.",
+    "accord_remint_cosign_btn": "Tia saini mbegu pamoja — gusa YubiKey yako",
+    "accord_remint_cosign_btn_busy": "Inatia saini pamoja — gusa YubiKey yako…",
+    "accord_remint_cosign_desc": "Mkabidhi kifaa mshikaji anayefuata. Yeye anaidhinisha mbegu ILEILE kwa YubiKey yake mwenyewe, kwa PIN yake mwenyewe. Rudia hadi nodi iripoti kuwa mbegu imekamilika.",
+    "accord_remint_cosign_paste_label": "Rekodi isiyokamilika ya kutiwa saini pamoja (SignedKeyRecord JSON)",
+    "accord_remint_cosign_title": "Hatua ya 3 — Tia saini pamoja (mshikaji wa pili)",
+    "accord_remint_desc": "Geuza orodha ILIYOPO ya accord na nodi moja kanuni ya kutumikia kuwa mbegu inayobebeka ya mzizi wa uaminifu. Washikaji wawili wa accord wanaidhinisha, kila mmoja kwa YubiKey moja. Hakuna kinachoandikwa upya: orodha, funguo za umma na anwani hujazwa mapema kutoka kwa nodi hii. Programu haishikilii funguo yoyote — kugusa YubiKey ndiyo ridhaa.",
+    "accord_remint_done_desc": "Ihifadhi, iweke nje ya mtandao, na uikabidhi jinsi ungekabidhi ufunguo — yeyote anayeishikilia anaweza kusimamisha mesh juu ya mzizi huu wa uaminifu.",
+    "accord_remint_done_family": "Ufunguo wa familia: {key}",
+    "accord_remint_done_fingerprint": "Alama ya kidole: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Linganisha alama hii ya kidole nje ya njia hii — ana kwa ana au kwenye simu mnayoitambua nyote wawili — kabla ya mtu yeyote kuambatisha mbegu hii.",
+    "accord_remint_done_holders": "Washikaji waliobebwa: {count}",
+    "accord_remint_done_serve_nodes": "Nodi za kutumikia zilizobebwa: {count}",
+    "accord_remint_done_title": "Mbegu imeidhinishwa",
+    "accord_remint_no_canonicals": "Hakuna seva kanuni katika chanzo cha kutengeneza upya.",
+    "accord_remint_produce_btn": "Tengeneza genesis inayobebeka",
+    "accord_remint_produce_btn_busy": "Inatengeneza…",
+    "accord_remint_propose_btn": "Pendekeza mbegu — gusa YubiKey yako",
+    "accord_remint_propose_btn_busy": "Inapendekeza — gusa YubiKey yako…",
+    "accord_remint_propose_desc": "Mshika wa kwanza hutengeneza na kutia saini hati ya msingi na ruhusa ya mbegu kwa kutumia YubiKey yake mwenyewe. Programu haishikilii funguo yoyote — kugusa ndiko kuridhia.",
+    "accord_remint_propose_title": "Hatua ya 2 — Pendekeza (mshika wa kwanza)",
+    "accord_remint_quorum_line": "Akidi: washika-makubaliano {m} kati ya {n} lazima waidhinishe mbegu.",
+    "accord_remint_quorum_note": "Akidi {quorum} — washika wawili tu wanahitajika kuwepo; rekodi ya wa tatu husafiri ndani ya orodha.",
+    "accord_remint_reblessed_note": "Sherehe hii pia imeibariki seva kuu iliyochaguliwa kuwa seva ya nyayo (infra:serve) — haikuwa na baraka hiyo. Sasa inaaminiwa kwa chaguo-msingi kupokea nyayo; unaweza kuondoa baraka wakati wowote kwa operesheni ya kujiondoa ya seva kuu.",
+    "accord_remint_review_title": "Hatua ya 1 — Kagua kitakachobebwa na mbegu",
+    "accord_remint_roster_empty": "Bado hakuna washika-makubaliano katika chanzo cha kutengeneza upya.",
+    "accord_remint_roster_title": "Washika-makubaliano (orodha kamili husafiri ndani ya mbegu)",
+    "accord_remint_save_bundle": "Hifadhi kifurushi cha mwanzo",
+    "accord_remint_seed_scope": "Mbegu hubeba mzizi wa uaminifu — orodha kamili ya washika wa makubaliano haya — pamoja na nodi ya kuhudumia iliyochaguliwa hapa chini. Hakuna kinachotiwa saini katika hatua hii.",
+    "accord_remint_serve_missing": "bado haijabarikiwa kuhudumia — utengenezaji huu upya unarekebisha hilo",
+    "accord_remint_serve_node_line": "Nodi ya kuhudumia: {key}",
+    "accord_remint_serve_ok": "hutoa infra:serve ✓",
+    "accord_remint_start_over_btn": "Anza mbegu nyingine",
+    "accord_remint_step1_desc": "Mshika wa kwanza hutia saini-kaguzi seva kuu iliyochaguliwa (key_id + funguo za umma + anwani vimejazwa tayari). Saini-kaguzi moja bado haitoi mamlaka — husambaa kwa washika wengine ili watie saini pamoja.",
+    "accord_remint_step1_title": "Hatua ya 1 — Pendekeza (A1)",
+    "accord_remint_step2_desc": "Rekodi isiyokamilika husambaa kwa vifaa vya washika wengine — mshika wa pili huitia saini pamoja kutoka Saini-pamoja Zinazosubiri (au aibandike hapa chini ili kutia saini kwenye kifaa hiki). Ikifikia akidi ya familia, rekodi hupewa mamlaka.",
+    "accord_remint_step2_title": "Hatua ya 2 — Tia saini pamoja (B1)",
+    "accord_remint_step3_desc": "Bandika rekodi iliyokamilika (iliyotiwa saini pamoja) — husafiri kama ilivyo, haisimbwi upya kamwe. Nodi hukataa rekodi isiyotoa infra:serve.",
+    "accord_remint_step3_title": "Hatua ya 3 — Tengeneza mwanzo unaobebeka",
+    "accord_remint_step_done": "Imekamilika — mbegu imeidhinishwa",
+    "accord_remint_step_of": "Hatua ya {step} kati ya {total}",
+    "accord_remint_title": "Tengeneza upya mzizi wa uaminifu uliopo",
+    "accord_scrub_module_hint": "Acha wazi — nodi huchagua chaguo-msingi la mfumo wa uendeshaji (libykcs11)",
+    "accord_scrub_module_label": "Njia ya moduli ya PKCS#11 (ya kina)",
+    "add_fedid_confirm": "Ongeza Kitambulisho cha Shirikisho",
+    "add_fedid_intro": "Tayari umeingia — hii huongeza kitambulisho cha shirikisho kwenye akaunti yako iliyopo bila kuiunda upya. Kuingia kwako kunahifadhiwa.",
+    "add_fedid_label_heading": "Ipe jina kitambulisho chako cha shirikisho",
+    "add_fedid_title": "Ongeza Kitambulisho cha Shirikisho",
+    "announce_decision_body_off": "IMEZIMWA (inapendekezwa): faragha kamili. Nodi yako inabaki katika upeo wake binafsi — kila kitu hufanya kazi ndani ya kifaa na kusawazishwa kati ya vifaa vyako mwenyewe, lakini jamii haiwezi kuiona wala kuifikia. Washa hii ili kutuma nyayo na kujiunga na jamii.",
+    "announce_decision_body_on": "IMEWASHWA: nodi yako inakuwa inayoonekana kwenye shirikisho. Hii ndiyo inayokuwezesha kutuma nyayo za ufikiri kwa kundi la seva kuu zinazoaminika na kujiunga na jamii zinapoanza kupatikana. Unaweza kuizima baadaye.",
+    "announce_decision_title": "Ujiunge na shirikisho?",
+    "announce_decision_toggle_label": "Fanya nodi yangu ionekane kwenye shirikisho",
+    "announce_decision_trace_desc": "Shiriki alama za ubora wa ufikiri na mifumo ya maamuzi (bila maudhui ya ujumbe) na kundi la seva kuu zinazoaminika.",
+    "announce_decision_trace_locked": "Washa utangazaji hapo juu ili kuwezesha kutuma nyayo za ufikiri na kujiunga na jamii.",
+    "announce_decision_trace_title": "Tuma nyayo za ufikiri"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "Mali ya Pamoja",
       "federation": "Shirikisho",
       "client": "Mteja",
-      "safety": "Usalama"
+      "safety": "Usalama",
+      "node": "Nodi"
     },
     "surface": {
       "sessions": "Vikao",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Toa Mshikaji",
       "accord_ceremony": "Sherehe ya Mwanzo",
       "identity_management": "Utambulisho Wangu",
-      "transport": "Usafirishaji"
+      "transport": "Usafirishaji",
+      "contacts": "Anwani"
     }
   },
   "setup_validation_select_provider": "Chagua mtoa huduma wa LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + redio · nodi hii",
     "title": "Usafirishaji",
     "unavailable": "Taarifa za usafirishaji hazipatikani (nodi imedhoofika?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Hukumu yenye kikomo cha muda haiwezi kuendesha uondoaji usio na kikomo. Ushushaji pekee wa msingi unaotegemea ufunguo wa mtendaji huchukua kumbukumbu nzima, jambo ambalo lingeharibu historia ambayo kikomo hiki kimeacha ikisimama kwa makusudi. Uondoaji wenye kikomo cha muda ULIOPO ni kufutwa kwa uandikishaji pamoja na kikomo cha historia.",
+      "not_reached": "Safu za uthibitisho zilizochaguliwa zenyewe hazishushwi. Kila mbeba-mzigo katika msingi huu umefungwa ndani ya saini yake mwenyewe, hivyo baiti zake haziwezi kuondolewa bila kuifanya safu isomeke kama ya kughushi; uwezo wa kufutika huamuliwa wakati wa kutengenezwa, na hakuna kinachotengenezwa leo kinachoweza kufutika."
+    },
+    "enforcement": {
+      "annotate": "Hukumu iliyosainiwa isiyo na athari hadi msomaji aiheshimu. Hakuna kinachozuiliwa, kupunguzwa kasi wala kuondolewa.",
+      "deadmit": "Ubatilishaji uliosainiwa katika uwanda wa kawaida wa kuongeza-tu. Ni ushahidi ambao msomaji huukunja, si mlango unaofungwa kwa nguvu: uhakiki wa saini, vielekezi vya unakili na upokeaji wa safu vyote vinaendelea kufanya kazi kwa makusudi, kwa sababu kukataa safu za zamani za ufunguo ulioathiriwa kungeharibu ushahidi unaohitajika kuamua tukio hilo la kuathiriwa.",
+      "descend": "Haiwezi kutenduliwa kwa muundo wake. Ushushaji haumaliziki sifuri kamwe — ukungu na kaburi hubaki — lakini kilichoondolewa hakirudi.",
+      "quarantine": "Alama iliyosainiwa, si amri: hakuna kinachofutwa wala kuandikwa upya. Njia za utoaji huduma za nodi hii huacha kuwakabidhi wenzao safu na mafungu ya data ya funguo zilizotajwa; mwenzako anayekunja tofauti hapokei tu kutoka kwetu.",
+      "re_admit": "Imerekodiwa kama utenguzi wenye mwandishi anayejulikana. Safu ya ubatilishaji hubaki na kila msomaji bado huikunja: vizuizi hujumuika lakini vilegezo havijumuiki, na hakuna tabaka la msingi huu linaloweka wazi njia ya kutobatilisha.",
+      "throttle": "Imerekodiwa kama hukumu yenye mwandishi tu. Msingi huu hauna bajeti ya uandikishaji kwa kila ufunguo iliyoandikwa na mpokeaji: kiwango cha uandishi cha mwenzako ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao upunguzaji kasi unaweza kuutegemea. Hakuna kinachobadilika katika kile nodi hii inakubali kutoka funguo zilizotajwa."
+    },
+    "preview": {
+      "note": "Hiki ndicho hasa ambacho utekelezaji utakifanyia kazi. Wasilisha hashi ya uteuzi pamoja na utekelezaji; ikiwa uteuzi umebadilika, utekelezaji hukataa.",
+      "window_in_application": "Dirisha la muda hutumiwa na nodi hii, si na hoja ya msingi: usomaji wa jumla wa uthibitisho hauheshimu mhimili wa dirisha. Kikomo cha ukurasa hutumika kwanza, hivyo uteuzi wenye dirisha unaweza kurudi ukiwa pungufu."
+    },
+    "quarantine": {
+      "not_withheld": "Ufunguo huu kwa sasa hauzuiliwi hapa, hivyo hakuna cha kuachiliwa."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Ulichokitazama awali si kile kitakachotekelezwa — uteuzi umebadilika tangu muhtasari. Rudia muhtasari kisha uidhinishe hashi mpya.",
+      "quorum_insufficient": "Operesheni hii haiwezi kutenduliwa na inahitaji akidi ya mamlaka tofauti, si mnyororo mmoja wa ukabidhi. Minyororo miwili kutoka mzizi mmoja ni mamlaka moja iliyovaa kofia mbili."
+    },
+    "reversal": {
+      "evidence_only": "Safu ya awali hubaki na bado hukunjwa na kila msomaji. Utenguzi huu ni ushahidi uliorekodiwa, si kutendua — msingi hauweki wazi njia yoyote ya kutobatilisha.",
+      "substrate": "Hali ya msingi imetenduliwa: nodi hii inaacha kuzuia safu za ufunguo huu.",
+      "symmetric": "Hakuna kilichotenduliwa katika msingi kwa sababu hakuna kitu katika msingi kilichotekeleza hukumu ya awali. Vitendo vyote viwili ni ushahidi uliorekodiwa."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Huwezi kutumia mitiririko au huduma zinazohitaji uthibitisho wa uwezo kutoka kwa watu wa tatu, kwa sababu hutakuwa na wowote.",
+        "no_reputation": "Hujengi sifa HATA KIDOGO — kila dai la capacity:* kukuhusu hukataliwa, hivyo hakuna linaloweza kuwepo kamwe.",
+        "peers_may_refuse": "Baadhi ya wenzako wanaweza kukataa kuingiliana nawe kabisa."
+      },
+      "summary": "Unaweza kutuma nyayo bila kukubali kuchambuliwa. Nyayo bado zitapita."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Mwenzako anaweza KUPIMA nyayo zako — hii ndiyo inayojenga sifa.",
+        "title": "Kupimwa alama"
+      },
+      "replication": {
+        "permits": "Mwenzako anaweza KUHIFADHI nyayo zako.",
+        "title": "Tuma nyayo"
+      }
+    },
+    "grants": {
+      "independent": "Hizi ni idhini tofauti kwenye kingo zinazopingana. Kutoa moja hakutoi nyingine, na yoyote inaweza kuondolewa bila nyingine."
+    },
+    "mesh_participation": {
+      "action": "Kubali kushiriki katika mtandao wa CIRIS"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Huwezi kushiriki katika jumuiya yoyote ya kikanda. Uanachama huamuliwa na iwapo seli yako iko ndani ya kanda ya jumuiya yenyewe, hivyo bila seli hakuna cha kulinganisha.",
+      "no_regional_reporting": "Shughuli zako haziwezi kuchangia katika ripoti za mienendo ya kikanda."
+    },
+    "permits": "Huambatisha seli pana ya H3 kwenye bahasha yako ili mienendo iweze kuripotiwa katika kanda mbalimbali. Msingi hukataa chochote chenye undani zaidi ya kiwango cha 7, hivyo hutambua kanda ya jumla — kamwe si eneo lako mahususi wala anwani yako.",
+    "purpose": "Kuripoti mienendo ya kikanda, na kushiriki katika jumuiya za kikanda. Jumuiya inaweza pia kuitumia kama lango la HIARI la mwonekano, ikizuia vitu vinavyokusudiwa jumuiya hiyo vifike kwa wanachama ambao kanda yao iko ndani yake. Si kizuizi cha jumla kwa nyayo zako — hicho huamuliwa na idhini zilizo hapo juu.",
+    "title": "Shiriki kanda yako ya takriban"
+  },
+  "mesh": {
+    "announce_requirement": "Nodi isiyojitangaza haipati ufikiaji wa huduma katika mtandao wala huduma za wakala. Swichi ya kuzima ya makubaliano ina maana tu dhidi ya nodi inayoweza kuifikia, hivyo nodi isiyofikika haihudumiwi tangu mwanzo."
+  },
+  "mesh_config": {
+    "dry_run": "Hakuna kilichosainiwa na hakuna kilichowasilishwa. Hizi ndizo baiti kamili za kikanuni ambazo msaini-mwenza lazima azisaini ili scrub yake ihesabike katika uwasilishaji halisi.",
+    "durability": {
+      "substrate_decides": "Ni uamuzi wa msingi kubainisha ni vitendo vipi vinavyostahili mpangilio wa kudumu, husomwa upya kwa kila wito na kuripotiwa kwa tokeni yake mwenyewe ya kukataa. Nodi hii haina sheria yake yoyote ya udumu."
+    },
+    "emergency": {
+      "bound": "Nafuu ya dharura huisha kwa muundo wake. Dirisha refu zaidi ni la msingi, limebebwa hapa ili fomu iweze kuweka mpaka wa ingizo; msingi hukataa lolote refu zaidi kwenye mlango wake mwenyewe."
+    },
+    "history": {
+      "empty": "Kila mzizi uliojiandikisha ulisomwa na hakuna hata mmoja aliyewahi kuwasilisha safu ya usanidi wa mtandao.",
+      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi ambao umewahi kuweza kuwasilisha safu ya usanidi wa mtandao hapa.",
+      "partial": "Baadhi ya mizizi iliyojiandikisha haikuweza kusomwa, hivyo historia hii haijakamilika. Mizizi iliyoshindikana imetajwa.",
+      "present": "Kila safu ya usanidi wa mtandao ambayo nodi hii inashikilia, mpya zaidi kwanza.",
+      "truncated": "Ukurasa huu ulikatwa kwenye kikomo. Jumla iliyo hapa chini inahesabu kila safu iliyosomwa.",
+      "unreadable": "Historia ya usanidi wa mtandao haikuweza kusomwa hapa. HII SI kauli kwamba hakuna safu iliyowahi kuwasilishwa."
+    },
+    "outcome": {
+      "admitted": "Msingi uliikubali safu hii. Ni ALAMA, si amri: hakuna kilichobadilishwa kwa kuwasili kwake, na athari yake yote ni ukunjaji wa wakati wa kusoma ambao mtumiaji anaweza kuuheshimu."
+    },
+    "plane": {
+      "configured": "Angalau ufunguo mmoja umehamishwa kutoka thamani ya msingi ya mmiliki na mzizi uliojiandikisha.",
+      "no_rows_held": "Nodi hii imejiandikisha kwa angalau mzizi mmoja wa imani na haishikilii safu yoyote ya usanidi wa mtandao kutoka kwa yeyote kati yao. Kila ufunguo unafanya kazi kwa thamani ya msingi ya mmiliki mwenyewe.",
+      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi unaoweza kuisanidi. Uandikishaji NDIO ukingo wa imani.",
+      "none_binding": "Rekodi za mesh-config zimehifadhiwa lakini hakuna inayotekelezwa: kila moja imekwisha muda, imebanwa kwa ridhaa ya mmiliki, au inaomba thamani ya msingi inayotumika tayari.",
+      "unreadable": "Tabaka la mesh-config halikuweza kusomwa hapa. HII SI kauli kwamba hakuna kilichowekwa — thamani zilizo hapa chini hazijulikani, si chaguo-msingi."
+    },
+    "provenance": {
+      "baseline_not_moved": "Mizizi iliyojisajili ina rekodi hai kwa ufunguo huu na hakuna iliyoibadilisha: kila moja ilibanwa kwa ridhaa ya mmiliki au iliomba thamani inayotumika tayari.",
+      "baseline_unspoken": "Hakuna mzizi uliojisajili wenye rekodi hai kwa ufunguo huu, kwa hivyo nodi inatumia thamani ambayo mmiliki wake aliridhia.",
+      "root": "Rekodi iliyotiwa saini ya mzizi uliojisajili iliweka thamani hii. Rekodi hiyo, mwandishi wake na ukabidhi uliotumika vimetajwa kando yake."
+    },
+    "ttl": {
+      "expired": "Dirisha la rekodi hii limefungwa. Ukunjaji hutupilia mbali rekodi iliyokwisha muda wakati wa kusoma, kwa hivyo hauhitaji ubatilishaji wala mwandishi anayeweza kufikiwa.",
+      "running": "Dirisha la rekodi hii liko wazi na litafungwa katika wakati uliotajwa.",
+      "unbounded": "Rekodi hii haina tarehe ya kuisha. Inatumika hadi itakapobadilishwa na nyingine."
+    }
   }
 }

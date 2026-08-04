@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "Kısmi (SignedKeyRecord JSON)",
     "accord_coscrub_paste_invalid": "Bu geçerli bir JSON değil — tam kısmi kaydı (SignedKeyRecord) yapıştırın.",
     "accord_halt_raise_desc": "2/3'lük anayasal bir acil durdurma anahtarını DEVREYE ALIN. Tek imzanız yürürlüğe GİRMEZ — diğer accord sahiplerine iletilir; durdurmanın kilitlenmesi için onların da 2/3'e ulaşacak şekilde onaylaması gerekir. Uygulama hiçbir anahtar tutmaz; YubiKey dokunuşu sizin rızanızdır.",
-    "accord_raise_halt": "Durdurmayı başlat"
+    "accord_raise_halt": "Durdurmayı başlat",
+    "accord_bless_ci_desc": "Alt katmanın CI çalışan anahtarlarını (derleme hatları + ajan yöneticisi) tek bir törende toplu olarak scrub imzalayın. Her biri bir infra:attest düğüm anahtarıdır — roller sunucu tarafında belirlenir, bu yüzden yalnızca genel anahtarları yapıştırın. Alanlar önceden doldurulmuştur; her deponun ML-DSA-65 genel anahtarını dışa aktarma işi çıktısından yapıştırın. Uygulama hiçbir anahtar tutmaz — YubiKey dokunuşu onaydır.",
+    "accord_bless_ci_ed25519_label": "Ed25519 genel anahtarı (base64)",
+    "accord_bless_ci_mldsa_label": "ML-DSA-65 genel anahtarı (base64) — dışa aktarma işinden yapıştırın",
+    "accord_bless_ci_submit": "CI çalışanlarını kutsa — YubiKey'inize dokunun",
+    "accord_bless_ci_submit_busy": "Kutsanıyor — YubiKey'inize dokunun…",
+    "accord_bless_ci_title": "CI çalışanlarını kutsa",
+    "accord_coscrub_export_hint": "Bu kısmi kaydı bir sonraki sahibe verin:",
+    "accord_coscrub_export_save": "Dosyaya kaydet",
+    "accord_new_bless_ci_workers": "CI çalışanlarını kutsa",
+    "accord_new_remint_trust_root": "Mevcut güven kökünü yeniden bas",
+    "accord_op_copy": "Kopyala",
+    "accord_remint_auth_tally": "{needed} yetkilendirmeden {have} tanesi.",
+    "accord_remint_back_btn": "Geri",
+    "accord_remint_bundle_ready": "Taşınabilir tohum hazır — kaydedin veya kopyalayın (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Yeniden basılacak kanonik sunucuyu seçin…",
+    "accord_remint_close_btn": "Kapat",
+    "accord_remint_completed_label": "Tamamlanmış kayıt (SignedKeyRecord JSON)",
+    "accord_remint_continue_btn": "Öneri adımına geç",
+    "accord_remint_cosign_all_signed": "Bu listedeki her sahip bu tohumu zaten yetkilendirdi.",
+    "accord_remint_cosign_btn": "Tohumu birlikte imzala — YubiKey'inize dokunun",
+    "accord_remint_cosign_btn_busy": "Birlikte imzalanıyor — YubiKey'inize dokunun…",
+    "accord_remint_cosign_desc": "Cihazı bir sonraki sahibe verin. AYNI tohumu kendi YubiKey'i ve kendi PIN'i ile yetkilendirir. Düğüm tohumun tamamlandığını bildirene kadar tekrarlayın.",
+    "accord_remint_cosign_paste_label": "Birlikte imzalanacak kısmi kayıt (SignedKeyRecord JSON)",
+    "accord_remint_cosign_title": "3. Adım — Birlikte imzala (ikinci sahip)",
+    "accord_remint_desc": "MEVCUT mutabakat listesini ve bir kanonik hizmet düğümünü taşınabilir bir güven kökü tohumuna dönüştürün. İki mutabakat sahibi, her biri bir YubiKey ile yetkilendirir. Hiçbir şey yeniden yazılmaz: liste, genel anahtarlar ve adres bu düğümden önceden doldurulur. Uygulama hiçbir anahtar tutmaz — YubiKey dokunuşu onaydır.",
+    "accord_remint_done_desc": "Kaydedin, çevrimdışı saklayın ve bir anahtarı devreder gibi teslim edin — onu elinde tutan herkes bu güven kökü üzerine bir mesh kurabilir.",
+    "accord_remint_done_family": "Aile anahtarı: {key}",
+    "accord_remint_done_fingerprint": "Parmak izi: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Kimse bu tohumu bağlamadan önce bu parmak izini bant dışı bir yolla — yüz yüze veya ikinizin de tanıdığı bir görüşmede — karşılaştırın.",
+    "accord_remint_done_holders": "Taşınan sahipler: {count}",
+    "accord_remint_done_serve_nodes": "Taşınan hizmet düğümleri: {count}",
+    "accord_remint_done_title": "Tohum yetkilendirildi",
+    "accord_remint_no_canonicals": "Yeniden basım kaynağında kanonik sunucu yok.",
+    "accord_remint_produce_btn": "Taşınabilir genesis üret",
+    "accord_remint_produce_btn_busy": "Üretiliyor…",
+    "accord_remint_propose_btn": "Tohumu öner — YubiKey'inize dokunun",
+    "accord_remint_propose_btn_busy": "Öneriliyor — YubiKey'inize dokunun…",
+    "accord_remint_propose_desc": "İlk sahip, tohumun tüzüğünü ve yetkisini kendi YubiKey'inde üretir ve imzalar. Uygulama hiçbir anahtar tutmaz — dokunuş rızadır.",
+    "accord_remint_propose_title": "Adım 2 — Öner (ilk sahip)",
+    "accord_remint_quorum_line": "Yeter sayı: {n} mutabakat sahibinden {m} tanesi tohumu yetkilendirmelidir.",
+    "accord_remint_quorum_note": "Yeter sayı {quorum} — yalnızca iki sahibin bulunması yeterlidir; üçüncünün kaydı listeyle birlikte taşınır.",
+    "accord_remint_reblessed_note": "Bu tören ayrıca seçilen kanonik düğümü iz sunucusu (infra:serve) olarak kutsadı — daha önce hiç yetkisi yoktu. Artık izleri almak için varsayılan olarak güveniliyor; kanonik geri çekme işlemiyle istediğiniz zaman kutsamayı kaldırabilirsiniz.",
+    "accord_remint_review_title": "Adım 1 — Tohumun neleri taşıyacağını gözden geçirin",
+    "accord_remint_roster_empty": "Yeniden basım kaynağında henüz mutabakat sahibi yok.",
+    "accord_remint_roster_title": "Mutabakat sahipleri (listenin tamamı tohumla birlikte taşınır)",
+    "accord_remint_save_bundle": "Genesis paketini kaydet",
+    "accord_remint_seed_scope": "Tohum, güven kökünü — bu mutabakatın tüm sahip listesini — ve aşağıda seçilen sunum düğümünü taşır. Bu adımda hiçbir şey imzalanmaz.",
+    "accord_remint_serve_missing": "henüz sunum için kutsanmadı — bu yeniden basım bunu düzeltir",
+    "accord_remint_serve_node_line": "Sunum düğümü: {key}",
+    "accord_remint_serve_ok": "infra:serve verir ✓",
+    "accord_remint_start_over_btn": "Başka bir tohum başlat",
+    "accord_remint_step1_desc": "İlk sahip, seçilen kanonik düğümü scrub-imzalar (önceden doldurulmuş key_id + açık anahtarlar + adres). Tek scrub'lı kısmi kayıt henüz yetki vermez — birlikte imzalanmak üzere diğer sahiplere yayılır.",
+    "accord_remint_step1_title": "Adım 1 — Öner (A1)",
+    "accord_remint_step2_desc": "Kısmi kayıt diğer sahiplerin cihazlarına yayılır — ikinci sahip onu Bekleyen ortak imzalar bölümünden birlikte imzalar (ya da bu cihazda imzalamak için aşağıya yapıştırır). Aile yeter sayısına ulaşıldığında kayıt yetki kazanır.",
+    "accord_remint_step2_title": "Adım 2 — Birlikte imzala (B1)",
+    "accord_remint_step3_desc": "Tamamlanmış (birlikte imzalanmış) kaydı yapıştırın — kayıt olduğu gibi taşınır, asla yeniden kodlanmaz. Düğüm, infra:serve vermeyen bir kaydı reddeder.",
+    "accord_remint_step3_title": "Adım 3 — Taşınabilir genesis'i üret",
+    "accord_remint_step_done": "Tamamlandı — tohum yetkilendirildi",
+    "accord_remint_step_of": "Adım {step} / {total}",
+    "accord_remint_title": "Mevcut güven kökünü yeniden bas",
+    "accord_scrub_module_hint": "Boş bırakın — düğüm işletim sistemi varsayılanını seçer (libykcs11)",
+    "accord_scrub_module_label": "PKCS#11 modül yolu (gelişmiş)",
+    "add_fedid_confirm": "Federasyon Kimliği Ekle",
+    "add_fedid_intro": "Zaten oturum açtınız — bu işlem, hesabınızı yeniden oluşturmadan mevcut hesabınıza bir federasyon kimliği ekler. Oturumunuz korunur.",
+    "add_fedid_label_heading": "Federasyon kimliğinize bir ad verin",
+    "add_fedid_title": "Federasyon Kimliği Ekle",
+    "announce_decision_body_off": "KAPALI (önerilir): tamamen gizli. Düğümünüz kendi kapsamında kalır — her şey yerel olarak çalışır ve kendi cihazlarınız arasında eşitlenir, ancak topluluk onu göremez veya ona erişemez. İz göndermek ve topluluklara katılmak için bunu açın.",
+    "announce_decision_body_on": "AÇIK: düğümünüz federasyonda görünür hale gelir. Akıl yürütme izlerini güvenilen kanonik sunucu grubuna göndermenizi ve topluluklar devreye girdikçe onlara katılmanızı sağlayan şey budur. Bunu daha sonra kapatabilirsiniz.",
+    "announce_decision_title": "Federasyona katılınsın mı?",
+    "announce_decision_toggle_label": "Düğümüm federasyonda görünür olsun",
+    "announce_decision_trace_desc": "Akıl yürütme kalitesi puanlarını ve karar örüntülerini (mesaj içeriği olmadan) güvenilen kanonik sunucu grubuyla paylaşın.",
+    "announce_decision_trace_locked": "Akıl yürütme izleri göndermeyi ve topluluklara katılmayı etkinleştirmek için yukarıdaki duyurmayı açın.",
+    "announce_decision_trace_title": "Akıl yürütme izleri gönder"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "Müşterekler",
       "federation": "Federasyon",
       "client": "İstemci",
-      "safety": "Güvenlik"
+      "safety": "Güvenlik",
+      "node": "Düğüm"
     },
     "surface": {
       "sessions": "Oturumlar",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Sahip Sağla",
       "accord_ceremony": "Doğuş Töreni",
       "identity_management": "Kimliğim",
-      "transport": "Taşıma"
+      "transport": "Taşıma",
+      "contacts": "Kişiler"
     }
   },
   "setup_validation_select_provider": "Bir LLM sağlayıcısı seçin",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + radyo · bu düğüm",
     "title": "Aktarım",
     "unavailable": "Aktarım bilgileri kullanılamıyor (düğüm bozulmuş olabilir mi?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Zaman sınırlı bir hüküm, sınırsız bir tasfiyeyi yürütemez. Alt katmanın aktör anahtarlı tek indirgemesi bütün külliyatı kapsar; bu da bu sınırın bilerek ayakta bıraktığı geçmişi yok ederdi. Gerçekten uygulanmış olan zaman sınırlı kaldırma, geçmiş sınırı taşıyan kabul iptalidir.",
+      "not_reached": "Seçilen tasdik satırlarının kendileri indirgenmez. Bu alt katmandaki her yük taşıyıcısı kendi imzasının içinde mühürlüdür; dolayısıyla baytları, satır sahte görünmeden düşürülemez. Silinebilirlik basım anında kararlaştırılır ve bugün basılan hiçbir şey silinebilir değildir."
+    },
+    "enforcement": {
+      "annotate": "Bir okuyucu ona uyana kadar hiçbir etkisi olmayan, imzalı bir hüküm. Hiçbir şey esirgenmez, kısıtlanmaz veya kaldırılmaz.",
+      "deadmit": "Sıradan, yalnızca ekleme yapılan düzlemde imzalı bir iptal. Çarpan bir kapı değil, okuyucunun katladığı bir kanıttır: imza doğrulaması, çoğaltma imleçleri ve satır alımı bilerek çalışmayı sürdürür; çünkü ele geçirilmiş bir anahtarın eski satırlarını reddetmek, ihlali yargılamak için gereken kanıtı yok ederdi.",
+      "descend": "Tasarımı gereği geri alınamaz. İndirgeme asla sıfırda bitmez — bulanıklaştırma ve mezar taşı kaydı ayakta kalır — ama dökülen geri gelmez.",
+      "quarantine": "Bir komut değil, imzalı bir işaret: hiçbir şey silinmez ve hiçbir şey yeniden yazılmaz. Bu düğümün sunum yolları, adı geçen anahtarların satırlarını ve blob'larını eşlere vermeyi bırakır; farklı katlayan bir eş, onları bizden almaz, o kadar.",
+      "re_admit": "Kime ait olduğu belirtilmiş bir geri çevirme olarak kaydedilir. İptal satırı ayakta kalır ve her okuyucu onu katlamayı sürdürür: kısıtlamalar birleşir, müsamahalar birleşmez ve bu alt katmanın hiçbir katmanı iptali geri alan bir işlem sunmaz.",
+      "throttle": "Yalnızca, kime ait olduğu belirtilmiş bir hüküm olarak kaydedilir. Bu alt katmanda alıcının yazdığı, anahtar başına bir kabul bütçesi yoktur: eş yazma kotası, bir kısıtlamanın dayanabileceği bir politika yüzeyi değil, sabit bir kaçak döngü emniyetidir. Bu düğümün adı geçen anahtarlardan kabul ettiği şey değişmez."
+    },
+    "preview": {
+      "note": "Bir kesinleştirme tam olarak bunun üzerinde işlem yapacak. Seçim hash'ini kesinleştirmeyle birlikte sun; seçim değiştiyse kesinleştirme reddeder.",
+      "window_in_application": "Zaman penceresini alt katman sorgusu değil, bu düğüm uygular: genel tasdik okuması pencere eksenini dikkate almaz. Sayfa sınırı önce uygulanır, bu yüzden pencereli bir seçim eksik dönebilir."
+    },
+    "quarantine": {
+      "not_withheld": "Bu anahtar şu anda burada esirgenmiyor, dolayısıyla serbest bırakılacak bir şey yok."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Önizlediğiniz şey, çalıştırılacak şey değil — önizlemeden bu yana seçim değişti. Önizlemeyi yeniden çalıştırın ve yeni hash'i onaylayın.",
+      "quorum_insufficient": "Bu işlem geri alınamaz ve tek bir yetki devri zincirini değil, birbirinden ayrı yetkililerden oluşan bir yeter sayıyı gerektirir. Aynı kökten çıkan iki zincir, iki şapka takan tek bir yetkilidir."
+    },
+    "reversal": {
+      "evidence_only": "Özgün satır ayakta kalır ve hâlâ her okuyucu tarafından katlanır. Bu geri çevirme bir geri alma değil, kayda geçmiş bir kanıttır — alt katman iptali geri alan bir işlem sunmaz.",
+      "substrate": "Alt katman durumu geri çevrilir: bu düğüm, anahtarın satırlarını esirgemeyi bırakır.",
+      "symmetric": "Alt katmanda hiçbir şey geri çevrilmez, çünkü özgün hükmü alt katmanda uygulayan bir şey yoktu. Her iki eylem de kayda geçmiş kanıttır."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Üçüncü taraf yetenek tasdikleri gerektiren akışları veya hizmetleri kullanamazsınız, çünkü hiçbirine sahip olmayacaksınız.",
+        "no_reputation": "HİÇBİR itibar oluşturmazsınız — hakkınızdaki her capacity:* iddiası reddedilir, dolayısıyla hiçbiri var olamaz.",
+        "peers_may_refuse": "Bazı eşler sizinle hiç etkileşime girmeyi reddedebilir."
+      },
+      "summary": "Analiz edilmeye rıza göstermeden de izler gönderebilirsiniz. İzler yine de akmaya devam eder."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Eş, izlerinizi PUANLAYABİLİR — itibarı oluşturan budur.",
+        "title": "Puanlanmak"
+      },
+      "replication": {
+        "permits": "Eş, izlerinizi TUTABİLİR.",
+        "title": "İz gönder"
+      }
+    },
+    "grants": {
+      "independent": "Bunlar, karşıt kenarlardaki ayrı rızalardır. Birini vermek diğerini vermez ve her biri diğerinden bağımsız olarak geri çekilebilir."
+    },
+    "mesh_participation": {
+      "action": "CIRIS Mesh Katılımına Rıza Göster"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Hiçbir bölgesel topluluğa katılamazsınız. Üyelik, hücrenizin topluluğun kendi bölgesinin içine düşüp düşmediğine göre belirlenir; hücre olmadan karşılaştırılacak bir şey de olmaz.",
+      "no_regional_reporting": "Etkinliğiniz bölgesel örüntü raporlamasına katkıda bulunamaz."
+    },
+    "permits": "Örüntülerin bölgeler genelinde raporlanabilmesi için zarfınıza kaba bir H3 hücresi ekler. Alt katman, 7. çözünürlükten daha ince olan hiçbir şeyi kabul etmez; yani kabaca bir bölgeyi belirtir — asla belirli semtinizi veya adresinizi değil.",
+    "purpose": "Bölgesel örüntü raporlaması ve bölgesel topluluklara katılım. Bir topluluk bunu İSTEĞE BAĞLI bir görünürlük kapısı olarak da kullanabilir; o topluluğa yönelik öğeleri, bölgesi topluluğun içine düşen üyelerle sınırlar. Bu, izleriniz üzerinde genel bir kısıtlama değildir — onu yukarıdaki rızalar belirler.",
+    "title": "Yaklaşık bölgenizi paylaşın"
+  },
+  "mesh": {
+    "announce_requirement": "Kendini duyurmayan bir düğüm, mesh üzerinde hizmet erişimi ve ajan hizmetleri alamaz. Anlaşmanın acil durdurma anahtarı yalnızca ulaşabildiği bir düğüme karşı anlamlıdır; bu yüzden erişilemeyen bir düğüme zaten baştan hizmet verilmez."
+  },
+  "mesh_config": {
+    "dry_run": "Hiçbir şey imzalanmadı ve hiçbir şey gönderilmedi. Bunlar, bir ortak imzacının scrub'ının gerçek gönderimde sayılması için imzalaması gereken tam kanonik baytlardır.",
+    "durability": {
+      "substrate_decides": "Hangi eylemlerin kalıcı bir ayar hak ettiği alt katmanın kararıdır; her çağrıda yeniden okunur ve alt katmanın kendi ret jetonuyla bildirilir. Bu düğüm kendine ait hiçbir kalıcılık kuralı içermez."
+    },
+    "emergency": {
+      "bound": "Acil durum muafiyeti yapısı gereği sona erer. Azami pencere alt katmana aittir ve bir formun girdisini sınırlayabilmesi için buraya taşınmıştır; alt katman daha uzun olan her şeyi kendi kapısında reddeder."
+    },
+    "history": {
+      "empty": "Abone olunan her kök okundu ve hiçbiri bugüne dek bir mesh-config satırı kaydetmedi.",
+      "no_subscription": "Bu düğüm canlı bir güven kökü kenarı tutmuyor, dolayısıyla hiçbir kök buraya bugüne dek bir mesh-config satırı kaydedemedi.",
+      "partial": "Abone olunan bazı kökler okunamadı, bu yüzden bu geçmiş eksiktir. Başarısız olan kökler adlarıyla belirtilmiştir.",
+      "present": "Bu düğümün tuttuğu her mesh-config satırı, en yenisi başta.",
+      "truncated": "Bu sayfa sınırda kesildi. Aşağıdaki toplam, okunan her satırı sayar.",
+      "unreadable": "mesh-config geçmişi burada okunamadı. Bu, hiçbir satırın hiç kaydedilmediği anlamına GELMEZ."
+    },
+    "outcome": {
+      "admitted": "Alt katman bu satırı kabul etti. Bu bir komut değil, bir İŞARETTİR: gelişiyle hiçbir şey değişmedi ve etkisi tamamen, bir tüketicinin uymayı seçebileceği okuma anındaki katlamadır."
+    },
+    "plane": {
+      "configured": "Abone olunan bir kök, en az bir anahtarı sahibinin temel değerinden kaydırmış durumda.",
+      "no_rows_held": "Bu düğüm en az bir güven köküne abonedir ve bunların hiçbirinden mesh-config satırı tutmuyor. Her anahtar, sahibinin kendi temel değeriyle çalışır.",
+      "no_subscription": "Bu düğüm canlı bir güven kökü kenarı tutmuyor, dolayısıyla hiçbir kök onu yapılandıramaz. Abonelik, güven kenarının ta kendisidir.",
+      "none_binding": "Mesh yapılandırma satırları tutuluyor ancak hiçbiri bağlayıcı değil: her biri ya süresi dolmuş, ya sahibin onayına göre kısıtlanmış, ya da zaten yürürlükte olan temel değeri istiyor.",
+      "unreadable": "Mesh yapılandırma düzlemi burada okunamadı. Bu, hiçbir şeyin ayarlanmadığı anlamına GELMEZ — aşağıdaki değerler varsayılan değil, bilinmiyor."
+    },
+    "provenance": {
+      "baseline_not_moved": "Abone olunan kökler bu anahtar için canlı satırlar tutuyor ve hiçbiri onu değiştirmedi: her biri ya sahibin onayına göre kısıtlandı ya da zaten yürürlükte olan değeri istedi.",
+      "baseline_unspoken": "Abone olunan hiçbir kök bu anahtar için canlı bir satır tutmuyor; bu nedenle düğüm, sahibinin onayladığı değerle çalışır.",
+      "root": "Bu değeri, abone olunan bir kökün imzalı satırı belirledi. Satır, yazarı ve hangi yetki devri altında alındığı yanında belirtilmiştir."
+    },
+    "ttl": {
+      "expired": "Bu satırın penceresi kapandı. Katlama, süresi dolmuş bir satırı okuma anında düşürür; bu yüzden ne bir iptale ne de erişilebilir bir yazara ihtiyaç duyar.",
+      "running": "Bu satırın penceresi açık ve belirtilen anda kapanacak.",
+      "unbounded": "Bu satır bir son kullanma tarihi taşımıyor. Yerine yenisi geçene kadar geçerlidir."
+    }
   }
 }

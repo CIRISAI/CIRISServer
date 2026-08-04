@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "Partiel (JSON SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Ce n'est pas un JSON valide — collez l'enregistrement partiel complet (SignedKeyRecord).",
     "accord_halt_raise_desc": "DÉCLENCHER un coupe-circuit constitutionnel 2-sur-3. Votre seule signature ne prend PAS effet — elle est diffusée aux autres détenteurs de l'accord, qui doivent l'approuver à 2-sur-3 pour que l'arrêt se verrouille. L'application ne détient aucune clé ; le contact YubiKey est votre consentement.",
-    "accord_raise_halt": "Déclencher l'arrêt"
+    "accord_raise_halt": "Déclencher l'arrêt",
+    "accord_bless_ci_desc": "Scrub-signez en lot les clés des workers CI du substrat (pipelines de build + l'intendant d'agent) en une seule cérémonie. Chacune est une clé de nœud infra:attest — les rôles sont définis côté serveur, ne collez donc que les clés publiques. Les champs sont pré-remplis ; collez la clé publique ML-DSA-65 de chaque dépôt depuis l'artefact de son job d'export. L'application ne détient aucune clé — le contact de la YubiKey vaut consentement.",
+    "accord_bless_ci_ed25519_label": "Clé publique Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Clé publique ML-DSA-65 (base64) — à coller depuis le job d'export",
+    "accord_bless_ci_submit": "Bénir les workers CI — touchez votre YubiKey",
+    "accord_bless_ci_submit_busy": "Bénédiction en cours — touchez votre YubiKey…",
+    "accord_bless_ci_title": "Bénir les workers CI",
+    "accord_coscrub_export_hint": "Remettez ce partiel au détenteur suivant :",
+    "accord_coscrub_export_save": "Enregistrer dans un fichier",
+    "accord_new_bless_ci_workers": "Bénir les workers CI",
+    "accord_new_remint_trust_root": "Regénérer la racine de confiance existante",
+    "accord_op_copy": "Copier",
+    "accord_remint_auth_tally": "{have} autorisations sur {needed}.",
+    "accord_remint_back_btn": "Retour",
+    "accord_remint_bundle_ready": "La graine portable est prête — enregistrez-la ou copiez-la (mesh-genesis.json) :",
+    "accord_remint_canonical_select": "Sélectionnez le serveur canonique à regénérer…",
+    "accord_remint_close_btn": "Fermer",
+    "accord_remint_completed_label": "Enregistrement complété (JSON SignedKeyRecord)",
+    "accord_remint_continue_btn": "Continuer vers la proposition",
+    "accord_remint_cosign_all_signed": "Tous les détenteurs de cette liste ont déjà autorisé cette graine.",
+    "accord_remint_cosign_btn": "Cosigner la graine — touchez votre YubiKey",
+    "accord_remint_cosign_btn_busy": "Cosignature en cours — touchez votre YubiKey…",
+    "accord_remint_cosign_desc": "Passez l'appareil au détenteur suivant. Il autorise la MÊME graine avec sa propre YubiKey et son propre code PIN. Répétez l'opération jusqu'à ce que le nœud signale que la graine est complète.",
+    "accord_remint_cosign_paste_label": "Partiel à cosigner (JSON SignedKeyRecord)",
+    "accord_remint_cosign_title": "Étape 3 — Cosigner (le second détenteur)",
+    "accord_remint_desc": "Transformez la liste EXISTANTE des détenteurs de l'accord et un nœud de service canonique en une graine de racine de confiance portable. Deux détenteurs de l'accord l'autorisent, avec une YubiKey chacun. Rien n'est ressaisi : la liste, les clés publiques et l'adresse sont pré-remplies depuis ce nœud. L'application ne détient aucune clé — le contact de la YubiKey vaut consentement.",
+    "accord_remint_done_desc": "Enregistrez-la, conservez-la hors ligne et transmettez-la comme vous le feriez d'une clé — quiconque la détient peut établir un maillage sur cette racine de confiance.",
+    "accord_remint_done_family": "Clé de famille : {key}",
+    "accord_remint_done_fingerprint": "Empreinte : {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Comparez cette empreinte hors bande — en personne ou lors d'un appel où vous vous reconnaissez mutuellement — avant que quiconque n'attache cette graine.",
+    "accord_remint_done_holders": "Détenteurs transportés : {count}",
+    "accord_remint_done_serve_nodes": "Nœuds de service transportés : {count}",
+    "accord_remint_done_title": "La graine est autorisée",
+    "accord_remint_no_canonicals": "Aucun serveur canonique dans la source de regénération.",
+    "accord_remint_produce_btn": "Produire la genèse portable",
+    "accord_remint_produce_btn_busy": "Production en cours…",
+    "accord_remint_propose_btn": "Proposer la graine — touchez votre YubiKey",
+    "accord_remint_propose_btn_busy": "Proposition en cours — touchez votre YubiKey…",
+    "accord_remint_propose_desc": "Le premier détenteur génère et signe la charte et l'octroi de la graine sur sa propre YubiKey. L'application ne détient aucune clé — la pression tactile vaut consentement.",
+    "accord_remint_propose_title": "Étape 2 — Proposer (le premier détenteur)",
+    "accord_remint_quorum_line": "Quorum : {m} détenteurs d'accord sur {n} doivent autoriser la graine.",
+    "accord_remint_quorum_note": "Quorum {quorum} — seuls deux détenteurs doivent être présents ; l'enregistrement du troisième voyage avec la liste.",
+    "accord_remint_reblessed_note": "Cette cérémonie a également béni le canonique sélectionné en tant que serveur de traces (infra:serve) — il ne l'était pas. Il est désormais approuvé par défaut pour recevoir des traces ; vous pouvez le débénir à tout moment avec l'opération de retrait canonique.",
+    "accord_remint_review_title": "Étape 1 — Vérifiez ce que la graine transportera",
+    "accord_remint_roster_empty": "Aucun détenteur d'accord dans la source de re-frappe pour l'instant.",
+    "accord_remint_roster_title": "Détenteurs d'accord (la liste complète voyage avec la graine)",
+    "accord_remint_save_bundle": "Enregistrer le bundle de genèse",
+    "accord_remint_seed_scope": "La graine transporte la racine de confiance — la liste complète des détenteurs de cet accord — et le nœud de service sélectionné ci-dessous. Rien n'est signé à cette étape.",
+    "accord_remint_serve_missing": "pas encore béni pour servir — cette re-frappe y remédie",
+    "accord_remint_serve_node_line": "Nœud de service : {key}",
+    "accord_remint_serve_ok": "confère infra:serve ✓",
+    "accord_remint_start_over_btn": "Créer une autre graine",
+    "accord_remint_step1_desc": "Le premier détenteur signe par scrub le canonique sélectionné (key_id, clés publiques et adresse pré-remplis). Le partiel à 1 scrub ne confère pas encore — il est diffusé aux autres détenteurs pour cosignature.",
+    "accord_remint_step1_title": "Étape 1 — Proposer (A1)",
+    "accord_remint_step2_desc": "Le partiel est diffusé vers les appareils des autres détenteurs — le second détenteur le cosigne depuis Cosignatures en attente (ou le colle ci-dessous pour cosigner sur cet appareil). Au quorum de la famille, l'enregistrement est conféré.",
+    "accord_remint_step2_title": "Étape 2 — Cosigner (B1)",
+    "accord_remint_step3_desc": "Collez l'enregistrement complété (cosigné) — il voyage tel quel, jamais ré-encodé. Le nœud refuse un enregistrement qui ne confère pas infra:serve.",
+    "accord_remint_step3_title": "Étape 3 — Produire la genèse portable",
+    "accord_remint_step_done": "Terminé — la graine est autorisée",
+    "accord_remint_step_of": "Étape {step} sur {total}",
+    "accord_remint_title": "Re-frapper une racine de confiance existante",
+    "accord_scrub_module_hint": "Laissez vide — le nœud choisit la valeur par défaut du système (libykcs11)",
+    "accord_scrub_module_label": "Chemin du module PKCS#11 (avancé)",
+    "add_fedid_confirm": "Ajouter un Fed ID",
+    "add_fedid_intro": "Vous êtes déjà connecté — cette opération ajoute un identifiant de fédération à votre compte existant sans le recréer. Votre connexion est préservée.",
+    "add_fedid_label_heading": "Nommez votre identifiant de fédération",
+    "add_fedid_title": "Ajouter un Fed ID",
+    "announce_decision_body_off": "DÉSACTIVÉ (recommandé) : entièrement privé. Votre nœud reste limité à lui-même — tout fonctionne localement et se synchronise entre vos propres appareils, mais la communauté ne peut ni le voir ni l'atteindre. Activez cette option pour envoyer des traces et rejoindre des communautés.",
+    "announce_decision_body_on": "ACTIVÉ : votre nœud devient visible sur la fédération. C'est ce qui vous permet d'envoyer des traces de raisonnement au groupe de serveurs canoniques de confiance et de rejoindre les communautés au fur et à mesure de leur mise en ligne. Vous pourrez désactiver cette option plus tard.",
+    "announce_decision_title": "Rejoindre la fédération ?",
+    "announce_decision_toggle_label": "Rendre mon nœud visible sur la fédération",
+    "announce_decision_trace_desc": "Partagez les scores de qualité de raisonnement et les schémas de décision (aucun contenu de message) avec le groupe de serveurs canoniques de confiance.",
+    "announce_decision_trace_locked": "Activez l'annonce ci-dessus pour pouvoir envoyer des traces de raisonnement et rejoindre des communautés.",
+    "announce_decision_trace_title": "Envoyer des traces de raisonnement"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "Bien Commun",
       "federation": "Fédération",
       "client": "Client",
-      "safety": "Sécurité"
+      "safety": "Sécurité",
+      "node": "Nœud"
     },
     "surface": {
       "sessions": "Sessions",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Provisionner le détenteur",
       "accord_ceremony": "Cérémonie de genèse",
       "identity_management": "Mon identité",
-      "transport": "Transport"
+      "transport": "Transport",
+      "contacts": "Contacts"
     }
   },
   "setup_validation_select_provider": "Sélectionnez un fournisseur LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + radio · ce nœud",
     "title": "Transport",
     "unavailable": "Données de transport indisponibles (nœud dégradé ?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Un jugement borné dans le temps ne peut pas déclencher une éviction non bornée. La seule descente indexée par acteur du substrat emporte l'intégralité du corpus, ce qui détruirait l'historique que cette borne laisse délibérément en place. La suppression bornée dans le temps qui EST implémentée est la désadmission avec une borne d'historique.",
+      "not_reached": "Les lignes d'attestation sélectionnées ne sont elles-mêmes pas descendues. Sur ce substrat, chaque porteur de charge utile est scellé dans sa propre signature : ses octets ne peuvent donc pas être supprimés sans que la ligne ne soit lue comme falsifiée ; l'effaçabilité se décide à l'émission, et rien de ce qui est émis aujourd'hui n'est effaçable."
+    },
+    "enforcement": {
+      "annotate": "Un jugement signé, sans effet tant qu'un lecteur ne l'honore pas. Rien n'est retenu, limité ni supprimé.",
+      "deadmit": "Une révocation signée sur le plan ordinaire en ajout seul. C'est une preuve qu'un lecteur replie, pas une porte qui claque : la vérification des signatures, les curseurs de réplication et l'ingestion des lignes continuent délibérément de fonctionner, car refuser les anciennes lignes d'une clé compromise détruirait les preuves nécessaires pour juger la compromission.",
+      "descend": "Irréversible par conception. Une descente ne se termine jamais à zéro — le flou et la pierre tombale subsistent — mais ce qui a été abandonné ne reviendra pas.",
+      "quarantine": "Un marqueur signé, pas une commande : rien n'est supprimé et rien n'est réécrit. Les chemins de service de ce nœud cessent de transmettre aux pairs les lignes et les blobs des clés nommées ; un pair qui replie différemment ne les reçoit tout simplement pas de notre part.",
+      "re_admit": "Enregistré comme un renversement attribué. La ligne de révocation subsiste et chaque lecteur la replie toujours : les restrictions se composent, les assouplissements non, et aucune couche de ce substrat n'expose de dé-révocation.",
+      "throttle": "Enregistré uniquement comme un jugement attribué. Ce substrat n'a pas de budget d'admission par clé défini par le destinataire : le quota d'écriture des pairs est un garde-fou fixe contre les boucles emballées, pas une surface de politique sur laquelle une limitation pourrait s'indexer. Rien ne change dans ce que ce nœud accepte des clés nommées."
+    },
+    "preview": {
+      "note": "C'est exactement ce sur quoi une validation agira. Présentez le hachage de la sélection avec la validation ; si la sélection a changé, la validation est refusée.",
+      "window_in_application": "La fenêtre temporelle est appliquée par ce nœud, pas par la requête du substrat : la lecture générale des attestations n'honore pas l'axe de fenêtre. La borne de page est appliquée en premier, une sélection fenêtrée peut donc revenir incomplète."
+    },
+    "quarantine": {
+      "not_withheld": "Cette clé n'est pas actuellement retenue ici, il n'y a donc rien à libérer."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Ce que vous avez prévisualisé n'est pas ce qui serait exécuté — la sélection a changé depuis l'aperçu. Relancez l'aperçu et ratifiez le nouveau hachage.",
+      "quorum_insufficient": "Cette opération est irréversible et exige un quorum d'autorités distinctes, pas une seule chaîne de délégation. Deux chaînes issues de la même racine ne font qu'une seule autorité portant deux casquettes."
+    },
+    "reversal": {
+      "evidence_only": "La ligne d'origine subsiste et reste repliée par chaque lecteur. Ce renversement est une preuve enregistrée, pas une annulation — le substrat n'expose aucune dé-révocation.",
+      "substrate": "L'état du substrat est renversé : ce nœud cesse de retenir les lignes de la clé.",
+      "symmetric": "Rien n'est renversé dans le substrat, car rien dans le substrat n'appliquait le jugement d'origine. Les deux actes sont des preuves enregistrées."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Vous ne pouvez pas utiliser les flux ou les services qui exigent des attestations de capacité tierces, car vous n'en aurez aucune.",
+        "no_reputation": "Vous ne bâtissez AUCUNE réputation — toute revendication capacity:* à votre sujet est refusée, aucune ne pourra donc jamais exister.",
+        "peers_may_refuse": "Certains pairs peuvent refuser toute interaction avec vous."
+      },
+      "summary": "Vous pouvez envoyer des traces sans consentir à être analysé. Les traces circuleront quand même."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Le pair peut NOTER vos traces — c'est ce qui bâtit la réputation.",
+        "title": "Être noté"
+      },
+      "replication": {
+        "permits": "Le pair peut CONSERVER vos traces.",
+        "title": "Envoyer des traces"
+      }
+    },
+    "grants": {
+      "independent": "Ce sont des consentements distincts, sur des arêtes opposées. Accorder l'un n'accorde pas l'autre, et chacun peut être retiré sans l'autre."
+    },
+    "mesh_participation": {
+      "action": "Consentir à la participation au maillage CIRIS"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Vous ne pouvez prendre part à aucune communauté régionale. L'appartenance est décidée selon que votre cellule tombe ou non dans la région propre à la communauté ; sans cellule, il n'y a rien à comparer.",
+      "no_regional_reporting": "Votre activité ne peut pas contribuer au signalement des tendances régionales."
+    },
+    "permits": "Attache une cellule H3 grossière à votre enveloppe afin que les tendances puissent être signalées d'une région à l'autre. Le substrat refuse toute granularité plus fine que la résolution 7 : cela identifie donc une région approximative — jamais votre localité ni votre adresse précises.",
+    "purpose": "Signalement des tendances régionales et participation aux communautés régionales. Une communauté peut aussi s'en servir comme filtre de visibilité OPTIONNEL, en restreignant les éléments qui lui sont destinés aux membres dont la région s'inscrit dans la sienne. Ce n'est pas une restriction générale sur vos traces — cela est décidé par les consentements ci-dessus.",
+    "title": "Partager votre région approximative"
+  },
+  "mesh": {
+    "announce_requirement": "Un nœud qui ne s'annonce pas n'obtient aucun accès aux services du maillage ni aux services d'agent. Le coupe-circuit de l'accord n'a de sens que contre un nœud qu'il peut atteindre ; un nœud injoignable n'est donc jamais servi au départ."
+  },
+  "mesh_config": {
+    "dry_run": "Rien n'a été signé et rien n'a été soumis. Voici les octets canoniques exacts qu'un co-signataire doit signer pour que son scrub compte lors de la soumission réelle.",
+    "durability": {
+      "substrate_decides": "Les actes qui méritent un réglage durable relèvent de la décision du substrat, relue à chaque appel et rapportée par son propre jeton de refus. Ce nœud n'encode aucune règle de durabilité qui lui soit propre."
+    },
+    "emergency": {
+      "bound": "L'assouplissement d'urgence expire par construction. La fenêtre maximale est celle du substrat, reportée ici pour qu'un formulaire puisse borner sa saisie ; le substrat refuse toute durée plus longue à sa propre porte."
+    },
+    "history": {
+      "empty": "Chaque racine souscrite a été lue et aucune n'a jamais déposé de ligne de configuration de maillage.",
+      "no_subscription": "Ce nœud ne détient aucune arête de racine de confiance active ; aucune racine n'a donc jamais pu y déposer de ligne de configuration de maillage.",
+      "partial": "Certaines racines souscrites n'ont pas pu être lues, cet historique est donc incomplet. Les racines en échec sont nommées.",
+      "present": "Toutes les lignes de configuration de maillage détenues par ce nœud, les plus récentes en premier.",
+      "truncated": "Cette page a été coupée à la limite. Le total ci-dessous compte toutes les lignes lues.",
+      "unreadable": "L'historique de configuration de maillage n'a pas pu être lu ici. Cela ne signifie PAS qu'aucune ligne n'a jamais été déposée."
+    },
+    "outcome": {
+      "admitted": "Le substrat a admis cette ligne. C'est un MARQUEUR, pas une commande : son arrivée n'a rien changé, et son effet réside entièrement dans le repli à la lecture qu'un consommateur peut honorer."
+    },
+    "plane": {
+      "configured": "Au moins une clé est écartée de la référence du propriétaire par une racine souscrite.",
+      "no_rows_held": "Ce nœud souscrit à au moins une racine de confiance et ne détient aucune ligne de configuration de maillage provenant de l'une d'elles. Chaque clé fonctionne à la référence propre du propriétaire.",
+      "no_subscription": "Ce nœud ne détient aucune arête de racine de confiance active ; aucune racine ne peut donc le configurer. La souscription EST l'arête de confiance.",
+      "none_binding": "Des lignes mesh-config sont détenues, mais aucune ne s'applique : chacune est expirée, plafonnée par le consentement du propriétaire, ou demande la valeur de référence déjà en vigueur.",
+      "unreadable": "Le plan mesh-config n'a pas pu être lu ici. Cela ne signifie PAS qu'aucune valeur n'est définie — les valeurs ci-dessous sont inconnues, et non des valeurs par défaut."
+    },
+    "provenance": {
+      "baseline_not_moved": "Les racines auxquelles ce nœud est abonné détiennent des lignes actives pour cette clé et aucune ne l'a modifiée : chacune a été plafonnée par le consentement du propriétaire ou demandait la valeur déjà en vigueur.",
+      "baseline_unspoken": "Aucune racine abonnée ne détient de ligne active pour cette clé : le nœud applique donc la valeur consentie par son propriétaire.",
+      "root": "La ligne signée d'une racine abonnée a défini cette valeur. La ligne, son auteur et la délégation sous laquelle elle a été prise sont nommés à côté."
+    },
+    "ttl": {
+      "expired": "La fenêtre de cette ligne est close. Le repli écarte une ligne expirée à la lecture : elle n'exige donc ni révocation ni auteur joignable.",
+      "running": "La fenêtre de cette ligne est ouverte et se refermera à l'instant indiqué.",
+      "unbounded": "Cette ligne ne porte aucune expiration. Elle s'applique jusqu'à ce qu'elle soit remplacée."
+    }
   }
 }

@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "Parziale (JSON SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Questo non è un JSON valido — incolla il record parziale completo (SignedKeyRecord).",
     "accord_halt_raise_desc": "ATTIVA un kill-switch costituzionale a 2 su 3. La tua singola firma NON ha effetto: viene comunicata agli altri titolari dell'accord, che devono concordare a 2 su 3 affinché il blocco venga applicato. L'app non conserva alcuna chiave; il tocco della YubiKey è il tuo consenso.",
-    "accord_raise_halt": "Attiva blocco"
+    "accord_raise_halt": "Attiva blocco",
+    "accord_bless_ci_desc": "Esegui lo scrub in blocco delle chiavi dei worker CI del substrato (pipeline di build + lo steward dell'agente) in un'unica cerimonia. Ognuna è una chiave di nodo infra:attest — i ruoli sono impostati lato server, quindi incolla solo le chiavi pubbliche. I campi sono precompilati; incolla la chiave pubblica ML-DSA-65 di ogni repo dall'artefatto del suo export job. L'app non conserva chiavi — il tocco della YubiKey è il consenso.",
+    "accord_bless_ci_ed25519_label": "Chiave pubblica Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Chiave pubblica ML-DSA-65 (base64) — incolla dall'export job",
+    "accord_bless_ci_submit": "Benedici i worker CI — tocca la tua YubiKey",
+    "accord_bless_ci_submit_busy": "Benedizione in corso — tocca la tua YubiKey…",
+    "accord_bless_ci_title": "Benedici i worker CI",
+    "accord_coscrub_export_hint": "Consegna questa firma parziale al detentore successivo:",
+    "accord_coscrub_export_save": "Salva su file",
+    "accord_new_bless_ci_workers": "Benedici i worker CI",
+    "accord_new_remint_trust_root": "Ri-emetti una trust root esistente",
+    "accord_op_copy": "Copia",
+    "accord_remint_auth_tally": "{have} autorizzazioni su {needed}.",
+    "accord_remint_back_btn": "Indietro",
+    "accord_remint_bundle_ready": "Il seed portabile è pronto — salvalo o copialo (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Seleziona il server canonico da ri-emettere…",
+    "accord_remint_close_btn": "Chiudi",
+    "accord_remint_completed_label": "Record completato (SignedKeyRecord JSON)",
+    "accord_remint_continue_btn": "Continua per proporre",
+    "accord_remint_cosign_all_signed": "Tutti i detentori di questo elenco hanno già autorizzato questo seed.",
+    "accord_remint_cosign_btn": "Cofirma il seed — tocca la tua YubiKey",
+    "accord_remint_cosign_btn_busy": "Cofirma in corso — tocca la tua YubiKey…",
+    "accord_remint_cosign_desc": "Passa il dispositivo al detentore successivo. Autorizzerà LO STESSO seed con la propria YubiKey e il proprio PIN. Ripeti finché il nodo non segnala che il seed è completo.",
+    "accord_remint_cosign_paste_label": "Firma parziale da cofirmare (SignedKeyRecord JSON)",
+    "accord_remint_cosign_title": "Passaggio 3 — Cofirma (il secondo detentore)",
+    "accord_remint_desc": "Trasforma l'elenco ESISTENTE dei detentori dell'accordo e un nodo canonico di servizio in un seed di trust root portabile. Due detentori dell'accordo lo autorizzano, una YubiKey ciascuno. Non si ridigita nulla: elenco, chiavi pubbliche e indirizzo si precompilano da questo nodo. L'app non conserva chiavi — il tocco della YubiKey è il consenso.",
+    "accord_remint_done_desc": "Salvalo, tienilo offline e consegnalo come faresti con una chiave: chiunque lo possieda può fondare una mesh su questa trust root.",
+    "accord_remint_done_family": "Chiave della famiglia: {key}",
+    "accord_remint_done_fingerprint": "Impronta: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Confronta questa impronta fuori banda — di persona o in una chiamata in cui vi riconoscete entrambi — prima che qualcuno colleghi questo seed.",
+    "accord_remint_done_holders": "Detentori inclusi: {count}",
+    "accord_remint_done_serve_nodes": "Nodi di servizio inclusi: {count}",
+    "accord_remint_done_title": "Il seed è autorizzato",
+    "accord_remint_no_canonicals": "Nessun server canonico nella sorgente della ri-emissione.",
+    "accord_remint_produce_btn": "Genera il genesis portabile",
+    "accord_remint_produce_btn_busy": "Generazione in corso…",
+    "accord_remint_propose_btn": "Proponi il seed — tocca la tua YubiKey",
+    "accord_remint_propose_btn_busy": "Proposta in corso — tocca la tua YubiKey…",
+    "accord_remint_propose_desc": "Il primo titolare conia e firma la carta e la concessione del seed sulla propria YubiKey. L'app non conserva chiavi: il tocco è il consenso.",
+    "accord_remint_propose_title": "Passo 2 — Proponi (il primo titolare)",
+    "accord_remint_quorum_line": "Quorum: {m} titolari dell'accordo su {n} devono autorizzare il seed.",
+    "accord_remint_quorum_note": "Quorum {quorum} — devono essere presenti solo due titolari; il record del terzo viaggia con il roster.",
+    "accord_remint_reblessed_note": "Questa cerimonia ha anche consacrato il canonical selezionato come server di tracce (infra:serve): prima non lo era. Ora è attendibile per impostazione predefinita per ricevere tracce; puoi revocarne la consacrazione in qualsiasi momento con l'operazione di ritiro del canonical.",
+    "accord_remint_review_title": "Passo 1 — Rivedi ciò che il seed porterà con sé",
+    "accord_remint_roster_empty": "Ancora nessun titolare dell'accordo nell'origine del ri-conio.",
+    "accord_remint_roster_title": "Titolari dell'accordo (l'intero roster viaggia con il seed)",
+    "accord_remint_save_bundle": "Salva il bundle di genesi",
+    "accord_remint_seed_scope": "Il seed porta con sé la radice di fiducia — l'intero roster dei titolari di questo accordo — e il nodo di servizio selezionato qui sotto. In questo passo non viene firmato nulla.",
+    "accord_remint_serve_missing": "non ancora consacrato al servizio — questo ri-conio lo risolve",
+    "accord_remint_serve_node_line": "Nodo di servizio: {key}",
+    "accord_remint_serve_ok": "conferisce infra:serve ✓",
+    "accord_remint_start_over_btn": "Crea un altro seed",
+    "accord_remint_step1_desc": "Il primo titolare firma con scrub il canonical selezionato (key_id + chiavi pubbliche + indirizzo precompilati). Il parziale con 1 scrub non conferisce ancora nulla: viene diffuso agli altri titolari perché lo cofirmino.",
+    "accord_remint_step1_title": "Passo 1 — Proponi (A1)",
+    "accord_remint_step2_desc": "Il parziale viene diffuso ai dispositivi degli altri titolari: il secondo titolare lo cofirma da Cofirme in sospeso (oppure incollalo qui sotto per cofirmarlo su questo dispositivo). Raggiunto il quorum della famiglia, il record è conferito.",
+    "accord_remint_step2_title": "Passo 2 — Cofirma (B1)",
+    "accord_remint_step3_desc": "Incolla il record completato (cofirmato): viaggia testualmente, senza mai essere ricodificato. Il nodo rifiuta un record che non conferisce infra:serve.",
+    "accord_remint_step3_title": "Passo 3 — Genera la genesi portatile",
+    "accord_remint_step_done": "Fatto — il seed è autorizzato",
+    "accord_remint_step_of": "Passo {step} di {total}",
+    "accord_remint_title": "Ri-conia una radice di fiducia esistente",
+    "accord_scrub_module_hint": "Lascia vuoto — il nodo sceglie l'impostazione predefinita del sistema operativo (libykcs11)",
+    "accord_scrub_module_label": "Percorso del modulo PKCS#11 (avanzate)",
+    "add_fedid_confirm": "Aggiungi Federation ID",
+    "add_fedid_intro": "Hai già effettuato l'accesso: questa operazione aggiunge un Federation ID al tuo account esistente senza ricrearlo. Le tue credenziali di accesso restano invariate.",
+    "add_fedid_label_heading": "Assegna un nome al tuo Federation ID",
+    "add_fedid_title": "Aggiungi Federation ID",
+    "announce_decision_body_off": "OFF (consigliato): completamente privato. Il tuo nodo resta con ambito personale: tutto funziona in locale e si sincronizza tra i tuoi dispositivi, ma la comunità non può vederlo né raggiungerlo. Attivalo per inviare tracce e unirti alle comunità.",
+    "announce_decision_body_on": "ON: il tuo nodo diventa visibile alla federazione. È questo che ti consente di inviare tracce di ragionamento al gruppo di server canonici attendibili e di unirti alle comunità man mano che diventano disponibili. Puoi disattivarlo in seguito.",
+    "announce_decision_title": "Vuoi unirti alla federazione?",
+    "announce_decision_toggle_label": "Rendi il mio nodo visibile alla federazione",
+    "announce_decision_trace_desc": "Condividi i punteggi di qualità del ragionamento e gli schemi decisionali (nessun contenuto dei messaggi) con il gruppo di server canonici attendibili.",
+    "announce_decision_trace_locked": "Attiva l'annuncio qui sopra per poter inviare tracce di ragionamento e unirti alle comunità.",
+    "announce_decision_trace_title": "Invia tracce di ragionamento"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "Bene Comune",
       "federation": "Federazione",
       "client": "Client",
-      "safety": "Sicurezza"
+      "safety": "Sicurezza",
+      "node": "Nodo"
     },
     "surface": {
       "sessions": "Sessioni",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Provisiona titolare",
       "accord_ceremony": "Cerimonia di genesi",
       "identity_management": "La mia identità",
-      "transport": "Trasporto"
+      "transport": "Trasporto",
+      "contacts": "Contatti"
     }
   },
   "setup_validation_select_provider": "Seleziona un provider LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + radio · questo nodo",
     "title": "Trasporto",
     "unavailable": "Dati di trasporto non disponibili (nodo degradato?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Un giudizio limitato nel tempo non può guidare uno sfratto illimitato. L'unica discesa per attore del substrato prende l'intero corpus, il che distruggerebbe la storia che questo limite lascia deliberatamente in piedi. La rimozione limitata nel tempo che È implementata è la de-ammissione con un limite storico.",
+      "not_reached": "Le righe di attestazione selezionate non vengono esse stesse discese. Ogni portatore di payload su questo substrato è sigillato dentro la propria firma, quindi i suoi byte non possono essere eliminati senza far apparire la riga come falsificata; la cancellabilità si decide al momento del conio e nulla di ciò che viene coniato oggi è cancellabile."
+    },
+    "enforcement": {
+      "annotate": "Un giudizio firmato senza alcun effetto finché un lettore non lo onora. Nulla viene trattenuto, limitato o rimosso.",
+      "deadmit": "Una revoca firmata sul consueto piano append-only. È una prova che un lettore integra nel proprio fold, non una porta che sbatte: la verifica delle firme, i cursori di replica e l'ingest delle righe continuano deliberatamente a funzionare, perché rifiutare le righe più vecchie di una chiave compromessa distruggerebbe le prove necessarie a giudicare la compromissione.",
+      "descend": "Irreversibile per progettazione. La discesa non termina mai a zero — la sfocatura e il tombstone sopravvivono — ma ciò che è stato eliminato non tornerà.",
+      "quarantine": "Un marcatore firmato, non un comando: nulla viene eliminato e nulla viene riscritto. I percorsi di servizio di questo nodo smettono di consegnare ai peer le righe e i blob delle chiavi indicate; un peer che applica un fold diverso semplicemente non li riceve da noi.",
+      "re_admit": "Registrata come un'inversione attribuita. La riga di revoca sopravvive e ogni lettore continua a integrarla: le restrizioni si compongono, le indulgenze no, e nessuno strato di questo substrato espone un annullamento della revoca.",
+      "throttle": "Registrato solo come giudizio attribuito. Questo substrato non ha un budget di ammissione per chiave definito dal destinatario: la quota di scrittura dei peer è una protezione fissa contro i cicli impazziti, non una superficie di policy su cui una limitazione possa agire. Nulla cambia in ciò che questo nodo accetta dalle chiavi indicate."
+    },
+    "preview": {
+      "note": "Questo è esattamente ciò su cui agirà un commit. Presenta l'hash della selezione insieme al commit; se la selezione è cambiata, il commit viene rifiutato.",
+      "window_in_application": "La finestra temporale è applicata da questo nodo, non dalla query del substrato: la lettura generale delle attestazioni non onora l'asse temporale. Il limite di pagina viene applicato per primo, quindi una selezione con finestra può risultare incompleta."
+    },
+    "quarantine": {
+      "not_withheld": "Questa chiave non è attualmente trattenuta qui, quindi non c'è nulla da rilasciare."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Ciò che hai visualizzato in anteprima non è ciò che verrebbe eseguito: la selezione è cambiata dopo l'anteprima. Riesegui l'anteprima e ratifica il nuovo hash.",
+      "quorum_insufficient": "Questa operazione è irreversibile e richiede un quorum di autorità distinte, non un'unica catena di delega. Due catene dalla stessa radice sono un'unica autorità con due cappelli."
+    },
+    "reversal": {
+      "evidence_only": "La riga originale sopravvive ed è ancora integrata da ogni lettore. Questa inversione è una prova registrata, non un annullamento: il substrato non espone alcuna revoca della revoca.",
+      "substrate": "Lo stato del substrato è invertito: questo nodo smette di trattenere le righe della chiave.",
+      "symmetric": "Nulla nel substrato viene invertito, perché nulla nel substrato applicava il giudizio originale. Entrambi gli atti sono prove registrate."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Non potrai usare flussi o servizi che richiedono attestazioni di capacità di terze parti, perché non ne avrai nessuna.",
+        "no_reputation": "NON costruisci alcuna reputazione: ogni dichiarazione capacity:* su di te viene rifiutata, quindi non potrà mai esistere.",
+        "peers_may_refuse": "Alcuni peer potrebbero rifiutarsi del tutto di interagire con te."
+      },
+      "summary": "Puoi inviare tracce senza acconsentire a essere analizzato. Le tracce continueranno a fluire."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Il peer può VALUTARE le tue tracce: è questo a costruire la reputazione.",
+        "title": "Essere valutato"
+      },
+      "replication": {
+        "permits": "Il peer può CONSERVARE le tue tracce.",
+        "title": "Invia tracce"
+      }
+    },
+    "grants": {
+      "independent": "Si tratta di consensi separati su archi opposti. Concederne uno non concede l'altro, e ciascuno può essere revocato indipendentemente dall'altro."
+    },
+    "mesh_participation": {
+      "action": "Acconsenti alla partecipazione alla mesh CIRIS"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Non puoi partecipare a nessuna comunità regionale. L'appartenenza è decisa dal fatto che la tua cella ricada all'interno della regione della comunità stessa: senza una cella non c'è nulla da confrontare.",
+      "no_regional_reporting": "La tua attività non può contribuire ai report sui pattern regionali."
+    },
+    "permits": "Allega alla tua busta una cella H3 approssimativa, così i pattern possono essere riportati tra le regioni. Il substrato rifiuta qualsiasi granularità più fine della risoluzione 7, quindi identifica una regione di massima — mai la tua località o il tuo indirizzo specifico.",
+    "purpose": "Report sui pattern regionali e partecipazione alle comunità regionali. Una comunità può anche usarlo come filtro di visibilità OPZIONALE, limitando gli elementi destinati a quella comunità ai membri la cui regione ricade al suo interno. Non è una restrizione generale sulle tue tracce: quella è decisa dai consensi qui sopra.",
+    "title": "Condividi la tua regione approssimativa"
+  },
+  "mesh": {
+    "announce_requirement": "Un nodo che non si annuncia non ottiene accesso ai servizi sulla mesh né ai servizi degli agenti. Il kill switch dell'accordo ha senso solo contro un nodo che può raggiungere, quindi un nodo irraggiungibile non viene servito fin dal principio."
+  },
+  "mesh_config": {
+    "dry_run": "Nulla è stato firmato e nulla è stato inviato. Questi sono gli esatti byte canonici che un co-firmatario deve firmare perché il suo scrub valga nell'invio reale.",
+    "durability": {
+      "substrate_decides": "Quali atti meritino un'impostazione durevole è una decisione del substrato, riletta a ogni chiamata e riportata dal suo stesso token di rifiuto. Questo nodo non codifica alcuna regola di durabilità propria."
+    },
+    "emergency": {
+      "bound": "Il provvedimento di emergenza scade per costruzione. La finestra massima è quella del substrato, riportata qui perché un modulo possa limitare il proprio input; il substrato rifiuta qualsiasi durata superiore alla propria porta."
+    },
+    "history": {
+      "empty": "Ogni radice sottoscritta è stata letta e nessuna ha mai depositato una riga di mesh-config.",
+      "no_subscription": "Questo nodo non detiene alcun arco attivo verso una radice di fiducia, quindi nessuna radice ha mai potuto depositare qui una riga di mesh-config.",
+      "partial": "Alcune radici sottoscritte non hanno potuto essere lette, quindi questa cronologia è incompleta. Le radici che hanno fallito sono indicate.",
+      "present": "Ogni riga di mesh-config detenuta da questo nodo, dalla più recente.",
+      "truncated": "Questa pagina è stata tagliata al limite. Il totale qui sotto conta ogni riga letta.",
+      "unreadable": "Non è stato possibile leggere qui la cronologia mesh-config. Questo NON significa che non sia mai stata depositata alcuna riga."
+    },
+    "outcome": {
+      "admitted": "Il substrato ha ammesso questa riga. È un MARCATORE, non un comando: il suo arrivo non ha cambiato nulla, e il suo effetto è interamente il fold in lettura che un consumatore può onorare."
+    },
+    "plane": {
+      "configured": "Almeno una chiave è spostata dalla baseline del proprietario da una radice sottoscritta.",
+      "no_rows_held": "Questo nodo sottoscrive almeno una radice di fiducia e non detiene alcuna riga di mesh-config da nessuna di esse. Ogni chiave funziona alla baseline del proprietario stesso.",
+      "no_subscription": "Questo nodo non detiene alcun arco attivo verso una radice di fiducia, quindi nessuna radice può configurarlo. La sottoscrizione È l'arco di fiducia.",
+      "none_binding": "Sono presenti righe mesh-config, ma nessuna di esse vincola: ognuna è scaduta, limitata dal consenso del proprietario oppure richiede il valore di base già in vigore.",
+      "unreadable": "Non è stato possibile leggere il piano mesh-config qui. Questo NON significa che non sia impostato nulla: i valori qui sotto sono sconosciuti, non predefiniti."
+    },
+    "provenance": {
+      "baseline_not_moved": "I root sottoscritti hanno righe attive per questa chiave e nessuna di esse l'ha modificata: ognuna è stata limitata dal consenso del proprietario oppure richiedeva il valore già in vigore.",
+      "baseline_unspoken": "Nessun root sottoscritto ha una riga attiva per questa chiave, quindi il nodo usa il valore a cui il suo proprietario ha acconsentito.",
+      "root": "La riga firmata di un root sottoscritto ha impostato questo valore. La riga, il suo autore e la delega in base alla quale è stata emessa sono indicati accanto."
+    },
+    "ttl": {
+      "expired": "La finestra di questa riga è chiusa. Il fold scarta una riga scaduta al momento della lettura, quindi non serve alcuna revoca né un autore raggiungibile.",
+      "running": "La finestra di questa riga è aperta e si chiude nell'istante indicato.",
+      "unbounded": "Questa riga non ha scadenza. Si applica finché non viene sostituita."
+    }
   }
 }

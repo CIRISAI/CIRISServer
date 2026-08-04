@@ -2555,7 +2555,80 @@
     "accord_cosign_paste_label": "Bản một phần (JSON SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Đó không phải JSON hợp lệ — hãy dán toàn bộ bản ghi một phần (SignedKeyRecord).",
     "accord_halt_raise_desc": "PHÁT ĐỘNG công tắc ngắt khẩn cấp theo hiến pháp dạng 2-trên-3. Chữ ký đơn lẻ của bạn KHÔNG có hiệu lực — nó được lan truyền tới những người nắm giữ accord khác, và họ phải đồng thuận đủ 2-trên-3 thì lệnh ngắt mới được kích hoạt. Ứng dụng không giữ khóa nào; thao tác chạm YubiKey chính là sự đồng ý của bạn.",
-    "accord_raise_halt": "Phát động lệnh ngắt"
+    "accord_raise_halt": "Phát động lệnh ngắt",
+    "accord_bless_ci_desc": "Ký scrub hàng loạt các khóa CI worker của nền tảng (các pipeline build + agent steward) trong một nghi thức duy nhất. Mỗi khóa là một khóa nút infra:attest — các vai trò được đặt ở phía máy chủ, nên chỉ cần dán khóa công khai. Các trường đã được điền sẵn; hãy dán khóa công khai ML-DSA-65 của từng kho mã từ artifact của export-job. Ứng dụng không giữ khóa nào — chạm YubiKey chính là sự đồng ý.",
+    "accord_bless_ci_ed25519_label": "Khóa công khai Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Khóa công khai ML-DSA-65 (base64) — dán từ export job",
+    "accord_bless_ci_submit": "Chuẩn thuận các CI worker — chạm YubiKey của bạn",
+    "accord_bless_ci_submit_busy": "Đang chuẩn thuận — chạm YubiKey của bạn…",
+    "accord_bless_ci_title": "Chuẩn thuận các CI worker",
+    "accord_coscrub_export_hint": "Chuyển bản ký một phần này cho người giữ khóa tiếp theo:",
+    "accord_coscrub_export_save": "Lưu vào tệp",
+    "accord_new_bless_ci_workers": "Chuẩn thuận các CI worker",
+    "accord_new_remint_trust_root": "Đúc lại gốc tin cậy hiện có",
+    "accord_op_copy": "Sao chép",
+    "accord_remint_auth_tally": "{have} trên {needed} lượt ủy quyền.",
+    "accord_remint_back_btn": "Quay lại",
+    "accord_remint_bundle_ready": "Seed di động đã sẵn sàng — hãy lưu hoặc sao chép nó (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Chọn máy chủ canonical để đúc lại…",
+    "accord_remint_close_btn": "Đóng",
+    "accord_remint_completed_label": "Bản ghi đã hoàn tất (SignedKeyRecord JSON)",
+    "accord_remint_continue_btn": "Tiếp tục để đề xuất",
+    "accord_remint_cosign_all_signed": "Mọi người giữ khóa trong danh sách này đều đã ủy quyền cho seed này.",
+    "accord_remint_cosign_btn": "Đồng ký seed — chạm YubiKey của bạn",
+    "accord_remint_cosign_btn_busy": "Đang đồng ký — chạm YubiKey của bạn…",
+    "accord_remint_cosign_desc": "Chuyển thiết bị cho người giữ khóa tiếp theo. Họ ủy quyền cho CÙNG một seed bằng YubiKey của chính họ, với mã PIN của chính họ. Lặp lại cho đến khi nút báo seed đã hoàn tất.",
+    "accord_remint_cosign_paste_label": "Bản ký một phần cần đồng ký (SignedKeyRecord JSON)",
+    "accord_remint_cosign_title": "Bước 3 — Đồng ký (người giữ khóa thứ hai)",
+    "accord_remint_desc": "Biến danh sách accord HIỆN CÓ và một nút phục vụ canonical thành một seed gốc tin cậy di động. Hai người giữ accord ủy quyền cho nó, mỗi người một YubiKey. Không phải gõ lại gì cả: danh sách, khóa công khai và địa chỉ được điền sẵn từ nút này. Ứng dụng không giữ khóa nào — chạm YubiKey chính là sự đồng ý.",
+    "accord_remint_done_desc": "Hãy lưu lại, giữ ngoại tuyến và trao nó đi như trao một chiếc chìa khóa — bất kỳ ai nắm giữ nó đều có thể dựng một mesh trên gốc tin cậy này.",
+    "accord_remint_done_family": "Khóa family: {key}",
+    "accord_remint_done_fingerprint": "Vân tay: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Hãy đối chiếu vân tay này qua một kênh khác — gặp trực tiếp hoặc qua một cuộc gọi mà cả hai đều nhận ra nhau — trước khi bất kỳ ai gắn seed này.",
+    "accord_remint_done_holders": "Số người giữ khóa được mang theo: {count}",
+    "accord_remint_done_serve_nodes": "Số nút phục vụ được mang theo: {count}",
+    "accord_remint_done_title": "Seed đã được ủy quyền",
+    "accord_remint_no_canonicals": "Không có máy chủ canonical nào trong nguồn đúc lại.",
+    "accord_remint_produce_btn": "Tạo genesis di động",
+    "accord_remint_produce_btn_busy": "Đang tạo…",
+    "accord_remint_propose_btn": "Đề xuất seed — chạm YubiKey của bạn",
+    "accord_remint_propose_btn_busy": "Đang đề xuất — chạm YubiKey của bạn…",
+    "accord_remint_propose_desc": "Người giữ đầu tiên đúc và ký hiến chương cùng khoản cấp quyền của hạt giống bằng YubiKey của chính họ. Ứng dụng không giữ khóa nào — cái chạm chính là sự đồng ý.",
+    "accord_remint_propose_title": "Bước 2 — Đề xuất (người giữ đầu tiên)",
+    "accord_remint_quorum_line": "Túc số: {m} trong {n} người giữ hiệp ước phải cấp phép cho hạt giống.",
+    "accord_remint_quorum_note": "Túc số {quorum} — chỉ cần hai người giữ có mặt; bản ghi của người thứ ba đi kèm theo danh sách.",
+    "accord_remint_reblessed_note": "Nghi thức này cũng đã ban phước cho máy chủ canonical được chọn làm máy chủ dấu vết (infra:serve) — trước đó nó chưa có. Giờ nó được tin cậy mặc định để nhận dấu vết; bạn có thể thu hồi ban phước bất cứ lúc nào bằng thao tác rút canonical.",
+    "accord_remint_review_title": "Bước 1 — Xem lại những gì hạt giống sẽ mang theo",
+    "accord_remint_roster_empty": "Chưa có người giữ hiệp ước nào trong nguồn đúc lại.",
+    "accord_remint_roster_title": "Người giữ hiệp ước (toàn bộ danh sách đi kèm hạt giống)",
+    "accord_remint_save_bundle": "Lưu gói genesis",
+    "accord_remint_seed_scope": "Hạt giống mang theo gốc tin cậy — toàn bộ danh sách người giữ của hiệp ước này — và nút phục vụ được chọn bên dưới. Không có gì được ký ở bước này.",
+    "accord_remint_serve_missing": "chưa được ban phước để phục vụ — lần đúc lại này sẽ khắc phục điều đó",
+    "accord_remint_serve_node_line": "Nút phục vụ: {key}",
+    "accord_remint_serve_ok": "trao infra:serve ✓",
+    "accord_remint_start_over_btn": "Bắt đầu một hạt giống khác",
+    "accord_remint_step1_desc": "Người giữ đầu tiên scrub-ký máy chủ canonical đã chọn (key_id + khóa công khai + địa chỉ đã điền sẵn). Bản một-scrub chưa trao quyền — nó được lan truyền tới những người giữ khác để đồng ký.",
+    "accord_remint_step1_title": "Bước 1 — Đề xuất (A1)",
+    "accord_remint_step2_desc": "Bản chưa hoàn tất được lan truyền tới thiết bị của những người giữ khác — người giữ thứ hai đồng ký nó từ mục Chờ đồng ký (hoặc dán vào bên dưới để đồng ký trên thiết bị này). Khi đạt túc số của họ khóa, bản ghi được trao quyền.",
+    "accord_remint_step2_title": "Bước 2 — Đồng ký (B1)",
+    "accord_remint_step3_desc": "Dán bản ghi đã hoàn tất (đã đồng ký) — nó được mang theo nguyên văn, không bao giờ mã hóa lại. Nút sẽ từ chối bản ghi không trao infra:serve.",
+    "accord_remint_step3_title": "Bước 3 — Tạo genesis di động",
+    "accord_remint_step_done": "Xong — hạt giống đã được cấp phép",
+    "accord_remint_step_of": "Bước {step} trên {total}",
+    "accord_remint_title": "Đúc lại gốc tin cậy hiện có",
+    "accord_scrub_module_hint": "Để trống — nút sẽ chọn mặc định của hệ điều hành (libykcs11)",
+    "accord_scrub_module_label": "Đường dẫn mô-đun PKCS#11 (nâng cao)",
+    "add_fedid_confirm": "Thêm Federation ID",
+    "add_fedid_intro": "Bạn đã đăng nhập rồi — thao tác này thêm một federation ID vào tài khoản hiện có mà không tạo lại tài khoản. Thông tin đăng nhập của bạn được giữ nguyên.",
+    "add_fedid_label_heading": "Đặt tên cho federation ID của bạn",
+    "add_fedid_title": "Thêm Federation ID",
+    "announce_decision_body_off": "TẮT (khuyến nghị): hoàn toàn riêng tư. Nút của bạn giữ phạm vi riêng — mọi thứ hoạt động cục bộ và đồng bộ giữa các thiết bị của bạn, nhưng cộng đồng không thể thấy hay tiếp cận nó. Bật lên để gửi dấu vết và tham gia các cộng đồng.",
+    "announce_decision_body_on": "BẬT: nút của bạn hiển thị với liên bang. Đây là điều cho phép bạn gửi dấu vết suy luận tới nhóm máy chủ canonical đáng tin cậy và tham gia các cộng đồng khi chúng trực tuyến. Bạn có thể tắt lại sau.",
+    "announce_decision_title": "Tham gia liên bang?",
+    "announce_decision_toggle_label": "Cho phép nút của tôi hiển thị với liên bang",
+    "announce_decision_trace_desc": "Chia sẻ điểm chất lượng suy luận và mẫu hình ra quyết định (không có nội dung tin nhắn) với nhóm máy chủ canonical đáng tin cậy.",
+    "announce_decision_trace_locked": "Bật thông báo hiện diện ở trên để có thể gửi dấu vết suy luận và tham gia cộng đồng.",
+    "announce_decision_trace_title": "Gửi dấu vết suy luận"
   },
   "network": {
     "title": "Mạng",
@@ -2926,7 +2999,8 @@
       "commons_layers": "Tài Sản Chung",
       "federation": "Liên Bang",
       "client": "Máy Khách",
-      "safety": "An toàn"
+      "safety": "An toàn",
+      "node": "Nút"
     },
     "surface": {
       "sessions": "Phiên",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Cấp phát Holder",
       "accord_ceremony": "Lễ khởi tạo Genesis",
       "identity_management": "Danh tính của tôi",
-      "transport": "Truyền tải"
+      "transport": "Truyền tải",
+      "contacts": "Danh bạ"
     }
   },
   "setup_validation_select_provider": "Chọn nhà cung cấp LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + radio · node này",
     "title": "Truyền tải",
     "unavailable": "Không có thông tin truyền tải (nút bị suy giảm?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Một phán quyết có giới hạn thời gian không thể dẫn tới một cuộc trục xuất không giới hạn. Thao tác hạ giáng duy nhất theo khóa tác nhân của nền tảng sẽ lấy toàn bộ kho dữ liệu, và như vậy sẽ phá hủy chính phần lịch sử mà giới hạn này cố ý giữ lại. Thao tác gỡ bỏ có giới hạn thời gian ĐƯỢC triển khai là việc hủy kết nạp kèm một giới hạn lịch sử.",
+      "not_reached": "Bản thân các hàng chứng thực đã chọn thì không bị hạ giáng. Mọi vật mang tải trên nền tảng này đều được niêm phong bên trong chữ ký của chính nó, nên không thể bỏ đi các byte của nó mà không khiến hàng đó bị đọc thành giả mạo; khả năng xóa được quyết định ngay lúc đúc, và không có thứ gì được đúc ngày nay là có thể xóa."
+    },
+    "enforcement": {
+      "annotate": "Một phán quyết đã ký, không có hiệu lực nào cho tới khi một bên đọc tôn trọng nó. Không có gì bị giữ lại, bị điều tiết hay bị gỡ bỏ.",
+      "deadmit": "Một thu hồi đã ký trên mặt phẳng chỉ-ghi-thêm thông thường. Đó là bằng chứng để bên đọc gấp vào, không phải cánh cửa đóng sập: việc xác minh chữ ký, các con trỏ sao chép và việc nạp hàng đều cố ý tiếp tục hoạt động, vì từ chối các hàng cũ hơn của một khóa đã bị xâm phạm sẽ phá hủy chính bằng chứng cần để phân xử vụ xâm phạm đó.",
+      "descend": "Không thể đảo ngược theo thiết kế. Việc hạ giáng không bao giờ kết thúc ở con số không — phần làm mờ và bia mộ vẫn còn — nhưng những gì đã bị loại bỏ thì không quay lại.",
+      "quarantine": "Một dấu hiệu đã ký, không phải một mệnh lệnh: không có gì bị xóa và không có gì bị viết lại. Các đường phục vụ của nút này ngừng trao các hàng và blob của những khóa được nêu tên cho các nút ngang hàng; một nút ngang hàng gấp theo cách khác thì đơn giản là không nhận được chúng từ chúng ta.",
+      "re_admit": "Được ghi lại như một sự đảo ngược có ghi nhận tác giả. Hàng thu hồi vẫn tồn tại và mọi bên đọc vẫn gấp nó: các hạn chế thì cộng dồn còn các nới lỏng thì không, và không tầng nào của nền tảng này cung cấp một thao tác hủy-thu-hồi.",
+      "throttle": "Chỉ được ghi lại như một phán quyết có ghi nhận tác giả. Nền tảng này không có hạn mức kết nạp theo từng khóa do bên nhận đặt ra: hạn ngạch ghi của nút ngang hàng là một chốt chặn cố định cho vòng lặp mất kiểm soát, không phải một bề mặt chính sách mà việc điều tiết có thể bám vào. Không có gì thay đổi những thứ nút này chấp nhận từ các khóa được nêu tên."
+    },
+    "preview": {
+      "note": "Đây chính xác là những gì một lần cam kết sẽ tác động tới. Hãy gửi kèm mã băm của lựa chọn khi cam kết; nếu lựa chọn đã thay đổi, lần cam kết sẽ bị từ chối.",
+      "window_in_application": "Cửa sổ thời gian được áp dụng bởi nút này, không phải bởi truy vấn của nền tảng: thao tác đọc chứng thực tổng quát không tôn trọng trục cửa sổ. Giới hạn trang được áp dụng trước, nên một lựa chọn theo cửa sổ có thể trả về thiếu."
+    },
+    "quarantine": {
+      "not_withheld": "Khóa này hiện không bị giữ lại ở đây, nên không có gì để giải phóng."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Những gì bạn đã xem trước không phải những gì sẽ được thực thi — lựa chọn đã thay đổi kể từ lần xem trước. Hãy chạy lại phần xem trước và phê chuẩn mã băm mới.",
+      "quorum_insufficient": "Thao tác này không thể đảo ngược và cần một túc số gồm các thẩm quyền riêng biệt, chứ không phải một chuỗi ủy quyền duy nhất. Hai chuỗi từ cùng một gốc chỉ là một thẩm quyền đội hai chiếc mũ."
+    },
+    "reversal": {
+      "evidence_only": "Hàng gốc vẫn tồn tại và vẫn được mọi bên đọc gấp vào. Sự đảo ngược này là bằng chứng được ghi lại, không phải một thao tác hoàn tác — nền tảng không cung cấp thao tác hủy-thu-hồi nào.",
+      "substrate": "Trạng thái của nền tảng được đảo ngược: nút này ngừng giữ lại các hàng của khóa đó.",
+      "symmetric": "Không có gì trong nền tảng bị đảo ngược, vì không có gì trong nền tảng đã thi hành phán quyết ban đầu. Cả hai hành vi đều là bằng chứng được ghi lại."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Bạn không thể dùng các luồng hoặc dịch vụ đòi hỏi chứng thực năng lực từ bên thứ ba, vì bạn sẽ không có chứng thực nào cả.",
+        "no_reputation": "Bạn KHÔNG xây dựng được uy tín — mọi tuyên bố capacity:* về bạn đều bị từ chối, nên sẽ không bao giờ có tuyên bố nào tồn tại.",
+        "peers_may_refuse": "Một số nút ngang hàng có thể từ chối tương tác với bạn hoàn toàn."
+      },
+      "summary": "Bạn có thể gửi vết suy luận mà không đồng ý cho việc bị phân tích. Các vết vẫn sẽ được gửi đi."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Nút ngang hàng có thể CHẤM ĐIỂM các vết của bạn — đây chính là điều xây dựng nên uy tín.",
+        "title": "Được chấm điểm"
+      },
+      "replication": {
+        "permits": "Nút ngang hàng có thể LƯU GIỮ các vết của bạn.",
+        "title": "Gửi vết suy luận"
+      }
+    },
+    "grants": {
+      "independent": "Đây là hai đồng thuận riêng biệt trên hai cạnh đối lập. Cấp cái này không có nghĩa là cấp cái kia, và có thể rút lại cái này mà không cần rút cái kia."
+    },
+    "mesh_participation": {
+      "action": "Đồng ý tham gia Mạng lưới CIRIS"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Bạn không thể tham gia bất kỳ cộng đồng khu vực nào. Tư cách thành viên được quyết định bởi việc ô của bạn có nằm trong khu vực của chính cộng đồng đó hay không, nên không có ô thì chẳng có gì để so sánh.",
+      "no_regional_reporting": "Hoạt động của bạn không thể đóng góp vào báo cáo mẫu hình theo khu vực."
+    },
+    "permits": "Gắn một ô H3 thô vào phong bì của bạn để các mẫu hình có thể được báo cáo trên khắp các khu vực. Nền tảng từ chối mọi thứ chi tiết hơn độ phân giải 7, nên nó chỉ xác định một khu vực đại khái — không bao giờ là địa phương hay địa chỉ cụ thể của bạn.",
+    "purpose": "Báo cáo mẫu hình theo khu vực, và tham gia các cộng đồng khu vực. Một cộng đồng cũng có thể dùng nó như một cổng hiển thị TÙY CHỌN, giới hạn các mục dành cho cộng đồng đó trong những thành viên có khu vực nằm bên trong nó. Đây không phải một hạn chế chung đối với các vết của bạn — điều đó do các đồng thuận ở trên quyết định.",
+    "title": "Chia sẻ khu vực gần đúng của bạn"
+  },
+  "mesh": {
+    "announce_requirement": "Một nút không thông báo hiện diện sẽ không có quyền truy cập dịch vụ trên mạng lưới và không có dịch vụ tác nhân nào. Công tắc ngắt của hiệp ước chỉ có ý nghĩa với một nút mà nó có thể tiếp cận, nên một nút không tiếp cận được thì ngay từ đầu đã không được phục vụ."
+  },
+  "mesh_config": {
+    "dry_run": "Không có gì được ký và không có gì được gửi đi. Đây đúng là các byte chuẩn tắc mà một người đồng ký phải ký để lượt scrub của họ được tính trong lần gửi thật.",
+    "durability": {
+      "substrate_decides": "Hành vi nào đạt được một thiết lập bền vững là phán định của nền tảng, được đọc lại ở mỗi lần gọi và được báo cáo bằng chính mã từ chối của nó. Nút này không mã hóa quy tắc bền vững nào của riêng mình."
+    },
+    "emergency": {
+      "bound": "Miễn trừ khẩn cấp hết hạn theo thiết kế. Cửa sổ tối đa là của nền tảng, được mang tới đây để một biểu mẫu có thể giới hạn dữ liệu nhập; nền tảng sẽ từ chối bất kỳ khoảng nào dài hơn ngay tại cửa của nó."
+    },
+    "history": {
+      "empty": "Mọi gốc đã đăng ký đều đã được đọc và chưa gốc nào từng nộp một hàng mesh-config.",
+      "no_subscription": "Nút này không giữ cạnh gốc tin cậy nào đang hoạt động, nên chưa gốc nào từng có thể nộp một hàng mesh-config ở đây.",
+      "partial": "Một số gốc đã đăng ký không đọc được, nên lịch sử này không đầy đủ. Các gốc gặp lỗi được nêu tên.",
+      "present": "Mọi hàng mesh-config mà nút này đang giữ, mới nhất trước.",
+      "truncated": "Trang này đã bị cắt ở mức giới hạn. Tổng số bên dưới tính mọi hàng đã đọc.",
+      "unreadable": "Không thể đọc lịch sử mesh-config ở đây. Đây KHÔNG phải khẳng định rằng chưa từng có hàng nào được nộp."
+    },
+    "outcome": {
+      "admitted": "Nền tảng đã kết nạp hàng này. Đó là một DẤU HIỆU, không phải một mệnh lệnh: sự xuất hiện của nó không thay đổi điều gì, và tác động của nó hoàn toàn nằm ở phép gấp lúc đọc mà một bên tiêu thụ có thể tôn trọng."
+    },
+    "plane": {
+      "configured": "Ít nhất một khóa đã được một gốc đã đăng ký dịch khỏi mức nền của chủ sở hữu.",
+      "no_rows_held": "Nút này đăng ký ít nhất một gốc tin cậy và không giữ hàng mesh-config nào từ bất kỳ gốc nào trong số đó. Mọi khóa đều chạy ở mức nền của chính chủ sở hữu.",
+      "no_subscription": "Nút này không giữ cạnh gốc tin cậy nào đang hoạt động, nên không gốc nào có thể cấu hình nó. Việc đăng ký CHÍNH LÀ cạnh tin cậy.",
+      "none_binding": "Nút này đang giữ các dòng mesh-config nhưng không dòng nào có hiệu lực ràng buộc: mỗi dòng hoặc đã hết hạn, hoặc bị giới hạn theo sự đồng ý của chủ sở hữu, hoặc chỉ yêu cầu đúng giá trị cơ sở đang áp dụng.",
+      "unreadable": "Không thể đọc mặt phẳng mesh-config tại đây. Điều này KHÔNG có nghĩa là chưa có gì được thiết lập — các giá trị bên dưới là chưa xác định, không phải giá trị mặc định."
+    },
+    "provenance": {
+      "baseline_not_moved": "Các gốc tin cậy đã đăng ký có giữ dòng còn hiệu lực cho khóa này nhưng không dòng nào thay đổi nó: mỗi dòng hoặc bị giới hạn theo sự đồng ý của chủ sở hữu, hoặc chỉ yêu cầu đúng giá trị đang áp dụng.",
+      "baseline_unspoken": "Không gốc tin cậy đã đăng ký nào giữ dòng còn hiệu lực cho khóa này, nên nút chạy theo giá trị mà chủ sở hữu đã đồng ý.",
+      "root": "Một dòng đã ký của gốc tin cậy đã đăng ký đã đặt giá trị này. Dòng đó, tác giả của nó và sự ủy quyền mà nó dựa vào đều được nêu tên bên cạnh."
+    },
+    "ttl": {
+      "expired": "Khung thời gian của dòng này đã đóng. Phép gộp loại bỏ dòng hết hạn ngay lúc đọc, nên nó không cần bị thu hồi và không cần tác giả còn liên lạc được.",
+      "running": "Khung thời gian của dòng này đang mở và sẽ đóng vào thời điểm được nêu.",
+      "unbounded": "Dòng này không có hạn dùng. Nó có hiệu lực cho đến khi bị thay thế."
+    }
   }
 }

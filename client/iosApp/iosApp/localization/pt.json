@@ -2229,7 +2229,80 @@
     "accord_cosign_paste_label": "Parcial (JSON SignedKeyRecord)",
     "accord_coscrub_paste_invalid": "Isso não é um JSON válido — cole o registro parcial completo (SignedKeyRecord).",
     "accord_halt_raise_desc": "ACIONE um interruptor de emergência constitucional de 2 de 3. A sua assinatura isolada NÃO entra em vigor — ela é propagada aos outros detentores do accord, que devem concordar para 2 de 3 a fim de que a interrupção seja travada. O app não guarda chaves; o toque no YubiKey é o seu consentimento.",
-    "accord_raise_halt": "Acionar interrupção"
+    "accord_raise_halt": "Acionar interrupção",
+    "accord_bless_ci_desc": "Faça o scrub em lote das chaves dos workers de CI do substrato (pipelines de build + o steward do agente) numa única cerimónia. Cada uma é uma chave de nó infra:attest — os papéis são definidos do lado do servidor, por isso cole apenas as chaves públicas. Os campos estão pré-preenchidos; cole a chave pública ML-DSA-65 de cada repositório a partir do artefacto do seu export job. A aplicação não guarda chaves — o toque na YubiKey é o consentimento.",
+    "accord_bless_ci_ed25519_label": "Chave pública Ed25519 (base64)",
+    "accord_bless_ci_mldsa_label": "Chave pública ML-DSA-65 (base64) — cole a partir do export job",
+    "accord_bless_ci_submit": "Abençoar os workers de CI — toque na sua YubiKey",
+    "accord_bless_ci_submit_busy": "A abençoar — toque na sua YubiKey…",
+    "accord_bless_ci_title": "Abençoar os workers de CI",
+    "accord_coscrub_export_hint": "Entregue este parcial ao próximo detentor:",
+    "accord_coscrub_export_save": "Guardar em ficheiro",
+    "accord_new_bless_ci_workers": "Abençoar os workers de CI",
+    "accord_new_remint_trust_root": "Recunhar a raiz de confiança existente",
+    "accord_op_copy": "Copiar",
+    "accord_remint_auth_tally": "{have} de {needed} autorizações.",
+    "accord_remint_back_btn": "Voltar",
+    "accord_remint_bundle_ready": "A semente portátil está pronta — guarde-a ou copie-a (mesh-genesis.json):",
+    "accord_remint_canonical_select": "Selecione o servidor canónico a recunhar…",
+    "accord_remint_close_btn": "Fechar",
+    "accord_remint_completed_label": "Registo concluído (JSON SignedKeyRecord)",
+    "accord_remint_continue_btn": "Continuar para propor",
+    "accord_remint_cosign_all_signed": "Todos os detentores desta lista já autorizaram esta semente.",
+    "accord_remint_cosign_btn": "Coassinar a semente — toque na sua YubiKey",
+    "accord_remint_cosign_btn_busy": "A coassinar — toque na sua YubiKey…",
+    "accord_remint_cosign_desc": "Entregue o dispositivo ao próximo detentor. Ele autoriza a MESMA semente na sua própria YubiKey, com o seu próprio PIN. Repita até o nó indicar que a semente está completa.",
+    "accord_remint_cosign_paste_label": "Parcial a coassinar (JSON SignedKeyRecord)",
+    "accord_remint_cosign_title": "Passo 3 — Coassinar (o segundo detentor)",
+    "accord_remint_desc": "Transforme a lista de detentores do acordo EXISTENTE e um nó canónico de serviço numa semente portátil de raiz de confiança. Dois detentores do acordo autorizam-na, uma YubiKey cada. Nada é reescrito: a lista, as chaves públicas e o endereço são pré-preenchidos a partir deste nó. A aplicação não guarda chaves — o toque na YubiKey é o consentimento.",
+    "accord_remint_done_desc": "Guarde-a, mantenha-a offline e entregue-a como entregaria uma chave — quem a tiver pode erguer uma mesh sobre esta raiz de confiança.",
+    "accord_remint_done_family": "Chave da família: {key}",
+    "accord_remint_done_fingerprint": "Impressão digital: {fingerprint}",
+    "accord_remint_done_fingerprint_caption": "Compare esta impressão digital por um canal separado — presencialmente ou numa chamada que ambos reconheçam — antes de alguém anexar esta semente.",
+    "accord_remint_done_holders": "Detentores incluídos: {count}",
+    "accord_remint_done_serve_nodes": "Nós de serviço incluídos: {count}",
+    "accord_remint_done_title": "A semente está autorizada",
+    "accord_remint_no_canonicals": "Nenhum servidor canónico na origem da recunhagem.",
+    "accord_remint_produce_btn": "Produzir génese portátil",
+    "accord_remint_produce_btn_busy": "A produzir…",
+    "accord_remint_propose_btn": "Propor a semente — toque na sua YubiKey",
+    "accord_remint_propose_btn_busy": "A propor — toque na sua YubiKey…",
+    "accord_remint_propose_desc": "O primeiro titular cunha e assina a carta e a concessão da semente na sua própria YubiKey. A aplicação não guarda chaves — o toque é o consentimento.",
+    "accord_remint_propose_title": "Passo 2 — Propor (o primeiro titular)",
+    "accord_remint_quorum_line": "Quórum: {m} de {n} titulares do acordo têm de autorizar a semente.",
+    "accord_remint_quorum_note": "Quórum {quorum} — só é preciso que dois titulares estejam presentes; o registo do terceiro viaja na lista.",
+    "accord_remint_reblessed_note": "Esta cerimónia também abençoou o canónico selecionado como servidor de traços (infra:serve) — não tinha nenhum. Passa a ser fiável por omissão para receber traços; retire-lhe a bênção a qualquer momento com a operação de retirada do canónico.",
+    "accord_remint_review_title": "Passo 1 — Reveja o que a semente vai transportar",
+    "accord_remint_roster_empty": "Ainda não há titulares do acordo na origem da recunhagem.",
+    "accord_remint_roster_title": "Titulares do acordo (a lista completa viaja na semente)",
+    "accord_remint_save_bundle": "Guardar pacote de génese",
+    "accord_remint_seed_scope": "A semente transporta a raiz de confiança — a lista completa de titulares deste acordo — e o nó de serviço selecionado abaixo. Nada é assinado neste passo.",
+    "accord_remint_serve_missing": "ainda não abençoado para servir — esta recunhagem corrige isso",
+    "accord_remint_serve_node_line": "Nó de serviço: {key}",
+    "accord_remint_serve_ok": "confere infra:serve ✓",
+    "accord_remint_start_over_btn": "Iniciar outra semente",
+    "accord_remint_step1_desc": "O primeiro titular assina por scrub o canónico selecionado (key_id + chaves públicas + endereço pré-preenchidos). O parcial com 1 scrub ainda não confere — é difundido aos restantes titulares para cossinatura.",
+    "accord_remint_step1_title": "Passo 1 — Propor (A1)",
+    "accord_remint_step2_desc": "O parcial é difundido para os dispositivos dos restantes titulares — o segundo titular cossina-o a partir de Cossinaturas pendentes (ou cola-o abaixo para cossinar neste dispositivo). Ao atingir o quórum da família, o registo é conferido.",
+    "accord_remint_step2_title": "Passo 2 — Cossinar (B1)",
+    "accord_remint_step3_desc": "Cole o registo completo (cossinado) — viaja tal e qual, nunca é recodificado. O nó recusa um registo que não confira infra:serve.",
+    "accord_remint_step3_title": "Passo 3 — Produzir a génese portátil",
+    "accord_remint_step_done": "Concluído — a semente está autorizada",
+    "accord_remint_step_of": "Passo {step} de {total}",
+    "accord_remint_title": "Recunhar raiz de confiança existente",
+    "accord_scrub_module_hint": "Deixe em branco — o nó escolhe a predefinição do sistema operativo (libykcs11)",
+    "accord_scrub_module_label": "Caminho do módulo PKCS#11 (avançado)",
+    "add_fedid_confirm": "Adicionar ID de federação",
+    "add_fedid_intro": "Já tem sessão iniciada — isto adiciona um ID de federação à sua conta existente sem a recriar. O seu início de sessão é preservado.",
+    "add_fedid_label_heading": "Dê um nome ao seu ID de federação",
+    "add_fedid_title": "Adicionar ID de federação",
+    "announce_decision_body_off": "DESLIGADO (recomendado): totalmente privado. O seu nó permanece de âmbito próprio — tudo funciona localmente e sincroniza entre os seus dispositivos, mas a comunidade não o consegue ver nem alcançar. Ative isto para enviar traços e aderir a comunidades.",
+    "announce_decision_body_on": "LIGADO: o seu nó torna-se visível na federação. É isto que lhe permite enviar traços de raciocínio para o grupo de servidores canónicos de confiança e aderir a comunidades à medida que ficam disponíveis. Pode desativar isto mais tarde.",
+    "announce_decision_title": "Aderir à federação?",
+    "announce_decision_toggle_label": "Tornar o meu nó visível na federação",
+    "announce_decision_trace_desc": "Partilhe pontuações de qualidade do raciocínio e padrões de decisão (sem conteúdo das mensagens) com o grupo de servidores canónicos de confiança.",
+    "announce_decision_trace_locked": "Ative o anúncio acima para permitir o envio de traços de raciocínio e a adesão a comunidades.",
+    "announce_decision_trace_title": "Enviar traços de raciocínio"
   },
   "prompts": {
     "dma": {
@@ -2926,7 +2999,8 @@
       "commons_layers": "Bem Comum",
       "federation": "Federação",
       "client": "Cliente",
-      "safety": "Segurança"
+      "safety": "Segurança",
+      "node": "Nó"
     },
     "surface": {
       "sessions": "Sessões",
@@ -2970,7 +3044,8 @@
       "provision_accord_holder": "Provisionar Detentor",
       "accord_ceremony": "Cerimônia de Gênese",
       "identity_management": "Minha Identidade",
-      "transport": "Transporte"
+      "transport": "Transporte",
+      "contacts": "Contactos"
     }
   },
   "setup_validation_select_provider": "Selecione um provedor de LLM",
@@ -3002,5 +3077,110 @@
     "subtitle": "Reticulum + rádio · este nó",
     "title": "Transporte",
     "unavailable": "Informações de transporte indisponíveis (nó degradado?)."
+  },
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Um julgamento limitado no tempo não pode acionar uma remoção ilimitada. A única descida com chave de ator do substrato abrange todo o corpus, o que destruiria o histórico que este limite deliberadamente preserva. A remoção limitada no tempo que ESTÁ implementada é a desadmissão com um limite de histórico.",
+      "not_reached": "As próprias linhas de atestação selecionadas não são descidas. Todo o portador de carga útil neste substrato está selado dentro da sua própria assinatura, pelo que os seus bytes não podem ser descartados sem que a linha passe a ser lida como falsificada; a possibilidade de apagamento é decidida na cunhagem e nada do que é cunhado hoje é apagável."
+    },
+    "enforcement": {
+      "annotate": "Um julgamento assinado sem efeito até que um leitor o honre. Nada é retido, limitado nem removido.",
+      "deadmit": "Uma revogação assinada no plano comum, apenas de acréscimo. É prova que um leitor incorpora, não uma porta que se fecha: a verificação de assinaturas, os cursores de replicação e a ingestão de linhas continuam deliberadamente a funcionar, porque recusar as linhas mais antigas de uma chave comprometida destruiria as provas necessárias para julgar o comprometimento.",
+      "descend": "Irreversível por conceção. A descida nunca termina em zero — o desfoque e a lápide sobrevivem — mas o que foi eliminado não volta.",
+      "quarantine": "Um marcador assinado, não um comando: nada é apagado e nada é reescrito. Os caminhos de serviço deste nó deixam de entregar aos pares as linhas e os blobs das chaves indicadas; um par que incorpore de outra forma simplesmente não os recebe de nós.",
+      "re_admit": "Registado como uma reversão atribuída. A linha de revogação sobrevive e todos os leitores continuam a incorporá-la: as restrições compõem-se e as permissões não, e nenhuma camada deste substrato expõe uma anulação de revogação.",
+      "throttle": "Registado apenas como um julgamento atribuído. Este substrato não tem um orçamento de admissão por chave definido pelo destinatário: a quota de escrita dos pares é uma proteção fixa contra ciclos descontrolados, não uma superfície de política em que uma limitação se possa apoiar. Nada muda naquilo que este nó aceita das chaves indicadas."
+    },
+    "preview": {
+      "note": "É exatamente sobre isto que a confirmação irá atuar. Apresente o hash da seleção juntamente com a confirmação; se a seleção tiver mudado, a confirmação é recusada.",
+      "window_in_application": "A janela temporal é aplicada por este nó, não pela consulta ao substrato: a leitura geral de atestações não honra o eixo temporal. O limite de página é aplicado primeiro, pelo que uma seleção com janela pode vir incompleta."
+    },
+    "quarantine": {
+      "not_withheld": "Esta chave não está atualmente retida aqui, por isso não há nada para libertar."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "O que pré-visualizou não é o que seria executado — a seleção mudou desde a pré-visualização. Volte a executar a pré-visualização e ratifique o novo hash.",
+      "quorum_insufficient": "Esta operação é irreversível e exige um quórum de autoridades distintas, não uma única cadeia de delegação. Duas cadeias com a mesma raiz são uma só autoridade com dois chapéus."
+    },
+    "reversal": {
+      "evidence_only": "A linha original sobrevive e continua a ser incorporada por todos os leitores. Esta reversão é prova registada, não uma anulação — o substrato não expõe qualquer anulação de revogação.",
+      "substrate": "O estado do substrato é revertido: este nó deixa de reter as linhas da chave.",
+      "symmetric": "Nada no substrato é revertido porque nada no substrato impôs o julgamento original. Ambos os atos são prova registada."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Não poderá utilizar fluxos ou serviços que exijam atestações de capacidade de terceiros, porque não terá nenhuma.",
+        "no_reputation": "NÃO constrói qualquer reputação — todas as afirmações capacity:* a seu respeito são recusadas, pelo que nenhuma poderá alguma vez existir.",
+        "peers_may_refuse": "Alguns pares podem recusar-se por completo a interagir consigo."
+      },
+      "summary": "Pode enviar rastreios sem consentir ser analisado. Os rastreios continuarão a fluir."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "O par pode PONTUAR os seus rastreios — é isto que constrói reputação.",
+        "title": "Ser pontuado"
+      },
+      "replication": {
+        "permits": "O par pode GUARDAR os seus rastreios.",
+        "title": "Enviar rastreios"
+      }
+    },
+    "grants": {
+      "independent": "Estes são consentimentos separados, em arestas opostas. Conceder um não concede o outro, e qualquer um deles pode ser retirado sem o outro."
+    },
+    "mesh_participation": {
+      "action": "Consentir a participação na malha CIRIS"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Não pode participar em nenhuma comunidade regional. A adesão é decidida pelo facto de a sua célula cair ou não dentro da região da própria comunidade, por isso, sem célula não há nada para comparar.",
+      "no_regional_reporting": "A sua atividade não pode contribuir para o reporte regional de padrões."
+    },
+    "permits": "Anexa uma célula H3 grosseira ao seu envelope para que os padrões possam ser reportados entre regiões. O substrato recusa qualquer coisa mais fina do que a resolução 7, pelo que identifica uma região aproximada — nunca a sua localidade ou morada específica.",
+    "purpose": "Reporte regional de padrões e participação em comunidades regionais. Uma comunidade pode também usá-lo como porta de visibilidade OPCIONAL, restringindo os itens destinados a essa comunidade aos membros cuja região caia dentro dela. Não é uma restrição geral aos seus rastreios — isso é decidido pelos consentimentos acima.",
+    "title": "Partilhe a sua região aproximada"
+  },
+  "mesh": {
+    "announce_requirement": "Um nó que não se anuncia não obtém acesso a serviços na malha nem a serviços de agente. O interruptor de emergência do acordo só tem significado contra um nó que ele consiga alcançar, pelo que um nó inalcançável nunca chega sequer a ser servido."
+  },
+  "mesh_config": {
+    "dry_run": "Nada foi assinado e nada foi submetido. Estes são os bytes canónicos exatos que um co-signatário tem de assinar para que o seu scrub conte na submissão real.",
+    "durability": {
+      "substrate_decides": "Que atos merecem uma definição duradoura é uma decisão do substrato, relida em cada chamada e comunicada pelo seu próprio token de recusa. Este nó não codifica nenhuma regra de durabilidade própria."
+    },
+    "emergency": {
+      "bound": "O alívio de emergência expira por construção. A janela máxima é a do substrato, trazida para aqui apenas para que um formulário possa limitar a sua entrada; o substrato recusa à sua própria porta qualquer valor mais longo."
+    },
+    "history": {
+      "empty": "Todas as raízes subscritas foram lidas e nenhuma alguma vez registou uma linha de mesh-config.",
+      "no_subscription": "Este nó não detém qualquer aresta de raiz de confiança ativa, pelo que nenhuma raiz alguma vez pôde registar aqui uma linha de mesh-config.",
+      "partial": "Algumas raízes subscritas não puderam ser lidas, pelo que este histórico está incompleto. As raízes que falharam estão identificadas.",
+      "present": "Todas as linhas de mesh-config que este nó detém, das mais recentes para as mais antigas.",
+      "truncated": "Esta página foi cortada no limite. O total abaixo conta todas as linhas lidas.",
+      "unreadable": "O histórico de mesh-config não pôde ser lido aqui. Isto NÃO é uma afirmação de que nunca foi registada nenhuma linha."
+    },
+    "outcome": {
+      "admitted": "O substrato admitiu esta linha. É um MARCADOR, não um comando: nada foi alterado pela sua chegada, e o seu efeito é inteiramente a incorporação, no momento da leitura, que um consumidor pode honrar."
+    },
+    "plane": {
+      "configured": "Pelo menos uma chave é afastada da linha de base do proprietário por uma raiz subscrita.",
+      "no_rows_held": "Este nó subscreve pelo menos uma raiz de confiança e não detém qualquer linha de mesh-config de nenhuma delas. Todas as chaves funcionam na linha de base do próprio proprietário.",
+      "no_subscription": "Este nó não detém qualquer aresta de raiz de confiança ativa, pelo que nenhuma raiz o pode configurar. A subscrição É a aresta de confiança.",
+      "none_binding": "Existem linhas de mesh-config, mas nenhuma vincula: cada uma está expirada, foi limitada ao consentimento do proprietário ou pede o valor de base já em vigor.",
+      "unreadable": "Não foi possível ler o plano de mesh-config aqui. Isto NÃO significa que nada esteja definido — os valores abaixo são desconhecidos, não predefinições."
+    },
+    "provenance": {
+      "baseline_not_moved": "As raízes subscritas têm linhas ativas para esta chave e nenhuma a alterou: cada uma foi limitada ao consentimento do proprietário ou pediu o valor já em vigor.",
+      "baseline_unspoken": "Nenhuma raiz subscrita tem uma linha ativa para esta chave, por isso o nó usa o valor que o seu proprietário consentiu.",
+      "root": "Uma linha assinada de uma raiz subscrita definiu este valor. A linha, o seu autor e a delegação ao abrigo da qual foi tomada são identificados ao lado."
+    },
+    "ttl": {
+      "expired": "A janela desta linha fechou. A dobra descarta uma linha expirada no momento da leitura, por isso não precisa de revogação nem de um autor acessível.",
+      "running": "A janela desta linha está aberta e fecha no instante indicado.",
+      "unbounded": "Esta linha não tem prazo de validade. Aplica-se até ser substituída."
+    }
   }
 }
