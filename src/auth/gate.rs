@@ -56,6 +56,14 @@ pub enum CapabilityVerb {
     Wipe,
     /// Accord kill-switch / halt (`/v1/accord/*` custody ops). NEVER delegatable.
     AccordHalt,
+    /// CIRISServer#356 — read the composed operator surface
+    /// (`GET /v1/node/state`, [`crate::operator_surface`]). A READ, and the
+    /// only read-shaped verb here: the view names this node's peers in the
+    /// withhold ring, the handles of consent deletions it is late on, and its
+    /// quarantine grounds, so it is owner-gated like the write ops. Delegatable
+    /// on purpose — an owner may hand a monitoring agent "watch this node"
+    /// without also handing it `peer` or `announce`.
+    ReadNodeState,
 }
 
 impl CapabilityVerb {
@@ -71,6 +79,7 @@ impl CapabilityVerb {
             CapabilityVerb::Delegate => "delegate",
             CapabilityVerb::Wipe => "wipe",
             CapabilityVerb::AccordHalt => "accord_halt",
+            CapabilityVerb::ReadNodeState => "read_node_state",
         }
     }
 
