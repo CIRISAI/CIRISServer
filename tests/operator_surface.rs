@@ -247,6 +247,32 @@ async fn serve_with(
     (format!("http://{addr}"), handle)
 }
 
+/// Serve the trace plane the way [`ciris_server::compose`] mounts it — the
+/// route that ADMITS and the route that READS, over the ledger
+/// [`operator_surface::trace_plane_router`] mints for them. No handle is passed
+/// in, which is the point: the composition has no opportunity to hand them
+/// different ones.
+async fn serve_trace_plane(
+    engine: Arc<Engine>,
+    metrics: Option<EdgeMetrics>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let key_id = node_key_id(&engine).await;
+    let app = operator_surface::trace_plane_router(
+        engine,
+        key_id,
+        metrics,
+        ciris_server::mesh_config_effect::MeshConfigEffect::unwired(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle)
+}
+
 /// A live-but-idle process: a round finished, nothing served, nothing withheld.
 fn idle_metrics() -> EdgeMetrics {
     let m = EdgeMetrics::new();
@@ -767,4 +793,122 @@ async fn every_string_on_the_wire_is_localizable() {
     {
         assert!(c["message"]["id"].is_string(), "{c}");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  THE COMPOSITION GATE — one ledger, both routes (CIRISServer#370)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[path = "support/accord_batch.rs"]
+mod accord_batch;
+
+/// **The join nobody owned.**
+///
+/// #370's entire reading rests on one sentence that used to live only as a
+/// comment at the composition root: *pass the SAME ledger to the route that
+/// admits and the route that reads.* A composition that minted a second one
+/// compiled, served, and passed every test in this repo — the ingest route would
+/// count into a ledger with no reader while the operator surface reported a
+/// permanently `not_exercised` gate on a node being flooded. Individually
+/// correct components, a silently dead composite: the 2026-08-05 failure with
+/// the subject changed.
+///
+/// So this drives BOTH routes on ONE served application, built the way
+/// `compose::serve` builds it, and asserts that a refusal delivered to the first
+/// is visible on the second. There is no ledger handle in the test at all —
+/// [`operator_surface::trace_plane_router`] mints it, which is what makes the
+/// two-ledger composition unrepresentable rather than merely discouraged.
+///
+/// MUTATION EVIDENCE: give `trace_plane_router` a second
+/// `IngestRefusals::new()` for the operator half; the surface reads
+/// `not_exercised` with `refused_total: 0` while the gate returns 401, and this
+/// goes RED. Every other test in this repo stays green.
+#[tokio::test]
+async fn the_route_that_admits_and_the_route_that_reads_share_one_ledger() {
+    // The RCA's own producer: a real Ed25519 key, correctly signed, naming
+    // itself with its agent-credits identity.
+    const CREDITS: &str = "agent-55fe8d181727";
+
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve_trace_plane(Arc::clone(&engine), Some(idle_metrics())).await;
+
+    // Before anything is offered, the gate is honestly UNTESTED — not clean.
+    // Without this the assertion below could be passing on a stale default.
+    let before = read_state(&base, &owner).await;
+    assert_eq!(
+        before["ingest"]["standing"],
+        serde_json::json!("not_exercised"),
+        "nothing has been offered yet, and that is an untested zero: {}",
+        before["ingest"]
+    );
+
+    // Offer a batch to the INGEST route on the SAME application.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{base}{}",
+            ciris_server::ingest_http::LEGACY_INGEST_PATH
+        ))
+        .header("content-type", "application/json")
+        .header("user-agent", "CIRIS-AccordMetrics/1.0")
+        .body(accord_batch::build_batch_bytes(
+            &SigningKey::from_bytes(&[0x11; 32]),
+            CREDITS,
+            "trace-compose-0001",
+        ))
+        .send()
+        .await
+        .expect("POST the ingest route");
+    assert_eq!(
+        resp.status(),
+        401,
+        "the admission gate must refuse an unregistered signer — it was always right"
+    );
+    let refusal: Value = resp.json().await.expect("refusal body");
+    assert_eq!(refusal["error"], serde_json::json!("verify_unknown_key"));
+    assert_eq!(
+        refusal["key_id_namespace"],
+        serde_json::json!("agent_credits"),
+        "and it must tell the producer which of its identities it signed with: {refusal}"
+    );
+
+    // ...and the OPERATOR route on that same application must have seen it.
+    let after = read_state(&base, &owner).await;
+    assert_eq!(
+        after["ingest"]["refused_total"],
+        serde_json::json!(1),
+        "the refusal reached the gate and not the reader — two ledgers, one question, and the \
+         operator surface would report a quiet node through any flood: {}",
+        after["ingest"]
+    );
+    assert_eq!(
+        after["ingest"]["by_kind"]["verify_unknown_key"],
+        serde_json::json!(1),
+        "{}",
+        after["ingest"]
+    );
+    assert_eq!(
+        after["ingest"]["top_signers"][0]["signer_id"],
+        serde_json::json!(CREDITS),
+        "the operator's copy names WHO to go fix: {}",
+        after["ingest"]
+    );
+    assert_ne!(
+        after["ingest"]["standing"], before["ingest"]["standing"],
+        "an offered batch must change the reading; if it does not, the two routes are not looking \
+         at the same ledger"
+    );
+
+    // The ingest route also publishes the ledger to the process static the
+    // in-process (python fold) accessor reads — a second way to hold the same
+    // handle, and it must agree with the HTTP surface rather than be a third
+    // answer.
+    let held = ciris_server::ingest_http::held().expect("the mounted route published its ledger");
+    assert_eq!(
+        held.snapshot().refused_total,
+        1,
+        "the fold accessor and the HTTP surface must read ONE ledger"
+    );
 }

@@ -2086,6 +2086,50 @@ pub fn router(
         })
 }
 
+/// **The trace plane's two halves, over ONE ledger** — the route that ADMITS
+/// ([`crate::ingest_http::router`]) merged with the route that READS
+/// ([`router`]), sharing a single [`crate::ingest_http::IngestRefusals`] handle
+/// that this function mints and no caller can substitute.
+///
+/// # Why a composition function and not two merges
+///
+/// #370's whole reading rests on one sentence that used to live only in a
+/// comment at the composition root: *"pass the SAME ledger to both."* A
+/// composition that minted a second one would compile, serve, and pass every
+/// test in this repo — the ingest route would count into a ledger nobody reads
+/// while the operator surface reported a permanently `not_exercised` gate on a
+/// node being flooded. That is the 2026-08-05 failure exactly: every component
+/// correct, the composite silently dead, and no one owning the join.
+///
+/// The parameters here are the ones a HOST legitimately varies (which engine,
+/// which node, whether there is an edge, which mesh-config plane). The ledger is
+/// not among them, because there is no correct second answer to *"where does
+/// this process record its refusals"* — so the type no longer offers one.
+///
+/// `metrics` is the live edge counter handle, or `None` on a node with no
+/// transport (rendered `unavailable`, never a clean zero). `mesh_config` is the
+/// live `mesh_config` reading gating the inbound trace plane (CIRISServer#365);
+/// a composition running no plane passes
+/// [`MeshConfigEffect::unwired`](crate::mesh_config_effect::MeshConfigEffect::unwired).
+pub fn trace_plane_router(
+    engine: Arc<Engine>,
+    node_key_id: String,
+    metrics: Option<ciris_edge::observability::EdgeMetrics>,
+    mesh_config: crate::mesh_config_effect::MeshConfigEffect,
+) -> Router {
+    // THE one ledger. Minted here, handed to both halves, reachable by no other
+    // route — `ingest_http::router` also publishes it to the process static the
+    // in-process fold reads (`ingest_http::held`).
+    let refusals = crate::ingest_http::IngestRefusals::new();
+    router(
+        Arc::clone(&engine),
+        node_key_id,
+        metrics,
+        Some(refusals.clone()),
+    )
+    .merge(crate::ingest_http::router(engine, refusals, mesh_config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
