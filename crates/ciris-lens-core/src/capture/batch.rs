@@ -562,7 +562,7 @@ mod tests {
         seal::apply_hybrid_signature(
             &mut trace,
             &hybrid.classical.signature,
-            "hybrid-host-key",
+            &crate::key_id::FederationKeyId::derive("hybrid-host-key", vk.as_bytes()),
             &hybrid.pqc.signature,
             &hybrid.pqc.public_key,
             "hyb-pqc",

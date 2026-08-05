@@ -75,6 +75,7 @@
 use serde_json::{json, Map, Value};
 
 use super::partial::CompleteTrace;
+use crate::key_id::FederationKeyId;
 
 /// Recursively strip `null` / `""` / `[]` / `{}` from a JSON value,
 /// matching CIRISAgent's `_strip_empty`. **`0` and `false` are kept** —
@@ -245,7 +246,13 @@ pub fn encode_signature(sig_bytes: &[u8]) -> String {
 /// [`apply_hybrid_signature`] — the classical-only stamp is rejected by
 /// persist's `VerifyMode::Full` hybrid hard cut (CIRISPersist#225).
 /// Retained for the Ed25519-only verify path + back-compat unit tests.
-pub fn apply_signature(trace: &mut CompleteTrace, sig_bytes: &[u8], key_id: &str) {
+///
+/// `key_id` is a [`FederationKeyId`] and not a `&str` because
+/// `signature_key_id` is resolved against `federation_keys` by the verifier,
+/// and a value from any other derivation namespace is a 401 in someone else's
+/// process (CIRISServer#371 — the wire is unchanged; only the *choice* is
+/// typed).
+pub fn apply_signature(trace: &mut CompleteTrace, sig_bytes: &[u8], key_id: &FederationKeyId) {
     trace.signature = Some(encode_signature(sig_bytes));
     trace.signature_key_id = Some(key_id.to_string());
 }
@@ -261,11 +268,24 @@ pub fn apply_signature(trace: &mut CompleteTrace, sig_bytes: &[u8], key_id: &str
 /// input `canonical ‖ ed25519_sig`. The caller (the Engine-coupled
 /// hybrid signer glue) obtains both halves + the PQC pubkey from
 /// `Engine::sign_hybrid`, which builds exactly this bound shape.
+///
+/// # Two key ids, two axes — deliberately two types
+///
+/// `key_id` is the **federation** id the verifier resolves against
+/// `federation_keys`, so it is a [`FederationKeyId`]: passing an
+/// agent-credits id, a keystore alias, or an accord seat here is the
+/// CIRISServer#371 incident and is now a compile error.
+///
+/// `pqc_key_id` stays `&str`. It is a *label* persist stores verbatim and the
+/// hybrid verify never consults — the producer's ML-DSA-65 pubkey rides the
+/// envelope and is bound into the verify. Typing it as a federation id would
+/// assert an equivalence nothing checks, which is the same axis fusion in the
+/// opposite direction.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_hybrid_signature(
     trace: &mut CompleteTrace,
     ed25519_sig: &[u8],
-    key_id: &str,
+    key_id: &FederationKeyId,
     ml_dsa_65_sig: &[u8],
     pubkey_ml_dsa_65: &[u8],
     pqc_key_id: &str,
@@ -339,13 +359,23 @@ pub enum TraceSealError {
 /// this returns `Ok`, the trace is ready for `receive_and_persist` +
 /// upstream fan-out (the Engine/Edge integration that lands with the
 /// `LensCore::client` surface).
+///
+/// # The stamp is the DERIVED id, not the keystore alias
+///
+/// This stamped `signer.key_id()` — the raw keystore **alias** — until
+/// CIRISServer#371 typed the parameter. persist documents the distinction on
+/// `LocalSigner::derived_key_id`: the alias is the `derive_key_id` *input*, a
+/// `federation_keys` row is registered under the *output*, and *"any value that
+/// must FK to `federation_keys` … MUST use this, not `key_id`"*
+/// (CIRISPersist#247). Stamping the alias is CIRISServer#118, and the verifier
+/// answers it with `verify_unknown_key` in a different process.
 pub fn sign_trace(
     signer: &ciris_persist::prelude::LocalSigner,
     trace: &mut CompleteTrace,
 ) -> Result<(), TraceSealError> {
     let bytes = canonical_bytes(trace).map_err(TraceSealError::Canonicalize)?;
     let sig = signer.sign_ed25519(&bytes)?;
-    apply_signature(trace, &sig, signer.key_id());
+    apply_signature(trace, &sig, &FederationKeyId::of_local_signer(signer));
     Ok(())
 }
 
@@ -579,9 +609,10 @@ mod tests {
         let mut t = sealed_trace();
         let msg = canonical_bytes(&t).expect("canonicalize");
         let sig = sk.sign(&msg);
-        apply_signature(&mut t, &sig.to_bytes(), "agent-unified-key");
+        let key_id = FederationKeyId::derive("agent-unified", &vk);
+        apply_signature(&mut t, &sig.to_bytes(), &key_id);
 
-        assert_eq!(t.signature_key_id.as_deref(), Some("agent-unified-key"));
+        assert_eq!(t.signature_key_id.as_deref(), Some(key_id.as_str()));
         assert!(
             verify_trace_signature(&t, &vk),
             "freshly signed trace must verify"
@@ -598,7 +629,7 @@ mod tests {
 
         let mut t = sealed_trace();
         let sig = sk.sign(&canonical_bytes(&t).unwrap());
-        apply_signature(&mut t, &sig.to_bytes(), "k");
+        apply_signature(&mut t, &sig.to_bytes(), &FederationKeyId::derive("k", &vk));
         assert!(verify_trace_signature(&t, &vk));
 
         // Tamper the trace_id (a top-level signed field).
@@ -636,7 +667,19 @@ mod tests {
         let mut t = sealed_trace();
         sign_trace(&signer, &mut t).expect("sign");
 
-        assert_eq!(t.signature_key_id.as_deref(), Some("host-unified-key"));
+        // The stamp is the DERIVED federation id, NOT the keystore alias
+        // `host-unified-key` this asserted before CIRISServer#371. That
+        // assertion was green while the value it pinned was the one persist's
+        // verifier answers with `verify_unknown_key` — the axis-fusion
+        // signature: the check is green and the behaviour is wrong.
+        let expected = FederationKeyId::derive("host-unified-key", &vk);
+        assert_eq!(t.signature_key_id.as_deref(), Some(expected.as_str()));
+        assert_ne!(
+            t.signature_key_id.as_deref(),
+            Some("host-unified-key"),
+            "stamping the alias is CIRISServer#118 — the registered row is under \
+             derive_key_id(alias, pubkey), not the alias"
+        );
         assert!(t.signature.is_some());
         assert!(
             verify_trace_signature(&t, &vk),
@@ -884,7 +927,7 @@ mod tests {
 
         let msg = canonical_bytes(&t).expect("canonicalize 3.0.0");
         let sig = sk.sign(&msg);
-        apply_signature(&mut t, &sig.to_bytes(), "jcs-test-key");
+        apply_signature(&mut t, &sig.to_bytes(), &FederationKeyId::derive("jcs-test", &vk));
 
         assert!(
             verify_trace_signature(&t, &vk),

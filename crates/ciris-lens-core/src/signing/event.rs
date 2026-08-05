@@ -43,6 +43,7 @@ use ciris_persist::prelude::{
 };
 use serde_json::{json, Value};
 
+use crate::key_id::FederationKeyId;
 use crate::scoring::axis_calibration::{AxisCalibration, AxisEntry};
 use crate::scoring::result::{
     DetectionEvent as Summary, IndeterminateReason, ManifoldConformity, Severity, UnavailableReason,
@@ -238,7 +239,7 @@ pub struct PreparedDetection {
 /// `Engine.local_pqc_sign`).
 pub fn prepare_detection(
     inputs: &DetectionInputs<'_>,
-    signing_key_id: &str,
+    signing_key_id: &FederationKeyId,
 ) -> Result<PreparedDetection, SigningError> {
     let detection_id = Uuid::new_v4();
     let ts = Utc::now();
@@ -257,7 +258,7 @@ pub fn prepare_detection(
         "lens_core_version":           inputs.lens_core_version,
         "ratchet_calibration_version": inputs.ratchet_calibration_version,
         "evidence_refs":               inputs.evidence_refs,
-        "signing_key_id":              signing_key_id,
+        "signing_key_id":              signing_key_id.as_str(),
         "ts":                          ts.to_rfc3339(),
     });
 
@@ -283,7 +284,7 @@ pub fn assemble_event(
     prepared: PreparedDetection,
     ed25519_sig: Vec<u8>,
     ml_dsa_65_sig: Vec<u8>,
-    signing_key_id: String,
+    signing_key_id: FederationKeyId,
 ) -> Result<(DetectionEvent, Summary), SigningError> {
     if ed25519_sig.len() != 64 {
         return Err(SigningError::SignatureShape {
@@ -316,7 +317,10 @@ pub fn assemble_event(
         canonical_bytes: prepared.canonical_bytes,
         ed25519_sig,
         ml_dsa_65_sig,
-        signing_key_id,
+        // The type ends here: `DetectionEvent` is a persist row type whose
+        // `signing_key_id` is a `String` this repo does not own. Unwrapping at
+        // the substrate boundary is the point — the CHOICE upstream was typed.
+        signing_key_id: signing_key_id.into_string(),
         ts: prepared.ts,
     };
 
@@ -340,7 +344,13 @@ pub async fn sign_detection(
     signer: &LocalSigner,
     inputs: DetectionInputs<'_>,
 ) -> Result<(DetectionEvent, Summary), SigningError> {
-    let prepared = prepare_detection(&inputs, signer.key_id())?;
+    // The DERIVED federation key id, not `signer.key_id()` (the keystore
+    // alias). This read the alias until CIRISServer#371 typed the parameter;
+    // persist's own doc on `derived_key_id` says any value that must FK to
+    // `federation_keys` MUST use the derived id (CIRISPersist#247), and a
+    // detection event is federation evidence.
+    let signing_key_id = FederationKeyId::of_local_signer(signer);
+    let prepared = prepare_detection(&inputs, &signing_key_id)?;
 
     // Crypto-DRY (CIRISServer#283 finding 3): call the ONE hybrid composer
     // (`LocalSigner::sign_hybrid`) instead of re-deriving `canonical ‖
@@ -353,7 +363,6 @@ pub async fn sign_detection(
     let ed25519_sig = hybrid.classical.signature;
     let ml_dsa_65_sig = hybrid.pqc.signature;
 
-    let signing_key_id = signer.key_id().to_string();
     assemble_event(
         &inputs,
         prepared,
@@ -611,7 +620,8 @@ mod tests {
                 "crc-v1:bundle.sha256:BBB".into(),
             ],
         };
-        let prepared = prepare_detection(&inputs, "key-1").unwrap();
+        let prepared =
+            prepare_detection(&inputs, &FederationKeyId::derive("key-1", &[1u8; 32])).unwrap();
         let envelope: Value = serde_json::from_slice(&prepared.canonical_bytes).unwrap();
         let refs = envelope["evidence_refs"].as_array().unwrap();
         assert_eq!(refs.len(), 2);

@@ -49,6 +49,7 @@ use super::consent::{ConsentConfig, ConsentResolution, GrantState};
 use super::correlation::CorrelationMetadata;
 use super::partial::{CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore};
 use super::seal;
+use crate::key_id::FederationKeyId;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -280,7 +281,7 @@ impl PyEngineCapture {
     pub fn apply_signature_and_batch(
         trace: &mut CompleteTrace,
         sig_bytes: &[u8],
-        key_id: &str,
+        key_id: &FederationKeyId,
         provenance: &BatchProvenance,
     ) -> Result<Vec<u8>, BatchBuildError> {
         seal::apply_signature(trace, sig_bytes, key_id);
@@ -299,7 +300,7 @@ impl PyEngineCapture {
     pub fn apply_hybrid_signature_and_batch(
         trace: &mut CompleteTrace,
         ed25519_sig: &[u8],
-        key_id: &str,
+        key_id: &FederationKeyId,
         ml_dsa_65_sig: &[u8],
         pubkey_ml_dsa_65: &[u8],
         pqc_key_id: &str,
@@ -501,7 +502,7 @@ mod tests {
         let batch_bytes = PyEngineCapture::apply_signature_and_batch(
             &mut trace,
             &sig,
-            "py-engine-test-key",
+            &FederationKeyId::derive("py-engine-test", vk.as_bytes()),
             &provenance,
         )
         .expect("apply_signature_and_batch");

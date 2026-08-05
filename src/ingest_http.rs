@@ -65,6 +65,8 @@ use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::NullScrubber;
 use serde::Serialize;
 
+use crate::{classify_key_id, KeyIdNamespace};
+
 /// The LEGACY path the deployed emitter POSTs to (UA `CIRIS-AccordMetrics/1.0`).
 /// Mounted verbatim so the Caddy bridge forwards it unchanged — zero rewrite.
 pub const LEGACY_INGEST_PATH: &str = "/lens-api/api/v1/accord/events";
@@ -145,14 +147,28 @@ async fn ingest(State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
         }
         Err(e) => {
             let status = ingest_status(&e);
+            let namespace = refused_key_namespace(&e);
             // AV-15: surface the stable token, never the verbose Display (which
             // could echo payload bytes). The Display goes to the tracing log only.
-            tracing::warn!(error = %e, kind = e.kind(), %status, "HTTP ingest rejected");
+            tracing::warn!(
+                error = %e,
+                kind = e.kind(),
+                key_id_namespace = ?namespace.map(KeyIdNamespace::as_str),
+                %status,
+                "HTTP ingest rejected"
+            );
             (
                 status,
                 Json(IngestErr {
                     error: e.kind(),
-                    detail: e.detail(),
+                    // The namespace WINS over persist's detail when both exist:
+                    // persist returns `None` for every Verify variant, so there
+                    // is nothing to lose, and the namespace is the only field
+                    // that tells the producer which of their two identities they
+                    // signed with (RCA 2026-08-05 fix 6).
+                    detail: namespace
+                        .map(|n| n.as_str().to_owned())
+                        .or_else(|| e.detail()),
                 }),
             )
                 .into_response()
@@ -185,6 +201,37 @@ fn ingest_status(e: &IngestError) -> StatusCode {
     }
 }
 
+/// Which **derivation namespace** the signer id in a refused batch belongs to —
+/// `None` when the refusal was not a directory miss.
+///
+/// # Why the 401 has to say this (RCA 2026-08-05 fix 6)
+///
+/// On 2026-08-02 a producer began signing with `agent-55fe8d181727` — the
+/// agent-credits namespace, not [`FederationKeyId`](crate::FederationKeyId).
+/// persist refused it correctly, logged a genuinely excellent diagnostic naming
+/// the byte length and a sample of the directory it looked in — **in this
+/// server's log.** What the producer received was one token,
+/// `verify_unknown_key`, which is true of a typo, a revoked key, a key not yet
+/// registered, and a key from the wrong derivation entirely. Those need four
+/// different fixes, and only the producer can apply any of them.
+///
+/// So the namespace rides the response. It is a closed-set token
+/// ([`KeyIdNamespace::as_str`]) and never the offending value — AV-15 holds; the
+/// value stays in the log.
+///
+/// `verify_unknown_key` and `unrecognized` together still mean "not registered
+/// here", which is the honest answer for a key that IS derive_key_id-shaped:
+/// this node cannot tell a typo from a pending registration, and guessing would
+/// be the same class of error one level up.
+fn refused_key_namespace(e: &IngestError) -> Option<KeyIdNamespace> {
+    match e {
+        IngestError::Verify(ciris_persist::verify::Error::UnknownKey(key_id)) => {
+            Some(classify_key_id(key_id))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +261,46 @@ mod tests {
             ingest_status(&IngestError::Verify(VerifyError::HybridRequired)),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// The 2026-08-05 refusal, as the producer now receives it.
+    ///
+    /// The status is unchanged (401 — the admission gate was always right); what
+    /// changed is that the body distinguishes *"you signed with your credits
+    /// identity"* from *"we do not have your federation key"*. Those are the two
+    /// conditions the flood conflated for 71 hours.
+    #[test]
+    fn an_unknown_key_refusal_names_the_derivation_namespace() {
+        use ciris_persist::verify::Error as VerifyError;
+
+        // The exact id from the RCA (4,317 rejections / 24h).
+        let credits = IngestError::Verify(VerifyError::UnknownKey("agent-55fe8d181727".into()));
+        assert_eq!(ingest_status(&credits), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            refused_key_namespace(&credits).map(KeyIdNamespace::as_str),
+            Some("agent_credits"),
+        );
+
+        // A well-formed federation id that simply is not registered here reads
+        // as its own namespace — "unknown key", not "wrong namespace". Merging
+        // the two would send every honest new peer chasing the producer fix.
+        let unregistered =
+            IngestError::Verify(VerifyError::UnknownKey("ciris-agent-bootstrap-25uzoxtlro".into()));
+        assert_eq!(
+            refused_key_namespace(&unregistered).map(KeyIdNamespace::as_str),
+            Some("federation_derive_key_id"),
+        );
+
+        // A keystore alias (CIRISServer#118's shape) is neither.
+        let alias = IngestError::Verify(VerifyError::UnknownKey("ciris-client".into()));
+        assert_eq!(
+            refused_key_namespace(&alias).map(KeyIdNamespace::as_str),
+            Some("unrecognized"),
+        );
+
+        // A refusal that is NOT a directory miss must not claim a namespace —
+        // a signature mismatch says nothing about which derivation was used.
+        assert!(refused_key_namespace(&IngestError::Verify(VerifyError::SignatureMismatch)).is_none());
+        assert!(refused_key_namespace(&IngestError::Verify(VerifyError::HybridRequired)).is_none());
     }
 }

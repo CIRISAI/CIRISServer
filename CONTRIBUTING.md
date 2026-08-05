@@ -28,7 +28,7 @@ It compiles. It passes clippy. It usually passes the tests, because the wrong
 answer is a *semantic* mismatch, not a type error. Umbrella issue:
 `CIRISPersist#532`.
 
-**Nine instances, four repositories, one arc:**
+**Ten instances, four repositories, one arc:**
 
 | | the name | axis A | axis B |
 |---|---|---|---|
@@ -41,6 +41,7 @@ answer is a *semantic* mismatch, not a type error. Umbrella issue:
 | 7 | `config:*` cohort scope | the typed, load-bearing column | the envelope JSON copy, never read back |
 | 8 | signed-state | an **integrity** property | spent as **authority** |
 | 9 | the `trace_plane` detector | the mirrored variant: two names computing one meaning, and drifted apart |
+| 10 | `signing_key_id` | `fedcode::derive_key_id` output (federation) | `agent-{hash[:12]}` (agent-credits) |
 
 Two more from the trust-root ceremony, which took four mints, each failure a
 check that asked one question and read as a verdict on the whole set:
@@ -65,7 +66,18 @@ a reviewed exemption, making the fusion visible in the artefact.
 attention:** each of the nine was found by a *different* method — a live harness
 run, a manifest walk, an adoption compile error, an audit sweep, a cross-repo
 grep, a feature-flag review, a doc read, a self-review — and **none by review of
-the code containing it**.
+the code containing it**. The tenth was found by log archaeology during a soak,
+71 hours and 8,631 refusals/day after it started
+(`FSD/RCA_INGEST_REJECTION_2026-08-05.md`).
+
+**Instance 10 is also the first one cured by mechanism rather than by a fix.**
+`FederationKeyId` (CIRISServer#371, `crates/ciris-lens-core/src/key_id.rs`) makes
+the namespace a type, so choosing the wrong one is a compile error at the site
+that chooses it rather than a 401 in another process two days later. Typing the
+seal-stamp parameter immediately surfaced **six** sites in this repo that stamped
+a *fourth* namespace — the keystore alias, `derive_key_id`'s own input
+(CIRISServer#118) — into the same field, none of which any review had caught.
+That is the argument for a type, made by the type.
 
 ### The heuristic
 

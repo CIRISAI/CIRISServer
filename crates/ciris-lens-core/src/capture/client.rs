@@ -78,6 +78,7 @@ use super::correlation::CorrelationMetadata;
 use super::partial::CompleteTrace;
 use super::partial::{CaptureOutcome, InboundEvent, PartialTraceStore};
 use super::seal::{self, apply_signature, canonical_bytes, TraceSealError};
+use crate::key_id::FederationKeyId;
 
 // ── Error types ──────────────────────────────────────────────────────
 
@@ -248,6 +249,15 @@ pub enum PrepareSealOutcome {
 /// Factored out as a standalone async function (not a method) so it
 /// is directly unit-testable without a full `CaptureClient` — see
 /// the `tests` module below.
+/// # The stamp is the DERIVED id, not `current_alias()`
+///
+/// This stamped `signer.current_alias()` until CIRISServer#371 typed
+/// [`seal::apply_signature`]'s `key_id`. The alias is the `derive_key_id`
+/// *input* (`ciris-client`); a `federation_keys` row is registered under the
+/// *output* (`ciris-client-cjgfikxxd5`), so an alias-stamped trace is refused
+/// with `verify_unknown_key` — CIRISServer#118, and the same axis as the
+/// 2026-08-05 outage. The derivation is verify's, called through
+/// [`FederationKeyId::derive`] with the signer's own alias + public key.
 pub async fn sign_trace_via_hardware_signer(
     signer: &dyn HardwareSigner,
     trace: &mut CompleteTrace,
@@ -257,8 +267,12 @@ pub async fn sign_trace_via_hardware_signer(
         .sign(&bytes)
         .await
         .map_err(|e| SealSignError::HardwareSign(e.to_string()))?;
-    let key_id = signer.current_alias();
-    apply_signature(trace, &sig, key_id);
+    let pubkey = signer
+        .public_key()
+        .await
+        .map_err(|e| SealSignError::HardwareSign(e.to_string()))?;
+    let key_id = FederationKeyId::derive(signer.current_alias(), &pubkey);
+    apply_signature(trace, &sig, &key_id);
     Ok(())
 }
 
@@ -276,10 +290,23 @@ pub async fn sign_trace_via_hardware_signer(
 /// `verify_trace_hybrid` under `HybridPolicy::Strict` (CIRISPersist#225
 /// trace-tier hard cut).
 ///
-/// `signature_key_id` uses the Engine signer's current alias (the
-/// Ed25519 key persist resolves from `accord_public_keys`); the
-/// ML-DSA-65 `pqc_key_id` uses the LocalSigner's `pqc_key_id`, falling
-/// back to the classical alias when the PQC key has no distinct id.
+/// # `signature_key_id` is the DERIVED federation id — not the alias
+///
+/// This read `engine.signer().current_alias()` and its doc asserted that was
+/// *"the Ed25519 key persist resolves from `accord_public_keys`"*. It is not:
+/// the alias is the `derive_key_id` **input**, and persist registers the
+/// `federation_keys` row under the **output** (`LocalSigner::derived_key_id`,
+/// CIRISPersist#247). The doc restated CIRISServer#118 as if it were correct,
+/// which is why review never caught it — the name was honest about one of its
+/// two jobs. CIRISServer#371 typed the parameter and the compiler found it.
+///
+/// The id now comes from [`Engine::local_derived_key_id`], persist's own
+/// derivation, called and never re-implemented.
+///
+/// `pqc_key_id` is a different axis and stays a plain label: persist stores it
+/// verbatim and the hybrid verify does not consult it (the producer's ML-DSA-65
+/// pubkey rides the envelope and is bound into the verify). The Engine exposes
+/// no separate PQC alias accessor, so it carries the same string.
 async fn hybrid_sign_trace_via_engine(
     engine: &Engine,
     trace: &mut CompleteTrace,
@@ -289,20 +316,16 @@ async fn hybrid_sign_trace_via_engine(
         .sign_hybrid(&bytes)
         .await
         .map_err(|e| SealSignError::HybridSign(e.to_string()))?;
-    // The Ed25519 key_id is the producer's federation alias persist
-    // resolves from `accord_public_keys`. `pqc_key_id` is verbatim
-    // metadata persist stores but the hybrid verify does not consult
-    // (the producer's ML-DSA-65 pubkey rides the envelope and is bound
-    // into the verify); the Engine exposes no separate PQC alias
-    // accessor, so we label it with the same federation alias.
-    let key_id = engine.signer().current_alias().to_owned();
+    let key_id = FederationKeyId::of_engine(engine)
+        .await
+        .map_err(|e| SealSignError::HybridSign(format!("local_derived_key_id: {e}")))?;
     seal::apply_hybrid_signature(
         trace,
         &hybrid.classical.signature,
         &key_id,
         &hybrid.pqc.signature,
         &hybrid.pqc.public_key,
-        &key_id,
+        key_id.as_str(),
     );
     Ok(())
 }
@@ -974,7 +997,20 @@ mod tests {
         let mut trace = sealed_trace_fixture();
         seal::sign_trace(&signer, &mut trace).expect("sign");
 
-        assert_eq!(trace.signature_key_id.as_deref(), Some("hw-key-alias"));
+        // The stamp is the DERIVED federation id — `derive_key_id(alias,
+        // pubkey)` — not the keystore alias `hw-key-alias` this asserted
+        // before CIRISServer#371. The old assertion was green while pinning
+        // exactly the value persist's verifier refuses with
+        // `verify_unknown_key`: the axis-fusion signature, "the check is green
+        // and the behaviour is wrong".
+        let expected = FederationKeyId::derive("hw-key-alias", vk.as_bytes());
+        assert_eq!(trace.signature_key_id.as_deref(), Some(expected.as_str()));
+        assert_ne!(
+            trace.signature_key_id.as_deref(),
+            Some("hw-key-alias"),
+            "the alias is the derive_key_id INPUT; the registered federation_keys \
+             row is under its OUTPUT (CIRISPersist#247 / CIRISServer#118)"
+        );
         assert!(
             seal::verify_trace_signature(&trace, &vk.to_bytes()),
             "signature stamped by local signer must verify"

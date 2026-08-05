@@ -62,7 +62,11 @@ use uuid::Uuid;
 /// `engine.local_derived_key_id()` call once persist exposes that method to
 /// Python (CIRISPersist DX issue — it has the Rust method, just not the pyo3
 /// binding).
-fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<String> {
+///
+/// Returns a [`FederationKeyId`], not a `String`: this function's whole purpose
+/// is to be the *other* namespace from `local_key_id()`, and returning the same
+/// type as the wrong answer is what let #118 recur as CIRISServer#371.
+fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<FederationKeyId> {
     use base64::Engine as _;
     let alias: String = engine
         .call_method0("local_key_id")
@@ -75,7 +79,7 @@ fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<String> {
     let pubkey = base64::engine::general_purpose::STANDARD
         .decode(pub_b64.trim())
         .map_err(|e| PyRuntimeError::new_err(format!("decode local_public_key_b64: {e}")))?;
-    Ok(ciris_verify_core::fedcode::derive_key_id(&alias, &pubkey))
+    Ok(FederationKeyId::derive(&alias, &pubkey))
 }
 
 use crate::capture::client::{CaptureClient, CaptureEventOutcome};
@@ -86,6 +90,7 @@ use crate::capture::py_engine::{NonSealingKind, PyEngineCapture, PyPrepareOutcom
 use crate::cohort;
 use crate::config::EgressFilter;
 use crate::detector::{detect, DetectionResult};
+use crate::key_id::FederationKeyId;
 use crate::pipeline::lifecycle::LENS_CORE_VERSION;
 use crate::scoring::result::{ManifoldConformity, Severity};
 use crate::scoring::{assemble, AssemblyInput};
@@ -232,7 +237,7 @@ fn process_trace_batch<'py>(
     let batch_id = Uuid::new_v4().to_string();
     // Stamp the DERIVED federation key_id, not the bare alias — `receive_and_persist`
     // verifies seals against the derived id (CIRISServer#118).
-    let signing_key_id: String = engine_federation_key_id(engine)?;
+    let signing_key_id = engine_federation_key_id(engine)?;
 
     let detections = PyList::empty(py);
     let mut traces_processed: usize = 0;
@@ -282,7 +287,7 @@ fn process_one<'py>(
     py: Python<'py>,
     engine: &Bound<'py, PyAny>,
     event_json: &str,
-    signing_key_id: &str,
+    signing_key_id: &FederationKeyId,
 ) -> PyResult<PerTraceSummary> {
     let trace: Value = serde_json::from_str(event_json)
         .map_err(|e| PyValueError::new_err(format!("invalid trace JSON: {e}")))?;
@@ -376,7 +381,7 @@ fn process_one<'py>(
         prepared,
         ed25519_sig,
         ml_dsa_65_sig,
-        signing_key_id.to_string(),
+        signing_key_id.clone(),
     )
     .map_err(|e| PyRuntimeError::new_err(format!("assemble: {e}")))?;
 
@@ -928,7 +933,7 @@ impl PyLensClient {
                         // 3b. Key ID via Python — the DERIVED federation key_id, not
                         // the bare alias (CIRISServer#118; `receive_and_persist`
                         // verifies against the derived id).
-                        let key_id: String = engine_federation_key_id(engine)?;
+                        let key_id = engine_federation_key_id(engine)?;
 
                         // 3c. HYBRID-sign via Python — the federation-admissible
                         // seal persist v10's VerifyMode::Full hard cut requires
@@ -994,7 +999,7 @@ impl PyLensClient {
                             &key_id,
                             &pqc_sig,
                             &pqc_pub,
-                            &key_id,
+                            key_id.as_str(),
                             &provenance,
                         )
                         .map_err(|e| PyRuntimeError::new_err(format!("build_batch_bytes: {e}")))?;

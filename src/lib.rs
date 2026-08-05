@@ -336,6 +336,44 @@ pub mod withdraws_arbitrage;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
 
+/// The **`derive_key_id` namespace, made a type** (CIRISServer#371).
+///
+/// `signing_key_id` was one `String` carrying identities minted by two different
+/// derivations — verify's `fedcode::derive_key_id` (what `federation_keys`
+/// registers) and CIRISAgent's agent-credits `agent-{hash[:12]}`. Every layer
+/// accepted the wrong one because at every layer it is a string that looks like
+/// a key id; it failed at a directory lookup, 8,631 times a day for 71 hours,
+/// and the trace plane was dead for two days
+/// (`FSD/RCA_INGEST_REJECTION_2026-08-05.md`).
+///
+/// Defined in the in-tree `ciris-lens-core` — the lowest crate in this workspace
+/// that stamps the value — and re-exported here so the server's own boundaries
+/// name one type.
+///
+/// The incident is now a compile error:
+///
+/// ```compile_fail
+/// use ciris_server::FederationKeyId;
+///
+/// let id: FederationKeyId = "agent-55fe8d181727".to_string().into();
+/// ```
+///
+/// …and the value that *was* posted is refused by name rather than by shrug:
+///
+/// ```
+/// use ciris_server::{FederationKeyId, KeyIdNamespaceError};
+///
+/// assert_eq!(
+///     FederationKeyId::parse("agent-55fe8d181727"),
+///     Err(KeyIdNamespaceError::AgentCredits),
+/// );
+/// assert!(FederationKeyId::parse("ciris-agent-bootstrap-25uzoxtlro").is_ok());
+/// ```
+pub use ciris_lens_core::key_id;
+pub use ciris_lens_core::key_id::{
+    classify as classify_key_id, FederationKeyId, KeyIdNamespace, KeyIdNamespaceError,
+};
+
 /// The config-as-CEG schema types (Server 0.5 Phase 1) — re-exported at the crate
 /// root for downstream/test use.
 pub use graph_config::{ConfigEntry, ConfigScope, ConfigValue};

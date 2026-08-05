@@ -25,6 +25,7 @@ use std::sync::Arc;
 use ciris_persist::prelude::{LocalSigner, LocalSignerError};
 
 use super::{canonical_bytes, BatchEnvelope, CanonicalError};
+use crate::key_id::FederationKeyId;
 
 /// Typed trace-signing identity. Wraps a shared `LocalSigner` so
 /// multiple call sites can sign without re-loading filesystem seeds.
@@ -44,11 +45,17 @@ impl Ed25519TraceSigner {
         Self { signer }
     }
 
-    /// The wrapped local identity's `key_id`. Stamped onto signed
-    /// trace envelopes for federation-side verification via
-    /// `verify_hybrid_via_directory`.
-    pub fn key_id(&self) -> &str {
-        self.signer.key_id()
+    /// The wrapped local identity's **federation** key id — the value
+    /// `verify_hybrid_via_directory` resolves against `federation_keys`.
+    ///
+    /// This returned `self.signer.key_id()` (the raw keystore **alias**) until
+    /// CIRISServer#371 typed the field it feeds. The alias is the
+    /// `derive_key_id` *input*; the registered row carries the *output*
+    /// (CIRISPersist#247 / CIRISServer#118), so the doc above was describing
+    /// the right job and naming the wrong value — the axis-fusion signature.
+    #[must_use]
+    pub fn federation_key_id(&self) -> FederationKeyId {
+        FederationKeyId::of_local_signer(&self.signer)
     }
 
     /// Sign a [`BatchEnvelope`] with Ed25519 only. Used in transit
@@ -68,7 +75,7 @@ impl Ed25519TraceSigner {
             canonical_bytes: canonical,
             ed25519_sig: ed25519_sig.to_vec(),
             ml_dsa_65_sig: None,
-            signing_key_id: self.signer.key_id().to_string(),
+            signing_key_id: self.federation_key_id(),
         })
     }
 
@@ -101,7 +108,7 @@ impl Ed25519TraceSigner {
             canonical_bytes: canonical,
             ed25519_sig: ed25519_sig.to_vec(),
             ml_dsa_65_sig: Some(ml_dsa_65_sig),
-            signing_key_id: self.signer.key_id().to_string(),
+            signing_key_id: self.federation_key_id(),
         })
     }
 }
@@ -119,8 +126,9 @@ pub struct SignedEnvelope {
     /// 3309-byte ML-DSA-65 signature (FIPS 204 final). `None` for
     /// `sign_ed25519`-only paths; required for federation evidence.
     pub ml_dsa_65_sig: Option<Vec<u8>>,
-    /// Wrapped signer's `key_id` at sign time.
-    pub signing_key_id: String,
+    /// Wrapped signer's **federation** key id at sign time — the derived id
+    /// the directory resolves, never the keystore alias (CIRISServer#371).
+    pub signing_key_id: FederationKeyId,
 }
 
 /// Errors from [`Ed25519TraceSigner`] sign operations.

@@ -76,6 +76,7 @@ pub mod config;
 pub mod detector;
 pub mod extract;
 pub mod ffi;
+pub mod key_id;
 pub mod observability;
 pub mod pipeline;
 pub mod retention;
@@ -108,6 +109,7 @@ pub use config::{
     UxConfig,
 };
 pub use detector::CoherenceRatchetDetector;
+pub use key_id::{FederationKeyId, KeyIdNamespace, KeyIdNamespaceError};
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use retention::{
     evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary,
