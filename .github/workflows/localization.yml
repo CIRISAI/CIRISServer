@@ -19,13 +19,29 @@ jobs:
         with:
           python-version: '3.12'
 
+      # A green step here means nothing unless this gate can go red, so it
+      # proves it first: --self-test builds a synthetic bundle, breaks it 20
+      # ways (flat-vs-nested key, desynced mirror, corrupted placeholder,
+      # invalid JSON, …) and asserts every check fires with a true message.
+      # It is a required step: if the guard has lost the ability to fail, the
+      # job is red BEFORE the real bundle is ever looked at. See CIRISServer#366.
+      - name: Prove the guard can fail (mutation self-test)
+        run: python3 client/tools/check_localization_sync.py --self-test
+
       # Stdlib-only guard, no deps required. ERROR-level checks block:
-      #   - every *.json in both localization dirs parses,
-      #   - the two dirs (shared/ + desktopApp/) stay byte-identical (the
-      #     desktopApp copy has historically gone stale and shadowed shared),
-      #   - every localizedString/getString key in commonMain Kotlin resolves
-      #     in en.json (an undefined key renders RAW on every platform).
-      # Cross-language translation drift is a WARNING (graceful English
-      # fallback) and is fixed by the `localize-ui` Claude workflow.
-      - name: Localization guard (mirror parity + reference coverage)
+      #   - every *.json in all FOUR runtime bundles parses,
+      #   - all four bundles (shared/ + desktopApp/ + androidApp/ + iosApp/)
+      #     stay byte-identical — any that goes stale ships raw keys,
+      #   - the manifest language list and the shipped locale files agree,
+      #   - every localizedString/getString key in commonMain Kotlin RESOLVES
+      #     in en.json under LocalizationManager.resolveKey semantics,
+      #   - every key in every locale is REACHABLE by that same resolver — a
+      #     flat dotted key ("a.b.c": …) is dead in every language including
+      #     English, which is how 53 ids shipped dead in 0c728b1 (#366),
+      #   - a translated value carries exactly en.json's placeholders.
+      # Cross-language translation drift (missing/empty/extra keys) is a
+      # WARNING — graceful English fallback — and is fixed by the `localize-ui`
+      # Claude workflow. The tree currently passes `--strict` too; add that flag
+      # here if drift should block as well.
+      - name: Localization guard (four-bundle mirror, resolvability, placeholders)
         run: python3 client/tools/check_localization_sync.py
