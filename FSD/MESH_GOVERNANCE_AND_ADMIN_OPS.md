@@ -283,27 +283,56 @@ a single member can respond to a flood *now*, and the community can reverse them
 Requiring approval first means the response arrives after the harm; requiring
 nothing means one member governs.
 
-**It is not implemented, at two layers:**
+**It was not implemented, at two layers**, and both statements below were true
+when this section was written:
 
-1. The `consensus_protocol` vocabulary is `founder_only | unanimous | majority |
+1. The `consensus_protocol` vocabulary was `founder_only | unanimous | majority |
    quorum:{m}/{n} | weighted:{rubric} | custom:{id}` — **every form is
-   approve-to-act.** No objection form exists.
+   approve-to-act.** No objection form existed.
 2. CIRISServer#111 is open: *"no consensus engine — `consensus_protocol` is a
    stored label, nothing reaches consensus."* Communities cannot do forward
-   quorum either.
+   quorum either. **Still true** — forward quorum is untouched by any of this.
 
-This is the keystone gap. The private plane is protected by consent and proven;
-the commons is protected by community self-policing and that mechanism does not
-exist at any layer.
+### Landed (CIRISPersist#574 / #591, CIRISServer#367)
 
-Required shape:
+Persist shipped the mechanism in v25.0.0 and v26.0.0 and this node reaches it as
+of `src/commons_surface.rs`. The shape:
 
 ```
-reverse_quorum:{m}/{n}:{window}    act now; reversed if m of n object within window
+reverse_quorum:{m}/{n}:{window}+escalate:{steward_secs}:{floor}
 ```
 
-with the objection itself a signed CEG object, and the reversal automatic rather
-than discretionary.
+- the objection IS a signed CEG object (`objection:raised:v1`, a `scores` row),
+  so it replicates on the ordinary attestation plane and a peer partitioned
+  during the window still counts it when it arrives;
+- the reversal is **derived, not discretionary** — `fold_reverse_quorum` is pure
+  and evaluated at read time, so every node holding the rows folds to the same
+  answer with no coordination and nothing is mutated by an objection's arrival;
+- **one objection raises the brake, m-of-n dismisses it**, and the undo side is
+  floored at a strict majority of the LIVE roster while the protective side is
+  never floored at all;
+- **silence is its own arm.** Past the steward deadline with no upholding
+  ruling, the escalated undo counts **respondents, not the roster** — the
+  property that lets a burned-out commons still resolve — bounded below by
+  `ESCALATION_RESPONDENT_FLOOR = 3`, which no policy string may lower
+  (`ReverseQuorumPolicy::parse` refuses a sub-floor declaration outright, so a
+  cohort configured below it cannot exist).
+
+Two corrections to this section's own framing, forced by the implementation:
+
+1. *"an action takes effect immediately and is undone if m members object"* —
+   persist does **not** undo anything. `ReverseQuorumStanding::Reversed` is a
+   derived state over held rows in exactly the sense `ConsentState::Revoked` is;
+   the objected-to row is never deleted, tombstoned or rewritten. "Undone" is
+   what a reader that honours the fold does, and honouring is the reader's.
+2. Escalation is **not an op**. Nobody performs it, it grants nobody anything,
+   and its instant is a function of the ACTION's `asserted_at` and the cohort's
+   declaration alone — so no objector can advance the clock by writing anything.
+   The only thing it changes is which denominator the undo is priced against.
+
+The surface (`GET /v1/commons/standing`, `POST /v1/commons/{objections,ballots,
+dismissals}`) is deliberately **not** under `/v1/admin/*`: those routes are
+authority acting *on* the commons, and this is the commons acting on itself.
 
 ---
 
@@ -383,7 +412,8 @@ threatened by a backlog.
 |---|---|---|
 | mesh_config plane, `slash` scope, attributed hard_case, time-bounded de-admission, quarantine marker | persist | #570 |
 | object-keyed erasure | persist | #573 |
-| **reverse quorum + a consensus engine** | persist | **to file — the keystone** |
+| **reverse quorum** | persist | **SHIPPED** — #574 (v25.0.0) + #591 escalation-on-silence (v26.0.0); consumed here as `src/commons_surface.rs` (CIRISServer#367) |
+| a consensus engine (FORWARD quorum) | server | #111, open — untouched by the above |
 | rate/quota plane with reserved admission class | persist | to file |
 | mesh-config consumption, ConfigRelief, quarantine-aware offers | edge | #440 |
 | per-row delivery receipts | edge | to file |

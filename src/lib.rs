@@ -75,6 +75,16 @@ pub mod benchmarks;
 /// to the target's `POST /v1/setup/root`. The app does NO crypto. Public so the
 /// integration test (`tests/claim_remote.rs`) can drive build + apply directly.
 pub mod claim_remote;
+/// **The commons surface** (CIRISServer#367) — the owner-gated read and the
+/// three write doors onto persist's
+/// [`reverse_quorum`](ciris_persist::federation::reverse_quorum) plane:
+/// `GET /v1/commons/standing` plus `POST /v1/commons/{objections,ballots,dismissals}`.
+/// One member raises the brake, the cohort's m-of-n lifts it, and silence
+/// escalates to a quorum of respondents rather than of the roster. Every
+/// threshold is persist's, folded at read time; this module encodes none.
+/// Public so the integration test (`tests/commons_surface.rs`) can drive the
+/// router directly.
+pub mod commons_surface;
 /// **CC 4.5.2.2 `compliance-vertical`** — the machine-readable vertical/statutory
 /// compliance map (CIRISServer#159). Bakes `evidence/cc_compliance_map.tsv` (a faithful
 /// transcription of CC 4.5.2.2 + CC 8.8.5 Annex C) into the binary and parses it into
