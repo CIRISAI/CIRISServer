@@ -115,8 +115,8 @@ pub use retention::{
 };
 pub use role::{
     CalibrationBundleResponse, LensCoreHandler, LensQueryError, ManifoldAggregateResponse,
-    NodeError, NodeHandle, RelayError, RelayHandle, RetRelayHandle, ScoreListResponse,
-    ScoreResponse,
+    NodeError, NodeHandle, RelayError, RelayHandle, RetRelayHandle, RowFidelity, ScoreListResponse,
+    ScoreResponse, ServeFidelityProvider,
 };
 pub use scores::{AgentScoreAggregate, OracleError, ScoresOracle, SeverityDistribution};
 pub use scoring::result::{ManifoldConformity, Score};

@@ -52,6 +52,28 @@
 //! post-egress-filter by contract (CIRISPersist#89). A deployment that points
 //! agents *directly* at this endpoint as a first-hop privacy boundary would
 //! need a real scrubber — same caveat as the relay.
+//!
+//! ## `feature.trace_replication` — the mesh-config consumer (CIRISServer#365)
+//!
+//! This route is the trace plane's INBOUND leg in this build, and it is the
+//! heaviest plane a congested canonical carries. A subscribed trust root that
+//! sets `feature.trace_replication = 0` on persist's `mesh_config` plane pauses
+//! it: a batch is refused **before verification**, with its own stable token,
+//! and NOTHING is persisted. Rows already held are untouched.
+//!
+//! The value is read live off [`crate::mesh_config_effect`], which re-folds on a
+//! cadence — so a relief takes effect without a restart and, more importantly,
+//! **stops** taking effect when its TTL closes without anyone filing anything.
+//!
+//! Two limits, stated rather than implied:
+//!
+//! - it gates the INBOUND leg only; the outbound replication offer filter is
+//!   edge's (CIRISEdge#440) and is not reachable from this process;
+//! - it fails OPEN. A plane that cannot be read leaves the relay accepting, the
+//!   owner default. An ingest path that fail-closed on a directory blip would
+//!   turn a transient substrate error into a silent trace outage, which is
+//!   exactly the 71-hour failure `FSD/RCA_INGEST_REJECTION_2026-08-05.md`
+//!   documents.
 
 use std::sync::Arc;
 
@@ -64,6 +86,8 @@ use ciris_persist::ingest::IngestError;
 use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::NullScrubber;
 use serde::Serialize;
+
+use crate::mesh_config_effect::{MeshConfigEffect, PlaneAdmission};
 
 /// The LEGACY path the deployed emitter POSTs to (UA `CIRIS-AccordMetrics/1.0`).
 /// Mounted verbatim so the Caddy bridge forwards it unchanged — zero rewrite.
@@ -98,24 +122,77 @@ struct IngestErr {
     detail: Option<String>,
 }
 
+/// The stable refusal token a paused trace plane answers with. Distinct from
+/// every [`IngestError`] kind on purpose: *"I refuse your batch"* and *"I am
+/// not taking any batches right now"* are different answers, and an emitter
+/// that cannot tell them apart will either retry a permanent failure forever or
+/// give up on a temporary one.
+pub const REFUSAL_TRACE_PLANE_PAUSED: &str = "trace_replication_paused";
+
+/// Everything the ingest routes need: the substrate, and the live mesh-config
+/// reading the trace-plane gate consults.
+#[derive(Clone)]
+struct IngestState {
+    engine: Arc<Engine>,
+    mesh_config: MeshConfigEffect,
+}
+
 /// Merge the HTTP trace-ingest routes onto the read-API listener.
 ///
 /// Both the legacy path (so the bridge forwards unchanged) AND the canonical
-/// alias resolve to the same handler. Returned router carries its own
-/// `Arc<Engine>` state, so it composes via `.merge(...)` exactly like the auth
-/// / safety routers in `compose.rs`.
-pub fn router(engine: Arc<Engine>) -> Router {
+/// alias resolve to the same handler. Returned router carries its own state, so
+/// it composes via `.merge(...)` exactly like the auth / safety routers in
+/// `compose.rs`.
+///
+/// `mesh_config` is the live reading of persist's `mesh_config` plane
+/// (CIRISServer#365). A composition that runs no plane passes
+/// [`MeshConfigEffect::unwired`], which reads every key as unreadable and
+/// leaves this relay accepting — the parameter is REQUIRED rather than
+/// defaulted so a new host has to decide, instead of silently inheriting an
+/// ungated route.
+pub fn router(engine: Arc<Engine>, mesh_config: MeshConfigEffect) -> Router {
     Router::new()
         .route(LEGACY_INGEST_PATH, axum::routing::post(ingest))
         .route(CANONICAL_INGEST_PATH, axum::routing::post(ingest))
-        .with_state(engine)
+        .with_state(IngestState {
+            engine,
+            mesh_config,
+        })
 }
 
 /// `POST <ingest path>` — deserialize-verify-persist, identical to the RET
 /// relay handler. Returns `200` + the ingest counts, or a 4xx/5xx + a stable
 /// error token. NEVER persists an unverified batch (verify-before-persist runs
 /// inside `receive_and_persist`).
-async fn ingest(State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
+async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
+    // ── `feature.trace_replication` (CIRISServer#365) ───────────────────────
+    // BEFORE the body is even parsed: a paused plane must cost this node
+    // nothing, and refusing after verification would spend the ML-DSA-65 work
+    // the relief was filed to avoid.
+    if st.mesh_config.trace_plane() == PlaneAdmission::Paused {
+        tracing::warn!(
+            bytes = body.len(),
+            "HTTP ingest REFUSED: a subscribed trust root has paused the trace plane \
+             (mesh_config feature.trace_replication = 0). Nothing was parsed, verified or \
+             persisted; rows already held are untouched. The relief carries a TTL and lifts \
+             itself."
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(IngestErr {
+                error: REFUSAL_TRACE_PLANE_PAUSED,
+                detail: Some(
+                    "A subscribed trust root has paused trace replication on this node via the \
+                     mesh_config plane (feature.trace_replication = 0). This is temporary and \
+                     TTL-bounded; retry later. GET /v1/mesh-config shows the row, its author \
+                     and its countdown."
+                        .to_string(),
+                ),
+            }),
+        )
+            .into_response();
+    }
+    let engine = st.engine;
     // The SAME call the RET relay's `LensCoreHandler::handle` makes — the raw
     // posted bytes ARE a `BatchEnvelope`/`AccordEventsBatch` JSON; persist's
     // IngestPipeline canonicalizes + verifies BEFORE persisting (VerifyMode::Full,

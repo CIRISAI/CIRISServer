@@ -666,6 +666,28 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         config_sd_rx,
     );
 
+    // ── The MESH-CONFIG consumer refresh loop (CIRISServer#365) ───────────────
+    // The FEDERATION-scoped sibling of the loop above, and a different plane
+    // entirely: `config:*` is what this node's OWNER set (SELF, #324);
+    // `mesh_config:{key}` is what a subscribed TRUST ROOT set, folded
+    // most-restrictive across roots with expired rows dropped at read time.
+    //
+    // It exists because #365 found the plane operable and NOT EFFECTIVE — nine
+    // keys, and this repo had a caller for none, so an operator could set a
+    // relief, watch it admit, watch its TTL count down, and change nothing. Two
+    // consumers read this handle below: the lens read API's serve fidelity
+    // (`backpressure.summary_only`) and the HTTP trace-ingest relay
+    // (`feature.trace_replication`). It folds once here, so the first request
+    // already sees the plane, and re-folds on its own cadence, which is what
+    // makes an expiring relief actually expire.
+    let (mesh_config_sd_tx, mesh_config_sd_rx) = watch::channel(false);
+    let (mesh_config_effect, mesh_config_join) = crate::mesh_config_effect::spawn(
+        Arc::clone(&engine),
+        cfg.key_id.clone(),
+        mesh_config_sd_rx,
+    )
+    .await;
+
     // ── The responsible-USER signer for POST /v1/setup/claim-remote is no longer
     //    resolved at boot (it would be absent on a fresh node — the fed-ID is minted
     //    DURING the first-run wizard). The claim-remote router resolves it at request
@@ -694,7 +716,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         );
     }
     let read = {
-        let read = LensCore::read_api_with_extra(
+        let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
             cfg.read_api_addr(),
             PeerAcl::AllowAll,
@@ -1072,7 +1094,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // SAME Engine::receive_and_persist verify-before-persist path the
                     // Reticulum relay uses (LensCoreHandler). Unauthenticated like the
                     // relay — the per-trace CEG signature IS the auth.
-                    .merge(crate::ingest_http::router(Arc::clone(&engine)));
+                    //
+                    // CIRISServer#365: it also carries the live mesh-config
+                    // reading, so a trust root that sets
+                    // `feature.trace_replication = 0` pauses this node's heaviest
+                    // inbound plane — refused before verification, nothing
+                    // persisted, lifting itself when the relief's TTL closes.
+                    .merge(crate::ingest_http::router(
+                        Arc::clone(&engine),
+                        mesh_config_effect.clone(),
+                    ));
                 // ── ADAPTER SEAM (get_services_to_register) ──────────────────
                 // Fold the downstream adapter's HTTP surface onto the SAME
                 // read-API listener, AFTER all built-in routers. NoopAdapter
@@ -1103,6 +1134,29 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 let _ = mesh_dispatch_router.set(r.clone());
                 r
             },
+            // CIRISServer#365 — `backpressure.summary_only`, the serve path's
+            // half. The frozen `/lens/api/v1/*` read API is the ONE row-serving
+            // surface this build mounts, and under a trust root's backpressure
+            // relief it thins each row to its summary (identity, detector,
+            // severity, timestamp) and withholds the opaque per-score payload,
+            // marking that it did so. Invoked PER REQUEST off the live fold, so
+            // the relief arrives — and expires — with no restart.
+            //
+            // lens-core reads no mesh-config plane of its own: it is handed a
+            // verdict. Deciding what an UNREADABLE plane means belongs to the
+            // half that reads it, and it means `Full` — the owner default, and
+            // what this API served before the knob existed.
+            Some({
+                let effect = mesh_config_effect.clone();
+                Arc::new(move || match effect.serve_fidelity() {
+                    crate::mesh_config_effect::ServeFidelity::Full => {
+                        ciris_lens_core::RowFidelity::Full
+                    }
+                    crate::mesh_config_effect::ServeFidelity::SummaryOnly => {
+                        ciris_lens_core::RowFidelity::SummaryOnly
+                    }
+                }) as ciris_lens_core::ServeFidelityProvider
+            }),
         )
         .await
         .context("start read API")?;
@@ -1242,6 +1296,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // first would race its shutdown branch against a `changed()` error break.
     let _ = retention_sd_tx.send(true);
     let _ = retention_join.await;
+    // Tear down the mesh-config consumer refresh loop (CIRISServer#365). Its
+    // readers (the read API, the ingest router) are already gone by here.
+    let _ = mesh_config_sd_tx.send(true);
+    let _ = mesh_config_join.await;
     // Tear down the CEG-driven config reconcile loop (Server 0.5 Phase 2).
     let _ = config_sd_tx.send(true);
     let _ = config_reconcile_join.await;

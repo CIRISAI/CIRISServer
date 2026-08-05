@@ -230,6 +230,12 @@ pub mod location;
 /// `cirisgraph_nodes` / `cirisgraph_edges` SQLite tables onto the client's
 /// wire contract so both cards work in server mode.
 pub mod memory_api;
+/// CIRISServer#365 — **the mesh-config CONSUMERS**: the loops in this build
+/// that read persist's `mesh_config` plane and change what they do, plus the
+/// registry the read surface's `consumed` flag is DERIVED from. A plane with no
+/// consumer confirms; this is the module that stops it lying and the module
+/// that stops it being empty.
+pub mod mesh_config_effect;
 /// CIRISServer#346 — **the Mesh Configuration surface** (the fourth tab): the
 /// owner-gated read of persist's `mesh_config:{key}` plane (effective values,
 /// provenance, counting-down TTLs, full signed history) plus the two write

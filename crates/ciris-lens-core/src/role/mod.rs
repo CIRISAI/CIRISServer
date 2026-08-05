@@ -65,7 +65,7 @@ pub mod ret_relay;
 pub use handler::LensCoreHandler;
 pub use node::{
     CalibrationBundleResponse, LensQueryError, ManifoldAggregateResponse, NodeError, NodeHandle,
-    ScoreListResponse, ScoreResponse,
+    RowFidelity, ScoreListResponse, ScoreResponse, ServeFidelityProvider,
 };
 pub use relay::{RelayError, RelayHandle};
 pub use ret_relay::RetRelayHandle;

@@ -45,7 +45,10 @@ use ciris_persist::schema::{
 use ciris_persist::verify::canonical::Canonicalizer;
 use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
 
-use ciris_server::ingest_http::{self, CANONICAL_INGEST_PATH, LEGACY_INGEST_PATH};
+use ciris_server::ingest_http::{
+    self, CANONICAL_INGEST_PATH, LEGACY_INGEST_PATH, REFUSAL_TRACE_PLANE_PAUSED,
+};
+use ciris_server::mesh_config_effect::{EffectiveMeshConfig, MeshConfigEffect};
 
 // ── A fabric node: one independent in-memory Engine + its node-identity signer ──
 // Mirrors `tests/replication.rs::node` — production `compose::build_engine`
@@ -165,9 +168,21 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
     envelope.to_string().into_bytes()
 }
 
-/// POST `body` to `path` on the ingest router; return (status, parsed JSON body).
+/// POST `body` to `path` on the ingest router with the trace plane OPEN (the
+/// owner default, and what an unreadable mesh-config plane also produces).
 async fn post(engine: Arc<Engine>, path: &str, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
-    let app = ingest_http::router(engine);
+    post_under(engine, MeshConfigEffect::unwired(), path, body).await
+}
+
+/// POST `body` to `path` on the ingest router under a given mesh-config
+/// reading; return (status, parsed JSON body).
+async fn post_under(
+    engine: Arc<Engine>,
+    mesh_config: MeshConfigEffect,
+    path: &str,
+    body: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
+    let app = ingest_http::router(engine, mesh_config);
     let req = Request::builder()
         .method("POST")
         .uri(path)
@@ -331,4 +346,160 @@ async fn unknown_key_batch_is_rejected() {
         Some("verify_unknown_key"),
         "rejection must be an unknown-key verify failure: {body}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  `feature.trace_replication` — the mesh-config consumer (CIRISServer#365)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// #365: the mesh_config plane was operable and NOT effective — nine keys, and
+// this repo had a caller for none. An operator could pause the trace plane,
+// watch the row admit, watch it fold most-restrictive across roots, watch its
+// TTL count down, and **nothing changed.**
+//
+// So the test that matters is not "the value was read". A test asserting
+// `effective == 0` passes against the broken code, because the broken code
+// folded correctly and ignored the answer. What must be proven is that the
+// SAME batch that persists with the plane open is REFUSED with the plane
+// paused, and that nothing lands.
+
+const PAUSE_ROOT: &str = "ingest-pause-root";
+
+/// A mesh-config reading in which a subscribed trust root has paused the trace
+/// plane. Built through persist's OWN envelope producer and persist's OWN pure
+/// fold — the same two functions production folds with, so this fixture cannot
+/// encode a rule the substrate does not.
+fn trace_plane_paused() -> MeshConfigEffect {
+    use ciris_persist::federation::mesh_config::{fold_mesh_config, mesh_config_envelope};
+    use ciris_persist::federation::types::{attestation_tier, attestation_type, cohort_scope};
+    use ciris_persist::federation::{MeshConfigBaseline, MeshConfigForm, MeshConfigKey};
+
+    let now = Utc::now();
+    let key = MeshConfigKey::FeatureTraceReplication;
+    let row = ciris_persist::federation::types::Attestation {
+        attestation_id: "mesh-config-pause-row".into(),
+        attesting_key_id: "root-holder".into(),
+        attested_key_id: PAUSE_ROOT.into(),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        asserted_at: now - chrono::Duration::minutes(1),
+        expires_at: None,
+        attestation_envelope: mesh_config_envelope(
+            key,
+            // 0 = off = LESS flow: a relief, admissible under relieve-never-expand.
+            0,
+            PAUSE_ROOT,
+            MeshConfigForm::Emergency,
+            Some(now + chrono::Duration::hours(4)),
+            "delegation-ingest-pause",
+            None,
+            "canonical is congested; shed the heaviest inbound plane",
+        ),
+        original_content_hash: String::new(),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
+        scrub_key_id: "root-holder".into(),
+        scrub_timestamp: now,
+        pqc_completed_at: None,
+        persist_row_hash: String::new(),
+        subject_key_ids: Vec::new(),
+        withdraws_admission_rule: None,
+        cohort_scope: cohort_scope::FEDERATION.to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+        additional_scrubs: Vec::new(),
+    };
+    MeshConfigEffect::pinned(EffectiveMeshConfig::folded(fold_mesh_config(
+        "node-under-relief",
+        &MeshConfigBaseline::owner_defaults(),
+        &[PAUSE_ROOT.to_string()],
+        &[row],
+        now,
+    )))
+}
+
+#[tokio::test]
+async fn a_paused_trace_plane_refuses_a_batch_that_would_otherwise_persist() {
+    let engine = node(0xB0, "node-b").await;
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    cross_register(&engine, AGENT_KEY_ID, &agent_sk).await;
+
+    let trace_id = "trace-http-paused-0001";
+    let bytes = build_batch_bytes(&agent_sk, AGENT_KEY_ID, trace_id);
+
+    // ── The plane is PAUSED: the batch is refused. ──────────────────────────
+    let (status, body) = post_under(
+        Arc::clone(&engine),
+        trace_plane_paused(),
+        LEGACY_INGEST_PATH,
+        bytes.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a paused trace plane must refuse the batch, got {status}: {body}"
+    );
+    assert_eq!(
+        body["error"].as_str(),
+        Some(REFUSAL_TRACE_PLANE_PAUSED),
+        "the refusal must carry its OWN token — 'I refuse your batch' and 'I am not taking \
+         batches' are different answers to an emitter: {body}"
+    );
+
+    // ── And NOTHING landed. ─────────────────────────────────────────────────
+    // The same bytes, now with the plane open, insert as the FIRST row for this
+    // trace_id (`deduplicated: 0`). Dedup fires only against a row that actually
+    // landed, so a zero here is proof the refused POST persisted nothing — the
+    // same evidence shape the tampered-batch test uses.
+    let (status_open, body_open) =
+        post(Arc::clone(&engine), LEGACY_INGEST_PATH, bytes.clone()).await;
+    assert_eq!(
+        status_open,
+        StatusCode::OK,
+        "the SAME batch must persist once the plane is open — otherwise this test proves \
+         nothing about the gate: {status_open}: {body_open}"
+    );
+    assert_eq!(
+        body_open["trace_events_inserted"].as_u64(),
+        Some(1),
+        "the open-plane POST must be the FIRST insert for this trace_id: {body_open}"
+    );
+    assert_eq!(
+        body_open["deduplicated"].as_u64(),
+        Some(0),
+        "no prior row exists to dedup against — the refused POST wrote nothing: {body_open}"
+    );
+
+    // ── The gate is not path-specific. ──────────────────────────────────────
+    let (status_alias, body_alias) =
+        post_under(engine, trace_plane_paused(), CANONICAL_INGEST_PATH, bytes).await;
+    assert_eq!(
+        status_alias,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the canonical alias must be gated identically: {status_alias}: {body_alias}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_mesh_config_plane_leaves_the_relay_accepting() {
+    // The fail-OPEN choice, pinned. A directory read error must not become a
+    // silent trace outage: that is the 71-hour failure
+    // FSD/RCA_INGEST_REJECTION_2026-08-05.md documents, and fail-closed ingest
+    // is how you would build it on purpose.
+    let engine = node(0xB1, "node-b").await;
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    cross_register(&engine, AGENT_KEY_ID, &agent_sk).await;
+
+    let bytes = build_batch_bytes(&agent_sk, AGENT_KEY_ID, "trace-http-unreadable-0001");
+    let unreadable =
+        MeshConfigEffect::pinned(EffectiveMeshConfig::unreadable("directory unavailable"));
+    let (status, body) = post_under(engine, unreadable, LEGACY_INGEST_PATH, bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unreadable mesh-config plane must leave ingest ACCEPTING (the owner default), \
+         got {status}: {body}"
+    );
+    assert_eq!(body["trace_events_inserted"].as_u64(), Some(1), "{body}");
 }
