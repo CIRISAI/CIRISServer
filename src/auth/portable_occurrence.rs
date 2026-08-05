@@ -59,10 +59,12 @@ use crate::ServerConfig;
 #[derive(Clone)]
 struct PortableState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` — used to resolve the bound owner's self.
-    node_key_id: String,
     /// The node config — the source of `keystore_alias` (the user alias prefix) and
     /// the conventional user seed dir, for minting + installing keysets.
+    ///
+    /// NOTE: read for the KEYSTORE alias and the seed dir only. `cfg.key_id` is
+    /// never read here — this node's own signing identity comes from the engine
+    /// (CIRISServer#372 Level 2).
     cfg: Arc<ServerConfig>,
 }
 
@@ -132,10 +134,24 @@ fn owner_user_alias(cfg: &ServerConfig) -> String {
 /// verified owner session (`FedIdUse::OwnerSession`), and we assert its `key_id()`
 /// matches — so a portable occurrence can ONLY ever be minted against the owner's
 /// own, locally-held primary.
+///
+/// The `node` the owner-binding is looked up FOR is resolved from the engine
+/// (CIRISServer#372 Level 2), not threaded in: "who owns this node" must be
+/// asked about the key this node actually signs as, or a fold whose engine
+/// identity differs from the CLI label would read a *different* node's
+/// owner-binding and mint a portable copy of the wrong person's self.
 async fn resolve_owner_primary(
     st: &PortableState,
 ) -> Result<(String, Arc<ciris_persist::prelude::LocalSigner>), Response> {
-    let identity_key_id = match ownership::is_steward_bound(&st.engine, &st.node_key_id).await {
+    let node_key_id = crate::self_identity::resolve(&st.engine, "auth::portable_occurrence")
+        .await
+        .map_err(|e| {
+            http_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
+            )
+        })?;
+    let identity_key_id = match ownership::is_steward_bound(&st.engine, &node_key_id).await {
         Some(id) => id,
         None => {
             return Err(http_err(
@@ -494,12 +510,11 @@ fn short_unique() -> String {
 
 /// The portable-occurrence router — merge onto the read-API listener behind the
 /// loopback guard (see `compose.rs`). Owner-gated per-handler.
-pub fn router(engine: Arc<Engine>, node_key_id: String, cfg: Arc<ServerConfig>) -> Router {
-    let state = PortableState {
-        engine,
-        node_key_id,
-        cfg,
-    };
+///
+/// **It takes no key id** (CIRISServer#372 Level 2): the node whose
+/// owner-binding is read is resolved from the engine at request time.
+pub fn router(engine: Arc<Engine>, cfg: Arc<ServerConfig>) -> Router {
+    let state = PortableState { engine, cfg };
     Router::new()
         .route(
             "/v1/self/occurrence/portable",

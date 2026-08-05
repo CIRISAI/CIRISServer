@@ -113,10 +113,23 @@ struct DeviceGrant {
 #[derive(Clone)]
 struct DeviceGrantState {
     engine: Arc<Engine>,
-    /// The LOCAL responsible-owner's federation key_id (`<keystore_alias>-user`)
-    /// — the issuer of the `delegates_to` edge. Its signer is re-opened at approve
-    /// time from [`Self::seed_dir`] (hardware presence prompted there).
-    owner_key_id: String,
+    /// The LOCAL responsible-owner's **KEYSTORE ALIAS** (`<keystore_alias>-user`)
+    /// — the *default* alias its signer is re-opened under at approve time from
+    /// [`Self::seed_dir`] (hardware presence prompted there), and only when the
+    /// active-alias pointer is absent.
+    ///
+    /// # Not a key id, and deliberately not derived (CIRISServer#372 Level 2)
+    ///
+    /// This is on two axes away from the node's signing identity: it names the
+    /// **owner** (a human), not this node, and it names a keystore **blob**, not
+    /// a federation key id. `live_delegations` already documents the trap — the
+    /// owner's edges are authored under the signer's DERIVED `key_id()`, "NOT
+    /// `st.owner_alias`, which is the keystore alias the edges are NOT authored
+    /// under". Resolving it from this node's engine would be simply wrong.
+    ///
+    /// It was called `owner_key_id`, which is the one-name-two-axes spelling
+    /// this issue exists to remove; the field now says which axis it is on.
+    owner_alias: String,
     /// Where the owner's federation signer is re-opened from (the conventional
     /// user-seed path); passed to `resolve_user_signer` on approve/revoke.
     seed_dir: PathBuf,
@@ -162,7 +175,7 @@ async fn resolve_owner_signer(
         crate::compose::FedIdUse::OwnerSession,
         // Active-alias pointer (CIRISServer 0.5.59): resolve the owner signer under
         // the user's chosen name at request time, falling back to <node>-user.
-        &crate::active_user_alias(&st.seed_dir, &st.owner_key_id),
+        &crate::active_user_alias(&st.seed_dir, &st.owner_alias),
         st.seed_dir.clone(),
     )
     .await
@@ -1081,7 +1094,7 @@ struct GrantSummary {
 
 /// The owner's LIVE act-on-behalf delegations, read FROM THE GRAPH under the
 /// owner's DERIVED federation key_id (`owner_fed_id` = the signer's `key_id()` —
-/// NOT `st.owner_key_id`, which is the keystore alias the edges are NOT authored
+/// NOT `st.owner_alias`, which is the keystore alias the edges are NOT authored
 /// under). Outbound `delegates_to(owner → actor)` edges carrying a non-`infra:*`
 /// scope (so node owner-bindings are excluded), confirmed live via
 /// `reachable_under_scope` (withdraws-aware). Returns `(actor, scope, attestation_id)`.
@@ -1229,11 +1242,13 @@ async fn revoke(
 /// `session::router` / `api_keys::router` / `self_login::router`. Grants live for
 /// [`GRANT_TTL_SECS`] (RFC 8628 `expires_in`).
 ///
-/// `owner_key_id` is the LOCAL responsible-owner's federation key_id (the issuer
-/// of the `delegates_to` edges) and `seed_dir` is where its signer is re-opened
-/// (hardware presence prompted on approve/revoke).
-pub fn router(engine: Arc<Engine>, owner_key_id: String, seed_dir: PathBuf) -> Router {
-    router_with_ttl(engine, owner_key_id, seed_dir, GRANT_TTL_SECS)
+/// `owner_alias` is the LOCAL responsible-owner's KEYSTORE ALIAS (the default
+/// name its signer is re-opened under — NOT the federation key id the
+/// `delegates_to` edges are authored under, which is the signer's own
+/// `key_id()`), and `seed_dir` is where that signer is re-opened (hardware
+/// presence prompted on approve/revoke).
+pub fn router(engine: Arc<Engine>, owner_alias: String, seed_dir: PathBuf) -> Router {
+    router_with_ttl(engine, owner_alias, seed_dir, GRANT_TTL_SECS)
 }
 
 /// Build the router with an explicit grant TTL (seconds). Production uses
@@ -1241,13 +1256,13 @@ pub fn router(engine: Arc<Engine>, owner_key_id: String, seed_dir: PathBuf) -> R
 /// drive the `410 expired_token` poll path deterministically.
 pub fn router_with_ttl(
     engine: Arc<Engine>,
-    owner_key_id: String,
+    owner_alias: String,
     seed_dir: PathBuf,
     grant_ttl_secs: u64,
 ) -> Router {
     let state = DeviceGrantState {
         engine,
-        owner_key_id,
+        owner_alias,
         seed_dir,
         grants: Arc::new(Mutex::new(HashMap::new())),
         user_index: Arc::new(Mutex::new(HashMap::new())),

@@ -316,8 +316,12 @@ async fn put_delegation(
 }
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let nk = node_key_id(&engine).await;
-    let app = mesh_config_surface::router(engine, nk);
+    // No key id is handed to the router (CIRISServer#372 Level 2) — it resolves
+    // this node's identity from the engine. The harness therefore CANNOT restate
+    // it, which is the point: a harness that can restate an identity is a harness
+    // that can be wrong about it for eight releases while production ships
+    // something else.
+    let app = mesh_config_surface::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

@@ -177,10 +177,29 @@ fn refusal(code: StatusCode, token: &str, id: &str, text: &str) -> Response {
 #[derive(Clone)]
 struct MeshConfigState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` — the SUBSCRIBER whose `trust:accepts`
-    /// edges enumerate the roots, and the node whose baseline is the ceiling.
-    /// The row's *author* is the signer's derived key id, resolved per call.
-    node_key_id: String,
+}
+
+/// THIS node's federation `key_id` — the SUBSCRIBER whose `trust:accepts` edges
+/// enumerate the roots, and the node whose baseline is the ceiling.
+///
+/// **Resolved from the engine, never accepted as a parameter**
+/// (CIRISServer#372 Level 2). It used to ride in [`MeshConfigState`] from
+/// `compose`'s `cfg.key_id`, which begins life as the `--key-id` CLI *label*;
+/// the subscriber whose roots are enumerated and the signer whose derived key
+/// authors the row must be ONE identity, and in the embedded fold the label and
+/// the signer differ. Asking the engine here makes them the same fact by
+/// construction — the same value [`build_row`] signs under.
+async fn self_key_id(st: &MeshConfigState) -> Result<String, Response> {
+    crate::self_identity::resolve(&st.engine, "mesh_config_surface")
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::self_identity::REFUSAL_TOKEN,
+                crate::self_identity::MESSAGE_ID,
+                format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
+            )
+        })
 }
 
 /// Owner-authority gate — the [`crate::federation_admin`] spine verbatim:
@@ -242,12 +261,18 @@ async fn require_owner(
 /// knob, only the owner directly.** `ConfigWrite` would have been the wrong
 /// verb in a way that matters — it is the SELF config plane's verb, and the two
 /// planes never merge.
+///
+/// **Returns THIS node's resolved signing identity** so every route runs on the
+/// one value the gate itself was evaluated against — the owner-binding walked
+/// here and the subscriber whose roots are read below cannot name two different
+/// nodes (CIRISServer#372 Level 2).
 async fn gate(
     st: &MeshConfigState,
     headers: &HeaderMap,
     verb: CapabilityVerb,
-) -> Result<(), Response> {
-    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+) -> Result<String, Response> {
+    let node_key_id = self_key_id(st).await?;
+    if crate::auth::gate::require_owner_bound(&st.engine, &node_key_id)
         .await
         .is_err()
     {
@@ -263,7 +288,7 @@ async fn gate(
     if let Some(resp) = crate::auth::gate::require_verb(&caller, verb) {
         return Err(resp);
     }
-    Ok(())
+    Ok(node_key_id)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -831,14 +856,15 @@ async fn get_mesh_config(
     headers: HeaderMap,
     Query(q): Query<NowQuery>,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers, CapabilityVerb::ReadNodeState).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers, CapabilityVerb::ReadNodeState).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let now = match parse_now(q.now.as_deref()) {
         Ok(n) => n,
         Err(e) => return bad_now(e),
     };
-    match snapshot(&st.engine, &st.node_key_id, now).await {
+    match snapshot(&st.engine, &node_key_id, now).await {
         Ok(s) => (StatusCode::OK, Json(read_surface_json(Some(&s), now))).into_response(),
         Err(e) => {
             let mut body = read_surface_json(None, now);
@@ -963,9 +989,10 @@ async fn get_history(
     headers: HeaderMap,
     Query(q): Query<HistoryQuery>,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers, CapabilityVerb::ReadNodeState).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers, CapabilityVerb::ReadNodeState).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let now = match parse_now(q.now.as_deref()) {
         Ok(n) => n,
         Err(e) => return bad_now(e),
@@ -974,7 +1001,7 @@ async fn get_history(
         .limit
         .unwrap_or(DEFAULT_HISTORY_LIMIT)
         .clamp(1, MAX_HISTORY_LIMIT);
-    match snapshot(&st.engine, &st.node_key_id, now).await {
+    match snapshot(&st.engine, &node_key_id, now).await {
         Ok(s) => (StatusCode::OK, Json(history_json(Some(&s), limit, now))).into_response(),
         Err(e) => {
             let mut body = history_json(None, limit, now);
@@ -1221,8 +1248,14 @@ fn outcome_response(
 
 /// The shared tail of both write paths: check the base fields, resolve the
 /// baseline, assemble, sign, submit, render.
+///
+/// `node_key_id` is the value [`gate`] resolved from the engine — passed down
+/// rather than re-derived so the host this row is judged against is provably the
+/// same identity the gate authorised (CIRISServer#372 Level 2).
+#[allow(clippy::too_many_arguments)]
 async fn submit(
     st: &MeshConfigState,
+    node_key_id: &str,
     base: &ConfigWriteBase,
     form: MeshConfigForm,
     valid_until: Option<DateTime<Utc>>,
@@ -1290,7 +1323,7 @@ async fn submit(
     };
     let outcome = match st
         .engine
-        .record_mesh_config_row(&st.node_key_id, &baseline, &row, now)
+        .record_mesh_config_row(node_key_id, &baseline, &row, now)
         .await
     {
         Ok(o) => o,
@@ -1331,9 +1364,10 @@ async fn post_relief(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers, CapabilityVerb::Wipe).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers, CapabilityVerb::Wipe).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let req: ReliefRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -1371,6 +1405,7 @@ async fn post_relief(
     // here, and a row that ratifies something is not an emergency.
     submit(
         &st,
+        &node_key_id,
         &req.base,
         MeshConfigForm::Emergency,
         Some(valid_until),
@@ -1386,9 +1421,10 @@ async fn post_durable(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers, CapabilityVerb::Wipe).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers, CapabilityVerb::Wipe).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let req: DurableRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -1445,6 +1481,7 @@ async fn post_durable(
     }
     submit(
         &st,
+        &node_key_id,
         &req.base,
         MeshConfigForm::Durable,
         None,
@@ -1459,19 +1496,20 @@ async fn post_durable(
 //  Router
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Mount the Mesh Configuration surface. `node_key_id` is THIS node's
-/// federation key id — the SUBSCRIBER whose trust edges enumerate the roots and
-/// whose baseline is the ceiling every row is clamped against.
-pub fn router(engine: Arc<Engine>, node_key_id: String) -> Router {
+/// Mount the Mesh Configuration surface.
+///
+/// **It takes no key id** (CIRISServer#372 Level 2). THIS node's federation key
+/// id — the SUBSCRIBER whose trust edges enumerate the roots and whose baseline
+/// is the ceiling every row is clamped against — is resolved per request from
+/// the engine that will actually sign the row (see [`self_key_id`]). There is
+/// no argument here for a caller, a harness or a CLI label to disagree with.
+pub fn router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route(ROUTE_READ, axum::routing::get(get_mesh_config))
         .route(ROUTE_HISTORY, axum::routing::get(get_history))
         .route(ROUTE_DURABLE, axum::routing::post(post_durable))
         .route(ROUTE_RELIEF, axum::routing::post(post_relief))
-        .with_state(MeshConfigState {
-            engine,
-            node_key_id,
-        })
+        .with_state(MeshConfigState { engine })
 }
 
 #[cfg(test)]

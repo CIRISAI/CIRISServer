@@ -85,11 +85,19 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 struct SurfaceState {
     engine: Arc<Engine>,
-    /// The node's derived federation `key_id` (`== edge.signer_key_id()`).
-    self_key_id: String,
     /// The ONE shared edge runtime (compose builds/reuses it before mounting).
     edge: Arc<Edge>,
 }
+
+/// How the peer counts on `GET /v1/federation/identity` were arrived at.
+///
+/// **Three states, not one counter** (the 2026-08-05 RCA's second instrument
+/// finding). "Zero peers", "the store could not be read" and "this node cannot
+/// resolve its own identity so there is no `self` to count peers OF" are
+/// different conditions that used to render as the same `0`.
+const COUNTS_MEASURED: &str = "measured";
+/// The peer store could not be read; the counts are not evidence.
+const COUNTS_STORE_UNAVAILABLE: &str = "store_unavailable";
 
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
@@ -104,14 +112,27 @@ fn err(code: StatusCode, error: &str) -> Response {
 ///
 /// A peer-count store error degrades to zero counts rather than failing the
 /// whole call — the agent did the same when its seeder wasn't wired ("we
-/// still have a working Edge identity to return").
+/// still have a working Edge identity to return") — but the degradation is now
+/// **named**: `peer_counts_standing` distinguishes a measured zero from an
+/// unreadable store from an unresolvable self (CIRISServer#372 / the
+/// 2026-08-05 RCA). A zero that cannot say why it is zero is not evidence.
+///
+/// The node's own key id — the `self` the peers are counted relative to — is
+/// resolved from the engine (CIRISServer#372 Level 2), not threaded in from
+/// `cfg.key_id`. It was documented as `== edge.signer_key_id()`; asking the
+/// engine makes that an identity rather than an assertion.
 async fn get_identity(State(st): State<SurfaceState>) -> Response {
-    let (total, canonical) =
-        match crate::federation_peers::peer_counts(&st.engine, &st.self_key_id).await {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::debug!("peer counts unavailable for federation identity: {e}");
-                (0, 0)
+    let (total, canonical, standing) =
+        match crate::self_identity::resolve(&st.engine, "federation_surface").await {
+            Err(_) => (0, 0, crate::self_identity::REFUSAL_TOKEN),
+            Ok(self_key_id) => {
+                match crate::federation_peers::peer_counts(&st.engine, &self_key_id).await {
+                    Ok((t, c)) => (t, c, COUNTS_MEASURED),
+                    Err(e) => {
+                        tracing::debug!("peer counts unavailable for federation identity: {e}");
+                        (0, 0, COUNTS_STORE_UNAVAILABLE)
+                    }
+                }
             }
         };
     (
@@ -122,6 +143,7 @@ async fn get_identity(State(st): State<SurfaceState>) -> Response {
                 "crate_version": ciris_edge::version::VERSION,
                 "peer_count_total": total,
                 "peer_count_canonical": canonical,
+                "peer_counts_standing": standing,
                 "capabilities": FEDERATION_CAPABILITIES,
             }
         })),
@@ -567,16 +589,14 @@ async fn events_stream(
         .into_response()
 }
 
-/// The agent-compat federation edge-surface router (#261). `self_key_id` is
-/// the node's derived federation `key_id`; `edge` is the ONE shared edge
-/// runtime — mounted right after [`crate::federation_peers::router`] in
-/// [`crate::compose`].
-pub fn router(engine: Arc<Engine>, self_key_id: String, edge: Arc<Edge>) -> Router {
-    let state = SurfaceState {
-        engine,
-        self_key_id,
-        edge,
-    };
+/// The agent-compat federation edge-surface router (#261). `edge` is the ONE
+/// shared edge runtime — mounted right after [`crate::federation_peers::router`]
+/// in [`crate::compose`].
+///
+/// **It takes no key id** (CIRISServer#372 Level 2): the node's own derived
+/// federation `key_id` is resolved from the engine at request time.
+pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
+    let state = SurfaceState { engine, edge };
     Router::new()
         .route("/v1/federation/identity", axum::routing::get(get_identity))
         .route("/v1/federation/metrics", axum::routing::get(get_metrics))

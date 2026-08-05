@@ -139,10 +139,29 @@ async fn seed_ceg_graph_projects_a_rich_graph() {
     set(&engine, "mode", ConfigValue::Str("server".into())).await;
 
     // Seed identity + CEG projection (the two boot calls, in order).
-    memory_api::seed_identity_graph(&engine, &nk, "node").await;
-    memory_api::seed_ceg_graph(&engine, &nk).await;
+    memory_api::seed_identity_graph(&engine, "node").await;
+    memory_api::seed_ceg_graph(&engine).await;
 
     let g = graph(&engine);
+
+    // CIRISServer#372 Level 2 — the identity WRITTEN INTO THE GRAPH is the id
+    // the engine signs as. `NODE_KEY_ID` here is the keystore ALIAS; the derived
+    // id is `<alias>-<fingerprint>`, so this assertion fails if the seed ever
+    // goes back to writing a label.
+    let id_node = g
+        .get_node("node/identity", GraphScope::Identity)
+        .await
+        .expect("identity node read")
+        .expect("node/identity must exist");
+    assert_eq!(
+        id_node.attributes["key_id"], nk,
+        "node/identity must carry the ENGINE-derived key id, not a label"
+    );
+    assert_ne!(
+        id_node.attributes["key_id"], NODE_KEY_ID,
+        "node/identity must NOT carry the bare keystore alias"
+    );
+    assert_eq!(id_node.updated_by, nk, "updated_by must be the derived id");
 
     // Well beyond the single `node/identity` node the old seed produced.
     let n = total_nodes(&g).await;
@@ -197,16 +216,15 @@ async fn seed_ceg_graph_projects_a_rich_graph() {
 async fn seed_ceg_graph_is_idempotent() {
     let engine = node().await;
     register_self(&engine).await;
-    let nk = node_key_id(&engine).await;
     set(&engine, "scorer.window", ConfigValue::I64(500)).await;
 
-    memory_api::seed_identity_graph(&engine, &nk, "node").await;
-    memory_api::seed_ceg_graph(&engine, &nk).await;
+    memory_api::seed_identity_graph(&engine, "node").await;
+    memory_api::seed_ceg_graph(&engine).await;
     let g = graph(&engine);
     let first = total_nodes(&g).await;
 
     // Re-run: must not dup nodes or error.
-    memory_api::seed_ceg_graph(&engine, &nk).await;
+    memory_api::seed_ceg_graph(&engine).await;
     let second = total_nodes(&g).await;
 
     assert_eq!(first, second, "re-seed must be idempotent (no dup nodes)");

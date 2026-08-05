@@ -312,6 +312,13 @@ pub mod retention_loop;
 /// integration test (`tests/safety.rs`) can drive the modules + routers directly.
 pub mod safety;
 pub mod scorer;
+/// **This node's own signing identity, resolved from the engine rather than
+/// accepted as a parameter** (CIRISServer#372 Level 2). The `--key-id` CLI flag
+/// is an operator LABEL; `Engine::local_derived_key_id()` is what the engine
+/// actually signs with, and in the embedded fold they differ. A surface that
+/// acts or signs as this node asks [`self_identity::resolve`] instead of taking
+/// a `node_key_id` argument a caller could disagree with.
+pub mod self_identity;
 /// The capacity score→emit pipeline — a periodic task that derives per-agent
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
