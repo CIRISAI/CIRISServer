@@ -38,6 +38,11 @@ use std::collections::BTreeSet;
 use ciris_persist::federation::MeshConfigKey;
 use ciris_server::mesh_config_effect::{consumption, Consumption, MeshConfigEffect};
 
+/// The ONE port of `LocalizationManager.resolveKey`. See the module doc there
+/// for why this is shared rather than retyped per suite.
+#[path = "support/localization.rs"]
+mod localization;
+
 /// Every `.rs` file under `src/`, excluding the module that DEFINES the
 /// accessors — a definition is not a call site, and counting it would let a
 /// consumer be declared into existence.
@@ -217,22 +222,6 @@ fn the_registry_answers_for_every_key_and_names_a_tracker_when_it_cannot() {
     }
 }
 
-/// Resolve a dotted message id the way the client actually does.
-///
-/// `LocalizationManager.resolveKey` (LocalizationManager.kt:296) ALWAYS splits
-/// on `.` and walks NESTED objects; it never attempts an exact top-level match.
-/// A gate that did `bundle.get("a.b.c")` would therefore pass on exactly the
-/// shape that renders RAW in the client — which is not hypothetical: 1,484 keys
-/// shipped flat and were dead in every language, English included, until they
-/// were re-nested. The check must speak the loader's language, not JSON's.
-fn resolve_id<'a>(bundle: &'a serde_json::Value, id: &str) -> Option<&'a str> {
-    let mut cur = bundle;
-    for part in id.split('.') {
-        cur = cur.get(part)?;
-    }
-    cur.as_str()
-}
-
 #[test]
 fn every_consumption_message_resolves_in_the_canonical_bundle() {
     // The surface emits `{id, text}` pairs and a UI resolves the id in the
@@ -240,24 +229,26 @@ fn every_consumption_message_resolves_in_the_canonical_bundle() {
     // in the canonical bundle renders RAW on every platform; an entry whose
     // English has drifted from the source renders a *stale translation of
     // different content*, which is worse — it looks right.
-    let bundle: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/client/shared/src/desktopMain/resources/localization/en.json"
-        ))
-        .expect("read the canonical localization bundle"),
-    )
-    .expect("the canonical bundle is JSON");
+    //
+    // **This gate used to read `bundle.get(&id)`** — an exact top-level lookup
+    // the Kotlin loader never performs. Against a correctly NESTED bundle that
+    // returns `None` for every dotted id, so the assertion could only pass while
+    // the bundle carried the flat keys #366 exists to forbid: the gate did not
+    // miss the defect, it required it. It now goes through the one shared port
+    // of the loader's own algorithm, which carries its own proof that it can
+    // fail (`the_resolver_refuses_a_flat_dotted_key`).
+    let bundle = localization::canonical_bundle();
 
     for &key in MeshConfigKey::ALL {
         let c = consumption(key);
         let id = c.message_id();
         assert_eq!(
-            resolve_id(&bundle, &id),
+            localization::resolve_id(&bundle, &id),
             Some(c.message_text()),
-            "`{id}` must resolve in the canonical en.json with the SAME English the server \
-             emits (missing ⇒ the id renders raw; different ⇒ every translated locale is a \
-             translation of text this build no longer sends)"
+            "`{id}` must resolve in the canonical en.json BY NESTED TRAVERSAL, with the SAME \
+             English the server emits (unresolvable ⇒ the id renders raw in every language; \
+             different ⇒ every translated locale is a translation of text this build no longer \
+             sends)"
         );
     }
 }

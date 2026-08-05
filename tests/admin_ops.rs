@@ -40,6 +40,11 @@ use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use ciris_server::admin_ops::{self, Selection, DESCEND_QUORUM_MIN};
 use ciris_server::auth::store;
 
+/// The ONE port of `LocalizationManager.resolveKey`. See the module doc there
+/// for why this is shared rather than retyped per suite.
+#[path = "support/localization.rs"]
+mod localization;
+
 const NODE_ALIAS: &str = "ciris-admin-node";
 /// The key the ladder acts ON in most tests.
 const TARGET: &str = "wl-target";
@@ -1911,6 +1916,127 @@ async fn tier_r_reads_the_same_judgement_set_persist_folds() {
     assert_eq!(
         json["node_fold"]["marker_id"].as_str(),
         reference.marker_id.as_deref()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Every emitted string must be REACHABLE by the loader (CIRISServer#366)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn every_string_these_routes_emit_resolves_in_the_canonical_bundle() {
+    // Harvested from REAL responses rather than a hand-listed vocabulary: a list
+    // maintained beside the routes is a list that falls behind them, and this
+    // module emits its strings from six different places (enforcement notes,
+    // standings, decisions, reversals, refusals, advisories).
+    //
+    // Resolution goes through the shared port of the Kotlin loader, which walks
+    // NESTED objects only. A flat dotted bundle key renders raw in every
+    // language including English — the defect that has now bitten three times,
+    // twice after being fixed.
+    let bundle = localization::canonical_bundle();
+    let f = fixture().await;
+    let judgement = raise_judgement(&f).await;
+    let mut seen = 0usize;
+
+    let mut check = |what: &str, json: &serde_json::Value| {
+        let mut pairs = Vec::new();
+        localization::collect_pairs(json, &mut pairs);
+        seen += pairs.len();
+        localization::assert_pairs_resolve(&bundle, json, what);
+    };
+
+    // ── tier S: the standing read, then each of the six acts ───────────────
+    let (_, json) = get(&f, "/v1/admin/self").await;
+    check("GET /v1/admin/self (all three never declared)", &json);
+    for (axis, declare, lift) in SELF_ACTS {
+        let mut body = self_commit(&f.owner_binding, "gating the strings this act emits");
+        body["compelled_by"] = serde_json::json!("a named authority");
+        let (_, json) = post(&f, declare, &body).await;
+        check(axis, &json);
+        let (_, json) = post(&f, lift, &self_commit(&f.owner_binding, "lifting")).await;
+        check(axis, &json);
+    }
+    let (_, json) = get(&f, "/v1/admin/self").await;
+    check("GET /v1/admin/self (all three lifted)", &json);
+
+    // ── tier R: the fold, a decline, an honour ─────────────────────────────
+    let (_, json) = reader_fold(&f, TARGET).await;
+    check("POST /v1/admin/reader/fold", &json);
+    let (_, json) = reader_fold(&f, NOISE).await;
+    check("POST /v1/admin/reader/fold (nothing held)", &json);
+    for route in ["/v1/admin/reader/decline", "/v1/admin/reader/honour"] {
+        let (_, json) = post(
+            &f,
+            route,
+            &serde_json::json!({
+                "judgement_id": judgement,
+                "delegation_id": f.owner_binding,
+                "reason": "gating the strings this decision emits",
+            }),
+        )
+        .await;
+        check(route, &json);
+    }
+
+    // ── the refusals, which are the strings an operator sees when stuck ────
+    let refusals: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "/v1/admin/self/shed",
+            self_commit(&f.serve_not_owner, "wrong issuer"),
+        ),
+        (
+            "/v1/admin/self/shed",
+            self_commit(&f.slash_a, "wrong scope"),
+        ),
+        (
+            "/v1/admin/self/shed",
+            serde_json::json!({ "delegation_id": f.owner_binding, "reason": " " }),
+        ),
+        (
+            "/v1/admin/reader/fold",
+            serde_json::json!({ "subject_key_id": "  " }),
+        ),
+        (
+            "/v1/admin/reader/decline",
+            serde_json::json!({
+                "judgement_id": "no-such-row",
+                "delegation_id": f.owner_binding,
+                "reason": "unresolvable",
+            }),
+        ),
+        (
+            "/v1/admin/reader/honour",
+            serde_json::json!({
+                "judgement_id": "t-early-1",
+                "delegation_id": f.owner_binding,
+                "reason": "not a judgement",
+            }),
+        ),
+    ];
+    for (route, body) in refusals {
+        let (status, json) = post(&f, route, &body).await;
+        assert!(status.is_client_error(), "{route} must refuse: {json}");
+        check(route, &json);
+    }
+
+    // ── and the tier 0–4 strings this suite already drives ─────────────────
+    let (hash, json) = preview(&f, &target_selection()).await;
+    check("POST /v1/admin/preview", &json);
+    let (_, json) = post(
+        &f,
+        "/v1/admin/annotate",
+        &commit(target_selection(), &hash, &f.review_only),
+    )
+    .await;
+    check("POST /v1/admin/annotate", &json);
+
+    // A zero denominator is not evidence — this gate must have looked at a
+    // realistic number of strings, not at nothing.
+    assert!(
+        seen >= 40,
+        "the gate examined only {seen} strings; it is meant to cover this module's whole \
+         emitted vocabulary"
     );
 }
 
