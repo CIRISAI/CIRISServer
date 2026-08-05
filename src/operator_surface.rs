@@ -1863,7 +1863,11 @@ async fn trace_corpus(engine: &Engine) -> Result<TraceCorpus, String> {
 /// whose database it could not open — a failed read rendering as a fact about
 /// the node. Behind an `await` it is untestable and therefore ungated; in front
 /// of one it is neither.
-fn corpus_of(
+/// `pub(crate)` so [`crate::trace_plane_watch`] reads the corpus through the
+/// SAME projection this surface does. A watch with its own field selection would
+/// be a second answer to "when did a trace last arrive", and the log and the
+/// surface would eventually disagree about one node.
+pub(crate) fn corpus_of(
     summary: Result<
         ciris_persist::retention::StorageSummary,
         ciris_persist::retention::RetentionError,

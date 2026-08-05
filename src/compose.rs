@@ -1172,6 +1172,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // enforced BEFORE any dispatch, so mounting the full surface here
                 // widens nothing.
                 let _ = mesh_dispatch_router.set(r.clone());
+                // CIRISServer#369 follow-on — THE PERIODIC READER.
+                //
+                // #369 built the trace-plane liveness band and #370 the refusal
+                // reading, and `GET /v1/node/state` renders both. But that
+                // surface is PULL. This process runs seven periodic loops —
+                // retention, scorer, config reconcile, replication reconcile,
+                // federation delivery, equivocation, mesh-config refresh — and
+                // not one of them asks whether the plane this node exists to
+                // receive on is alive. A node running only those would hold a
+                // correct red band that nobody requested, which is the
+                // 2026-08-05 outage moved up one level: the signal exists and
+                // has no reader.
+                //
+                // Spawned HERE, after the router chain, because
+                // `ingest_http::router` publishes the ledger to `held()` at
+                // construction — asking earlier would hand the watch `None` and
+                // degrade an honest reading into `unreadable`.
+                crate::trace_plane_watch::spawn(Arc::clone(&engine), crate::ingest_http::held());
                 r
             },
             // CIRISServer#365 — `backpressure.summary_only`, the serve path's

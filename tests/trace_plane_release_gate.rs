@@ -60,6 +60,8 @@ use ciris_server::operator_surface::{self, IngestStanding, OperatorStateOptions}
 
 #[path = "support/accord_batch.rs"]
 mod accord_batch;
+#[path = "support/log_capture.rs"]
+mod log_capture;
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Fixtures
@@ -560,6 +562,150 @@ fn the_33_hour_overlap_window_reads_live_and_stuck_at_once() {
         calm["ingest"]["band"], view["ingest"]["band"],
         "a fed node with a working gate and a fed node with a stuck producer must not read alike"
     );
+}
+
+/// **Something SAYS so — the periodic reader, driven against a real corpus.**
+///
+/// #369 built the band and `GET /v1/node/state` renders it, but that surface is
+/// PULL: nothing in this process asks. A node running only the seven pre-existing
+/// loops holds a correct red band that nobody requested, which is the outage's
+/// own shape one level up — the signal exists and has no reader.
+///
+/// So this drives [`ciris_server::trace_plane_watch::tick`] against a REAL engine
+/// and a REAL refusal ledger, and asserts on what the node **said**:
+///
+/// 1. a fed plane emits nothing an operator must act on, and then falls silent
+///    entirely — because a watch that restated a green verdict every 15 minutes
+///    would be 96 identical lines a day, i.e. the log volume nobody read;
+/// 2. the incident emits an `ERROR`, and the message carries the two message ids
+///    an operator can look up;
+/// 3. the same condition, unchanged, does NOT emit again on the next tick.
+///
+/// MUTATION EVIDENCE: make `Watch::observe` return `Some(Emit::Changed)`
+/// unconditionally and leg (1)'s silence and leg (3) both go RED; drop the
+/// `StateBand::Red` arm of `say` to `info!` and leg (2) goes RED.
+#[tokio::test]
+async fn the_watch_says_it_out_loud_and_then_stops_saying_it() {
+    use ciris_server::trace_plane_watch::{tick, Emit, Watch};
+
+    const PRODUCER: &str = "ciris-agent-bootstrap-25uzoxtlro";
+    let admitted = at("2026-08-03T23:30:00Z");
+
+    let engine = node(0xE5, "node-watch").await;
+    let refusals = IngestRefusals::new();
+    let sk = SigningKey::from_bytes(&[0x21; 32]);
+    cross_register(&engine, PRODUCER, &sk, identity_type::AGENT).await;
+    let (status, _) = post(
+        Arc::clone(&engine),
+        &refusals,
+        accord_batch::build_batch_bytes_at(&sk, PRODUCER, "trace-watch-0001", admitted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut watch = Watch::new();
+
+    // ── (1) A fed plane: audible once, then silent ──────────────────────────
+    let (emit, log) = log_capture::capture(tick(
+        &mut watch,
+        &engine,
+        Some(&refusals),
+        admitted + Duration::minutes(5),
+    ))
+    .await;
+    assert_eq!(
+        emit,
+        Some(Emit::Changed),
+        "the FIRST reading always speaks — a node that comes up already dark has no transition to \
+         observe, and silence there would make the watch quietest in the case it exists for"
+    );
+    assert!(
+        log.alarms().is_empty(),
+        "a healthy node must not raise an alarm about itself:\n{}",
+        log.render()
+    );
+    assert_eq!(
+        log.at(tracing::Level::INFO).len(),
+        1,
+        "...and it must be AUDIBLE. A silent pass and a dead loop look identical from \
+         outside:\n{}",
+        log.render()
+    );
+
+    let (emit, log) = log_capture::capture(tick(
+        &mut watch,
+        &engine,
+        Some(&refusals),
+        admitted + Duration::minutes(20),
+    ))
+    .await;
+    assert_eq!(
+        emit, None,
+        "a steady green must fall silent — 96 identical lines a day is exactly the log volume the \
+         RCA says nobody was reading"
+    );
+    assert!(log.events().is_empty(), "{}", log.render());
+
+    // ── (2) The incident: an ERROR, unasked ─────────────────────────────────
+    //
+    // Same corpus, 48 hours later. Nothing about the node changed except the
+    // clock, which is the point: the plane walks green → yellow → red by itself.
+    let found_at = admitted + Duration::hours(48);
+
+    // The flood is stamped explicitly rather than driven through the route,
+    // because the handler stamps `Utc::now()` and this test drives an injected
+    // clock — a ledger written in wall-clock time and read at a fixture instant
+    // is two clocks, and the refusals would fall outside the window for reasons
+    // that say nothing about the watch. That the REAL route counts a real
+    // refusal into this ledger is proven separately, twice
+    // (`one_refusal_both_names_the_namespace_and_reaches_the_operator_reading`
+    // and the composition gate in `tests/operator_surface.rs`); what is under
+    // test here is only what the watch SAYS about a given reading.
+    for i in 0..80i64 {
+        refusals.observe_refusal_at(
+            found_at - Duration::minutes(i),
+            &unknown_key(STUCK[(i % 2) as usize]),
+        );
+    }
+    let (emit, log) =
+        log_capture::capture(tick(&mut watch, &engine, Some(&refusals), found_at)).await;
+    assert_eq!(emit, Some(Emit::Changed));
+    let errors = log.at(tracing::Level::ERROR);
+    assert_eq!(
+        errors.len(),
+        1,
+        "a plane that has admitted nothing for two days must reach the log at ERROR, without \
+         anyone asking:\n{}",
+        log.render()
+    );
+    // The message names both conditions by their looked-up ids, so the log line
+    // and the operator surface cannot drift into two vocabularies.
+    let said = &errors[0].message;
+    assert!(
+        said.contains("operator.trace_plane.dark"),
+        "the line must name the trace-plane condition: {said}"
+    );
+    assert!(
+        said.contains("operator.ingest.stuck_producer"),
+        "...and WHY, which is the half that says whether to go fix a producer or go find the \
+         routing: {said}"
+    );
+
+    // ── (3) Unchanged: it does not say it again on the next tick ────────────
+    let (emit, log) = log_capture::capture(tick(
+        &mut watch,
+        &engine,
+        Some(&refusals),
+        found_at + Duration::minutes(15),
+    ))
+    .await;
+    assert_eq!(
+        emit, None,
+        "an unchanged red is restated on a six-hourly cadence, not every tick — an alarm that \
+         repeats every fifteen minutes is one an operator filters out, and the filter takes the \
+         next incident with it"
+    );
+    assert!(log.events().is_empty(), "{}", log.render());
 }
 
 /// **The three trace-plane zeroes, driven through the real corpus reader.**

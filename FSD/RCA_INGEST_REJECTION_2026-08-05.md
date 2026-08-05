@@ -151,6 +151,50 @@ shown able to fail, in the same session it is trusted.**
 
 ---
 
+## What 0.5.156 actually proves — and what it does not
+
+The release gate for 0.5.156 ran the fixes above rather than reading them.
+`tests/trace_plane_release_gate.rs` drives a signed batch through the real HTTP
+route, the real verify-before-persist gate and the real corpus, and thirteen
+mutations were applied to confirm every check can fail. **Two of those mutations
+were caught by nothing that existed before the gate was written**, and both are
+worth naming because both are this RCA's own shape:
+
+- the composition minted a **second** refusal ledger, so the ingest route counted
+  into one nobody read while the operator surface reported `not_exercised` on a
+  node returning 401s. 332 tests stayed green.
+- the ingest band was dropped from the headline roll-up, so a red
+  `stuck_producer` was invisible behind a green trace plane — which is exactly
+  the 33-hour overlap window above. 332 tests stayed green.
+
+Both are now unrepresentable or gated. `trace_plane_watch` also closes the half
+the fix list did not name: #369 built the signal and left it **pull**, and this
+node runs seven periodic loops none of which asks whether the trace plane is
+alive. It is the eighth, edge-triggered so it cannot become the log volume
+nobody read.
+
+**The residual, stated plainly, because a release note that omits it is the same
+kind of document as a health check that cannot fail:**
+
+1. **In-process coverage is not a live mesh.** Everything above runs
+   `sqlite::memory:` with an in-process router. There is no Reticulum, no real
+   peer, and no Caddy bridge. The production ingest path depends on that bridge
+   forwarding `/lens-api/api/v1/accord/events` verbatim; a bridge
+   misconfiguration produces symptoms **identical** to this outage and this
+   suite would stay green throughout.
+2. **The Reticulum ingest leg is not counted at all.** `IngestRefusals` covers
+   the HTTP path only — the payload says so — so a `clean` ingest reading is not
+   a statement about every way a trace can be offered to this node.
+3. **`last_admitted_at` is the producer's clock, not this node's.** `trace_events`
+   carries no server-side admission instant (CIRISPersist#606). A producer whose
+   clock runs slow pins the plane dark while it is being fed; one whose clock runs
+   fast is only prevented from pinning it green by a token spent on saying so.
+4. **`unreadable` is composed, never driven.** No backend can be made to fail on
+   demand (CIRISPersist#604), and `store_unavailable` on
+   `GET /v1/federation/identity` is uncovered for the same reason. Not faked.
+5. **The ledger is process-local.** It resets on restart and is stored nowhere,
+   so a crash-looping node loses the very reading that would explain why.
+
 ## The lesson worth keeping
 
 Every layer behaved correctly. The producer signed, the server verified, the

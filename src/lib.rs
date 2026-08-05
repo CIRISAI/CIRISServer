@@ -350,6 +350,13 @@ pub mod system_data;
 pub mod telemetry_logs;
 #[cfg(feature = "test-anchor")]
 mod test_bless;
+/// CIRISServer#369 follow-on — **the periodic reader for the trace-plane band.**
+/// #369 built the signal and `GET /v1/node/state` renders it, but that surface is
+/// PULL: this process runs seven periodic loops and not one of them asks whether
+/// the plane this node exists to receive on is alive. This is the eighth, and it
+/// writes the verdict to the node log — edge-triggered, so it cannot become the
+/// log volume nobody read.
+pub mod trace_plane_watch;
 // TEST-ANCHOR-ONLY QA — mint a portable trust root (accord + canonical) in
 // substrate test mode and USE it: the acceptance gate for the next persist
 // repin (CIRISPersist#486/#488). It lives in `tests/trust_root_qa.rs`, NOT here,
