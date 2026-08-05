@@ -42,6 +42,11 @@ use tokio::sync::watch;
 use ciris_lens_core::capacity::CapacityAttestation;
 use ciris_lens_core::scoring;
 use ciris_persist::federation::envelope::paths;
+/// The four stances persist's ONE canonical scoped-consent fold can return.
+/// Named here rather than path-qualified at the match arm so the gate reads as
+/// the four-way question it is — and so a fifth stance CC might add would fail
+/// to compile at the arm rather than fold silently into "declined".
+use ciris_persist::federation::hard_case::ConsentState;
 use ciris_persist::federation::types::cohort_scope;
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
@@ -292,6 +297,10 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     let mut empty_matrix_agents = 0usize;
     let mut unchanged_agents = 0usize;
     let mut not_consented_agents = 0usize;
+    // CIRISServer#351 — counted SEPARATELY from `not_consented_agents`, and
+    // deliberately absent from `accounted` below: an unreadable consent fold
+    // must never help a zero-emission pass read as a healthy steady state.
+    let mut consent_unreadable_agents = 0usize;
     let mut unregistered_agents = 0usize;
     let mut emitted = 0usize;
     for (agent_id_hash, traces) in by_agent {
@@ -323,12 +332,28 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             // from "nothing to say it with".
             // Declining to be scored is a permanent, legitimate choice. Count
             // it; do not alarm on it.
-            Ok(ScoreOutcome::NotConsented) => {
+            Ok(ScoreOutcome::NotConsented { stance }) => {
                 not_consented_agents += 1;
                 tracing::debug!(
                     agent = %attested_key_id,
+                    ?stance,
                     "capacity scorer: no live CC#46 `analyze` consent from this subject — \
                      skipping (an allowed choice, not a fault)"
+                );
+            }
+            // The subject's answer could not be READ (CIRISServer#351). Not the
+            // arm above: that one is the gate working. This one is the gate
+            // blind, and CC 3.4.5 makes `capacity:*` the only family whose
+            // admission turns on a consent read at all — so a failed read stops
+            // the whole family. Per-agent at DEBUG (the 24,500-lines-a-day
+            // lesson), aggregated into the pass line at WARN.
+            Ok(ScoreOutcome::ConsentUnreadable { error }) => {
+                consent_unreadable_agents += 1;
+                tracing::debug!(
+                    agent = %attested_key_id,
+                    %error,
+                    "capacity scorer: the CC#46 `analyze` consent fold FAILED TO READ for this \
+                     subject — this is NOT a decline; see the pass line"
                 );
             }
             Ok(ScoreOutcome::Unchanged {
@@ -416,7 +441,13 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             .await
             .map(|p| p.items.len())
             .unwrap_or(usize::MAX);
-        let narrowing = if raw_trace_events == usize::MAX {
+        let narrowing = if consent_unreadable_agents > 0 {
+            // FIRST, ahead of every corpus narrowing below: the traces arrived
+            // and were read fine; what failed is the CC#46 gate's own input.
+            // Reporting this as "feature semantics" would send the reader to the
+            // trace plane for a fault in the consent plane (CIRISServer#351).
+            "THE CONSENT FOLD FAILED TO READ — this is NOT a subject declining. CC 3.4.5              makes `capacity:*` the one family gated on a consent read, so a failed read stops              the family. Check the federation directory backend handle, then                `resolve_scoped_consent` for the (attester, subject, `analyze`) triple"
+        } else if raw_trace_events == usize::MAX {
             "read FAILED — the summary read itself errored; the scorer cannot see the corpus"
         } else if raw_trace_events == 0 {
             "nothing arrived — the corpus has no traces this scorer can read (delivery, not scoring)"
@@ -438,14 +469,48 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         // So account for the agents first: if every agent this pass is either
         // already-standing, feature-less, or unregistered, the zero is EXPLAINED
         // and it is not a fault.
+        //
+        // `consent_unreadable_agents` is NOT in this sum, and that omission is
+        // the fix (CIRISServer#351). An outcome only accounts for a zero if it
+        // is a state the system is legitimately allowed to be in; a consent fold
+        // that cannot be read is not one, so it can never make a zero look
+        // healthy. Before the split it did exactly that twice over — it counted
+        // as `not_consented_agents`, which both entered this sum AND satisfies
+        // the `|| not_consented_agents > 0` trigger, so a total failure of the
+        // consent read logged INFO "steady state, not a fault" for every agent
+        // in the corpus.
         let accounted =
             unchanged_agents + not_consented_agents + empty_matrix_agents + unregistered_agents;
-        if (unchanged_agents > 0 || not_consented_agents > 0) && accounted >= n_agents {
+        if consent_unreadable_agents > 0 {
+            // Its own line, ahead of the generic zero WARN, because the MESSAGE
+            // is what an operator reads: "the agents do not account for it" sends
+            // them to the trace plane, and the trace plane is fine — the traces
+            // arrived, the read saw them, and the CC#46 gate's own input is what
+            // went missing. The `narrowing` field says the same thing; a fact
+            // that only exists in a structured field is a fact most readers of a
+            // log line do not have.
+            tracing::warn!(
+                n_summaries,
+                n_agents,
+                unchanged_agents,
+                not_consented_agents,
+                consent_unreadable_agents,
+                empty_matrix_agents,
+                unregistered_agents,
+                window = cfg.window,
+                raw_trace_events,
+                narrowing,
+                "capacity scorer pass emitted ZERO because the CC#46 `analyze` consent fold \
+                 FAILED TO READ — these subjects did NOT decline, their answer is unreadable, \
+                 and capacity:* is the one family CC 3.4.5 gates on that read"
+            );
+        } else if (unchanged_agents > 0 || not_consented_agents > 0) && accounted >= n_agents {
             tracing::info!(
                 n_summaries,
                 n_agents,
                 unchanged_agents,
                 not_consented_agents,
+                consent_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
                 "capacity scorer pass authored nothing — every score already stands within its \
@@ -457,6 +522,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 n_agents,
                 unchanged_agents,
                 not_consented_agents,
+                consent_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
                 window = cfg.window,
@@ -467,6 +533,23 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                  `narrowing` for which plane stopped it"
             );
         }
+    } else if consent_unreadable_agents > 0 {
+        // A PARTIAL consent-fold failure is still a failure (CIRISServer#351).
+        // `emitted > 0` says some subjects' answers were readable; it says
+        // nothing about the ones whose were not, and folding those into the
+        // "pass complete" INFO is how a gate degrades silently — the majority
+        // path stays green while the gate goes blind for a subset.
+        tracing::warn!(
+            n_summaries,
+            n_agents,
+            emitted,
+            unchanged_agents,
+            not_consented_agents,
+            consent_unreadable_agents,
+            unregistered_agents,
+            "capacity scorer pass authored rows BUT the CC#46 `analyze` consent fold failed to \
+             read for some subjects — those are NOT declines and were not scored"
+        );
     } else {
         tracing::info!(
             n_summaries,
@@ -474,6 +557,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             emitted,
             unchanged_agents,
             not_consented_agents,
+            consent_unreadable_agents,
             unregistered_agents,
             "capacity scorer pass complete (capacity attestations authored → replication)"
         );
@@ -742,7 +826,37 @@ enum ScoreOutcome {
     /// production canonical: 17 of 20 agents, 51 WARN lines every three minutes,
     /// roughly 24,500 a day, none of them actionable. An alarm that fires on a
     /// legitimate steady state trains people to ignore the log.
-    NotConsented,
+    ///
+    /// Carries the stance persist's fold actually returned, so the log can name
+    /// WHICH refusal it was: a subject who never spoke (`Unspecified`), one who
+    /// spoke and withdrew (`Revoked`), and one whose grant ran out (`Expired`)
+    /// are three different facts, and only the middle one is someone changing
+    /// their mind.
+    NotConsented { stance: ConsentState },
+    /// **The consent fold could not be READ** (CIRISServer#351).
+    ///
+    /// NOT [`ScoreOutcome::NotConsented`]. "The subject declined" and "we could
+    /// not ask the subject" are opposite facts: the first is the gate working,
+    /// the second is the gate's only input missing. CC 3.4.5 leaves `capacity:*`
+    /// as the ONE family whose admission turns on a consent read — the ruling
+    /// keeps this gate and gates nothing else on a subject's say-so — so a
+    /// consent read that FAILS is that whole gate failing, not a quiet no.
+    ///
+    /// They shared an arm. `resolve_scoped_consent` returns
+    /// `Result<ConsentState, _>` and the gate asked `!matches!(stance,
+    /// Ok(Granted))`, folding every backend error into the one outcome this
+    /// module declares must never alarm — while `not_consented_agents > 0` is
+    /// itself one of the two conditions that promote a zero-emission pass to
+    /// INFO *"steady state, not a fault"*. So a corpus-wide failure of the
+    /// consent read reported, once a minute, that every agent had declined and
+    /// all was well: `FSD/RCA_TRACE_PLANE_2026-07-31.md`'s shape landing on the
+    /// one gate CC 3.4.5 kept.
+    ///
+    /// Deliberately NOT an `Err`: the per-agent `Err` arm WARNs once per agent
+    /// per pass, which is the 24,500-lines-a-day failure the arm above records.
+    /// This is counted, named in the pass line, and — the load-bearing half —
+    /// excluded from the set of outcomes that can account for a zero.
+    ConsentUnreadable { error: String },
     /// The score is unchanged and already stands, asserted within the current
     /// coalescing bucket. Nothing to say; saying it anyway would cost a
     /// permanent, replicated row carrying no new information.
@@ -807,6 +921,18 @@ async fn score_and_emit(
     // unconsented subject costs no hybrid signature, and — the reason this
     // exists — declining is reported as the ordinary state it is rather than as
     // a refused write.
+    // THREE ZEROES, NOT ONE (CIRISServer#351). `resolve_scoped_consent` returns
+    // `Result<ConsentState, _>`, so "did the subject permit this?" has three
+    // possible answers and the gate must not fold two of them together:
+    //   Ok(Granted)   → proceed.
+    //   Ok(_ )        → the subject declined. Legitimate, permanent, never an
+    //                   alarm — and the stance says WHICH decline it was.
+    //   Err(_)        → the subject's answer is UNREADABLE. The gate has no
+    //                   input; this is a fault, and it is the fault that used to
+    //                   be indistinguishable from the line above.
+    // Fail-closed is preserved in every arm — nothing is emitted unless the fold
+    // returns `Granted`. What changes is what the instrument SAYS about the two
+    // ways it can fail to.
     let stance = engine
         .federation_directory()
         .resolve_scoped_consent(
@@ -817,11 +943,14 @@ async fn score_and_emit(
             now,
         )
         .await;
-    if !matches!(
-        stance,
-        Ok(ciris_persist::federation::hard_case::ConsentState::Granted)
-    ) {
-        return Ok(ScoreOutcome::NotConsented);
+    match stance {
+        Ok(ConsentState::Granted) => {}
+        Ok(declined) => return Ok(ScoreOutcome::NotConsented { stance: declined }),
+        Err(e) => {
+            return Ok(ScoreOutcome::ConsentUnreadable {
+                error: e.to_string(),
+            })
+        }
     }
 
     // Already said this, in this bucket? Then there is nothing new to assert,
@@ -899,9 +1028,13 @@ async fn score_and_emit(
 mod outcome_accounting_tests {
     /// **A legitimate steady state must never be an alarm.**
     ///
-    /// Every arm of [`super::ScoreOutcome`] except `Emitted` must be counted
-    /// into the zero-path accounting, or the pass WARNs that "the agents do not
-    /// account for" a zero it can perfectly well account for.
+    /// Every arm of [`super::ScoreOutcome`] that names a state the system is
+    /// ALLOWED to be in must be counted into the zero-path accounting, or the
+    /// pass WARNs that "the agents do not account for" a zero it can perfectly
+    /// well account for. The one arm that is not such a state —
+    /// `ConsentUnreadable` — is held out by
+    /// [`an_unreadable_consent_fold_never_accounts_for_a_zero`], which is the
+    /// other half of this rule and not an exception to it.
     ///
     /// Measured before this was fixed: 17 of 20 agents on the production
     /// canonical had not granted CC#46 `analyze` consent — a permanent, allowed
@@ -939,6 +1072,63 @@ mod outcome_accounting_tests {
                  gets missed.\naccounting: {accounted}"
             );
         }
+    }
+
+    /// **An unreadable consent fold never accounts for a zero** — the inverse
+    /// of the rule above, and the CIRISServer#351 fix (CC 3.4.5).
+    ///
+    /// CC 3.4.5 ratifies consent-before-scoring for `capacity:*` and for nothing
+    /// else: it is the ONE family whose admission turns on reading a subject's
+    /// answer. So the answer being UNREADABLE is not one of the states this pass
+    /// is allowed to sit in, and it must not be able to make a zero-emission
+    /// pass read as healthy.
+    ///
+    /// Before the split it could, twice over. `Err(_)` from
+    /// `resolve_scoped_consent` folded into `NotConsented`, which (a) entered
+    /// `accounted` and (b) is itself one of the two triggers for the INFO
+    /// *"steady state, not a fault"* line. A corpus-wide failure of the consent
+    /// read therefore printed, once a minute, that every agent had declined and
+    /// all was well — an instrument reporting its own blindness as the subjects'
+    /// choice, which is the `FSD/RCA_TRACE_PLANE_2026-07-31.md` shape landing on
+    /// the one gate the ruling kept.
+    ///
+    /// Source-asserted for the same reason as the test above: both conditions
+    /// are properties of expressions, not of any value they produce.
+    #[test]
+    fn an_unreadable_consent_fold_never_accounts_for_a_zero() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scorer.rs"),
+        )
+        .expect("readable");
+        let code = src.split("#[cfg(test)]").next().expect("code");
+        let (_, after) = code
+            .split_once("let accounted =")
+            .expect("the zero-path accounting must exist");
+        let accounted = after.split(';').next().unwrap_or("");
+        assert!(
+            !accounted.contains("consent_unreadable_agents"),
+            "`consent_unreadable_agents` is in the zero-path accounting, so a pass whose \
+             consent fold failed for EVERY agent counts as fully explained. \"The subject \
+             declined\" and \"we could not read the subject's answer\" are opposite facts; \
+             only the first accounts for a zero.\naccounting: {accounted}"
+        );
+
+        // …and it must be DECIDED BEFORE the quiet branch, not merely left out
+        // of the sum: a single readable decline plus N unreadable folds would
+        // otherwise still satisfy `unchanged || not_consented` and log INFO.
+        // Everything between the accounting and the first `tracing::info!` is
+        // the guard the quiet line sits behind.
+        let before_the_quiet_line = after
+            .split_once("tracing::info!")
+            .map(|(guard, _)| guard)
+            .unwrap_or("");
+        assert!(
+            before_the_quiet_line.contains("consent_unreadable_agents > 0"),
+            "nothing between the zero-path accounting and the INFO \"steady state, not a \
+             fault\" line tests `consent_unreadable_agents`, so one readable decline is enough \
+             to let an otherwise-blind pass report itself healthy.\nguard: \
+             {before_the_quiet_line}"
+        );
     }
 }
 

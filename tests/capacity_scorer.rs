@@ -35,6 +35,8 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 
 use ciris_server::scorer::{self, ScorerConfig};
 
+#[path = "support/log_capture.rs"]
+mod log_capture;
 #[path = "support/revocation.rs"]
 mod revocation;
 
@@ -580,4 +582,215 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
         "a capacity row whose author's statements are revoked from an earlier instant must \
          not count as a standing assertion — otherwise one forged row silences the scorer"
     );
+}
+
+// ── CIRISServer#351 — "the subject declined" is not "we could not ask" ───────
+//
+// CC 3.4.5 ratifies consent-before-scoring and scopes it to `capacity:*` alone:
+// the artifact-integrity and adversarial-detector families stay ungated ("a
+// forger never consents to verification"; an adversary must not be able to opt
+// out of `rollback_detected`). That ruling makes this scorer's `analyze`-consent
+// check the ONE place in the server where a subject's own answer decides whether
+// a row about them may exist — so an instrument that cannot tell that answer
+// from its own failure to read it is a hole in the only gate the ruling kept.
+
+/// Stand up Node A on a **file-backed** sqlite DB, so a second connection can
+/// reach the same tables. `sqlite::memory:` is private to the engine's own
+/// connection — the same reason `tests/audit_chain.rs` uses a file DSN.
+///
+/// Otherwise identical to [`node_a_with_keys`]: the scorer hybrid-signs, so the
+/// node signer needs a real ML-DSA-65 half, and the returned pubkeys are the
+/// ones that must be registered for its own emits to admit.
+async fn node_a_on_disk(db_path: &str) -> (Arc<Engine>, String, String) {
+    use ciris_keyring::PqcSigner as _;
+    let signing_key = SigningKey::from_bytes(&[0xA1; 32]);
+    let ed_pub_b64 = BASE64.encode(signing_key.verifying_key().to_bytes());
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_KEY_ID}-pqc"))
+            .expect("node-a ML-DSA-65 seed"),
+    );
+    let mldsa_pub_b64 = BASE64.encode(pqc.public_key().await.expect("node-a ML-DSA-65 pubkey"));
+    let signer = Arc::new(LocalSigner::from_parts(
+        signing_key,
+        NODE_KEY_ID.to_string(),
+        Some(pqc),
+        Some(format!("{NODE_KEY_ID}-pqc")),
+    ));
+    // DSN: persist strips `sqlite:///` INCLUDING the leading slash, so an
+    // absolute path is glued onto the scheme (→ `sqlite:////abs/path`).
+    let engine = Engine::with_signer(signer, &format!("sqlite:///{db_path}"))
+        .await
+        .expect("Engine::with_signer (file-backed sqlite)");
+    (Arc::new(engine), ed_pub_b64, mldsa_pub_b64)
+}
+
+/// Rename `federation_attestations` on a SECOND connection to the engine's own
+/// DB file, so persist's `resolve_scoped_consent` — which reads that table
+/// through `list_attestations_for` — returns `Err` instead of a stance.
+///
+/// This is the only honest way to produce the condition. The fold is persist's
+/// canonical one and the server deliberately does not re-implement it (a second
+/// implementation of a rule is a second answer that can disagree), so the error
+/// has to come from the real backend rather than from a stubbed trait. Renaming
+/// rather than dropping keeps the corpus intact, which is what lets the same
+/// test put it back and prove the pass goes quiet again.
+fn set_consent_fold_readable(db_path: &std::path::Path, readable: bool) {
+    let conn = rusqlite::Connection::open(db_path).expect("open fault-injection connection");
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .expect("busy_timeout");
+    let sql = if readable {
+        "ALTER TABLE federation_attestations_hidden RENAME TO federation_attestations"
+    } else {
+        "ALTER TABLE federation_attestations RENAME TO federation_attestations_hidden"
+    };
+    conn.execute_batch(sql)
+        .expect("rename federation_attestations");
+}
+
+/// **An unreadable consent fold must not report itself as the subject's choice.**
+///
+/// The three zeroes this pass has to keep apart:
+///
+/// | fact | rows authored | what an operator must read |
+/// |---|---|---|
+/// | the subject granted `analyze` | one | routine |
+/// | the subject declined | none | routine, permanent, **never an alarm** |
+/// | the subject's answer is unreadable | none | **a fault** |
+///
+/// Before CIRISServer#351 the third collapsed into the second:
+/// `resolve_scoped_consent` returns `Result<ConsentState, _>` and the gate asked
+/// `!matches!(stance, Ok(Granted))`, so every backend error became "declined" —
+/// and because `not_consented_agents > 0` is one of the two triggers for the
+/// INFO *"steady state, not a fault"* pass line, a corpus-wide failure of the
+/// consent read printed, once a minute, that every agent had declined and all
+/// was well.
+///
+/// Asserted on the LOG, not on a return value, because both readings return
+/// `Ok(0)`: the difference between them exists only in what the pass said.
+#[tokio::test]
+async fn an_unreadable_consent_fold_is_not_a_decline() {
+    let dir = std::env::temp_dir().join(format!("ciris-351-consent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let db_path = dir.join("node-a.db");
+    let (node, node_ed_pub_b64, node_mldsa_pub_b64) =
+        node_a_on_disk(&db_path.to_string_lossy()).await;
+
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
+    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let node_key_id = node
+        .local_derived_key_id()
+        .await
+        .expect("derive node federation key_id");
+    register_key_hybrid(
+        &node,
+        &node_key_id,
+        &node_ed_pub_b64,
+        Some(&node_mldsa_pub_b64),
+        identity_type::NODE,
+    )
+    .await;
+    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    for i in 0..30usize {
+        node.receive_and_persist(&build_trace_batch(&agent_sk, &mldsa, i), &NullScrubber)
+            .await
+            .expect("ingest synthetic trace");
+    }
+    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+
+    let cfg = ScorerConfig {
+        cadence: std::time::Duration::from_secs(3600),
+        window: 500,
+        sample_size_gate: 2,
+        target_n_eff: 8.0,
+    };
+
+    // (1) GREEN — the subject consented, the fold is readable, a row is
+    //     authored, and the pass says nothing alarming.
+    let (emitted, log) = log_capture::capture(scorer::run_pass(&node, &node_key_id, &cfg)).await;
+    assert_eq!(
+        emitted.expect("consented pass"),
+        1,
+        "a consented subject with a full trace window must be scored"
+    );
+    assert!(
+        log.alarms().is_empty(),
+        "the consented path must not alarm:\n{}",
+        log.render()
+    );
+
+    // (2) BREAK the gate's only input. Nothing about the subject's answer has
+    //     changed — the grant is still in the corpus, untouched.
+    set_consent_fold_readable(&db_path, false);
+
+    let (emitted, log) = log_capture::capture(scorer::run_pass(&node, &node_key_id, &cfg)).await;
+    assert_eq!(
+        emitted.expect("the pass itself must survive an unreadable fold"),
+        0,
+        "fail-closed: an unreadable consent answer authors nothing"
+    );
+
+    // The load-bearing assertions. `Ok(0)` is also what a corpus of declining
+    // subjects returns, so the only place the difference can live is the log.
+    let alarms = log.alarms();
+    assert!(
+        !alarms.is_empty(),
+        "an unreadable CC#46 consent fold was reported with NO alarm at all — the gate went \
+         blind and the pass read as routine.\n{}",
+        log.render()
+    );
+    assert!(
+        alarms
+            .iter()
+            .any(|e| e.message.contains("consent fold") && e.message.contains("FAILED TO READ")),
+        "no alarm names the CONSENT FOLD as what failed. The reader has to be sent to the \
+         consent plane, not the trace plane — the traces arrived and were read fine.\n{}",
+        log.render()
+    );
+    assert!(
+        log.events()
+            .iter()
+            .all(|e| !e.message.contains("steady state, not a fault")),
+        "the pass reported a blind consent gate as a healthy steady state — the exact \
+         collapse CIRISServer#351 is about.\n{}",
+        log.render()
+    );
+    assert!(
+        log.events()
+            .iter()
+            .any(|e| e.message.contains("NOT a decline")),
+        "the per-agent line must say the subject did not decline: \"no consent\" and \"no \
+         answer\" are opposite facts about the subject.\n{}",
+        log.render()
+    );
+
+    // (3) RESTORE — same corpus, same subject, same grant. The fold is readable
+    //     again, the score already stands, and the pass goes quiet. Without this
+    //     leg the test would pass equally well against a scorer that alarms
+    //     unconditionally.
+    set_consent_fold_readable(&db_path, true);
+
+    let (emitted, log) = log_capture::capture(scorer::run_pass(&node, &node_key_id, &cfg)).await;
+    assert_eq!(
+        emitted.expect("restored pass"),
+        0,
+        "the score is unchanged inside its coalescing bucket, so nothing new is authored"
+    );
+    assert!(
+        log.alarms().is_empty(),
+        "with the fold readable again the pass must be quiet — an alarm that never clears is \
+         the same instrument failure pointed the other way:\n{}",
+        log.render()
+    );
+    assert!(
+        log.events()
+            .iter()
+            .any(|e| e.message.contains("steady state, not a fault")),
+        "the restored pass must be AUDIBLE about being healthy, not merely silent — a silent \
+         pass and a dead loop look identical from outside (CIRISServer#315).\n{}",
+        log.render()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
