@@ -78,12 +78,55 @@
 //! The ids are wire-stable: renaming one silently un-translates that string in
 //! every locale. If the MEANING changes, mint a new id (`…:v2`).
 //!
+//! # Tier S — self-directed (CIRISServer#345)
+//!
+//! ```text
+//! GET  /v1/admin/self                    the three standings, never folded together
+//! POST /v1/admin/self/shed               shed my own load        (+ resume-load)
+//! POST /v1/admin/self/stop-accepting     stop accepting          (+ resume-accepting)
+//! POST /v1/admin/self/compelled          declare legal compulsion(+ compulsion-lifted)
+//! ```
+//!
+//! Every rung above acts on someone else. Tier S is the only one available
+//! under **partition** — a node that cannot reach its peers can still act on
+//! itself — so every call on it is local: the owner-binding walk, the config
+//! write and the tombstone all touch this node's own database and nothing
+//! else. See [`SelfAct`].
+//!
+//! Its authority is the **owner-binding**, re-derived exactly like every other
+//! rung's ([`REQUIRED_SCOPE_SELF_DIRECTED`]) and additionally required to be
+//! issued by the party [`is_steward_bound`](crate::auth::ownership::is_steward_bound)
+//! resolves as this node's responsible party — a third party's `infra:serve`
+//! grant is not the owner's.
+//!
+//! # Tier R — subject-side / per-reader (CIRISServer#345)
+//!
+//! ```text
+//! POST /v1/admin/reader/fold             read-only: what THIS reader does with what it holds
+//! POST /v1/admin/reader/honour           adopt one judgement    (proportion-gated)
+//! POST /v1/admin/reader/decline          refuse one judgement   (a NORMAL outcome)
+//! ```
+//!
+//! NoCeM's actual property: a signed judgement takes effect at a consumer that
+//! *chose* to honour that signer. Tiers 1–4 apply automatically at the
+//! consumer, which is the property NoCeM was invented to avoid; tier R is the
+//! reader's own accept/refuse policy over other parties' judgements, and a
+//! decline is a **first-class outcome, never an error**.
+//!
+//! The reader's policy is not invented here: it is this node's own
+//! `trust:accepts:v1` subscription set
+//! ([`trusted_roots_of`](ciris_persist::federation::trust_root::trusted_roots_of)),
+//! composed with persist's own scoped-delegation walk and folded by persist's
+//! own **pure** [`fold_quarantine`](ciris_persist::federation::quarantine::fold_quarantine).
+//! Only the *which signers* predicate is ours — the same shape
+//! `fold_mesh_config(…, roots, …)` already takes.
+//!
 //! # Deliberately NOT here
 //!
-//! Tiers S (self-directed) and R (subject-side reader policy), and everything
-//! on the mesh-config plane. The latter is blocked on CIRISConstitution#57:
-//! CC 4.2.1 scopes accord signatures to `EmergencyShutdown` alone, so nobody
-//! may sign a mesh-config row yet.
+//! Everything on the mesh-config **federation** plane (the root-authored rows);
+//! that surface is [`crate::mesh_config_surface`]. Tier S writes only this
+//! node's own SELF-plane baseline, which persist's fold composes
+//! restriction-only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -98,20 +141,27 @@ use sha2::{Digest, Sha256};
 
 use ciris_persist::ceg::list::federation::AttestationFilter;
 use ciris_persist::federation::admission::{
-    DELEGATION_SCOPE_MODERATE, DELEGATION_SCOPE_REVIEW, DELEGATION_SCOPE_SLASH,
-    MAX_MODERATION_DELEGATION_DEPTH,
+    reachable_under_scope_with_reasons, DELEGATION_SCOPE_MODERATE, DELEGATION_SCOPE_REVIEW,
+    DELEGATION_SCOPE_SLASH, MAX_MODERATION_DELEGATION_DEPTH, QUARANTINE_DIMENSION_PREFIX,
 };
 use ciris_persist::federation::envelope::paths;
-use ciris_persist::federation::hard_case::{admin_action_event, admin_op, HardCaseEvent};
+use ciris_persist::federation::hard_case::{
+    admin_action_event, admin_action_kind, admin_op, HardCaseEvent, HardCaseFilter,
+};
 use ciris_persist::federation::quarantine;
+use ciris_persist::federation::trust_root::trusted_roots_of;
 use ciris_persist::federation::types::{
     attestation_tier, attestation_type, cohort_scope, Attestation, Revocation, SignedRevocation,
 };
+use ciris_persist::federation::MeshConfigKey;
 use ciris_persist::prelude::{CallerScope, Engine};
 
 use crate::auth::gate::CapabilityVerb;
+use crate::auth::ownership::{is_steward_bound, INFRA_SERVE};
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
+use crate::graph_config::{self, ConfigScope, ConfigValue};
+use crate::mesh_config_surface::BASELINE_CONFIG_PREFIX;
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Vocabulary
@@ -165,6 +215,44 @@ pub const OP_THROTTLE_RELEASE: &str = "throttle_release";
 pub const OP_DESCEND: &str = "descend";
 /// `admin_action:{op}` suffix for the tier 4 reversal.
 pub const OP_RE_ADMISSION: &str = "re_admission";
+
+/// **The delegation scope every tier S and tier R op requires.**
+///
+/// `infra:serve` — "serve reads / relay / store / transport", the scope the CC
+/// 3.2 owner-binding stamps
+/// ([`OWNER_BINDING_INFRA_SCOPES`](crate::auth::ownership::OWNER_BINDING_INFRA_SCOPES)).
+/// Both families change what THIS node does with its own serving: tier S sheds
+/// or closes it, tier R decides whose judgements it honours about what it
+/// serves. Neither is a duty over another party, so neither takes a moderation
+/// scope a third party granted — which is also why tier S survives partition:
+/// the only chain it walks is the one its owner already gave it.
+pub const REQUIRED_SCOPE_SELF_DIRECTED: &str = INFRA_SERVE;
+
+/// `admin_action:{op}` suffix — tier S, "shed my own load".
+pub const OP_SELF_SHED: &str = "self_shed";
+/// `admin_action:{op}` suffix — the tier S shed reversal.
+pub const OP_SELF_SHED_RELEASE: &str = "self_shed_release";
+/// `admin_action:{op}` suffix — tier S, "stop accepting".
+pub const OP_SELF_STOP_ACCEPTING: &str = "self_stop_accepting";
+/// `admin_action:{op}` suffix — the tier S stop-accepting reversal.
+pub const OP_SELF_ACCEPTING_RESUMED: &str = "self_accepting_resumed";
+/// `admin_action:{op}` suffix — tier S, "declare legal compulsion". **Its own
+/// op, never a flavour of [`OP_SELF_STOP_ACCEPTING`]**: a reader has to be able
+/// to tell *this node chose to stop* from *this node was made to stop*.
+pub const OP_SELF_COMPELLED: &str = "self_compelled";
+/// `admin_action:{op}` suffix — a declared compulsion has ended.
+pub const OP_SELF_COMPULSION_LIFTED: &str = "self_compulsion_lifted";
+
+/// `admin_action:{op}` suffix — tier R, "I honour this judgement".
+pub const OP_READER_HONOUR: &str = "reader_honour";
+/// `admin_action:{op}` suffix — tier R, "I do not honour this judgement".
+/// Recorded as its own act because a decline is a decision, and the whole point
+/// of the rung is that it is not an error.
+pub const OP_READER_DECLINE: &str = "reader_decline";
+
+/// Hard ceiling on the judgement set one tier R fold reads. A fold an operator
+/// cannot read is not evidence.
+pub const MAX_JUDGEMENT_PAGE: i64 = 2_000;
 
 /// Default page size for a preview. A bound, not a working set.
 pub const DEFAULT_PREVIEW_LIMIT: i64 = 500;
