@@ -891,7 +891,7 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         shutil.rmtree(root / SERVER_SRC)
 
     def server_id_text_truncated(root: Path) -> None:
-        """THE 2026-08-05 defect: en.json carries a PREFIX of what the server emits.
+        r"""THE 2026-08-05 defect: en.json carries a PREFIX of what the server emits.
 
         Key sets, resolvability, placeholder parity and bundle mirroring all stay
         green over a value cut mid-word — 55 real ids shipped that way, because
@@ -927,7 +927,7 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
 def _truncate_nav_home(root: Path) -> None:
-    """The 2026-08-05 defect, reproduced: en.json carries a PREFIX of the text the
+    r"""The 2026-08-05 defect, reproduced: en.json carries a PREFIX of the text the
     server actually emits. Key sets, resolvability, placeholders and mirroring all
     stay green — 55 real ids shipped this way, cut mid-word at ~80 chars, because
     the extractor's regex stopped at the first `\` of a continued Rust literal."""
