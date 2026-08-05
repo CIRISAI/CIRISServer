@@ -113,6 +113,54 @@ consented to look.
   unauthenticated `POST /v1/accord/canonical/gossip-partial`
 - it is not transitive and cannot be enforced downstream
 
+### The subject's consent gates `capacity:*` and nothing else — on purpose
+
+CIRISServer#351 read the fourth line of the table above the other way round: any
+admitted key can write a signed row *naming anyone*, subject-side consent covers
+`capacity:*` alone, and that looked like the SKS attach-anything shape with one
+family accidentally fenced. CC 3.4.5 has since ruled, and the ruling inverts the
+reading — **the fence is the design, and one family is its intended extent**:
+
+- **Consent-before-scoring is family-scoped to `capacity:*`.** Federation-tier
+  admission requires a live `consent:scope:analyze` grant from the subject
+  covering the scoring community. It is the one place in the whole substrate
+  where a consent record is load-bearing at *admission* rather than only in
+  governance (CC 3.3.7 says so in terms).
+- **The abuse-response families stay open, and generalising the gate would be
+  the bug.** `detection:*`, `moderation:*`, `slashing:*` — *"an abuser never
+  consents to the response to their abuse."*
+- **The fourteen verify families are adjudicated ungated, per family**, on the
+  integrity-not-conduct line: *"a forger never consents to verification"*, and
+  `rollback_detected:{revision_field}` is an adversarial detector nobody may opt
+  out of. Consent gates the family that judges **agents**, never the families
+  that verify **artifacts**. (Filed upstream as CIRISPersist#569; adjudicated,
+  and pinned as `bootstrap_admission` B5/B7.)
+- **A new family cannot land ungated by accident** — CC 3.1.7 R2 makes
+  provisional registration *carrying the intended emitter rule* a producer
+  obligation at mint, and an emission on an unregistered family a conformance
+  failure (`namespace_family_unregistered`) rather than a quiet admit under the
+  ProducerSteward fallback.
+- **The subject's lever is a counter-claim, not a veto or an erasure.**
+  `reconsideration:{grounds}`, on which CC 4.5.5 grants the subject standing
+  explicitly as *"the CC 3.4.5 contestation pair"* — contestation at zero
+  disclosure. It is what makes the CC 2.4.1.1 rule admissible that a subject may
+  **not** withdraw a third-party `capacity:*` or `detection:*` row about itself:
+  selective erasure of adverse evidence is reputation laundering, so the door
+  closes only because a contest path is open. The two are one ruling.
+
+So the asymmetry #351 named is real and it is deliberate: the subject cannot
+refuse attachment, and gets contest instead of veto. What the server owes this
+model is not a second gate — persist's admission gate is the boundary, and a
+second implementation of a rule is a second answer that can disagree — but an
+**honest instrument on the one gate that exists**. `src/scorer.rs` was not one:
+`resolve_scoped_consent` returns `Result<ConsentState, _>` and the gate asked
+`!matches!(stance, Ok(Granted))`, so a consent read that *failed* was reported as
+the subject having *declined* — the one outcome that module declares must never
+alarm, and one of the two triggers for its INFO "steady state, not a fault" pass
+line. A corpus-wide failure of the CC#46 fold therefore logged, once a minute,
+that every agent had declined and all was well. Three zeroes, one arm. Fixed and
+mutation-pinned; the remaining upstream ask is in §8.
+
 ---
 
 ## 2. Multi-polar roots are the design, not the escape hatch
@@ -394,6 +442,7 @@ Three further asks the tier 0–4 implementation surfaced, all persist:
 
 | ask | why |
 |---|---|
+| **make CC 4.5.5 subject standing on `reconsideration:{grounds}` substrate-reachable** (persist) | The one part of CIRISServer#351 that is ratified but not yet enforceable. CC 4.5.5 grants the **subject of the target attestation** standing to file a contest — normatively, and as *"the CC 3.4.5 contestation pair"* — but its own target→duty-holder resolution table gives `reconsideration:{grounds}` only `is_named_moderator(·, C, review)`. `takedown_notice` got a subject clause; this did not. Persist implements the table (`check_delegated_duty_scores_admission` routes `reconsideration:` → `review`, `duty_holders_for_community`), correctly: #517 removed the earlier seeding from the row's own `subject_key_ids`, because a self-declared subject set lets any Rooted producer file over any community action. So a subject who is not a named moderator cannot file the contest CC says they hold standing to file — and CC 2.4.1.1 closes the `withdraws` path for `capacity:*` / `detection:*` **on the strength of that contest existing**. Persist has already named the resolver: key it on the referenced prior action, not the row's own envelope (`references_attestation_id_from_envelope` + the retained-but-unreachable `duty_holders_from_signed_subjects`, the `subject_of`-style fail-secure shape `takedown_notice` already uses). Needs the CC table row and the persist wiring in one change; **not** a server gate. |
 | `list_attestations` must honour `AttestationFilter::window` | the v17.4.0 window / tier / attester_filter axes are read only by the `list_scores` / `resolve_scores` handles; the general read silently ignores them. Same silent-narrowing class `dimension_exact` was in until v17.5.2 (#461) — a caller sets a predicate and gets rows that do not satisfy it. `src/admin_ops.rs` enforces `after:` in-process and labels the response `window_enforced: "application"` rather than hand an operator a hash over twice the blast radius they ratified. |
 | an assemble-only companion to `emit_attestation_self` | `record_quarantine_marker` takes an already-signed `Attestation`, and every sanctioned emit helper canonicalizes-signs-assembles **and puts**. The one door built for tier 2 cannot be reached through the chokepoint built to stop hand-rolled rows. |
 | export a "does THIS delegation row carry scope S" predicate | `delegation_scope_set` is `pub(crate)`, so the only public authority question is `reachable_under_scope(issuer → actor, S)` — which is true the moment the issuer granted S by ANY edge. On its own that lets a `review` delegation be *recorded* as the authority for a `slash` act. |
