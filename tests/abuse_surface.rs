@@ -31,7 +31,7 @@
 //! | 4 | `capacity:*` self-inflation is refused three ways | **control**, exercised at all three doors |
 //! | 4b | …and a two-key Sybil still lands it | **residual** (FSD §7: m-of-n counts keys) |
 //! | 5 | AV-77 de-admission really does stop a hostile peer's writes | **control that fires** |
-//! | 5b | …and **no route in this server emits it** | **the recourse gap** |
+//! | 5b | …and `src/admin_ops.rs` now emits the row (`POST /v1/admin/refuse-writes`, CIRISServer#375) | **the recourse gap, CLOSED** |
 //! | 5c | a de-admitted key keeps the one dimension that de-admits others | **HOLE** |
 //! | 6 | `PeerWriteQuota` refuses a flood, and **nothing here counts the refusal** | **control with no reader** |
 //!
@@ -791,7 +791,7 @@ async fn node_signed_row(
     }
 }
 
-/// **PINS A CONTROL THAT FIRES — and the caller that does not exist.**
+/// **PINS A CONTROL THAT FIRES — and, since CIRISServer#375, its caller.**
 ///
 /// AV-77 (`revocation:peer_admission:v1`, persist v22.0.0 / #543 finding 5) is
 /// the only primitive in the whole stack that *stops a hostile admitted peer
@@ -801,19 +801,22 @@ async fn node_signed_row(
 /// This test drives it end to end: the abuser writes, the node emits the
 /// de-admission, the abuser's next write is REFUSED. The control is real.
 ///
-/// The second half is the finding. **No route in this server emits that row.**
-/// `POST /v1/admin/deadmit` — tier 4, the rung named "de-admit — key may no
-/// longer write" — writes a `Revocation` on the append-only key plane instead,
-/// and says so itself: *"It is evidence a reader folds, not a door that
-/// slams … the replication cursors and row ingest all deliberately keep
-/// working."* Those are two different acts and only one of them stops writes.
+/// The second half used to be the finding: **no route in this server emitted
+/// that row.** `POST /v1/admin/deadmit` — tier 4, the rung named "de-admit —
+/// key may no longer write" — writes a `Revocation` on the append-only key
+/// plane instead, and says so itself: *"It is evidence a reader folds, not a
+/// door that slams … the replication cursors and row ingest all deliberately
+/// keep working."* Those are two different acts and only one of them stops
+/// writes. `POST /v1/admin/refuse-writes` is the other one, and
+/// `tests/admin_ops.rs::refuse_writes_stops_the_next_write_and_accept_writes_admits_it_again`
+/// walks the same round trip through the HTTP route.
 ///
-/// So the gate is armed, proven, and unreachable from any operator surface. The
-/// source scan below is what keeps that claim honest as the code moves — the
-/// same discipline `tests/commons_surface.rs::property_2_*` applies to
-/// threshold arithmetic.
+/// The source scan below is now the regression pin in the other direction: it
+/// keeps the caller from quietly disappearing and returning the operator to the
+/// armed-and-unreachable state — the same discipline
+/// `tests/commons_surface.rs::property_2_*` applies to threshold arithmetic.
 #[tokio::test]
-async fn av77_deadmission_stops_the_writes_and_no_route_here_emits_it() {
+async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
     let engine = node().await;
     let node_key = register_self(&engine).await;
     self_register(&engine, "av77-victim", identity_type::AGENT)
@@ -890,6 +893,13 @@ async fn av77_deadmission_stops_the_writes_and_no_route_here_emits_it() {
     // literal. Prose about the gate writes it in backticks, which is why
     // `src/compose.rs`'s three accurate paragraphs are not callers — and why
     // the discriminator is the QUOTE, not the token.
+    //
+    // **This half used to assert the list was EMPTY**, and it was — the gate
+    // was armed, proven armed, and unreachable from every operator surface.
+    // CIRISServer#375 landed the caller, so the pin is inverted rather than
+    // deleted: an emitter that quietly disappears again puts the operator back
+    // in the position this test was written to expose, and nothing else in the
+    // suite would notice.
     let mut emitters = Vec::new();
     for entry in walk_rs("src") {
         let text = std::fs::read_to_string(&entry).expect("read source");
@@ -900,10 +910,11 @@ async fn av77_deadmission_stops_the_writes_and_no_route_here_emits_it() {
         }
     }
     assert!(
-        emitters.is_empty(),
-        "PIN: no server surface emits the ONE row that stops a hostile peer writing. If this \
-         list is no longer empty, a caller landed — delete this pin and say so. Found: \
-         {emitters:?}"
+        emitters.iter().any(|e| e.ends_with("admin_ops.rs")),
+        "PIN: `src/admin_ops.rs` must reach the ONE row that stops a hostile peer writing \
+         (POST /v1/admin/refuse-writes, CIRISServer#375). If it no longer does, the gate is \
+         armed and unreachable again — which is the exact state this test was written to \
+         expose. Found: {emitters:?}"
     );
 }
 
