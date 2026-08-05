@@ -32,6 +32,9 @@
 //!   evidence for `slashing:*`; a named-moderator / quorum adjudication is the
 //!   load-bearing gate (FSD §6). This module emits the `ModerationEvent` only
 //!   when the signer is ADMITTED to exercise the duty.
+//! - [`read_track_record`] returns `Result`, not `u64` (CIRISServer#357): a
+//!   ledger that could not be consulted is [`MeritUnreadable`], never a `0` that
+//!   a ranking can mistake for a measurement.
 
 use std::sync::Arc;
 
@@ -191,6 +194,62 @@ pub async fn emit_moderation_event(
     Ok(attestation_id)
 }
 
+/// **Why the merit signal is not a number** (CIRISServer#357 part 1).
+///
+/// A merit read that cannot happen and a merit read that happened and found
+/// nothing are DIFFERENT FACTS. Collapsing them onto the same `0` is what made
+/// #357 dangerous: the caller could not tell "nobody has a track record" from
+/// "the track record cannot be reached", and promoted on the latter as if it
+/// were the former. Every one of these variants used to be a bare `return 0`.
+///
+/// This is the same distinct-zeroes discipline as
+/// `FSD/RCA_INGEST_REJECTION_2026-08-05.md` — where a zero that could not be
+/// told from an absence hid a dead plane for 71 hours.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum MeritUnreadable {
+    /// No SQLite federation directory — there is no ledger to consult at all.
+    /// (Was a silent `0`.)
+    NoDirectory,
+    /// The ledger read itself FAILED. (Was a silent `0`.)
+    LedgerReadFailed {
+        /// The substrate error, verbatim.
+        detail: String,
+    },
+    /// **The #357 seam.** The merit ledger lives at FEDERATION tier
+    /// ([`read_track_record`] walks `list_attestations_by`, which is
+    /// federation-tier only), and this community cannot reach that tier: CC
+    /// 4.5.4 / §11.11 refuses federation to a community with no live
+    /// `moderate`-duty holder (persist `CommunityHasNoModerator`), so its rows
+    /// cannot be promoted. A community in that state reads `0` for EVERY
+    /// member whether or not merit exists — the number is not a measurement,
+    /// and MUST NOT be ranked on.
+    FederationTierClosed {
+        /// The community whose merit ledger is out of reach.
+        community_key_id: String,
+    },
+}
+
+impl std::fmt::Display for MeritUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MeritUnreadable::NoDirectory => {
+                write!(f, "no SQLite federation directory to read the ledger from")
+            }
+            MeritUnreadable::LedgerReadFailed { detail } => {
+                write!(f, "the track-record ledger read failed: {detail}")
+            }
+            MeritUnreadable::FederationTierClosed { community_key_id } => write!(
+                f,
+                "the track-record ledger is federation-tier-only and community \
+                 {community_key_id:?} cannot federate (CC 4.5.4 / §11.11 — no live \
+                 `moderate`-duty holder), so every member reads 0 whether or not merit \
+                 exists (CIRISServer#357)"
+            ),
+        }
+    }
+}
+
 /// **Read** a member's `moderation_track_record:{community}` — the count of
 /// upheld moderation actions they have authored in this community (the
 /// auto-promotion ranking signal, FSD §A.1/§A.3).
@@ -203,18 +262,32 @@ pub async fn emit_moderation_event(
 /// survives the lapse of their `moderate` standing — exactly the signal merit
 /// auto-promotion needs after a moderator steps down). Upstream-ask §9 #10
 /// canonicalizes the richer reputation basis + the deterministic tiebreak.
+///
+/// ## `Ok(0)` and `Err(..)` are different answers (CIRISServer#357)
+///
+/// `Ok(0)` means **the ledger was consulted and this member has nothing in it.**
+/// `Err` means **the ledger was not consulted** — see [`MeritUnreadable`]. This
+/// function used to return `u64` and answered both with `0`; the caller could
+/// not tell, and [`super::named::auto_promotion_outcome`] ranked on the
+/// indistinguishable zero. The tier-closed variant is NOT decided here (it is a
+/// community-level fact about federation reachability, not a per-member one);
+/// see `named::auto_promotion_outcome`.
 pub async fn read_track_record(
     engine: &Engine,
     member_key_id: &str,
     community_key_id: &str,
-) -> u64 {
+) -> Result<u64, MeritUnreadable> {
     let Some(directory) = engine.sqlite_backend() else {
-        return 0;
+        return Err(MeritUnreadable::NoDirectory);
     };
-    let Ok(rows) = directory.list_attestations_by(member_key_id).await else {
-        return 0;
-    };
-    rows.into_iter()
+    let rows = directory
+        .list_attestations_by(member_key_id)
+        .await
+        .map_err(|e| MeritUnreadable::LedgerReadFailed {
+            detail: e.to_string(),
+        })?;
+    Ok(rows
+        .into_iter()
         .filter(|r| {
             track_record_row_counts(
                 &r.attestation_type,
@@ -222,7 +295,7 @@ pub async fn read_track_record(
                 community_key_id,
             )
         })
-        .count() as u64
+        .count() as u64)
 }
 
 /// Does one of `member`'s authored rows COUNT toward its
@@ -244,6 +317,21 @@ pub async fn read_track_record(
 /// explicit `self` is dropped; external/peer-witnessed rows (the load-bearing
 /// signal) count. Mirrors the CC 3.4.7 `witness_relation: self` downweight in
 /// [`crate::compose_policy`] — the READ side of the same structural safeguard.
+///
+/// ## What this predicate does NOT do (CIRISServer#357 part 2)
+///
+/// `witness_relation` is a **producer-written envelope field**, so this
+/// exclusion is only as strong as the admission boundary the row crossed to get
+/// here. At FEDERATION tier that boundary is real (a `moderation:*` row faces
+/// persist's §11.10 `check_delegated_duty_scores_admission` at `put_attestation`,
+/// and a promotion faces the whole stack since #589). At LOCAL tier there is no
+/// boundary at all: `attestation_upsert_local` runs no duty gate, the row carries
+/// no signature, and a producer that wants its self-witness to count simply omits
+/// the field. That is why #357's option 1 (widening this read to local tier) was
+/// held — see `tests/safety.rs`
+/// `local_tier_merit_is_producer_asserted_so_the_local_read_stays_held`, which
+/// pins the two row shapes as indistinguishable. Do not widen the tier without
+/// first giving a local-tier row its own provenance.
 fn track_record_row_counts(
     attestation_type: &str,
     envelope: &serde_json::Value,
