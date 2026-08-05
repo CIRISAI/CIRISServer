@@ -3079,16 +3079,29 @@
   "wa_service_status": "Service Status",
   "wa_status": "Status",
   "admin": {
+    "accept_writes": {
+      "not_reached": "It restores nothing that was refused while the de-admission stood. Those writes were rejected at the door and never landed here; if the peer still holds them it has to send them again. Nothing else about the key changes.",
+      "not_refused": "This key is not de-admitted here, so there is nothing to lift."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "No live de-admission authored by this node names this key, so its writes are admitted here. This says nothing about any other node: de-admission is local to the corpus that emits it.",
+        "refused": "This node holds a live de-admission of this key that it authored itself, so the key's next write into this node's corpus is refused at the substrate's own door.",
+        "unreadable": "This node could not read its own admission state for this key, so it does not know whether that key's writes are refused. This is NOT 'admitted' — do not render it as one."
+      }
+    },
     "descend": {
       "bounded_unsupported": "A time-bounded judgement cannot drive an unbounded eviction. The substrate's only actor-keyed descent takes the whole corpus, which would destroy the history this bound deliberately leaves standing. The time-bounded removal that IS implemented is de-admission with a history bound.",
       "not_reached": "The selected attestation rows themselves are not descended. Every payload carrier on this substrate is sealed inside its own signature, so its bytes cannot be dropped without making the row read as forged; erasability is decided at mint and nothing minted today is erasable."
     },
     "enforcement": {
+      "accept_writes": "This node stops refusing the named keys' writes: the de-admission it authored is withdrawn and the substrate admits their next write again. Both the de-admission and this withdrawal survive as readable history.",
       "annotate": "A signed judgement with no effect until a reader honours it. Nothing is withheld, throttled or removed.",
       "deadmit": "A signed revocation on the ordinary append-only plane. It is evidence a reader folds, not a door that slams: signature verification, the replication cursors and row ingest all deliberately keep working, because refusing a compromised key's older rows would destroy the evidence needed to adjudicate the compromise.",
       "descend": "Irreversible by design. Descent never terminates at zero — the blur and the tombstone survive — but what was shed is not coming back.",
       "quarantine": "A signed marker, not a command: nothing is deleted and nothing is rewritten. This node's serve paths stop handing the named keys' rows and blobs to peers; a peer that folds differently simply does not receive them from us.",
       "re_admit": "Recorded as an attributed reversal. The revocation row survives and every reader still folds it: restrictions compose and leniencies do not, and no layer of this substrate exposes an un-revoke.",
+      "refuse_writes": "This node refuses the named keys' next write into its own corpus, at the substrate's own door and before any other gate runs. It is LOCAL by design: no node decrees another node's admission set, because a globally-effective de-admission would itself be a censorship weapon. Isolation of a genuine abuser is emergent — it arrives when many nodes independently reach the same conclusion — and is never decreed from here.",
       "throttle": "Recorded as an attributed judgement only. This substrate has no recipient-authored per-key admission budget: the peer write quota is a fixed runaway-loop backstop, not a policy surface a throttle can key on. Nothing changes what this node accepts from the named keys."
     },
     "preview": {
@@ -3122,6 +3135,8 @@
       "authority_unresolved": "The named delegation is not a row this node holds, so its scope cannot be checked. This node does not act on an authority it cannot verify.",
       "bad_request": "The request body could not be parsed.",
       "community_absent": "community_id is required: a quarantine is filed under a community's authority, and a marker that names no community names no authority.",
+      "deadmission_gate_dormant": "This node has not declared its own identity to the substrate, so the de-admission gate is dormant: the row would be written and would refuse nothing. Refused rather than handed back as done — a sanction gate that silently does nothing is worse than no gate, because an operator will believe de-admission works. This is a node-configuration fault, not a fault of the request.",
+      "deadmission_gate_foreign_identity": "The identity this node signs as and the identity the de-admission gate compares writers against are two different keys, so a de-admission signed here would never be folded as this node's own and would refuse nothing. This is a node-configuration fault, not a fault of the request.",
       "judgement_subjectless": "That judgement names no subject, so honouring or declining it would change nothing about anyone. This node does not record a decision it cannot apply.",
       "judgement_unresolved": "That judgement is not a row this node holds, so this reader has nothing to decide about. A reader decides what it HOLDS; it does not pre-refuse what it has never seen.",
       "node_unowned": "This node has no responsible party (owner-binding), so it performs no graded admin operation on anyone's behalf. Claim ownership first.",
@@ -3135,6 +3150,11 @@
       "session_invalid": "That session is invalid or expired.",
       "store_unavailable": "The substrate could not be read.",
       "subject_absent": "subject_key_id is required: a reader fold is about one subject's judgements, and an unnamed subject is every subject."
+    },
+    "refuse_writes": {
+      "already_refused": "This key is already de-admitted here, so nothing was written and the standing is unchanged.",
+      "not_reached": "It unwrites nothing. Rows these keys already wrote here are untouched and still served — quarantine is the op that stops serving them. Rows that already replicated to peers are not recalled and cannot be. The keys are not removed, their signatures still verify, and they go on writing to every other node, including this node's peers, from which those rows may arrive here again by replication. One exemption survives on purpose so that a node can always lift its own denial, and it does not ask who is writing: a de-admitted key may still write de-admission rows here (CIRISPersist#608).",
+      "reversal": "Reversible, and the reversal reaches the substrate rather than merely recording a change of mind: POST /v1/admin/accept-writes withdraws the de-admission and the key's writes are admitted here again. Two of this ladder's reversals reach the substrate — releasing a quarantine, which restores what this node SERVES, and this one, which restores what it ACCEPTS. Both rows survive and stay readable: 'refused and then re-admitted' is not the same fact as 'never refused'."
     },
     "reversal": {
       "evidence_only": "The original row survives and is still folded by every reader. This reversal is recorded evidence, not an undo — the substrate exposes no un-revoke.",

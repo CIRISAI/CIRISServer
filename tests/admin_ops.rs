@@ -378,6 +378,21 @@ async fn emit_score(
     dimension: &str,
     asserted_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    try_emit_score(engine, author, id, dimension, asserted_at)
+        .await
+        .expect("put score")
+}
+
+/// The same write, with the substrate's verdict returned instead of unwrapped.
+/// The AV-77 round trip is *"the same write is refused"*, so the write has to
+/// be a thing that can come back refused.
+async fn try_emit_score(
+    engine: &Engine,
+    author: &LocalSigner,
+    id: &str,
+    dimension: &str,
+    asserted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<String, String> {
     let key_id = author.key_id().to_string();
     let envelope = serde_json::json!({
         "dimension": dimension,
@@ -418,8 +433,8 @@ async fn emit_score(
         .federation_directory()
         .put_attestation(SignedAttestation { attestation })
         .await
-        .expect("put score");
-    id.to_string()
+        .map_err(|e| e.to_string())?;
+    Ok(id.to_string())
 }
 
 /// A community whose founder is `founder` — persist resolves the `slash`
@@ -1257,6 +1272,402 @@ async fn tier_4_deadmit_writes_a_signed_revocation_with_the_history_bound() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Tier 4, the WRITE DOOR — refuse-writes / accept-writes (AV-77, #375)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Arm the AV-77 gate exactly as `compose::arm_peer_deadmission_gate` does —
+/// declare, then READ BACK, because the readback is the whole point.
+async fn arm_av77(f: &Fixture) {
+    f.engine.set_self_key_id(Some(f.node_key.clone()));
+    assert_eq!(
+        f.engine.self_key_id().as_deref(),
+        Some(f.node_key.as_str()),
+        "the AV-77 predicate has no `me` to compare against until this sticks"
+    );
+}
+
+/// A fresh write by TARGET, timestamped now so it never collides with the
+/// fixture's fixed corpus.
+async fn target_write(f: &Fixture, target: &LocalSigner, id: &str) -> Result<String, String> {
+    try_emit_score(
+        &f.engine,
+        target,
+        id,
+        "health:liveness:v1",
+        chrono::Utc::now(),
+    )
+    .await
+}
+
+/// **THE ROUND TRIP.** An admitted key writes; the route de-admits it; the
+/// SAME write is refused by the substrate; the reversal route lifts it; the
+/// same write lands again.
+///
+/// A test that only asserted the row was emitted would prove nothing about the
+/// door — that is the distinction CIRISServer#375 was filed over, so this
+/// suite's tier-4 write-door test is the one that walks through it.
+#[tokio::test]
+async fn refuse_writes_stops_the_next_write_and_accept_writes_admits_it_again() {
+    let f = fixture().await;
+    arm_av77(&f).await;
+    let target = party_signer(TARGET);
+
+    // ── BEFORE: the key writes freely ─────────────────────────────────────
+    target_write(&f, &target, "rt-before")
+        .await
+        .expect("an admitted key writes freely before any sanction");
+
+    // ── THE ACT ───────────────────────────────────────────────────────────
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["tier"], 4);
+    assert_eq!(json["required_scope"], "slash");
+    assert_eq!(json["deadmission_gate"], "armed");
+    let result = &json["results"][0];
+    assert_eq!(result["target_key_id"], TARGET, "{json}");
+    assert_eq!(result["outcome"], "refused", "{json}");
+    assert_eq!(result["standing_before"]["standing"], "admitted");
+    assert_eq!(result["standing_after"]["standing"], "refused");
+    let deadmission_id = result["deadmission_id"]
+        .as_str()
+        .expect("the emitted row's id")
+        .to_string();
+
+    // The row is a real, signed, federation-tier AV-77 row authored by THIS
+    // node — not an approximation of one.
+    let row = f
+        .engine
+        .federation_directory()
+        .get_attestation(&deadmission_id)
+        .await
+        .expect("read the de-admission")
+        .expect("the de-admission is stored");
+    assert_eq!(row.attesting_key_id, f.node_key);
+    assert_eq!(row.attested_key_id, TARGET);
+    assert_eq!(
+        row.attestation_envelope["dimension"],
+        serde_json::json!(ciris_persist::federation::admission::PEER_DEADMISSION_DIMENSION),
+    );
+    assert_eq!(
+        row.attestation_envelope["delegation_id"],
+        serde_json::json!(f.slash_a),
+        "the authority travels with the act, not only in the local ledger"
+    );
+    assert!(!row.scrub_signature_classical.is_empty());
+    assert!(row.scrub_signature_pqc.is_some(), "hybrid-signed");
+
+    // ── AFTER: the SAME write is refused by the substrate ─────────────────
+    let err = target_write(&f, &target, "rt-after")
+        .await
+        .expect_err("a de-admitted key's next write MUST be refused");
+    assert!(
+        err.contains("de-admitted"),
+        "the refusal must name de-admission, not something incidental: {err}"
+    );
+
+    // ── THE REVERSAL, which genuinely reaches the substrate ───────────────
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/accept-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    let result = &json["results"][0];
+    assert_eq!(result["outcome"], "accepted", "{json}");
+    assert_eq!(result["standing_before"]["standing"], "refused");
+    assert_eq!(result["standing_after"]["standing"], "admitted");
+    assert_eq!(
+        result["withdrew"][0]["deadmission_id"],
+        serde_json::json!(deadmission_id),
+        "the lift names the row it lifts, resolved from this node's own fold"
+    );
+
+    target_write(&f, &target, "rt-lifted")
+        .await
+        .expect("once the de-admission is withdrawn the key writes again");
+
+    // Both acts are in the ledger, under distinct op suffixes, so an auditor
+    // can tell which was done — the whole reason this is not spelled `deadmit`.
+    let kinds: Vec<String> = hard_cases(&f.engine)
+        .await
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(
+        kinds.iter().any(|k| k.ends_with("refuse_writes"))
+            && kinds.iter().any(|k| k.ends_with("accept_writes")),
+        "both acts are recorded and distinguishable: {kinds:?}"
+    );
+}
+
+/// **The negative.** `slash`, walked the same way as every neighbouring rung.
+/// A `review` delegation is real, live, and issued to this node — and it does
+/// not authorize refusing anyone's writes.
+#[tokio::test]
+async fn refuse_writes_takes_slash_and_a_review_delegation_does_not_reach_it() {
+    let f = fixture().await;
+    arm_av77(&f).await;
+    let target = party_signer(TARGET);
+    let (hash, _) = preview(&f, &target_selection()).await;
+
+    for (delegation, expected) in [
+        (&f.review_only, "authority_scope_absent"),
+        (&f.slash_elsewhere, "authority_not_to_actor"),
+        (&"no-such-delegation".to_string(), "authority_unresolved"),
+    ] {
+        let (status, json) = post(
+            &f,
+            "/v1/admin/refuse-writes",
+            &commit(target_selection(), &hash, delegation),
+        )
+        .await;
+        assert_eq!(status, 403, "{json}");
+        assert_eq!(json["refusal"], expected, "{json}");
+        assert_localizable(&json["message"], "refusal message");
+    }
+
+    // Property 1 binds to THIS route too: a real authority over a selection
+    // that is not the one previewed is refused before anything is emitted.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), "0".repeat(64).as_str(), &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 409, "{json}");
+    assert_eq!(json["refusal"], "preview_hash_mismatch", "{json}");
+
+    // Nothing was written, and the key still writes.
+    assert!(
+        hard_cases(&f.engine).await.is_empty(),
+        "a refused op records no tombstone"
+    );
+    target_write(&f, &target, "unauthorized-noop")
+        .await
+        .expect("an unauthorized de-admission attempt must not de-admit anyone");
+
+    // The reversal takes the same authority — a laxer path to UN-refusing is
+    // the same inversion in the other direction.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/accept-writes",
+        &commit(target_selection(), &hash, &f.review_only),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    assert_eq!(json["refusal"], "authority_scope_absent", "{json}");
+}
+
+/// **A sanction that would not be enforced is refused, not reported as done.**
+///
+/// AV-77's predicate compares a writer against the key the host declared. With
+/// no declaration — or with someone else's — the emitted row refuses nothing.
+/// `compose::arm_peer_deadmission_gate` refuses to BOOT over this, for the
+/// reason it states: *"a silently-dormant sanction gate is strictly worse than
+/// no gate, because operators will believe de-admission works."*
+#[tokio::test]
+async fn refuse_writes_refuses_when_the_av77_gate_would_not_enforce_it() {
+    let f = fixture().await;
+    let target = party_signer(TARGET);
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let body = commit(target_selection(), &hash, &f.slash_a);
+
+    // (a) dormant — the host never declared an identity.
+    assert_eq!(f.engine.self_key_id(), None, "the gate starts dormant");
+    let (status, json) = post(&f, "/v1/admin/refuse-writes", &body).await;
+    assert_eq!(status, 503, "{json}");
+    assert_eq!(json["refusal"], "deadmission_gate_dormant", "{json}");
+    assert_localizable(&json["message"], "dormant-gate message");
+
+    // (b) foreign identity — declared, and not the key this node signs as.
+    f.engine
+        .set_self_key_id(Some("some-other-node".to_string()));
+    let (status, json) = post(&f, "/v1/admin/refuse-writes", &body).await;
+    assert_eq!(status, 503, "{json}");
+    assert_eq!(
+        json["refusal"], "deadmission_gate_foreign_identity",
+        "{json}"
+    );
+    assert_localizable(&json["message"], "foreign-identity message");
+
+    assert!(
+        hard_cases(&f.engine).await.is_empty(),
+        "an op refused for being unenforceable writes nothing at all"
+    );
+    target_write(&f, &target, "dormant-noop")
+        .await
+        .expect("nothing was de-admitted");
+
+    // The LIFT is not blocked by the same condition: withdrawing a sanction is
+    // the lenient direction, and refusing to lift a de-admission because it was
+    // not being enforced leaves it standing to bite when the node is fixed.
+    arm_av77(&f).await;
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    f.engine.set_self_key_id(None);
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/accept-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "the lift is not gated on the gate: {json}");
+    assert_eq!(
+        json["deadmission_gate"], "dormant",
+        "and it says so: {json}"
+    );
+    assert_eq!(json["results"][0]["outcome"], "accepted", "{json}");
+}
+
+/// **Three zeroes, three renderings.** "not de-admitted", "de-admitted" and
+/// "could not read the admission state" are three facts, and the third is the
+/// one that kills: rendered as the first it is a false clean.
+///
+/// The `refused` / `admitted` transition is driven through the real route
+/// above; this pins that the three never collapse into each other, and that a
+/// no-op is reported as a no-op rather than as an act.
+#[tokio::test]
+async fn the_write_doors_three_zeroes_never_render_alike() {
+    let f = fixture().await;
+    arm_av77(&f).await;
+
+    // Nothing held: "not de-admitted" — not an error, and not silence.
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/accept-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "nothing to lift is a NORMAL outcome: {json}");
+    assert_eq!(json["results"][0]["outcome"], "not_refused");
+    assert_eq!(
+        json["results"][0]["standing_before"]["standing"],
+        "admitted"
+    );
+    assert_localizable(&json["results"][0]["message"], "not-refused message");
+    assert!(
+        hard_cases(&f.engine).await.is_empty(),
+        "a lift with nothing to lift records no act"
+    );
+
+    // De-admitted, then asked again: idempotent, and reported as unchanged
+    // rather than as a second sanction.
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let body = commit(target_selection(), &hash, &f.slash_a);
+    let (_, first) = post(&f, "/v1/admin/refuse-writes", &body).await;
+    assert_eq!(first["results"][0]["outcome"], "refused");
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, again) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["results"][0]["outcome"], "already_refused", "{again}");
+    assert_eq!(again["results"][0]["standing_after"]["standing"], "refused");
+
+    // The three standings never render alike — ids AND English.
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for standing in ["refused", "admitted", "unreadable"] {
+        let bundle = localization::canonical_bundle();
+        let id = format!("admin.admission.standing.{standing}");
+        let text = localization::resolve_id(&bundle, &id)
+            .unwrap_or_else(|| panic!("{id} must resolve by nested traversal"));
+        seen.push((id, text.to_string()));
+    }
+    for i in 0..seen.len() {
+        for j in (i + 1)..seen.len() {
+            assert_ne!(seen[i].0, seen[j].0, "two standings share one message id");
+            assert_ne!(
+                seen[i].1, seen[j].1,
+                "two standings render the same sentence"
+            );
+        }
+    }
+    assert!(
+        seen[2].1.contains("NOT 'admitted'"),
+        "the unreadable standing must say, in the string an operator reads, that it is not \
+         the clean one: {}",
+        seen[2].1
+    );
+}
+
+/// **What the route says it does NOT reach must be true.** The response claims
+/// the key's existing rows are untouched and still readable, and that the key
+/// itself is not removed. Both are asserted against the substrate rather than
+/// left as prose.
+#[tokio::test]
+async fn refuse_writes_says_what_it_does_not_reach_and_that_is_checkable() {
+    let f = fixture().await;
+    arm_av77(&f).await;
+    let before: Vec<String> = f
+        .engine
+        .federation_directory()
+        .list_attestations_by(TARGET)
+        .await
+        .expect("list TARGET's rows")
+        .into_iter()
+        .map(|a| a.attestation_id)
+        .collect();
+    assert!(!before.is_empty(), "the fixture gave TARGET a corpus");
+
+    let (hash, _) = preview(&f, &target_selection()).await;
+    let (status, json) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert_localizable(&json["enforcement"], "enforcement note");
+    assert_localizable(&json["not_reached"], "not-reached note");
+    assert_localizable(&json["reversal"], "reversal note");
+
+    // "It unwrites nothing."
+    let after: Vec<String> = f
+        .engine
+        .federation_directory()
+        .list_attestations_by(TARGET)
+        .await
+        .expect("list TARGET's rows")
+        .into_iter()
+        .map(|a| a.attestation_id)
+        .collect();
+    assert_eq!(
+        before, after,
+        "every row the key already wrote is still here"
+    );
+
+    // "The keys are not removed."
+    assert!(
+        f.engine
+            .federation_directory()
+            .lookup_public_key(TARGET)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "de-admission is about future writes, not about the key's existence"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Tier S — self-directed
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2058,6 +2469,28 @@ async fn every_string_these_routes_emit_resolves_in_the_canonical_bundle() {
     .await;
     check("POST /v1/admin/annotate", &json);
 
+    // ── the write door, in all four of its shapes ──────────────────────────
+    // Dormant first (the refusal an operator hits when the node is misconfigured),
+    // then armed: nothing-to-lift, the sanction, and the lift.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/refuse-writes",
+        &commit(target_selection(), &hash, &f.slash_a),
+    )
+    .await;
+    assert!(status.is_server_error(), "a dormant gate refuses: {json}");
+    check("POST /v1/admin/refuse-writes (dormant)", &json);
+    arm_av77(&f).await;
+    for route in [
+        "/v1/admin/accept-writes",
+        "/v1/admin/refuse-writes",
+        "/v1/admin/accept-writes",
+    ] {
+        let (hash, _) = preview(&f, &target_selection()).await;
+        let (_, json) = post(&f, route, &commit(target_selection(), &hash, &f.slash_a)).await;
+        check(route, &json);
+    }
+
     // A zero denominator is not evidence — this gate must have looked at a
     // realistic number of strings, not at nothing.
     assert!(
@@ -2086,6 +2519,8 @@ async fn every_graded_route_is_owner_gated() {
         "/v1/admin/descend",
         "/v1/admin/deadmit",
         "/v1/admin/re-admit",
+        "/v1/admin/refuse-writes",
+        "/v1/admin/accept-writes",
         "/v1/admin/self/shed",
         "/v1/admin/self/resume-load",
         "/v1/admin/self/stop-accepting",

@@ -215,7 +215,8 @@ Every op remains a signed, attributed CEG object. What changes is the rungs.
 | 1 | **throttle** — accept, deprioritise | key | **`un-throttle`** | `moderate` |
 | 2 | **quarantine** — withhold from serving, retain locally | row set | **`un-quarantine`** | `moderate` |
 | 3 | **force descent** — CC 6.1.2 pressure; blur + tombstone remain | row set | no, by design | `slash` + **quorum** |
-| 4 | **de-admit** — key may no longer write | key | **`re-admit`** | `slash` |
+| 4a | **revoke** — signed evidence about a key, optionally time-bounded | key | `re-admit`, evidence-only | `slash` |
+| 4b | **refuse writes** — this node stops accepting the key's rows (AV-77) | key, **in this corpus** | **`accept-writes`, reaches the substrate** | `slash` |
 | 5 | **halt** — kill switch | node | **offline release token — see below** | accord quorum |
 | **S** | **self-directed** — shed my own load, stop accepting, descend my own corpus, declare legal compulsion | **self** | yes | owner |
 | **R** | **subject-side** — a reader's own accept/refuse policy over others' judgements | **the reader's view** | yes | reader |
@@ -323,6 +324,23 @@ doc that keeps asserting them is how the next reader inherits them.
    no layer exposes an un-revoke. `re-admit` exists and records an attributed
    reversal; the revocation row survives and every reader still folds it. Of the
    three reversals only tier 2's reaches the substrate.
+
+   **Correction to that correction (CIRISServer#375).** It was true of the act
+   the rung shipped, and it made the rung's *label* false. "De-admit — key may
+   no longer write" describes AV-77
+   (`revocation:peer_admission:v1`), which `check_peer_deadmission` reads at
+   `put_attestation` to refuse that key's NEXT write; `POST /v1/admin/deadmit`
+   writes a `Revocation`, which by its own text is *"evidence a reader folds,
+   not a door that slams"*. Two acts — one for a **compromised** key whose
+   history must stay readable, one for a **hostile** one whose next write must
+   stop — and only the first was reachable. The gate for the second was armed at
+   boot, proven armed by readback, and had no caller anywhere in the repo.
+   `POST /v1/admin/refuse-writes` is now that caller, with
+   `POST /v1/admin/accept-writes` as its reversal. So **tier 4 has two arms**:
+   the revocation arm is still irreversible and still evidence-only, and the
+   write-door arm is reversible **all the way into the substrate** — the second
+   reversal on the whole ladder that reaches past a record, and the only one on
+   a key rather than a row set.
 4. **The time bound lives on tier 4, not tier 3.** `Revocation::revoked_after`
    is the only time-bounded removal persist implements. Tier 3 accepts `after:`
    as a selection window and records it, but refuses to drive the unbounded
@@ -513,7 +531,7 @@ threatened by a backlog.
 | rate/quota plane with reserved admission class | persist | to file |
 | mesh-config consumption, ConfigRelief, quarantine-aware offers | edge | #440 |
 | per-row delivery receipts | edge | to file |
-| four-tab card, graded routes, preview hash | server | #346 — tiers 0–4 landed as `src/admin_ops.rs` |
+| four-tab card, graded routes, preview hash | server | #346 — tiers 0–4 landed as `src/admin_ops.rs`; tier 4's AV-77 write door landed as #375 |
 | consensus engine (`consensus_protocol` is a stored label) | server | #111, open |
 
 Three further asks the tier 0–4 implementation surfaced, all persist:
@@ -549,7 +567,7 @@ careful prose.
 | **`PeerWriteQuota`** — one key flooding is refused at the documented allowance with `Error::RateLimited`, and the reserved class keeps `accord:` / `objection:` writable through a flood | `the_peer_write_quota_refuses_a_flood_and_nothing_here_counts_it` | every `put_attestation`, per backend instance, in memory |
 | **`capacity:*` anti-Goodhart wall** — self-attestation refused at the federation tier (AV-62/74), refused at the local tier (AV-83), and third-party scoring refused without the subject's `analyze` grant (CC#46) | `capacity_self_inflation_is_refused_at_every_door`, each arm required to name its own rule | the `capacity:*` family |
 | **`accord_holder` is not self-assertable** | `a_self_asserted_accord_holder_is_refused_at_the_door` | the halt/kill-switch plane |
-| **AV-77 peer de-admission** — a de-admitted key's next write is refused before any DB-walking gate | `av77_deadmission_stops_the_writes_and_no_route_here_emits_it` | this node's own corpus |
+| **AV-77 peer de-admission** — a de-admitted key's next write is refused before any DB-walking gate, and `POST /v1/admin/refuse-writes` emits the row (#375) | `av77_deadmission_stops_the_writes_and_admin_ops_emits_it`, plus the HTTP round trip in `tests/admin_ops.rs::refuse_writes_stops_the_next_write_and_accept_writes_admits_it_again` | this node's own corpus |
 | **tier 5 halt is now releasable offline** (#347) | `src/accord_release.rs` + its suite | a halted node, by file drop |
 
 Two of those deserve their qualifier stated rather than implied. The quota is
@@ -561,22 +579,47 @@ reaching the same conclusion independently.
 
 ### 9.2 What does not
 
-**The recourse gap, stated plainly.** AV-77 is the only primitive in the stack
-that stops a hostile admitted peer from writing. `src/compose.rs` arms it at
-boot, reads the value back, and refuses to serve if it did not stick — because
-*"a silently-dormant sanction gate is strictly worse than no gate."* **No route
-in this server emits the row.** `POST /v1/admin/deadmit` — tier 4, the rung
-§3 labels *"key may no longer write"* — writes a `Revocation` on the append-only
-key plane and says so itself: *"evidence a reader folds, not a door that
-slams … the replication cursors and row ingest all deliberately keep working."*
-That is the right act for a **compromised** key and the wrong one for a
-**hostile** one. Filed as CIRISServer#375; the gate itself is proven working, so
-this is a caller, not a design.
+**The recourse gap — CLOSED (CIRISServer#375).** AV-77 is the only primitive in
+the stack that stops a hostile admitted peer from writing. `src/compose.rs` arms
+it at boot, reads the value back, and refuses to serve if it did not stick —
+because *"a silently-dormant sanction gate is strictly worse than no gate."* For
+the length of this audit **no route in this server emitted the row**: `POST
+/v1/admin/deadmit` writes a `Revocation` on the append-only key plane and says
+so itself (*"evidence a reader folds, not a door that slams"*), which is the
+right act for a **compromised** key and the wrong one for a **hostile** one. So
+the one control that closes the door was armed, proven armed, and unreachable.
 
-Until it lands, the honest answer to *"a peer we admitted is writing rows we do
-not want"* is: **annotate it (tier 0, no effect), quarantine the rows it already
-wrote (tier 2, the only reversal that reaches the substrate), or halt the whole
-node (tier 5).** Nothing in between stops the next write.
+`POST /v1/admin/refuse-writes` is the caller, on the existing ladder and with its
+existing properties (preview hash, `{delegation_id, reason}` in the row AND in
+the tombstone, `slash` re-derived by the same walk, `Wipe` verb, owner-only).
+`POST /v1/admin/accept-writes` withdraws it. What the route says of itself, and
+what `tests/admin_ops.rs` checks against the substrate rather than asserting:
+
+- it **reaches** this node's own corpus — the peer's next `put_attestation` is
+  refused before any DB-walking gate runs. The round trip is driven end to end:
+  the key writes, the route de-admits, **the same write is refused**, the
+  reversal lifts it, the same write lands again;
+- it is **local by design** and says so. Isolation of a genuine abuser is
+  emergent across nodes, never decreed from one;
+- it **does not** unwrite anything (the rows already written are still there and
+  still served — quarantine is the op for that), does not recall what already
+  replicated, does not remove the key, and does not stop it writing anywhere
+  else;
+- it **refuses rather than lying** when the AV-77 gate is dormant or armed to a
+  different identity. Emitting a row that would refuse nothing is precisely the
+  condition `arm_peer_deadmission_gate` will not boot over, and an operator told
+  "done" would stop looking. The LIFT is deliberately not gated the same way:
+  withdrawing a sanction is the lenient direction.
+
+What is left is one rung short of the whole answer, and it is persist's:
+`check_peer_deadmission`'s exemption arm is a disjunction that never asks who is
+writing, so a de-admitted key keeps the one dimension that de-admits others
+(CIRISPersist#608, pinned below).
+
+The honest answer to *"a peer we admitted is writing rows we do not want"* is now:
+**stop its next write (tier 4b, reversible), quarantine what it already wrote
+(tier 2), annotate (tier 0), or halt the node (tier 5)** — with something between
+"ignore it" and "halt", which is what this section could not say before.
 
 **Four privileged identity types are self-assertable**, and the doors they open
 are pure `identity_type` membership tests rather than the re-derivation their

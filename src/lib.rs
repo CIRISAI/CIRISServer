@@ -59,9 +59,12 @@ pub mod accord_release;
 /// lifecycle to the SAME shared core, instead of re-composing the substrate.
 pub mod adapter;
 /// The **graded admin-op ladder, tiers 0–4** (CIRISServer#346) — owner-gated
-/// `POST /v1/admin/{preview,annotate,throttle,quarantine,descend,deadmit}` (+
-/// the three reversals) over persist's removal primitives, every mutating call
-/// committing the hash its preview returned. Public so the integration test
+/// `POST /v1/admin/{preview,annotate,throttle,quarantine,descend,deadmit,refuse-writes}`
+/// (+ the four reversals) over persist's removal primitives, every mutating call
+/// committing the hash its preview returned. `refuse-writes` is tier 4's write
+/// door (CIRISServer#375): it emits persist's AV-77 row, which is the one
+/// primitive that stops a hostile admitted peer's NEXT write — `deadmit`'s
+/// revocation is evidence a reader folds. Public so the integration test
 /// (`tests/admin_ops.rs`) can drive the router directly.
 pub mod admin_ops;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
