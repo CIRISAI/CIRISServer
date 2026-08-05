@@ -944,6 +944,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // second time on a persist-side delegation scope
                     // (`review` / `moderate` / `slash`) re-walked from this
                     // node's own verified state.
+                    //
+                    // Plus the two rungs that do not act on someone else
+                    // (CIRISServer#345): tier S — /v1/admin/self, the three
+                    // self-directed standings and the six acts that move them,
+                    // the only rung reachable under partition — and tier R —
+                    // /v1/admin/reader/*, this reader's own accept/refuse
+                    // policy over other parties' judgements. Both take the
+                    // OWNER's own `infra:serve` grant, not a third party's.
                     .merge(crate::admin_ops::router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),

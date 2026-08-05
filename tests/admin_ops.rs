@@ -48,6 +48,10 @@ const NOISE: &str = "wl-noise";
 /// The community whose named-moderator authority the quarantine marker is filed
 /// under.
 const COMMUNITY: &str = "wl-community";
+/// The authority a tier R reader SUBSCRIBES to. Not a `user` identity: persist
+/// refuses a steward → user `delegates_to` without guardianship, which is a
+/// different plane's rule and not the one under test here.
+const SUB_ROOT: &str = "wl-sub-root";
 
 // ─── substrate + identity helpers (mirror tests/safety.rs) ──────────────────
 
@@ -192,18 +196,19 @@ const OWNER_USER: &str = "ciris-admin-owner";
 
 /// CC 3.2 owner-binding: a `user`-role responsible party plus
 /// `delegates_to(user → node, infra:*)`. Without it every route 403s at the
-/// serve-only floor.
-async fn bind_owner(engine: &Engine) -> LocalSigner {
+/// serve-only floor. Returns the signer and the binding's `attestation_id` —
+/// the `delegation_id` every tier S / tier R act is taken under.
+async fn bind_owner(engine: &Engine) -> (LocalSigner, String) {
     let owner = register_party(engine, OWNER_USER, identity_type::USER).await;
     let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
         .iter()
         .map(|s| s.to_string())
         .collect();
     let nk = node_key_id(engine).await;
-    ciris_server::auth::ownership::emit_steward_binding(engine, &owner, &nk, &scopes)
+    let binding = ciris_server::auth::ownership::emit_steward_binding(engine, &owner, &nk, &scopes)
         .await
         .expect("emit owner-binding");
-    owner
+    (owner, binding)
 }
 
 async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
@@ -304,6 +309,57 @@ async fn emit_delegation(
         .put_attestation(SignedAttestation { attestation })
         .await
         .expect("put delegation");
+    attestation_id
+}
+
+/// **This node's own subscription edge** — `delegates_to(node → root)` on
+/// `trust:accepts:v1`, the deletable un-trust lever `trusted_roots_of` reads.
+/// Authored as the node's DERIVED federation key (the identity `register_self`
+/// registered), because that is the key the walk starts from.
+async fn subscribe_to(engine: &Engine, root_key_id: &str) -> String {
+    let node = node_key_id(engine).await;
+    let now = chrono::Utc::now();
+    let envelope = serde_json::json!({
+        "kind": "delegates_to",
+        "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
+        "attesting_key_id": node,
+        "attested_key_id": root_key_id,
+        "scope": ["review"],
+    });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize subscription");
+    let sig = engine
+        .sign_hybrid(&canonical)
+        .await
+        .expect("sign subscription");
+    let attestation_id = format!("subscribe-{node}-{root_key_id}");
+    let attestation = Attestation {
+        attestation_id: attestation_id.clone(),
+        attesting_key_id: node.clone(),
+        attested_key_id: root_key_id.to_string(),
+        attestation_type: attestation_type::DELEGATES_TO.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: node,
+        additional_scrubs: Vec::new(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![root_key_id.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put subscription edge");
     attestation_id
 }
 
@@ -424,6 +480,12 @@ struct Fixture {
     review_only: String,
     /// A `slash` delegation granted to SOMEONE ELSE.
     slash_elsewhere: String,
+    /// The OWNER-BINDING's `attestation_id` — the only authority tier S and
+    /// tier R accept.
+    owner_binding: String,
+    /// An `infra:serve` delegation from root A (NOT the owner) → node. Carries
+    /// the right scope and the wrong issuer.
+    serve_not_owner: String,
     _handle: tokio::task::JoinHandle<()>,
 }
 
@@ -436,7 +498,7 @@ fn t0() -> chrono::DateTime<chrono::Utc> {
 async fn fixture() -> Fixture {
     let engine = node().await;
     register_self(&engine).await;
-    bind_owner(&engine).await;
+    let (_owner, owner_binding) = bind_owner(&engine).await;
     let node_key = node_key_id(&engine).await;
 
     let target = register_party(&engine, TARGET, identity_type::WITNESS).await;
@@ -486,6 +548,7 @@ async fn fixture() -> Fixture {
     let slash_b = emit_delegation(&engine, &root_b, &node_key, &["slash"]).await;
     let review_only = emit_delegation(&engine, &root_a, &node_key, &["review"]).await;
     let slash_elsewhere = emit_delegation(&engine, &root_a, "bystander", &["slash"]).await;
+    let serve_not_owner = emit_delegation(&engine, &root_a, &node_key, &["infra:serve"]).await;
     let _ = bystander;
 
     let owner_token = mint_session(&engine, "wa-owner", WaRole::Root).await;
@@ -500,6 +563,8 @@ async fn fixture() -> Fixture {
         slash_a2,
         review_only,
         slash_elsewhere,
+        owner_binding,
+        serve_not_owner,
         _handle,
     }
 }
@@ -524,6 +589,18 @@ async fn post(
         .send()
         .await
         .expect("POST");
+    let status = resp.status();
+    let json = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+async fn get(f: &Fixture, path: &str) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .get(format!("{}{path}", f.base))
+        .bearer_auth(&f.owner_token)
+        .send()
+        .await
+        .expect("GET");
     let status = resp.status();
     let json = resp.json().await.unwrap_or(serde_json::Value::Null);
     (status, json)
@@ -1148,6 +1225,696 @@ async fn tier_4_deadmit_writes_a_signed_revocation_with_the_history_bound() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Tier S — self-directed
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A tier S / tier R commit body: attribution, no selection hash.
+fn self_commit(delegation_id: &str, reason: &str) -> serde_json::Value {
+    serde_json::json!({ "delegation_id": delegation_id, "reason": reason })
+}
+
+/// The three axes, and the route that declares each.
+const SELF_ACTS: [(&str, &str, &str); 3] = [
+    (
+        "load_shed",
+        "/v1/admin/self/shed",
+        "/v1/admin/self/resume-load",
+    ),
+    (
+        "accepting",
+        "/v1/admin/self/stop-accepting",
+        "/v1/admin/self/resume-accepting",
+    ),
+    (
+        "legal_compulsion",
+        "/v1/admin/self/compelled",
+        "/v1/admin/self/compulsion-lifted",
+    ),
+];
+
+#[tokio::test]
+async fn tier_s_the_three_acts_are_independently_recorded_and_distinguishable() {
+    let f = fixture().await;
+
+    let mut event_ids = Vec::new();
+    for (axis, declare, _) in SELF_ACTS {
+        let (status, json) = post(
+            &f,
+            declare,
+            &self_commit(
+                &f.owner_binding,
+                "hosting bill unpaid; shedding before eviction",
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{declare}: {json}");
+        assert_eq!(json["tier"], "S");
+        assert_eq!(json["axis"], axis);
+        assert_eq!(json["standing"]["standing"], "in_force");
+        assert_localizable(&json["enforcement"], "tier S enforcement");
+        assert_localizable(&json["partition"], "tier S partition note");
+        event_ids.push(json["event_id"].as_str().expect("event_id").to_string());
+    }
+    let distinct: std::collections::BTreeSet<&String> = event_ids.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "three acts are three records, not one: {event_ids:?}"
+    );
+
+    // Three distinct `admin_action:` kinds on the ledger.
+    let kinds: std::collections::BTreeSet<String> = hard_cases(&f.engine)
+        .await
+        .into_iter()
+        .filter(|e| e.kind.starts_with("admin_action:self_"))
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        3,
+        "each act carries its own op suffix: {kinds:?}"
+    );
+
+    // All three stand, side by side, on the read.
+    let (status, json) = get(&f, "/v1/admin/self").await;
+    assert_eq!(status, 200, "{json}");
+    for (axis, _, _) in SELF_ACTS {
+        assert_eq!(
+            json["standings"][axis]["standing"], "in_force",
+            "{axis} must stand on its own axis: {json}"
+        );
+    }
+
+    // Lifting ONE leaves the other two untouched — the axes do not fold
+    // together.
+    let (status, _) = post(
+        &f,
+        "/v1/admin/self/resume-load",
+        &self_commit(&f.owner_binding, "bill paid; resuming"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, json) = get(&f, "/v1/admin/self").await;
+    assert_eq!(json["standings"]["load_shed"]["standing"], "lifted");
+    assert_eq!(json["standings"]["accepting"]["standing"], "in_force");
+    assert_eq!(
+        json["standings"]["legal_compulsion"]["standing"],
+        "in_force"
+    );
+}
+
+#[tokio::test]
+async fn tier_s_a_compulsion_is_never_conflatable_with_a_voluntary_stop() {
+    let f = fixture().await;
+
+    // A node that CHOSE to stop.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/self/stop-accepting",
+        &self_commit(&f.owner_binding, "disk nearly full; taking nothing new"),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+
+    let (_, standing) = get(&f, "/v1/admin/self").await;
+    assert_eq!(standing["standings"]["accepting"]["standing"], "in_force");
+    assert_eq!(
+        standing["standings"]["legal_compulsion"]["standing"], "never_declared",
+        "choosing to stop must NOT read as being made to stop: {standing}"
+    );
+
+    // A node that was MADE to stop. Same observable — nothing arriving — and
+    // the opposite meaning.
+    let mut compelled = self_commit(&f.owner_binding, "order served; not permitted to say more");
+    compelled["compelled_by"] = serde_json::json!("sealed order, district court");
+    let (status, json) = post(&f, "/v1/admin/self/compelled", &compelled).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["axis"], "legal_compulsion");
+
+    let events = hard_cases(&f.engine).await;
+    let compulsion = events
+        .iter()
+        .find(|e| e.kind == "admin_action:self_compelled")
+        .expect("the compulsion has its own kind");
+    let stop = events
+        .iter()
+        .find(|e| e.kind == "admin_action:self_stop_accepting")
+        .expect("the voluntary stop has its own kind");
+    assert_ne!(compulsion.kind, stop.kind);
+    assert_ne!(compulsion.event_id, stop.event_id);
+    assert_eq!(compulsion.detail["axis"], "legal_compulsion");
+    assert_eq!(stop.detail["axis"], "accepting");
+    assert_eq!(
+        compulsion.detail["compelled_by"], "sealed order, district court",
+        "the compelling authority rides on the compulsion: {:?}",
+        compulsion.detail
+    );
+    assert!(
+        stop.detail.get("compelled_by").is_none(),
+        "a voluntary stop must never carry the marks of a compelled one: {:?}",
+        stop.detail
+    );
+
+    // A gagged operator can still leave a trace: `compelled_by` is optional,
+    // and its absence is recorded as an absence rather than refusing the act.
+    let f2 = fixture().await;
+    let (status, json) = post(
+        &f2,
+        "/v1/admin/self/compelled",
+        &self_commit(
+            &f2.owner_binding,
+            "compelled; I am not permitted to say by whom",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the most constrained operator must still be able to record the act: {json}"
+    );
+    let gagged = hard_cases(&f2.engine)
+        .await
+        .into_iter()
+        .find(|e| e.kind == "admin_action:self_compelled")
+        .expect("recorded");
+    assert!(
+        gagged.detail["compelled_by"].is_null(),
+        "an unnamed compelling authority is recorded as unnamed, not as absent: {:?}",
+        gagged.detail
+    );
+}
+
+#[tokio::test]
+async fn tier_s_the_three_zeroes_never_render_alike() {
+    let f = fixture().await;
+
+    // Zero 1 — never declared, on every axis, on a fresh node.
+    let (status, json) = get(&f, "/v1/admin/self").await;
+    assert_eq!(status, 200, "{json}");
+    for (axis, _, _) in SELF_ACTS {
+        assert_eq!(json["standings"][axis]["standing"], "never_declared");
+        assert_eq!(json["standings"][axis]["counts"]["declarations"], 0);
+        assert!(json["standings"][axis]["since"].is_null());
+        assert_localizable(
+            &json["standings"][axis]["message"],
+            "never-declared message",
+        );
+    }
+    let never = json["standings"]["load_shed"]["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    // Zero 2 — declared and lifted. A DIFFERENT fact, with a different token
+    // and a different message id.
+    post(
+        &f,
+        "/v1/admin/self/shed",
+        &self_commit(&f.owner_binding, "shedding"),
+    )
+    .await;
+    post(
+        &f,
+        "/v1/admin/self/resume-load",
+        &self_commit(&f.owner_binding, "resuming"),
+    )
+    .await;
+    let (_, json) = get(&f, "/v1/admin/self").await;
+    let lifted = &json["standings"]["load_shed"];
+    assert_eq!(lifted["standing"], "lifted");
+    assert_ne!(
+        lifted["message"]["id"].as_str().expect("id"),
+        never,
+        "'declared and lifted' must not render as 'never declared'"
+    );
+    assert_eq!(lifted["counts"]["declarations"], 1);
+    assert_eq!(lifted["counts"]["lifts"], 1);
+    assert!(
+        !lifted["since"].is_null(),
+        "a lifted axis knows WHEN it was lifted; a never-declared one has no instant"
+    );
+
+    // Zero 3 — unreadable. Distinct token, distinct message, and it is the one
+    // that must never be mistaken for either of the other two.
+    use ciris_server::admin_ops::SelfStanding;
+    let tokens: std::collections::BTreeSet<&str> = [
+        SelfStanding::InForce,
+        SelfStanding::Lifted,
+        SelfStanding::NeverDeclared,
+        SelfStanding::Unreadable,
+    ]
+    .iter()
+    .map(|s| s.token())
+    .collect();
+    assert_eq!(tokens.len(), 4, "four standings, four tokens: {tokens:?}");
+}
+
+#[tokio::test]
+async fn tier_s_is_the_only_rung_a_partitioned_node_can_still_use() {
+    // This fixture IS a partitioned node: an in-memory engine with no peer
+    // registered, no transport configured and nothing to dial. Every other rung
+    // is about someone else; these three are about this node, so they must all
+    // complete here.
+    let f = fixture().await;
+    for (axis, declare, lift) in SELF_ACTS {
+        let (status, json) = post(
+            &f,
+            declare,
+            &self_commit(&f.owner_binding, "partitioned; acting on myself"),
+        )
+        .await;
+        assert_eq!(status, 200, "{declare} must work while partitioned: {json}");
+        assert_eq!(json["axis"], axis);
+
+        let (status, json) =
+            post(&f, lift, &self_commit(&f.owner_binding, "partition healed")).await;
+        assert_eq!(status, 200, "{lift} must work while partitioned: {json}");
+        assert_eq!(json["reversal"]["reach"], "symmetric");
+    }
+    let (status, _) = get(&f, "/v1/admin/self").await;
+    assert_eq!(status, 200, "the standing read is local too");
+}
+
+#[tokio::test]
+async fn tier_s_takes_the_owners_own_authority_and_no_one_elses() {
+    let f = fixture().await;
+
+    // Right scope, wrong issuer: root A granted this node `infra:serve`, but
+    // root A is not this node's responsible party.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/self/shed",
+        &self_commit(&f.serve_not_owner, "shedding"),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    assert_eq!(json["refusal"], "authority_not_the_owner");
+    assert_localizable(&json["message"], "not-the-owner message");
+
+    // Right issuer, wrong scope: the `slash` chain is not a serve grant.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/self/shed",
+        &self_commit(&f.slash_a, "shedding"),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    assert_eq!(json["refusal"], "authority_scope_absent");
+
+    // No reason: refused before anything is written.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/self/shed",
+        &serde_json::json!({ "delegation_id": f.owner_binding, "reason": "  " }),
+    )
+    .await;
+    assert_eq!(status, 400, "{json}");
+    assert_eq!(json["refusal"], "attribution_absent");
+
+    assert!(
+        !hard_cases(&f.engine)
+            .await
+            .iter()
+            .any(|e| e.kind.starts_with("admin_action:self_")),
+        "no refused act leaves a record claiming it happened"
+    );
+
+    // The owner's own binding carries `infra:serve` and is accepted.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/self/shed",
+        &self_commit(&f.owner_binding, "shedding, by the owner"),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["delegation_id"], f.owner_binding);
+    let ev = hard_cases(&f.engine)
+        .await
+        .into_iter()
+        .find(|e| e.kind == "admin_action:self_shed")
+        .expect("recorded");
+    assert_eq!(
+        ev.detail["delegation_id"], f.owner_binding,
+        "the act carries the authority it was taken under"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tier R — subject-side / per-reader
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Raise a real quarantine marker about TARGET through the tier 2 route, and
+/// return its `attestation_id` — a genuine third-party-shaped judgement, minted
+/// through persist's own admission door.
+async fn raise_judgement(f: &Fixture) -> String {
+    put_community(&f.engine, COMMUNITY, &f.node_key).await;
+    let (hash, _) = preview(f, &target_selection()).await;
+    let mut body = commit(target_selection(), &hash, &f.slash_a);
+    body["community_id"] = serde_json::json!(COMMUNITY);
+    let (status, json) = post(f, "/v1/admin/quarantine", &body).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["results"][0]["outcome"], "admitted", "{json}");
+    json["results"][0]["marker_id"]
+        .as_str()
+        .expect("marker_id")
+        .to_string()
+}
+
+async fn reader_fold(f: &Fixture, subject: &str) -> (reqwest::StatusCode, serde_json::Value) {
+    post(
+        f,
+        "/v1/admin/reader/fold",
+        &serde_json::json!({ "subject_key_id": subject }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn tier_r_two_reader_policies_reach_different_both_valid_states_from_one_judgement() {
+    let f = fixture().await;
+    let judgement = raise_judgement(&f).await;
+    // This reader subscribes to an authority that reaches the marker's signer
+    // under `slash` — persist's own §11.10 walk, not a predicate of ours.
+    // (Not one of the USER roots: persist refuses a steward→user delegation
+    // without guardianship, which is a different plane's rule.)
+    let sub_root = register_party(&f.engine, SUB_ROOT, identity_type::WITNESS).await;
+    emit_delegation(&f.engine, &sub_root, &f.node_key, &["slash"]).await;
+    subscribe_to(&f.engine, SUB_ROOT).await;
+
+    // ── policy A: subscribed to the signer's authority, no explicit decision.
+    // The judgement is honoured by policy, and the reader's fold agrees with
+    // the node's serve-side fold.
+    let (status, a) = reader_fold(&f, TARGET).await;
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(a["standing"], "decided");
+    assert_eq!(a["counts"]["judgements_held"], 1);
+    let decision_a = a["judgements"][0]["decision"]
+        .as_str()
+        .expect("decision")
+        .to_string();
+    assert_eq!(
+        decision_a, "honoured_by_subscription",
+        "the subscription set is read from this node's own trust edges: {a}"
+    );
+    assert!(
+        a["judgements"][0]["honoured"].as_bool().expect("honoured"),
+        "policy A honours it: {a}"
+    );
+    assert_eq!(a["reader_fold"]["state"], "withheld", "{a}");
+    assert_eq!(a["node_fold"]["state"], "withheld");
+    assert_eq!(a["diverges"], false);
+
+    // ── policy B: the same reader, having decided to refuse the same
+    // judgement. Same row, same fold function, different row set in — and a
+    // different, equally valid state out.
+    let (status, decline) = post(
+        &f,
+        "/v1/admin/reader/decline",
+        &serde_json::json!({
+            "judgement_id": judgement,
+            "delegation_id": f.owner_binding,
+            "reason": "the grounds do not hold up; we will not relay this withhold",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{decline}");
+
+    let (status, b) = reader_fold(&f, TARGET).await;
+    assert_eq!(status, 200, "{b}");
+    assert_eq!(b["judgements"][0]["decision"], "declined");
+    assert_ne!(
+        decision_a, "declined",
+        "the two policies must not be the same policy"
+    );
+    assert_eq!(
+        b["reader_fold"]["state"], "not_quarantined",
+        "policy B's fold does not withhold: {b}"
+    );
+    assert_eq!(
+        b["node_fold"]["state"], "withheld",
+        "and the node's serve path still does — the divergence is reported, not hidden"
+    );
+    assert_eq!(b["diverges"], true);
+    assert_localizable(&b["advisory"], "reader advisory");
+
+    // Honouring it again is a decision too, and it wins over the decline.
+    let (status, _) = post(
+        &f,
+        "/v1/admin/reader/honour",
+        &serde_json::json!({
+            "judgement_id": judgement,
+            "delegation_id": f.owner_binding,
+            "reason": "grounds corroborated on review",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, c) = reader_fold(&f, TARGET).await;
+    assert_eq!(c["judgements"][0]["decision"], "honoured_explicit");
+    assert_eq!(c["reader_fold"]["state"], "withheld");
+}
+
+#[tokio::test]
+async fn tier_r_declining_a_judgement_is_a_normal_outcome_not_an_error() {
+    let f = fixture().await;
+    let judgement = raise_judgement(&f).await;
+
+    let (status, json) = post(
+        &f,
+        "/v1/admin/reader/decline",
+        &serde_json::json!({
+            "judgement_id": judgement,
+            "delegation_id": f.owner_binding,
+            "reason": "we do not honour this signer's withholds",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "a decline is not an error path: {json}");
+    assert_eq!(json["outcome"], "declined");
+    assert_eq!(
+        json["refused"], false,
+        "stated in the payload too, so a client branching on shape cannot read it as a failure"
+    );
+    assert_localizable(&json["message"], "decline message");
+    assert_eq!(json["standing"]["judgements"][0]["decision"], "declined");
+
+    let recorded = hard_cases(&f.engine)
+        .await
+        .into_iter()
+        .find(|e| e.kind == "admin_action:reader_decline")
+        .expect("a decline is recorded as its own act");
+    assert_eq!(recorded.detail["judgement_id"], judgement);
+    assert_eq!(recorded.detail["delegation_id"], f.owner_binding);
+}
+
+#[tokio::test]
+async fn tier_r_distinguishes_not_honoured_from_refused_and_from_nothing_held() {
+    let f = fixture().await;
+
+    // Nothing held about a subject nobody has judged. Not "decided", not
+    // "unreadable" — and the fold reports a state, not an absence.
+    let (status, json) = reader_fold(&f, NOISE).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["standing"], "no_judgements_held");
+    assert_eq!(json["counts"]["judgements_held"], 0);
+    assert_localizable(&json["message"], "no-judgements message");
+
+    // A judgement from a signer this reader does not subscribe to is NOT
+    // honoured — and that is nobody's decision yet, which is a different fact
+    // from having refused it. No `subscribe_to` here, deliberately.
+    let judgement = raise_judgement(&f).await;
+    let (status, json) = reader_fold(&f, TARGET).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["subscription"]["count"], 0);
+    assert_eq!(
+        json["judgements"][0]["decision"], "undecided_unsubscribed",
+        "held, not honoured, and nobody has decided: {json}"
+    );
+    assert_eq!(json["reader_fold"]["state"], "not_quarantined");
+    assert_eq!(
+        json["node_fold"]["state"], "withheld",
+        "the node's serve path still withholds — the gap is reported, not hidden"
+    );
+
+    // Refusing it is a DECISION, and it reads differently even though the
+    // fold's answer is the same.
+    let (status, _) = post(
+        &f,
+        "/v1/admin/reader/decline",
+        &serde_json::json!({
+            "judgement_id": judgement,
+            "delegation_id": f.owner_binding,
+            "reason": "reviewed and refused",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, after) = reader_fold(&f, TARGET).await;
+    assert_eq!(after["judgements"][0]["decision"], "declined");
+    assert_eq!(
+        after["reader_fold"]["state"], json["reader_fold"]["state"],
+        "same fold, different fact — which is exactly why the decision is \
+         reported separately from the state"
+    );
+
+    use ciris_server::admin_ops::ReaderDecision;
+    let tokens: std::collections::BTreeSet<&str> = [
+        ReaderDecision::HonouredExplicit,
+        ReaderDecision::HonouredBySubscription,
+        ReaderDecision::UndecidedUnsubscribed,
+        ReaderDecision::Declined,
+    ]
+    .iter()
+    .map(|d| d.token())
+    .collect();
+    assert_eq!(tokens.len(), 4, "four decisions, four tokens: {tokens:?}");
+    assert!(!ReaderDecision::UndecidedUnsubscribed.honoured());
+    assert!(!ReaderDecision::Declined.honoured());
+    assert_ne!(
+        ReaderDecision::UndecidedUnsubscribed.token(),
+        ReaderDecision::Declined.token(),
+        "'nobody decided' and 'we refused' are the same outcome for the fold and \
+         different facts for the operator"
+    );
+}
+
+#[tokio::test]
+async fn tier_r_only_decides_about_judgements_this_node_actually_holds() {
+    let f = fixture().await;
+    raise_judgement(&f).await;
+
+    // A row this node does not hold.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/reader/decline",
+        &serde_json::json!({
+            "judgement_id": "no-such-row",
+            "delegation_id": f.owner_binding,
+            "reason": "pre-refusing something I have never seen",
+        }),
+    )
+    .await;
+    assert_eq!(status, 404, "{json}");
+    assert_eq!(json["refusal"], "judgement_unresolved");
+
+    // A row this node holds that is not a judgement.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/reader/honour",
+        &serde_json::json!({
+            "judgement_id": "t-early-1",
+            "delegation_id": f.owner_binding,
+            "reason": "honouring an ordinary attestation",
+        }),
+    )
+    .await;
+    assert_eq!(status, 400, "{json}");
+    assert_eq!(json["refusal"], "not_a_judgement");
+
+    // The owner's authority is required here too.
+    let (status, json) = post(
+        &f,
+        "/v1/admin/reader/decline",
+        &serde_json::json!({
+            "judgement_id": "no-such-row",
+            "delegation_id": f.serve_not_owner,
+            "reason": "not the owner",
+        }),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    assert_eq!(json["refusal"], "authority_not_the_owner");
+
+    assert!(
+        !hard_cases(&f.engine)
+            .await
+            .iter()
+            .any(|e| e.kind.starts_with("admin_action:reader_")),
+        "no refused decision leaves a record"
+    );
+}
+
+#[tokio::test]
+async fn tier_r_two_decisions_in_one_second_are_two_decisions() {
+    // Persist keys an admin-action `event_id` on `(op, target, whole second)`,
+    // and the target of a reader decision is the judgement's SUBJECT — so two
+    // declines about two judgements naming one subject, inside one second,
+    // would collapse onto one row and silently lose a decision.
+    let f = fixture().await;
+    put_community(&f.engine, COMMUNITY, &f.node_key).await;
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let (hash, _) = preview(&f, &target_selection()).await;
+        let mut body = commit(target_selection(), &hash, &f.slash_a);
+        body["community_id"] = serde_json::json!(COMMUNITY);
+        let (status, json) = post(&f, "/v1/admin/quarantine", &body).await;
+        assert_eq!(status, 200, "{json}");
+        ids.push(
+            json["results"][0]["marker_id"]
+                .as_str()
+                .expect("marker_id")
+                .to_string(),
+        );
+    }
+    assert_ne!(ids[0], ids[1], "two markers, two rows");
+
+    for id in &ids {
+        let (status, json) = post(
+            &f,
+            "/v1/admin/reader/decline",
+            &serde_json::json!({
+                "judgement_id": id,
+                "delegation_id": f.owner_binding,
+                "reason": "both of these withholds are refused",
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+    }
+
+    let declines: Vec<_> = hard_cases(&f.engine)
+        .await
+        .into_iter()
+        .filter(|e| e.kind == "admin_action:reader_decline")
+        .collect();
+    assert_eq!(
+        declines.len(),
+        2,
+        "two decisions about two judgements are two records, whatever the clock says: {declines:?}"
+    );
+    let (_, json) = reader_fold(&f, TARGET).await;
+    for j in json["judgements"].as_array().expect("judgements") {
+        assert_eq!(j["decision"], "declined", "every decision survives: {json}");
+    }
+}
+
+#[tokio::test]
+async fn tier_r_reads_the_same_judgement_set_persist_folds() {
+    let f = fixture().await;
+    raise_judgement(&f).await;
+
+    let (status, json) = reader_fold(&f, TARGET).await;
+    assert_eq!(status, 200, "{json}");
+    // Persist's own `resolve_quarantine` is the reference. `node_fold` is this
+    // module's gatherer plus persist's fold, so a divergence here means the
+    // gatherer drifted from `markers_about` — the two-lists defect this module
+    // documents rather than risks silently.
+    let reference = f
+        .engine
+        .resolve_quarantine(TARGET, chrono::Utc::now())
+        .await
+        .expect("resolve_quarantine");
+    assert_eq!(
+        json["node_fold"]["state"].as_str().expect("state"),
+        reference.state.as_str(),
+        "our gatherer must select exactly what persist's own read selects"
+    );
+    assert_eq!(
+        json["node_fold"]["marker_id"].as_str(),
+        reference.marker_id.as_deref()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  The owner gate
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1166,6 +1933,15 @@ async fn every_graded_route_is_owner_gated() {
         "/v1/admin/descend",
         "/v1/admin/deadmit",
         "/v1/admin/re-admit",
+        "/v1/admin/self/shed",
+        "/v1/admin/self/resume-load",
+        "/v1/admin/self/stop-accepting",
+        "/v1/admin/self/resume-accepting",
+        "/v1/admin/self/compelled",
+        "/v1/admin/self/compulsion-lifted",
+        "/v1/admin/reader/fold",
+        "/v1/admin/reader/honour",
+        "/v1/admin/reader/decline",
     ] {
         // No session at all.
         let resp = client
@@ -1189,5 +1965,22 @@ async fn every_graded_route_is_owner_gated() {
         assert_eq!(json["refusal"], "not_owner");
         assert_localizable(&json["message"], "not-owner message");
     }
+
+    // The one GET on the ladder, gated by the same stack.
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/v1/admin/self", f.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), 401, "the standing read is owner-only too");
+    let resp = client
+        .get(format!("{}/v1/admin/self", f.base))
+        .bearer_auth(&observer)
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), 403);
+
     assert!(hard_cases(&f.engine).await.is_empty());
 }

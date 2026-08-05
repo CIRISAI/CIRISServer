@@ -3098,14 +3098,67 @@
     "quarantine": {
       "not_withheld": "This key is not currently withheld here, so there is nothing to release."
     },
+    "reader": {
+      "advisory": "An issued judgement is advisory to each reader. `reader_fold` is what THIS reader's policy makes of what it holds; `node_fold` is what this node's serve paths do today, which is to honour every marker the substrate admitted. They can differ, and when they do the difference is the substrate gap: there is no reader-policy hook in the serve-side fold, so a decline is recorded and reported and does not yet stop this node withholding.",
+      "decision": {
+        "declined": "This reader refused this judgement. A normal outcome: an issued judgement is advisory to each reader, and refusing one is the property the whole rung exists for.",
+        "honoured_by_subscription": "No explicit decision was recorded; this reader subscribes to the signer, so the judgement is honoured by policy.",
+        "honoured_explicit": "This reader adopted this judgement deliberately.",
+        "undecided_unsubscribed": "This reader does not subscribe to the signer and has recorded no decision. The judgement is not honoured, and that is nobody's decision yet — which is a different fact from having refused it."
+      },
+      "standing": {
+        "decided": "Every judgement this node holds about that subject is listed with what this reader does about it.",
+        "none_held": "This node holds no judgement about that subject. Nobody has judged it here — which is not the same as this node being unable to say.",
+        "unreadable": "This reader could not read its own state, so it cannot say what it honours. This is NOT 'no judgements' and NOT 'nothing withheld' — an unreadable policy rendered as an empty one silently drops every restriction it carried."
+      }
+    },
     "refusal": {
+      "attribution_absent": "delegation_id is required. An action that does not carry its own authority cannot be told from an unauthorized one once the actor is gone.",
+      "authority_not_a_delegation": "The named delegation id is not a delegates_to row.",
+      "authority_not_the_owner": "A self-directed act is the owner's own. The named delegation carries the right scope but was not issued by this node's responsible party, and a third party's serve grant is not the owner's.",
+      "authority_not_to_actor": "The named delegation was not granted to this node, so this node is not the party it authorizes.",
+      "authority_scope_absent": "The named delegation does not carry the scope this operation requires. Another delegation from the same issuer might, but the act would then record an authority it was not taken under.",
+      "authority_scope_unreachable": "No live delegation chain carrying the scope this operation requires reaches this node from that issuer. Authority is re-derived from this node's own verified state, never taken from the request.",
+      "authority_unresolved": "The named delegation is not a row this node holds, so its scope cannot be checked. This node does not act on an authority it cannot verify.",
+      "bad_request": "The request body could not be parsed.",
+      "community_absent": "community_id is required: a quarantine is filed under a community's authority, and a marker that names no community names no authority.",
+      "judgement_subjectless": "That judgement names no subject, so honouring or declining it would change nothing about anyone. This node does not record a decision it cannot apply.",
+      "judgement_unresolved": "That judgement is not a row this node holds, so this reader has nothing to decide about. A reader decides what it HOLDS; it does not pre-refuse what it has never seen.",
+      "node_unowned": "This node has no responsible party (owner-binding), so it performs no graded admin operation on anyone's behalf. Claim ownership first.",
+      "not_a_judgement": "That row is not a judgement this rung can decide about. Tier R is the reader's policy over other parties' JUDGEMENTS, and an ordinary attestation is not one.",
+      "not_owner": "Graded admin operations require the owner (SYSTEM_ADMIN) role.",
       "preview_hash_mismatch": "What you previewed is not what would execute — the selection has changed since the preview. Re-run the preview and ratify the new hash.",
-      "quorum_insufficient": "This operation is irreversible and takes a quorum of distinct authorities, not one delegation chain. Two chains from the same root are one authority wearing two hats."
+      "quorum_insufficient": "This operation is irreversible and takes a quorum of distinct authorities, not one delegation chain. Two chains from the same root are one authority wearing two hats.",
+      "reason_absent": "reason is required. An action with no recorded reason is indistinguishable from an unauthorized one once the actor is gone.",
+      "selection_unpredicated": "The selection carries no predicate at all, which means the whole corpus. Name what you are acting on.",
+      "session_absent": "No session token was presented. Graded admin operations are owner-only.",
+      "session_invalid": "That session is invalid or expired.",
+      "store_unavailable": "The substrate could not be read.",
+      "subject_absent": "subject_key_id is required: a reader fold is about one subject's judgements, and an unnamed subject is every subject."
     },
     "reversal": {
       "evidence_only": "The original row survives and is still folded by every reader. This reversal is recorded evidence, not an undo — the substrate exposes no un-revoke.",
       "substrate": "The substrate state is reversed: this node stops withholding the key's rows.",
       "symmetric": "Nothing in the substrate is reversed because nothing in the substrate enforced the original judgement. Both acts are recorded evidence."
+    },
+    "self": {
+      "distinct_zeroes": "Three of the four standings are zeroes and they mean different things: never declared, declared and lifted, and could not be read. Render them differently.",
+      "enforcement": {
+        "compelled": "Recorded on its own axis, as its own act. This is a statement about force applied from OUTSIDE the mesh, and by itself it changes nothing this node does — deliberately. A compelled node may be made to keep serving, to stop, or to hand something over; folding any of those into 'this node stopped accepting' would destroy the only signal a downstream party has for telling a choice from a compulsion.",
+        "shed": "Recorded as this node's own attributed declaration, and nothing more. The mesh-config plane that would carry a load ceiling is authored by trust roots, and this node runs no consumer of the folded values yet, so no loop changes what it carries. What changes is the record: an operator, a peer or a later audit can tell that this node chose to carry less, under whose authority, and when.",
+        "stop_accepting": "Recorded as this node's own attributed declaration that it is taking on nothing new. Nothing in this substrate enforces it: the receive plane is peer-blind and the per-peer write quota is a fixed runaway-loop backstop, not a policy surface a stop can key on. The declaration is the artifact — and it is the one a peer reads to stop offering."
+      },
+      "lift": {
+        "compelled": "Recorded as a distinct act: a compulsion that ENDED is not a compulsion that never happened. The declaration it lifts survives, and both remain readable.",
+        "voluntary": "Recorded as a distinct act. The declaration it lifts survives, and both remain readable — 'declared and lifted' is not 'never declared'."
+      },
+      "partition": "Every act on this rung is local: the owner-binding walk, the ledger write and this read all touch this node's own database and nothing else. It is the only rung available while partitioned — every other rung has to reach someone.",
+      "standing": {
+        "in_force": "This node declared this and has not lifted it.",
+        "lifted": "This node declared this and lifted it again. That is not the same fact as never having declared it.",
+        "never_declared": "This node has never declared this. That is not the same fact as having declared and lifted it, and not the same fact as being unable to read.",
+        "unreadable": "The record could not be read, so this node does not know its own standing on this axis. This is NOT 'nothing in force' — do not render it as one."
+      }
     }
   },
   "consent": {
