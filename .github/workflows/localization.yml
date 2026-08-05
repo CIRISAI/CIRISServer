@@ -38,10 +38,13 @@ jobs:
       #   - every key in every locale is REACHABLE by that same resolver — a
       #     flat dotted key ("a.b.c": …) is dead in every language including
       #     English, which is how 53 ids shipped dead in 0c728b1 (#366),
+      #   - a server-emitted {id, text} id that en.json DEFINES is reachable,
       #   - a translated value carries exactly en.json's placeholders.
-      # Cross-language translation drift (missing/empty/extra keys) is a
-      # WARNING — graceful English fallback — and is fixed by the `localize-ui`
-      # Claude workflow. The tree currently passes `--strict` too; add that flag
-      # here if drift should block as well.
+      # Two WARNING-level checks (exit 0 here, exit 1 under --strict), both
+      # cases of "falls back to English by design, but should not stay that way":
+      #   - translation drift (missing/empty/extra keys per locale),
+      #   - server-emitted ids with no en.json entry at all — 84 of 137 today,
+      #     which is a real localize-ui worklist, not a clean bill of health.
+      # Do NOT add --strict here until that worklist is worked off.
       - name: Localization guard (four-bundle mirror, resolvability, placeholders)
         run: python3 client/tools/check_localization_sync.py
