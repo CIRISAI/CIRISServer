@@ -732,14 +732,18 @@ const CAPACITY_READ_LIMIT: i64 = 512;
 /// counting while the key's pre-compromise measurements keep doing so.
 ///
 /// A revocation read that fails must never return the rows unfiltered — that
-/// is the direction the attack above needs. It returns
-/// [`StandingRows::Unreadable`], which suppresses; see that type for why
-/// suppressing is safe on BOTH axes and an empty set was safe on only one.
+/// is the direction the attack above needs. It returns `Err`, which suppresses;
+/// see [`StandingRows`] for why suppressing is safe on BOTH axes and an empty
+/// set was safe on only one.
+///
+/// `Err` carries the backend's own message and means **the read failed**. It is
+/// deliberately outside [`StandingRows`] rather than a fourth variant of it, for
+/// the reason spelled out on that type.
 async fn live_capacity_rows(
     engine: &Engine,
     attested_key_id: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> StandingRows {
+) -> Result<StandingRows, String> {
     use ciris_persist::ceg::list::federation::AttestationFilter;
 
     let mut filter = AttestationFilter::default();
@@ -761,7 +765,7 @@ async fn live_capacity_rows(
         .await
     {
         Ok(page) => page,
-        Err(e) => return StandingRows::Unreadable(format!("list_attestations(capacity): {e}")),
+        Err(e) => return Err(format!("list_attestations(capacity): {e}")),
     };
     // How many rows the corpus holds ABOUT this subject in this family, before
     // any liveness filter. This is the number that separates "this subject has
@@ -784,7 +788,7 @@ async fn live_capacity_rows(
             .await
         {
             Ok(held) => held,
-            Err(e) => return StandingRows::Unreadable(format!("revocations_for(attesters): {e}")),
+            Err(e) => return Err(format!("revocations_for(attesters): {e}")),
         };
     let live: Vec<ciris_persist::federation::Attestation> = if held.is_empty() {
         rows
@@ -801,14 +805,15 @@ async fn live_capacity_rows(
             .collect()
     };
 
-    // THREE ZEROES, and only one of them is an absence of an answer.
-    if !live.is_empty() {
+    // THREE ZEROES — every one of them a real answer, because the absence of an
+    // answer left through `Err` above and cannot arrive here.
+    Ok(if !live.is_empty() {
         StandingRows::Standing(live)
     } else if read == 0 {
         StandingRows::NeverScored
     } else {
         StandingRows::NoneStanding { read }
-    }
+    })
 }
 
 /// What the standing-rows read actually returned — **the three zeroes kept
@@ -852,13 +857,33 @@ async fn live_capacity_rows(
 /// - [`NeverScored`](StandingRows::NeverScored) — the corpus holds no
 ///   `capacity:*` row about this subject at all. A cold subject; the first pass
 ///   of every agent's life sees this.
-/// - [`Unreadable`](StandingRows::Unreadable) — not a zero. No answer.
 ///
 /// `NoneStanding` and `NeverScored` both proceed to author, and deliberately:
 /// they are the same DECISION reached from different facts, and collapsing them
 /// would leave the log unable to say whether a re-emission followed a
 /// revocation or a cold start. That is the distinction the previous shape
 /// destroyed for all three at once.
+///
+/// # Why "unreadable" is NOT a variant here
+///
+/// It is the `Err` of [`live_capacity_rows`], because a failed read is not a
+/// fourth kind of answer — it is the absence of one, and that is exactly the
+/// distinction this type exists to hold. The module already answers this
+/// question this way one gate up: `resolve_scoped_consent` returns
+/// `Result<ConsentState, _>`, and `score_and_emit` splits it three ways with
+/// the unreadable case in `Err`. Two shapes for one question is how the axes get
+/// fused in the first place.
+///
+/// It is also the difference between a defect that is *detectable* and one that
+/// is *unrepresentable*. An earlier draft of this fix made `Unreadable` a fourth
+/// variant whose `rows()` returned `&[]`, with a doc comment claiming "the type
+/// is what enforces it: a caller who ignores the arm cannot reach the rows
+/// without saying so." That claim was false. Dropping the early return compiled
+/// silently, `standing.rows()` handed back `&[]`, and the function walked
+/// straight back into the original bug — a failed read reported as "nothing
+/// stands" — with every test still green. With the failure in `Err`, there is no
+/// `StandingRows` value to call `rows()` on until the error has been discharged,
+/// so the silent form of that regression no longer compiles.
 #[derive(Debug)]
 enum StandingRows {
     /// Live `capacity:*` rows about this subject. Non-empty by construction.
@@ -868,17 +893,15 @@ enum StandingRows {
     NoneStanding { read: usize },
     /// No `capacity:*` row about this subject exists at all.
     NeverScored,
-    /// **The read failed.** Carries the backend's own message.
-    Unreadable(String),
 }
 
 impl StandingRows {
     /// The live rows, as a slice — empty for both real zeroes.
     ///
-    /// [`Unreadable`](StandingRows::Unreadable) also yields an empty slice, and
-    /// that is safe ONLY because every caller of this method is downstream of a
-    /// `match` that has already returned on that arm. The type is what enforces
-    /// it: a caller who ignores the arm cannot reach the rows without saying so.
+    /// Every value of this type is an answer, so an empty slice here always
+    /// means "nothing stands" and never "we could not tell". That is a property
+    /// of the type, not of the caller's discipline: see the note on the type
+    /// about why the unreadable case is `Err` rather than a variant.
     fn rows(&self) -> &[ciris_persist::federation::Attestation] {
         match self {
             Self::Standing(rows) => rows,
@@ -901,13 +924,12 @@ impl StandingRows {
         }
     }
 
-    /// The one-word fact for a log line: which zero (or not a zero at all).
+    /// The one-word fact for a log line: which of the three answers this was.
     fn kind(&self) -> &'static str {
         match self {
             Self::Standing(_) => "standing",
             Self::NoneStanding { .. } => "none_standing",
             Self::NeverScored => "never_scored",
-            Self::Unreadable(_) => "unreadable",
         }
     }
 }
@@ -1201,16 +1223,19 @@ async fn score_and_emit(
     // ONE read feeds BOTH derivations. They used to issue one each, so the
     // bucket came from one corpus and the standing check from another, and each
     // swallowed its own failure into an empty vec independently.
-    let standing = live_capacity_rows(engine, attested_key_id, now).await;
-    if let StandingRows::Unreadable(_error) = &standing {}
-    if let StandingRows::NeverScored = standing {  // MUTATION D: arm no longer returns
-        let error = String::new();
-        // FAIL CLOSED. The argument is on `ScoreOutcome::StandingUnreadable`;
-        // the short form is that the row we would author has an `asserted_at`
-        // derived from the read that just failed, so "author it anyway, it would
-        // be identical" is false precisely when it matters.
-        return Ok(ScoreOutcome::StandingUnreadable { error });
-    }
+    //
+    // Split exactly like the consent gate above, and for the same reason:
+    //   Ok(rows) → a real answer about what stands (which of the three zeroes it
+    //              was is a fact for the log, not for the decision).
+    //   Err(_)   → NO answer. FAIL CLOSED. The argument is on
+    //              `ScoreOutcome::StandingUnreadable`; the short form is that
+    //              the row we would author carries an `asserted_at` derived from
+    //              the read that just failed, so "author it anyway, it would be
+    //              identical" is false precisely when it matters.
+    let standing = match live_capacity_rows(engine, attested_key_id, now).await {
+        Ok(standing) => standing,
+        Err(error) => return Ok(ScoreOutcome::StandingUnreadable { error }),
+    };
 
     // ── Coalesce the assertion instant (CIRISPersist#519 item 2a-iii) ────────
     //
@@ -1464,19 +1489,44 @@ mod outcome_accounting_tests {
         );
     }
 
-    /// **The standing-rows read must SUPPRESS, never author** (CIRISServer#374).
+    /// **The CC#46 consent gate is asked BEFORE the standing-rows read**
+    /// (CIRISServer#374).
     ///
-    /// The decision this pins is the one that could most plausibly be reverted
-    /// by someone reasoning from "the row would be identical anyway": that the
-    /// `Unreadable` arm returns before any emission. It would not be identical
-    /// — `asserted_at` is inside the signed envelope and is floored to a bucket
-    /// derived from the very read that failed — and it would be permanent.
+    /// A subject who declined is a decline whatever the corpus says. Asking the
+    /// corpus first would report a capacity-plane read failure about a subject
+    /// whose answer was "no" — the #351 category error, committed by the fix for
+    /// it — and would make an unconsented subject pay for a scan the gate is
+    /// about to render pointless.
     ///
-    /// Asserted on the SOURCE because the ordering is what carries the property:
-    /// the arm must return before `emit_attestation_self` is reached, and no
-    /// return value distinguishes "suppressed" from "would have suppressed".
+    /// Source-asserted because the property IS a source ordering, and this is
+    /// the form of that assertion which can fail: move the read above the gate
+    /// and the two offsets swap. (`find` takes the first occurrence of each, so
+    /// the earliest mention of either is what is compared.)
+    ///
+    /// # What used to be here, and why it is gone
+    ///
+    /// This test also asserted that `score_and_emit` "returns
+    /// `StandingUnreadable` before reaching `emit_attestation_self`" — by
+    /// checking that the *string* `ScoreOutcome::StandingUnreadable` occurred
+    /// somewhere in the source ahead of the emit. **That assertion could not
+    /// fail.** Mutation D — hang the early return off the wrong arm, so an
+    /// unreadable read falls through and authors — leaves the string exactly
+    /// where it was, and the gate stayed green over the restored bug.
+    ///
+    /// It is not replaced by a stricter source scan, because the property is not
+    /// a source property. It has two better owners now:
+    ///
+    /// - the TYPE, which no longer admits the silent form of the regression at
+    ///   all (see [`StandingRows`]); and
+    /// - `an_unreadable_standing_read_is_not_nothing_standing` in
+    ///   `tests/capacity_scorer.rs`, which breaks the read against a real
+    ///   backend and counts the rows in the corpus — measuring the suppression
+    ///   rather than looking for a name. Its own justification for being
+    ///   source-asserted ("no return value distinguishes suppressed from would
+    ///   have suppressed") was simply untrue: `run_pass` returns the emitted
+    ///   count, and the corpus is countable.
     #[test]
-    fn an_unreadable_standing_read_returns_before_the_emit() {
+    fn the_consent_gate_is_asked_before_the_standing_rows_read() {
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scorer.rs"),
         )
@@ -1486,20 +1536,6 @@ mod outcome_accounting_tests {
             .split_once("async fn score_and_emit")
             .expect("score_and_emit must exist")
             .1;
-        let (before_emit, _) = body
-            .split_once("emit_attestation_self")
-            .expect("score_and_emit must reach the emit");
-        assert!(
-            before_emit.contains("ScoreOutcome::StandingUnreadable"),
-            "`score_and_emit` reaches `emit_attestation_self` without ever returning \
-             `StandingUnreadable`, so an unreadable capacity-history read authors a row whose \
-             signed `asserted_at` is derived from the read that failed. Fail CLOSED: not \
-             writing costs one 60s cadence; writing costs a permanent, replicating row."
-        );
-        // And the read must be taken AFTER the consent gate: a subject who
-        // declined is a decline whatever the corpus says, and asking the corpus
-        // first would report a capacity-plane failure about a subject whose
-        // answer was "no".
         let consent_at = body
             .find("resolve_scoped_consent")
             .expect("the CC#46 gate must exist");
