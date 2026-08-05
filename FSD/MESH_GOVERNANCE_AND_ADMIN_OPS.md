@@ -524,3 +524,157 @@ Three further asks the tier 0–4 implementation surfaced, all persist:
 | `list_attestations` must honour `AttestationFilter::window` | the v17.4.0 window / tier / attester_filter axes are read only by the `list_scores` / `resolve_scores` handles; the general read silently ignores them. Same silent-narrowing class `dimension_exact` was in until v17.5.2 (#461) — a caller sets a predicate and gets rows that do not satisfy it. `src/admin_ops.rs` enforces `after:` in-process and labels the response `window_enforced: "application"` rather than hand an operator a hash over twice the blast radius they ratified. |
 | an assemble-only companion to `emit_attestation_self` | `record_quarantine_marker` takes an already-signed `Attestation`, and every sanctioned emit helper canonicalizes-signs-assembles **and puts**. The one door built for tier 2 cannot be reached through the chokepoint built to stop hand-rolled rows. |
 | export a "does THIS delegation row carry scope S" predicate | `delegation_scope_set` is `pub(crate)`, so the only public authority question is `reachable_under_scope(issuer → actor, S)` — which is true the moment the issuer granted S by ANY edge. On its own that lets a `review` delegation be *recorded* as the authority for a `slash` act. |
+
+---
+
+## 9. The residual abuse surface, measured (0.5.156 release gate)
+
+Everything above this section is design. This section is what a hostile peer can
+actually do against the shipped code, established by running it, and what the
+operator can actually do back. The evidence is `tests/abuse_surface.rs` — ten
+tests against a real sqlite engine, real `register_federation_key`, real
+`put_attestation`, no test doubles, every assertion mutation-verified (the
+guarded thing broken, the test RED, the break reverted).
+
+The rule this section keeps: **a control is only claimed if it was seen to
+fire.** §6 of this document had to be rewritten once already because it asserted
+"zero rate limiting anywhere" about a limiter that shipped. The cure is not more
+careful prose.
+
+### 9.1 What fires
+
+| control | demonstrated by | reach |
+|---|---|---|
+| **reverse quorum** — 1 objection raises the brake, below-*m* does not lift it, *m*-of-*n* does, and `ESCALATION_RESPONDENT_FLOOR` cannot be lowered by a policy string | `tests/commons_surface.rs` `property_1_*` / `property_2_*` / `property_4_*`, all four mutation-verified | commons actions in a cohort that declared a protocol |
+| **`PeerWriteQuota`** — one key flooding is refused at the documented allowance with `Error::RateLimited`, and the reserved class keeps `accord:` / `objection:` writable through a flood | `the_peer_write_quota_refuses_a_flood_and_nothing_here_counts_it` | every `put_attestation`, per backend instance, in memory |
+| **`capacity:*` anti-Goodhart wall** — self-attestation refused at the federation tier (AV-62/74), refused at the local tier (AV-83), and third-party scoring refused without the subject's `analyze` grant (CC#46) | `capacity_self_inflation_is_refused_at_every_door`, each arm required to name its own rule | the `capacity:*` family |
+| **`accord_holder` is not self-assertable** | `a_self_asserted_accord_holder_is_refused_at_the_door` | the halt/kill-switch plane |
+| **AV-77 peer de-admission** — a de-admitted key's next write is refused before any DB-walking gate | `av77_deadmission_stops_the_writes_and_no_route_here_emits_it` | this node's own corpus |
+| **tier 5 halt is now releasable offline** (#347) | `src/accord_release.rs` + its suite | a halted node, by file drop |
+
+Two of those deserve their qualifier stated rather than implied. The quota is
+per **backend instance and in memory**: a restart returns every budget to full,
+and a multi-process deployment holds N independent quotas. And AV-77 is **local
+by design** — a node refusing an author's writes is that node's sovereignty, not
+a federation ban; isolation of a real abuser is emergent across many nodes
+reaching the same conclusion independently.
+
+### 9.2 What does not
+
+**The recourse gap, stated plainly.** AV-77 is the only primitive in the stack
+that stops a hostile admitted peer from writing. `src/compose.rs` arms it at
+boot, reads the value back, and refuses to serve if it did not stick — because
+*"a silently-dormant sanction gate is strictly worse than no gate."* **No route
+in this server emits the row.** `POST /v1/admin/deadmit` — tier 4, the rung
+§3 labels *"key may no longer write"* — writes a `Revocation` on the append-only
+key plane and says so itself: *"evidence a reader folds, not a door that
+slams … the replication cursors and row ingest all deliberately keep working."*
+That is the right act for a **compromised** key and the wrong one for a
+**hostile** one. Filed as CIRISServer#375; the gate itself is proven working, so
+this is a caller, not a design.
+
+Until it lands, the honest answer to *"a peer we admitted is writing rows we do
+not want"* is: **annotate it (tier 0, no effect), quarantine the rows it already
+wrote (tier 2, the only reversal that reaches the substrate), or halt the whole
+node (tier 5).** Nothing in between stops the next write.
+
+**Four privileged identity types are self-assertable**, and the doors they open
+are pure `identity_type` membership tests rather than the re-derivation their
+conferral modes promise (CIRISPersist#607, mutation-verified repro):
+
+| self-asserted claim | unlocks | about |
+|---|---|---|
+| `witness` | `age_assurance:*`, `capacity_assurance:*`, `transparency_log:cosigned:*` | any third party |
+| `lenscore_detector` | the whole `detection:*` wildcard | any third party |
+| `trusted_publisher` | the `content_rating:` read chain (`lookup_trusted_publisher_chain`) | any third party |
+| `substrate_persist` | `system:` / `audit_chain:` / `corpus_health:` / `identity_continuity:` / `federation_directory:` / **`hard_case:`** | its own node — **except `hard_case:`** |
+
+The last cell is the sharp one. `hard_case:` is where `src/admin_ops.rs` writes
+every tier 0–4 tombstone, and a tombstone's whole job is to carry the authorizing
+`delegates_to` id and reason for an act about **someone else**. persist's own
+mode table sets the retirement condition — *"if a `system:*` row ever becomes an
+input to a decision ABOUT ANOTHER PARTY, this must move to `AccordCoScrubbed`"* —
+and `hard_case:` is not on the list it checks. So the ladder's accountability
+plane rests on a claim anybody can make.
+
+These are reachable **over replication**, not only by an operator's own admit
+ceremony: `apply_replicated_key_record` → `ReplicatedKeyPlan::Insert` →
+`put_public_key`, the same gate chain.
+
+Scope of what was RUN, so the table is not read as more than it is. The
+self-assertability of all four is demonstrated
+(`which_privileged_claims_are_self_assertable_and_which_are_gated` registers
+every member of `AUTHORITY_CONFERRING_IDENTITY_TYPES` and pins the exact
+admitted/refused split — seven and two). The *emission* consequence is
+demonstrated for `witness` (`age_assurance:level:adult` about a third party),
+`lenscore_detector` (`detection:correlated_action`) and `substrate_persist`
+(`hard_case:admin_action`). The `trusted_publisher` → `content_rating:` read
+chain is **by inspection of `lookup_trusted_publisher_chain`, not run** — treat
+it as the weakest cell in the table until someone drives it.
+
+Not every self-assertable claim is a hole: `steward`, `partner` and
+`wise_authority` are also in the admitted set and are fine, because their
+authority genuinely is re-derived at each use (the steward-binding walk, the
+licensure quorum, the WA adjudication edge). The defect is not "a claim is
+self-assertable" — it is *a claim whose conferral mode promises re-derivation
+opening a door that does a membership test instead.*
+
+**The receive plane still has no subject** — §0's first architectural finding,
+unchanged. Any admitted key writes signed rows naming anyone; subject-side
+consent exists for `capacity:*` alone. Edge #426 threaded the authenticated
+`source_peer` to the apply layer so a per-peer receive decision is *expressible*;
+`dispatch_apply` does not take it, and nothing expresses one.
+
+**A sanctioned key keeps the sanctioning dimension.** `check_peer_deadmission`'s
+exemption is a disjunction that never asks who is writing, so a de-admitted key
+may go on writing `revocation:peer_admission:v1` rows about anyone
+(CIRISPersist#608). They have no local effect and they replicate.
+
+**The quota's refusal has no reader.** The refusal is correct and nothing counts
+it: `PeerQuotaObservation` exposes only the #583 tail-squeeze tripwire, so a node
+refusing 100% of a peer's writes renders `peer_quota: clean`, band **green**.
+This is the 2026-08-05 shape exactly (`FSD/RCA_INGEST_REJECTION_2026-08-05.md`) —
+a correct refusal nobody is reading — on the one control a hostile peer will
+actually trip. Filed as CIRISPersist#609.
+
+**Two keys defeat every consent wall.** The `capacity:*` gate is satisfied by the
+abuser granting `analyze` to its own second key. That is §7's *"m-of-n counts
+keys, not independent humans"* and it is not payable here; it is pinned
+(`a_two_key_sybil_still_inflates_its_own_capacity`) so it stays a measured fact
+rather than a paragraph.
+
+### 9.3 Corrections to §6
+
+§6 describes the v22/v24 quota. At the pinned persist v29.0.0 it is materially
+stronger and the stale text should not be inherited:
+
+- **bytes ARE metered** (`QuotaDimension::Bytes`, #583) — "bytes are not counted
+  at all" is false;
+- the tracked-peer cap is **8192**, not 4096, and rotation buys nothing: an
+  untracked identity spends a **shared tail budget**, so a Sybil wave contends
+  with itself rather than with honest peers;
+- a **reserved admission class** ships (`accord:` / `objection:`, charged against
+  its own bucket and nothing else), which is §6's own must-ship caveat, closed;
+- a restart is worth **one node-wide burst (6 000 writes)**, not the
+  2 611 200 it was, because the node-wide budget is charged by every ordinary
+  write regardless of how many identities produce them.
+
+What remains true from §6: only `put_attestation` is guarded, the buckets are
+in-memory and reset on restart, and the reserved class is decided by a **pure,
+therefore forgeable, predicate** — traffic shaped as `accord:*` exhausts the
+reserve before the emitter rule refuses it a few gates later (persist's #575 ask
+(d)).
+
+### 9.4 The one-paragraph answer
+
+An attacker who gets one key admitted — which costs a self-signed
+proof-of-possession — can write signed rows naming anyone on every ungated
+dimension, can self-assert `witness`, `lenscore_detector`, `trusted_publisher` or
+`substrate_persist` and reach the age-assurance, detection, publisher and
+hard-case planes about third parties, can inflate its own capacity score with a
+second key, and can flood at 600 rows/minute sustained with the refusals landing
+in a counter nobody reads and resetting on every restart. The operator's answer
+is: quarantine what was already written, or halt the node. **The one control that
+would stop the next write is built, armed, proven, and has no caller.** That is
+CIRISServer#375, and it is the smallest change on this page with the largest
+effect on what an operator can actually do.
