@@ -3098,14 +3098,67 @@
     "quarantine": {
       "not_withheld": "Esta chave não está atualmente retida aqui, portanto não há nada a liberar."
     },
+    "reader": {
+      "advisory": "Um julgamento emitido é consultivo para cada leitor. `reader_fold` é o que a política DESTE leitor faz daquilo que ele detém; `node_fold` é o que os caminhos de serviço deste nó fazem hoje, ou seja, honrar todo marcador que o substrato admitiu. Os dois podem divergir e, quando divergem, a diferença é a lacuna do substrato: não há nenhum ponto de encaixe para a política do leitor na incorporação do lado do serviço, portanto uma recusa é registrada e relatada, mas ainda não faz este nó deixar de reter.",
+      "decision": {
+        "declined": "Este leitor recusou este julgamento. É um desfecho normal: um julgamento emitido é consultivo para cada leitor, e poder recusá-lo é exatamente a propriedade pela qual todo este degrau existe.",
+        "honoured_by_subscription": "Nenhuma decisão explícita foi registrada; este leitor é assinante do signatário, portanto o julgamento é honrado por política.",
+        "honoured_explicit": "Este leitor adotou este julgamento deliberadamente.",
+        "undecided_unsubscribed": "Este leitor não é assinante do signatário e não registrou nenhuma decisão. O julgamento não é honrado, e isso ainda não é decisão de ninguém — o que é um fato diferente de tê-lo recusado."
+      },
+      "standing": {
+        "decided": "Todo julgamento que este nó detém sobre esse sujeito está listado junto com o que este leitor faz a respeito dele.",
+        "none_held": "Este nó não detém nenhum julgamento sobre esse sujeito. Ninguém o julgou aqui — o que não é o mesmo que este nó não conseguir se pronunciar.",
+        "unreadable": "Este leitor não conseguiu ler o próprio estado, portanto não pode dizer o que honra. Isto NÃO é 'nenhum julgamento' e NÃO é 'nada retido' — uma política ilegível apresentada como uma política vazia descarta silenciosamente todas as restrições que ela carregava."
+      }
+    },
     "refusal": {
+      "attribution_absent": "delegation_id é obrigatório. Uma ação que não carrega a própria autoridade não pode ser distinguida de uma ação não autorizada depois que o ator se foi.",
+      "authority_not_a_delegation": "O id de delegação indicado não é uma linha delegates_to.",
+      "authority_not_the_owner": "Um ato autodirigido é do próprio proprietário. A delegação indicada carrega o escopo exigido, mas não foi emitida pelo responsável deste nó, e a concessão de serviço de um terceiro não é a do proprietário.",
+      "authority_not_to_actor": "A delegação indicada não foi concedida a este nó, portanto este nó não é a parte que ela autoriza.",
+      "authority_scope_absent": "A delegação indicada não carrega o escopo que esta operação exige. Outra delegação do mesmo emissor poderia carregá-lo, mas então o ato registraria uma autoridade sob a qual ele não foi praticado.",
+      "authority_scope_unreachable": "Nenhuma cadeia de delegação viva que carregue o escopo exigido por esta operação alcança este nó a partir desse emissor. A autoridade é rederivada do estado verificado do próprio nó, nunca extraída da requisição.",
+      "authority_unresolved": "A delegação indicada não é uma linha que este nó detenha, portanto seu escopo não pode ser verificado. Este nó não age sob uma autoridade que não consegue verificar.",
+      "bad_request": "Não foi possível interpretar o corpo da requisição.",
+      "community_absent": "community_id é obrigatório: uma quarentena é registrada sob a autoridade de uma comunidade, e um marcador que não nomeia nenhuma comunidade não nomeia nenhuma autoridade.",
+      "judgement_subjectless": "Esse julgamento não nomeia nenhum sujeito, portanto honrá-lo ou recusá-lo não mudaria nada a respeito de ninguém. Este nó não registra uma decisão que não pode aplicar.",
+      "judgement_unresolved": "Esse julgamento não é uma linha que este nó detenha, portanto este leitor não tem nada a decidir a respeito. Um leitor decide sobre o que DETÉM; ele não recusa de antemão o que nunca viu.",
+      "node_unowned": "Este nó não tem responsável (vínculo de propriedade), portanto não realiza nenhuma operação administrativa graduada em nome de ninguém. Reivindique a propriedade primeiro.",
+      "not_a_judgement": "Essa linha não é um julgamento sobre o qual este degrau possa decidir. A camada R é a política do leitor sobre os JULGAMENTOS de outras partes, e uma atestação comum não é um deles.",
+      "not_owner": "Operações administrativas graduadas exigem o papel de proprietário (SYSTEM_ADMIN).",
       "preview_hash_mismatch": "O que você pré-visualizou não é o que seria executado — a seleção mudou desde a pré-visualização. Execute a pré-visualização novamente e ratifique o novo hash.",
-      "quorum_insufficient": "Esta operação é irreversível e exige um quórum de autoridades distintas, não uma única cadeia de delegação. Duas cadeias a partir da mesma raiz são uma só autoridade usando dois chapéus."
+      "quorum_insufficient": "Esta operação é irreversível e exige um quórum de autoridades distintas, não uma única cadeia de delegação. Duas cadeias a partir da mesma raiz são uma só autoridade usando dois chapéus.",
+      "reason_absent": "reason é obrigatório. Uma ação sem motivo registrado é indistinguível de uma ação não autorizada depois que o ator se foi.",
+      "selection_unpredicated": "A seleção não carrega predicado algum, o que significa o corpus inteiro. Nomeie aquilo sobre o que você está agindo.",
+      "session_absent": "Nenhum token de sessão foi apresentado. Operações administrativas graduadas são exclusivas do proprietário.",
+      "session_invalid": "Essa sessão é inválida ou expirou.",
+      "store_unavailable": "Não foi possível ler o substrato.",
+      "subject_absent": "subject_key_id é obrigatório: uma incorporação de leitor trata dos julgamentos sobre um único sujeito, e um sujeito não nomeado é todo sujeito."
     },
     "reversal": {
       "evidence_only": "A linha original sobrevive e continua a ser incorporada por todos os leitores. Esta reversão é prova registrada, não um desfazer — o substrato não expõe nenhuma anulação de revogação.",
       "substrate": "O estado do substrato é revertido: este nó deixa de reter as linhas da chave.",
       "symmetric": "Nada no substrato é revertido, porque nada no substrato impôs o julgamento original. Ambos os atos são prova registrada."
+    },
+    "self": {
+      "distinct_zeroes": "Três das quatro situações são zeros e significam coisas diferentes: nunca declarado, declarado e depois levantado, e não foi possível ler. Apresente-os de forma distinta.",
+      "enforcement": {
+        "compelled": "Registrado em seu próprio eixo, como um ato próprio. Esta é uma declaração sobre força aplicada DE FORA da malha e, por si só, não muda nada do que este nó faz — deliberadamente. Um nó sob coação pode ser obrigado a continuar servindo, a parar ou a entregar alguma coisa; dobrar qualquer uma dessas situações em 'este nó parou de aceitar' destruiria o único sinal de que uma parte a jusante dispõe para distinguir uma escolha de uma coação.",
+        "shed": "Registrado como declaração atribuída do próprio nó, e nada mais. O plano de configuração da malha que carregaria um teto de carga é escrito pelas raízes de confiança, e este nó ainda não executa nenhum consumidor dos valores incorporados, portanto nenhum laço muda o que ele carrega. O que muda é o registro: um operador, um par ou uma auditoria posterior pode constatar que este nó escolheu carregar menos, sob a autoridade de quem e quando.",
+        "stop_accepting": "Registrado como declaração atribuída do próprio nó de que ele não está assumindo nada de novo. Nada neste substrato o impõe: o plano de recepção é cego aos pares e a cota de escrita por par é uma proteção fixa contra loops descontrolados, não uma superfície de política em que uma parada possa se apoiar. A declaração é o artefato — e é ela que um par lê para deixar de oferecer."
+      },
+      "lift": {
+        "compelled": "Registrado como um ato distinto: uma coação que TERMINOU não é uma coação que nunca existiu. A declaração que ele levanta sobrevive, e ambas permanecem legíveis.",
+        "voluntary": "Registrado como um ato distinto. A declaração que ele levanta sobrevive, e ambas permanecem legíveis — 'declarado e levantado' não é 'nunca declarado'."
+      },
+      "partition": "Todo ato neste degrau é local: a caminhada pelo vínculo de propriedade, a escrita no livro-razão e esta leitura tocam apenas o banco de dados deste nó e nada mais. É o único degrau disponível durante uma partição — todos os outros degraus precisam alcançar alguém.",
+      "standing": {
+        "in_force": "Este nó declarou isto e não o levantou.",
+        "lifted": "Este nó declarou isto e voltou a levantá-lo. Esse não é o mesmo fato que nunca ter declarado.",
+        "never_declared": "Este nó nunca declarou isto. Esse não é o mesmo fato que ter declarado e levantado, nem o mesmo fato que não conseguir ler.",
+        "unreadable": "Não foi possível ler o registro, portanto este nó não sabe qual é a própria situação neste eixo. Isto NÃO é 'nada em vigor' — não o apresente como tal."
+      }
     }
   },
   "consent": {

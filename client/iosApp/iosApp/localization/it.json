@@ -3098,14 +3098,67 @@
     "quarantine": {
       "not_withheld": "Questa chiave non è attualmente trattenuta qui, quindi non c'è nulla da rilasciare."
     },
+    "reader": {
+      "advisory": "Un giudizio emesso è consultivo per ciascun lettore. `reader_fold` è ciò che la policy di QUESTO lettore fa di ciò che detiene; `node_fold` è ciò che i percorsi di servizio di questo nodo fanno oggi, cioè onorare ogni marcatore che il substrato ha ammesso. Possono divergere, e quando divergono la differenza è la lacuna del substrato: nel fold lato servizio non esiste alcun aggancio alla policy del lettore, quindi una mancata adesione viene registrata e riportata, ma non impedisce ancora a questo nodo di trattenere.",
+      "decision": {
+        "declined": "Questo lettore ha declinato questo giudizio. È un esito normale: un giudizio emesso è consultivo per ciascun lettore, e poterlo declinare è proprio la proprietà per cui questo gradino esiste.",
+        "honoured_by_subscription": "Non è stata registrata alcuna decisione esplicita; questo lettore è iscritto al firmatario, quindi il giudizio è onorato per policy.",
+        "honoured_explicit": "Questo lettore ha adottato deliberatamente questo giudizio.",
+        "undecided_unsubscribed": "Questo lettore non è iscritto al firmatario e non ha registrato alcuna decisione. Il giudizio non è onorato, ma non è ancora la decisione di nessuno — un fatto diverso dall'averlo declinato."
+      },
+      "standing": {
+        "decided": "Ogni giudizio che questo nodo detiene su quel soggetto è elencato insieme a ciò che questo lettore ne fa.",
+        "none_held": "Questo nodo non detiene alcun giudizio su quel soggetto. Qui nessuno lo ha giudicato — il che non equivale al fatto che questo nodo non sia in grado di pronunciarsi.",
+        "unreadable": "Questo lettore non è riuscito a leggere il proprio stato, quindi non può dire che cosa onora. Questo NON significa 'nessun giudizio' e NON significa 'nulla trattenuto' — una policy illeggibile presentata come vuota lascia cadere silenziosamente ogni restrizione che portava."
+      }
+    },
     "refusal": {
+      "attribution_absent": "delegation_id è obbligatorio. Un'azione che non porta con sé la propria autorità non è distinguibile da una non autorizzata una volta che l'attore non c'è più.",
+      "authority_not_a_delegation": "L'id di delega indicato non è una riga delegates_to.",
+      "authority_not_the_owner": "Un atto auto-diretto appartiene al proprietario. La delega indicata porta l'ambito corretto ma non è stata emessa dalla parte responsabile di questo nodo, e la concessione di servizio di un terzo non è quella del proprietario.",
+      "authority_not_to_actor": "La delega indicata non è stata concessa a questo nodo, quindi questo nodo non è la parte che essa autorizza.",
+      "authority_scope_absent": "La delega indicata non porta l'ambito richiesto da questa operazione. Un'altra delega dello stesso emittente potrebbe portarlo, ma l'atto registrerebbe allora un'autorità sotto la quale non è stato compiuto.",
+      "authority_scope_unreachable": "Nessuna catena di deleghe attiva che porti l'ambito richiesto da questa operazione raggiunge questo nodo a partire da quell'emittente. L'autorità viene riderivata dallo stato verificato di questo nodo, mai presa dalla richiesta.",
+      "authority_unresolved": "La delega indicata non è una riga che questo nodo detiene, quindi il suo ambito non può essere controllato. Questo nodo non agisce su un'autorità che non può verificare.",
+      "bad_request": "Non è stato possibile analizzare il corpo della richiesta.",
+      "community_absent": "community_id è obbligatorio: una quarantena viene registrata sotto l'autorità di una comunità, e un marcatore che non nomina alcuna comunità non nomina alcuna autorità.",
+      "judgement_subjectless": "Quel giudizio non nomina alcun soggetto, quindi onorarlo o declinarlo non cambierebbe nulla per nessuno. Questo nodo non registra una decisione che non può applicare.",
+      "judgement_unresolved": "Quel giudizio non è una riga che questo nodo detiene, quindi questo lettore non ha nulla su cui decidere. Un lettore decide su ciò che DETIENE; non declina in anticipo ciò che non ha mai visto.",
+      "node_unowned": "Questo nodo non ha una parte responsabile (owner-binding), quindi non esegue alcuna operazione amministrativa graduata per conto di nessuno. Rivendica prima la proprietà.",
+      "not_a_judgement": "Quella riga non è un giudizio su cui questo gradino possa decidere. Il Tier R è la policy del lettore sui GIUDIZI di altre parti, e un'attestazione ordinaria non è un giudizio.",
+      "not_owner": "Le operazioni amministrative graduate richiedono il ruolo di proprietario (SYSTEM_ADMIN).",
       "preview_hash_mismatch": "Ciò che hai visualizzato in anteprima non è ciò che verrebbe eseguito: la selezione è cambiata dopo l'anteprima. Riesegui l'anteprima e ratifica il nuovo hash.",
-      "quorum_insufficient": "Questa operazione è irreversibile e richiede un quorum di autorità distinte, non un'unica catena di delega. Due catene dalla stessa radice sono un'unica autorità con due cappelli."
+      "quorum_insufficient": "Questa operazione è irreversibile e richiede un quorum di autorità distinte, non un'unica catena di delega. Due catene dalla stessa radice sono un'unica autorità con due cappelli.",
+      "reason_absent": "reason è obbligatorio. Un'azione senza una motivazione registrata è indistinguibile da una non autorizzata una volta che l'attore non c'è più.",
+      "selection_unpredicated": "La selezione non porta alcun predicato, il che significa l'intero corpus. Indica su che cosa stai agendo.",
+      "session_absent": "Non è stato presentato alcun token di sessione. Le operazioni amministrative graduate sono riservate al proprietario.",
+      "session_invalid": "Quella sessione non è valida o è scaduta.",
+      "store_unavailable": "Non è stato possibile leggere il substrato.",
+      "subject_absent": "subject_key_id è obbligatorio: un fold del lettore riguarda i giudizi su un solo soggetto, e un soggetto non nominato è ogni soggetto."
     },
     "reversal": {
       "evidence_only": "La riga originale sopravvive ed è ancora integrata nel fold da ogni lettore. Questa inversione è una prova registrata, non un annullamento: il substrato non espone alcuna revoca della revoca.",
       "substrate": "Lo stato del substrato è invertito: questo nodo smette di trattenere le righe della chiave.",
       "symmetric": "Nulla nel substrato viene invertito, perché nulla nel substrato applicava il giudizio originale. Entrambi gli atti sono prove registrate."
+    },
+    "self": {
+      "distinct_zeroes": "Tre delle quattro condizioni sono zeri e significano cose diverse: mai dichiarato, dichiarato e poi ritirato, e impossibile da leggere. Rendile in modo distinto.",
+      "enforcement": {
+        "compelled": "Registrato su un asse proprio, come atto a sé stante. È una dichiarazione riguardo a una forza applicata dall'ESTERNO della mesh e, di per sé, non cambia nulla di ciò che questo nodo fa — deliberatamente. Un nodo costretto può essere obbligato a continuare a servire, a fermarsi o a consegnare qualcosa; far confluire una di queste situazioni in 'questo nodo ha smesso di accettare' distruggerebbe l'unico segnale con cui una parte a valle può distinguere una scelta da una costrizione.",
+        "shed": "Registrata come dichiarazione attribuita di questo nodo, e nulla di più. Il piano mesh-config che porterebbe un tetto di carico è redatto dalle trust root, e questo nodo non esegue ancora alcun consumatore dei valori integrati nel fold, quindi nessun ciclo cambia ciò che esso porta. Ciò che cambia è la registrazione: un operatore, un peer o un audit successivo possono constatare che questo nodo ha scelto di portare meno, sotto quale autorità e quando.",
+        "stop_accepting": "Registrata come dichiarazione attribuita di questo nodo, secondo cui esso non prende in carico nulla di nuovo. Nulla in questo substrato la fa rispettare: il piano di ricezione è cieco rispetto ai peer e la quota di scrittura per peer è una protezione fissa contro i cicli impazziti, non una superficie di policy su cui un arresto possa agire. La dichiarazione è l'artefatto — ed è quella che un peer legge per smettere di offrire."
+      },
+      "lift": {
+        "compelled": "Registrato come atto distinto: una costrizione che è TERMINATA non è una costrizione che non è mai avvenuta. La dichiarazione che ritira sopravvive, ed entrambe restano leggibili.",
+        "voluntary": "Registrato come atto distinto. La dichiarazione che ritira sopravvive, ed entrambe restano leggibili: 'dichiarato e poi ritirato' non è 'mai dichiarato'."
+      },
+      "partition": "Ogni atto su questo gradino è locale: la risoluzione dell'owner-binding, la scrittura sul ledger e questa lettura toccano soltanto il database di questo nodo e nient'altro. È l'unico gradino disponibile in caso di partizione — ogni altro gradino deve raggiungere qualcuno.",
+      "standing": {
+        "in_force": "Questo nodo lo ha dichiarato e non lo ha ritirato.",
+        "lifted": "Questo nodo lo ha dichiarato e poi lo ha ritirato. Non è lo stesso fatto del non averlo mai dichiarato.",
+        "never_declared": "Questo nodo non lo ha mai dichiarato. Non è lo stesso fatto dell'averlo dichiarato e poi ritirato, né lo stesso fatto del non essere in grado di leggere.",
+        "unreadable": "Non è stato possibile leggere la registrazione, quindi questo nodo non conosce la propria condizione su questo asse. Questo NON significa 'nulla in vigore' — non renderlo come tale."
+      }
     }
   },
   "consent": {

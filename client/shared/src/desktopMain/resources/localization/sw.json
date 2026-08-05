@@ -3098,14 +3098,67 @@
     "quarantine": {
       "not_withheld": "Ufunguo huu kwa sasa hauzuiliwi hapa, hivyo hakuna cha kuachiliwa."
     },
+    "reader": {
+      "advisory": "Hukumu iliyotolewa ni ushauri kwa kila msomaji. `reader_fold` ni kile ambacho sera ya msomaji HUYU inakifanya kwa kile anachokishikilia; `node_fold` ni kile ambacho njia za utoaji huduma za nodi hii zinafanya leo, yaani kuheshimu kila alama ambayo msingi umeikubali. Vyaweza kutofautiana, na vinapotofautiana tofauti hiyo ndiyo pengo la msingi: hakuna kishikizo cha sera ya msomaji katika ukunjaji wa upande wa utoaji huduma, hivyo kukataa kunarekodiwa na kuripotiwa lakini bado hakuizuii nodi hii kuendelea kuzuia.",
+      "decision": {
+        "declined": "Msomaji huyu amekataa kuipokea hukumu hii. Ni matokeo ya kawaida: hukumu iliyotolewa ni ushauri kwa kila msomaji, na kuweza kuikataa ndiyo sifa hasa ambayo ngazi hii yote ipo kwa ajili yake.",
+        "honoured_by_subscription": "Hakuna uamuzi wa wazi uliorekodiwa; msomaji huyu amejiandikisha kwa mtia-saini, hivyo hukumu inaheshimiwa kwa mujibu wa sera.",
+        "honoured_explicit": "Msomaji huyu ameipokea hukumu hii kwa makusudi.",
+        "undecided_unsubscribed": "Msomaji huyu hajajiandikisha kwa mtia-saini na hajarekodi uamuzi wowote. Hukumu haiheshimiwi, na hilo bado si uamuzi wa mtu yeyote — jambo ambalo ni ukweli tofauti na kuwa ameikataa."
+      },
+      "standing": {
+        "decided": "Kila hukumu ambayo nodi hii inaishikilia kuhusu mhusika huyo imeorodheshwa pamoja na kile msomaji huyu anachokifanya kuihusu.",
+        "none_held": "Nodi hii haishikilii hukumu yoyote kuhusu mhusika huyo. Hakuna aliyemhukumu hapa — jambo ambalo si sawa na nodi hii kushindwa kusema chochote.",
+        "unreadable": "Msomaji huyu ameshindwa kusoma hali yake mwenyewe, hivyo hawezi kusema anachokiheshimu. Hii SI 'hakuna hukumu' wala SI 'hakuna kinachozuiliwa' — sera isiyosomeka ikionyeshwa kama sera tupu hutupa kimyakimya kila kizuizi ilichokuwa imebeba."
+      }
+    },
     "refusal": {
+      "attribution_absent": "delegation_id inahitajika. Kitendo kisichobeba mamlaka yake mwenyewe hakiwezi kutofautishwa na kitendo kisicho na idhini pale mtendaji anapokuwa ameondoka.",
+      "authority_not_a_delegation": "Kitambulisho cha ukabidhi kilichotajwa si safu ya delegates_to.",
+      "authority_not_the_owner": "Kitendo cha kujielekeza mwenyewe ni cha mmiliki mwenyewe. Ukabidhi uliotajwa unabeba wigo unaotakiwa lakini haukutolewa na mwajibikaji wa nodi hii, na ruhusa ya kutoa huduma kutoka kwa mtu wa tatu si ile ya mmiliki.",
+      "authority_not_to_actor": "Ukabidhi uliotajwa haukutolewa kwa nodi hii, hivyo nodi hii si upande ambao unaidhinishwa nao.",
+      "authority_scope_absent": "Ukabidhi uliotajwa haubebi wigo unaohitajika na operesheni hii. Ukabidhi mwingine kutoka kwa mtoaji yuleyule waweza kuubeba, lakini hapo kitendo kingerekodi mamlaka ambayo hakikufanywa chini yake.",
+      "authority_scope_unreachable": "Hakuna mnyororo hai wa ukabidhi unaobeba wigo unaohitajika na operesheni hii unaofika kwenye nodi hii kutoka kwa mtoaji huyo. Mamlaka hutolewa upya kutoka katika hali iliyohakikiwa ya nodi hii yenyewe, kamwe hayachukuliwi kutoka kwenye ombi.",
+      "authority_unresolved": "Ukabidhi uliotajwa si safu ambayo nodi hii inaishikilia, hivyo wigo wake hauwezi kuhakikiwa. Nodi hii haitendi kwa mamlaka ambayo haiwezi kuithibitisha.",
+      "bad_request": "Mwili wa ombi haukuweza kuchanganuliwa.",
+      "community_absent": "community_id inahitajika: karantini huwekwa chini ya mamlaka ya jamii, na alama isiyotaja jamii yoyote haitaji mamlaka yoyote.",
+      "judgement_subjectless": "Hukumu hiyo haitaji mhusika yeyote, hivyo kuiheshimu au kuikataa hakungebadilisha chochote kwa mtu yeyote. Nodi hii hairekodi uamuzi ambao haiwezi kuutumia.",
+      "judgement_unresolved": "Hukumu hiyo si safu ambayo nodi hii inaishikilia, hivyo msomaji huyu hana la kuamua kuihusu. Msomaji huamua kuhusu kile ANACHOKISHIKILIA; hakatai mapema kile ambacho hajawahi kukiona.",
+      "node_unowned": "Nodi hii haina mwajibikaji (kifungo cha umiliki), hivyo haifanyi operesheni yoyote ya usimamizi yenye madaraja kwa niaba ya mtu yeyote. Dai umiliki kwanza.",
+      "not_a_judgement": "Safu hiyo si hukumu ambayo ngazi hii inaweza kuamua kuihusu. Tabaka R ni sera ya msomaji kuhusu HUKUMU za pande nyingine, na uthibitisho wa kawaida si hukumu.",
+      "not_owner": "Operesheni za usimamizi zenye madaraja zinahitaji wadhifa wa mmiliki (SYSTEM_ADMIN).",
       "preview_hash_mismatch": "Ulichokitazama katika onyesho la awali si kile kitakachotekelezwa — uteuzi umebadilika tangu onyesho hilo. Rudia onyesho la awali kisha uidhinishe hashi mpya.",
-      "quorum_insufficient": "Operesheni hii haiwezi kutenduliwa na inahitaji akidi ya mamlaka tofautitofauti, si mnyororo mmoja wa ukabidhi. Minyororo miwili kutoka mzizi mmoja ni mamlaka moja iliyovaa kofia mbili."
+      "quorum_insufficient": "Operesheni hii haiwezi kutenduliwa na inahitaji akidi ya mamlaka tofautitofauti, si mnyororo mmoja wa ukabidhi. Minyororo miwili kutoka mzizi mmoja ni mamlaka moja iliyovaa kofia mbili.",
+      "reason_absent": "reason inahitajika. Kitendo kisicho na sababu iliyorekodiwa hakitofautishiki na kitendo kisicho na idhini pale mtendaji anapokuwa ameondoka.",
+      "selection_unpredicated": "Uteuzi hauna kigezo chochote, jambo linalomaanisha mkusanyiko mzima. Taja kile unachokifanyia kazi.",
+      "session_absent": "Hakuna tokeni ya kipindi iliyowasilishwa. Operesheni za usimamizi zenye madaraja ni za mmiliki pekee.",
+      "session_invalid": "Kipindi hicho si halali au kimeisha muda.",
+      "store_unavailable": "Msingi haukuweza kusomwa.",
+      "subject_absent": "subject_key_id inahitajika: ukunjaji wa msomaji unahusu hukumu za mhusika mmoja, na mhusika asiyetajwa ni kila mhusika."
     },
     "reversal": {
       "evidence_only": "Safu ya awali hubaki na bado hukunjwa na kila msomaji. Utenguzi huu ni ushahidi uliorekodiwa, si kutendua — msingi hautoi njia yoyote ya kutengua ubatilishaji.",
       "substrate": "Hali ya msingi imetenduliwa: nodi hii inaacha kuzuia safu za ufunguo huu.",
       "symmetric": "Hakuna kilichotenduliwa katika msingi kwa sababu hakuna kitu katika msingi kilichotekeleza hukumu ya awali. Vitendo vyote viwili ni ushahidi uliorekodiwa."
+    },
+    "self": {
+      "distinct_zeroes": "Tatu kati ya hali nne ni sufuri na zinamaanisha mambo tofauti: haijawahi kutangazwa, ilitangazwa kisha ikaondolewa, na haikuweza kusomwa. Zionyeshe kwa namna tofauti.",
+      "enforcement": {
+        "compelled": "Imerekodiwa kwenye mhimili wake yenyewe, kama kitendo chake yenyewe. Hii ni kauli kuhusu nguvu iliyotumika KUTOKA NJE ya mtandao, na yenyewe peke yake haibadilishi chochote anachofanya nodi hii — kwa makusudi. Nodi iliyolazimishwa yaweza kulazimishwa kuendelea kutoa huduma, kusimama, au kukabidhi kitu; kukunja lolote kati ya hayo ndani ya 'nodi hii imeacha kupokea' kungeharibu ishara pekee ambayo upande ulio chini ya mkondo unayo ya kutofautisha uchaguzi na kulazimishwa.",
+        "shed": "Imerekodiwa kama tangazo la nodi hii yenyewe lenye mwandishi anayejulikana, na si zaidi ya hapo. Uwanda wa usanidi wa mtandao ambao ungebeba dari la mzigo huandikwa na mizizi ya uaminifu, na nodi hii bado haiendeshi mtumiaji yeyote wa thamani zilizokunjwa, hivyo hakuna kitanzi kinachobadilisha kile inachokibeba. Kinachobadilika ni rekodi: mwendeshaji, mwenza au ukaguzi wa baadaye anaweza kubaini kwamba nodi hii ilichagua kubeba kidogo, chini ya mamlaka ya nani, na lini.",
+        "stop_accepting": "Imerekodiwa kama tangazo la nodi hii yenyewe lenye mwandishi anayejulikana kwamba haichukui chochote kipya. Hakuna kitu katika msingi huu kinachotekeleza jambo hilo: uwanda wa upokeaji hauwatambui wenza, na kiwango cha uandishi kwa kila mwenza ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao kusimama kunaweza kuutegemea. Tangazo lenyewe ndilo kilichopo — na ndilo ambalo mwenza hulisoma ili aache kutoa."
+      },
+      "lift": {
+        "compelled": "Imerekodiwa kama kitendo tofauti: kulazimishwa kulikoISHA si sawa na kulazimishwa ambako hakukuwahi kutokea. Tangazo linaloondolewa hubaki, na yote mawili yanaendelea kusomeka.",
+        "voluntary": "Imerekodiwa kama kitendo tofauti. Tangazo linaloondolewa hubaki, na yote mawili yanaendelea kusomeka — 'ilitangazwa kisha ikaondolewa' si 'haijawahi kutangazwa'."
+      },
+      "partition": "Kila kitendo katika ngazi hii ni cha ndani: ufuatiliaji wa kifungo cha umiliki, uandishi kwenye daftari na usomaji huu vyote hugusa hifadhidata ya nodi hii yenyewe pekee na si kingine chochote. Ndiyo ngazi pekee inayopatikana wakati mtandao umegawanyika — kila ngazi nyingine lazima imfikie mtu mwingine.",
+      "standing": {
+        "in_force": "Nodi hii ilitangaza hili na haijaliondoa.",
+        "lifted": "Nodi hii ilitangaza hili kisha ikaliondoa tena. Hilo si jambo lilelile na kutokuwahi kulitangaza.",
+        "never_declared": "Nodi hii haijawahi kutangaza hili. Hilo si jambo lilelile na kuwa ilitangaza kisha ikaondoa, wala si jambo lilelile na kushindwa kusoma.",
+        "unreadable": "Rekodi haikuweza kusomwa, hivyo nodi hii haijui hali yake yenyewe katika mhimili huu. Hii SI 'hakuna kinachotumika' — usiionyeshe hivyo."
+      }
     }
   },
   "consent": {

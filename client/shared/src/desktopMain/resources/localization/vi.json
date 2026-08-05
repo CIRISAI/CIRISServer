@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Những gì bạn đã xem trước không phải những gì sẽ được thực thi — lựa chọn đã thay đổi kể từ lần xem trước. Hãy chạy lại phần xem trước và phê chuẩn mã băm mới.",
-      "quorum_insufficient": "Thao tác này không thể đảo ngược và cần một túc số gồm các thẩm quyền riêng biệt, chứ không phải một chuỗi ủy quyền duy nhất. Hai chuỗi từ cùng một gốc chỉ là một thẩm quyền đội hai chiếc mũ."
+      "quorum_insufficient": "Thao tác này không thể đảo ngược và cần một túc số gồm các thẩm quyền riêng biệt, chứ không phải một chuỗi ủy quyền duy nhất. Hai chuỗi từ cùng một gốc chỉ là một thẩm quyền đội hai chiếc mũ.",
+      "attribution_absent": "delegation_id là bắt buộc. Một hành vi không mang theo thẩm quyền của chính nó thì không thể phân biệt được với một hành vi không có thẩm quyền, một khi người thực hiện đã rời đi.",
+      "authority_not_a_delegation": "Mã ủy quyền được nêu tên không phải là một hàng delegates_to.",
+      "authority_not_the_owner": "Một hành vi tự áp đặt là hành vi của chính chủ sở hữu. Ủy quyền được nêu tên có đúng phạm vi nhưng không do bên chịu trách nhiệm của nút này ban hành, và quyền phục vụ do một bên thứ ba cấp thì không phải là của chủ sở hữu.",
+      "authority_not_to_actor": "Ủy quyền được nêu tên không được cấp cho nút này, nên nút này không phải là bên mà nó trao quyền.",
+      "authority_scope_absent": "Ủy quyền được nêu tên không mang phạm vi mà thao tác này đòi hỏi. Một ủy quyền khác từ cùng bên ban hành có thể có phạm vi đó, nhưng khi ấy hành vi sẽ ghi lại một thẩm quyền mà nó không hề dựa vào để thực hiện.",
+      "authority_scope_unreachable": "Không có chuỗi ủy quyền còn hiệu lực nào mang phạm vi mà thao tác này đòi hỏi đi từ bên ban hành đó tới nút này. Thẩm quyền luôn được suy dẫn lại từ trạng thái đã xác minh của chính nút này, không bao giờ lấy từ yêu cầu.",
+      "authority_unresolved": "Ủy quyền được nêu tên không phải là một hàng mà nút này đang giữ, nên không thể kiểm tra phạm vi của nó. Nút này không hành động dựa trên một thẩm quyền mà nó không thể xác minh.",
+      "bad_request": "Không thể phân tích phần thân của yêu cầu.",
+      "community_absent": "community_id là bắt buộc: một lệnh cách ly được lập dưới thẩm quyền của một cộng đồng, và một dấu hiệu không nêu tên cộng đồng nào thì cũng không nêu tên thẩm quyền nào.",
+      "judgement_subjectless": "Phán quyết đó không nêu tên chủ thể nào, nên dù tôn trọng hay khước từ nó cũng không thay đổi điều gì đối với bất kỳ ai. Nút này không ghi lại một quyết định mà nó không thể áp dụng.",
+      "judgement_unresolved": "Phán quyết đó không phải là một hàng mà nút này đang giữ, nên bên đọc này không có gì để quyết định. Một bên đọc quyết định về những gì nó ĐANG GIỮ; nó không khước từ trước những gì nó chưa từng thấy.",
+      "node_unowned": "Nút này không có bên chịu trách nhiệm (ràng buộc chủ sở hữu), nên nó không thực hiện thao tác quản trị phân bậc nào thay mặt cho bất kỳ ai. Hãy yêu cầu quyền sở hữu trước.",
+      "not_a_judgement": "Hàng đó không phải là một phán quyết mà nấc thang này có thể quyết định về nó. Tier R là chính sách của bên đọc đối với các PHÁN QUYẾT của những bên khác, còn một chứng thực thông thường thì không phải là phán quyết.",
+      "not_owner": "Các thao tác quản trị phân bậc đòi hỏi vai trò chủ sở hữu (SYSTEM_ADMIN).",
+      "reason_absent": "reason là bắt buộc. Một hành vi không có lý do được ghi lại thì không thể phân biệt được với một hành vi không có thẩm quyền, một khi người thực hiện đã rời đi.",
+      "selection_unpredicated": "Lựa chọn hoàn toàn không mang vị từ nào, nghĩa là nó bao trùm toàn bộ kho dữ liệu. Hãy nêu rõ đối tượng mà bạn đang tác động tới.",
+      "session_absent": "Không có mã phiên nào được xuất trình. Các thao tác quản trị phân bậc chỉ dành cho chủ sở hữu.",
+      "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
+      "store_unavailable": "Không đọc được nền tảng.",
+      "subject_absent": "subject_key_id là bắt buộc: một phép gấp của bên đọc là về các phán quyết đối với một chủ thể, còn một chủ thể không được nêu tên thì là mọi chủ thể."
     },
     "reversal": {
       "evidence_only": "Hàng gốc vẫn tồn tại và vẫn được mọi bên đọc gấp vào. Sự đảo ngược này là bằng chứng được ghi lại, không phải một thao tác hoàn tác — nền tảng không cung cấp thao tác hủy-thu-hồi nào.",
       "substrate": "Trạng thái của nền tảng được đảo ngược: nút này ngừng giữ lại các hàng của khóa đó.",
       "symmetric": "Không có gì trong nền tảng bị đảo ngược, vì không có gì trong nền tảng đã thi hành phán quyết ban đầu. Cả hai hành vi đều là bằng chứng được ghi lại."
+    },
+    "reader": {
+      "advisory": "Một phán quyết đã ban hành chỉ mang tính khuyến nghị đối với mỗi bên đọc. `reader_fold` là điều mà chính sách của BÊN ĐỌC NÀY rút ra từ những gì nó đang giữ; `node_fold` là điều mà các đường phục vụ của nút này thực sự làm hôm nay, tức là tôn trọng mọi dấu hiệu mà nền tảng đã kết nạp. Hai điều đó có thể khác nhau, và khi khác nhau thì chỗ khác biệt chính là khoảng trống của nền tảng: không có điểm móc nối cho chính sách bên đọc trong phép gấp ở phía phục vụ, nên một lần khước từ được ghi lại và được báo cáo, nhưng chưa làm nút này ngừng giữ lại.",
+      "decision": {
+        "declined": "Bên đọc này đã khước từ phán quyết này. Đây là một kết quả bình thường: một phán quyết đã ban hành chỉ mang tính khuyến nghị đối với mỗi bên đọc, và việc khước từ nó chính là đặc tính mà cả nấc thang này tồn tại để bảo đảm.",
+        "honoured_by_subscription": "Không có quyết định tường minh nào được ghi lại; bên đọc này có đăng ký theo dõi bên ký, nên phán quyết được tôn trọng theo chính sách.",
+        "honoured_explicit": "Bên đọc này đã chủ ý tiếp nhận phán quyết này.",
+        "undecided_unsubscribed": "Bên đọc này không đăng ký theo dõi bên ký và chưa ghi lại quyết định nào. Phán quyết không được tôn trọng, và điều đó chưa phải là quyết định của bất kỳ ai — đây là một sự việc khác với việc đã khước từ nó."
+      },
+      "standing": {
+        "decided": "Mọi phán quyết mà nút này đang giữ về chủ thể đó đều được liệt kê kèm theo cách bên đọc này xử lý nó.",
+        "none_held": "Nút này không giữ phán quyết nào về chủ thể đó. Chưa ai phán quyết về chủ thể đó ở đây — điều này không giống với việc nút này không thể trả lời.",
+        "unreadable": "Bên đọc này không đọc được trạng thái của chính nó, nên nó không thể nói mình tôn trọng những gì. Đây KHÔNG phải là “không có phán quyết nào” và KHÔNG phải là “không có gì bị giữ lại” — một chính sách không đọc được mà lại hiển thị thành chính sách rỗng sẽ âm thầm làm rơi mọi hạn chế mà nó mang theo."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Ba trong bốn trạng thái đều là số không và chúng mang những nghĩa khác nhau: chưa bao giờ tuyên bố, đã tuyên bố rồi gỡ bỏ, và không đọc được. Hãy hiển thị chúng khác nhau.",
+      "enforcement": {
+        "compelled": "Được ghi lại trên trục riêng của nó, như một hành vi riêng của nó. Đây là một phát biểu về sức ép áp đặt từ BÊN NGOÀI lưới, và tự thân nó không thay đổi bất cứ điều gì nút này làm — một cách có chủ ý. Một nút bị cưỡng ép có thể bị buộc phải tiếp tục phục vụ, bị buộc phải dừng lại, hoặc bị buộc phải giao nộp thứ gì đó; gấp bất kỳ điều nào trong số đó thành “nút này đã ngừng tiếp nhận” sẽ phá hủy tín hiệu duy nhất mà một bên ở hạ nguồn có được để phân biệt một lựa chọn tự nguyện với một sự cưỡng ép.",
+        "shed": "Được ghi lại như tuyên bố có ghi nhận tác giả của chính nút này, và không gì hơn thế. Mặt phẳng cấu hình lưới vốn sẽ mang trần tải là do các gốc tin cậy soạn, và nút này chưa chạy bộ tiêu thụ nào cho các giá trị đã gấp, nên không có vòng lặp nào thay đổi khối lượng nó đang mang. Cái thay đổi là bản ghi: một người vận hành, một nút ngang hàng hay một cuộc kiểm toán sau này có thể thấy rằng nút này đã tự chọn mang ít hơn, dưới thẩm quyền của ai, và vào lúc nào.",
+        "stop_accepting": "Được ghi lại như tuyên bố có ghi nhận tác giả của chính nút này rằng nó không nhận thêm gì mới. Không có gì trong nền tảng này thực thi điều đó: mặt phẳng tiếp nhận không phân biệt nút ngang hàng, còn hạn ngạch ghi theo từng nút ngang hàng là một chốt chặn cố định cho vòng lặp mất kiểm soát, không phải một bề mặt chính sách mà một lệnh dừng có thể bám vào. Chính bản tuyên bố là sản phẩm — và nó là thứ mà một nút ngang hàng đọc để ngừng gửi thêm cho nút này."
+      },
+      "lift": {
+        "compelled": "Được ghi lại như một hành vi riêng biệt: một sự cưỡng ép đã CHẤM DỨT không phải là một sự cưỡng ép chưa từng xảy ra. Bản tuyên bố mà nó gỡ bỏ vẫn còn, và cả hai vẫn đọc được.",
+        "voluntary": "Được ghi lại như một hành vi riêng biệt, do chính nút này tự thực hiện. Bản tuyên bố mà nó gỡ bỏ vẫn còn, và cả hai vẫn đọc được — “đã tuyên bố rồi gỡ bỏ” không phải là “chưa bao giờ tuyên bố”."
+      },
+      "partition": "Mọi hành vi trên nấc thang này đều là cục bộ: việc duyệt ràng buộc chủ sở hữu, việc ghi sổ cái và chính lần đọc này đều chỉ chạm tới cơ sở dữ liệu của riêng nút này, không gì khác. Đây là nấc thang duy nhất còn dùng được khi mạng bị phân mảnh — mọi nấc thang khác đều phải liên hệ tới một ai đó.",
+      "standing": {
+        "in_force": "Nút này đã tuyên bố điều này và chưa gỡ bỏ nó.",
+        "lifted": "Nút này đã tuyên bố điều này rồi lại gỡ bỏ nó. Đó không phải là cùng một sự việc với việc chưa bao giờ tuyên bố nó.",
+        "never_declared": "Nút này chưa bao giờ tuyên bố điều này. Đó không phải là cùng một sự việc với việc đã tuyên bố rồi gỡ bỏ, và cũng không phải là cùng một sự việc với việc không đọc được.",
+        "unreadable": "Không đọc được bản ghi, nên nút này không biết trạng thái của chính mình trên trục này. Đây KHÔNG phải là “không có gì đang có hiệu lực” — đừng hiển thị nó như vậy."
+      }
     }
   },
   "consent": {

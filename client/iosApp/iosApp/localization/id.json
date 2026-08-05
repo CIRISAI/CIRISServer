@@ -3098,14 +3098,67 @@
     "quarantine": {
       "not_withheld": "Kunci ini saat ini tidak sedang ditahan di sini, jadi tidak ada yang bisa dilepaskan."
     },
+    "reader": {
+      "advisory": "Penilaian yang diterbitkan bersifat anjuran bagi setiap pembaca. `reader_fold` adalah hasil yang dibuat kebijakan pembaca INI atas apa yang dipegangnya; `node_fold` adalah apa yang dilakukan jalur penyajian node ini hari ini, yaitu menghormati setiap penanda yang diterima substrat. Keduanya bisa berbeda, dan ketika berbeda, selisih itulah celah substratnya: tidak ada kait kebijakan pembaca di dalam fold sisi penyajian, sehingga keputusan untuk tidak menghormati memang dicatat dan dilaporkan, tetapi belum menghentikan node ini menahan baris-baris itu.",
+      "decision": {
+        "declined": "Pembaca ini memilih untuk tidak menghormati penilaian ini. Ini hasil yang normal: penilaian yang diterbitkan bersifat anjuran bagi setiap pembaca, dan kemampuan untuk tidak menghormatinya justru merupakan sifat yang menjadi alasan keberadaan seluruh anak tangga ini.",
+        "honoured_by_subscription": "Tidak ada keputusan eksplisit yang tercatat; pembaca ini berlangganan pada penanda tangan, sehingga penilaian itu dihormati berdasarkan kebijakan.",
+        "honoured_explicit": "Pembaca ini mengadopsi penilaian ini secara sengaja.",
+        "undecided_unsubscribed": "Pembaca ini tidak berlangganan pada penanda tangan dan belum mencatat keputusan apa pun. Penilaian itu tidak dihormati, tetapi hal itu belum menjadi keputusan siapa pun — sebuah fakta yang berbeda dari pembaca yang memang telah memilih untuk tidak menghormatinya."
+      },
+      "standing": {
+        "decided": "Setiap penilaian yang dipegang node ini tentang subjek tersebut dicantumkan beserta apa yang dilakukan pembaca ini terhadapnya.",
+        "none_held": "Node ini tidak memegang penilaian apa pun tentang subjek tersebut. Di sini belum ada yang menilainya — hal ini tidak sama dengan node ini yang tidak mampu menyatakannya.",
+        "unreadable": "Pembaca ini tidak dapat membaca keadaannya sendiri, sehingga tidak dapat menyatakan apa yang dihormatinya. Ini BUKAN 'tidak ada penilaian' dan BUKAN 'tidak ada yang ditahan' — kebijakan yang tak terbaca lalu ditampilkan seolah kosong akan diam-diam menggugurkan setiap pembatasan yang dibawanya."
+      }
+    },
     "refusal": {
+      "attribution_absent": "delegation_id wajib diisi. Tindakan yang tidak membawa kewenangannya sendiri tidak dapat dibedakan dari tindakan tanpa izin setelah pelakunya tiada.",
+      "authority_not_a_delegation": "delegation id yang disebutkan bukan baris delegates_to.",
+      "authority_not_the_owner": "Tindakan yang diarahkan pada diri sendiri adalah milik pemilik node itu sendiri. Delegasi yang disebutkan memang membawa cakupan yang tepat, tetapi tidak diterbitkan oleh pihak yang bertanggung jawab atas node ini, dan pemberian hak penyajian dari pihak ketiga bukanlah pemberian dari pemilik.",
+      "authority_not_to_actor": "Delegasi yang disebutkan tidak diberikan kepada node ini, sehingga node ini bukanlah pihak yang diberinya wewenang.",
+      "authority_scope_absent": "Delegasi yang disebutkan tidak membawa cakupan yang dibutuhkan operasi ini. Delegasi lain dari penerbit yang sama mungkin membawanya, tetapi tindakan itu lalu akan mencatat kewenangan yang bukan dasar pelaksanaannya.",
+      "authority_scope_unreachable": "Tidak ada rantai delegasi aktif yang membawa cakupan yang dibutuhkan operasi ini dan mencapai node ini dari penerbit tersebut. Kewenangan diturunkan ulang dari keadaan terverifikasi milik node ini sendiri, tidak pernah diambil dari permintaan.",
+      "authority_unresolved": "Delegasi yang disebutkan bukan baris yang dipegang node ini, sehingga cakupannya tidak dapat diperiksa. Node ini tidak bertindak atas kewenangan yang tidak dapat diverifikasinya.",
+      "bad_request": "Isi permintaan tidak dapat diurai.",
+      "community_absent": "community_id wajib diisi: karantina diajukan di bawah kewenangan sebuah komunitas, dan penanda yang tidak menyebut komunitas mana pun tidak menyebut kewenangan apa pun.",
+      "judgement_subjectless": "Penilaian itu tidak menyebut subjek apa pun, sehingga menghormati maupun tidak menghormatinya tidak akan mengubah apa pun tentang siapa pun. Node ini tidak mencatat keputusan yang tidak dapat diterapkannya.",
+      "judgement_unresolved": "Penilaian itu bukan baris yang dipegang node ini, sehingga tidak ada yang perlu diputuskan pembaca ini. Pembaca memutuskan tentang apa yang DIPEGANGNYA; ia tidak menolak lebih dahulu apa yang belum pernah dilihatnya.",
+      "node_unowned": "Node ini tidak memiliki pihak yang bertanggung jawab (owner-binding), sehingga tidak menjalankan operasi admin bertingkat atas nama siapa pun. Klaim kepemilikan terlebih dahulu.",
+      "not_a_judgement": "Baris itu bukan penilaian yang dapat diputuskan oleh anak tangga ini. Tier R adalah kebijakan pembaca atas PENILAIAN pihak lain, dan atestasi biasa bukanlah penilaian.",
+      "not_owner": "Operasi admin bertingkat memerlukan peran pemilik (SYSTEM_ADMIN).",
       "preview_hash_mismatch": "Apa yang Anda pratinjau bukanlah apa yang akan dieksekusi — seleksi telah berubah sejak pratinjau. Jalankan ulang pratinjau dan sahkan hash yang baru.",
-      "quorum_insufficient": "Operasi ini tidak dapat dibatalkan dan memerlukan kuorum dari otoritas yang berbeda-beda, bukan satu rantai delegasi. Dua rantai dari akar yang sama adalah satu otoritas yang mengenakan dua topi."
+      "quorum_insufficient": "Operasi ini tidak dapat dibatalkan dan memerlukan kuorum dari otoritas yang berbeda-beda, bukan satu rantai delegasi. Dua rantai dari akar yang sama adalah satu otoritas yang mengenakan dua topi.",
+      "reason_absent": "reason wajib diisi. Tindakan tanpa alasan yang tercatat tidak dapat dibedakan dari tindakan tanpa izin setelah pelakunya tiada.",
+      "selection_unpredicated": "Seleksi tidak membawa predikat sama sekali, yang berarti seluruh korpus. Sebutkan apa yang sedang Anda kenai tindakan.",
+      "session_absent": "Tidak ada token sesi yang diberikan. Operasi admin bertingkat hanya untuk pemilik.",
+      "session_invalid": "Sesi tersebut tidak valid atau telah kedaluwarsa.",
+      "store_unavailable": "Substrat tidak dapat dibaca.",
+      "subject_absent": "subject_key_id wajib diisi: fold pembaca menyangkut penilaian atas satu subjek, dan subjek yang tidak disebutkan berarti setiap subjek."
     },
     "reversal": {
       "evidence_only": "Baris aslinya tetap ada dan masih dilipat oleh setiap pembaca. Pembalikan ini adalah bukti yang tercatat, bukan pembatalan — substrat tidak menyediakan pembatalan pencabutan.",
       "substrate": "Keadaan substrat dibalik: node ini berhenti menahan baris-baris milik kunci tersebut.",
       "symmetric": "Tidak ada yang dibalik di dalam substrat karena tidak ada bagian substrat yang menegakkan penilaian aslinya. Kedua tindakan tercatat sebagai bukti."
+    },
+    "self": {
+      "distinct_zeroes": "Tiga dari empat status berupa nol dan artinya berbeda-beda: tidak pernah dinyatakan, pernah dinyatakan lalu ditarik, dan tidak dapat dibaca. Tampilkan ketiganya secara berbeda.",
+      "enforcement": {
+        "compelled": "Dicatat pada porosnya sendiri, sebagai tindakan tersendiri. Ini adalah pernyataan tentang paksaan yang diterapkan dari LUAR mesh, dan dengan sendirinya hal itu tidak mengubah apa pun yang dilakukan node ini — memang disengaja. Node yang dipaksa bisa saja diharuskan tetap melayani, berhenti, atau menyerahkan sesuatu; melipat salah satu dari itu menjadi 'node ini berhenti menerima' akan menghancurkan satu-satunya sinyal yang dimiliki pihak di hilir untuk membedakan pilihan sendiri dari paksaan.",
+        "shed": "Dicatat sebagai deklarasi beratribusi milik node ini sendiri, dan tidak lebih dari itu. Bidang mesh-config yang akan membawa batas beban ditulis oleh trust root, dan node ini belum menjalankan konsumen apa pun atas nilai-nilai hasil lipatan itu, sehingga tidak ada loop yang mengubah beban yang dipikulnya. Yang berubah adalah catatannya: seorang operator, sebuah peer, atau audit di kemudian hari dapat mengetahui bahwa node ini memilih memikul lebih sedikit, di bawah kewenangan siapa, dan kapan.",
+        "stop_accepting": "Dicatat sebagai deklarasi beratribusi milik node ini sendiri bahwa ia tidak lagi menerima hal baru. Tidak ada apa pun di substrat ini yang menegakkannya: bidang penerimaan bersifat buta-peer, dan kuota tulis per peer adalah pengaman tetap terhadap loop liar, bukan permukaan kebijakan yang dapat dijadikan acuan oleh sebuah penghentian. Deklarasi itulah artefaknya — dan itulah yang dibaca sebuah peer untuk berhenti menawarkan."
+      },
+      "lift": {
+        "compelled": "Dicatat sebagai tindakan tersendiri: paksaan yang telah BERAKHIR bukanlah paksaan yang tidak pernah terjadi. Deklarasi yang ditariknya tetap ada, dan keduanya tetap dapat dibaca.",
+        "voluntary": "Dicatat sebagai tindakan tersendiri. Deklarasi yang ditariknya tetap ada, dan keduanya tetap dapat dibaca — 'pernah dinyatakan lalu ditarik' bukanlah 'tidak pernah dinyatakan'."
+      },
+      "partition": "Setiap tindakan pada anak tangga ini bersifat lokal: penelusuran owner-binding, penulisan ke ledger, dan pembacaan ini semuanya hanya menyentuh basis data milik node ini sendiri dan tidak menyentuh yang lain. Inilah satu-satunya anak tangga yang tersedia saat terjadi partisi — setiap anak tangga lainnya harus menjangkau pihak lain.",
+      "standing": {
+        "in_force": "Node ini telah menyatakannya dan belum menariknya.",
+        "lifted": "Node ini telah menyatakannya lalu menariknya kembali. Itu bukan fakta yang sama dengan tidak pernah menyatakannya.",
+        "never_declared": "Node ini tidak pernah menyatakan hal ini. Itu bukan fakta yang sama dengan pernah menyatakannya lalu menariknya, dan bukan pula fakta yang sama dengan tidak mampu membacanya.",
+        "unreadable": "Catatannya tidak dapat dibaca, sehingga node ini tidak mengetahui statusnya sendiri pada poros ini. Ini BUKAN 'tidak ada yang berlaku' — jangan menampilkannya seperti itu."
+      }
     }
   },
   "consent": {

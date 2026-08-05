@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Önizlediğiniz şey, çalıştırılacak şey değil — önizlemeden bu yana seçim değişti. Önizlemeyi yeniden çalıştırın ve yeni hash'i onaylayın.",
-      "quorum_insufficient": "Bu işlem geri alınamaz ve tek bir yetki devri zincirini değil, birbirinden ayrı yetkililerden oluşan bir yeter sayıyı gerektirir. Aynı kökten çıkan iki zincir, iki şapka takan tek bir yetkilidir."
+      "quorum_insufficient": "Bu işlem geri alınamaz ve tek bir yetki devri zincirini değil, birbirinden ayrı yetkililerden oluşan bir yeter sayıyı gerektirir. Aynı kökten çıkan iki zincir, iki şapka takan tek bir yetkilidir.",
+      "attribution_absent": "delegation_id zorunludur. Kendi yetkisini taşımayan bir eylem, aktör ortadan kalktıktan sonra yetkisiz bir eylemden ayırt edilemez.",
+      "authority_not_a_delegation": "Adı geçen yetki devri kimliği bir delegates_to satırı değil.",
+      "authority_not_the_owner": "Kendine yönelik bir edim, sahibin kendi edimidir. Adı geçen yetki devri doğru kapsamı taşıyor ama bu düğümün sorumlu tarafınca verilmemiş; üçüncü bir tarafın sunum izni de sahibin izni değildir.",
+      "authority_not_to_actor": "Adı geçen yetki devri bu düğüme verilmemiş, dolayısıyla bu düğüm onun yetkilendirdiği taraf değil.",
+      "authority_scope_absent": "Adı geçen yetki devri, bu işlemin gerektirdiği kapsamı taşımıyor. Aynı verenden gelen başka bir yetki devri taşıyor olabilir, ama o zaman edim, altında gerçekleştirilmediği bir yetkiyi kaydetmiş olurdu.",
+      "authority_scope_unreachable": "O verenden bu düğüme, bu işlemin gerektirdiği kapsamı taşıyan canlı bir yetki devri zinciri ulaşmıyor. Yetki, bu düğümün kendi doğrulanmış durumundan yeniden türetilir; istekten asla alınmaz.",
+      "authority_unresolved": "Adı geçen yetki devri, bu düğümün tuttuğu bir satır değil; dolayısıyla kapsamı denetlenemez. Bu düğüm, doğrulayamadığı bir yetkiye dayanarak işlem yapmaz.",
+      "bad_request": "İstek gövdesi ayrıştırılamadı.",
+      "community_absent": "community_id zorunludur: bir karantina, bir topluluğun yetkisi altında kaydedilir ve hiçbir topluluğu adlandırmayan bir işaret, hiçbir yetkiyi adlandırmaz.",
+      "judgement_subjectless": "O hüküm hiçbir özneyi adlandırmıyor; dolayısıyla ona uymak da uymamak da kimse hakkında hiçbir şeyi değiştirmezdi. Bu düğüm, uygulayamayacağı bir kararı kaydetmez.",
+      "judgement_unresolved": "O hüküm, bu düğümün tuttuğu bir satır değil; dolayısıyla bu okuyucunun hakkında karar vereceği bir şey yok. Bir okuyucu TUTTUĞU şeye karar verir; hiç görmediği bir şeye peşinen uymamayı seçmez.",
+      "node_unowned": "Bu düğümün sorumlu bir tarafı (owner-binding) yok; dolayısıyla kimse adına dereceli bir yönetim işlemi yapmaz. Önce sahipliği üstlenin.",
+      "not_a_judgement": "O satır, bu basamağın hakkında karar verebileceği bir hüküm değil. R kademesi, okuyucunun diğer tarafların HÜKÜMLERİ üzerindeki politikasıdır ve sıradan bir tasdik hüküm değildir.",
+      "not_owner": "Dereceli yönetim işlemleri sahip (SYSTEM_ADMIN) rolünü gerektirir.",
+      "reason_absent": "reason zorunludur. Kaydedilmiş bir gerekçesi olmayan bir eylem, aktör ortadan kalktıktan sonra yetkisiz bir eylemden ayırt edilemez.",
+      "selection_unpredicated": "Seçim hiçbir yüklem taşımıyor; bu da bütün külliyat demektir. Üzerinde işlem yaptığınız şeyi adlandırın.",
+      "session_absent": "Hiçbir oturum jetonu sunulmadı. Dereceli yönetim işlemleri yalnızca sahibe açıktır.",
+      "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş.",
+      "store_unavailable": "Alt katman okunamadı.",
+      "subject_absent": "subject_key_id zorunludur: bir okuyucu katlaması tek bir öznenin hükümleriyle ilgilidir ve adlandırılmamış bir özne, bütün özneler demektir."
     },
     "reversal": {
       "evidence_only": "Özgün satır ayakta kalır ve hâlâ her okuyucu tarafından katlanır. Bu geri çevirme bir geri alma değil, kayda geçmiş bir kanıttır — alt katman iptali geri alan bir işlem sunmaz.",
       "substrate": "Alt katman durumu geri çevrilir: bu düğüm, anahtarın satırlarını esirgemeyi bırakır.",
       "symmetric": "Alt katmanda hiçbir şey geri çevrilmez, çünkü özgün hükmü alt katmanda uygulayan bir şey yoktu. Her iki eylem de kayda geçmiş kanıttır."
+    },
+    "reader": {
+      "advisory": "Verilmiş bir hüküm, her okuyucu için bağlayıcı değil yol göstericidir. `reader_fold`, BU okuyucunun politikasının elinde tuttuğundan çıkardığı sonuçtur; `node_fold` ise bu düğümün sunum yollarının bugün yaptığı şeydir, yani alt katmanın kabul ettiği her işarete uymaktır. İkisi ayrışabilir; ayrıştıklarında aradaki fark alt katman boşluğudur: sunum tarafındaki katlamada okuyucu politikası için bir kanca yoktur, dolayısıyla uymama yönündeki bir seçim kaydedilir ve bildirilir ama henüz bu düğümün esirgemesini durdurmaz.",
+      "decision": {
+        "declined": "Bu okuyucu bu hükme uymamayı seçti. Bu olağan bir sonuçtur: verilmiş bir hüküm her okuyucu için yalnızca yol göstericidir ve ona uymamak, bu basamağın var oluş nedeni olan özelliğin ta kendisidir.",
+        "honoured_by_subscription": "Açık bir karar kaydedilmedi; bu okuyucu imzalayana abone olduğu için hükme politika gereği uyulur.",
+        "honoured_explicit": "Bu okuyucu bu hükmü bilerek benimsedi.",
+        "undecided_unsubscribed": "Bu okuyucu imzalayana abone değil ve kaydedilmiş bir kararı yok. Hükme uyulmuyor, ama bu henüz kimsenin kararı değil — bu, ona uymamayı seçmiş olmaktan başka bir olgudur."
+      },
+      "standing": {
+        "decided": "Bu düğümün o özne hakkında tuttuğu her hüküm, bu okuyucunun o hüküm karşısında ne yaptığıyla birlikte listelenir.",
+        "none_held": "Bu düğüm o özne hakkında hiçbir hüküm tutmuyor. Burada kimse onun hakkında hüküm vermemiş — bu, bu düğümün söyleyecek durumda olmamasıyla aynı şey değildir.",
+        "unreadable": "Bu okuyucu kendi durumunu okuyamadı, dolayısıyla neye uyduğunu söyleyemez. Bu, 'hüküm yok' DEĞİLDİR ve 'esirgenen bir şey yok' DEĞİLDİR — okunamayan bir politikayı boş bir politika gibi göstermek, o politikanın taşıdığı her kısıtlamayı sessizce düşürür."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Dört durumun üçü sıfırdır ve farklı şeyler anlatırlar: hiç beyan edilmemiş, beyan edilip kaldırılmış ve okunamamış. Bunları birbirinden farklı gösterin.",
+      "enforcement": {
+        "compelled": "Kendi ekseninde, kendi edimi olarak kaydedilir. Bu, mesh'in DIŞINDAN uygulanan bir zorlamaya ilişkin bir beyandır ve tek başına bu düğümün yaptığı hiçbir şeyi değiştirmez — bilerek. Zorlanan bir düğüm sunmayı sürdürmeye, durmaya ya da bir şeyi teslim etmeye mecbur bırakılmış olabilir; bunlardan herhangi birini 'bu düğüm yeni bir şey almayı bıraktı' içine katlamak, aşağı akıştaki bir tarafın bir seçimi bir zorlamadan ayırt etmek için elindeki tek işareti yok ederdi.",
+        "shed": "Bu düğümün kendi, kime ait olduğu belirtilmiş beyanı olarak kaydedilir; fazlası değil. Bir yük tavanını taşıyacak olan mesh-config düzlemi güven köklerince yazılır ve bu düğüm katlanmış değerleri tüketen bir bileşen henüz çalıştırmıyor; dolayısıyla hiçbir döngü, taşıdığı yükü değiştirmez. Değişen şey kayıttır: bir operatör, bir eş ya da sonraki bir denetim, bu düğümün daha az taşımayı seçtiğini, kimin yetkisi altında ve ne zaman seçtiğini görebilir.",
+        "stop_accepting": "Bu düğümün, yeni hiçbir şey üstlenmediğine dair kendi, kime ait olduğu belirtilmiş beyanı olarak kaydedilir. Bu alt katmanda bunu uygulayan hiçbir şey yok: alım düzlemi eşleri görmez ve eş başına yazma kotası, bir durdurmanın dayanabileceği bir politika yüzeyi değil, sabit bir kaçak döngü emniyetidir. Ortaya çıkan şey beyanın kendisidir — ve bir eşin, sunmayı bırakmak için okuduğu şey odur."
+      },
+      "lift": {
+        "compelled": "Ayrı bir edim olarak kaydedilir: SONA EREN bir zorlama, hiç yaşanmamış bir zorlama değildir. Kaldırdığı beyan ayakta kalır ve ikisi de okunabilir kalır.",
+        "voluntary": "Ayrı bir edim olarak kaydedilir. Kaldırdığı beyan ayakta kalır ve ikisi de okunabilir kalır — 'beyan edilip kaldırılmış', 'hiç beyan edilmemiş' değildir."
+      },
+      "partition": "Bu basamaktaki her edim yereldir: owner-binding yürüyüşü, defter yazımı ve bu okuma yalnızca bu düğümün kendi veritabanına dokunur, başka hiçbir şeye değil. Bölünme sırasında kullanılabilen tek basamak budur — diğer her basamağın birine ulaşması gerekir.",
+      "standing": {
+        "in_force": "Bu düğüm bunu beyan etti ve henüz kaldırmadı.",
+        "lifted": "Bu düğüm bunu beyan etti ve sonra yeniden kaldırdı. Bu, hiç beyan etmemiş olmakla aynı olgu değildir.",
+        "never_declared": "Bu düğüm bunu hiç beyan etmedi. Bu, beyan edip kaldırmış olmakla aynı olgu değildir; okuyamıyor olmakla da aynı olgu değildir.",
+        "unreadable": "Kayıt okunamadı; dolayısıyla bu düğüm bu eksendeki kendi durumunu bilmiyor. Bu, 'yürürlükte bir şey yok' DEĞİLDİR — onu öyle göstermeyin."
+      }
     }
   },
   "consent": {

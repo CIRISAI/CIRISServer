@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Was Sie in der Vorschau gesehen haben, ist nicht das, was ausgeführt würde — die Auswahl hat sich seit der Vorschau geändert. Führen Sie die Vorschau erneut aus und bestätigen Sie den neuen Hash.",
-      "quorum_insufficient": "Dieser Vorgang ist unumkehrbar und erfordert ein Quorum verschiedener Autoritäten, nicht eine einzelne Delegationskette. Zwei Ketten aus derselben Wurzel sind eine Autorität mit zwei Hüten."
+      "quorum_insufficient": "Dieser Vorgang ist unumkehrbar und erfordert ein Quorum verschiedener Autoritäten, nicht eine einzelne Delegationskette. Zwei Ketten aus derselben Wurzel sind eine Autorität mit zwei Hüten.",
+      "attribution_absent": "delegation_id ist erforderlich. Eine Handlung, die ihre eigene Autorität nicht mitführt, lässt sich, sobald der Handelnde fort ist, nicht mehr von einer unbefugten unterscheiden.",
+      "authority_not_a_delegation": "Die genannte Delegations-ID ist keine delegates_to-Zeile.",
+      "authority_not_the_owner": "Eine selbstgerichtete Handlung ist die des Eigentümers selbst. Die genannte Delegation trägt zwar den richtigen Bereich, wurde aber nicht vom Verantwortlichen dieses Knotens erteilt, und die Auslieferungsberechtigung eines Dritten ist nicht die des Eigentümers.",
+      "authority_not_to_actor": "Die genannte Delegation wurde nicht diesem Knoten erteilt, dieser Knoten ist also nicht die Partei, die sie ermächtigt.",
+      "authority_scope_absent": "Die genannte Delegation trägt nicht den Bereich, den dieser Vorgang verlangt. Eine andere Delegation desselben Ausstellers könnte ihn tragen, doch die Handlung würde dann eine Autorität festhalten, unter der sie nicht vorgenommen wurde.",
+      "authority_scope_unreachable": "Von diesem Aussteller erreicht diesen Knoten keine lebende Delegationskette, die den von diesem Vorgang verlangten Bereich trägt. Autorität wird aus dem eigenen geprüften Zustand dieses Knotens neu abgeleitet und niemals der Anfrage entnommen.",
+      "authority_unresolved": "Die genannte Delegation ist keine Zeile, die dieser Knoten hält, ihr Bereich lässt sich daher nicht prüfen. Dieser Knoten handelt nicht auf eine Autorität hin, die er nicht überprüfen kann.",
+      "bad_request": "Der Anfragetext konnte nicht ausgewertet werden.",
+      "community_absent": "community_id ist erforderlich: Eine Quarantäne wird unter der Autorität einer Gemeinschaft eingereicht, und eine Markierung, die keine Gemeinschaft nennt, nennt keine Autorität.",
+      "judgement_subjectless": "Dieses Urteil nennt kein Subjekt, es zu beachten oder abzulehnen würde also an niemandem etwas ändern. Dieser Knoten erfasst keine Entscheidung, die er nicht anwenden kann.",
+      "judgement_unresolved": "Dieses Urteil ist keine Zeile, die dieser Knoten hält, dieser Leser hat also nichts, worüber er entscheiden könnte. Ein Leser entscheidet über das, was er HÄLT; er lehnt nicht im Voraus ab, was er nie gesehen hat.",
+      "node_unowned": "Dieser Knoten hat keinen Verantwortlichen (Eigentümerbindung) und führt daher keinen abgestuften Admin-Vorgang in irgendjemandes Namen aus. Beanspruchen Sie zuerst die Eigentümerschaft.",
+      "not_a_judgement": "Diese Zeile ist kein Urteil, über das diese Sprosse entscheiden kann. Stufe R ist die Richtlinie des Lesers über die URTEILE anderer Parteien, und eine gewöhnliche Attestierung ist keines.",
+      "not_owner": "Abgestufte Admin-Vorgänge erfordern die Eigentümerrolle (SYSTEM_ADMIN).",
+      "reason_absent": "reason ist erforderlich. Eine Handlung ohne erfassten Grund ist, sobald der Handelnde fort ist, von einer unbefugten nicht zu unterscheiden.",
+      "selection_unpredicated": "Die Auswahl trägt überhaupt kein Prädikat, das bedeutet den gesamten Bestand. Benennen Sie, worauf Sie einwirken.",
+      "session_absent": "Es wurde kein Sitzungstoken vorgelegt. Abgestufte Admin-Vorgänge sind ausschließlich dem Eigentümer vorbehalten.",
+      "session_invalid": "Diese Sitzung ist ungültig oder abgelaufen.",
+      "store_unavailable": "Das Substrat konnte nicht gelesen werden.",
+      "subject_absent": "subject_key_id ist erforderlich: Eine Leserfaltung betrifft die Urteile über ein Subjekt, und ein ungenanntes Subjekt ist jedes Subjekt."
     },
     "reversal": {
       "evidence_only": "Die ursprüngliche Zeile bleibt bestehen und wird weiterhin von jedem Leser eingefaltet. Diese Umkehrung ist erfasstes Beweismaterial, kein Rückgängigmachen — das Substrat bietet keine Aufhebung des Widerrufs.",
       "substrate": "Der Substratzustand ist umgekehrt: Dieser Knoten hält die Zeilen des Schlüssels nicht länger zurück.",
       "symmetric": "Im Substrat wird nichts umgekehrt, weil im Substrat nichts das ursprüngliche Urteil durchgesetzt hat. Beide Handlungen sind erfasstes Beweismaterial."
+    },
+    "reader": {
+      "advisory": "Ein ergangenes Urteil ist für jeden Leser beratend. `reader_fold` ist das, was die Richtlinie DIESES Lesers aus dem macht, was er hält; `node_fold` ist das, was die Auslieferungspfade dieses Knotens heute tun, nämlich jede Markierung zu beachten, die das Substrat zugelassen hat. Sie können voneinander abweichen, und wo sie es tun, ist die Differenz die Substratlücke: In der auslieferungsseitigen Faltung gibt es keinen Ansatzpunkt für die Leserrichtlinie, daher wird eine Ablehnung erfasst und gemeldet, hält diesen Knoten aber noch nicht davon ab, weiterhin vorzuenthalten.",
+      "decision": {
+        "declined": "Dieser Leser hat dieses Urteil abgelehnt. Ein normales Ergebnis: Ein ergangenes Urteil ist für jeden Leser beratend, und es abzulehnen ist genau die Eigenschaft, für die diese Sprosse überhaupt besteht.",
+        "honoured_by_subscription": "Es wurde keine ausdrückliche Entscheidung erfasst; dieser Leser hat den Unterzeichner abonniert, daher wird das Urteil richtliniengemäß beachtet.",
+        "honoured_explicit": "Dieser Leser hat dieses Urteil bewusst übernommen.",
+        "undecided_unsubscribed": "Dieser Leser hat den Unterzeichner nicht abonniert und keine Entscheidung erfasst. Das Urteil wird nicht beachtet, und das ist bislang niemandes Entscheidung — was eine andere Tatsache ist, als es abgelehnt zu haben."
+      },
+      "standing": {
+        "decided": "Jedes Urteil, das dieser Knoten über dieses Subjekt hält, ist aufgeführt, zusammen damit, was dieser Leser damit macht.",
+        "none_held": "Dieser Knoten hält kein Urteil über dieses Subjekt. Hier hat niemand darüber geurteilt — was nicht dasselbe ist, wie wenn dieser Knoten keine Auskunft geben könnte.",
+        "unreadable": "Dieser Leser konnte seinen eigenen Zustand nicht lesen und kann daher nicht sagen, was er beachtet. Das ist NICHT „keine Urteile“ und NICHT „nichts vorenthalten“ — eine unlesbare Richtlinie, die als leere dargestellt wird, lässt stillschweigend jede Einschränkung fallen, die sie trug."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Drei der vier Statusangaben sind Nullen und bedeuten Verschiedenes: nie erklärt, erklärt und wieder aufgehoben, und nicht lesbar. Stellen Sie sie unterschiedlich dar.",
+      "enforcement": {
+        "compelled": "Wird auf einer eigenen Achse erfasst, als eigenständige Handlung. Dies ist eine Aussage über Zwang, der von AUSSERHALB des Mesh ausgeübt wird, und für sich genommen ändert sie nichts an dem, was dieser Knoten tut — mit Absicht. Ein Knoten unter Zwang kann dazu gebracht werden, weiter auszuliefern, aufzuhören oder etwas herauszugeben; würde man eines davon in „dieser Knoten nimmt nichts mehr an“ einfalten, zerstörte das das einzige Signal, an dem eine nachgelagerte Partei eine Entscheidung von einem Zwang unterscheiden kann.",
+        "shed": "Wird als eigene zurechenbare Erklärung dieses Knotens erfasst, und als nichts weiter. Die Mesh-Config-Ebene, die eine Lastobergrenze tragen würde, wird von Vertrauenswurzeln verfasst, und dieser Knoten betreibt noch keinen Verbraucher der gefalteten Werte, also ändert keine Schleife, was er trägt. Was sich ändert, ist der Datensatz: Ein Betreiber, ein Peer oder ein späteres Audit kann erkennen, dass dieser Knoten sich entschieden hat, weniger zu tragen, unter wessen Autorität und wann.",
+        "stop_accepting": "Wird als eigene zurechenbare Erklärung dieses Knotens erfasst, dass er nichts Neues mehr aufnimmt. Nichts in diesem Substrat setzt das durch: Die Empfangsebene ist peer-blind, und das Schreibkontingent je Peer ist eine feste Absicherung gegen Endlosschleifen, keine Richtlinienfläche, an der ein Stopp ansetzen könnte. Die Erklärung ist das Artefakt — und sie ist es, die ein Peer liest, um nichts mehr anzubieten."
+      },
+      "lift": {
+        "compelled": "Wird als eigenständige Handlung erfasst: Ein Zwang, der GEENDET hat, ist kein Zwang, den es nie gab. Die Erklärung, die sie aufhebt, bleibt bestehen, und beide bleiben lesbar.",
+        "voluntary": "Wird als eigenständige Handlung erfasst. Die Erklärung, die sie aufhebt, bleibt bestehen, und beide bleiben lesbar — „erklärt und aufgehoben“ ist nicht „nie erklärt“."
+      },
+      "partition": "Jede Handlung auf dieser Sprosse ist lokal: der Durchlauf der Eigentümerbindung, der Schreibvorgang im Journal und dieser Lesevorgang berühren allesamt nur die eigene Datenbank dieses Knotens und nichts sonst. Es ist die einzige Sprosse, die bei Netztrennung zur Verfügung steht — jede andere Sprosse muss jemanden erreichen.",
+      "standing": {
+        "in_force": "Dieser Knoten hat dies erklärt und nicht wieder aufgehoben.",
+        "lifted": "Dieser Knoten hat dies erklärt und wieder aufgehoben. Das ist nicht dieselbe Tatsache, wie es nie erklärt zu haben.",
+        "never_declared": "Dieser Knoten hat dies nie erklärt. Das ist nicht dieselbe Tatsache, wie es erklärt und wieder aufgehoben zu haben, und auch nicht dieselbe, wie es nicht lesen zu können.",
+        "unreadable": "Der Datensatz konnte nicht gelesen werden, dieser Knoten kennt daher seinen eigenen Stand auf dieser Achse nicht. Das ist NICHT „nichts in Kraft“ — stellen Sie es nicht als solches dar."
+      }
     }
   },
   "consent": {

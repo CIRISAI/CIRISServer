@@ -54,6 +54,18 @@ const FULL_FILE_ALLOW: &[(&str, &str)] = &[
 /// does not silence the gate.
 const LINE_ALLOW: &[(&str, &str, &str)] = &[
     (
+        "admin_ops.rs",
+        "\"dimension\": r.attestation_envelope.get(paths::DIMENSION)",
+        // The tier-R reader-fold projection. The same line READS the envelope
+        // through `paths::DIMENSION` — the rule is honoured where it applies.
+        // The flagged literal is the OUTPUT field name in this surface's HTTP
+        // response, which is a contract with clients, not envelope vocabulary:
+        // if persist renamed DIMENSION tomorrow the wire key it reads must
+        // follow, and the JSON field name clients parse must NOT. Same
+        // reasoning as the `memory_api.rs` entry below.
+        "response-body field name, decoupled from the envelope key on purpose",
+    ),
+    (
         "memory_api.rs",
         "\"dimension\": dim",
         // A client-facing CEG projection-node property (siblings `kind`,

@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Ce que vous avez prévisualisé n'est pas ce qui serait exécuté — la sélection a changé depuis l'aperçu. Relancez l'aperçu et ratifiez le nouveau hachage.",
-      "quorum_insufficient": "Cette opération est irréversible et exige un quorum d'autorités distinctes, pas une seule chaîne de délégation. Deux chaînes issues de la même racine ne font qu'une seule autorité portant deux casquettes."
+      "quorum_insufficient": "Cette opération est irréversible et exige un quorum d'autorités distinctes, pas une seule chaîne de délégation. Deux chaînes issues de la même racine ne font qu'une seule autorité portant deux casquettes.",
+      "attribution_absent": "delegation_id est requis. Une action qui ne porte pas sa propre autorité ne peut pas être distinguée d'une action non autorisée une fois l'acteur parti.",
+      "authority_not_a_delegation": "L'id de délégation nommé n'est pas une ligne delegates_to.",
+      "authority_not_the_owner": "Un acte auto-dirigé appartient en propre au propriétaire. La délégation nommée porte la bonne portée, mais elle n'a pas été émise par le responsable de ce nœud, et l'octroi de service d'un tiers n'est pas celui du propriétaire.",
+      "authority_not_to_actor": "La délégation nommée n'a pas été accordée à ce nœud : ce nœud n'est donc pas la partie qu'elle autorise.",
+      "authority_scope_absent": "La délégation nommée ne porte pas la portée qu'exige cette opération. Une autre délégation du même émetteur le pourrait, mais l'acte consignerait alors une autorité sous laquelle il n'a pas été accompli.",
+      "authority_scope_unreachable": "Aucune chaîne de délégation vivante portant la portée qu'exige cette opération n'atteint ce nœud depuis cet émetteur. L'autorité est redérivée de l'état vérifié de ce nœud lui-même, jamais tirée de la requête.",
+      "authority_unresolved": "La délégation nommée n'est pas une ligne que ce nœud détient : sa portée ne peut donc pas être vérifiée. Ce nœud n'agit pas sur une autorité qu'il ne peut pas vérifier.",
+      "bad_request": "Le corps de la requête n'a pas pu être analysé.",
+      "community_absent": "community_id est requis : une quarantaine est déposée sous l'autorité d'une communauté, et un marqueur qui ne nomme aucune communauté ne nomme aucune autorité.",
+      "judgement_subjectless": "Ce jugement ne nomme aucun sujet : l'honorer ou le décliner ne changerait donc rien pour personne. Ce nœud ne consigne pas une décision qu'il ne peut pas appliquer.",
+      "judgement_unresolved": "Ce jugement n'est pas une ligne que ce nœud détient : ce lecteur n'a donc rien à décider à son sujet. Un lecteur décide de ce qu'il DÉTIENT ; il ne décline pas d'avance ce qu'il n'a jamais vu.",
+      "node_unowned": "Ce nœud n'a aucun responsable (liaison de propriété), il n'effectue donc aucune opération d'administration graduée pour le compte de qui que ce soit. Revendiquez-en d'abord la propriété.",
+      "not_a_judgement": "Cette ligne n'est pas un jugement sur lequel cet échelon peut se prononcer. Le palier R est la politique du lecteur portant sur les JUGEMENTS d'autres parties, et une attestation ordinaire n'en est pas un.",
+      "not_owner": "Les opérations d'administration graduée exigent le rôle de propriétaire (SYSTEM_ADMIN).",
+      "reason_absent": "Un motif est requis. Une action sans motif consigné est indiscernable d'une action non autorisée une fois l'acteur parti.",
+      "selection_unpredicated": "La sélection ne porte aucun prédicat, ce qui signifie l'intégralité du corpus. Nommez ce sur quoi vous agissez.",
+      "session_absent": "Aucun jeton de session n'a été présenté. Les opérations d'administration graduée sont réservées au propriétaire.",
+      "session_invalid": "Cette session est invalide ou expirée.",
+      "store_unavailable": "Le substrat n'a pas pu être lu.",
+      "subject_absent": "subject_key_id est requis : un repliement de lecteur porte sur les jugements concernant un seul sujet, et un sujet non nommé, ce sont tous les sujets."
     },
     "reversal": {
       "evidence_only": "La ligne d'origine subsiste et reste repliée par chaque lecteur. Ce renversement est une preuve enregistrée, pas une annulation — le substrat n'expose aucune dé-révocation.",
       "substrate": "L'état du substrat est renversé : ce nœud cesse de retenir les lignes de la clé.",
       "symmetric": "Rien n'est renversé dans le substrat, car rien dans le substrat n'appliquait le jugement d'origine. Les deux actes sont des preuves enregistrées."
+    },
+    "reader": {
+      "advisory": "Un jugement émis n'a qu'une valeur consultative pour chaque lecteur. `reader_fold` est ce que la politique de CE lecteur fait de ce qu'il détient ; `node_fold` est ce que font aujourd'hui les chemins de service de ce nœud, à savoir honorer chaque marqueur que le substrat a admis. Les deux peuvent différer, et lorsqu'ils diffèrent, l'écart est la lacune du substrat : il n'existe aucun point d'accroche pour la politique du lecteur dans le repliement côté service, si bien que le fait de décliner est consigné et rapporté sans encore empêcher ce nœud de retenir.",
+      "decision": {
+        "declined": "Ce lecteur a décliné ce jugement. C'est une issue normale : un jugement émis n'a qu'une valeur consultative pour chaque lecteur, et le décliner est précisément la propriété pour laquelle tout cet échelon existe.",
+        "honoured_by_subscription": "Aucune décision explicite n'a été consignée ; ce lecteur est abonné au signataire, le jugement est donc honoré par politique.",
+        "honoured_explicit": "Ce lecteur a adopté ce jugement délibérément.",
+        "undecided_unsubscribed": "Ce lecteur n'est pas abonné au signataire et n'a consigné aucune décision. Le jugement n'est pas honoré, et ce n'est encore la décision de personne — un fait différent de celui de l'avoir décliné."
+      },
+      "standing": {
+        "decided": "Chaque jugement que ce nœud détient à propos de ce sujet est listé avec ce que ce lecteur en fait.",
+        "none_held": "Ce nœud ne détient aucun jugement à propos de ce sujet. Personne ne l'a jugé ici — ce qui n'équivaut pas à ce que ce nœud soit incapable de se prononcer.",
+        "unreadable": "Ce lecteur n'a pas pu lire son propre état : il ne peut donc pas dire ce qu'il honore. Ce n'est PAS « aucun jugement » et PAS « rien de retenu » — une politique illisible affichée comme une politique vide abandonne silencieusement toutes les restrictions qu'elle portait."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Trois des quatre états sont des zéros et ils signifient des choses différentes : jamais déclaré, déclaré puis levé, et impossible à lire. Affichez-les différemment.",
+      "enforcement": {
+        "compelled": "Consigné sur son propre axe, comme son propre acte. C'est un énoncé au sujet d'une force appliquée depuis l'EXTÉRIEUR du maillage et, en soi, il ne change rien à ce que fait ce nœud — délibérément. Un nœud contraint peut être forcé à continuer de servir, à s'arrêter ou à remettre quelque chose ; replier l'un quelconque de ces cas dans « ce nœud a cessé d'accepter » détruirait le seul signal dont dispose une partie en aval pour distinguer un choix d'une contrainte.",
+        "shed": "Consigné comme la déclaration attribuée de ce nœud lui-même, et rien de plus. Le plan de mesh-config qui porterait un plafond de charge est rédigé par les racines de confiance, et ce nœud n'exécute encore aucun consommateur des valeurs repliées : aucune boucle ne change donc ce qu'il porte. Ce qui change, c'est ce qui est consigné : un opérateur, un pair ou un audit ultérieur peut constater que ce nœud a choisi de porter moins, sous l'autorité de qui, et quand.",
+        "stop_accepting": "Consigné comme la déclaration attribuée de ce nœud lui-même, selon laquelle il ne prend plus rien de nouveau en charge. Rien dans ce substrat ne l'impose : le plan de réception est aveugle aux pairs, et le quota d'écriture par pair est un garde-fou fixe contre les boucles emballées, pas une surface de politique sur laquelle un arrêt pourrait s'indexer. La déclaration est l'artefact — et c'est elle qu'un pair lit pour cesser de proposer."
+      },
+      "lift": {
+        "compelled": "Consigné comme un acte distinct : une contrainte qui a PRIS FIN n'est pas une contrainte qui n'a jamais eu lieu. La déclaration qu'il lève subsiste, et les deux restent lisibles.",
+        "voluntary": "Consigné comme un acte distinct. La déclaration qu'il lève subsiste, et les deux restent lisibles — « déclaré puis levé » n'est pas « jamais déclaré »."
+      },
+      "partition": "Chaque acte de cet échelon est local : le parcours de la liaison de propriété, l'écriture au registre et cette lecture touchent tous la base de données de ce nœud lui-même et rien d'autre. C'est le seul échelon disponible en situation de partition — tous les autres échelons doivent atteindre quelqu'un.",
+      "standing": {
+        "in_force": "Ce nœud l'a déclaré et ne l'a pas levé.",
+        "lifted": "Ce nœud l'a déclaré puis l'a levé de nouveau. Ce n'est pas le même fait que de ne l'avoir jamais déclaré.",
+        "never_declared": "Ce nœud ne l'a jamais déclaré. Ce n'est pas le même fait que de l'avoir déclaré puis levé, ni le même fait que d'être incapable de le lire.",
+        "unreadable": "L'enregistrement n'a pas pu être lu : ce nœud ne connaît donc pas son propre état sur cet axe. Ce n'est PAS « rien en vigueur » — ne l'affichez pas comme tel."
+      }
     }
   },
   "consent": {

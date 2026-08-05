@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Lo que previsualizaste no es lo que se ejecutaría: la selección ha cambiado desde la vista previa. Vuelve a ejecutar la vista previa y ratifica el nuevo hash.",
-      "quorum_insufficient": "Esta operación es irreversible y requiere un cuórum de autoridades distintas, no una sola cadena de delegación. Dos cadenas con la misma raíz son una única autoridad con dos sombreros."
+      "quorum_insufficient": "Esta operación es irreversible y requiere un cuórum de autoridades distintas, no una sola cadena de delegación. Dos cadenas con la misma raíz son una única autoridad con dos sombreros.",
+      "attribution_absent": "delegation_id es obligatorio. Una acción que no lleva consigo su propia autoridad no se puede distinguir de una no autorizada una vez que el actor ya no está.",
+      "authority_not_a_delegation": "El id de delegación nombrado no es una fila delegates_to.",
+      "authority_not_the_owner": "Un acto autodirigido es del propietario y de nadie más. La delegación nombrada lleva el ámbito correcto, pero no la emitió el responsable de este nodo, y la concesión de servicio de un tercero no es la del propietario.",
+      "authority_not_to_actor": "La delegación nombrada no se concedió a este nodo, así que este nodo no es la parte a la que autoriza.",
+      "authority_scope_absent": "La delegación nombrada no lleva el ámbito que esta operación requiere. Otra delegación del mismo emisor podría llevarlo, pero entonces el acto registraría una autoridad bajo la cual no se tomó.",
+      "authority_scope_unreachable": "Ninguna cadena de delegación viva que lleve el ámbito que esta operación requiere alcanza este nodo desde ese emisor. La autoridad se vuelve a derivar del estado verificado de este propio nodo; nunca se toma de la solicitud.",
+      "authority_unresolved": "La delegación nombrada no es una fila que este nodo mantenga, así que no se puede comprobar su ámbito. Este nodo no actúa sobre una autoridad que no puede verificar.",
+      "bad_request": "No se pudo analizar el cuerpo de la solicitud.",
+      "community_absent": "community_id es obligatorio: una cuarentena se registra bajo la autoridad de una comunidad, y un marcador que no nombra ninguna comunidad no nombra ninguna autoridad.",
+      "judgement_subjectless": "Ese juicio no nombra ningún sujeto, así que acatarlo o declinarlo no cambiaría nada respecto de nadie. Este nodo no registra una decisión que no puede aplicar.",
+      "judgement_unresolved": "Ese juicio no es una fila que este nodo mantenga, así que este lector no tiene nada que decidir al respecto. Un lector decide sobre lo que MANTIENE; no declina de antemano lo que nunca ha visto.",
+      "node_unowned": "Este nodo no tiene responsable (vinculación de propietario), así que no realiza ninguna operación de administración graduada en nombre de nadie. Reclama primero la propiedad.",
+      "not_a_judgement": "Esa fila no es un juicio sobre el que este peldaño pueda decidir. El nivel R es la política del lector sobre los JUICIOS de otras partes, y una atestación ordinaria no lo es.",
+      "not_owner": "Las operaciones de administración graduada requieren el rol de propietario (SYSTEM_ADMIN).",
+      "reason_absent": "Se requiere un motivo. Una acción sin motivo registrado es indistinguible de una no autorizada una vez que el actor ya no está.",
+      "selection_unpredicated": "La selección no lleva ningún predicado, lo que significa el corpus entero. Nombra sobre qué estás actuando.",
+      "session_absent": "No se presentó ningún token de sesión. Las operaciones de administración graduada son solo para el propietario.",
+      "session_invalid": "Esa sesión no es válida o ha caducado.",
+      "store_unavailable": "No se pudo leer el sustrato.",
+      "subject_absent": "subject_key_id es obligatorio: un plegado de lector trata de los juicios sobre un solo sujeto, y un sujeto sin nombrar son todos los sujetos."
     },
     "reversal": {
       "evidence_only": "La fila original sobrevive y todo lector la sigue plegando. Esta reversión es evidencia registrada, no un deshacer: el sustrato no expone ninguna des-revocación.",
       "substrate": "El estado del sustrato se revierte: este nodo deja de retener las filas de la clave.",
       "symmetric": "No se revierte nada en el sustrato porque nada en el sustrato aplicó el juicio original. Ambos actos son evidencia registrada."
+    },
+    "reader": {
+      "advisory": "Un juicio emitido es orientativo para cada lector. `reader_fold` es lo que la política de ESTE lector hace con lo que mantiene; `node_fold` es lo que hacen hoy las rutas de servicio de este nodo, que es acatar todos los marcadores que el sustrato admitió. Pueden diferir, y cuando difieren la diferencia es la brecha del sustrato: no existe ningún punto de enganche para la política del lector en el plegado del lado del servicio, así que declinar queda registrado y comunicado, pero todavía no hace que este nodo deje de retener.",
+      "decision": {
+        "declined": "Este lector declinó este juicio. Es un resultado normal: un juicio emitido es orientativo para cada lector, y declinarlo es justamente la propiedad para la que existe todo este peldaño.",
+        "honoured_by_subscription": "No se registró ninguna decisión explícita; este lector está suscrito al firmante, así que el juicio se acata por política.",
+        "honoured_explicit": "Este lector adoptó este juicio deliberadamente.",
+        "undecided_unsubscribed": "Este lector no está suscrito al firmante y no ha registrado ninguna decisión. El juicio no se acata, y eso todavía no es decisión de nadie — un hecho distinto de haberlo declinado."
+      },
+      "standing": {
+        "decided": "Se enumera cada juicio que este nodo mantiene sobre ese sujeto junto con lo que este lector hace con él.",
+        "none_held": "Este nodo no mantiene ningún juicio sobre ese sujeto. Nadie lo ha juzgado aquí — lo que no es lo mismo que este nodo no poder decirlo.",
+        "unreadable": "Este lector no pudo leer su propio estado, así que no puede decir qué acata. Esto NO es «ningún juicio» ni «nada retenido» — una política ilegible presentada como una política vacía descarta en silencio todas las restricciones que llevaba."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Tres de las cuatro situaciones son ceros y significan cosas distintas: nunca declarado, declarado y levantado, y no se pudo leer. Preséntalos de forma diferente.",
+      "enforcement": {
+        "compelled": "Se registra en su propio eje, como su propio acto. Es una afirmación sobre una fuerza aplicada desde FUERA de la malla y, por sí misma, no cambia nada de lo que este nodo hace — deliberadamente. A un nodo coaccionado se le puede obligar a seguir sirviendo, a detenerse o a entregar algo; fundir cualquiera de esas cosas en «este nodo dejó de aceptar» destruiría la única señal de la que dispone una parte aguas abajo para distinguir una elección de una coacción.",
+        "shed": "Se registra como la declaración atribuida de este propio nodo, y nada más. El plano de mesh-config que llevaría un techo de carga lo redactan las raíces de confianza, y este nodo todavía no ejecuta ningún consumidor de los valores plegados, así que ningún bucle cambia lo que carga. Lo que cambia es lo que queda registrado: un operador, un par o una auditoría posterior pueden saber que este nodo eligió cargar menos, bajo la autoridad de quién y cuándo.",
+        "stop_accepting": "Se registra como la declaración atribuida de este propio nodo de que no está asumiendo nada nuevo. Nada en este sustrato lo hace cumplir: el plano de recepción es ciego a los pares y la cuota de escritura por par es un tope fijo contra bucles descontrolados, no una superficie de política sobre la que una detención pueda actuar. La declaración es el artefacto — y es la que un par lee para dejar de ofrecer."
+      },
+      "lift": {
+        "compelled": "Se registra como un acto distinto: una coacción que TERMINÓ no es una coacción que nunca ocurrió. La declaración que levanta sobrevive, y ambas siguen siendo legibles.",
+        "voluntary": "Se registra como un acto distinto. La declaración que levanta sobrevive, y ambas siguen siendo legibles — «declarado y levantado» no es «nunca declarado»."
+      },
+      "partition": "Todo acto en este peldaño es local: el recorrido de la vinculación de propietario, la escritura en el libro de registro y esta misma lectura tocan la base de datos de este propio nodo y nada más. Es el único peldaño disponible mientras se está particionado — cualquier otro peldaño tiene que alcanzar a alguien.",
+      "standing": {
+        "in_force": "Este nodo declaró esto y no lo ha levantado.",
+        "lifted": "Este nodo declaró esto y lo volvió a levantar. Ese no es el mismo hecho que no haberlo declarado nunca.",
+        "never_declared": "Este nodo nunca ha declarado esto. Ese no es el mismo hecho que haberlo declarado y levantado, ni el mismo hecho que no poder leerlo.",
+        "unreadable": "No se pudo leer el registro, así que este nodo no conoce su propia situación en este eje. Esto NO es «nada en vigor» — no lo presentes como tal."
+      }
     }
   },
   "consent": {

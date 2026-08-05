@@ -3100,12 +3100,65 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Ohun tí o wò tẹ́lẹ̀ kì í ṣe ohun tí yóò ṣiṣẹ́ — ìyànfẹ́ náà ti yípadà láti ìgbà ìwòtẹ́lẹ̀. Tún ìwòtẹ́lẹ̀ náà ṣe kí o sì fọwọ́sí hash tuntun.",
-      "quorum_insufficient": "Iṣẹ́ yìí kò lè yí padà, ó sì nílò iye tí ó tó ti àwọn aláṣẹ ọ̀tọ̀ọ̀tọ̀, kì í ṣe ẹ̀wọ̀n ìfiṣẹ́lé-ẹnìkan-lọ́wọ́ kan ṣoṣo. Ẹ̀wọ̀n méjì láti gbòngbò kan náà jẹ́ aláṣẹ kan tí ó wọ fìlà méjì."
+      "quorum_insufficient": "Iṣẹ́ yìí kò lè yí padà, ó sì nílò iye tí ó tó ti àwọn aláṣẹ ọ̀tọ̀ọ̀tọ̀, kì í ṣe ẹ̀wọ̀n ìfiṣẹ́lé-ẹnìkan-lọ́wọ́ kan ṣoṣo. Ẹ̀wọ̀n méjì láti gbòngbò kan náà jẹ́ aláṣẹ kan tí ó wọ fìlà méjì.",
+      "attribution_absent": "delegation_id jẹ́ dandan. Ìṣe tí kò gbé àṣẹ tirẹ̀ dání kò ṣe é yà sọ́tọ̀ kúrò nínú ìṣe tí kò ní àṣẹ, lẹ́yìn tí ẹni tí ó ṣe é bá ti lọ.",
+      "authority_not_a_delegation": "Ìdámọ̀ ìfiṣẹ́lé-ẹnìkan-lọ́wọ́ tí a dárúkọ kì í ṣe ilà delegates_to.",
+      "authority_not_the_owner": "Ìṣe tí ó dojú kọ ara ẹni jẹ́ ti onílé fúnra rẹ̀. Ìfiṣẹ́lé tí a dárúkọ gbé àgbègbè tí ó tọ́, ṣùgbọ́n kì í ṣe ẹni tí ó ní ojúṣe fún nódù yìí ni ó gbé e jáde, ìfúnni ìsìn láti ọwọ́ ẹni-kẹta kì í sì í ṣe ti onílé.",
+      "authority_not_to_actor": "A kò fún nódù yìí ní ìfiṣẹ́lé tí a dárúkọ, nítorí náà nódù yìí kì í ṣe ẹni tí ó fún ní àṣẹ.",
+      "authority_scope_absent": "Ìfiṣẹ́lé tí a dárúkọ kò gbé àgbègbè tí iṣẹ́ yìí béèrè. Ìfiṣẹ́lé mìíràn láti ọ̀dọ̀ olùgbéjáde kan náà lè gbé e, ṣùgbọ́n nígbà náà ìṣe náà yóò ṣàkọsílẹ̀ àṣẹ kan tí kì í ṣe lábẹ́ rẹ̀ ni a ti ṣe é.",
+      "authority_scope_unreachable": "Kò sí ẹ̀wọ̀n ìfiṣẹ́lé tí ó wà láàyè tí ó gbé àgbègbè tí iṣẹ́ yìí béèrè tí ó sì dé ọ̀dọ̀ nódù yìí láti ọ̀dọ̀ olùgbéjáde yẹn. Láti inú ipò tí nódù yìí fúnra rẹ̀ ti jẹ́rìísí ni a ti ń tún àṣẹ mú jáde, a kì í gbà á lọ́wọ́ ìbéèrè náà láé.",
+      "authority_unresolved": "Ìfiṣẹ́lé tí a dárúkọ kì í ṣe ilà tí nódù yìí ní, nítorí náà a kò lè yẹ àgbègbè rẹ̀ wò. Nódù yìí kì í ṣiṣẹ́ lórí àṣẹ tí kò lè jẹ́rìísí.",
+      "bad_request": "A kò lè túmọ̀ ara ìbéèrè náà.",
+      "community_absent": "community_id jẹ́ dandan: lábẹ́ àṣẹ àwùjọ kan ni a ń fi ìyàsọ́tọ̀ lélẹ̀, àmì tí kò sì dárúkọ àwùjọ kankan kò dárúkọ àṣẹ kankan.",
+      "judgement_subjectless": "Ìdájọ́ yẹn kò dárúkọ kókó-ọ̀rọ̀ kankan, nítorí náà bíbọ̀wọ̀ fún un tàbí àìgbà rẹ̀ kò ní yí ohunkóhun padà nípa ẹnikẹ́ni. Nódù yìí kì í ṣàkọsílẹ̀ ìpinnu tí kò lè lò.",
+      "judgement_unresolved": "Ìdájọ́ yẹn kì í ṣe ilà tí nódù yìí ní, nítorí náà kò sí ohun tí olùkàwé yìí lè pinnu nípa rẹ̀. Olùkàwé ń pinnu nípa ohun tí Ó NÍ lọ́wọ́; kì í kọ ohun tí kò tíì rí rí sílẹ̀ ṣáájú.",
+      "node_unowned": "Nódù yìí kò ní ẹni tí ó ní ojúṣe fún un (ìdè-onílé), nítorí náà kò ṣe iṣẹ́ ìṣàkóso onípele kankan fún ẹnikẹ́ni. Gba ìní rẹ̀ ná.",
+      "not_a_judgement": "Ilà yẹn kì í ṣe ìdájọ́ tí ìpele yìí lè pinnu nípa rẹ̀. Tier R ni ìlànà olùkàwé lórí àwọn ÌDÁJỌ́ ti àwọn ẹgbẹ́ mìíràn, ẹ̀rí lásán kì í sì í ṣe ìdájọ́.",
+      "not_owner": "Àwọn iṣẹ́ ìṣàkóso onípele béèrè ipa onílé (SYSTEM_ADMIN).",
+      "reason_absent": "reason jẹ́ dandan. Ìṣe tí kò ní ìdí tí a ṣàkọsílẹ̀ kò ṣe é yà sọ́tọ̀ kúrò nínú ìṣe tí kò ní àṣẹ, lẹ́yìn tí ẹni tí ó ṣe é bá ti lọ.",
+      "selection_unpredicated": "Ìyànfẹ́ náà kò ní ààlà kankan rárá, èyí tí ó túmọ̀ sí gbogbo àkójọ náà. Dárúkọ ohun tí o ń ṣiṣẹ́ lé lórí.",
+      "session_absent": "Kò sí àmì-ìpàdé kankan tí a gbé kalẹ̀. Àwọn iṣẹ́ ìṣàkóso onípele jẹ́ ti onílé nìkan.",
+      "session_invalid": "Ìpàdé yẹn kò wúlò tàbí àkókò rẹ̀ ti pé.",
+      "store_unavailable": "A kò lè ka ìpìlẹ̀ náà.",
+      "subject_absent": "subject_key_id jẹ́ dandan: ìṣirò olùkàwé jẹ́ nípa àwọn ìdájọ́ ti kókó-ọ̀rọ̀ kan, kókó-ọ̀rọ̀ tí a kò sì dárúkọ jẹ́ gbogbo kókó-ọ̀rọ̀."
     },
     "reversal": {
       "evidence_only": "Ilà ìpilẹ̀ṣẹ̀ náà ṣì wà, gbogbo olùkàwé sì ṣì ń ká a sínú ìṣirò. Ìyípadà yìí jẹ́ ẹ̀rí tí a ṣàkọsílẹ̀, kì í ṣe ìparẹ́ — ìpìlẹ̀ náà kò pèsè ìmúkúrò-ìfagilé kankan.",
       "substrate": "A yí ipò ìpìlẹ̀ náà padà: nódù yìí dáwọ́ dídá àwọn ilà kọ́kọ́rọ́ náà dúró.",
       "symmetric": "Kò sí ohun tí a yí padà nínú ìpìlẹ̀ nítorí kò sí ohun tí ó fi ìdájọ́ ìpilẹ̀ṣẹ̀ náà lélẹ̀ nínú ìpìlẹ̀. Ẹ̀rí tí a ṣàkọsílẹ̀ ni ìṣe méjèèjì."
+    },
+    "reader": {
+      "advisory": "Ìdájọ́ tí a ti gbé jáde jẹ́ ìmọ̀ràn fún olùkàwé kọ̀ọ̀kan. `reader_fold` ni ohun tí ìlànà OLÙKÀWÉ YÌÍ ṣe pẹ̀lú ohun tí ó ní lọ́wọ́; `node_fold` ni ohun tí àwọn ọ̀nà ìsìn ti nódù yìí ń ṣe lónìí, èyí tí í ṣe bíbọ̀wọ̀ fún gbogbo àmì tí ìpìlẹ̀ náà gbà wọlé. Wọ́n lè yàtọ̀; bí wọ́n bá sì yàtọ̀, ìyàtọ̀ náà ni àlàfo ìpìlẹ̀: kò sí ojú-ìsopọ̀ fún ìlànà olùkàwé nínú ìṣirò ìhà-ìsìn, nítorí náà a ń ṣàkọsílẹ̀ ìpinnu láti má gbà, a sì ń ròyìn rẹ̀, ṣùgbọ́n kò tíì yí ohun tí nódù yìí ń dá dúró padà.",
+      "decision": {
+        "declined": "Olùkàwé yìí kò gba ìdájọ́ yìí. Àbájáde déédéé ni: ìdájọ́ tí a gbé jáde jẹ́ ìmọ̀ràn fún olùkàwé kọ̀ọ̀kan, àìgbà rẹ̀ sì ni ànímọ́ tí gbogbo ìpele yìí fi wà.",
+        "honoured_by_subscription": "Kò sí ìpinnu tí a sọ ní kedere tí a ṣàkọsílẹ̀; olùkàwé yìí ń tẹ̀lé ẹni tí ó fọwọ́sí i, nítorí náà a bọ̀wọ̀ fún ìdájọ́ náà gẹ́gẹ́ bí ìlànà ti wí.",
+        "honoured_explicit": "Olùkàwé yìí gba ìdájọ́ yìí ní mọ̀ọ́mọ̀.",
+        "undecided_unsubscribed": "Olùkàwé yìí kò tẹ̀lé ẹni tí ó fọwọ́sí i, kò sì ti ṣàkọsílẹ̀ ìpinnu kankan. A kò bọ̀wọ̀ fún ìdájọ́ náà, ìyẹn kò sì tíì jẹ́ ìpinnu ẹnikẹ́ni — èyí yàtọ̀ sí ọ̀ràn tí a bá ti pinnu láti má gbà á."
+      },
+      "standing": {
+        "decided": "Gbogbo ìdájọ́ tí nódù yìí ní nípa kókó-ọ̀rọ̀ yẹn ni a kọ sílẹ̀ pẹ̀lú ohun tí olùkàwé yìí ṣe nípa rẹ̀.",
+        "none_held": "Nódù yìí kò ní ìdájọ́ kankan nípa kókó-ọ̀rọ̀ yẹn. Kò sí ẹni tí ó ti dá a lẹ́jọ́ níbí — èyí kò rí bákan náà pẹ̀lú pé nódù yìí kò lè sọ ohunkóhun.",
+        "unreadable": "Olùkàwé yìí kò lè ka ipò tirẹ̀, nítorí náà kò lè sọ ohun tí ó ń bọ̀wọ̀ fún. Èyí KÌ Í ṣe “kò sí ìdájọ́ kankan”, bẹ́ẹ̀ ni kì í ṣe “kò sí ohun tí a dá dúró” — ìlànà tí a kò lè kà, tí a bá fi hàn bí èyí tí ó ṣófo, yóò ju gbogbo ìdíwọ́ tí ó gbé sọnù ní ìdákẹ́jẹ́ẹ́."
+      }
+    },
+    "self": {
+      "distinct_zeroes": "Mẹ́ta lára àwọn ipò mẹ́rẹ̀ẹ̀rin jẹ́ òdo, wọ́n sì túmọ̀ sí ohun ọ̀tọ̀ọ̀tọ̀: kò kéde rí, ó kéde ó sì gbé e kúrò, àti a kò lè kà á. Fi wọ́n hàn ní ọ̀tọ̀ọ̀tọ̀.",
+      "enforcement": {
+        "compelled": "A ṣàkọsílẹ̀ rẹ̀ lórí ẹ̀ka tirẹ̀, gẹ́gẹ́ bí ìṣe tirẹ̀. Ọ̀rọ̀ nípa agbára tí a fi ń rọni láti ÒDE àwọ̀n náà ni, fúnra rẹ̀ kò sì yí ohunkóhun tí nódù yìí ń ṣe padà — ní mọ̀ọ́mọ̀. A lè fi ipá mú nódù tí a ń rọ láti máa bá ìsìn lọ, láti dúró, tàbí láti fi ohun kan lélẹ̀; kíká èyíkéyìí nínú wọn sínú “nódù yìí dáwọ́ gbígba nǹkan tuntun” yóò pa àmì kan ṣoṣo tí ẹgbẹ́ ìsàlẹ̀-odò ní láti fi yà ìyànfẹ́ ara-ẹni sọ́tọ̀ kúrò nínú ìfipá-mú run.",
+        "shed": "A ṣàkọsílẹ̀ rẹ̀ gẹ́gẹ́ bí ìkéde ti nódù yìí fúnra rẹ̀ tí a mọ ẹni tí ó ṣe é, kò sì ju bẹ́ẹ̀ lọ. Àwọn gbòngbò ìgbẹ́kẹ̀lé ni wọ́n ń kọ pẹpẹ ìtòlẹ́sẹẹsẹ àwọ̀n tí yóò gbé òkè-ààlà ẹrù, nódù yìí kò sì tíì ń ṣiṣẹ́ pẹ̀lú olùlò kankan fún àwọn iye tí a ká sínú ìṣirò, nítorí náà kò sí ìyíká kan tí ó yí iye ohun tí ó ń gbé padà. Ohun tí ó yí padà ni àkọsílẹ̀ náà: olùṣiṣẹ́, ẹlẹ́gbẹ́ kan tàbí àyẹ̀wò tí ó bá wá lẹ́yìn lè mọ̀ pé nódù yìí fúnra rẹ̀ yàn láti gbé díẹ̀ kù, lábẹ́ àṣẹ ta, àti nígbà wo.",
+        "stop_accepting": "A ṣàkọsílẹ̀ rẹ̀ gẹ́gẹ́ bí ìkéde ti nódù yìí fúnra rẹ̀ tí a mọ ẹni tí ó ṣe é, pé kò gba ohunkóhun tuntun mọ́. Kò sí ohunkóhun nínú ìpìlẹ̀ yìí tí ó fi í lélẹ̀: pẹpẹ ìgbàwọlé kò mọ ẹlẹ́gbẹ́ kankan, ìwọ̀n kíkọ fún ẹlẹ́gbẹ́ kọ̀ọ̀kan sì jẹ́ ààbò tí a gbé kalẹ̀ ṣinṣin fún ìyíká tí ó bá sá lọ, kì í ṣe ojú ìlànà tí ìdáwọ́dúró lè gbé lé. Ìkéde náà fúnra rẹ̀ ni ohun tí a ṣe — òun sì ni ohun tí ẹlẹ́gbẹ́ kan ń kà kí ó tó dáwọ́ fífi nǹkan ránṣẹ́ sí i."
+      },
+      "lift": {
+        "compelled": "A ṣàkọsílẹ̀ rẹ̀ gẹ́gẹ́ bí ìṣe ọ̀tọ̀: ìfipá-mú tí Ó TI PARÍ kì í ṣe ìfipá-mú tí kò ṣẹlẹ̀ rí. Ìkéde tí ó gbé kúrò ṣì wà, àwọn méjèèjì sì ṣì ṣe é kà.",
+        "voluntary": "A ṣàkọsílẹ̀ rẹ̀ gẹ́gẹ́ bí ìṣe ọ̀tọ̀, èyí tí nódù yìí fúnra rẹ̀ ṣe. Ìkéde tí ó gbé kúrò ṣì wà, àwọn méjèèjì sì ṣì ṣe é kà — “ó kéde ó sì gbé e kúrò” kì í ṣe “kò kéde rí”."
+      },
+      "partition": "Gbogbo ìṣe lórí ìpele yìí jẹ́ ti agbègbè: ìrìn ìdè-onílé, kíkọ sínú ìwé-ìṣirò àti kíkà yìí gan-an ni gbogbo wọn ń fọwọ́ kan ibi-ìpamọ́ àkọsílẹ̀ ti nódù yìí nìkan, kì í ṣe ohunkóhun mìíràn. Òun nìkan ni ìpele tí ó wà nígbà tí àwọ̀n bá ya sí méjì — gbogbo ìpele mìíràn ní láti dé ọ̀dọ̀ ẹnìkan.",
+      "standing": {
+        "in_force": "Nódù yìí kéde èyí, kò sì tíì gbé e kúrò.",
+        "lifted": "Nódù yìí kéde èyí, ó sì tún gbé e kúrò. Ìyẹn kì í ṣe òtítọ́ kan náà pẹ̀lú pé kò kéde rí.",
+        "never_declared": "Nódù yìí kò kéde èyí rí. Ìyẹn kì í ṣe òtítọ́ kan náà pẹ̀lú pé ó kéde tí ó sì gbé e kúrò, bẹ́ẹ̀ ni kì í ṣe òtítọ́ kan náà pẹ̀lú pé a kò lè kà á.",
+        "unreadable": "A kò lè ka àkọsílẹ̀ náà, nítorí náà nódù yìí kò mọ ipò tirẹ̀ lórí ẹ̀ka yìí. Èyí KÌ Í ṣe “kò sí ohun tí ó wà ní ipa” — má fi í hàn bẹ́ẹ̀."
+      }
     }
   },
   "consent": {
