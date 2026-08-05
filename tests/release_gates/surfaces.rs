@@ -82,12 +82,22 @@ fn gate_localization_reachable() {
 /// is created by an event the trigger does not cover.
 ///
 /// A release gate is the one place that hole closes for free: it runs on whatever
-/// tree you are about to tag, however that tree came to be. The durable fix is
-/// still the trigger (`push: branches: [main]`, or a merge_group), and it is NOT
-/// made here — `--strict`, which is what that workflow runs, currently exits 1 on
-/// 28 translation-drift warnings, so adding the trigger today would land main's
-/// CI red for an unrelated reason. That is a sequencing call for whoever owns the
-/// retranslation pass. This rung is what can be done without it.
+/// tree you are about to tag, however that tree came to be.
+///
+/// The durable fix is still the TRIGGER (`push: branches: [main]`, or a
+/// merge_group), and it is NOT made here. Be precise about why, because the
+/// obvious framing is wrong: it is not that adding the trigger *would* turn CI
+/// red. `localization.yml` already runs `--strict` on `pull_request`, and
+/// `--strict` exits 1 today on 28 translation-drift warnings — so **every PR
+/// opened against main already gets a red localization check**, for drift its
+/// author did not introduce. The trigger question is about ADDITIONAL coverage of
+/// merge results; the red is live on the coverage that already exists.
+///
+/// The workflow's own comment sets the rule this violates — *"the flag goes in
+/// only when the tree passes it"* — so the precondition `--strict` was admitted
+/// under is currently false. Clearing it is a retranslation pass (the `localize-ui`
+/// workflow), which is content and belongs to whoever owns the locales; this rung
+/// is what can be done without waiting on it.
 #[test]
 fn gate_localization_bundles_are_byte_identical_mirrors() {
     let canonical_dir = repo().join(BUNDLE_DIRS[0]);
