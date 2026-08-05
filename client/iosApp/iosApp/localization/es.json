@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Un bucle de esta compilación lee esta clave y cambia lo que hace. El valor efectivo que aparece a su lado está en vigor en este nodo.",
       "elsewhere": "Ningún bucle de esta compilación lee esta clave: su consumidor vive en otro componente. Una fila fijada aquí se admite y se pliega, y no cambia nada en este nodo.",
+      "unreachable": "El consumidor de esta clave se ejecuta en este proceso, pero nada le lleva un valor desde este plano: el componente que posee el mando lo toma una sola vez, cuando se compone el bucle, y después no ofrece forma alguna de cambiarlo. Una fila fijada aquí se admite y se pliega, y no cambia nada en ninguna parte.",
       "unbuilt": "El consumidor de esta clave todavía no se ha construido en ninguna parte. Una fila fijada aquí se admite y se pliega, y no cambia nada."
     }
   },

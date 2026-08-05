@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Wani madauki a cikin wannan sigar yana karanta wannan maɓalli kuma yana sauya abin da yake yi. Ƙimar da aka nuna a gefensa ita ce take aiki a kan wannan kumburi.",
       "elsewhere": "Babu wani madauki a cikin wannan siga da yake karanta wannan maɓalli: mai amfani da shi yana cikin wani sashe na daban. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai a kan wannan kumburi.",
+      "unreachable": "Mai amfani da wannan maɓalli yana gudana a cikin wannan tsari, amma babu abin da ke kai masa ƙima daga wannan filin: sashen da ke mallakar wannan saitin yana ɗaukar ƙimarsa sau ɗaya kaɗai lokacin da aka kafa madaukin, kuma daga baya ba ya ba da hanyar sauya ta. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai ko'ina.",
       "unbuilt": "Ba a gina mai amfani da wannan maɓalli ko'ina ba tukuna. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai."
     }
   },

@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Sebuah loop dalam build ini membaca kunci ini dan mengubah perilakunya. Nilai efektif di sebelahnya benar-benar berlaku pada node ini.",
       "elsewhere": "Tidak ada loop dalam build ini yang membaca kunci ini — konsumennya berada di komponen lain. Baris yang disetel di sini diterima dan dilipat, dan tidak mengubah apa pun pada node ini.",
+      "unreachable": "Konsumen kunci ini berjalan di dalam proses ini, tetapi tidak ada yang membawa nilai dari bidang ini kepadanya: komponen pemilik setelan ini mengambil nilainya satu kali saja saat loop dirakit, dan tidak menyediakan cara untuk mengubahnya setelah itu. Baris yang disetel di sini diterima dan dilipat, dan tidak mengubah apa pun di mana pun.",
       "unbuilt": "Konsumen untuk kunci ini belum dibangun di mana pun. Baris yang disetel di sini diterima dan dilipat, dan tidak mengubah apa pun."
     }
   },

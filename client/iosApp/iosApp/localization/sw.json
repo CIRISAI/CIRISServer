@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Mzunguko katika toleo hili lililojengwa husoma ufunguo huu na kubadilisha kile unachofanya. Thamani halisi iliyo kando yake inatumika kwenye nodi hii.",
       "elsewhere": "Hakuna mzunguko katika toleo hili lililojengwa unaosoma ufunguo huu — mtumiaji wake yuko katika kipengele kingine. Safu iliyowekwa hapa hukubaliwa na kukunjwa, na haibadilishi chochote kwenye nodi hii.",
+      "unreachable": "Mtumiaji wa ufunguo huu hufanya kazi ndani ya mchakato huu huu, lakini hakuna kinachopeleka thamani kutoka tabaka hili hadi kwake: kipengele kinachomiliki kigezo hicho hukipokea mara moja tu, wakati mzunguko unapoundwa, na hakitoi njia yoyote ya kukibadilisha baadaye. Safu iliyowekwa hapa hukubaliwa na kukunjwa, na haibadilishi chochote popote.",
       "unbuilt": "Mtumiaji wa ufunguo huu bado hajajengwa popote. Safu iliyowekwa hapa hukubaliwa na kukunjwa, na haibadilishi chochote."
     }
   },

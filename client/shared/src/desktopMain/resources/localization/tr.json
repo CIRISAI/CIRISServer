@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Bu derlemedeki bir döngü bu anahtarı okuyor ve davranışını ona göre değiştiriyor. Yanında gösterilen geçerli değer bu düğümde gerçekten yürürlüktedir.",
       "elsewhere": "Bu derlemede bu anahtarı okuyan hiçbir döngü yok — tüketicisi başka bir bileşende yaşıyor. Burada belirlenen bir satır kabul edilir ve katlanır, ancak bu düğümde hiçbir şeyi değiştirmez.",
+      "unreachable": "Bu anahtarın tüketicisi bu süreçte çalışıyor, ancak bu düzlemden ona değer taşıyan hiçbir şey yok: bu ayar düğmesine sahip bileşen, değeri yalnızca döngü kurulurken bir kez alır ve sonrasında onu değiştirmenin hiçbir yolunu sunmaz. Burada belirlenen bir satır kabul edilir ve katlanır, ancak hiçbir yerde hiçbir şeyi değiştirmez.",
       "unbuilt": "Bu anahtarın tüketicisi henüz hiçbir yerde geliştirilmedi. Burada belirlenen bir satır kabul edilir ve katlanır, ancak hiçbir şeyi değiştirmez."
     }
   },

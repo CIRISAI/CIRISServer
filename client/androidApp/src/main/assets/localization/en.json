@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "A loop in this build reads this key and changes what it does. The effective value beside it is in force on this node.",
       "elsewhere": "No loop in this build reads this key — its consumer lives in another component. A row set here is admitted and folded, and changes nothing on this node.",
+      "unreachable": "This key's consumer runs in this process, but nothing carries a value from this plane to it: the component that owns the knob takes it once when the loop is composed and offers no way to change it afterwards. A row set here is admitted and folded, and changes nothing anywhere.",
       "unbuilt": "This key's consumer has not been built anywhere yet. A row set here is admitted and folded, and changes nothing."
     }
   },

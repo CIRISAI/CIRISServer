@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Một vòng lặp trong bản dựng này đọc khóa này và thay đổi hành vi của nó theo đó. Giá trị hiệu lực hiển thị bên cạnh đang thực sự có hiệu lực trên nút này.",
       "elsewhere": "Không vòng lặp nào trong bản dựng này đọc khóa này — bên tiêu thụ nó nằm ở một thành phần khác. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì trên nút này.",
+      "unreachable": "Bên tiêu thụ của khóa này chạy ngay trong tiến trình này, nhưng không có gì mang giá trị từ mặt phẳng này đến nó: thành phần nắm núm điều chỉnh chỉ lấy giá trị một lần duy nhất khi vòng lặp được dựng lên và không cung cấp cách nào để thay đổi về sau. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì ở bất cứ đâu.",
       "unbuilt": "Bên tiêu thụ của khóa này chưa được xây dựng ở bất cứ đâu. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì."
     }
   },

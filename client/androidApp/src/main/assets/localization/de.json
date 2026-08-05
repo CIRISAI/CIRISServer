@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Eine Schleife in diesem Build liest diesen Schlüssel und ändert daraufhin ihr Verhalten. Der daneben genannte wirksame Wert gilt auf diesem Knoten.",
       "elsewhere": "Keine Schleife in diesem Build liest diesen Schlüssel — sein Konsument liegt in einer anderen Komponente. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert auf diesem Knoten nichts.",
+      "unreachable": "Der Konsument dieses Schlüssels läuft in diesem Prozess, aber nichts trägt einen Wert von dieser Ebene zu ihm hin: die Komponente, der dieser Regler gehört, nimmt ihn ein einziges Mal entgegen, wenn die Schleife zusammengesetzt wird, und bietet danach keine Möglichkeit mehr, ihn zu ändern. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert nirgends etwas.",
       "unbuilt": "Der Konsument dieses Schlüssels wurde noch nirgends gebaut. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert nichts."
     }
   },

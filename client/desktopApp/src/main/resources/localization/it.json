@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Un ciclo di questa build legge questa chiave e cambia ciò che fa. Il valore effettivo indicato accanto è realmente in vigore su questo nodo.",
       "elsewhere": "Nessun ciclo di questa build legge questa chiave: il suo consumatore vive in un altro componente. Una riga impostata qui viene ammessa ed entra nel fold, e non cambia nulla su questo nodo.",
+      "unreachable": "Il consumatore di questa chiave gira in questo processo, ma nulla porta fino a lui un valore da questo piano: il componente a cui appartiene la manopola ne prende il valore una sola volta, quando il ciclo viene composto, e non offre alcun modo di cambiarlo in seguito. Una riga impostata qui viene ammessa ed entra nel fold, e non cambia nulla da nessuna parte.",
       "unbuilt": "Il consumatore di questa chiave non è ancora stato costruito da nessuna parte. Una riga impostata qui viene ammessa ed entra nel fold, e non cambia nulla."
     }
   },

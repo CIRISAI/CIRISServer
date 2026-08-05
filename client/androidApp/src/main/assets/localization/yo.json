@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Ìyíká kan nínú ìkọ́lé yìí ń ka kọ́kọ́rọ́ yìí, ó sì ń yí ohun tí ó ń ṣe padà. Iye tí ó ń ṣiṣẹ́ lẹ́gbẹ̀ẹ́ rẹ̀ wà nínú iṣẹ́ lórí nódù yìí.",
       "elsewhere": "Kò sí ìyíká kankan nínú ìkọ́lé yìí tí ó ka kọ́kọ́rọ́ yìí — olùlò rẹ̀ ń gbé nínú ẹ̀ka mìíràn. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà lórí nódù yìí.",
+      "unreachable": "Olùlò kọ́kọ́rọ́ yìí ń ṣiṣẹ́ nínú ìlànà-iṣẹ́ yìí gan-an, ṣùgbọ́n kò sí ohun tí ó ń gbé iye kan láti orí pẹpẹ yìí wá sí ọ̀dọ̀ rẹ̀: ẹ̀ka tí ó ni ìdarí yìí ń gba iye náà lẹ́ẹ̀kan ṣoṣo nígbà tí a bá ń ṣàkójọ ìyíká náà, kò sì fi ọ̀nà kankan sílẹ̀ láti yí i padà lẹ́yìn náà. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà níbikíbi rárá.",
       "unbuilt": "A kò tíì kọ́ olùlò kọ́kọ́rọ́ yìí níbikíbi rárá. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà."
     }
   },

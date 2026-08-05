@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Um loop nesta compilação lê esta chave e muda o que faz. O valor efetivo ao lado dela está em vigor neste nó.",
       "elsewhere": "Nenhum loop nesta compilação lê esta chave — seu consumidor vive em outro componente. Uma linha definida aqui é admitida e incorporada, e não muda nada neste nó.",
+      "unreachable": "O consumidor desta chave é executado neste processo, mas nada leva um valor deste plano até ele: o componente dono do ajuste o recebe uma única vez, no momento em que o loop é composto, e não oferece nenhuma forma de alterá-lo depois. Uma linha definida aqui é admitida e incorporada, e não muda nada em lugar nenhum.",
       "unbuilt": "O consumidor desta chave ainda não foi construído em lugar nenhum. Uma linha definida aqui é admitida e incorporada, e não muda nada."
     }
   },

@@ -3238,6 +3238,7 @@
     "consumption": {
       "wired": "Une boucle de cette version lit cette clé et change ce qu'elle fait. La valeur effective affichée à côté est en vigueur sur ce nœud.",
       "elsewhere": "Aucune boucle de cette version ne lit cette clé : son consommateur réside dans un autre composant. Une ligne posée ici est admise et repliée, et ne change rien sur ce nœud.",
+      "unreachable": "Le consommateur de cette clé s'exécute dans ce processus, mais rien n'y achemine de valeur depuis ce plan : le composant qui détient ce réglage en prend la valeur une seule fois, au moment où la boucle est composée, et n'offre ensuite aucun moyen de la changer. Une ligne posée ici est admise et repliée, et ne change rien nulle part.",
       "unbuilt": "Le consommateur de cette clé n'a encore été construit nulle part. Une ligne posée ici est admise et repliée, et ne change rien."
     }
   },
