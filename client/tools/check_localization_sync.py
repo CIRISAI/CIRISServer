@@ -126,7 +126,47 @@ _KEY_CALL = re.compile(r'(?:localizedString|getString)\(\s*"([^"$\\]+)"')
 # (operator_surface.rs). Matching the PAIR rather than one helper name is what
 # makes this scan cover all three; requiring a space in the text is what keeps it
 # from matching adjacent unrelated literals.
-_SERVER_MSG = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*"([^"\\]{0,80})', re.S)
+# The FULL Rust string literal, including escapes and `\`-line-continuations.
+#
+# The previous pattern was `"([^"\\]{0,80})` — it stopped at the first backslash,
+# and EVERY operator string in this codebase is `\`-continued by rustfmt. So it
+# captured only the first physical line, silently, and a bulk import built from
+# it wrote 55 ids into en.json truncated mid-word at ~80 chars. The cut landed on
+# the load-bearing clause every time: `root_absent` lost "...is filed where no
+# fold will ever count it" (the remedy), `withhold_class.fault` lost "it is this
+# node's fault to fix" (the limiting sense).
+#
+# No check caught it, because until `check_server_id_text_matches_source` below
+# NOTHING compared VALUES — only key sets and placeholders. A truncated value has
+# the right key and the right (zero) placeholders.
+_SERVER_MSG = re.compile(
+    r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*"((?:[^"\\]|\\.)*)"', re.S
+)
+
+
+def _rust_unescape(raw: str) -> str:
+    r"""Resolve a Rust string literal body, including `\`-line-continuations.
+
+    A backslash followed by a newline eats the newline AND the leading
+    whitespace of the next line — that is what makes the multi-line literals in
+    `src/operator_surface.rs` a single sentence rather than a ragged one.
+    """
+    out, i = [], 0
+    simple = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt == "\n":
+                i += 2
+                while i < len(raw) and raw[i] in " \t":
+                    i += 1
+                continue
+            out.append(simple.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(raw[i])
+        i += 1
+    return "".join(out)
 
 # Per-file bookkeeping subtree (translator, review_status, native_name, …) —
 # legitimately varies between locales and is never a UI key, so it's excluded
@@ -351,6 +391,63 @@ def check_server_ids_resolvable(root: Path, en: dict, ids: Dict[str, Path]) -> R
     return msgs, len(ids)
 
 
+def server_message_texts(root: Path) -> Dict[str, str]:
+    """Map each server-emitted message id -> its FULL English text from Rust."""
+    out: Dict[str, str] = {}
+    src = root / SERVER_SRC
+    if not src.exists():
+        return out
+    for rs in sorted(src.rglob("*.rs")):
+        for m in _SERVER_MSG.finditer(rs.read_text(encoding="utf-8")):
+            txt = _rust_unescape(m.group(2))
+            if " " in txt:
+                out.setdefault(m.group(1), txt)
+    return out
+
+
+def check_server_id_text_matches_source(root: Path, en: dict) -> Result:
+    """ERROR: en.json's English for a server id must EQUAL what the server emits.
+
+    Nothing else in this guard compares VALUES. Key sets, resolvability,
+    placeholders and mirroring all pass over a value that is a truncated prefix
+    of the real sentence — and one did: a bulk import built on a regex that
+    stopped at the first backslash wrote 55 ids into en.json cut mid-word at
+    ~80 chars, and every check stayed green.
+
+    The consequence is not cosmetic. These sentences are load-bearing at exactly
+    the end that got cut: a remedy clause, a limiting clause, the second half of
+    a "cannot separate X from Y" hedge. And a locale translated from the
+    fragment is worse than an absent one, because it renders as a confident,
+    complete-looking sentence that says less than the server does — the failure
+    mode this file's own module docstring calls a stale translation of different
+    content.
+    """
+    msgs: List[str] = []
+    src_texts = server_message_texts(root)
+    for msg_id, source_text in sorted(src_texts.items()):
+        bundled = resolve_key(en, msg_id)
+        if bundled is None or not isinstance(bundled, str) or bundled == source_text:
+            continue
+        how = (
+            f"TRUNCATED at {len(bundled)} of {len(source_text)} chars"
+            if source_text.startswith(bundled)
+            else "DIVERGED (not a prefix)"
+        )
+        msgs.append(
+            f"    - {msg_id}: {how}\n"
+            f"        bundle: …{bundled[-60:]!r}\n"
+            f"        source: …{source_text[-60:]!r}"
+        )
+    if msgs:
+        msgs.insert(
+            0,
+            f"{len(msgs)} server id(s) whose en.json English differs from the text the "
+            f"server actually emits (a locale translated from this renders a confident "
+            f"sentence saying less than the wire does):",
+        )
+    return msgs, len(src_texts)
+
+
 def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Result:
     """WARNING: a server-emitted id with no en.json entry at all.
 
@@ -543,6 +640,9 @@ def run_checks(root: Path) -> Report:
     rep.record("server-id-reachable", msgs, n, severity="error", unit="emitted id(s)")
     msgs, n = check_server_ids_covered(root, en, server_ids)
     rep.record("server-id-coverage", msgs, n, severity="warning", unit="emitted id(s)")
+
+    msgs, n = check_server_id_text_matches_source(root, en)
+    rep.record("server-id-text", msgs, n, severity="error", unit="emitted id(s)")
 
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
