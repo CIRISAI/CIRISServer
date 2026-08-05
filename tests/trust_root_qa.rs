@@ -1,3 +1,4 @@
+#![cfg(feature = "test-anchor")]
 //! TEST-ANCHOR-ONLY QA (release/0.5.133-genesis) — **mint a portable trust
 //! root (accord + canonical) in substrate test mode, then USE it**, asserting
 //! the exact end-state so this module is the acceptance gate for the next
@@ -36,15 +37,50 @@
 //!    failure message tells you which acceptance test to un-ignore.
 //! 3. **`#[ignore]` acceptance gates** — the states the fixed triple must
 //!    reach. Run them with:
-//!    `cargo test --lib --features "extension-module test-anchor" trust_root_qa -- --ignored`
+//!    `cargo test --test trust_root_qa --features test-anchor -- --ignored`
 //!
-//! # Env hygiene
+//! # Why this is an INTEGRATION test and not a `src/` module (CIRISServer#362)
 //!
-//! Env vars are process-global; every test here funnels through
-//! [`mint_portable_root`], which holds a module-local async mutex for the
-//! fixture's whole lifetime and snapshot-restores every var it touches
-//! (mirrors verify-core's `test_anchor::ENV_LOCK` discipline, which is
-//! `pub(crate)` there and thus unreachable from this crate).
+//! [`mint_portable_root`] arms `CIRIS_TESTING_MODE` + `CIRIS_TEST_TRUST_ROOT*`,
+//! which are **process-global**. They are not this fixture's private state:
+//! under `--features test-anchor` persist re-reads them on *every*
+//! `Engine::with_signer` (`genesis::effective_accord_holder_records` →
+//! `test_anchor_genesis_records`, plus the `seed_family_and_canonical`
+//! skip-the-baked-canonical branch and the `admission` FIPS-custody floor). So
+//! while this fixture holds the anchor armed, **any concurrent engine
+//! construction in the same process silently boots against the QA roster
+//! instead of the baked genesis.**
+//!
+//! This module used to live in `src/` — i.e. in the `--lib` test binary,
+//! alongside 250 other tests, five of which build an `Engine`. A module-local
+//! mutex serialized the *writers* against each other and left every reader
+//! unsynchronised, in another crate. #362 reproduced all three resulting
+//! failures at `--test-threads=8`, and every one of them names the wrong
+//! subsystem:
+//!
+//! - `list_canonical_servers_..._baked_genesis_on_a_fresh_node` → `{"servers":[]}`
+//!   (the baked canonical seed was *skipped*, reading as a genesis-install bug);
+//! - `GenesisSeed("accord holder test-accord-holder-0 not seeded")`;
+//! - `GenesisSeed("seed canonical server ciris-canonical-1-…: accord quorum
+//!   unreachable: floor 1 exceeds the 0 qualifying roster member(s)")` — which
+//!   sends the reader to `canonical_seed.json`.
+//!
+//! Persist takes the anchor from the environment, not as an argument, so the
+//! shared mutable state cannot be removed in this repo (the upstream ask). What
+//! *can* be removed is the sharing: as an integration test this file is its own
+//! **process**, and a process is the one env scope Rust actually gives us. The
+//! only readers of these vars in this binary are the ones inside the fixture,
+//! all of them under [`ENV_LOCK`] — so here the lock finally guards what it
+//! claims to.
+//!
+//! **Do not move this back into `src/`, and do not add an `Engine`-constructing
+//! test to this binary that is not under [`ENV_LOCK`].** Both re-create #362.
+//!
+//! Within this process, env vars are still global: every test funnels through
+//! [`mint_portable_root`], which holds [`ENV_LOCK`] for the fixture's whole
+//! lifetime and snapshot-restores every var it touches (the same discipline as
+//! verify-core's `test_anchor::ENV_LOCK`, which is `pub(crate)` there and thus
+//! unreachable from this crate).
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -67,7 +103,7 @@ use ciris_verify_core::federation_self_record::{
 };
 use ciris_verify_core::self_at_login::{HybridSigningIdentity, SelfSigner};
 
-use crate::mesh_genesis::{install_trust_root_records, produce_genesis, verify_bundle};
+use ciris_server::mesh_genesis::{install_trust_root_records, produce_genesis, verify_bundle};
 
 /// The delegation-plane trust root: accord holder A1, keyed as the synthesized
 /// test-anchor roster id so the effective roster and our signer correspond.
@@ -89,9 +125,11 @@ const VOUCH_ROOT: &str = "qa-vouch-root";
 /// Deterministic `valid_from` for every minted key record (clock-free bytes).
 const VALID_FROM: &str = "2026-07-01T00:00:00Z";
 
-/// Serializes every test in this module: they all mutate the process-global
-/// test-anchor env vars. Async so a guard held across the fixture's awaits is
-/// sound (a `std` guard across `.await` trips `clippy::await_holding_lock`).
+/// Serializes every test in this **binary**: they all mutate the process-global
+/// test-anchor env vars. This lock is only sound because the binary contains
+/// nothing else — see the module header (CIRISServer#362). Async so a guard held
+/// across the fixture's awaits is sound (a `std` guard across `.await` trips
+/// `clippy::await_holding_lock`).
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Every env var this module (or the machinery it arms) reads. The
@@ -547,11 +585,11 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // A1's YubiKey through `/v1/accord/genesis/propose`.
     let charter = SignedAttestation {
         attestation: sign_row(
-            crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+            ciris_server::mesh_genesis::CHARTER_ATTESTATION_ID,
             &fx.holders[0],
             ROOT,
             attestation_type::DELEGATES_TO,
-            crate::mesh_genesis::charter_envelope(&[
+            ciris_server::mesh_genesis::charter_envelope(&[
                 HOLDER_IDS[1].to_string(),
                 HOLDER_IDS[2].to_string(),
             ])
@@ -563,7 +601,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     };
     let grant_id = format!(
         "{}:{CANONICAL}",
-        crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+        ciris_server::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
     );
     let grant = SignedAttestation {
         attestation: sign_row(
@@ -571,7 +609,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
             &fx.holders[0],
             CANONICAL,
             attestation_type::DELEGATES_TO,
-            crate::mesh_genesis::grant_envelope(CANONICAL),
+            ciris_server::mesh_genesis::grant_envelope(CANONICAL),
             chrono::Utc::now(),
             None,
         )
@@ -583,11 +621,11 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // drill band. `accord:*` requires an accord_holder attester, which A1 is.
     let lifecycle = SignedAttestation {
         attestation: sign_row(
-            crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
+            ciris_server::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
             &fx.holders[0],
             ROOT,
             attestation_type::SCORES,
-            crate::mesh_genesis::lifecycle_envelope(),
+            ciris_server::mesh_genesis::lifecycle_envelope(),
             chrono::Utc::now(),
             None,
         )
@@ -609,7 +647,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     assert!(
         matches!(
             verify_bundle(&bundle),
-            Err(crate::mesh_genesis::GenesisError::QuorumNotMet { needed: 2, .. })
+            Err(ciris_server::mesh_genesis::GenesisError::QuorumNotMet { needed: 2, .. })
         ),
         "an unauthorized bundle must not pass as a seed"
     );
@@ -618,12 +656,12 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // act. Each signs the digest binding the WHOLE artifact, so a signature
     // cannot be replayed onto a bundle with a swapped serve node.
     for h in [&fx.holders[0], &fx.holders[1]] {
-        let digest =
-            crate::mesh_genesis::authorization_digest(&bundle).expect("authorization digest");
+        let digest = ciris_server::mesh_genesis::authorization_digest(&bundle)
+            .expect("authorization digest");
         let (ed, pqc) = h.sign_bound(&digest).await.expect("authorize");
         bundle
             .authorizations
-            .push(crate::mesh_genesis::GenesisAuthorization {
+            .push(ciris_server::mesh_genesis::GenesisAuthorization {
                 holder_key_id: h.key_id().to_string(),
                 signature_classical: ed,
                 signature_pqc: pqc,
@@ -891,7 +929,7 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
             .expect("B1 scrub"),
     );
     assert!(
-        !crate::mesh_genesis::carries_infra_serve(&old),
+        !ciris_server::mesh_genesis::carries_infra_serve(&old),
         "precondition: the old canonical carries no infra:serve"
     );
 
@@ -916,7 +954,7 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
             .expect("B1 completes"),
     );
     assert!(
-        crate::mesh_genesis::carries_infra_serve(&reblessed),
+        ciris_server::mesh_genesis::carries_infra_serve(&reblessed),
         "the re-blessed canonical now carries infra:serve in its envelope"
     );
 
@@ -924,11 +962,11 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
     let family = ciris_persist::federation::genesis::accord_family_genesis_record();
     let charter = SignedAttestation {
         attestation: sign_row(
-            crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+            ciris_server::mesh_genesis::CHARTER_ATTESTATION_ID,
             &fx.holders[0],
             ROOT,
             attestation_type::DELEGATES_TO,
-            crate::mesh_genesis::charter_envelope(&[
+            ciris_server::mesh_genesis::charter_envelope(&[
                 HOLDER_IDS[1].to_string(),
                 HOLDER_IDS[2].to_string(),
             ])
@@ -942,12 +980,12 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         attestation: sign_row(
             &format!(
                 "{}:qa-canonical-old",
-                crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+                ciris_server::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
             ),
             &fx.holders[0],
             "qa-canonical-old",
             attestation_type::DELEGATES_TO,
-            crate::mesh_genesis::grant_envelope("qa-canonical-old"),
+            ciris_server::mesh_genesis::grant_envelope("qa-canonical-old"),
             chrono::Utc::now(),
             None,
         )
@@ -957,11 +995,11 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
     // for the same reason a fresh mint sets it.
     let lifecycle = SignedAttestation {
         attestation: sign_row(
-            crate::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
+            ciris_server::mesh_genesis::LIFECYCLE_ATTESTATION_ID,
             &fx.holders[0],
             ROOT,
             attestation_type::SCORES,
-            crate::mesh_genesis::lifecycle_envelope(),
+            ciris_server::mesh_genesis::lifecycle_envelope(),
             chrono::Utc::now(),
             None,
         )
@@ -977,12 +1015,12 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
     )
     .expect("the re-blessed canonical produces a genesis");
     for h in [&fx.holders[0], &fx.holders[1]] {
-        let digest =
-            crate::mesh_genesis::authorization_digest(&bundle).expect("authorization digest");
+        let digest = ciris_server::mesh_genesis::authorization_digest(&bundle)
+            .expect("authorization digest");
         let (ed, pqc) = h.sign_bound(&digest).await.expect("authorize");
         bundle
             .authorizations
-            .push(crate::mesh_genesis::GenesisAuthorization {
+            .push(ciris_server::mesh_genesis::GenesisAuthorization {
                 holder_key_id: h.key_id().to_string(),
                 signature_classical: ed,
                 signature_pqc: pqc,
