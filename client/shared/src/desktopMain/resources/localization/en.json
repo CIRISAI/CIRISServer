@@ -3240,6 +3240,17 @@
       "elsewhere": "No loop in this build reads this key — its consumer lives in another component. A row set here is admitted and folded, and changes nothing on this node.",
       "unreachable": "This key's consumer runs in this process, but nothing carries a value from this plane to it: the component that owns the knob takes it once when the loop is composed and offers no way to change it afterwards. A row set here is admitted and folded, and changes nothing anywhere.",
       "unbuilt": "This key's consumer has not been built anywhere yet. A row set here is admitted and folded, and changes nothing."
+    },
+    "refusal": {
+      "attribution_absent": "delegation_id is required. An act that does not carry its own authority cannot b",
+      "authority_not_a_delegation": "The named delegation id is not a delegates_to row.",
+      "authority_unresolved": "The named delegation is not a row this node holds, so the authority it records ",
+      "grounds_absent": "grounds is required. A knob turned for no recorded reason is indistinguishable f",
+      "node_unowned": "This node has no responsible party (owner-binding), so it neither reports nor ",
+      "not_owner": "The mesh-configuration surface requires the owner (SYSTEM_ADMIN) role.",
+      "root_absent": "root_ref is required: a mesh-config row is issued under a trust root, and a row ",
+      "session_absent": "No session token was presented. The mesh-configuration surface is owner-only.",
+      "session_invalid": "That session is invalid or expired."
     }
   },
   "commons_surface": {
@@ -3314,6 +3325,106 @@
       "overruled": "The appointed moderators ruled that this objection does not stand — and escalation opens anyway, because an undo is never theirs alone to make.",
       "silent": "The deadline passed with no ruling either way.",
       "upheld": "The appointed moderators ruled, in time, that this objection stands. The matter was judged by named people, on the record."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "idle": "Replication rounds finished, and this node served nothing and withheld nothing: ",
+      "moving": "This node served rows to its peers and withheld none.",
+      "not_exercised": "No replication round has finished on this process, so no serving-path gate has ",
+      "unreadable": "This node's carriage counters could not be read, so nothing here is a statement ",
+      "withholding": "This node declined to serve rows it held. `withholds_by_reason` names the branch"
+    },
+    "consent_sla": {
+      "none_overdue": "Every consent revocation this node promised to promote is inside its SLA window.",
+      "overdue": "This node is LATE promoting consent revocations it committed to. The sampled ",
+      "unreadable": "The consent-SLA backlog could not be read. That is not 'nothing overdue'."
+    },
+    "drill": {
+      "green": "This node's trust root proved its kill switch within the last 90 days.",
+      "never_drilled": "This node's trust root has NEVER proved its kill switch. It shares the red band ",
+      "no_root_walked": "No trust root was walked, so there is nothing to be undrilled about. This is not",
+      "stale": "This node's trust root last proved its kill switch more than 180 days ago. It ",
+      "yellow": "This node's trust root last proved its kill switch between 90 and 180 days ago."
+    },
+    "headline": {
+      "green": "Every signal this node can compute reads healthy.",
+      "red": "At least one signal reads unhealthy. Read the unknown list too: a red headline ",
+      "unknown": "One or more signals could not be computed. Read the unknown list — an uncomputed",
+      "yellow": "This node is serving, and something here warrants a look."
+    },
+    "ingest": {
+      "background": "Refusals are present but not sustained from a stable identity set: ordinary ",
+      "clean": "Batches were offered to the HTTP ingest path and none was refused inside the ",
+      "http_path_only": "This reading covers the HTTP ingest path only. A batch that arrives over the Ret",
+      "not_exercised": "Nothing has been offered to the HTTP ingest path on this process — no batch ",
+      "stuck_producer": "A SUSTAINED rate of refusals from a SMALL, STABLE set of signers: a producer is ",
+      "unattributed": "Batches were refused and NOT ONE named a signer: they failed before there was an",
+      "unreadable": "This node's ingest refusal ledger could not be read, so nothing here is a "
+    },
+    "key_statements": {
+      "stands": "No revocation this node holds covers a statement made right now.",
+      "suspect_after_bound": "A history-BOUNDED revocation covers a statement made right now: this key is ",
+      "suspect_unbounded": "An UNBOUNDED revocation covers this key, so everything it ever said is in doubt ",
+      "unreadable": "This node's key standing could not be computed. That is not 'stands' — an unaske"
+    },
+    "peer_quota": {
+      "clean": "The peer-write quota has been exercised and its slot-denial arithmetic still ",
+      "denials": "The peer-write quota recorded slot denials. The tracked-peers cap derivation no ",
+      "no_quota": "This backend holds no peer-write quota, so the tripwire reports nothing. That is",
+      "not_exercised": "No peer write has been charged against the quota on this process, so its zero is"
+    },
+    "quarantine": {
+      "not_quarantined": "No quarantine marker about this node's key has ever taken effect here.",
+      "released": "This node's key was withheld and then released. It serves now, and it did not ",
+      "unreadable": "The quarantine state could not be read. That is not 'not quarantined'.",
+      "withheld": "This node's key is withheld from serving by a quarantine marker."
+    },
+    "receive": {
+      "clean": "No row a peer offered has been refused on this process.",
+      "no_accepted_counter": "The substrate counts apply REFUSALS, not accepted applies. A clean reading there",
+      "not_exercised": "No replication round has finished on this process, so nothing has been offered ",
+      "refusing": "This node refused rows its peers offered. `apply_refusals_by_kind` names the ",
+      "unreadable": "This node's apply counters could not be read, so nothing here is a statement "
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "This node's carriage counters could not be read, so nothing here describes what "
+      },
+      "ingest_refusals": {
+        "unavailable": "This node's ingest refusal ledger could not be read, so nothing here describes w"
+      },
+      "node_state": {
+        "unavailable": "This node's state signals could not be read from the substrate, so nothing here "
+      },
+      "trace_corpus": {
+        "unavailable": "This node's trace corpus could not be read, so nothing here describes what it ha"
+      }
+    },
+    "trace_plane": {
+      "dark": "NOTHING HAS BEEN ADMITTED FOR LONGER THAN THIS NODE'S RED THRESHOLD. Arrival is ",
+      "future_dated": "The newest trace in the corpus is stamped in the FUTURE. The timestamp is the ",
+      "live": "A trace was admitted recently: the plane this node exists to receive on is being",
+      "never_admitted": "The corpus was read and holds no trace at all: nothing has ever been admitted on",
+      "producer_asserted_ts": "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-cloc",
+      "quiet": "No trace has been admitted for longer than expected, but not yet long enough to ",
+      "unreadable": "This node's trace corpus could not be read, so nothing here is a statement about"
+    },
+    "trust_root": {
+      "no_self_key": "The host never declared this node's own key id, so nothing self-scoped could be ",
+      "no_trust_edges": "This node declared itself and holds no live trust edge to any root: it roots to ",
+      "no_valid_root": "This node trusts one or more roots and none of them validates. The per-leg verdi",
+      "unreadable": "The trust-root walk could not be read. An unreadable directory is not an untrust",
+      "valid": "This node roots to a trust root that checks out in full: a live trust edge, a "
+    },
+    "volatility": {
+      "clock_dependent_local": "This band is computed on THIS node from a stored instant against the read clock,",
+      "process_local": "The carriage, receive and ingest counters are process-local and cumulative since"
+    },
+    "withhold_class": {
+      "fault": "A read or a wiring step failed and the serve path failed closed. This is NOT a ",
+      "integrity": "A row this node holds could not be served at all: it would not serialize, its ",
+      "policy": "A decision this node made on purpose — consent scope, a serve capability the "
     }
   }
 }

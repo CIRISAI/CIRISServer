@@ -107,10 +107,26 @@ MIRROR_BUNDLES: Tuple[str, ...] = (
 # Kotlin source set whose literal string keys must resolve against en.json.
 COMMON_MAIN = "client/shared/src/commonMain"
 
+# The OTHER emitter of localization keys: the Rust server. Operator surfaces
+# never send a sentence — they send ``{id, text}``, an id a UI resolves in the
+# reader's language plus the English source to fall back to (operator_surface.rs
+# SOURCE_LOCALE). Those ids are localization keys with no Kotlin call site, so
+# the commonMain scan below cannot see a single one of them; a guard that checks
+# only Kotlin has never looked at the surface #366 was actually about.
+SERVER_SRC = "src"
+
 # localizedString("key" …) / getString("key" …) — capture the literal first arg.
 # ``[^"$\\]`` rejects interpolated keys ("mobile.foo_${x}") which can't be
 # checked statically; those are skipped, not failed.
 _KEY_CALL = re.compile(r'(?:localizedString|getString)\(\s*"([^"$\\]+)"')
+
+# A server-emitted localizable string is an ``(id, english_text)`` literal pair,
+# whatever helper wraps it — ``m(id, text)`` (admin_ops.rs, mesh_config_surface.rs),
+# ``refusal(code, token, id, text)`` (admin_ops.rs), or a bare ``Msg`` tuple
+# (operator_surface.rs). Matching the PAIR rather than one helper name is what
+# makes this scan cover all three; requiring a space in the text is what keeps it
+# from matching adjacent unrelated literals.
+_SERVER_MSG = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*"([^"\\]{0,80})', re.S)
 
 # Per-file bookkeeping subtree (translator, review_status, native_name, …) —
 # legitimately varies between locales and is never a UI key, so it's excluded
@@ -304,6 +320,62 @@ def check_reference_coverage(root: Path, en: dict) -> Result:
     return msgs, len(refs)
 
 
+def server_message_ids(root: Path) -> Dict[str, Path]:
+    """Map each server-emitted message id -> first Rust emission site."""
+    ids: Dict[str, Path] = {}
+    src = root / SERVER_SRC
+    if not src.exists():
+        return ids
+    for rs in sorted(src.rglob("*.rs")):
+        text = rs.read_text(encoding="utf-8")
+        for m in _SERVER_MSG.finditer(text):
+            if " " not in m.group(2):
+                continue  # not an English sentence — not an (id, text) pair
+            ids.setdefault(m.group(1), rs.relative_to(root))
+    return ids
+
+
+def check_server_ids_resolvable(root: Path, en: dict, ids: Dict[str, Path]) -> Result:
+    """ERROR: a server-emitted id that en.json DEFINES must be reachable.
+
+    Present-but-unreachable is strictly worse than absent: the bundle claims the
+    string is localized, every mirror agrees, and the lookup still returns null.
+    That is the 0c728b1 failure exactly.
+    """
+    en_addrs = set(flat_values(en))
+    bad = sorted(i for i in ids if i in en_addrs and resolve_key(en, i) is None)
+    msgs = [
+        f"{len(bad)} server-emitted id(s) are DEFINED in en.json but unreachable by resolveKey "
+        f"({', '.join(bad[:3])}{'…' if len(bad) > 3 else ''})"
+    ] if bad else []
+    return msgs, len(ids)
+
+
+def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Result:
+    """WARNING: a server-emitted id with no en.json entry at all.
+
+    The wire carries ``{id, text}``, so an uncovered id degrades to the server's
+    English ``text`` — the designed fallback, same severity class as translation
+    lag. But it means the string cannot be localized into ANY of the 29
+    languages, so it belongs on the localize-ui worklist rather than in silence.
+    """
+    uncovered = sorted(i for i in ids if i not in set(flat_values(en)))
+    if not uncovered:
+        return [], len(ids)
+    by_file: Dict[str, int] = {}
+    for i in uncovered:
+        by_file[str(ids[i])] = by_file.get(str(ids[i]), 0) + 1
+    where = ", ".join(f"{f} ({n})" for f, n in sorted(by_file.items(), key=lambda kv: -kv[1]))
+    return (
+        [
+            f"{len(uncovered)} of {len(ids)} server-emitted message id(s) have no en.json entry, "
+            f"so they cannot be localized into any language and always render the server's "
+            f"English text — {where}; first: {', '.join(uncovered[:3])}…"
+        ],
+        len(ids),
+    )
+
+
 def check_key_resolvability(root: Path) -> Result:
     """THE #366 check: every leaf address a locale file carries must be reachable
     by :func:`resolve_key` — the faithful port of the Kotlin resolver.
@@ -466,6 +538,12 @@ def run_checks(root: Path) -> Report:
     msgs, n = check_key_resolvability(root)
     rep.record("key-resolvability", msgs, n, severity="error", unit="address(es)")
 
+    server_ids = server_message_ids(root)
+    msgs, n = check_server_ids_resolvable(root, en, server_ids)
+    rep.record("server-id-reachable", msgs, n, severity="error", unit="emitted id(s)")
+    msgs, n = check_server_ids_covered(root, en, server_ids)
+    rep.record("server-id-coverage", msgs, n, severity="warning", unit="emitted id(s)")
+
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
 
@@ -541,6 +619,12 @@ _FIXTURE_KT = (
     'val a = localizedString("mobile.greeting")\n'
     'val b = getString("nav.home")\n'
 )
+# One server emission site, in the (id, english_text) pair shape every operator
+# surface uses. Gives server-id-* a non-zero denominator in the fixture.
+_FIXTURE_RS = (
+    "fn m(id: &str, text: &str) -> Value { json!({ \"id\": id, \"text\": text }) }\n"
+    "fn home() -> Value { m(\"nav.home\", \"Home, the operator landing surface.\") }\n"
+)
 
 
 def _write_json(path: Path, doc: Any) -> None:
@@ -560,6 +644,9 @@ def _build_fixture(root: Path) -> None:
     kt = root / COMMON_MAIN / "kotlin" / "Fixture.kt"
     kt.parent.mkdir(parents=True, exist_ok=True)
     kt.write_text(_FIXTURE_KT, encoding="utf-8")
+    rs = root / SERVER_SRC / "fixture.rs"
+    rs.parent.mkdir(parents=True, exist_ok=True)
+    rs.write_text(_FIXTURE_RS, encoding="utf-8")
 
 
 def _mutations() -> List[Tuple[str, str, Any, str]]:
@@ -685,6 +772,23 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
     def missing_mirror_dir(root: Path) -> None:
         shutil.rmtree(root / MIRROR_BUNDLES[2])
 
+    def server_id_uncovered(root: Path) -> None:
+        """A new operator sentence emitted with an id en.json never defines."""
+        rs = root / SERVER_SRC / "fixture.rs"
+        rs.write_text(
+            _FIXTURE_RS
+            + 'fn refused() -> Value { m("operator.refusal.brand_new", "A refusal nobody translated.") }\n',
+            encoding="utf-8",
+        )
+
+    def server_id_defined_but_flat(root: Path) -> None:
+        """en.json defines the emitted id — in the shape the resolver cannot read."""
+        _flatten_nav_home(root)
+
+    def no_server_sources(root: Path) -> None:
+        """Zero denominator on the server side: the scan finds no emission sites."""
+        shutil.rmtree(root / SERVER_SRC)
+
     return [
         ("nested key -> flat dotted key (THE 0c728b1 bug)", "error", flatten_a_nested_key, "resolveKey"),
         ("delete a key from de.json", "warning", del_key, "missing 1"),
@@ -706,6 +810,9 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         ("manifest lists a language with no file", "error", manifest_lists_missing_lang, "fr.json is missing"),
         ("every bundle emptied (zero denominator)", "error", empty_bundle, "looked at nothing"),
         ("androidApp bundle dir deleted", "error", missing_mirror_dir, "missing"),
+        ("server emits an id en.json never defines", "warning", server_id_uncovered, "no en.json entry"),
+        ("server id defined but flat (unreachable)", "error", server_id_defined_but_flat, "DEFINED in en.json"),
+        ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
 
 
@@ -758,9 +865,12 @@ def _prove_keyset_comparison_is_blind(root: Path) -> int:
     rep = run_checks(root)
     resolvability = [e for e in rep.errors if e.startswith("key-resolvability")]
     other_errors = [e for e in rep.errors if not e.startswith("key-resolvability")]
-    # reference-coverage also fires here (the Kotlin call site for nav.home stops
-    # resolving), which is correct and is the same defect seen from the call side.
-    other_errors = [e for e in other_errors if not e.startswith("reference-coverage")]
+    # reference-coverage and server-id-reachable also fire here — the Kotlin call
+    # site and the Rust emission site for nav.home both stop resolving. Both are
+    # correct: the same defect seen from the two consumer sides.
+    other_errors = [
+        e for e in other_errors if not e.startswith(("reference-coverage", "server-id-reachable"))
+    ]
     problems: List[str] = []
     if before != after:
         problems.append("the flattened key set CHANGED — the mutation is not the #366 shape")

@@ -70,14 +70,38 @@ Six ERROR-level checks (exit 1 if any fail):
    `resolveKey` semantics (an unresolvable key renders raw on every platform).
 5. **key-resolvability** — every key in every locale file is reachable by the
    ported `resolveKey`, i.e. no flat dotted keys. See the section above.
-6. **placeholder-parity** — a translated value carries exactly the placeholders
+6. **server-id-reachable** — every server-emitted message id that `en.json`
+   *defines* resolves. See "The other emitter" below.
+7. **placeholder-parity** — a translated value carries exactly the placeholders
    of its `en.json` source (`{named}`, `${…}`, `{0}`, `%s`, `%1$s`). A dropped or
    misspelled `{count}` renders literally, so this is corruption, not lag.
 
-…and one WARNING-level check (exit 0 by default, exit 1 under `--strict`):
+…and two WARNING-level checks (exit 0 by default, exit 1 under `--strict`) —
+both are "falls back to English by design, but should not stay that way":
 
-7. **translation-drift** — each locale carries `en.json`'s full key set, with no
+8. **translation-drift** — each locale carries `en.json`'s full key set, with no
    empty values and no keys `en.json` lacks.
+9. **server-id-coverage** — server-emitted ids with no `en.json` entry at all.
+   **84 of 137 today**, so `--strict` is currently red; that is a worklist, not
+   a defect in the guard.
+
+## The other emitter: `{id, text}` from the Rust server
+
+The operator surfaces never send a sentence. They send `{id, text}` — an id a UI
+resolves in the reader's language plus the English source to fall back to
+(`operator_surface.rs::SOURCE_LOCALE`). Those ids are localization keys **with no
+Kotlin call site**, in three different helper shapes:
+
+```rust
+m("mesh_config.ttl.expired", "This row's window has closed. …")          // admin_ops.rs, mesh_config_surface.rs
+refusal(code, "not_owner", "admin.refusal.not_owner", "You do not own …") // admin_ops.rs
+("operator.carriage.idle", "Nothing is moving and nothing is withheld.") // operator_surface.rs (bare Msg tuple)
+```
+
+The validator scrapes the `(id, english_text)` **pair** rather than any one
+helper name, which is what makes it cover all three. A guard that scanned only
+`commonMain` — as this one did until #366 — had never looked at a single one of
+these ids, and they are the entire surface #366 was about.
 
 Every check prints **what it examined**, not just what it found — `0 findings
 over 86,275 addresses` is evidence; `0 findings` alone is not. A check whose
@@ -85,7 +109,7 @@ denominator is zero is reported as an error in its own right.
 
 ### The self-test is the point
 
-`--self-test` builds a synthetic bundle in a temp dir, breaks it twenty ways —
+`--self-test` builds a synthetic bundle in a temp dir, breaks it 23 ways —
 flattening a nested key, desyncing each of the three mirrors, corrupting a named
 and a printf placeholder, invalid JSON, an unlisted locale file, a zero
 denominator — and asserts each check fires **with a message that names the
@@ -96,6 +120,21 @@ check could not have caught #366, and the reason the resolvability check exists.
 CI runs `--self-test` as a required step **before** the real check
 (`.github/workflows/localization.yml`), so the gate demonstrates it can fail on
 every run. A gate that has never been shown able to fail is not evidence.
+
+### The Rust rung
+
+`tests/localization_gate.rs` carries the same invariant into `cargo test`, for
+the release-gate ladder:
+
+| test fn | asserts |
+|---|---|
+| `server_emitted_message_ids_resolve_under_loader_semantics` | every emitted id that `en.json` defines is reachable by the Rust port of `resolveKey` (and that ≥100 ids were scraped — a zero denominator is not evidence) |
+| `server_emitted_message_id_coverage_does_not_regress` | ratchet: ids with no `en.json` entry may not exceed `MAX_UNCOVERED` (84 on `26605b5`; lower it as `localize-ui` works the list off, never raise it) |
+| `rust_and_python_resolvers_agree_on_the_bundle` | the Rust and Python ports of `resolveKey` give the same verdict on `en.json` |
+| `localization_bundles_pass_the_guard` | the Python guard exits 0 on the committed tree |
+| `localization_guard_self_test_proves_it_can_fail` | the guard's 23 mutations all still fire |
+
+Run it with `cargo test --test localization_gate` (never `--workspace`).
 
 ## Filling missing translations — the `localize-ui` Claude workflow
 

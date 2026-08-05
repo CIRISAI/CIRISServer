@@ -38,19 +38,23 @@ jobs:
       #   - every key in every locale is REACHABLE by that same resolver — a
       #     flat dotted key ("a.b.c": …) is dead in every language including
       #     English, which is how 53 ids shipped dead in 0c728b1 (#366),
+      #   - a server-emitted {id, text} id that en.json DEFINES is reachable,
       #   - a translated value carries exactly en.json's placeholders.
-      # `--strict` ALSO blocks on cross-language drift (missing/empty keys).
+      # `--strict` promotes both WARNING checks to blocking:
+      #   - translation drift (missing/empty keys per locale),
+      #   - server-emitted ids with no en.json entry at all.
       #
-      # #366 recommended leaving drift a warning, on the sound reasoning that a
-      # lagging locale degrades to English by design. That reasoning rested on
-      # translation being slow and manual. It is not: 53 ids went into 28
-      # languages in ~14 minutes of `localize-ui` agent time, and again for 56
-      # more. The cost that justified a warning is gone, and what the warning
-      # actually bought was 24 locales sitting 53 keys short for two days with
-      # nobody noticing — the same shape as the RCA in
-      # FSD/RCA_INGEST_REJECTION_2026-08-05.md, one layer up.
+      # Both are "falls back to English by design, but should not stay that
+      # way". #366 recommended leaving them warnings, on the sound reasoning
+      # that a lagging locale degrades gracefully. That rested on translation
+      # being slow and manual. It is not: 53 ids reached 28 languages in ~14
+      # minutes of `localize-ui` agent time, then 56 more, then 39, then 3.
       #
-      # If this ever blocks inconveniently: drop the flag. It is one word, and
-      # the tree passed `--strict` on the day it was added.
-      - name: Localization guard (mirror, resolvability, placeholders, drift)
+      # What the warning actually bought was 24 locales sitting 53 keys short
+      # for two days with nobody noticing — the RCA shape
+      # (FSD/RCA_INGEST_REJECTION_2026-08-05.md) one layer up.
+      #
+      # The flag goes in only when the tree passes it. If it ever blocks
+      # inconveniently, dropping it is one word.
+      - name: Localization guard (mirror, resolvability, placeholders, drift, coverage)
         run: python3 client/tools/check_localization_sync.py --strict

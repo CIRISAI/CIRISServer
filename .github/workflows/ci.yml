@@ -180,6 +180,28 @@ jobs:
       - name: clippy (test-anchor surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --features test-anchor -- -D warnings
+      # ...and RUN them. The step above compiles the test-anchor surface; it does
+      # not execute it, and two whole test files live behind this feature gate:
+      #
+      #   tests/trace_round_e2e.rs   4 tests — an agent-shaped node's sealed
+      #                              `trace:*` crossing to a canonical over a real
+      #                              anti-entropy round. THE acceptance proof that
+      #                              traces flow.
+      #   tests/trust_root_qa.rs     7 tests — the trust-root QA roster.
+      #
+      # Both begin `#![cfg(feature = "test-anchor")]`, so without the feature the
+      # binary contains ZERO tests and cargo prints `test result: ok. 0 passed`.
+      # A green line, an empty instrument. Eleven tests — including the one that
+      # proves the thing this whole release is for — were never run by CI, and a
+      # full 65-target local sweep counted `trace_round_e2e` as passing.
+      #
+      # Same shape as CIRISServer#373 (bare `cargo test` tests the ROOT PACKAGE
+      # only, so a workspace member's 364 tests never ran). Twice now the gap has
+      # been in CI's SELECTION — which targets, which features — rather than in
+      # any assertion. Compilation coverage is not execution coverage.
+      - name: test (test-anchor surface, Linux)
+        if: runner.os == 'Linux'
+        run: cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the
