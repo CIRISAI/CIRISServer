@@ -3080,7 +3080,7 @@
   },
   "admin": {
     "descend": {
-      "bounded_unsupported": "Un jugement borné dans le temps ne peut pas déclencher une éviction non bornée. La seule descente indexée par acteur du substrat emporte l'intégralité du corpus, ce qui détruirait l'historique que cette borne laisse délibérément en place. La suppression bornée dans le temps qui EST implémentée est la désadmission avec une borne d'historique.",
+      "bounded_unsupported": "Un jugement borné dans le temps ne peut pas déclencher une éviction non bornée. La seule descente indexée par acteur dont dispose le substrat emporte l'intégralité du corpus, ce qui détruirait l'historique que cette borne laisse délibérément en place. La suppression bornée dans le temps qui EST implémentée est la désadmission assortie d'une borne d'historique.",
       "not_reached": "Les lignes d'attestation sélectionnées ne sont elles-mêmes pas descendues. Sur ce substrat, chaque porteur de charge utile est scellé dans sa propre signature : ses octets ne peuvent donc pas être supprimés sans que la ligne ne soit lue comme falsifiée ; l'effaçabilité se décide à l'émission, et rien de ce qui est émis aujourd'hui n'est effaçable."
     },
     "enforcement": {
@@ -3169,13 +3169,13 @@
       "configured": "Au moins une clé est écartée de la référence du propriétaire par une racine souscrite.",
       "no_rows_held": "Ce nœud souscrit à au moins une racine de confiance et ne détient aucune ligne de configuration de maillage provenant de l'une d'elles. Chaque clé fonctionne à la référence propre du propriétaire.",
       "no_subscription": "Ce nœud ne détient aucune arête de racine de confiance active ; aucune racine ne peut donc le configurer. La souscription EST l'arête de confiance.",
-      "none_binding": "Des lignes mesh-config sont détenues, mais aucune ne s'applique : chacune est expirée, plafonnée par le consentement du propriétaire, ou demande la valeur de référence déjà en vigueur.",
-      "unreadable": "Le plan mesh-config n'a pas pu être lu ici. Cela ne signifie PAS qu'aucune valeur n'est définie — les valeurs ci-dessous sont inconnues, et non des valeurs par défaut."
+      "none_binding": "Des lignes de configuration de maillage sont détenues et aucune d'elles ne s'applique : chacune est expirée, plafonnée par le consentement du propriétaire, ou demande la valeur de référence déjà en vigueur.",
+      "unreadable": "Le plan de configuration de maillage n'a pas pu être lu ici. Cela ne signifie PAS qu'aucune valeur n'est définie — les valeurs ci-dessous sont inconnues, et non des valeurs par défaut."
     },
     "provenance": {
-      "baseline_not_moved": "Les racines auxquelles ce nœud est abonné détiennent des lignes actives pour cette clé et aucune ne l'a modifiée : chacune a été plafonnée par le consentement du propriétaire ou demandait la valeur déjà en vigueur.",
-      "baseline_unspoken": "Aucune racine abonnée ne détient de ligne active pour cette clé : le nœud applique donc la valeur consentie par son propriétaire.",
-      "root": "La ligne signée d'une racine abonnée a défini cette valeur. La ligne, son auteur et la délégation sous laquelle elle a été prise sont nommés à côté."
+      "baseline_not_moved": "Des racines souscrites détiennent des lignes actives pour cette clé et aucune ne l'a modifiée : chacune a été plafonnée par le consentement du propriétaire ou demandait la valeur déjà en vigueur.",
+      "baseline_unspoken": "Aucune racine souscrite ne détient de ligne active pour cette clé : le nœud applique donc la valeur consentie par son propriétaire.",
+      "root": "La ligne signée d'une racine souscrite a défini cette valeur. La ligne, son auteur et la délégation sous laquelle elle a été prise sont nommés à côté."
     },
     "ttl": {
       "expired": "La fenêtre de cette ligne est close. Le repli écarte une ligne expirée à la lecture : elle n'exige donc ni révocation ni auteur joignable.",

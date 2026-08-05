@@ -3080,16 +3080,16 @@
   },
   "admin": {
     "descend": {
-      "bounded_unsupported": "Hukumu yenye kikomo cha muda haiwezi kuendesha uondoaji usio na kikomo. Ushushaji pekee wa msingi unaotegemea ufunguo wa mtendaji huchukua kumbukumbu nzima, jambo ambalo lingeharibu historia ambayo kikomo hiki kimeacha ikisimama kwa makusudi. Uondoaji wenye kikomo cha muda ULIOPO ni kufutwa kwa uandikishaji pamoja na kikomo cha historia.",
-      "not_reached": "Safu za uthibitisho zilizochaguliwa zenyewe hazishushwi. Kila mbeba-mzigo katika msingi huu umefungwa ndani ya saini yake mwenyewe, hivyo baiti zake haziwezi kuondolewa bila kuifanya safu isomeke kama ya kughushi; uwezo wa kufutika huamuliwa wakati wa kutengenezwa, na hakuna kinachotengenezwa leo kinachoweza kufutika."
+      "bounded_unsupported": "Hukumu yenye kikomo cha muda haiwezi kuendesha uondoaji usio na kikomo. Ushushaji pekee wa msingi unaotegemea ufunguo wa mtendaji huchukua mkusanyiko mzima, jambo ambalo lingeharibu historia ambayo kikomo hiki kimeiacha ikisimama kwa makusudi. Uondoaji wenye kikomo cha muda ULIOTEKELEZWA ni kuondolewa kwa uandikishaji pamoja na kikomo cha historia.",
+      "not_reached": "Safu za uthibitisho zilizochaguliwa zenyewe hazishushwi. Kila mbeba-mzigo katika msingi huu umefungwa ndani ya saini yake mwenyewe, hivyo baiti zake haziwezi kuondolewa bila kuifanya safu isomeke kama iliyoghushiwa; uwezo wa kufutika huamuliwa wakati wa kuundwa, na hakuna kinachoundwa leo kinachoweza kufutika."
     },
     "enforcement": {
-      "annotate": "Hukumu iliyosainiwa isiyo na athari hadi msomaji aiheshimu. Hakuna kinachozuiliwa, kupunguzwa kasi wala kuondolewa.",
-      "deadmit": "Ubatilishaji uliosainiwa katika uwanda wa kawaida wa kuongeza-tu. Ni ushahidi ambao msomaji huukunja, si mlango unaofungwa kwa nguvu: uhakiki wa saini, vielekezi vya unakili na upokeaji wa safu vyote vinaendelea kufanya kazi kwa makusudi, kwa sababu kukataa safu za zamani za ufunguo ulioathiriwa kungeharibu ushahidi unaohitajika kuamua tukio hilo la kuathiriwa.",
-      "descend": "Haiwezi kutenduliwa kwa muundo wake. Ushushaji haumaliziki sifuri kamwe — ukungu na kaburi hubaki — lakini kilichoondolewa hakirudi.",
-      "quarantine": "Alama iliyosainiwa, si amri: hakuna kinachofutwa wala kuandikwa upya. Njia za utoaji huduma za nodi hii huacha kuwakabidhi wenzao safu na mafungu ya data ya funguo zilizotajwa; mwenzako anayekunja tofauti hapokei tu kutoka kwetu.",
-      "re_admit": "Imerekodiwa kama utenguzi wenye mwandishi anayejulikana. Safu ya ubatilishaji hubaki na kila msomaji bado huikunja: vizuizi hujumuika lakini vilegezo havijumuiki, na hakuna tabaka la msingi huu linaloweka wazi njia ya kutobatilisha.",
-      "throttle": "Imerekodiwa kama hukumu yenye mwandishi tu. Msingi huu hauna bajeti ya uandikishaji kwa kila ufunguo iliyoandikwa na mpokeaji: kiwango cha uandishi cha mwenzako ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao upunguzaji kasi unaweza kuutegemea. Hakuna kinachobadilika katika kile nodi hii inakubali kutoka funguo zilizotajwa."
+      "annotate": "Hukumu iliyosainiwa isiyo na athari yoyote hadi msomaji aiheshimu. Hakuna kinachozuiliwa, kupunguzwa kasi wala kuondolewa.",
+      "deadmit": "Ubatilishaji uliosainiwa katika uwanda wa kawaida wa kuongeza-tu. Ni ushahidi ambao msomaji huukunja, si mlango unaofungwa kwa nguvu: uhakiki wa saini, vielekezi vya unakili na upokeaji wa safu vyote vinaendelea kufanya kazi kwa makusudi, kwa sababu kukataa safu za zamani za ufunguo ulioathiriwa kungeharibu ushahidi unaohitajika kuhukumu tukio hilo la kuathiriwa.",
+      "descend": "Haiwezi kutenduliwa kwa muundo wake. Ushushaji haukomi kwenye sifuri kamwe — ukungu na alama ya kaburi hubaki — lakini kilichoondolewa hakirudi.",
+      "quarantine": "Alama iliyosainiwa, si amri: hakuna kinachofutwa na hakuna kinachoandikwa upya. Njia za utoaji huduma za nodi hii huacha kuwakabidhi wenzao safu na mafungu ya data ya funguo zilizotajwa; mwenzako anayekunja tofauti hapokei tu kutoka kwetu.",
+      "re_admit": "Imerekodiwa kama utenguzi wenye mwandishi anayejulikana. Safu ya ubatilishaji hubaki na kila msomaji bado huikunja: vizuizi hujumuika lakini vilegezo havijumuiki, na hakuna tabaka la msingi huu linalotoa kitendo cha kutengua ubatilishaji.",
+      "throttle": "Imerekodiwa kama hukumu yenye mwandishi tu. Msingi huu hauna bajeti ya uandikishaji kwa kila ufunguo iliyowekwa na mpokeaji: kiwango cha uandishi cha mwenzako ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao upunguzaji kasi unaweza kuutegemea. Hakuna kinachobadilika katika kile nodi hii inakubali kutoka kwa funguo zilizotajwa."
     },
     "preview": {
       "note": "Hiki ndicho hasa ambacho utekelezaji utakifanyia kazi. Wasilisha hashi ya uteuzi pamoja na utekelezaji; ikiwa uteuzi umebadilika, utekelezaji hukataa.",
@@ -3099,11 +3099,11 @@
       "not_withheld": "Ufunguo huu kwa sasa hauzuiliwi hapa, hivyo hakuna cha kuachiliwa."
     },
     "refusal": {
-      "preview_hash_mismatch": "Ulichokitazama awali si kile kitakachotekelezwa — uteuzi umebadilika tangu muhtasari. Rudia muhtasari kisha uidhinishe hashi mpya.",
-      "quorum_insufficient": "Operesheni hii haiwezi kutenduliwa na inahitaji akidi ya mamlaka tofauti, si mnyororo mmoja wa ukabidhi. Minyororo miwili kutoka mzizi mmoja ni mamlaka moja iliyovaa kofia mbili."
+      "preview_hash_mismatch": "Ulichokitazama katika onyesho la awali si kile kitakachotekelezwa — uteuzi umebadilika tangu onyesho hilo. Rudia onyesho la awali kisha uidhinishe hashi mpya.",
+      "quorum_insufficient": "Operesheni hii haiwezi kutenduliwa na inahitaji akidi ya mamlaka tofautitofauti, si mnyororo mmoja wa ukabidhi. Minyororo miwili kutoka mzizi mmoja ni mamlaka moja iliyovaa kofia mbili."
     },
     "reversal": {
-      "evidence_only": "Safu ya awali hubaki na bado hukunjwa na kila msomaji. Utenguzi huu ni ushahidi uliorekodiwa, si kutendua — msingi hauweki wazi njia yoyote ya kutobatilisha.",
+      "evidence_only": "Safu ya awali hubaki na bado hukunjwa na kila msomaji. Utenguzi huu ni ushahidi uliorekodiwa, si kutendua — msingi hautoi njia yoyote ya kutengua ubatilishaji.",
       "substrate": "Hali ya msingi imetenduliwa: nodi hii inaacha kuzuia safu za ufunguo huu.",
       "symmetric": "Hakuna kilichotenduliwa katika msingi kwa sababu hakuna kitu katika msingi kilichotekeleza hukumu ya awali. Vitendo vyote viwili ni ushahidi uliorekodiwa."
     }
@@ -3131,7 +3131,7 @@
       "independent": "Hizi ni idhini tofauti kwenye kingo zinazopingana. Kutoa moja hakutoi nyingine, na yoyote inaweza kuondolewa bila nyingine."
     },
     "mesh_participation": {
-      "action": "Kubali kushiriki katika mtandao wa CIRIS"
+      "action": "Kubali Kushiriki katika Mesh ya CIRIS"
     }
   },
   "location": {
@@ -3144,7 +3144,7 @@
     "title": "Shiriki kanda yako ya takriban"
   },
   "mesh": {
-    "announce_requirement": "Nodi isiyojitangaza haipati ufikiaji wa huduma katika mtandao wala huduma za wakala. Swichi ya kuzima ya makubaliano ina maana tu dhidi ya nodi inayoweza kuifikia, hivyo nodi isiyofikika haihudumiwi tangu mwanzo."
+    "announce_requirement": "Nodi isiyojitangaza haipati ufikiaji wa huduma katika mesh wala huduma za wakala. Swichi ya kuzima ya accord ina maana tu dhidi ya nodi inayoweza kuifikia, hivyo nodi isiyofikika haihudumiwi tangu mwanzo."
   },
   "mesh_config": {
     "dry_run": "Hakuna kilichosainiwa na hakuna kilichowasilishwa. Hizi ndizo baiti kamili za kikanuni ambazo msaini-mwenza lazima azisaini ili scrub yake ihesabike katika uwasilishaji halisi.",
@@ -3155,32 +3155,32 @@
       "bound": "Nafuu ya dharura huisha kwa muundo wake. Dirisha refu zaidi ni la msingi, limebebwa hapa ili fomu iweze kuweka mpaka wa ingizo; msingi hukataa lolote refu zaidi kwenye mlango wake mwenyewe."
     },
     "history": {
-      "empty": "Kila mzizi uliojiandikisha ulisomwa na hakuna hata mmoja aliyewahi kuwasilisha safu ya usanidi wa mtandao.",
-      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi ambao umewahi kuweza kuwasilisha safu ya usanidi wa mtandao hapa.",
-      "partial": "Baadhi ya mizizi iliyojiandikisha haikuweza kusomwa, hivyo historia hii haijakamilika. Mizizi iliyoshindikana imetajwa.",
-      "present": "Kila safu ya usanidi wa mtandao ambayo nodi hii inashikilia, mpya zaidi kwanza.",
+      "empty": "Kila mzizi uliojisajili ulisomwa na hakuna hata mmoja aliyewahi kuwasilisha safu ya mesh-config.",
+      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi ambao umewahi kuweza kuwasilisha safu ya mesh-config hapa.",
+      "partial": "Baadhi ya mizizi iliyojisajili haikuweza kusomwa, hivyo historia hii haijakamilika. Mizizi iliyoshindikana imetajwa.",
+      "present": "Kila safu ya mesh-config ambayo nodi hii inashikilia, mpya zaidi kwanza.",
       "truncated": "Ukurasa huu ulikatwa kwenye kikomo. Jumla iliyo hapa chini inahesabu kila safu iliyosomwa.",
-      "unreadable": "Historia ya usanidi wa mtandao haikuweza kusomwa hapa. HII SI kauli kwamba hakuna safu iliyowahi kuwasilishwa."
+      "unreadable": "Historia ya mesh-config haikuweza kusomwa hapa. HII SI kauli kwamba hakuna safu iliyowahi kuwasilishwa."
     },
     "outcome": {
       "admitted": "Msingi uliikubali safu hii. Ni ALAMA, si amri: hakuna kilichobadilishwa kwa kuwasili kwake, na athari yake yote ni ukunjaji wa wakati wa kusoma ambao mtumiaji anaweza kuuheshimu."
     },
     "plane": {
-      "configured": "Angalau ufunguo mmoja umehamishwa kutoka thamani ya msingi ya mmiliki na mzizi uliojiandikisha.",
-      "no_rows_held": "Nodi hii imejiandikisha kwa angalau mzizi mmoja wa imani na haishikilii safu yoyote ya usanidi wa mtandao kutoka kwa yeyote kati yao. Kila ufunguo unafanya kazi kwa thamani ya msingi ya mmiliki mwenyewe.",
-      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi unaoweza kuisanidi. Uandikishaji NDIO ukingo wa imani.",
-      "none_binding": "Rekodi za mesh-config zimehifadhiwa lakini hakuna inayotekelezwa: kila moja imekwisha muda, imebanwa kwa ridhaa ya mmiliki, au inaomba thamani ya msingi inayotumika tayari.",
+      "configured": "Angalau ufunguo mmoja umeondolewa kwenye thamani ya msingi ya mmiliki na mzizi uliojisajili.",
+      "no_rows_held": "Nodi hii imejisajili kwa angalau mzizi mmoja wa imani na haishikilii safu yoyote ya mesh-config kutoka kwa yeyote kati yao. Kila ufunguo unafanya kazi kwa thamani ya msingi ya mmiliki mwenyewe.",
+      "no_subscription": "Nodi hii haina ukingo hai wa mzizi-wa-imani, hivyo hakuna mzizi unaoweza kuisanidi. Usajili NDIO ukingo wa imani.",
+      "none_binding": "Safu za mesh-config zimeshikiliwa na hakuna hata moja inayofunga: kila moja imekwisha muda, imebanwa kwa ridhaa ya mmiliki, au inaomba thamani ya msingi inayotumika tayari.",
       "unreadable": "Tabaka la mesh-config halikuweza kusomwa hapa. HII SI kauli kwamba hakuna kilichowekwa — thamani zilizo hapa chini hazijulikani, si chaguo-msingi."
     },
     "provenance": {
-      "baseline_not_moved": "Mizizi iliyojisajili ina rekodi hai kwa ufunguo huu na hakuna iliyoibadilisha: kila moja ilibanwa kwa ridhaa ya mmiliki au iliomba thamani inayotumika tayari.",
-      "baseline_unspoken": "Hakuna mzizi uliojisajili wenye rekodi hai kwa ufunguo huu, kwa hivyo nodi inatumia thamani ambayo mmiliki wake aliridhia.",
-      "root": "Rekodi iliyotiwa saini ya mzizi uliojisajili iliweka thamani hii. Rekodi hiyo, mwandishi wake na ukabidhi uliotumika vimetajwa kando yake."
+      "baseline_not_moved": "Mizizi iliyojisajili ina safu hai kwa ufunguo huu na hakuna iliyoibadilisha: kila moja ilibanwa kwa ridhaa ya mmiliki au iliomba thamani inayotumika tayari.",
+      "baseline_unspoken": "Hakuna mzizi uliojisajili wenye safu hai kwa ufunguo huu, kwa hivyo nodi inatumia thamani ambayo mmiliki wake aliridhia.",
+      "root": "Safu iliyotiwa saini ya mzizi uliojisajili iliweka thamani hii. Safu hiyo, mwandishi wake na ukabidhi uliotumika vimetajwa kando yake."
     },
     "ttl": {
-      "expired": "Dirisha la rekodi hii limefungwa. Ukunjaji hutupilia mbali rekodi iliyokwisha muda wakati wa kusoma, kwa hivyo hauhitaji ubatilishaji wala mwandishi anayeweza kufikiwa.",
-      "running": "Dirisha la rekodi hii liko wazi na litafungwa katika wakati uliotajwa.",
-      "unbounded": "Rekodi hii haina tarehe ya kuisha. Inatumika hadi itakapobadilishwa na nyingine."
+      "expired": "Dirisha la safu hii limefungwa. Ukunjaji hutupilia mbali safu iliyokwisha muda wakati wa kusoma, kwa hivyo hauhitaji ubatilishaji wala mwandishi anayeweza kufikiwa.",
+      "running": "Dirisha la safu hii liko wazi na litafungwa katika wakati uliotajwa.",
+      "unbounded": "Safu hii haina tarehe ya kuisha. Inatumika hadi itakapobadilishwa na nyingine."
     }
   }
 }

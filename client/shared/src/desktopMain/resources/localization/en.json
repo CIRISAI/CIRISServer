@@ -101,22 +101,6 @@
       "disclaimer_alerts": "Always take weather alerts seriously. Check official sources and local authorities."
     }
   },
-  "admin.descend.bounded_unsupported": "A time-bounded judgement cannot drive an unbounded eviction. The substrate's only actor-keyed descent takes the whole corpus, which would destroy the history this bound deliberately leaves standing. The time-bounded removal that IS implemented is de-admission with a history bound.",
-  "admin.descend.not_reached": "The selected attestation rows themselves are not descended. Every payload carrier on this substrate is sealed inside its own signature, so its bytes cannot be dropped without making the row read as forged; erasability is decided at mint and nothing minted today is erasable.",
-  "admin.enforcement.annotate": "A signed judgement with no effect until a reader honours it. Nothing is withheld, throttled or removed.",
-  "admin.enforcement.deadmit": "A signed revocation on the ordinary append-only plane. It is evidence a reader folds, not a door that slams: signature verification, the replication cursors and row ingest all deliberately keep working, because refusing a compromised key's older rows would destroy the evidence needed to adjudicate the compromise.",
-  "admin.enforcement.descend": "Irreversible by design. Descent never terminates at zero — the blur and the tombstone survive — but what was shed is not coming back.",
-  "admin.enforcement.quarantine": "A signed marker, not a command: nothing is deleted and nothing is rewritten. This node's serve paths stop handing the named keys' rows and blobs to peers; a peer that folds differently simply does not receive them from us.",
-  "admin.enforcement.re_admit": "Recorded as an attributed reversal. The revocation row survives and every reader still folds it: restrictions compose and leniencies do not, and no layer of this substrate exposes an un-revoke.",
-  "admin.enforcement.throttle": "Recorded as an attributed judgement only. This substrate has no recipient-authored per-key admission budget: the peer write quota is a fixed runaway-loop backstop, not a policy surface a throttle can key on. Nothing changes what this node accepts from the named keys.",
-  "admin.preview.note": "This is exactly what a commit will act on. Present the selection hash with the commit; if the selection has changed, the commit refuses.",
-  "admin.preview.window_in_application": "The time window is applied by this node, not by the substrate query: the general attestation read does not honour the window axis. The page bound is applied first, so a windowed selection can come back short.",
-  "admin.quarantine.not_withheld": "This key is not currently withheld here, so there is nothing to release.",
-  "admin.refusal.preview_hash_mismatch": "What you previewed is not what would execute — the selection has changed since the preview. Re-run the preview and ratify the new hash.",
-  "admin.refusal.quorum_insufficient": "This operation is irreversible and takes a quorum of distinct authorities, not one delegation chain. Two chains from the same root are one authority wearing two hats.",
-  "admin.reversal.evidence_only": "The original row survives and is still folded by every reader. This reversal is recorded evidence, not an undo — the substrate exposes no un-revoke.",
-  "admin.reversal.substrate": "The substrate state is reversed: this node stops withholding the key's rows.",
-  "admin.reversal.symmetric": "Nothing in the substrate is reversed because nothing in the substrate enforced the original judgement. Both acts are recorded evidence.",
   "agent": {
     "greeting": "Hello! How can I help you today?",
     "thinking": "Let me think about that...",
@@ -248,16 +232,6 @@
     "retry_observation_outro": "The user is waiting for a response to their new message. Use SPEAK to respond or use a TOOL if needed.",
     "retry_general_outro": "Remember: DEFER only for ethical dilemmas or permission issues — NOT for technical errors. If a tool fails, SPEAK to explain the error to the user."
   },
-  "consent.decline_analyze.cost.no_capability_services": "You cannot use streams or services that require third-party capability attestations, because you will not have any.",
-  "consent.decline_analyze.cost.no_reputation": "You build NO reputation — every capacity:* claim about you is refused, so none can ever exist.",
-  "consent.decline_analyze.cost.peers_may_refuse": "Some peers may refuse to interact with you at all.",
-  "consent.decline_analyze.summary": "You may send traces without consenting to be analyzed. Traces will still flow.",
-  "consent.grant.analyze.permits": "The peer may SCORE your traces — this is what builds reputation.",
-  "consent.grant.analyze.title": "Be scored",
-  "consent.grant.replication.permits": "The peer may HOLD your traces.",
-  "consent.grant.replication.title": "Send traces",
-  "consent.grants.independent": "These are separate consents on opposite edges. Granting one does not grant the other, and either can be withdrawn without the other.",
-  "consent.mesh_participation.action": "Consent to CIRIS Mesh Participation",
   "consent_about_desc": "Learn about how consent works in CIRIS",
   "consent_about_title": "About Consent",
   "consent_by": "Consented by",
@@ -424,11 +398,6 @@
   "interact_clear": "Clear",
   "interact_close": "Close",
   "interact_stop": "Stop",
-  "location.cost.no_regional_community": "You cannot take part in any regional community. Membership is decided by whether your cell falls inside the community's own region, so without a cell there is nothing to compare.",
-  "location.cost.no_regional_reporting": "Your activity cannot contribute to regional pattern reporting.",
-  "location.permits": "Attaches a coarse H3 cell to your envelope so patterns can be reported across regions. The substrate refuses anything finer than resolution 7, so it identifies a rough region — never your specific locality or address.",
-  "location.purpose": "Regional pattern reporting, and taking part in regional communities. A community may also use it as an OPTIONAL visibility gate, restricting items destined for that community to members whose region falls inside it. It is not a general restriction on your traces — that is decided by the consents above.",
-  "location.title": "Share your approximate region",
   "login_first_run_welcome": "Welcome! Choose how to set up your AI assistant.",
   "logs_search_placeholder": "Search logs...",
   "memory_attributes": "Attributes",
@@ -454,28 +423,6 @@
   "memory_time_range": "Time Range",
   "memory_total_nodes": "Total Nodes",
   "memory_try_graph": "Try Graph View",
-  "mesh.announce_requirement": "A node that does not announce gets no service access on the mesh and no agent services. The accord's kill switch is only meaningful against a node it can reach, so an unreachable node is never served in the first place.",
-  "mesh_config.dry_run": "Nothing was signed and nothing was submitted. These are the exact canonical bytes a co-signer must sign for their scrub to count on the real submission.",
-  "mesh_config.durability.substrate_decides": "Which acts earn a durable setting is the substrate's ruling, re-read on every call and reported by its own refusal token. This node encodes no durability rule of its own.",
-  "mesh_config.emergency.bound": "Emergency relief expires by construction. The maximum window is the substrate's, carried here so a form can bound its input; the substrate refuses anything longer at its own door.",
-  "mesh_config.history.empty": "Every subscribed root was read and none has ever filed a mesh-config row.",
-  "mesh_config.history.no_subscription": "This node holds no live trust-root edge, so no root has ever been able to file a mesh-config row here.",
-  "mesh_config.history.partial": "Some subscribed roots could not be read, so this history is incomplete. The roots that failed are named.",
-  "mesh_config.history.present": "Every mesh-config row this node holds, newest first.",
-  "mesh_config.history.truncated": "This page was cut at the limit. The total below counts every row read.",
-  "mesh_config.history.unreadable": "The mesh-config history could not be read here. This is NOT a statement that no row was ever filed.",
-  "mesh_config.outcome.admitted": "The substrate admitted this row. It is a MARKER, not a command: nothing was changed by its arrival, and its effect is entirely the read-time fold a consumer may honour.",
-  "mesh_config.plane.configured": "At least one key is moved off the owner's baseline by a subscribed root.",
-  "mesh_config.plane.no_rows_held": "This node subscribes to at least one trust root and holds no mesh-config row from any of them. Every key runs at the owner's own baseline.",
-  "mesh_config.plane.no_subscription": "This node holds no live trust-root edge, so no root may configure it. The subscription IS the trust edge.",
-  "mesh_config.plane.none_binding": "Mesh-config rows are held and none of them binds: each is expired, clamped to the owner's consent, or asks for the baseline value already in force.",
-  "mesh_config.plane.unreadable": "The mesh-config plane could not be read here. This is NOT a statement that nothing is set — the values below are unknown, not defaults.",
-  "mesh_config.provenance.baseline_not_moved": "Subscribed roots hold live rows for this key and none of them moved it: each was clamped to the owner's consent or asked for the value already in force.",
-  "mesh_config.provenance.baseline_unspoken": "No subscribed root holds a live row for this key, so the node runs the value its owner consented to.",
-  "mesh_config.provenance.root": "A subscribed root's signed row set this value. The row, its author and the delegation it was taken under are named beside it.",
-  "mesh_config.ttl.expired": "This row's window has closed. The fold drops an expired row at read time, so it needs no revocation and no reachable author.",
-  "mesh_config.ttl.running": "This row's window is open and closes at the named instant.",
-  "mesh_config.ttl.unbounded": "This row carries no expiry. It applies until it is superseded.",
   "mobile": {
     "claim_node_title": "Claim a node",
     "claim_node_back": "Back",
@@ -3130,5 +3077,110 @@
   "wa_reject": "Reject",
   "wa_resolve": "Resolve",
   "wa_service_status": "Service Status",
-  "wa_status": "Status"
+  "wa_status": "Status",
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "A time-bounded judgement cannot drive an unbounded eviction. The substrate's only actor-keyed descent takes the whole corpus, which would destroy the history this bound deliberately leaves standing. The time-bounded removal that IS implemented is de-admission with a history bound.",
+      "not_reached": "The selected attestation rows themselves are not descended. Every payload carrier on this substrate is sealed inside its own signature, so its bytes cannot be dropped without making the row read as forged; erasability is decided at mint and nothing minted today is erasable."
+    },
+    "enforcement": {
+      "annotate": "A signed judgement with no effect until a reader honours it. Nothing is withheld, throttled or removed.",
+      "deadmit": "A signed revocation on the ordinary append-only plane. It is evidence a reader folds, not a door that slams: signature verification, the replication cursors and row ingest all deliberately keep working, because refusing a compromised key's older rows would destroy the evidence needed to adjudicate the compromise.",
+      "descend": "Irreversible by design. Descent never terminates at zero — the blur and the tombstone survive — but what was shed is not coming back.",
+      "quarantine": "A signed marker, not a command: nothing is deleted and nothing is rewritten. This node's serve paths stop handing the named keys' rows and blobs to peers; a peer that folds differently simply does not receive them from us.",
+      "re_admit": "Recorded as an attributed reversal. The revocation row survives and every reader still folds it: restrictions compose and leniencies do not, and no layer of this substrate exposes an un-revoke.",
+      "throttle": "Recorded as an attributed judgement only. This substrate has no recipient-authored per-key admission budget: the peer write quota is a fixed runaway-loop backstop, not a policy surface a throttle can key on. Nothing changes what this node accepts from the named keys."
+    },
+    "preview": {
+      "note": "This is exactly what a commit will act on. Present the selection hash with the commit; if the selection has changed, the commit refuses.",
+      "window_in_application": "The time window is applied by this node, not by the substrate query: the general attestation read does not honour the window axis. The page bound is applied first, so a windowed selection can come back short."
+    },
+    "quarantine": {
+      "not_withheld": "This key is not currently withheld here, so there is nothing to release."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "What you previewed is not what would execute — the selection has changed since the preview. Re-run the preview and ratify the new hash.",
+      "quorum_insufficient": "This operation is irreversible and takes a quorum of distinct authorities, not one delegation chain. Two chains from the same root are one authority wearing two hats."
+    },
+    "reversal": {
+      "evidence_only": "The original row survives and is still folded by every reader. This reversal is recorded evidence, not an undo — the substrate exposes no un-revoke.",
+      "substrate": "The substrate state is reversed: this node stops withholding the key's rows.",
+      "symmetric": "Nothing in the substrate is reversed because nothing in the substrate enforced the original judgement. Both acts are recorded evidence."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "You cannot use streams or services that require third-party capability attestations, because you will not have any.",
+        "no_reputation": "You build NO reputation — every capacity:* claim about you is refused, so none can ever exist.",
+        "peers_may_refuse": "Some peers may refuse to interact with you at all."
+      },
+      "summary": "You may send traces without consenting to be analyzed. Traces will still flow."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "The peer may SCORE your traces — this is what builds reputation.",
+        "title": "Be scored"
+      },
+      "replication": {
+        "permits": "The peer may HOLD your traces.",
+        "title": "Send traces"
+      }
+    },
+    "grants": {
+      "independent": "These are separate consents on opposite edges. Granting one does not grant the other, and either can be withdrawn without the other."
+    },
+    "mesh_participation": {
+      "action": "Consent to CIRIS Mesh Participation"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "You cannot take part in any regional community. Membership is decided by whether your cell falls inside the community's own region, so without a cell there is nothing to compare.",
+      "no_regional_reporting": "Your activity cannot contribute to regional pattern reporting."
+    },
+    "permits": "Attaches a coarse H3 cell to your envelope so patterns can be reported across regions. The substrate refuses anything finer than resolution 7, so it identifies a rough region — never your specific locality or address.",
+    "purpose": "Regional pattern reporting, and taking part in regional communities. A community may also use it as an OPTIONAL visibility gate, restricting items destined for that community to members whose region falls inside it. It is not a general restriction on your traces — that is decided by the consents above.",
+    "title": "Share your approximate region"
+  },
+  "mesh": {
+    "announce_requirement": "A node that does not announce gets no service access on the mesh and no agent services. The accord's kill switch is only meaningful against a node it can reach, so an unreachable node is never served in the first place."
+  },
+  "mesh_config": {
+    "dry_run": "Nothing was signed and nothing was submitted. These are the exact canonical bytes a co-signer must sign for their scrub to count on the real submission.",
+    "durability": {
+      "substrate_decides": "Which acts earn a durable setting is the substrate's ruling, re-read on every call and reported by its own refusal token. This node encodes no durability rule of its own."
+    },
+    "emergency": {
+      "bound": "Emergency relief expires by construction. The maximum window is the substrate's, carried here so a form can bound its input; the substrate refuses anything longer at its own door."
+    },
+    "history": {
+      "empty": "Every subscribed root was read and none has ever filed a mesh-config row.",
+      "no_subscription": "This node holds no live trust-root edge, so no root has ever been able to file a mesh-config row here.",
+      "partial": "Some subscribed roots could not be read, so this history is incomplete. The roots that failed are named.",
+      "present": "Every mesh-config row this node holds, newest first.",
+      "truncated": "This page was cut at the limit. The total below counts every row read.",
+      "unreadable": "The mesh-config history could not be read here. This is NOT a statement that no row was ever filed."
+    },
+    "outcome": {
+      "admitted": "The substrate admitted this row. It is a MARKER, not a command: nothing was changed by its arrival, and its effect is entirely the read-time fold a consumer may honour."
+    },
+    "plane": {
+      "configured": "At least one key is moved off the owner's baseline by a subscribed root.",
+      "no_rows_held": "This node subscribes to at least one trust root and holds no mesh-config row from any of them. Every key runs at the owner's own baseline.",
+      "no_subscription": "This node holds no live trust-root edge, so no root may configure it. The subscription IS the trust edge.",
+      "none_binding": "Mesh-config rows are held and none of them binds: each is expired, clamped to the owner's consent, or asks for the baseline value already in force.",
+      "unreadable": "The mesh-config plane could not be read here. This is NOT a statement that nothing is set — the values below are unknown, not defaults."
+    },
+    "provenance": {
+      "baseline_not_moved": "Subscribed roots hold live rows for this key and none of them moved it: each was clamped to the owner's consent or asked for the value already in force.",
+      "baseline_unspoken": "No subscribed root holds a live row for this key, so the node runs the value its owner consented to.",
+      "root": "A subscribed root's signed row set this value. The row, its author and the delegation it was taken under are named beside it."
+    },
+    "ttl": {
+      "expired": "This row's window has closed. The fold drops an expired row at read time, so it needs no revocation and no reachable author.",
+      "running": "This row's window is open and closes at the named instant.",
+      "unbounded": "This row carries no expiry. It applies until it is superseded."
+    }
+  }
 }

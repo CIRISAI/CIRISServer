@@ -3089,7 +3089,7 @@
       "descend": "Irreversible por diseño. El descenso nunca termina en cero —el difuminado y la lápida sobreviven—, pero lo que se desprendió no volverá.",
       "quarantine": "Un marcador firmado, no una orden: no se elimina ni se reescribe nada. Las rutas de servicio de este nodo dejan de entregar a los pares las filas y los blobs de las claves nombradas; un par que pliegue de otro modo sencillamente no los recibe de nosotros.",
       "re_admit": "Se registra como una reversión atribuida. La fila de revocación sobrevive y todo lector la sigue plegando: las restricciones se componen y las indulgencias no, y ninguna capa de este sustrato expone una des-revocación.",
-      "throttle": "Se registra únicamente como un juicio atribuido. Este sustrato no tiene un presupuesto de admisión por clave redactado por el receptor: la cuota de escritura de pares es un tope fijo contra bucles descontrolados, no una superficie de política sobre la que pueda actuar una limitación. Nada cambia lo que este nodo acepta de las claves nombradas."
+      "throttle": "Se registra únicamente como un juicio atribuido. Este sustrato no tiene un presupuesto de admisión por clave definido por el receptor: la cuota de escritura de pares es un tope fijo contra bucles descontrolados, no una superficie de política sobre la que pueda actuar una limitación. Nada cambia lo que este nodo acepta de las claves nombradas."
     },
     "preview": {
       "note": "Esto es exactamente sobre lo que actuará una confirmación. Presenta el hash de la selección junto con la confirmación; si la selección ha cambiado, la confirmación se rechaza.",
@@ -3100,7 +3100,7 @@
     },
     "refusal": {
       "preview_hash_mismatch": "Lo que previsualizaste no es lo que se ejecutaría: la selección ha cambiado desde la vista previa. Vuelve a ejecutar la vista previa y ratifica el nuevo hash.",
-      "quorum_insufficient": "Esta operación es irreversible y requiere un quórum de autoridades distintas, no una sola cadena de delegación. Dos cadenas con la misma raíz son una única autoridad con dos sombreros."
+      "quorum_insufficient": "Esta operación es irreversible y requiere un cuórum de autoridades distintas, no una sola cadena de delegación. Dos cadenas con la misma raíz son una única autoridad con dos sombreros."
     },
     "reversal": {
       "evidence_only": "La fila original sobrevive y todo lector la sigue plegando. Esta reversión es evidencia registrada, no un deshacer: el sustrato no expone ninguna des-revocación.",
@@ -3169,7 +3169,7 @@
       "configured": "Al menos una clave ha sido apartada de la línea base del propietario por una raíz suscrita.",
       "no_rows_held": "Este nodo está suscrito a al menos una raíz de confianza y no mantiene ninguna fila de mesh-config de ninguna de ellas. Todas las claves funcionan en la línea base propia del propietario.",
       "no_subscription": "Este nodo no mantiene ninguna arista de raíz de confianza activa, así que ninguna raíz puede configurarlo. La suscripción ES la arista de confianza.",
-      "none_binding": "Se conservan filas de mesh-config y ninguna vincula: cada una está caducada, limitada por el consentimiento del propietario, o pide el valor de referencia que ya está en vigor.",
+      "none_binding": "Se conservan filas de mesh-config y ninguna vincula: cada una está caducada, limitada por el consentimiento del propietario, o pide el valor de línea base que ya está en vigor.",
       "unreadable": "No se pudo leer el plano de mesh-config aquí. Esto NO significa que no haya nada configurado: los valores de abajo son desconocidos, no valores predeterminados."
     },
     "provenance": {

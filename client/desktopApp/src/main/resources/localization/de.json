@@ -3078,57 +3078,109 @@
     "title": "Transport",
     "unavailable": "Transportinformationen nicht verfügbar (Knoten beeinträchtigt?)."
   },
-  "admin.descend.bounded_unsupported": "Ein zeitlich begrenztes Urteil kann keine unbegrenzte Entfernung antreiben. Der einzige akteursbezogene Abstieg des Substrats erfasst den gesamten Korpus und würde damit genau die Historie zerstören, die diese Begrenzung bewusst bestehen lässt. Die zeitlich begrenzte Entfernung, die tatsächlich implementiert IST, ist die Aberkennung der Zulassung mit einer Historiengrenze.",
-  "admin.descend.not_reached": "Die ausgewählten Attestierungszeilen selbst werden nicht dem Abstieg unterzogen. Jeder Nutzdatenträger auf diesem Substrat ist in seine eigene Signatur eingesiegelt, seine Bytes können also nicht entfernt werden, ohne dass die Zeile als gefälscht gelesen wird; die Löschbarkeit wird beim Prägen entschieden, und nichts, was heute geprägt wird, ist löschbar.",
-  "admin.enforcement.annotate": "Ein signiertes Urteil ohne Wirkung, bis ein Leser es beachtet. Nichts wird vorenthalten, gedrosselt oder entfernt.",
-  "admin.enforcement.deadmit": "Ein signierter Widerruf auf der gewöhnlichen, nur anfügenden Ebene. Er ist ein Beweisstück, das ein Leser einfaltet, keine Tür, die zuschlägt: Signaturprüfung, Replikationszeiger und Zeilenaufnahme arbeiten bewusst weiter, denn ältere Zeilen eines kompromittierten Schlüssels abzuweisen würde genau die Beweise zerstören, die zur Beurteilung der Kompromittierung nötig sind.",
-  "admin.enforcement.descend": "Von Grund auf unumkehrbar. Der Abstieg endet nie bei null — die Unschärfe und der Grabstein bleiben bestehen —, aber was abgeworfen wurde, kommt nicht zurück.",
-  "admin.enforcement.quarantine": "Eine signierte Markierung, kein Befehl: Nichts wird gelöscht und nichts umgeschrieben. Die Auslieferungspfade dieses Knotens geben die Zeilen und Blobs der genannten Schlüssel nicht mehr an Peers weiter; ein Peer, der anders einfaltet, erhält sie von uns schlicht nicht.",
-  "admin.enforcement.re_admit": "Wird als zurechenbare Umkehrung erfasst. Die Widerrufszeile bleibt bestehen und jeder Leser faltet sie weiterhin ein: Einschränkungen setzen sich zusammen, Lockerungen nicht, und keine Schicht dieses Substrats bietet eine Aufhebung des Widerrufs.",
-  "admin.enforcement.throttle": "Wird nur als zurechenbares Urteil erfasst. Dieses Substrat kennt kein vom Empfänger verfasstes Zulassungsbudget je Schlüssel: Das Schreibkontingent für Peers ist eine feste Absicherung gegen Endlosschleifen, keine Richtlinienfläche, an der eine Drosselung ansetzen könnte. An dem, was dieser Knoten von den genannten Schlüsseln annimmt, ändert sich nichts.",
-  "admin.preview.note": "Genau darauf wird ein Commit wirken. Übergeben Sie den Auswahl-Hash zusammen mit dem Commit; hat sich die Auswahl geändert, verweigert der Commit.",
-  "admin.preview.window_in_application": "Das Zeitfenster wird von diesem Knoten angewendet, nicht von der Substratabfrage: Der allgemeine Attestierungs-Lesevorgang beachtet die Zeitachse nicht. Die Seitengrenze wird zuerst angewendet, daher kann eine fenstergefilterte Auswahl zu klein zurückkommen.",
-  "admin.quarantine.not_withheld": "Dieser Schlüssel wird hier derzeit nicht vorenthalten, es gibt also nichts freizugeben.",
-  "admin.refusal.preview_hash_mismatch": "Was Sie in der Vorschau gesehen haben, ist nicht das, was ausgeführt würde — die Auswahl hat sich seit der Vorschau geändert. Führen Sie die Vorschau erneut aus und bestätigen Sie den neuen Hash.",
-  "admin.refusal.quorum_insufficient": "Dieser Vorgang ist unumkehrbar und erfordert ein Quorum verschiedener Autoritäten, nicht eine einzelne Delegationskette. Zwei Ketten aus derselben Wurzel sind eine Autorität mit zwei Hüten.",
-  "admin.reversal.evidence_only": "Die ursprüngliche Zeile bleibt bestehen und wird weiterhin von jedem Leser eingefaltet. Diese Umkehrung ist erfasstes Beweismaterial, kein Rückgängigmachen — das Substrat bietet keine Aufhebung des Widerrufs.",
-  "admin.reversal.substrate": "Der Substratzustand ist umgekehrt: Dieser Knoten hält die Zeilen des Schlüssels nicht länger zurück.",
-  "admin.reversal.symmetric": "Im Substrat wird nichts umgekehrt, weil im Substrat nichts das ursprüngliche Urteil durchgesetzt hat. Beide Handlungen sind erfasstes Beweismaterial.",
-  "consent.decline_analyze.cost.no_capability_services": "Sie können keine Streams oder Dienste nutzen, die Fähigkeitsattestierungen Dritter voraussetzen, weil Sie keine haben werden.",
-  "consent.decline_analyze.cost.no_reputation": "Sie bauen KEINE Reputation auf — jede capacity:*-Aussage über Sie wird abgewiesen, es kann also nie eine geben.",
-  "consent.decline_analyze.cost.peers_may_refuse": "Manche Peers verweigern möglicherweise jede Interaktion mit Ihnen.",
-  "consent.decline_analyze.summary": "Sie dürfen Traces senden, ohne einer Analyse zuzustimmen. Traces fließen weiterhin.",
-  "consent.grant.analyze.permits": "Der Peer darf Ihre Traces BEWERTEN — das ist es, was Reputation aufbaut.",
-  "consent.grant.analyze.title": "Bewertet werden",
-  "consent.grant.replication.permits": "Der Peer darf Ihre Traces VORHALTEN.",
-  "consent.grant.replication.title": "Traces senden",
-  "consent.grants.independent": "Dies sind getrennte Einwilligungen an entgegengesetzten Kanten. Die eine zu erteilen erteilt nicht die andere, und jede kann unabhängig von der anderen widerrufen werden.",
-  "consent.mesh_participation.action": "Der Teilnahme am CIRIS Mesh zustimmen",
-  "location.cost.no_regional_community": "Sie können an keiner regionalen Gemeinschaft teilnehmen. Die Mitgliedschaft entscheidet sich daran, ob Ihre Zelle in die eigene Region der Gemeinschaft fällt — ohne Zelle gibt es also nichts zu vergleichen.",
-  "location.cost.no_regional_reporting": "Ihre Aktivität kann nicht zur regionalen Musterberichterstattung beitragen.",
-  "location.permits": "Hängt eine grobe H3-Zelle an Ihren Umschlag an, damit Muster über Regionen hinweg berichtet werden können. Das Substrat weist alles Feinere als Auflösung 7 zurück, es benennt also eine ungefähre Region — niemals Ihren konkreten Ort oder Ihre Adresse.",
-  "location.purpose": "Regionale Musterberichterstattung und die Teilnahme an regionalen Gemeinschaften. Eine Gemeinschaft kann sie außerdem als OPTIONALES Sichtbarkeitsgatter nutzen und Inhalte, die für diese Gemeinschaft bestimmt sind, auf Mitglieder beschränken, deren Region darin liegt. Es ist keine allgemeine Einschränkung Ihrer Traces — das entscheiden die Einwilligungen oben.",
-  "location.title": "Ihre ungefähre Region teilen",
-  "mesh.announce_requirement": "Ein Knoten, der sich nicht ankündigt, erhält im Mesh keinen Dienstzugang und keine Agentendienste. Der Not-Aus-Schalter des Accords ist nur gegenüber einem Knoten wirksam, den er erreichen kann — ein nicht erreichbarer Knoten wird deshalb von vornherein nicht bedient.",
-  "mesh_config.dry_run": "Es wurde nichts signiert und nichts eingereicht. Dies sind exakt die kanonischen Bytes, die ein Mitunterzeichner signieren muss, damit sein Scrub bei der echten Einreichung zählt.",
-  "mesh_config.durability.substrate_decides": "Welche Handlungen eine dauerhafte Einstellung verdienen, entscheidet das Substrat; dies wird bei jedem Aufruf neu gelesen und über sein eigenes Ablehnungstoken gemeldet. Dieser Knoten kodiert keine eigene Dauerhaftigkeitsregel.",
-  "mesh_config.emergency.bound": "Notfallentlastung läuft konstruktionsbedingt ab. Das maximale Fenster stammt vom Substrat und wird hier mitgeführt, damit ein Formular seine Eingabe begrenzen kann; alles Längere weist das Substrat an seiner eigenen Tür ab.",
-  "mesh_config.history.empty": "Jede abonnierte Wurzel wurde gelesen, und keine hat je eine Mesh-Config-Zeile eingereicht.",
-  "mesh_config.history.no_subscription": "Dieser Knoten hält keine aktive Vertrauenswurzel-Kante, daher konnte hier nie eine Wurzel eine Mesh-Config-Zeile einreichen.",
-  "mesh_config.history.partial": "Einige abonnierte Wurzeln konnten nicht gelesen werden, daher ist diese Historie unvollständig. Die fehlgeschlagenen Wurzeln sind benannt.",
-  "mesh_config.history.present": "Jede Mesh-Config-Zeile, die dieser Knoten hält, neueste zuerst.",
-  "mesh_config.history.truncated": "Diese Seite wurde am Limit abgeschnitten. Die Gesamtzahl unten zählt jede gelesene Zeile.",
-  "mesh_config.history.unreadable": "Die Mesh-Config-Historie konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass nie eine Zeile eingereicht wurde.",
-  "mesh_config.outcome.admitted": "Das Substrat hat diese Zeile zugelassen. Sie ist eine MARKIERUNG, kein Befehl: Durch ihr Eintreffen wurde nichts verändert, und ihre Wirkung besteht ausschließlich in der Lesezeit-Faltung, die ein Konsument beachten kann.",
-  "mesh_config.plane.configured": "Mindestens ein Schlüssel wird durch eine abonnierte Wurzel von der Grundeinstellung des Eigentümers wegbewegt.",
-  "mesh_config.plane.no_rows_held": "Dieser Knoten abonniert mindestens eine Vertrauenswurzel und hält von keiner von ihnen eine Mesh-Config-Zeile. Jeder Schlüssel läuft auf der eigenen Grundeinstellung des Eigentümers.",
-  "mesh_config.plane.no_subscription": "Dieser Knoten hält keine aktive Vertrauenswurzel-Kante, daher darf ihn keine Wurzel konfigurieren. Das Abonnement IST die Vertrauenskante.",
-  "mesh_config.plane.none_binding": "Es liegen Mesh-Config-Zeilen vor, aber keine davon bindet: jede ist abgelaufen, auf die Einwilligung des Inhabers begrenzt oder fordert den bereits geltenden Basiswert.",
-  "mesh_config.plane.unreadable": "Die Mesh-Config-Ebene konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass nichts gesetzt ist — die Werte unten sind unbekannt, nicht Standardwerte.",
-  "mesh_config.provenance.baseline_not_moved": "Abonnierte Roots halten aktive Zeilen für diesen Schlüssel, und keine davon hat ihn verändert: jede wurde auf die Einwilligung des Inhabers begrenzt oder forderte den bereits geltenden Wert.",
-  "mesh_config.provenance.baseline_unspoken": "Kein abonnierter Root hält eine aktive Zeile für diesen Schlüssel, daher verwendet der Knoten den Wert, dem sein Inhaber zugestimmt hat.",
-  "mesh_config.provenance.root": "Die signierte Zeile eines abonnierten Roots hat diesen Wert gesetzt. Die Zeile, ihr Urheber und die Delegation, unter der sie erfolgte, sind daneben benannt.",
-  "mesh_config.ttl.expired": "Das Zeitfenster dieser Zeile ist geschlossen. Die Faltung verwirft eine abgelaufene Zeile beim Lesen, daher braucht sie weder einen Widerruf noch einen erreichbaren Urheber.",
-  "mesh_config.ttl.running": "Das Zeitfenster dieser Zeile ist offen und schließt zum genannten Zeitpunkt.",
-  "mesh_config.ttl.unbounded": "Diese Zeile trägt kein Ablaufdatum. Sie gilt, bis sie abgelöst wird."
+  "admin": {
+    "descend": {
+      "bounded_unsupported": "Ein zeitlich begrenztes Urteil kann keine unbegrenzte Entfernung antreiben. Der einzige akteursbezogene Abstieg des Substrats erfasst den gesamten Korpus und würde damit genau die Historie zerstören, die diese Begrenzung bewusst bestehen lässt. Die zeitlich begrenzte Entfernung, die tatsächlich implementiert IST, ist die Aberkennung der Zulassung mit einer Historiengrenze.",
+      "not_reached": "Die ausgewählten Attestierungszeilen selbst werden nicht dem Abstieg unterzogen. Jeder Nutzdatenträger auf diesem Substrat ist in seine eigene Signatur eingesiegelt, seine Bytes können also nicht entfernt werden, ohne dass die Zeile als gefälscht gelesen wird; die Löschbarkeit wird beim Prägen entschieden, und nichts, was heute geprägt wird, ist löschbar."
+    },
+    "enforcement": {
+      "annotate": "Ein signiertes Urteil ohne Wirkung, bis ein Leser es beachtet. Nichts wird vorenthalten, gedrosselt oder entfernt.",
+      "deadmit": "Ein signierter Widerruf auf der gewöhnlichen, nur anfügenden Ebene. Er ist ein Beweisstück, das ein Leser einfaltet, keine Tür, die zuschlägt: Signaturprüfung, Replikationszeiger und Zeilenaufnahme arbeiten bewusst weiter, denn ältere Zeilen eines kompromittierten Schlüssels abzuweisen würde genau die Beweise zerstören, die zur Beurteilung der Kompromittierung nötig sind.",
+      "descend": "Von Grund auf unumkehrbar. Der Abstieg endet nie bei null — die Unschärfe und der Grabstein bleiben bestehen —, aber was abgeworfen wurde, kommt nicht zurück.",
+      "quarantine": "Eine signierte Markierung, kein Befehl: Nichts wird gelöscht und nichts umgeschrieben. Die Auslieferungspfade dieses Knotens geben die Zeilen und Blobs der genannten Schlüssel nicht mehr an Peers weiter; ein Peer, der anders einfaltet, erhält sie von uns schlicht nicht.",
+      "re_admit": "Wird als zurechenbare Umkehrung erfasst. Die Widerrufszeile bleibt bestehen und jeder Leser faltet sie weiterhin ein: Einschränkungen setzen sich zusammen, Lockerungen nicht, und keine Schicht dieses Substrats bietet eine Aufhebung des Widerrufs.",
+      "throttle": "Wird nur als zurechenbares Urteil erfasst. Dieses Substrat kennt kein vom Empfänger verfasstes Zulassungsbudget je Schlüssel: Das Schreibkontingent für Peers ist eine feste Absicherung gegen Endlosschleifen, keine Richtlinienfläche, an der eine Drosselung ansetzen könnte. An dem, was dieser Knoten von den genannten Schlüsseln annimmt, ändert sich nichts."
+    },
+    "preview": {
+      "note": "Genau darauf wird ein Commit wirken. Übergeben Sie den Auswahl-Hash zusammen mit dem Commit; hat sich die Auswahl geändert, verweigert der Commit.",
+      "window_in_application": "Das Zeitfenster wird von diesem Knoten angewendet, nicht von der Substratabfrage: Der allgemeine Attestierungs-Lesevorgang beachtet die Zeitachse nicht. Die Seitengrenze wird zuerst angewendet, daher kann eine fenstergefilterte Auswahl zu klein zurückkommen."
+    },
+    "quarantine": {
+      "not_withheld": "Dieser Schlüssel wird hier derzeit nicht vorenthalten, es gibt also nichts freizugeben."
+    },
+    "refusal": {
+      "preview_hash_mismatch": "Was Sie in der Vorschau gesehen haben, ist nicht das, was ausgeführt würde — die Auswahl hat sich seit der Vorschau geändert. Führen Sie die Vorschau erneut aus und bestätigen Sie den neuen Hash.",
+      "quorum_insufficient": "Dieser Vorgang ist unumkehrbar und erfordert ein Quorum verschiedener Autoritäten, nicht eine einzelne Delegationskette. Zwei Ketten aus derselben Wurzel sind eine Autorität mit zwei Hüten."
+    },
+    "reversal": {
+      "evidence_only": "Die ursprüngliche Zeile bleibt bestehen und wird weiterhin von jedem Leser eingefaltet. Diese Umkehrung ist erfasstes Beweismaterial, kein Rückgängigmachen — das Substrat bietet keine Aufhebung des Widerrufs.",
+      "substrate": "Der Substratzustand ist umgekehrt: Dieser Knoten hält die Zeilen des Schlüssels nicht länger zurück.",
+      "symmetric": "Im Substrat wird nichts umgekehrt, weil im Substrat nichts das ursprüngliche Urteil durchgesetzt hat. Beide Handlungen sind erfasstes Beweismaterial."
+    }
+  },
+  "consent": {
+    "decline_analyze": {
+      "cost": {
+        "no_capability_services": "Sie können keine Streams oder Dienste nutzen, die Fähigkeitsattestierungen Dritter voraussetzen, weil Sie keine haben werden.",
+        "no_reputation": "Sie bauen KEINE Reputation auf — jede capacity:*-Aussage über Sie wird abgewiesen, es kann also nie eine geben.",
+        "peers_may_refuse": "Manche Peers verweigern möglicherweise jede Interaktion mit Ihnen."
+      },
+      "summary": "Sie dürfen Traces senden, ohne einer Analyse zuzustimmen. Traces fließen weiterhin."
+    },
+    "grant": {
+      "analyze": {
+        "permits": "Der Peer darf Ihre Traces BEWERTEN — das ist es, was Reputation aufbaut.",
+        "title": "Bewertet werden"
+      },
+      "replication": {
+        "permits": "Der Peer darf Ihre Traces VORHALTEN.",
+        "title": "Traces senden"
+      }
+    },
+    "grants": {
+      "independent": "Dies sind getrennte Einwilligungen an entgegengesetzten Kanten. Die eine zu erteilen erteilt nicht die andere, und jede kann unabhängig von der anderen widerrufen werden."
+    },
+    "mesh_participation": {
+      "action": "Der Teilnahme am CIRIS Mesh zustimmen"
+    }
+  },
+  "location": {
+    "cost": {
+      "no_regional_community": "Sie können an keiner regionalen Gemeinschaft teilnehmen. Die Mitgliedschaft entscheidet sich daran, ob Ihre Zelle in die eigene Region der Gemeinschaft fällt — ohne Zelle gibt es also nichts zu vergleichen.",
+      "no_regional_reporting": "Ihre Aktivität kann nicht zur regionalen Musterberichterstattung beitragen."
+    },
+    "permits": "Hängt eine grobe H3-Zelle an Ihren Umschlag an, damit Muster über Regionen hinweg berichtet werden können. Das Substrat weist alles Feinere als Auflösung 7 zurück, es benennt also eine ungefähre Region — niemals Ihren konkreten Ort oder Ihre Adresse.",
+    "purpose": "Regionale Musterberichterstattung und die Teilnahme an regionalen Gemeinschaften. Eine Gemeinschaft kann sie außerdem als OPTIONALES Sichtbarkeitsgatter nutzen und Inhalte, die für diese Gemeinschaft bestimmt sind, auf Mitglieder beschränken, deren Region darin liegt. Es ist keine allgemeine Einschränkung Ihrer Traces — das entscheiden die Einwilligungen oben.",
+    "title": "Ihre ungefähre Region teilen"
+  },
+  "mesh": {
+    "announce_requirement": "Ein Knoten, der sich nicht ankündigt, erhält im Mesh keinen Dienstzugang und keine Agentendienste. Der Not-Aus-Schalter des Accords ist nur gegenüber einem Knoten wirksam, den er erreichen kann — ein nicht erreichbarer Knoten wird deshalb von vornherein nicht bedient."
+  },
+  "mesh_config": {
+    "dry_run": "Es wurde nichts signiert und nichts eingereicht. Dies sind exakt die kanonischen Bytes, die ein Mitunterzeichner signieren muss, damit sein Scrub bei der echten Einreichung zählt.",
+    "durability": {
+      "substrate_decides": "Welche Handlungen eine dauerhafte Einstellung verdienen, entscheidet das Substrat; dies wird bei jedem Aufruf neu gelesen und über sein eigenes Ablehnungstoken gemeldet. Dieser Knoten kodiert keine eigene Dauerhaftigkeitsregel."
+    },
+    "emergency": {
+      "bound": "Notfallentlastung läuft konstruktionsbedingt ab. Das maximale Fenster stammt vom Substrat und wird hier mitgeführt, damit ein Formular seine Eingabe begrenzen kann; alles Längere weist das Substrat an seiner eigenen Tür ab."
+    },
+    "history": {
+      "empty": "Jede abonnierte Wurzel wurde gelesen, und keine hat je eine Mesh-Config-Zeile eingereicht.",
+      "no_subscription": "Dieser Knoten hält keine aktive Vertrauenswurzel-Kante, daher konnte hier nie eine Wurzel eine Mesh-Config-Zeile einreichen.",
+      "partial": "Einige abonnierte Wurzeln konnten nicht gelesen werden, daher ist diese Historie unvollständig. Die fehlgeschlagenen Wurzeln sind benannt.",
+      "present": "Jede Mesh-Config-Zeile, die dieser Knoten hält, neueste zuerst.",
+      "truncated": "Diese Seite wurde am Limit abgeschnitten. Die Gesamtzahl unten zählt jede gelesene Zeile.",
+      "unreadable": "Die Mesh-Config-Historie konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass nie eine Zeile eingereicht wurde."
+    },
+    "outcome": {
+      "admitted": "Das Substrat hat diese Zeile zugelassen. Sie ist eine MARKIERUNG, kein Befehl: Durch ihr Eintreffen wurde nichts verändert, und ihre Wirkung besteht ausschließlich in der Lesezeit-Faltung, die ein Konsument beachten kann."
+    },
+    "plane": {
+      "configured": "Mindestens ein Schlüssel wird durch eine abonnierte Wurzel von der Grundeinstellung des Eigentümers wegbewegt.",
+      "no_rows_held": "Dieser Knoten abonniert mindestens eine Vertrauenswurzel und hält von keiner von ihnen eine Mesh-Config-Zeile. Jeder Schlüssel läuft auf der eigenen Grundeinstellung des Eigentümers.",
+      "no_subscription": "Dieser Knoten hält keine aktive Vertrauenswurzel-Kante, daher darf ihn keine Wurzel konfigurieren. Das Abonnement IST die Vertrauenskante.",
+      "none_binding": "Es liegen Mesh-Config-Zeilen vor, aber keine davon bindet: jede ist abgelaufen, auf die Einwilligung des Inhabers begrenzt oder fordert den bereits geltenden Basiswert.",
+      "unreadable": "Die Mesh-Config-Ebene konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass nichts gesetzt ist — die Werte unten sind unbekannt, nicht Standardwerte."
+    },
+    "provenance": {
+      "baseline_not_moved": "Abonnierte Roots halten aktive Zeilen für diesen Schlüssel, und keine davon hat ihn verändert: jede wurde auf die Einwilligung des Inhabers begrenzt oder forderte den bereits geltenden Wert.",
+      "baseline_unspoken": "Kein abonnierter Root hält eine aktive Zeile für diesen Schlüssel, daher verwendet der Knoten den Wert, dem sein Inhaber zugestimmt hat.",
+      "root": "Die signierte Zeile eines abonnierten Roots hat diesen Wert gesetzt. Die Zeile, ihr Urheber und die Delegation, unter der sie erfolgte, sind daneben benannt."
+    },
+    "ttl": {
+      "expired": "Das Zeitfenster dieser Zeile ist geschlossen. Die Faltung verwirft eine abgelaufene Zeile beim Lesen, daher braucht sie weder einen Widerruf noch einen erreichbaren Urheber.",
+      "running": "Das Zeitfenster dieser Zeile ist offen und schließt zum genannten Zeitpunkt.",
+      "unbounded": "Diese Zeile trägt kein Ablaufdatum. Sie gilt, bis sie abgelöst wird."
+    }
+  }
 }
