@@ -941,6 +941,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                     ))
+                    // THE COMMONS SURFACE (CIRISServer#367): GET
+                    // /v1/commons/standing + POST /v1/commons/{objections,
+                    // ballots,dismissals}. Consent protects the private plane
+                    // structurally and gives the commons nothing, because in
+                    // the commons everyone has already consented to look — so
+                    // the commons polices itself by reverse quorum. ONE
+                    // objection raises the brake; the cohort's own m-of-n
+                    // lifts it; silence past the steward deadline escalates to
+                    // a quorum of RESPONDENTS rather than of the roster, which
+                    // is what lets a quiet community still resolve. Every
+                    // threshold, window and verdict is persist's
+                    // `resolve_reverse_quorum`, folded at read time; this node
+                    // encodes none of them. Reads on the delegatable
+                    // `read_node_state` verb, writes on the never-delegatable
+                    // `wipe` verb — a session gate, never a second threshold.
+                    .merge(crate::commons_surface::router(
+                        Arc::clone(&engine),
+                        cfg.key_id.clone(),
+                    ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
                     // the SAME way peering is (serve-only floor + SYSTEM_ADMIN owner
