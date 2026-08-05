@@ -3181,6 +3181,85 @@
       "expired": "La fenêtre de cette ligne est close. Le repli écarte une ligne expirée à la lecture : elle n'exige donc ni révocation ni auteur joignable.",
       "running": "La fenêtre de cette ligne est ouverte et se refermera à l'instant indiqué.",
       "unbounded": "Cette ligne ne porte aucune expiration. Elle s'applique jusqu'à ce qu'elle soit remplacée."
+    },
+    "consumption": {
+      "wired": "Une boucle de cette version lit cette clé et change ce qu'elle fait. La valeur effective affichée à côté est en vigueur sur ce nœud.",
+      "elsewhere": "Aucune boucle de cette version ne lit cette clé : son consommateur réside dans un autre composant. Une ligne posée ici est admise et repliée, et ne change rien sur ce nœud.",
+      "unbuilt": "Le consommateur de cette clé n'a encore été construit nulle part. Une ligne posée ici est admise et repliée, et ne change rien."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Un seul membre serre le frein ; il faut l'accord de la cohorte pour le desserrer. Élever une protection est inconditionnel et coûte une seule signature ; défaire celle d'autrui coûte le seuil propre à la cohorte, et l'annulation escaladée ne peut jamais descendre sous un plancher absolu qu'aucune chaîne de politique ne peut abaisser.",
+    "ballot": {
+      "admitted": "Le bulletin est consigné. Il n'a AUCUNE force à lui seul : son prix se paie à la lecture, contre un dénominateur qui n'existe pas encore au moment du dépôt — que le collège atteigne un jour le seuil escaladé dépend de qui d'autre répondra. Un membre peut changer d'avis ; c'est le dernier bulletin qui fait foi."
+    },
+    "dismissal": {
+      "admitted": "L'objection est écartée du décompte. Le seuil est redérivé à partir de la liste des membres propre à ce nœud à chaque lecture ultérieure : un rejet qui cesse de franchir le seuil d'une liste agrandie cesse de faire effet — et la protection qu'il avait retirée revient."
+    },
+    "dry_run": "Rien n'a été signé et rien n'a été soumis. Voici les octets canoniques exacts que chaque co-signataire doit signer pour que son scrub compte lors de la soumission réelle — le m-parmi-n porte sur ces octets et sur aucun autre.",
+    "escalation": {
+      "awaiting": "Les modérateurs désignés peuvent encore répondre, ou ils ont déjà tranché dans les délais. L'escalade ne s'est pas ouverte.",
+      "not_adopted": "Cette communauté n'a déclaré aucun palier d'intendance : il n'y a donc ni délai de modération ni escalade. Le silence ne change rien ici.",
+      "nothing_to_escalate": "Un palier d'intendance est déclaré et aucune objection vivante n'est en attente devant lui. Personne n'a gardé le silence, car rien n'a été demandé.",
+      "open": "Les titulaires du devoir n'ont pas répondu à temps, et la décision est passée à ceux qui l'ont fait. Le seuil compte désormais les RÉPONDANTS plutôt que l'ensemble de la liste des membres — c'est ce qui permet à une communauté silencieuse de trancher malgré tout — avec un plancher, pour que « joignable » ne dégénère jamais en « une seule personne décide »."
+    },
+    "objection": {
+      "admitted": "L'objection est consignée. C'est un MARQUEUR, pas une commande : son arrivée n'a rien changé, et elle se réplique sur le plan d'attestation ordinaire, de sorte qu'un pair partitionné pendant la fenêtre la compte quand même à son arrivée. Un seul membre suffit à la soulever ; l'écarter coûte le seuil propre à la cohorte."
+    },
+    "outcome": {
+      "dismissed": "Ceux qui ont répondu ont jugé que cette objection ne tient pas, et elle est écartée du décompte.",
+      "not_escalated": "L'escalade ne s'est pas ouverte pour cette objection.",
+      "unresolved": "L'escalade est ouverte et indécise : trop peu de personnes ont répondu, ou aucun des deux camps n'a atteint le seuil. Rien ne change — l'objection tient exactement comme avant.",
+      "upheld": "Ceux qui ont répondu ont jugé que cette objection tient."
+    },
+    "refusal": {
+      "action_absent": "Une action doit être nommée. Une objection désigne une ligne du bien commun ; celle qui ne désigne rien ne pourra jamais être comptée.",
+      "action_unknown": "Ce nœud ne détient aucune action de ce type : une ligne la désignant serait déposée là où aucun repli ne la comptera jamais.",
+      "actor_recused": "L'auteur de l'action ne vote pas sur l'objection visant son propre acte.",
+      "bad_now": "L'instant de lecture doit être un horodatage RFC 3339.",
+      "ballot_predates_action": "Un jugement ne peut pas être antérieur à ce qu'il juge.",
+      "canonicalize_failed": "Les octets canoniques de la ligne n'ont pas pu être produits : il n'y a donc rien qu'un co-signataire puisse signer.",
+      "cohort_absent": "Une cohorte doit être nommée : c'est elle qui détermine quelle liste de membres et quelle déclaration régissent le décompte.",
+      "cohort_not_a_commons": "La cohorte « soi » n'a aucune liste de membres sur laquelle former un quorum — ses membres sont les appareils d'une seule et même identité — elle n'a donc aucun bien commun à policer.",
+      "cohort_unknown": "Cette cohorte ne se résout pas sur ce nœud : il n'existe donc ni liste de membres ni déclaration permettant d'en juger. L'autorité doit provenir de l'état local vérifié.",
+      "cohort_unrecognized": "Ce n'est pas une cohorte dotée d'une liste de membres. Les objections vivent dans une famille, une communauté ou un groupe d'affiliations.",
+      "dimension_mismatch": "Cette ligne a été présentée à la mauvaise porte pour ce qu'elle transporte.",
+      "dismissal_quorum_short": "Moins de membres vérifiés et distincts de la liste ont cosigné que ne l'exige le seuil de la cohorte. Le nombre compté et le nombre requis figurent à côté de ce message.",
+      "duplicate_objection": "Vous détenez déjà une objection vivante contre cette action. Un membre vaut une objection — sinon un seul membre pourrait atteindre le seuil à lui seul.",
+      "grounds_absent": "Des motifs sont requis. Une objection soulevée sans raison consignée est indiscernable d'une objection soulevée pour une mauvaise raison — et les motifs sont consignés, jamais interprétés.",
+      "malformed_envelope": "Il manque à la ligne une référence dont le décompte a besoin.",
+      "node_unowned": "Ce nœud n'a aucun responsable : il ne lit ni ne parle dans le bien commun de quiconque en son nom. Revendiquez-en d'abord la propriété.",
+      "not_a_cohort_member": "Seul un membre de cette cohorte peut s'exprimer dans son bien commun. C'est le seul test qu'applique le côté protecteur — et la raison pour laquelle l'objection d'un inconnu ne devient jamais un marqueur que d'autres pourraient honorer.",
+      "not_filed_against_actor": "La ligne est déposée là où le repli ne la cherche pas : elle serait stockée, durable et définitivement inerte. Un marqueur que personne ne peut trouver n'est pas un marqueur.",
+      "not_governed": "Cette communauté ne déclare aucune politique de quorum inverse : elle n'a donc pas adopté le plan des objections. Refusé plutôt que réglé par défaut : inventer une fenêtre et un seuil pour un groupe qui n'a déclaré ni l'une ni l'autre est pire que de dire non.",
+      "not_owner": "La surface du bien commun exige le rôle de propriétaire.",
+      "objection_absent": "Une objection doit être nommée : un bulletin comme un rejet répondent chacun d'exactement une objection.",
+      "objection_unknown": "L'objection nommée n'est pas une objection que ce nœud détient contre cette action.",
+      "session_absent": "Aucun jeton de session n'a été présenté. La surface du bien commun est réservée au propriétaire.",
+      "session_invalid": "Cette session est invalide ou expirée.",
+      "sign_failed": "Ce nœud n'a pas pu signer la ligne : rien n'a donc été soumis.",
+      "steward_tier_not_adopted": "Cette communauté n'a déclaré aucun palier d'intendance : il n'existe donc aucun délai au-delà duquel garder le silence, ni aucun collège escaladé. Un bulletin déposé ici serait stocké et jamais lu.",
+      "store_unavailable": "Le substrat n'a pas pu être joint.",
+      "target_action_unknown": "L'action visée par l'objection n'est pas une ligne que ce nœud détient : l'objection serait donc incomptable et sa fenêtre impossible à résoudre.",
+      "unverifiable_signature": "La signature de la ligne n'a pas été vérifiée avec les clés du signataire telles qu'elles sont enregistrées sur ce nœud."
+    },
+    "standing": {
+      "action_unknown": "Ce nœud ne détient aucune action de ce type. Une objection désigne une ligne, et il n'y a ici aucune ligne à désigner.",
+      "cohort_unknown": "Cette cohorte ne se résout pas sur ce nœud : elle n'a donc ni liste de membres ni déclaration que ce nœud puisse lire.",
+      "not_governed": "Cette communauté ne déclare aucune politique de quorum inverse : le plan des objections ne s'applique donc pas du tout à son bien commun. C'est différent du cas où personne n'aurait objecté.",
+      "objected": "Au moins un membre a objecté et la fenêtre est encore ouverte. L'action tient pour l'instant ; une objection de plus pourrait suffire.",
+      "quiet": "Le plan a été lu et aucune objection n'a été soulevée contre cette action.",
+      "reversed": "Assez de membres distincts ont objecté à l'intérieur de la fenêtre. Tout nœud détenant ces lignes replie vers cette même réponse, sans aucune coordination.",
+      "stood": "La fenêtre s'est refermée en deçà du seuil de renversement. Cette action a fait l'objet d'objections et elle tient.",
+      "unreadable": "Le plan des objections n'a pas pu être lu ici. Cela ne signifie PAS que personne n'a objecté — les objections sont inconnues, et non absentes."
+    },
+    "steward": {
+      "awaiting": "Le délai n'est pas écoulé. Les modérateurs désignés peuvent encore répondre.",
+      "no_duty_holders": "Un palier d'intendance est déclaré et ce nœud ne résout aucun modérateur désigné pour ce palier. Personne n'a gardé le silence, car il n'y avait personne.",
+      "not_adopted": "Aucun palier d'intendance n'a été déclaré : aucun délai de modération ne s'applique donc.",
+      "overruled": "Les modérateurs désignés ont jugé que cette objection ne tient pas — et l'escalade s'ouvre malgré tout, car une annulation ne leur appartient jamais à eux seuls.",
+      "silent": "Le délai est passé sans décision dans un sens ni dans l'autre.",
+      "upheld": "Les modérateurs désignés ont jugé, dans les délais, que cette objection tient. L'affaire a été tranchée par des personnes nommées, et cela est consigné."
     }
   }
 }

@@ -3181,6 +3181,85 @@
       "expired": "Das Zeitfenster dieser Zeile ist geschlossen. Die Faltung verwirft eine abgelaufene Zeile beim Lesen, daher braucht sie weder einen Widerruf noch einen erreichbaren Urheber.",
       "running": "Das Zeitfenster dieser Zeile ist offen und schließt zum genannten Zeitpunkt.",
       "unbounded": "Diese Zeile trägt kein Ablaufdatum. Sie gilt, bis sie abgelöst wird."
+    },
+    "consumption": {
+      "wired": "Eine Schleife in diesem Build liest diesen Schlüssel und ändert daraufhin ihr Verhalten. Der daneben genannte wirksame Wert gilt auf diesem Knoten.",
+      "elsewhere": "Keine Schleife in diesem Build liest diesen Schlüssel — sein Konsument liegt in einer anderen Komponente. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert auf diesem Knoten nichts.",
+      "unbuilt": "Der Konsument dieses Schlüssels wurde noch nirgends gebaut. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert nichts."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Ein einzelnes Mitglied zieht die Bremse; die Kohorte muss zustimmen, um sie zu lösen. Schutz zu erheben ist bedingungslos und kostet eine einzige Signatur; den Schutz eines anderen aufzuheben kostet die Schwelle der Kohorte selbst, und die eskalierte Aufhebung darf niemals unter eine absolute Untergrenze fallen, die keine Richtlinienangabe senken darf.",
+    "ballot": {
+      "admitted": "Die Stimmabgabe ist aktenkundig. Sie hat für sich genommen KEINE Wirkung: Ihr Preis wird zur Lesezeit gegen einen Nenner abgerechnet, der im Moment der Abgabe noch nicht existiert — ob der Pool je die eskalierte Schwelle erreicht, hängt davon ab, wer sonst noch antwortet. Ein Mitglied darf seine Meinung ändern; es gilt die jüngste Stimmabgabe."
+    },
+    "dismissal": {
+      "admitted": "Der Einspruch ist für die Zählung aufgehoben. Die Schwelle wird bei jedem späteren Lesen neu aus der Mitgliederliste dieses Knotens abgeleitet; eine Zurückweisung, die eine gewachsene Mitgliederliste nicht mehr überschreitet, unterdrückt nicht länger — und der Schutz, den sie entfernt hat, kehrt zurück."
+    },
+    "dry_run": "Es wurde nichts signiert und nichts eingereicht. Dies sind exakt die kanonischen Bytes, die jeder Mitunterzeichner signieren muss, damit sein Scrub bei der echten Einreichung zählt — das m-von-n bezieht sich auf genau diese Bytes und auf keine anderen.",
+    "escalation": {
+      "awaiting": "Die bestellten Moderatoren können noch antworten, oder sie haben bereits rechtzeitig entschieden. Die Eskalation ist nicht eröffnet.",
+      "not_adopted": "Diese Gemeinschaft hat keine Steward-Stufe erklärt, daher gibt es keine Moderatorenfrist und keine Eskalation. Schweigen ändert hier nichts.",
+      "nothing_to_escalate": "Eine Steward-Stufe ist erklärt, und kein aktiver Einspruch wartet auf sie. Niemand hat geschwiegen, denn es wurde nichts gefragt.",
+      "open": "Die Pflichtträger haben nicht rechtzeitig geantwortet, und die Entscheidung ist an jene übergegangen, die es taten. Die Schwelle zählt nun die ANTWORTENDEN statt der gesamten Mitgliederliste — genau das lässt auch eine stille Gemeinschaft noch zu einem Ergebnis kommen — mit einer Untergrenze, damit „erreichbar“ nie zu „eine Person entscheidet“ verkommt."
+    },
+    "objection": {
+      "admitted": "Der Einspruch ist aktenkundig. Er ist eine MARKIERUNG, kein Befehl: Durch sein Eintreffen wurde nichts verändert, und er repliziert auf der gewöhnlichen Attestierungsebene, sodass ein Peer, der während des Fensters vom Netz getrennt war, ihn beim Eintreffen dennoch mitzählt. Ein einzelnes Mitglied genügt, um ihn zu erheben; ihn aufzuheben kostet die Schwelle der Kohorte selbst."
+    },
+    "outcome": {
+      "dismissed": "Die Antwortenden haben entschieden, dass dieser Einspruch nicht besteht; er ist für die Zählung unterdrückt.",
+      "not_escalated": "Für diesen Einspruch wurde keine Eskalation eröffnet.",
+      "unresolved": "Die Eskalation ist eröffnet und unentschieden: Zu wenige haben geantwortet, oder keine Seite hat die Schwelle erreicht. Nichts ändert sich — der Einspruch besteht genau wie zuvor.",
+      "upheld": "Die Antwortenden haben entschieden, dass dieser Einspruch besteht."
+    },
+    "refusal": {
+      "action_absent": "Es muss eine Handlung benannt werden. Ein Einspruch benennt eine Zeile im Gemeingut; einer, der nichts benennt, kann niemals gezählt werden.",
+      "action_unknown": "Dieser Knoten hält keine solche Handlung, daher würde eine Zeile, die sie benennt, dort abgelegt, wo keine Faltung sie je zählt.",
+      "actor_recused": "Der Urheber einer Handlung stimmt nicht über den Einspruch gegen das eigene Handeln ab.",
+      "bad_now": "Der Lesezeitpunkt muss ein Zeitstempel nach RFC 3339 sein.",
+      "ballot_predates_action": "Ein Urteil kann nicht älter sein als das, worüber es urteilt.",
+      "canonicalize_failed": "Die kanonischen Bytes der Zeile konnten nicht erzeugt werden, daher gibt es nichts, was ein Mitunterzeichner signieren könnte.",
+      "cohort_absent": "Es muss eine Kohorte benannt werden: Sie bestimmt, wessen Mitgliederliste und wessen Erklärung die Zählung regeln.",
+      "cohort_not_a_commons": "Die Kohorte „selbst“ hat keine Mitgliederliste, über die ein Quorum gebildet werden könnte — ihre Mitglieder sind die eigenen Geräte einer einzigen Identität —, daher hat sie kein Gemeingut zu überwachen.",
+      "cohort_unknown": "Diese Kohorte lässt sich auf diesem Knoten nicht auflösen, daher gibt es weder eine Mitgliederliste noch eine Erklärung, an der dies zu messen wäre. Autorität muss aus lokal verifiziertem Zustand stammen.",
+      "cohort_unrecognized": "Das ist keine Kohorte mit Mitgliederliste. Einsprüche leben in einer Familie, einer Gemeinschaft oder einer Affiliationsgruppe.",
+      "dimension_mismatch": "Diese Zeile wurde für das, was sie trägt, an der falschen Tür vorgelegt.",
+      "dismissal_quorum_short": "Es haben weniger verschiedene verifizierte Mitglieder der Mitgliederliste mitsigniert, als die Schwelle der Kohorte verlangt. Die gezählte und die geforderte Zahl stehen neben dieser Meldung.",
+      "duplicate_objection": "Sie halten bereits einen aktiven Einspruch gegen diese Handlung. Ein Mitglied ist ein Einspruch — sonst könnte ein einzelnes Mitglied die Schwelle allein erreichen.",
+      "grounds_absent": "Eine Begründung ist erforderlich. Ein Einspruch, der ohne festgehaltenen Grund erhoben wird, ist von einem aus schlechtem Grund erhobenen nicht zu unterscheiden — und die Begründung wird festgehalten, niemals ausgelegt.",
+      "malformed_envelope": "Der Zeile fehlt ein Verweis, den die Zählung benötigt.",
+      "node_unowned": "Dieser Knoten hat keinen Verantwortlichen, daher liest er weder in irgendjemandes Gemeingut noch spricht er dort in dessen Namen. Beanspruchen Sie zuerst die Eigentümerschaft.",
+      "not_a_cohort_member": "Nur ein Mitglied dieser Kohorte darf in ihrem Gemeingut sprechen. Das ist die einzige Prüfung, die die schützende Seite anwendet — und der Grund, warum der Einspruch eines Fremden nie zu einer Markierung wird, die andere beachten könnten.",
+      "not_filed_against_actor": "Die Zeile ist dort abgelegt, wo die Faltung nicht nach ihr sucht; sie wäre gespeichert, dauerhaft und für immer wirkungslos. Eine Markierung, die niemand finden kann, ist keine Markierung.",
+      "not_governed": "Diese Gemeinschaft erklärt keine Richtlinie für ein umgekehrtes Quorum, hat die Einspruchsebene also nicht übernommen. Abgelehnt statt mit Standardwerten belegt: Für eine Gruppe, die weder Fenster noch Schwelle erklärt hat, beides zu erfinden, ist schlimmer als ein Nein.",
+      "not_owner": "Die Gemeingut-Oberfläche erfordert die Eigentümerrolle.",
+      "objection_absent": "Es muss ein Einspruch benannt werden: Eine Stimmabgabe und eine Zurückweisung antworten jeweils auf genau einen.",
+      "objection_unknown": "Der benannte Einspruch ist keiner, den dieser Knoten gegen diese Handlung hält.",
+      "session_absent": "Es wurde kein Sitzungstoken vorgelegt. Die Gemeingut-Oberfläche ist ausschließlich dem Eigentümer vorbehalten.",
+      "session_invalid": "Diese Sitzung ist ungültig oder abgelaufen.",
+      "sign_failed": "Dieser Knoten konnte die Zeile nicht signieren, daher wurde nichts eingereicht.",
+      "steward_tier_not_adopted": "Diese Gemeinschaft hat keine Steward-Stufe erklärt, daher gibt es keine Frist, über die hinaus geschwiegen werden könnte, und keinen eskalierten Pool. Eine Stimmabgabe würde hier gespeichert und nie gelesen.",
+      "store_unavailable": "Das Substrat war nicht erreichbar.",
+      "target_action_unknown": "Die beanstandete Handlung ist keine Zeile, die dieser Knoten hält, daher wäre der Einspruch nicht zählbar und sein Fenster nicht auflösbar.",
+      "unverifiable_signature": "Die Signatur der Zeile ließ sich nicht gegen die auf diesem Knoten registrierten Schlüssel des Unterzeichners verifizieren."
+    },
+    "standing": {
+      "action_unknown": "Dieser Knoten hält keine solche Handlung. Ein Einspruch benennt eine Zeile, und hier gibt es keine Zeile, die benannt werden könnte.",
+      "cohort_unknown": "Diese Kohorte lässt sich auf diesem Knoten nicht auflösen, daher hat sie weder eine Mitgliederliste noch eine Erklärung, die dieser Knoten lesen kann.",
+      "not_governed": "Diese Gemeinschaft erklärt keine Richtlinie für ein umgekehrtes Quorum, daher gilt die Einspruchsebene für ihr Gemeingut überhaupt nicht. Das ist etwas anderes, als wenn niemand Einspruch erhoben hätte.",
+      "objected": "Mindestens ein Mitglied hat Einspruch erhoben, und das Fenster ist noch offen. Die Handlung besteht vorerst; ein weiterer Einspruch kann bereits genügen.",
+      "quiet": "Die Ebene wurde gelesen, und gegen diese Handlung wurde kein Einspruch erhoben.",
+      "reversed": "Genügend verschiedene Mitglieder haben innerhalb des Fensters Einspruch erhoben. Jeder Knoten, der diese Zeilen hält, faltet ohne jede Koordination zur selben Antwort.",
+      "stood": "Das Fenster schloss unterhalb der Umkehrschwelle. Gegen diese Handlung wurde Einspruch erhoben, und sie besteht.",
+      "unreadable": "Die Einspruchsebene konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass niemand Einspruch erhoben hat — die Einsprüche sind unbekannt, nicht etwa ausgeblieben."
+    },
+    "steward": {
+      "awaiting": "Die Frist ist noch nicht verstrichen. Die bestellten Moderatoren können noch antworten.",
+      "no_duty_holders": "Eine Steward-Stufe ist erklärt, und dieser Knoten löst dafür keinen bestellten Moderator auf. Niemand hat geschwiegen, denn es war niemand da.",
+      "not_adopted": "Es wurde keine Steward-Stufe erklärt, daher gilt keine Moderatorenfrist.",
+      "overruled": "Die bestellten Moderatoren haben entschieden, dass dieser Einspruch nicht besteht — und die Eskalation wird dennoch eröffnet, denn eine Aufhebung steht ihnen niemals allein zu.",
+      "silent": "Die Frist verstrich ohne Entscheidung in die eine oder andere Richtung.",
+      "upheld": "Die bestellten Moderatoren haben rechtzeitig entschieden, dass dieser Einspruch besteht. Die Sache wurde von namentlich benannten Personen entschieden und ist aktenkundig."
     }
   }
 }

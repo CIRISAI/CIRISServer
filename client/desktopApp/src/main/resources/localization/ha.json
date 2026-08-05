@@ -3181,6 +3181,85 @@
       "expired": "Tagar wannan layi ta rufe. Naɗin yana yar da layin da ya ƙare a lokacin karatu, don haka ba ya buƙatar sokewa ko marubuci da za a iya kaiwa gare shi.",
       "running": "Tagar wannan layi a buɗe take, kuma za ta rufe a daidai lokacin da aka ambata.",
       "unbounded": "Wannan layi ba shi da ranar ƙarewa. Yana aiki har sai an maye gurbinsa."
+    },
+    "consumption": {
+      "wired": "Wani madauki a cikin wannan sigar yana karanta wannan maɓalli kuma yana sauya abin da yake yi. Ƙimar da aka nuna a gefensa ita ce take aiki a kan wannan kumburi.",
+      "elsewhere": "Babu wani madauki a cikin wannan siga da yake karanta wannan maɓalli: mai amfani da shi yana cikin wani sashe na daban. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai a kan wannan kumburi.",
+      "unbuilt": "Ba a gina mai amfani da wannan maɓalli ko'ina ba tukuna. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Memba ɗaya yana ɗaga birki; ƙungiya gaba ɗaya kuwa dole ta yarda kafin a saukar da shi. Ɗaga kariya ba shi da sharaɗi kuma sa hannu ɗaya ne farashinsa; wargaza na wani kuwa yana kashe ƙofar ƙungiyar da kanta, kuma wargazawa da aka ɗaukaka ba za ta taɓa sauka ƙasa da gindi tabbatacce wanda babu wata ka'ida da za ta iya rage shi ba.",
+    "ballot": {
+      "admitted": "An rubuta kuri'ar. Ita kaɗai BA TA DA wani ƙarfi: ana biyan farashinta ne a lokacin karatu bisa mai rabawa da bai wanzu ba tukuna a lokacin da aka kaɗa ta — ko tafkin zai taɓa kai ƙofar da aka ɗaukaka ya dogara ne ga wanda kuma ya amsa. Memba na iya sauya ra'ayinsa; kuri'a mafi sabo ce ke mulki."
+    },
+    "dismissal": {
+      "admitted": "An ɗage ƙorafin daga ƙidaya. Ana sake samo ƙofa daga jerin membobin wannan kumburi da kansa a kowane karatu na gaba, don haka kawarwar da ta daina cimma ƙofar jerin membobi bayan ya girma tana daina dakatarwa — kuma kariyar da ta cire tana dawowa."
+    },
+    "dry_run": "Ba a sa wa komai hannu ba kuma ba a mika komai ba. Waɗannan su ne ainihin baitocin canonical da kowane abokin sa hannu dole ne ya sa wa hannu domin scrub ɗinsa ya ƙidaya a mikawa ta gaskiya — m-cikin-n yana kan waɗannan baitoci ne kaɗai, ba wasu ba.",
+    "escalation": {
+      "awaiting": "Masu kula da aka naɗa na iya amsawa tukuna, ko kuma sun riga sun yanke hukunci cikin lokaci. Ɗaukakawa ba ta buɗe ba.",
+      "not_adopted": "Wannan al'umma ba ta ayyana matakin masu kula ba, don haka babu wa'adin masu kula kuma babu ɗaukakawa. Shiru ba ya canza komai a nan.",
+      "nothing_to_escalate": "An ayyana matakin masu kula kuma babu wani ƙorafi mai rai da ke jiransa. Ba wanda ya yi shiru, domin ba a tambayi kome ba.",
+      "open": "Masu riƙe da hakki ba su amsa cikin lokaci ba, kuma hukuncin ya koma ga waɗanda suka amsa. Yanzu ƙofar tana ƙidaya MASU AMSAWA maimakon dukan jerin membobi — wannan shi ne abin da ke sa al'umma mai natsuwa ta iya warware batu duk da haka — tare da gindi domin ‘mai yiwuwar kaiwa’ kada ya taɓa lalacewa zuwa ‘mutum ɗaya ne ke yanke shawara’."
+    },
+    "objection": {
+      "admitted": "An rubuta ƙorafin. ALAMA ce, ba umarni ba: babu abin da ya sauya saboda zuwansa, kuma yana yaɗuwa a filin tabbatarwa na yau da kullum, don haka takwaran da aka raba shi da hanyar sadarwa a lokacin tagar zai ƙidaya shi sa'ad da ya iso gare shi. Memba ɗaya ya isa ya ɗaga shi; ɗage shi kuwa yana kashe ƙofar ƙungiyar da kanta."
+    },
+    "outcome": {
+      "dismissed": "Waɗanda suka amsa sun yanke hukuncin cewa wannan ƙorafi bai tsaya ba, kuma an dakatar da shi a ƙidaya.",
+      "not_escalated": "Ɗaukakawa ba ta buɗe ba ga wannan ƙorafi.",
+      "unresolved": "Ɗaukakawa a buɗe take kuma ba a yanke hukunci ba: masu amsawa sun yi kaɗan, ko kuma babu wani ɓangare da ya kai ƙofa. Babu abin da ya sauya — ƙorafin yana nan tsaye daidai yadda yake.",
+      "upheld": "Waɗanda suka amsa sun yanke hukuncin cewa wannan ƙorafi ya tsaya."
+    },
+    "refusal": {
+      "action_absent": "Dole ne a ambaci aiki. Ƙorafi yana ambaton layi ne a filin gama-gari; wanda bai ambaci kome ba, ba za a taɓa ƙidaya shi ba.",
+      "action_unknown": "Wannan kumburi bai riƙe irin wannan aiki ba, don haka layin da ya ambace shi za a shigar da shi inda babu naɗin da zai taɓa ƙidaya shi.",
+      "actor_recused": "Marubucin aikin ba ya kaɗa kuri'a a kan ƙorafin da aka yi wa aikinsa.",
+      "bad_now": "Lokacin karatu dole ne ya zama alamar lokaci ta RFC 3339.",
+      "ballot_predates_action": "Hukunci ba zai iya girmi abin da yake hukunta ba.",
+      "canonicalize_failed": "Ba a iya samar da baitocin canonical na layin ba, don haka babu abin da abokin sa hannu zai sa wa hannu.",
+      "cohort_absent": "Dole ne a ambaci ƙungiya: ita ce ke yanke wanne jerin membobi da wace sanarwa ce ke mulkin ƙidaya.",
+      "cohort_not_a_commons": "Ƙungiyar kai (self) ba ta da jerin membobi da za a yi ƙididdigar yanke shawara a kansa — membobinta na'urorin asali guda ɗaya ne — don haka ba ta da filin gama-gari da za a yi wa sa ido.",
+      "cohort_unknown": "Wannan ƙungiya ba ta warware a wannan kumburi ba, don haka babu jerin membobi kuma babu sanarwa da za a yi hukunci da ita. Dole ne iko ya fito daga yanayin gida da aka tabbatar.",
+      "cohort_unrecognized": "Wannan ba ƙungiya ce mai jerin membobi ba. Ƙorafe-ƙorafe suna zama ne a cikin iyali, a cikin al'umma ko a cikin ƙungiyar haɗin kai.",
+      "dimension_mismatch": "An gabatar da wannan layi a ƙofar da ba ta dace da abin da yake ɗauke da shi ba.",
+      "dismissal_quorum_short": "Membobin jerin da aka tabbatar kuma suka bambanta waɗanda suka sa hannu tare sun yi ƙasa da abin da ƙofar ƙungiyar ke buƙata. Adadin da aka ƙidaya da wanda ake buƙata suna gefen wannan saƙo.",
+      "duplicate_objection": "Kuna riƙe da ƙorafi mai rai a kan wannan aiki tuni. Memba ɗaya ƙorafi ɗaya — in ba haka ba, memba guda zai iya kai ƙofa shi kaɗai.",
+      "grounds_absent": "Ana buƙatar dalilai. Ƙorafin da aka ɗaga ba tare da dalilin da aka rubuta ba, ba shi da bambanci da wanda aka ɗaga bisa mummunan dalili — kuma ana rubuta dalilai ne kawai, ba a taɓa fassara su ba.",
+      "malformed_envelope": "Layin ya rasa madogarar da ƙidaya ke buƙata.",
+      "node_unowned": "Wannan kumburi ba shi da wanda ke da alhakinsa, don haka ba ya karatu kuma ba ya magana a filin gama-gari na kowa a madadinsa. Ku nemi mallaka tukuna.",
+      "not_a_cohort_member": "Memba na wannan ƙungiya kaɗai ne zai iya magana a filin gama-garinta. Wannan ita ce kaɗai gwajin da ɓangaren kariya ke yi — kuma ita ce dalilin da ya sa ƙorafin baƙo ba ya taɓa zama alamar da wasu za su girmama.",
+      "not_filed_against_actor": "An shigar da layin inda naɗi ba ya nemansa, don haka za a ajiye shi, mai dorewa kuma marar aiki har abada. Alamar da ba wanda zai iya samu, ba alama ba ce.",
+      "not_governed": "Wannan al'umma ba ta ayyana wata ka'idar ƙididdigar yanke shawara ta juyawa (reverse-quorum) ba, don haka ba ta ɗauki filin ƙorafi ba. An ƙi maimakon a koma ga tsoho: ƙirƙira taga da ƙofa wa ƙungiyar da ba ta ayyana ko ɗaya daga cikinsu ba ya fi muni fiye da a ce a'a.",
+      "not_owner": "Fuskar filin gama-gari tana buƙatar matsayin mai shi.",
+      "objection_absent": "Dole ne a ambaci ƙorafi: kuri'a da kawarwa kowanne yana amsa wa guda ɗaya kacal.",
+      "objection_unknown": "Ƙorafin da aka ambata ba ɗaya daga cikin waɗanda wannan kumburi ke riƙe da su a kan wannan aiki ba ne.",
+      "session_absent": "Ba a gabatar da token na zaman ba. Fuskar filin gama-gari ta mai shi kaɗai ce.",
+      "session_invalid": "Wannan zaman ba shi da inganci ko kuma ya ƙare.",
+      "sign_failed": "Wannan kumburi bai iya sa wa layin hannu ba, don haka ba a mika komai ba.",
+      "steward_tier_not_adopted": "Wannan al'umma ba ta ayyana matakin masu kula ba, don haka babu wa'adin da za a yi shiru har ya wuce kuma babu tafkin da aka ɗaukaka. Kuri'a a nan za a ajiye ta amma ba za a taɓa karanta ta ba.",
+      "store_unavailable": "Ba a iya kaiwa ga substrate ba.",
+      "target_action_unknown": "Aikin da aka yi wa ƙorafi ba layi ne da wannan kumburi ke riƙe da shi ba, don haka ba za a iya ƙidaya ƙorafin ba kuma ba za a iya warware tagarsa ba.",
+      "unverifiable_signature": "Sa hannun layin bai tabbata ba a kan maɓallan mai sa hannu kamar yadda aka yi rajista da su a wannan kumburi."
+    },
+    "standing": {
+      "action_unknown": "Wannan kumburi bai riƙe irin wannan aiki ba. Ƙorafi yana ambaton layi ne, kuma babu layin da za a ambata a nan.",
+      "cohort_unknown": "Wannan ƙungiya ba ta warware a wannan kumburi ba, don haka ba ta da jerin membobi kuma ba ta da sanarwa da wannan kumburi zai iya karantawa.",
+      "not_governed": "Wannan al'umma ba ta ayyana wata ka'idar ƙididdigar yanke shawara ta juyawa (reverse-quorum) ba, don haka filin ƙorafi bai shafi filin gama-garinta ko kaɗan ba. Wannan ya bambanta da cewa ba wanda ya yi ƙorafi.",
+      "objected": "Aƙalla memba ɗaya ya yi ƙorafi kuma tagar na nan a buɗe. Aikin yana tsaye a yanzu; ƙorafi ɗaya kuma na iya zama duk abin da ake buƙata.",
+      "quiet": "An karanta filin kuma ba a ɗaga wani ƙorafi a kan wannan aiki ba.",
+      "reversed": "Isassun membobi mabambanta sun yi ƙorafi cikin tagar. Kowane kumburi da ke riƙe da waɗannan layuka yana naɗewa zuwa amsa guda ɗaya, ba tare da wani haɗin kai ba.",
+      "stood": "Tagar ta rufe a ƙasa da ƙofar juyawa. An yi ƙorafi a kan wannan aiki kuma yana tsaye.",
+      "unreadable": "Ba a iya karanta filin ƙorafi a nan ba. Wannan BA yana nufin ba wanda ya yi ƙorafi ba ne — ƙorafe-ƙorafen ba a san su ba, ba cewa ba su nan ba."
+    },
+    "steward": {
+      "awaiting": "Wa'adin bai wuce ba. Masu kula da aka naɗa na iya amsawa tukuna.",
+      "no_duty_holders": "An ayyana matakin masu kula kuma wannan kumburi bai warware wani mai kula da aka naɗa gare shi ba. Ba wanda ya yi shiru, domin ba wanda yake nan.",
+      "not_adopted": "Ba a ayyana wani matakin masu kula ba, don haka babu wa'adin masu kula da ya shafi wannan.",
+      "overruled": "Masu kula da aka naɗa sun yanke hukuncin cewa wannan ƙorafi bai tsaya ba — duk da haka ɗaukakawa tana buɗewa, domin wargazawa ba ta taɓa zama tasu kaɗai ba.",
+      "silent": "Wa'adin ya wuce ba tare da an yanke wani hukunci ta kowane ɓangare ba.",
+      "upheld": "Masu kula da aka naɗa sun yanke hukunci, cikin lokaci, cewa wannan ƙorafi ya tsaya. Mutane da aka ambaci sunayensu ne suka yanke hukuncin wannan batu, kuma an rubuta shi."
     }
   }
 }

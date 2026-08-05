@@ -217,6 +217,22 @@ fn the_registry_answers_for_every_key_and_names_a_tracker_when_it_cannot() {
     }
 }
 
+/// Resolve a dotted message id the way the client actually does.
+///
+/// `LocalizationManager.resolveKey` (LocalizationManager.kt:296) ALWAYS splits
+/// on `.` and walks NESTED objects; it never attempts an exact top-level match.
+/// A gate that did `bundle.get("a.b.c")` would therefore pass on exactly the
+/// shape that renders RAW in the client — which is not hypothetical: 1,484 keys
+/// shipped flat and were dead in every language, English included, until they
+/// were re-nested. The check must speak the loader's language, not JSON's.
+fn resolve_id<'a>(bundle: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+    let mut cur = bundle;
+    for part in id.split('.') {
+        cur = cur.get(part)?;
+    }
+    cur.as_str()
+}
+
 #[test]
 fn every_consumption_message_resolves_in_the_canonical_bundle() {
     // The surface emits `{id, text}` pairs and a UI resolves the id in the
@@ -237,7 +253,7 @@ fn every_consumption_message_resolves_in_the_canonical_bundle() {
         let c = consumption(key);
         let id = c.message_id();
         assert_eq!(
-            bundle.get(&id).and_then(|v| v.as_str()),
+            resolve_id(&bundle, &id),
             Some(c.message_text()),
             "`{id}` must resolve in the canonical en.json with the SAME English the server \
              emits (missing ⇒ the id renders raw; different ⇒ every translated locale is a \

@@ -39,9 +39,18 @@ jobs:
       #     flat dotted key ("a.b.c": …) is dead in every language including
       #     English, which is how 53 ids shipped dead in 0c728b1 (#366),
       #   - a translated value carries exactly en.json's placeholders.
-      # Cross-language translation drift (missing/empty/extra keys) is a
-      # WARNING — graceful English fallback — and is fixed by the `localize-ui`
-      # Claude workflow. The tree currently passes `--strict` too; add that flag
-      # here if drift should block as well.
-      - name: Localization guard (four-bundle mirror, resolvability, placeholders)
-        run: python3 client/tools/check_localization_sync.py
+      # `--strict` ALSO blocks on cross-language drift (missing/empty keys).
+      #
+      # #366 recommended leaving drift a warning, on the sound reasoning that a
+      # lagging locale degrades to English by design. That reasoning rested on
+      # translation being slow and manual. It is not: 53 ids went into 28
+      # languages in ~14 minutes of `localize-ui` agent time, and again for 56
+      # more. The cost that justified a warning is gone, and what the warning
+      # actually bought was 24 locales sitting 53 keys short for two days with
+      # nobody noticing — the same shape as the RCA in
+      # FSD/RCA_INGEST_REJECTION_2026-08-05.md, one layer up.
+      #
+      # If this ever blocks inconveniently: drop the flag. It is one word, and
+      # the tree passed `--strict` on the day it was added.
+      - name: Localization guard (mirror, resolvability, placeholders, drift)
+        run: python3 client/tools/check_localization_sync.py --strict

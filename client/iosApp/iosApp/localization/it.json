@@ -3181,6 +3181,85 @@
       "expired": "La finestra di questa riga è chiusa. Il fold scarta una riga scaduta al momento della lettura, quindi non serve alcuna revoca né un autore raggiungibile.",
       "running": "La finestra di questa riga è aperta e si chiude nell'istante indicato.",
       "unbounded": "Questa riga non ha scadenza. Si applica finché non viene sostituita."
+    },
+    "consumption": {
+      "wired": "Un ciclo di questa build legge questa chiave e cambia ciò che fa. Il valore effettivo indicato accanto è realmente in vigore su questo nodo.",
+      "elsewhere": "Nessun ciclo di questa build legge questa chiave: il suo consumatore vive in un altro componente. Una riga impostata qui viene ammessa ed entra nel fold, e non cambia nulla su questo nodo.",
+      "unbuilt": "Il consumatore di questa chiave non è ancora stato costruito da nessuna parte. Una riga impostata qui viene ammessa ed entra nel fold, e non cambia nulla."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Un solo membro inserisce il freno; per rimuoverlo serve l'accordo della coorte. Attivare la protezione è incondizionato e costa una sola firma; annullare quella di un altro costa la soglia propria della coorte, e l'annullamento in escalation non può mai scendere sotto un limite minimo assoluto che nessuna stringa di policy può abbassare.",
+    "ballot": {
+      "admitted": "Il voto è agli atti. Di per sé NON ha alcuna forza: il suo prezzo si paga al momento della lettura contro un denominatore che, quando viene espresso, non esiste ancora — se il bacino raggiunga mai la soglia dell'escalation dipende da chi altro risponde. Un membro può cambiare idea; vale il voto più recente."
+    },
+    "dismissal": {
+      "admitted": "L'obiezione è rimossa ai fini del conteggio. La soglia viene ricalcolata dall'elenco dei membri di questo nodo stesso a ogni lettura successiva: perciò un rigetto che non raggiunge più la soglia di un elenco cresciuto smette di sopprimere — e la protezione che aveva rimosso torna in vigore."
+    },
+    "dry_run": "Nulla è stato firmato e nulla è stato inviato. Questi sono gli esatti byte canonici che ogni co-firmatario deve firmare perché il suo scrub valga nell'invio reale — l'm-di-n è su questi byte e su nessun altro.",
+    "escalation": {
+      "awaiting": "I moderatori designati possono ancora rispondere, oppure si sono già pronunciati entro i termini. L'escalation non si è aperta.",
+      "not_adopted": "Questa comunità non ha dichiarato alcun livello di steward, quindi non esiste alcun termine per i moderatori né alcuna escalation. Qui il silenzio non cambia nulla.",
+      "nothing_to_escalate": "Un livello di steward è dichiarato e nessuna obiezione attiva è in attesa di una sua pronuncia. Nessuno è rimasto in silenzio, perché non è stato chiesto nulla.",
+      "open": "I titolari del dovere non hanno risposto entro i termini e la decisione è passata a chi lo ha fatto. La soglia ora conta CHI HA RISPOSTO anziché l'intero elenco dei membri — è questo che permette a una comunità silenziosa di arrivare comunque a una conclusione — con un limite minimo, perché «raggiungibile» non degeneri mai in «decide una sola persona»."
+    },
+    "objection": {
+      "admitted": "L'obiezione è agli atti. È un MARCATORE, non un comando: il suo arrivo non ha cambiato nulla, e si replica sull'ordinario piano di attestazione, così un peer che era partizionato durante la finestra la conta comunque quando arriva. Basta un solo membro per sollevarla; rimuoverla costa la soglia propria della coorte."
+    },
+    "outcome": {
+      "dismissed": "Chi ha risposto ha deciso che questa obiezione non regge, ed essa è soppressa ai fini del conteggio.",
+      "not_escalated": "Per questa obiezione l'escalation non si è aperta.",
+      "unresolved": "L'escalation è aperta e non decisa: hanno risposto in troppo pochi, oppure nessuna delle due parti ha raggiunto la soglia. Nulla cambia — l'obiezione resta esattamente com'era.",
+      "upheld": "Chi ha risposto ha deciso che questa obiezione regge."
+    },
+    "refusal": {
+      "action_absent": "Occorre indicare un'azione. Un'obiezione indica una riga nel bene comune; una che non indica nulla non potrà mai essere conteggiata.",
+      "action_unknown": "Questo nodo non detiene alcuna azione di questo tipo, quindi una riga che la indicasse verrebbe depositata dove nessun fold la conterà mai.",
+      "actor_recused": "L'autore dell'azione non vota sull'obiezione al proprio atto.",
+      "bad_now": "L'istante di lettura deve essere un timestamp RFC 3339.",
+      "ballot_predates_action": "Un giudizio non può essere più vecchio della cosa che giudica.",
+      "canonicalize_failed": "Non è stato possibile produrre i byte canonici della riga, quindi non c'è nulla che un co-firmatario possa firmare.",
+      "cohort_absent": "Occorre indicare una coorte: è essa a stabilire quale elenco dei membri e quale dichiarazione governino il conteggio.",
+      "cohort_not_a_commons": "La coorte self non ha alcun elenco dei membri su cui formare un quorum — i suoi membri sono i dispositivi di un'unica identità — quindi non ha alcun bene comune da vigilare.",
+      "cohort_unknown": "Quella coorte non si risolve su questo nodo, quindi non esistono né un elenco dei membri né una dichiarazione con cui giudicare la questione. L'autorità deve provenire dallo stato locale verificato.",
+      "cohort_unrecognized": "Quella non è una coorte dotata di elenco dei membri. Le obiezioni vivono in una famiglia, in una comunità o in un gruppo di affiliazioni.",
+      "dimension_mismatch": "Quella riga è stata presentata alla porta sbagliata per ciò che trasporta.",
+      "dismissal_quorum_short": "Hanno co-firmato meno membri distinti e verificati dell'elenco di quanti ne richieda la soglia della coorte. I numeri conteggiati e richiesti sono indicati accanto a questo messaggio.",
+      "duplicate_objection": "Detieni già un'obiezione attiva contro questa azione. Un membro vale una sola obiezione — altrimenti un singolo membro potrebbe raggiungere da solo la soglia.",
+      "grounds_absent": "Le motivazioni sono obbligatorie. Un'obiezione sollevata senza alcuna ragione registrata è indistinguibile da una sollevata per una ragione cattiva — e le motivazioni vengono registrate, mai interpretate.",
+      "malformed_envelope": "Alla riga manca un riferimento necessario al conteggio.",
+      "node_unowned": "Questo nodo non ha alcun responsabile, quindi non legge né parla per conto di nessuno nel bene comune altrui. Rivendica prima la proprietà.",
+      "not_a_cohort_member": "Solo un membro di questa coorte può parlare nel suo bene comune. È l'unica verifica che il lato protettivo applica — ed è la ragione per cui l'obiezione di un estraneo non diventa mai un marcatore che altri potrebbero onorare.",
+      "not_filed_against_actor": "La riga è depositata dove il fold non la cerca, quindi sarebbe conservata, durevole e permanentemente inerte. Un marcatore che nessuno riesce a trovare non è un marcatore.",
+      "not_governed": "Questa comunità non dichiara alcuna policy di quorum inverso, quindi non ha adottato il piano delle obiezioni. Rifiutato anziché impostato per default: inventare una finestra e una soglia per un gruppo che non ha dichiarato né l'una né l'altra è peggio che dire di no.",
+      "not_owner": "La superficie del bene comune richiede il ruolo di proprietario.",
+      "objection_absent": "Occorre indicare un'obiezione: un voto e un rigetto rispondono ciascuno per una sola.",
+      "objection_unknown": "L'obiezione indicata non è tra quelle che questo nodo detiene contro questa azione.",
+      "session_absent": "Non è stato presentato alcun token di sessione. La superficie del bene comune è riservata al proprietario.",
+      "session_invalid": "Quella sessione non è valida oppure è scaduta.",
+      "sign_failed": "Questo nodo non è riuscito a firmare la riga, quindi non è stato inviato nulla.",
+      "steward_tier_not_adopted": "Questa comunità non ha dichiarato alcun livello di steward, quindi non esiste alcun termine oltre il quale restare in silenzio né alcun bacino di escalation. Un voto qui verrebbe conservato e mai letto.",
+      "store_unavailable": "Non è stato possibile raggiungere il substrato.",
+      "target_action_unknown": "L'azione contestata non è una riga che questo nodo detiene, quindi l'obiezione sarebbe non conteggiabile e la sua finestra non risolvibile.",
+      "unverifiable_signature": "La firma della riga non è stata verificata rispetto alle chiavi del firmatario così come registrate su questo nodo."
+    },
+    "standing": {
+      "action_unknown": "Questo nodo non detiene alcuna azione di questo tipo. Un'obiezione indica una riga, e qui non c'è alcuna riga da indicare.",
+      "cohort_unknown": "Quella coorte non si risolve su questo nodo, quindi non ha alcun elenco dei membri né alcuna dichiarazione che questo nodo possa leggere.",
+      "not_governed": "Questa comunità non dichiara alcuna policy di quorum inverso, quindi il piano delle obiezioni non si applica affatto al suo bene comune. È cosa diversa dal fatto che nessuno abbia obiettato.",
+      "objected": "Almeno un membro ha obiettato e la finestra è ancora aperta. Per ora l'azione regge; potrebbe bastare un'altra obiezione.",
+      "quiet": "Il piano è stato letto e contro questa azione non è stata sollevata alcuna obiezione.",
+      "reversed": "Un numero sufficiente di membri distinti ha obiettato entro la finestra. Ogni nodo che detiene queste righe arriva con il fold a questa stessa risposta, senza alcun coordinamento.",
+      "stood": "La finestra si è chiusa sotto la soglia di ribaltamento. Questa azione è stata contestata e regge.",
+      "unreadable": "Non è stato possibile leggere qui il piano delle obiezioni. Questo NON significa che nessuno abbia obiettato — le obiezioni sono sconosciute, non assenti."
+    },
+    "steward": {
+      "awaiting": "Il termine non è ancora scaduto. I moderatori designati possono ancora rispondere.",
+      "no_duty_holders": "Un livello di steward è dichiarato e questo nodo non risolve alcun moderatore designato per esso. Nessuno è rimasto in silenzio, perché non c'era nessuno.",
+      "not_adopted": "Non è stato dichiarato alcun livello di steward, quindi non si applica alcun termine per i moderatori.",
+      "overruled": "I moderatori designati hanno deciso che questa obiezione non regge — e l'escalation si apre comunque, perché un annullamento non spetta mai a loro soli.",
+      "silent": "Il termine è scaduto senza alcuna pronuncia, né in un senso né nell'altro.",
+      "upheld": "I moderatori designati hanno deciso, entro i termini, che questa obiezione regge. La questione è stata giudicata da persone identificate, agli atti."
     }
   }
 }

@@ -178,7 +178,7 @@ async fn require_owner(st: &CommonsState, headers: &HeaderMap) -> Result<Session
         return Err(refusal(
             StatusCode::UNAUTHORIZED,
             "session_absent",
-            "commons.refusal.session_absent",
+            "commons_surface.refusal.session_absent",
             "No session token was presented. The commons surface is owner-only.",
         ));
     };
@@ -192,19 +192,19 @@ async fn require_owner(st: &CommonsState, headers: &HeaderMap) -> Result<Session
         Ok(Some(_)) => Err(refusal(
             StatusCode::FORBIDDEN,
             "not_owner",
-            "commons.refusal.not_owner",
+            "commons_surface.refusal.not_owner",
             "The commons surface requires the owner (SYSTEM_ADMIN) role.",
         )),
         Ok(None) => Err(refusal(
             StatusCode::UNAUTHORIZED,
             "session_invalid",
-            "commons.refusal.session_invalid",
+            "commons_surface.refusal.session_invalid",
             "That session is invalid or expired.",
         )),
         Err(e) => Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
             "store_unavailable",
-            "commons.refusal.store_unavailable",
+            "commons_surface.refusal.store_unavailable",
             format!("The substrate could not be read: {e}"),
         )),
     }
@@ -226,7 +226,7 @@ async fn gate(
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "node_unowned",
-            "commons.refusal.node_unowned",
+            "commons_surface.refusal.node_unowned",
             "This node has no responsible party (owner-binding), so it neither reads nor speaks \
              in anyone's commons on their behalf. Claim ownership first.",
         ));
@@ -318,41 +318,41 @@ impl CommonsStanding {
     fn message(self) -> Value {
         match self {
             Self::Unreadable => m(
-                "commons.standing.unreadable",
+                "commons_surface.standing.unreadable",
                 "The objection plane could not be read here. This is NOT a statement that nobody \
                  objected — the objections are unknown, not absent.",
             ),
             Self::ActionUnknown => m(
-                "commons.standing.action_unknown",
+                "commons_surface.standing.action_unknown",
                 "This node holds no such action. An objection names a row, and there is no row \
                  here to name.",
             ),
             Self::CohortUnknown => m(
-                "commons.standing.cohort_unknown",
+                "commons_surface.standing.cohort_unknown",
                 "That cohort does not resolve on this node, so it has no roster and no \
                  declaration this node can read. Authority must come from local verified state.",
             ),
             Self::NotGoverned => m(
-                "commons.standing.not_governed",
+                "commons_surface.standing.not_governed",
                 "This community declares no reverse-quorum policy, so the objection plane does \
                  not apply to its commons at all. That is different from nobody having objected.",
             ),
             Self::Quiet => m(
-                "commons.standing.quiet",
+                "commons_surface.standing.quiet",
                 "The plane was read and no objection has been raised against this action.",
             ),
             Self::Objected => m(
-                "commons.standing.objected",
+                "commons_surface.standing.objected",
                 "At least one member has objected and the window is still open. The action \
                  stands for now; one more objection may be all it takes.",
             ),
             Self::Stood => m(
-                "commons.standing.stood",
+                "commons_surface.standing.stood",
                 "The window closed below the reversal threshold. This action was objected to and \
                  stands.",
             ),
             Self::Reversed => m(
-                "commons.standing.reversed",
+                "commons_surface.standing.reversed",
                 "Enough distinct members objected inside the window. Every node holding these \
                  rows folds to this same answer, with no coordination.",
             ),
@@ -434,22 +434,22 @@ impl EscalationStanding {
     fn message(self) -> Value {
         match self {
             Self::NotAdopted => m(
-                "commons.escalation.not_adopted",
+                "commons_surface.escalation.not_adopted",
                 "This community declared no steward tier, so there is no moderator deadline and \
                  no escalation. Silence changes nothing here.",
             ),
             Self::NothingToEscalate => m(
-                "commons.escalation.nothing_to_escalate",
+                "commons_surface.escalation.nothing_to_escalate",
                 "A steward tier is declared and no live objection is waiting on it. Nobody was \
                  silent, because nothing was asked.",
             ),
             Self::Awaiting => m(
-                "commons.escalation.awaiting",
+                "commons_surface.escalation.awaiting",
                 "The appointed moderators may still answer, or they have already ruled in time. \
                  Escalation has not opened.",
             ),
             Self::Open => m(
-                "commons.escalation.open",
+                "commons_surface.escalation.open",
                 "The duty-holders did not answer in time, and the decision has passed to those \
                  who did. The threshold now counts RESPONDENTS rather than the whole roster — \
                  which is what lets a quiet community still resolve — floored so that \
@@ -491,14 +491,14 @@ fn escalation_json(e: &ObjectionEscalation) -> Value {
         "objection_id": e.objection_id,
         "steward": e.steward.as_str(),
         "steward_message": m(
-            &format!("commons.steward.{}", e.steward.as_str()),
+            &format!("commons_surface.steward.{}", e.steward.as_str()),
             "The steward tier's answer on this objection. The token names which of the six \
              arms; the substrate owns that vocabulary.",
         ),
         "escalation_open": e.steward.escalates(),
         "outcome": e.outcome.as_str(),
         "outcome_message": m(
-            &format!("commons.outcome.{}", e.outcome.as_str()),
+            &format!("commons_surface.outcome.{}", e.outcome.as_str()),
             "What the commons said once it was asked. The token names which of the four arms; \
              the substrate owns that vocabulary.",
         ),
@@ -537,7 +537,7 @@ fn standing_json(
         "objection_threshold": OBJECTION_THRESHOLD,
         "escalation_respondent_floor": ESCALATION_RESPONDENT_FLOOR,
         "asymmetry_message": m(
-            "commons.asymmetry",
+            "commons_surface.asymmetry",
             "One member raises the brake; the cohort must agree to lift it. Raising protection \
              is unconditional and costs one signature; undoing somebody else's costs the \
              cohort's own threshold, and the escalated undo can never fall below an absolute \
@@ -631,7 +631,7 @@ fn parse_cohort(raw: &str) -> Result<Cohort, Response> {
         Ok(Cohort::SelfId) => Err(refusal(
             StatusCode::BAD_REQUEST,
             "cohort_not_a_commons",
-            "commons.refusal.cohort_not_a_commons",
+            "commons_surface.refusal.cohort_not_a_commons",
             "The `self` cohort has no roster to be a quorum over — its members are one \
              identity's own devices — so it has no commons to police.",
         )),
@@ -639,7 +639,7 @@ fn parse_cohort(raw: &str) -> Result<Cohort, Response> {
         Err(bad) => Err(err(
             StatusCode::BAD_REQUEST,
             "cohort_unrecognized",
-            "commons.refusal.cohort_unrecognized",
+            "commons_surface.refusal.cohort_unrecognized",
             format!("`{bad}` is not a rostered cohort."),
         )),
     }
@@ -676,7 +676,7 @@ async fn get_standing(
             return err(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                "commons.refusal.bad_now",
+                "commons_surface.refusal.bad_now",
                 e,
             )
         }
@@ -840,21 +840,21 @@ async fn check_base(
         (
             &base.cohort_key_id,
             "cohort_absent",
-            "commons.refusal.cohort_absent",
+            "commons_surface.refusal.cohort_absent",
             "cohort_key_id is required: it names whose roster and whose declaration govern the \
              count.",
         ),
         (
             &base.action_id,
             "action_absent",
-            "commons.refusal.action_absent",
+            "commons_surface.refusal.action_absent",
             "action_id is required. An objection names a row in the commons; one that names \
              nothing can never be counted.",
         ),
         (
             &base.grounds,
             "grounds_absent",
-            "commons.refusal.grounds_absent",
+            "commons_surface.refusal.grounds_absent",
             "grounds is required. An objection raised for no recorded reason is \
              indistinguishable from one raised for a bad one — and grounds are recorded, never \
              interpreted.",
@@ -872,14 +872,14 @@ async fn check_base(
         Ok(None) => Err(refusal(
             StatusCode::NOT_FOUND,
             "action_unknown",
-            "commons.refusal.action_unknown",
+            "commons_surface.refusal.action_unknown",
             "This node holds no such action, so a row naming it would be filed where no fold \
              will ever count it. The substrate refuses the same case at its own door.",
         )),
         Err(e) => Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
             "store_unavailable",
-            "commons.refusal.store_unavailable",
+            "commons_surface.refusal.store_unavailable",
             format!("The substrate could not be read: {e}"),
         )),
     }
@@ -968,7 +968,7 @@ fn outcome_response(
             body.insert(
                 "message".into(),
                 m(
-                    &format!("commons.refusal.{token}"),
+                    &format!("commons_surface.refusal.{token}"),
                     &format!(
                         "The substrate refused this row at the {token} gate. The refusal token \
                          names which rule; the substrate owns that vocabulary."
@@ -984,7 +984,7 @@ fn sign_failed(e: String) -> Response {
     err(
         StatusCode::SERVICE_UNAVAILABLE,
         "sign_failed",
-        "commons.refusal.sign_failed",
+        "commons_surface.refusal.sign_failed",
         e,
     )
 }
@@ -993,7 +993,7 @@ fn store_unavailable(e: String) -> Response {
     err(
         StatusCode::SERVICE_UNAVAILABLE,
         "store_unavailable",
-        "commons.refusal.store_unavailable",
+        "commons_surface.refusal.store_unavailable",
         format!("The substrate could not be written: {e}"),
     )
 }
@@ -1037,7 +1037,7 @@ async fn post_objection(
     outcome_response(
         outcome,
         m(
-            "commons.objection.admitted",
+            "commons_surface.objection.admitted",
             "The objection is on the record. It is a MARKER, not a command: nothing was changed \
              by its arrival, and it replicates on the ordinary attestation plane so a peer that \
              was partitioned during the window still counts it when it arrives. One member is \
@@ -1064,7 +1064,7 @@ async fn post_ballot(
     if let Some(r) = require_nonblank(
         &req.objection_id,
         "objection_absent",
-        "commons.refusal.objection_absent",
+        "commons_surface.refusal.objection_absent",
         "objection_id is required: a ballot answers a question about ONE objection.",
     ) {
         return r;
@@ -1096,7 +1096,7 @@ async fn post_ballot(
     outcome_response(
         outcome,
         m(
-            "commons.ballot.admitted",
+            "commons_surface.ballot.admitted",
             "The ballot is on the record. It has NO force on its own: its price is paid at read \
              time against a denominator that does not exist yet when it is cast — whether the \
              pool ever reaches the escalated threshold depends on who else answers. A member may \
@@ -1123,7 +1123,7 @@ async fn post_dismissal(
     if let Some(r) = require_nonblank(
         &req.objection_id,
         "objection_absent",
-        "commons.refusal.objection_absent",
+        "commons_surface.refusal.objection_absent",
         "objection_id is required: a dismissal lifts ONE named objection.",
     ) {
         return r;
@@ -1141,7 +1141,7 @@ async fn post_dismissal(
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "canonicalize_failed",
-                "commons.refusal.canonicalize_failed",
+                "commons_surface.refusal.canonicalize_failed",
                 e,
             )
         }
@@ -1155,7 +1155,7 @@ async fn post_dismissal(
                 "envelope": envelope,
                 "payload_sha256": sha,
                 "message": m(
-                    "commons.dry_run",
+                    "commons_surface.dry_run",
                     "Nothing was signed and nothing was submitted. These are the exact canonical \
                      bytes each co-signer must sign for their scrub to count on the real \
                      submission — the m-of-n is over these bytes and no others.",
@@ -1192,7 +1192,7 @@ async fn post_dismissal(
     outcome_response(
         decision.outcome,
         m(
-            "commons.dismissal.admitted",
+            "commons_surface.dismissal.admitted",
             "The objection is lifted for the count. The threshold is re-derived from this node's \
              own roster on every later read, so a dismissal that stops clearing a grown roster \
              stops suppressing — and the protection it removed comes back.",
@@ -1408,7 +1408,7 @@ mod tests {
                     serde_json::Map::new(),
                 );
                 assert_eq!(resp.status(), StatusCode::CONFLICT);
-                format!("commons.refusal.{}", r.as_str())
+                format!("commons_surface.refusal.{}", r.as_str())
             })
             .collect();
         assert_eq!(ids.len(), ObjectionRefusalReason::ALL.len());

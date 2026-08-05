@@ -3181,6 +3181,85 @@
       "expired": "Cửa sổ thời gian của hàng này đã đóng. Phép gấp loại bỏ một hàng đã hết hạn ngay lúc đọc, nên nó không cần bị thu hồi và không cần tác giả còn tiếp cận được.",
       "running": "Cửa sổ thời gian của hàng này đang mở và sẽ đóng vào thời điểm được nêu.",
       "unbounded": "Hàng này không mang hạn hết hiệu lực. Nó áp dụng cho đến khi bị thay thế."
+    },
+    "consumption": {
+      "wired": "Một vòng lặp trong bản dựng này đọc khóa này và thay đổi hành vi của nó theo đó. Giá trị hiệu lực hiển thị bên cạnh đang thực sự có hiệu lực trên nút này.",
+      "elsewhere": "Không vòng lặp nào trong bản dựng này đọc khóa này — bên tiêu thụ nó nằm ở một thành phần khác. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì trên nút này.",
+      "unbuilt": "Bên tiêu thụ của khóa này chưa được xây dựng ở bất cứ đâu. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Một thành viên kéo phanh; cả nhóm phải đồng thuận mới gỡ được phanh đó. Việc dựng lên sự bảo vệ là vô điều kiện và chỉ tốn một chữ ký; việc gỡ bỏ sự bảo vệ do người khác dựng lên thì tốn đúng ngưỡng của chính nhóm, và bản gỡ bỏ sau khi leo thang không bao giờ được rơi xuống dưới một mức sàn tuyệt đối mà không chuỗi chính sách nào có thể hạ thấp.",
+    "ballot": {
+      "admitted": "Lá phiếu đã được ghi vào hồ sơ. Tự nó KHÔNG có hiệu lực nào: cái giá của nó chỉ được trả lúc đọc, dựa trên một mẫu số còn chưa tồn tại vào lúc bỏ phiếu — việc bể phiếu có bao giờ đạt tới ngưỡng leo thang hay không phụ thuộc vào những ai khác trả lời. Một thành viên có thể đổi ý; lá phiếu mới nhất là lá phiếu chi phối."
+    },
+    "dismissal": {
+      "admitted": "Phản đối được gỡ ra khỏi phép đếm. Ngưỡng được suy ra lại từ chính danh sách thành viên của nút này ở mỗi lần đọc về sau, nên một quyết định bác bỏ không còn vượt được một danh sách đã lớn lên thì cũng ngừng đè phản đối xuống — và sự bảo vệ mà nó đã gỡ bỏ sẽ quay trở lại."
+    },
+    "dry_run": "Không có gì được ký và không có gì được gửi đi. Đây đúng là các byte chuẩn tắc mà mỗi người đồng ký phải ký để lượt scrub của họ được tính trong lần gửi thật — phép m-trên-n được tính trên chính những byte này chứ không phải trên byte nào khác.",
+    "escalation": {
+      "awaiting": "Những người kiểm duyệt được chỉ định vẫn có thể trả lời, hoặc họ đã phán quyết đúng hạn. Việc leo thang chưa mở ra.",
+      "not_adopted": "Cộng đồng này không tuyên bố tầng quản hộ (steward) nào, nên không có hạn chót cho người kiểm duyệt và không có leo thang. Ở đây, sự im lặng không thay đổi điều gì.",
+      "nothing_to_escalate": "Một tầng quản hộ (steward) đã được tuyên bố và không có phản đối nào còn hiệu lực đang chờ nó. Không ai im lặng cả, bởi vì không có gì được hỏi.",
+      "open": "Những người giữ nhiệm vụ đã không trả lời đúng hạn, và quyết định chuyển sang cho những ai đã trả lời. Ngưỡng bây giờ đếm NHỮNG NGƯỜI ĐÃ TRẢ LỜI thay vì toàn bộ danh sách thành viên — chính điều đó cho phép một cộng đồng ít lên tiếng vẫn giải quyết được việc — kèm một mức sàn để «có thể đạt tới» không bao giờ tụt xuống thành «một người quyết định»."
+    },
+    "objection": {
+      "admitted": "Phản đối đã được ghi vào hồ sơ. Đó là một DẤU HIỆU, không phải một mệnh lệnh: sự xuất hiện của nó không thay đổi điều gì, và nó được sao chép trên mặt phẳng chứng thực thông thường, nên một nút ngang hàng bị chia cắt trong suốt cửa sổ vẫn tính nó khi nó tới nơi. Một thành viên là đủ để nêu nó lên; việc gỡ bỏ nó tốn đúng ngưỡng của chính nhóm."
+    },
+    "outcome": {
+      "dismissed": "Những người đã trả lời phán quyết rằng phản đối này không đứng vững, và nó bị đè xuống trong phép đếm.",
+      "not_escalated": "Việc leo thang đã không mở ra cho phản đối này.",
+      "unresolved": "Việc leo thang đang mở và chưa ngã ngũ: quá ít người đã trả lời, hoặc chưa bên nào đạt tới ngưỡng. Không có gì thay đổi — phản đối vẫn đứng vững đúng như trước.",
+      "upheld": "Những người đã trả lời phán quyết rằng phản đối này đứng vững."
+    },
+    "refusal": {
+      "action_absent": "Phải nêu tên một hành động. Một phản đối nêu tên một hàng trong tài sản chung; phản đối không nêu tên gì cả thì không bao giờ có thể được đếm.",
+      "action_unknown": "Nút này không giữ hành động nào như vậy, nên một hàng nêu tên nó sẽ được nộp vào nơi mà không phép gấp nào từng đếm tới.",
+      "actor_recused": "Tác giả của hành động không bỏ phiếu về phản đối nhắm vào chính hành động của mình.",
+      "bad_now": "Thời điểm đọc phải là một dấu thời gian RFC 3339.",
+      "ballot_predates_action": "Một phán quyết không thể cũ hơn thứ mà nó phán xét.",
+      "canonicalize_failed": "Không tạo ra được các byte chuẩn tắc của hàng này, nên không có gì để một người đồng ký có thể ký.",
+      "cohort_absent": "Phải nêu tên một nhóm (cohort): chính nó quyết định danh sách thành viên của ai và tuyên bố của ai sẽ chi phối phép đếm.",
+      "cohort_not_a_commons": "Nhóm self không có danh sách thành viên nào để lập túc số bên trên — các thành viên của nó là những thiết bị của chính một danh tính — nên nó không có tài sản chung nào để tự quản.",
+      "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên không có danh sách thành viên và không có tuyên bố nào để phán xét việc này. Thẩm quyền phải đến từ trạng thái đã xác minh tại chỗ.",
+      "cohort_unrecognized": "Đó không phải một nhóm (cohort) có danh sách thành viên. Các phản đối sống trong một gia đình (family), một cộng đồng (community) hoặc một nhóm liên kết (affiliations).",
+      "dimension_mismatch": "Hàng đó được trình ở sai cửa so với thứ mà nó mang.",
+      "dismissal_quorum_short": "Số thành viên riêng biệt, đã được xác minh, cùng ký thì ít hơn mức ngưỡng của nhóm đòi hỏi. Con số đã đếm và con số yêu cầu nằm ngay bên cạnh thông báo này.",
+      "duplicate_objection": "Bạn đã có sẵn một phản đối còn hiệu lực đối với hành động này. Một thành viên là một phản đối — nếu không, một thành viên đơn lẻ có thể tự mình đạt tới ngưỡng.",
+      "grounds_absent": "Bắt buộc phải có căn cứ. Một phản đối nêu lên mà không có lý do nào được ghi lại thì không thể phân biệt với một phản đối nêu lên vì lý do tồi — và căn cứ chỉ được ghi lại, không bao giờ được diễn giải.",
+      "malformed_envelope": "Hàng này thiếu một tham chiếu mà phép đếm cần đến.",
+      "node_unowned": "Nút này không có bên chịu trách nhiệm nào, nên nó không đọc và cũng không nói thay ai trong tài sản chung của họ. Hãy nhận quyền sở hữu trước.",
+      "not_a_cohort_member": "Chỉ thành viên của nhóm này mới được nói trong tài sản chung của nó. Đây là phép kiểm tra duy nhất mà phía bảo vệ áp dụng — và là lý do vì sao phản đối của một người lạ không bao giờ trở thành một dấu hiệu mà người khác có thể tôn trọng.",
+      "not_filed_against_actor": "Hàng này được nộp vào nơi mà phép gấp không tìm tới, nên nó sẽ được lưu trữ, bền vững và trơ vĩnh viễn. Một dấu hiệu không ai tìm ra được thì không phải là một dấu hiệu.",
+      "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên nó chưa áp dụng mặt phẳng phản đối. Từ chối chứ không lấy giá trị mặc định: tự bịa ra một cửa sổ và một ngưỡng cho một nhóm chưa tuyên bố cả hai thứ đó còn tệ hơn là nói không.",
+      "not_owner": "Bề mặt tài sản chung đòi hỏi vai trò chủ sở hữu.",
+      "objection_absent": "Phải nêu tên một phản đối: một lá phiếu và một quyết định bác bỏ, mỗi thứ chỉ trả lời cho đúng một phản đối.",
+      "objection_unknown": "Phản đối được nêu tên không phải là phản đối mà nút này đang giữ đối với hành động này.",
+      "session_absent": "Không có token phiên nào được trình. Bề mặt tài sản chung chỉ dành cho chủ sở hữu.",
+      "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
+      "sign_failed": "Nút này không ký được hàng, nên không có gì được gửi đi.",
+      "steward_tier_not_adopted": "Cộng đồng này không tuyên bố tầng quản hộ (steward) nào, nên không có hạn chót nào để im lặng vượt qua và không có bể leo thang. Một lá phiếu ở đây sẽ được lưu trữ và không bao giờ được đọc.",
+      "store_unavailable": "Không thể tiếp cận được nền tảng.",
+      "target_action_unknown": "Hành động bị phản đối không phải là một hàng mà nút này đang giữ, nên phản đối sẽ không đếm được và cửa sổ của nó không giải quyết được.",
+      "unverifiable_signature": "Chữ ký của hàng không xác minh được với các khóa của người ký như đã đăng ký trên nút này."
+    },
+    "standing": {
+      "action_unknown": "Nút này không giữ hành động nào như vậy. Một phản đối nêu tên một hàng, mà ở đây không có hàng nào để nêu tên.",
+      "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên nó không có danh sách thành viên và không có tuyên bố nào mà nút này đọc được.",
+      "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên mặt phẳng phản đối hoàn toàn không áp dụng cho tài sản chung của nó. Điều đó khác với việc không có ai phản đối.",
+      "objected": "Ít nhất một thành viên đã phản đối và cửa sổ vẫn đang mở. Hành động tạm thời vẫn có hiệu lực; có thể chỉ cần thêm một phản đối nữa là đủ.",
+      "quiet": "Mặt phẳng đã được đọc và chưa có phản đối nào được nêu lên đối với hành động này.",
+      "reversed": "Đủ số thành viên riêng biệt đã phản đối bên trong cửa sổ. Mọi nút đang giữ những hàng này đều gấp ra cùng một đáp án, không cần phối hợp gì.",
+      "stood": "Cửa sổ đã đóng ở mức dưới ngưỡng đảo ngược. Hành động này từng bị phản đối và vẫn có hiệu lực.",
+      "unreadable": "Không thể đọc mặt phẳng phản đối tại đây. Đây KHÔNG phải khẳng định rằng không có ai phản đối — các phản đối là chưa xác định, không phải là không tồn tại."
+    },
+    "steward": {
+      "awaiting": "Hạn chót chưa trôi qua. Những người kiểm duyệt được chỉ định vẫn có thể trả lời.",
+      "no_duty_holders": "Một tầng quản hộ (steward) đã được tuyên bố và nút này không phân giải được người kiểm duyệt được chỉ định nào cho nó. Không ai im lặng cả, bởi vì không có ai ở đó.",
+      "not_adopted": "Không có tầng quản hộ (steward) nào được tuyên bố, nên không có hạn chót nào cho người kiểm duyệt được áp dụng.",
+      "overruled": "Những người kiểm duyệt được chỉ định phán quyết rằng phản đối này không đứng vững — và việc leo thang vẫn cứ mở ra, bởi một quyết định gỡ bỏ không bao giờ là việc của riêng họ.",
+      "silent": "Hạn chót đã trôi qua mà không có phán quyết nào theo cả hai chiều.",
+      "upheld": "Những người kiểm duyệt được chỉ định đã phán quyết, đúng hạn, rằng phản đối này đứng vững. Vụ việc đã được phán xét bởi những người có tên, và được ghi vào hồ sơ."
     }
   }
 }

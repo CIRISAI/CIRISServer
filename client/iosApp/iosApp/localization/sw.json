@@ -3181,6 +3181,85 @@
       "expired": "Dirisha la safu hii limefungwa. Ukunjaji hutupilia mbali safu iliyokwisha muda wakati wa kusoma, kwa hivyo hauhitaji ubatilishaji wala mwandishi anayeweza kufikiwa.",
       "running": "Dirisha la safu hii liko wazi na litafungwa katika wakati uliotajwa.",
       "unbounded": "Safu hii haina tarehe ya kuisha. Inatumika hadi itakapobadilishwa na nyingine."
+    },
+    "consumption": {
+      "wired": "Mzunguko katika toleo hili lililojengwa husoma ufunguo huu na kubadilisha kile unachofanya. Thamani halisi iliyo kando yake inatumika kwenye nodi hii.",
+      "elsewhere": "Hakuna mzunguko katika toleo hili lililojengwa unaosoma ufunguo huu — mtumiaji wake yuko katika kipengele kingine. Safu iliyowekwa hapa hukubaliwa na kukunjwa, na haibadilishi chochote kwenye nodi hii.",
+      "unbuilt": "Mtumiaji wa ufunguo huu bado hajajengwa popote. Safu iliyowekwa hapa hukubaliwa na kukunjwa, na haibadilishi chochote."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Mwanachama mmoja huweka breki; kundi zima lazima likubali kuiondoa. Kuweka ulinzi hakuna masharti na hugharimu saini moja tu; kutengua ulinzi wa mtu mwingine hugharimu kizingiti cha kundi lenyewe, na utenguzi uliopandishwa ngazi hauwezi kamwe kushuka chini ya kiwango cha chini kabisa ambacho hakuna tamko lolote la sera linaloweza kukishusha.",
+    "ballot": {
+      "admitted": "Kura imeingia kwenye rekodi. HAINA nguvu yoyote peke yake: gharama yake hulipwa wakati wa kusoma dhidi ya kigawanyo ambacho bado hakipo wakati inapopigwa — kama bwawa litafikia kizingiti kilichopandishwa ngazi au la inategemea ni nani mwingine atakayejibu. Mwanachama anaweza kubadili nia yake; kura ya mwisho ndiyo inayotawala."
+    },
+    "dismissal": {
+      "admitted": "Pingamizi limeondolewa kwenye hesabu. Kizingiti hukokotolewa upya kutokana na orodha ya nodi hii yenyewe katika kila usomaji unaofuata, kwa hivyo utupiliaji mbali unaoacha kufikia kizingiti cha orodha iliyokua huacha kukandamiza pingamizi — na ulinzi uliokuwa umeondolewa hurejea."
+    },
+    "dry_run": "Hakuna kilichosainiwa na hakuna kilichowasilishwa. Hizi ndizo baiti kamili za kikanuni ambazo kila msaini-mwenza lazima azisaini ili scrub yake ihesabike katika uwasilishaji halisi — m-kati-ya-n hupimwa juu ya baiti hizi na si nyingine zozote.",
+    "escalation": {
+      "awaiting": "Wasimamizi walioteuliwa bado wanaweza kujibu, au tayari wameamua kwa wakati. Kupanda ngazi hakujafunguliwa.",
+      "not_adopted": "Jamii hii haikutangaza tabaka lolote la waangalizi, kwa hivyo hakuna muda wa mwisho wa wasimamizi wala kupanda ngazi. Ukimya haubadilishi chochote hapa.",
+      "nothing_to_escalate": "Tabaka la waangalizi limetangazwa na hakuna pingamizi hai linalolisubiri. Hakuna aliyekaa kimya, kwa sababu hakuna kilichoulizwa.",
+      "open": "Washika-wajibu hawakujibu kwa wakati, na uamuzi umehamia kwa wale waliojibu. Sasa kizingiti huhesabu WALIOJIBU badala ya orodha nzima — ndicho kinachoiwezesha jamii tulivu kufikia uamuzi — lakini kimewekewa kiwango cha chini ili ‘inayofikika’ isishuke kamwe hadi ‘mtu mmoja ndiye anayeamua’."
+    },
+    "objection": {
+      "admitted": "Pingamizi limeingia kwenye rekodi. Ni ALAMA, si amri: hakuna kilichobadilishwa kwa kuwasili kwake, na hujirudufu katika uwanda wa kawaida wa uthibitisho ili mwenza aliyekuwa ametenganishwa wakati wa dirisha bado hulihesabu linapowasili kwake. Mwanachama mmoja anatosha kuliweka; kuliondoa hugharimu kizingiti cha kundi lenyewe."
+    },
+    "outcome": {
+      "dismissed": "Wale waliojibu waliamua kwamba pingamizi hili halisimami, na limeondolewa kwenye hesabu.",
+      "not_escalated": "Kupanda ngazi hakukufunguliwa kwa pingamizi hili.",
+      "unresolved": "Kupanda ngazi kuko wazi na hakujaamuliwa: waliojibu ni wachache mno, au hakuna upande uliofikia kizingiti. Hakuna kinachobadilika — pingamizi linasimama vilevile kama lilivyokuwa.",
+      "upheld": "Wale waliojibu waliamua kwamba pingamizi hili linasimama."
+    },
+    "refusal": {
+      "action_absent": "Ni lazima kitendo kitajwe. Pingamizi hutaja safu iliyo katika mali ya pamoja; lile lisilotaja chochote haliwezi kamwe kuhesabika.",
+      "action_unknown": "Nodi hii haishikilii kitendo kama hicho, kwa hivyo safu inayokitaja ingewasilishwa mahali ambapo hakuna ukunjaji utakaoihesabu kamwe.",
+      "actor_recused": "Mwandishi wa kitendo hapigi kura kuhusu pingamizi dhidi ya tendo lake mwenyewe.",
+      "bad_now": "Wakati wa kusoma lazima uwe muhuri wa saa wa RFC 3339.",
+      "ballot_predates_action": "Hukumu haiwezi kuwa ya zamani kuliko kile inachokihukumu.",
+      "canonicalize_failed": "Baiti za kikanuni za safu hii hazikuweza kutengenezwa, kwa hivyo hakuna chochote ambacho msaini-mwenza angeweza kusaini.",
+      "cohort_absent": "Ni lazima kundi litajwe: ndilo linaloamua orodha ya nani na tamko la nani vinavyotawala hesabu.",
+      "cohort_not_a_commons": "Kundi la nafsi halina orodha ambayo akidi ingepimwa juu yake — wanachama wake ni vifaa vya utambulisho mmoja wenyewe — kwa hivyo halina mali ya pamoja ya kusimamia nidhamu yake.",
+      "cohort_unknown": "Kundi hilo halipatikani katika nodi hii, kwa hivyo hakuna orodha wala tamko la kuhukumia jambo hili. Mamlaka lazima yatoke katika hali ya kienyeji iliyothibitishwa.",
+      "cohort_unrecognized": "Hilo si kundi lenye orodha. Mapingamizi hukaa katika familia, jamii au kikundi cha mahusiano.",
+      "dimension_mismatch": "Safu hiyo iliwasilishwa kwenye mlango usio sahihi kwa kile inachobeba.",
+      "dismissal_quorum_short": "Wanachama tofautitofauti walioorodheshwa na kuthibitishwa waliosaini pamoja ni wachache kuliko kizingiti cha kundi kinavyodai. Idadi iliyohesabiwa na ile inayohitajika zimo kando ya ujumbe huu.",
+      "duplicate_objection": "Tayari unashikilia pingamizi hai dhidi ya kitendo hiki. Mwanachama mmoja ni pingamizi moja — vinginevyo mwanachama mmoja peke yake angeweza kufikia kizingiti.",
+      "grounds_absent": "Sababu zinahitajika. Pingamizi lililowekwa bila sababu iliyorekodiwa halitofautishiki na lile lililowekwa kwa sababu mbaya — na sababu hurekodiwa, hazifasiriwi kamwe.",
+      "malformed_envelope": "Safu hii imekosa rejea ambayo hesabu inaihitaji.",
+      "node_unowned": "Nodi hii haina mtu anayewajibika, kwa hivyo haisomi wala haizungumzi katika mali ya pamoja ya mtu yeyote kwa niaba yake. Dai umiliki kwanza.",
+      "not_a_cohort_member": "Ni mwanachama wa kundi hili pekee anayeweza kuzungumza katika mali ya pamoja yake. Hiki ndicho kipimo pekee kinachotumiwa na upande wa ulinzi — na ndiyo sababu pingamizi la mgeni kamwe haliwi alama ambayo wengine wanaweza kuiheshimu.",
+      "not_filed_against_actor": "Safu imewasilishwa mahali ambapo ukunjaji hauitafuti, kwa hivyo ingehifadhiwa, ikadumu na ikabaki bila athari milele. Alama ambayo hakuna anayeweza kuipata si alama.",
+      "not_governed": "Jamii hii haitangazi sera yoyote ya akidi kinyume, kwa hivyo haijaukubali uwanda wa mapingamizi. Imekataliwa badala ya kupewa chaguo-msingi: kubuni dirisha na kizingiti kwa kikundi ambacho hakikutangaza chochote kati ya hivyo ni baya zaidi kuliko kusema hapana.",
+      "not_owner": "Uso wa mali ya pamoja unahitaji jukumu la mmiliki.",
+      "objection_absent": "Ni lazima pingamizi litajwe: kura na kutupilia mbali kila kimoja hujibu kwa pingamizi moja tu.",
+      "objection_unknown": "Pingamizi lililotajwa si mojawapo ya yale ambayo nodi hii inashikilia dhidi ya kitendo hiki.",
+      "session_absent": "Hakuna tokeni ya kipindi iliyowasilishwa. Uso wa mali ya pamoja ni wa mmiliki pekee.",
+      "session_invalid": "Kipindi hicho si halali au kimekwisha muda.",
+      "sign_failed": "Nodi hii haikuweza kuisaini safu, kwa hivyo hakuna kilichowasilishwa.",
+      "steward_tier_not_adopted": "Jamii hii haikutangaza tabaka lolote la waangalizi, kwa hivyo hakuna muda wa mwisho wa kukaa kimya kuupita wala bwawa lililopandishwa ngazi. Kura hapa ingehifadhiwa na kamwe isingesomwa.",
+      "store_unavailable": "Msingi haukuweza kufikiwa.",
+      "target_action_unknown": "Kitendo kilichopingwa si safu ambayo nodi hii inashikilia, kwa hivyo pingamizi lisingehesabika na dirisha lake lisingeweza kutatuliwa.",
+      "unverifiable_signature": "Saini ya safu haikuthibitika dhidi ya funguo za msaini kama zilivyosajiliwa katika nodi hii."
+    },
+    "standing": {
+      "action_unknown": "Nodi hii haishikilii kitendo kama hicho. Pingamizi hutaja safu, na hapa hakuna safu ya kutajwa.",
+      "cohort_unknown": "Kundi hilo halipatikani katika nodi hii, kwa hivyo halina orodha wala tamko ambalo nodi hii inaweza kulisoma.",
+      "not_governed": "Jamii hii haitangazi sera yoyote ya akidi kinyume, kwa hivyo uwanda wa mapingamizi hauhusiki hata kidogo na mali ya pamoja yake. Hilo ni tofauti na kusema hakuna aliyepinga.",
+      "objected": "Angalau mwanachama mmoja amepinga na dirisha bado liko wazi. Kitendo kinasimama kwa sasa; pingamizi moja zaidi linaweza kutosha.",
+      "quiet": "Uwanda ulisomwa na hakuna pingamizi lililowekwa dhidi ya kitendo hiki.",
+      "reversed": "Wanachama tofautitofauti wa kutosha walipinga ndani ya dirisha. Kila nodi inayoshikilia safu hizi hukunja na kufikia jibu hilihili, bila uratibu wowote.",
+      "stood": "Dirisha lilifungwa chini ya kizingiti cha utenguzi. Kitendo hiki kilipingwa na kinasimama.",
+      "unreadable": "Uwanda wa mapingamizi haukuweza kusomwa hapa. HII SI kauli kwamba hakuna aliyepinga — mapingamizi hayajulikani, si kwamba hayapo."
+    },
+    "steward": {
+      "awaiting": "Muda wa mwisho bado haujapita. Wasimamizi walioteuliwa bado wanaweza kujibu.",
+      "no_duty_holders": "Tabaka la waangalizi limetangazwa na nodi hii haipati msimamizi yeyote aliyeteuliwa kwa ajili yake. Hakuna aliyekaa kimya, kwa sababu hakukuwa na mtu.",
+      "not_adopted": "Hakuna tabaka la waangalizi lililotangazwa, kwa hivyo hakuna muda wa mwisho wa wasimamizi unaohusika.",
+      "overruled": "Wasimamizi walioteuliwa waliamua kwamba pingamizi hili halisimami — na kupanda ngazi kunafunguka hata hivyo, kwa sababu utenguzi kamwe si wao peke yao kuufanya.",
+      "silent": "Muda wa mwisho ulipita bila uamuzi wa upande wowote.",
+      "upheld": "Wasimamizi walioteuliwa waliamua, kwa wakati, kwamba pingamizi hili linasimama. Jambo hili lilihukumiwa na watu waliotajwa kwa majina, na kuwekwa kwenye rekodi."
     }
   }
 }

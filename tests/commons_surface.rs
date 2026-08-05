@@ -796,7 +796,7 @@ async fn property_1_one_member_is_one_objection() {
     );
     assert_eq!(
         second["message"]["id"],
-        serde_json::json!("commons.refusal.duplicate_objection"),
+        serde_json::json!("commons_surface.refusal.duplicate_objection"),
         "the message id is derived from persist's token"
     );
 }

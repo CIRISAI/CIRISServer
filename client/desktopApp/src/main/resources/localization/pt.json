@@ -3181,6 +3181,85 @@
       "expired": "A janela desta linha foi fechada. A incorporação descarta uma linha expirada no momento da leitura, portanto ela não precisa de revogação nem de um autor alcançável.",
       "running": "A janela desta linha está aberta e fecha no instante indicado.",
       "unbounded": "Esta linha não carrega prazo de expiração. Ela se aplica até ser substituída."
+    },
+    "consumption": {
+      "wired": "Um loop nesta compilação lê esta chave e muda o que faz. O valor efetivo ao lado dela está em vigor neste nó.",
+      "elsewhere": "Nenhum loop nesta compilação lê esta chave — seu consumidor vive em outro componente. Uma linha definida aqui é admitida e incorporada, e não muda nada neste nó.",
+      "unbuilt": "O consumidor desta chave ainda não foi construído em lugar nenhum. Uma linha definida aqui é admitida e incorporada, e não muda nada."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Um único membro aciona o freio; para liberá-lo é preciso o acordo da coorte. Acionar a proteção é incondicional e custa uma assinatura; desfazer a de outra pessoa custa o limiar da própria coorte, e o desfazer escalonado jamais pode cair abaixo de um piso absoluto que nenhuma declaração de política pode rebaixar.",
+    "ballot": {
+      "admitted": "O voto está registrado. Ele NÃO tem força por si só: seu preço é pago no momento da leitura, contra um denominador que ainda não existe quando ele é lançado — se o conjunto chegará ou não ao limiar escalonado depende de quem mais responder. Um membro pode mudar de ideia; vale o voto mais recente."
+    },
+    "dismissal": {
+      "admitted": "A objeção fica suspensa para efeito da contagem. O limiar é recalculado a partir do próprio quadro de membros deste nó a cada leitura posterior, portanto um indeferimento que deixe de atingir o limiar de um quadro que cresceu deixa de suprimir — e a proteção que ele havia removido volta."
+    },
+    "dry_run": "Nada foi assinado e nada foi submetido. Estes são exatamente os bytes canônicos que cada co-signatário precisa assinar para que seu scrub conte na submissão real — o m-de-n é sobre estes bytes e sobre nenhum outro.",
+    "escalation": {
+      "awaiting": "Os moderadores nomeados ainda podem responder, ou já decidiram dentro do prazo. O escalonamento não foi aberto.",
+      "not_adopted": "Esta comunidade não declarou nenhuma camada de curadores, portanto não há prazo para os moderadores nem escalonamento. Aqui o silêncio não muda nada.",
+      "nothing_to_escalate": "Há uma camada de curadores declarada e nenhuma objeção viva à espera dela. Ninguém ficou em silêncio, porque nada foi perguntado.",
+      "open": "Os titulares do dever não responderam a tempo, e a decisão passou a quem respondeu. O limiar agora conta os RESPONDENTES, e não todo o quadro de membros — é isso que permite que uma comunidade silenciosa ainda assim decida —, com um piso para que ‘alcançável’ nunca degenere em ‘uma pessoa decide’."
+    },
+    "objection": {
+      "admitted": "A objeção está registrada. Ela é um MARCADOR, não um comando: nada foi alterado por sua chegada, e ela se replica pelo plano comum de atestação, de modo que um par que estava particionado durante a janela ainda a conta quando ela chega. Um único membro basta para levantá-la; retirá-la custa o limiar da própria coorte."
+    },
+    "outcome": {
+      "dismissed": "Quem respondeu decidiu que esta objeção não subsiste, e ela fica suprimida para efeito da contagem.",
+      "not_escalated": "O escalonamento não foi aberto para esta objeção.",
+      "unresolved": "O escalonamento está aberto e indeciso: pouca gente respondeu, ou nenhum dos lados alcançou o limiar. Nada muda — a objeção permanece exatamente como estava.",
+      "upheld": "Quem respondeu decidiu que esta objeção subsiste."
+    },
+    "refusal": {
+      "action_absent": "É preciso nomear uma ação. Uma objeção nomeia uma linha do bem comum; uma que não nomeia nada jamais poderá ser contada.",
+      "action_unknown": "Este nó não mantém tal ação, portanto uma linha que a nomeasse seria arquivada onde nenhuma incorporação jamais a contará.",
+      "actor_recused": "O autor da ação não vota na objeção ao seu próprio ato.",
+      "bad_now": "O instante de leitura precisa ser um carimbo de tempo RFC 3339.",
+      "ballot_predates_action": "Um julgamento não pode ser mais antigo do que aquilo que julga.",
+      "canonicalize_failed": "Não foi possível produzir os bytes canônicos da linha, portanto não há nada que um co-signatário pudesse assinar.",
+      "cohort_absent": "É preciso nomear uma coorte: é ela que decide qual quadro de membros e qual declaração regem a contagem.",
+      "cohort_not_a_commons": "A coorte self não tem quadro de membros sobre o qual possa haver quórum — seus membros são os próprios dispositivos de uma única identidade —, portanto não tem bem comum a policiar.",
+      "cohort_unknown": "Essa coorte não resolve neste nó, portanto não há quadro de membros nem declaração pelos quais julgar isto. A autoridade precisa vir do estado local verificado.",
+      "cohort_unrecognized": "Essa não é uma coorte com quadro de membros. As objeções vivem em uma família, em uma comunidade ou em um grupo de afiliações.",
+      "dimension_mismatch": "Essa linha foi oferecida na porta errada para aquilo que ela carrega.",
+      "dismissal_quorum_short": "Menos membros distintos e verificados do quadro cossinaram do que exige o limiar da coorte. Os números contados e exigidos estão ao lado desta mensagem.",
+      "duplicate_objection": "Você já mantém uma objeção viva contra esta ação. Um membro é uma objeção — caso contrário, um único membro poderia alcançar o limiar sozinho.",
+      "grounds_absent": "É obrigatório apresentar fundamentos. Uma objeção levantada sem motivo registrado é indistinguível de uma levantada por um motivo ruim — e os fundamentos são registrados, nunca interpretados.",
+      "malformed_envelope": "Falta à linha uma referência de que a contagem precisa.",
+      "node_unowned": "Este nó não tem responsável, portanto não lê nem fala no bem comum de ninguém em nome de ninguém. Reivindique a propriedade primeiro.",
+      "not_a_cohort_member": "Somente um membro desta coorte pode falar em seu bem comum. Este é o único teste que o lado protetivo aplica — e a razão pela qual a objeção de um estranho nunca se torna um marcador que outros possam honrar.",
+      "not_filed_against_actor": "A linha está arquivada onde a incorporação não a procura, portanto ela ficaria armazenada, durável e permanentemente inerte. Um marcador que ninguém consegue encontrar não é um marcador.",
+      "not_governed": "Esta comunidade não declara nenhuma política de quórum reverso, portanto não adotou o plano de objeções. Recusado em vez de assumir um padrão: inventar uma janela e um limiar para um grupo que não declarou nem uma nem outro é pior do que dizer não.",
+      "not_owner": "A superfície do bem comum exige o papel de proprietário.",
+      "objection_absent": "É preciso nomear uma objeção: um voto e um indeferimento respondem, cada um, por exatamente uma.",
+      "objection_unknown": "A objeção nomeada não é uma das que este nó mantém contra esta ação.",
+      "session_absent": "Nenhum token de sessão foi apresentado. A superfície do bem comum é exclusiva do proprietário.",
+      "session_invalid": "Essa sessão é inválida ou expirou.",
+      "sign_failed": "Este nó não conseguiu assinar a linha, portanto nada foi submetido.",
+      "steward_tier_not_adopted": "Esta comunidade não declarou nenhuma camada de curadores, portanto não há prazo que se possa ultrapassar em silêncio nem conjunto escalonado. Um voto aqui seria armazenado e nunca lido.",
+      "store_unavailable": "Não foi possível alcançar o substrato.",
+      "target_action_unknown": "A ação objetada não é uma linha que este nó mantém, portanto a objeção seria incontável e sua janela não teria como se resolver.",
+      "unverifiable_signature": "A assinatura da linha não foi verificada contra as chaves do signatário tal como registradas neste nó."
+    },
+    "standing": {
+      "action_unknown": "Este nó não mantém tal ação. Uma objeção nomeia uma linha, e aqui não há linha alguma a nomear.",
+      "cohort_unknown": "Essa coorte não resolve neste nó, portanto não tem quadro de membros nem declaração que este nó possa ler.",
+      "not_governed": "Esta comunidade não declara nenhuma política de quórum reverso, portanto o plano de objeções simplesmente não se aplica ao seu bem comum. Isso é diferente de ninguém ter objetado.",
+      "objected": "Pelo menos um membro objetou e a janela ainda está aberta. Por ora a ação permanece de pé; mais uma objeção pode ser tudo o que falta.",
+      "quiet": "O plano foi lido e nenhuma objeção foi levantada contra esta ação.",
+      "reversed": "Membros distintos em número suficiente objetaram dentro da janela. Em todo nó que mantém estas linhas, a incorporação chega a esta mesma resposta, sem coordenação alguma.",
+      "stood": "A janela fechou abaixo do limiar de reversão. Esta ação foi objetada e permanece de pé.",
+      "unreadable": "O plano de objeções não pôde ser lido aqui. Isto NÃO é uma afirmação de que ninguém objetou — as objeções são desconhecidas, não inexistentes."
+    },
+    "steward": {
+      "awaiting": "O prazo ainda não venceu. Os moderadores nomeados ainda podem responder.",
+      "no_duty_holders": "Há uma camada de curadores declarada e este nó não resolve nenhum moderador nomeado para ela. Ninguém ficou em silêncio, porque não havia ninguém.",
+      "not_adopted": "Nenhuma camada de curadores foi declarada, portanto não se aplica prazo algum para os moderadores.",
+      "overruled": "Os moderadores nomeados decidiram que esta objeção não subsiste — e o escalonamento abre mesmo assim, porque desfazer nunca é decisão só deles.",
+      "silent": "O prazo venceu sem decisão em nenhum dos sentidos.",
+      "upheld": "Os moderadores nomeados decidiram, dentro do prazo, que esta objeção subsiste. A questão foi julgada por pessoas nomeadas, e ficou registrada."
     }
   }
 }

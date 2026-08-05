@@ -3181,6 +3181,85 @@
       "expired": "Jendela waktu baris ini telah tertutup. Proses fold membuang baris yang kedaluwarsa saat dibaca, sehingga tidak diperlukan pencabutan maupun penulis yang dapat dihubungi.",
       "running": "Jendela waktu baris ini terbuka dan akan tertutup pada waktu yang disebutkan.",
       "unbounded": "Baris ini tidak memiliki masa kedaluwarsa. Berlaku sampai digantikan."
+    },
+    "consumption": {
+      "wired": "Sebuah loop dalam build ini membaca kunci ini dan mengubah perilakunya. Nilai efektif di sebelahnya benar-benar berlaku pada node ini.",
+      "elsewhere": "Tidak ada loop dalam build ini yang membaca kunci ini — konsumennya berada di komponen lain. Baris yang disetel di sini diterima dan dilipat, dan tidak mengubah apa pun pada node ini.",
+      "unbuilt": "Konsumen untuk kunci ini belum dibangun di mana pun. Baris yang disetel di sini diterima dan dilipat, dan tidak mengubah apa pun."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Satu anggota menarik rem; kohort harus sepakat untuk melepasnya. Menaikkan perlindungan bersifat tanpa syarat dan berbiaya satu tanda tangan saja; membatalkan perlindungan yang dinaikkan orang lain berbiaya ambang batas milik kohort itu sendiri, dan pembatalan yang tereskalasi tidak pernah boleh jatuh di bawah batas bawah mutlak yang tak boleh diturunkan oleh string kebijakan mana pun.",
+    "ballot": {
+      "admitted": "Suara ini sudah tercatat. Dengan sendirinya suara ini TIDAK memiliki daya paksa: harganya dibayar saat-baca terhadap penyebut yang belum ada ketika suara itu diberikan — apakah kolam responden pernah mencapai ambang batas eskalasi bergantung pada siapa lagi yang menjawab. Seorang anggota boleh berubah pikiran; suara yang terakhirlah yang berlaku."
+    },
+    "dismissal": {
+      "admitted": "Keberatan ini digugurkan untuk keperluan penghitungan. Ambang batas dihitung ulang dari roster milik node ini sendiri pada setiap pembacaan berikutnya, sehingga pengguguran yang tidak lagi memenuhi ambang pada roster yang bertambah besar berhenti menekan keberatan itu — dan perlindungan yang tadinya dihilangkan kembali berlaku."
+    },
+    "dry_run": "Tidak ada yang ditandatangani dan tidak ada yang dikirim. Ini adalah byte kanonis persis yang harus ditandatangani setiap co-signer agar scrub mereka dihitung pada pengiriman yang sebenarnya — m-dari-n dihitung atas byte ini dan bukan atas byte yang lain.",
+    "escalation": {
+      "awaiting": "Moderator yang ditunjuk masih boleh menjawab, atau mereka memang sudah memutuskan tepat waktu. Eskalasi belum terbuka.",
+      "not_adopted": "Komunitas ini tidak mendeklarasikan tingkat steward, sehingga tidak ada tenggat bagi moderator dan tidak ada eskalasi. Kebisuan tidak mengubah apa pun di sini.",
+      "nothing_to_escalate": "Tingkat steward telah dideklarasikan dan tidak ada keberatan aktif yang sedang menunggunya. Tidak ada yang membisu, karena tidak ada yang ditanyakan.",
+      "open": "Para pengemban tugas tidak menjawab tepat waktu, dan keputusan berpindah kepada mereka yang menjawab. Ambang batas kini menghitung RESPONDEN, bukan seluruh roster — inilah yang membuat komunitas yang lengang tetap dapat memutuskan — dengan batas bawah agar ‘dapat dijangkau’ tidak pernah merosot menjadi ‘satu orang yang memutuskan’."
+    },
+    "objection": {
+      "admitted": "Keberatan ini sudah tercatat. Ini adalah PENANDA, bukan perintah: tidak ada yang berubah karena kedatangannya, dan ia direplikasi pada bidang atestasi biasa sehingga peer yang terpartisi selama jendela waktu tetap menghitungnya begitu keberatan itu sampai. Satu anggota saja sudah cukup untuk mengajukannya; menggugurkannya berbiaya ambang batas milik kohort itu sendiri."
+    },
+    "outcome": {
+      "dismissed": "Mereka yang menjawab memutuskan bahwa keberatan ini tidak berlaku, dan keberatan itu tidak diikutkan dalam penghitungan.",
+      "not_escalated": "Eskalasi tidak terbuka untuk keberatan ini.",
+      "unresolved": "Eskalasi terbuka dan belum diputuskan: terlalu sedikit yang menjawab, atau tidak ada satu pihak pun yang mencapai ambang batas. Tidak ada yang berubah — keberatan tetap berdiri persis seperti sebelumnya.",
+      "upheld": "Mereka yang menjawab memutuskan bahwa keberatan ini tetap berlaku."
+    },
+    "refusal": {
+      "action_absent": "Sebuah tindakan harus disebutkan. Keberatan menyebut satu baris di ranah bersama; keberatan yang tidak menyebut apa pun tidak akan pernah dapat dihitung.",
+      "action_unknown": "Node ini tidak memegang tindakan tersebut, sehingga baris yang menyebutnya akan diarsipkan di tempat yang tidak akan pernah dihitung oleh proses fold mana pun.",
+      "actor_recused": "Penulis tindakan tidak ikut memberikan suara atas keberatan terhadap perbuatannya sendiri.",
+      "bad_now": "Titik waktu saat-baca harus berupa stempel waktu RFC 3339.",
+      "ballot_predates_action": "Sebuah putusan tidak boleh lebih tua daripada hal yang diputuskannya.",
+      "canonicalize_failed": "Byte kanonis baris ini tidak dapat dihasilkan, sehingga tidak ada apa pun yang bisa ditandatangani oleh seorang co-signer.",
+      "cohort_absent": "Sebuah kohort harus disebutkan: kohort itulah yang menentukan roster siapa dan deklarasi siapa yang mengatur penghitungan.",
+      "cohort_not_a_commons": "Kohort diri tidak memiliki roster yang bisa dijadikan dasar kuorum — anggotanya adalah perangkat-perangkat milik satu identitas yang sama — sehingga ia tidak memiliki ranah bersama untuk diawasi.",
+      "cohort_unknown": "Kohort itu tidak dapat diresolusi di node ini, sehingga tidak ada roster dan tidak ada deklarasi yang bisa dijadikan dasar penilaian. Otoritas harus berasal dari keadaan lokal yang terverifikasi.",
+      "cohort_unrecognized": "Itu bukan kohort yang memiliki roster. Keberatan hanya hidup di dalam keluarga, komunitas, atau grup afiliasi.",
+      "dimension_mismatch": "Baris itu diajukan di pintu yang keliru untuk muatan yang dibawanya.",
+      "dismissal_quorum_short": "Jumlah anggota roster terverifikasi yang berbeda-beda yang ikut menandatangani lebih sedikit daripada yang dituntut ambang batas kohort. Angka yang terhitung dan yang dibutuhkan tertera di samping pesan ini.",
+      "duplicate_objection": "Anda sudah memiliki keberatan aktif terhadap tindakan ini. Satu anggota berarti satu keberatan — jika tidak, satu anggota saja bisa mencapai ambang batas seorang diri.",
+      "grounds_absent": "Alasan wajib disertakan. Keberatan yang diajukan tanpa alasan tercatat tidak dapat dibedakan dari keberatan yang diajukan atas alasan yang buruk — dan alasan hanya dicatat, tidak pernah ditafsirkan.",
+      "malformed_envelope": "Baris ini kehilangan sebuah rujukan yang dibutuhkan oleh penghitungan.",
+      "node_unowned": "Node ini tidak memiliki pihak yang bertanggung jawab, sehingga ia tidak membaca maupun berbicara di ranah bersama siapa pun atas nama mereka. Klaim kepemilikan terlebih dahulu.",
+      "not_a_cohort_member": "Hanya anggota kohort ini yang boleh berbicara di ranah bersamanya. Inilah satu-satunya uji yang diterapkan pada sisi pelindung — dan alasan mengapa keberatan dari orang asing tidak pernah menjadi penanda yang mungkin dihormati orang lain.",
+      "not_filed_against_actor": "Baris ini diarsipkan di tempat yang tidak dicari oleh proses fold, sehingga ia akan tersimpan, tahan lama, dan lembam selamanya. Penanda yang tidak dapat ditemukan siapa pun bukanlah penanda.",
+      "not_governed": "Komunitas ini tidak mendeklarasikan kebijakan kuorum terbalik, sehingga ia belum mengadopsi bidang keberatan. Ditolak alih-alih diberi nilai bawaan: mengarang sendiri jendela waktu dan ambang batas untuk kelompok yang tidak mendeklarasikan keduanya lebih buruk daripada mengatakan tidak.",
+      "not_owner": "Permukaan ranah bersama memerlukan peran pemilik.",
+      "objection_absent": "Sebuah keberatan harus disebutkan: satu suara dan satu pengguguran masing-masing menjawab tepat satu keberatan.",
+      "objection_unknown": "Keberatan yang disebutkan bukanlah keberatan yang dipegang node ini terhadap tindakan ini.",
+      "session_absent": "Tidak ada token sesi yang diberikan. Permukaan ranah bersama hanya untuk pemilik.",
+      "session_invalid": "Sesi tersebut tidak valid atau telah kedaluwarsa.",
+      "sign_failed": "Node ini tidak dapat menandatangani baris tersebut, sehingga tidak ada yang dikirim.",
+      "steward_tier_not_adopted": "Komunitas ini tidak mendeklarasikan tingkat steward, sehingga tidak ada tenggat yang bisa dilewati dengan membisu dan tidak ada kolam eskalasi. Suara di sini akan tersimpan dan tidak pernah dibaca.",
+      "store_unavailable": "Substrat tidak dapat dijangkau.",
+      "target_action_unknown": "Tindakan yang dikenai keberatan bukanlah baris yang dipegang node ini, sehingga keberatan itu tidak akan dapat dihitung dan jendela waktunya tidak akan dapat diselesaikan.",
+      "unverifiable_signature": "Tanda tangan baris ini tidak lolos verifikasi terhadap kunci penanda tangan sebagaimana terdaftar di node ini."
+    },
+    "standing": {
+      "action_unknown": "Node ini tidak memegang tindakan tersebut. Keberatan menyebut sebuah baris, dan di sini tidak ada baris untuk disebut.",
+      "cohort_unknown": "Kohort itu tidak dapat diresolusi di node ini, sehingga ia tidak memiliki roster maupun deklarasi yang dapat dibaca node ini.",
+      "not_governed": "Komunitas ini tidak mendeklarasikan kebijakan kuorum terbalik, sehingga bidang keberatan sama sekali tidak berlaku bagi ranah bersamanya. Itu berbeda dari keadaan tidak ada seorang pun yang mengajukan keberatan.",
+      "objected": "Setidaknya satu anggota telah mengajukan keberatan dan jendela waktunya masih terbuka. Untuk saat ini tindakan tetap berdiri; satu keberatan lagi mungkin sudah cukup.",
+      "quiet": "Bidang keberatan sudah dibaca dan tidak ada keberatan yang diajukan terhadap tindakan ini.",
+      "reversed": "Cukup banyak anggota berbeda yang mengajukan keberatan di dalam jendela waktu. Setiap node yang memegang baris-baris ini melipatnya menjadi jawaban yang sama, tanpa koordinasi apa pun.",
+      "stood": "Jendela waktu tertutup di bawah ambang batas pembalikan. Tindakan ini pernah dikenai keberatan dan tetap berdiri.",
+      "unreadable": "Bidang keberatan tidak dapat dibaca di sini. Ini BUKAN pernyataan bahwa tidak ada yang mengajukan keberatan — keberatan yang ada tidak diketahui, bukan tidak ada."
+    },
+    "steward": {
+      "awaiting": "Tenggat belum berlalu. Moderator yang ditunjuk masih boleh menjawab.",
+      "no_duty_holders": "Tingkat steward telah dideklarasikan dan node ini tidak meresolusi satu pun moderator yang ditunjuk untuknya. Tidak ada yang membisu, karena memang tidak ada siapa-siapa di sana.",
+      "not_adopted": "Tidak ada tingkat steward yang dideklarasikan, sehingga tidak ada tenggat moderator yang berlaku.",
+      "overruled": "Moderator yang ditunjuk memutuskan bahwa keberatan ini tidak berlaku — dan eskalasi tetap terbuka, karena pembatalan tidak pernah menjadi hak mereka seorang diri.",
+      "silent": "Tenggat berlalu tanpa putusan ke arah mana pun.",
+      "upheld": "Moderator yang ditunjuk memutuskan, tepat waktu, bahwa keberatan ini tetap berlaku. Perkara ini diadili oleh orang-orang yang disebutkan namanya, dan tercatat resmi."
     }
   }
 }

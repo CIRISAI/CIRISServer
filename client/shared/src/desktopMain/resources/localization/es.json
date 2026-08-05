@@ -3181,6 +3181,85 @@
       "expired": "La ventana de esta fila se ha cerrado. El pliegue descarta una fila caducada en el momento de la lectura, por lo que no necesita revocación ni un autor accesible.",
       "running": "La ventana de esta fila está abierta y se cierra en el instante indicado.",
       "unbounded": "Esta fila no lleva caducidad. Se aplica hasta que sea reemplazada."
+    },
+    "consumption": {
+      "wired": "Un bucle de esta compilación lee esta clave y cambia lo que hace. El valor efectivo que aparece a su lado está en vigor en este nodo.",
+      "elsewhere": "Ningún bucle de esta compilación lee esta clave: su consumidor vive en otro componente. Una fila fijada aquí se admite y se pliega, y no cambia nada en este nodo.",
+      "unbuilt": "El consumidor de esta clave todavía no se ha construido en ninguna parte. Una fila fijada aquí se admite y se pliega, y no cambia nada."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Un solo miembro acciona el freno; la cohorte debe estar de acuerdo para levantarlo. Accionar la protección es incondicional y cuesta una sola firma; deshacer la de otra persona cuesta el umbral propio de la cohorte, y el deshacer escalado nunca puede caer por debajo de un piso absoluto que ninguna cadena de política puede rebajar.",
+    "ballot": {
+      "admitted": "El voto queda registrado. NO tiene fuerza por sí solo: su precio se paga en tiempo de lectura contra un denominador que aún no existe cuando se emite — que el conjunto alcance alguna vez el umbral escalado depende de quién más responda. Un miembro puede cambiar de opinión; rige el último voto emitido."
+    },
+    "dismissal": {
+      "admitted": "La objeción queda levantada a efectos del recuento. El umbral se vuelve a derivar del propio padrón de este nodo en cada lectura posterior, así que una desestimación que deje de superar un padrón que ha crecido deja de suprimir — y la protección que retiró vuelve."
+    },
+    "dry_run": "No se firmó nada ni se envió nada. Estos son los bytes canónicos exactos que cada cofirmante debe firmar para que su scrub cuente en el envío real — el m-de-n recae sobre estos bytes y sobre ningunos otros.",
+    "escalation": {
+      "awaiting": "Los moderadores designados aún pueden responder, o ya resolvieron a tiempo. La escalada no se ha abierto.",
+      "not_adopted": "Esta comunidad no declaró ningún nivel de custodios, así que no hay plazo para los moderadores ni escalada. Aquí el silencio no cambia nada.",
+      "nothing_to_escalate": "Hay un nivel de custodios declarado y ninguna objeción viva pendiente de él. Nadie guardó silencio, porque no se preguntó nada.",
+      "open": "Los titulares del deber no respondieron a tiempo, y la decisión ha pasado a quienes sí lo hicieron. El umbral cuenta ahora a QUIENES RESPONDEN en lugar de a todo el padrón — que es lo que permite que una comunidad silenciosa resuelva igualmente — con un piso para que «alcanzable» nunca degenere en «decide una sola persona»."
+    },
+    "objection": {
+      "admitted": "La objeción queda registrada. Es un MARCADOR, no una orden: su llegada no cambió nada, y se replica en el plano ordinario de atestaciones, de modo que un par que estuvo particionado durante la ventana la cuenta igualmente cuando le llega. Basta un solo miembro para plantearla; levantarla cuesta el umbral propio de la cohorte."
+    },
+    "outcome": {
+      "dismissed": "Quienes respondieron resolvieron que esta objeción no se sostiene, y queda suprimida a efectos del recuento.",
+      "not_escalated": "La escalada no se abrió para esta objeción.",
+      "unresolved": "La escalada está abierta y sin decidir: han respondido demasiado pocos, o ninguna de las dos partes ha alcanzado el umbral. Nada cambia — la objeción se sostiene exactamente igual que antes.",
+      "upheld": "Quienes respondieron resolvieron que esta objeción se sostiene."
+    },
+    "refusal": {
+      "action_absent": "Debe nombrarse una acción. Una objeción nombra una fila del bien común; una que no nombra nada nunca podrá contarse.",
+      "action_unknown": "Este nodo no mantiene tal acción, así que una fila que la nombrara quedaría archivada donde ningún pliegue la contará jamás.",
+      "actor_recused": "El autor de la acción no vota sobre la objeción a su propio acto.",
+      "bad_now": "El instante de lectura debe ser una marca de tiempo RFC 3339.",
+      "ballot_predates_action": "Un juicio no puede ser anterior a aquello que juzga.",
+      "canonicalize_failed": "No se pudieron producir los bytes canónicos de la fila, así que no hay nada que un cofirmante pudiera firmar.",
+      "cohort_absent": "Debe nombrarse una cohorte: decide qué padrón y qué declaración rigen el recuento.",
+      "cohort_not_a_commons": "La cohorte propia no tiene padrón sobre el que formar un cuórum — sus miembros son los dispositivos de una misma identidad — así que no tiene ningún bien común que vigilar.",
+      "cohort_unknown": "Esa cohorte no se resuelve en este nodo, así que no hay padrón ni declaración con los que juzgar esto. La autoridad debe provenir del estado local verificado.",
+      "cohort_unrecognized": "Esa no es una cohorte con padrón. Las objeciones viven en una familia, una comunidad o un grupo de afiliaciones.",
+      "dimension_mismatch": "Esa fila se presentó en la puerta equivocada para lo que transporta.",
+      "dismissal_quorum_short": "Cofirmaron menos miembros verificados y distintos del padrón de los que exige el umbral de la cohorte. Las cifras contadas y requeridas figuran junto a este mensaje.",
+      "duplicate_objection": "Ya mantienes una objeción viva contra esta acción. Un miembro es una objeción — de lo contrario, un solo miembro podría alcanzar el umbral por sí mismo.",
+      "grounds_absent": "Se requieren fundamentos. Una objeción planteada sin motivo registrado es indistinguible de una planteada por un mal motivo — y los fundamentos se registran, nunca se interpretan.",
+      "malformed_envelope": "A la fila le falta una referencia que el recuento necesita.",
+      "node_unowned": "Este nodo no tiene responsable, así que ni lee ni habla en el bien común de nadie en su nombre. Reclama primero la propiedad.",
+      "not_a_cohort_member": "Solo un miembro de esta cohorte puede hablar en su bien común. Esta es la única comprobación que aplica el lado protector — y la razón por la que la objeción de un extraño nunca se convierte en un marcador que otros pudieran respetar.",
+      "not_filed_against_actor": "La fila queda archivada donde el pliegue no la busca, así que se almacenaría, duradera y permanentemente inerte. Un marcador que nadie puede encontrar no es un marcador.",
+      "not_governed": "Esta comunidad no declara ninguna política de cuórum inverso, así que no ha adoptado el plano de objeciones. Se rechaza en vez de aplicar valores predeterminados: inventar una ventana y un umbral para un grupo que no declaró ninguno de los dos es peor que decir que no.",
+      "not_owner": "La superficie del bien común requiere el rol de propietario.",
+      "objection_absent": "Debe nombrarse una objeción: tanto un voto como una desestimación responden por exactamente una.",
+      "objection_unknown": "La objeción nombrada no es una que este nodo mantenga contra esta acción.",
+      "session_absent": "No se presentó ningún token de sesión. La superficie del bien común es solo para el propietario.",
+      "session_invalid": "Esa sesión no es válida o ha caducado.",
+      "sign_failed": "Este nodo no pudo firmar la fila, así que no se envió nada.",
+      "steward_tier_not_adopted": "Esta comunidad no declaró ningún nivel de custodios, así que no hay plazo que dejar vencer en silencio ni conjunto escalado. Un voto aquí se almacenaría y no se leería jamás.",
+      "store_unavailable": "No se pudo alcanzar el sustrato.",
+      "target_action_unknown": "La acción objetada no es una fila que este nodo mantenga, así que la objeción sería incontable y su ventana, irresoluble.",
+      "unverifiable_signature": "La firma de la fila no se verificó contra las claves del firmante tal como están registradas en este nodo."
+    },
+    "standing": {
+      "action_unknown": "Este nodo no mantiene tal acción. Una objeción nombra una fila, y aquí no hay ninguna fila que nombrar.",
+      "cohort_unknown": "Esa cohorte no se resuelve en este nodo, así que no tiene padrón ni declaración que este nodo pueda leer.",
+      "not_governed": "Esta comunidad no declara ninguna política de cuórum inverso, así que el plano de objeciones no se aplica en absoluto a su bien común. Eso es distinto de que nadie haya objetado.",
+      "objected": "Al menos un miembro ha objetado y la ventana sigue abierta. La acción se mantiene por ahora; puede que baste una objeción más.",
+      "quiet": "Se leyó el plano y no se ha planteado ninguna objeción contra esta acción.",
+      "reversed": "Objetaron suficientes miembros distintos dentro de la ventana. Todo nodo que mantenga estas filas pliega a esta misma respuesta, sin coordinación alguna.",
+      "stood": "La ventana se cerró por debajo del umbral de reversión. Esta acción fue objetada y se mantiene.",
+      "unreadable": "No se pudo leer aquí el plano de objeciones. Esto NO afirma que nadie haya objetado: las objeciones son desconocidas, no inexistentes."
+    },
+    "steward": {
+      "awaiting": "El plazo no ha vencido. Los moderadores designados aún pueden responder.",
+      "no_duty_holders": "Hay un nivel de custodios declarado y este nodo no resuelve ningún moderador designado para él. Nadie guardó silencio, porque no había nadie.",
+      "not_adopted": "No se declaró ningún nivel de custodios, así que no se aplica ningún plazo para los moderadores.",
+      "overruled": "Los moderadores designados resolvieron que esta objeción no se sostiene — y la escalada se abre de todos modos, porque deshacer nunca les corresponde a ellos solos.",
+      "silent": "El plazo venció sin resolución en ningún sentido.",
+      "upheld": "Los moderadores designados resolvieron, a tiempo, que esta objeción se sostiene. El asunto lo juzgaron personas con nombre, y quedó registrado."
     }
   }
 }

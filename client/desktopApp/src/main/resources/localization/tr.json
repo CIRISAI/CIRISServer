@@ -3181,6 +3181,85 @@
       "expired": "Bu satırın penceresi kapandı. Katlama, süresi dolmuş bir satırı okuma anında düşürür; bu yüzden ne bir iptale ne de erişilebilir bir yazara ihtiyaç duyar.",
       "running": "Bu satırın penceresi açık ve belirtilen anda kapanacak.",
       "unbounded": "Bu satır bir son kullanma tarihi taşımıyor. Yerine yenisi geçene kadar geçerlidir."
+    },
+    "consumption": {
+      "wired": "Bu derlemedeki bir döngü bu anahtarı okuyor ve davranışını ona göre değiştiriyor. Yanında gösterilen geçerli değer bu düğümde gerçekten yürürlüktedir.",
+      "elsewhere": "Bu derlemede bu anahtarı okuyan hiçbir döngü yok — tüketicisi başka bir bileşende yaşıyor. Burada belirlenen bir satır kabul edilir ve katlanır, ancak bu düğümde hiçbir şeyi değiştirmez.",
+      "unbuilt": "Bu anahtarın tüketicisi henüz hiçbir yerde geliştirilmedi. Burada belirlenen bir satır kabul edilir ve katlanır, ancak hiçbir şeyi değiştirmez."
+    }
+  },
+  "commons_surface": {
+    "asymmetry": "Tek bir üye freni çeker; freni kaldırmak için kohortun rıza göstermesi gerekir. Koruma başlatmak koşulsuzdur ve tek bir imzaya mal olur; bir başkasının korumasını geri almak ise kohortun kendi eşiğine mal olur ve yükseltilmiş geri alma, hiçbir politika dizesinin düşüremeyeceği mutlak bir alt sınırın altına asla inemez.",
+    "ballot": {
+      "admitted": "Oy kayda geçti. Kendi başına HİÇBİR gücü yoktur: bedeli, oy verildiği anda henüz var olmayan bir paydaya karşı okuma anında ödenir — havuzun yükseltilmiş eşiğe hiç ulaşıp ulaşmayacağı, başka kimlerin yanıt verdiğine bağlıdır. Bir üye fikrini değiştirebilir; en son verilen oy geçerlidir."
+    },
+    "dismissal": {
+      "admitted": "İtiraz, sayım bakımından kaldırıldı. Eşik, sonraki her okumada bu düğümün kendi üye listesinden yeniden türetilir; bu yüzden büyümüş bir üye listesinin eşiğini artık aşamayan bir ret, bastırmayı da bırakır — ve kaldırdığı koruma geri gelir."
+    },
+    "dry_run": "Hiçbir şey imzalanmadı ve hiçbir şey gönderilmedi. Bunlar, her ortak imzacının scrub'ının gerçek gönderimde sayılması için imzalaması gereken tam kanonik baytlardır — m-of-n yalnızca bu baytlar üzerinedir, başka hiçbiri üzerine değil.",
+    "escalation": {
+      "awaiting": "Atanmış moderatörler hâlâ yanıt verebilir ya da süresi içinde zaten karar vermişlerdir. Yükseltme açılmadı.",
+      "not_adopted": "Bu topluluk hiçbir gözetmen katmanı ilan etmedi; dolayısıyla moderatörler için bir süre sınırı ve bir yükseltme yoktur. Burada sessizlik hiçbir şeyi değiştirmez.",
+      "nothing_to_escalate": "Bir gözetmen katmanı ilan edilmiş ve onu bekleyen canlı bir itiraz yok. Kimse sessiz kalmadı, çünkü hiçbir şey sorulmadı.",
+      "open": "Görev sahipleri süresi içinde yanıt vermedi ve karar, yanıt verenlere geçti. Eşik artık tüm üye listesini değil YANIT VERENLERİ sayıyor — sessiz bir topluluğun yine de bir sonuca varmasını sağlayan şey budur — ve \"ulaşılabilir\" olanın asla \"tek kişi karar verir\"e düşmemesi için bir alt sınırla korunmuştur."
+    },
+    "objection": {
+      "admitted": "İtiraz kayda geçti. Bu bir komut değil, bir İŞARETTİR: gelişiyle hiçbir şey değişmedi ve olağan tasdik düzleminde çoğaltılır; böylece pencere boyunca ağdan kopmuş bir eş, itiraz kendisine ulaştığında onu yine de sayar. Onu ortaya koymak için tek bir üye yeterlidir; kaldırmak ise kohortun kendi eşiğine mal olur."
+    },
+    "outcome": {
+      "dismissed": "Yanıt verenler bu itirazın geçerli olmadığına karar verdi ve itiraz, sayım bakımından bastırıldı.",
+      "not_escalated": "Bu itiraz için yükseltme açılmadı.",
+      "unresolved": "Yükseltme açık ve karara bağlanmadı: ya yeterince kişi yanıt vermedi ya da hiçbir taraf eşiğe ulaşmadı. Hiçbir şey değişmez — itiraz, aynen olduğu gibi ayakta kalır.",
+      "upheld": "Yanıt verenler bu itirazın geçerli olduğuna karar verdi."
+    },
+    "refusal": {
+      "action_absent": "Bir eylem adlandırılmalıdır. Bir itiraz, müştereklerdeki bir satırı adlandırır; hiçbir şeyi adlandırmayan bir itiraz asla sayılamaz.",
+      "action_unknown": "Bu düğüm böyle bir eylem tutmuyor; dolayısıyla onu adlandıran bir satır, hiçbir katlamanın onu asla saymayacağı bir yere kaydedilirdi.",
+      "actor_recused": "Eylemin sahibi, kendi eylemine yapılan itirazda oy kullanmaz.",
+      "bad_now": "Okuma anı, RFC 3339 biçiminde bir zaman damgası olmalıdır.",
+      "ballot_predates_action": "Bir hüküm, hükmettiği şeyden daha eski olamaz.",
+      "canonicalize_failed": "Satırın kanonik baytları üretilemedi; dolayısıyla bir ortak imzacının imzalayabileceği hiçbir şey yok.",
+      "cohort_absent": "Bir kohort adlandırılmalıdır: sayımda kimin üye listesinin ve kimin ilanının geçerli olacağını o belirler.",
+      "cohort_not_a_commons": "Self kohortunun, üzerinde nisap aranacak bir üye listesi yoktur — üyeleri tek bir kimliğin kendi cihazlarıdır — dolayısıyla denetleyeceği bir müşterek de yoktur.",
+      "cohort_unknown": "Bu kohort bu düğümde çözümlenmiyor; dolayısıyla bunu değerlendirecek bir üye listesi ve bir ilan yok. Yetki, yerel olarak doğrulanmış durumdan gelmelidir.",
+      "cohort_unrecognized": "Bu, üye listesi olan bir kohort değil. İtirazlar bir ailede, bir toplulukta ya da bir aidiyet grubunda yaşar.",
+      "dimension_mismatch": "Bu satır, taşıdığı içerik için yanlış kapıda sunuldu.",
+      "dismissal_quorum_short": "Kohortun eşiğinin gerektirdiğinden daha az sayıda farklı, doğrulanmış üye listesi mensubu birlikte imzaladı. Sayılan ve gereken sayılar bu iletinin yanında belirtilmiştir.",
+      "duplicate_objection": "Bu eyleme karşı zaten canlı bir itirazınız var. Bir üye, bir itiraz demektir — aksi hâlde tek bir üye eşiğe tek başına ulaşabilirdi.",
+      "grounds_absent": "Gerekçe zorunludur. Kaydedilmiş bir gerekçe olmadan ortaya konan bir itiraz, kötü bir gerekçeyle ortaya konandan ayırt edilemez — ve gerekçeler kaydedilir, asla yorumlanmaz.",
+      "malformed_envelope": "Satırda, sayımın ihtiyaç duyduğu bir referans eksik.",
+      "node_unowned": "Bu düğümün sorumlu bir sahibi yok; dolayısıyla kimsenin müştereklerinde onun adına ne okuma yapar ne de söz söyler. Önce sahipliği talep edin.",
+      "not_a_cohort_member": "Bu kohortun müştereklerinde yalnızca kohortun bir üyesi söz söyleyebilir. Koruyucu tarafın uyguladığı tek sınama budur — ve bir yabancının itirazının, başkalarının uyabileceği bir işarete asla dönüşmemesinin nedeni de budur.",
+      "not_filed_against_actor": "Satır, katlamanın onu aramadığı bir yere kaydedilmiş; bu yüzden saklanır, kalıcı olur ve sonsuza dek etkisiz kalırdı. Kimsenin bulamadığı bir işaret, işaret değildir.",
+      "not_governed": "Bu topluluk hiçbir ters nisap politikası ilan etmiyor; dolayısıyla itiraz düzlemini benimsememiştir. Varsayılana düşülmedi, reddedildi: ikisini de ilan etmemiş bir grup için bir pencere ve bir eşik uydurmak, hayır demekten daha kötüdür.",
+      "not_owner": "Müşterekler yüzeyi, sahip rolünü gerektirir.",
+      "objection_absent": "Bir itiraz adlandırılmalıdır: bir oy da bir ret de tam olarak tek bir itiraza karşılık gelir.",
+      "objection_unknown": "Adı geçen itiraz, bu düğümün bu eyleme karşı tuttuğu itirazlardan biri değil.",
+      "session_absent": "Hiçbir oturum jetonu sunulmadı. Müşterekler yüzeyi yalnızca sahibe açıktır.",
+      "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş.",
+      "sign_failed": "Bu düğüm satırı imzalayamadı; dolayısıyla hiçbir şey gönderilmedi.",
+      "steward_tier_not_adopted": "Bu topluluk hiçbir gözetmen katmanı ilan etmedi; dolayısıyla sessiz kalınarak aşılacak bir süre sınırı ve yükseltilmiş bir havuz yoktur. Buraya verilecek bir oy saklanır ve asla okunmaz.",
+      "store_unavailable": "Alt katmana erişilemedi.",
+      "target_action_unknown": "İtiraz edilen eylem, bu düğümün tuttuğu bir satır değil; dolayısıyla itiraz sayılamaz ve penceresi karara bağlanamaz olurdu.",
+      "unverifiable_signature": "Satırın imzası, imzalayanın bu düğümde kayıtlı anahtarlarına karşı doğrulanmadı."
+    },
+    "standing": {
+      "action_unknown": "Bu düğüm böyle bir eylem tutmuyor. Bir itiraz bir satırı adlandırır ve burada adlandırılacak bir satır yok.",
+      "cohort_unknown": "Bu kohort bu düğümde çözümlenmiyor; dolayısıyla bu düğümün okuyabileceği bir üye listesi ve bir ilanı yok.",
+      "not_governed": "Bu topluluk hiçbir ters nisap politikası ilan etmiyor; dolayısıyla itiraz düzlemi onun müştereklerinde hiç geçerli değil. Bu, kimsenin itiraz etmemiş olmasından farklı bir şeydir.",
+      "objected": "En az bir üye itiraz etti ve pencere hâlâ açık. Eylem şimdilik ayakta; bir itiraz daha yetebilir.",
+      "quiet": "Düzlem okundu ve bu eyleme karşı hiçbir itiraz ortaya konmadı.",
+      "reversed": "Pencere içinde yeterli sayıda farklı üye itiraz etti. Bu satırları tutan her düğüm, hiçbir eşgüdüm olmadan aynı yanıta katlar.",
+      "stood": "Pencere, geri çevirme eşiğinin altında kapandı. Bu eyleme itiraz edildi ve eylem ayakta kaldı.",
+      "unreadable": "İtiraz düzlemi burada okunamadı. Bu, kimsenin itiraz etmediği anlamına GELMEZ — itirazlar yok değil, bilinmiyor."
+    },
+    "steward": {
+      "awaiting": "Süre sınırı henüz dolmadı. Atanmış moderatörler hâlâ yanıt verebilir.",
+      "no_duty_holders": "Bir gözetmen katmanı ilan edilmiş ve bu düğüm bunun için hiçbir atanmış moderatör çözümleyemiyor. Kimse sessiz kalmadı, çünkü orada kimse yoktu.",
+      "not_adopted": "Hiçbir gözetmen katmanı ilan edilmedi; dolayısıyla moderatörler için bir süre sınırı geçerli değildir.",
+      "overruled": "Atanmış moderatörler bu itirazın geçerli olmadığına karar verdi — ve yükseltme yine de açılır, çünkü bir geri alma asla tek başlarına verebilecekleri bir karar değildir.",
+      "silent": "Süre sınırı, iki yönde de hiçbir karar verilmeden doldu.",
+      "upheld": "Atanmış moderatörler, süresi içinde, bu itirazın geçerli olduğuna karar verdi. Mesele, adı belli kişilerce ve kayda geçerek karara bağlandı."
     }
   }
 }
