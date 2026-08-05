@@ -3549,6 +3549,7 @@ mod tests {
     /// endpoint never reads the engine; the validation/NotSupported arms we test
     /// all return BEFORE any token open or engine use.
     async fn router_with_engine() -> Router {
+        crate::assert_test_anchor_disarmed("accord_provision::router_with_engine");
         let signing_key = SigningKey::from_bytes(&[0x7E; 32]);
         let signer = Arc::new(LocalSigner::from_parts(
             signing_key,
@@ -3565,6 +3566,7 @@ mod tests {
     /// The full provision surface (loopback ops + the OPEN `/gossip-partial`) merged, for
     /// exercising the co-scrub display store end to end.
     async fn coscrub_app() -> Router {
+        crate::assert_test_anchor_disarmed("accord_provision::coscrub_app");
         let signing_key = SigningKey::from_bytes(&[0x5C; 32]);
         let signer = Arc::new(LocalSigner::from_parts(
             signing_key,

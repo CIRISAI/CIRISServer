@@ -158,9 +158,11 @@ jobs:
       # agent team hit it building their harness wheel and flagged it before we
       # tagged. Build, not clippy: compilation is the failure mode.
       # --all-targets, NOT --lib: the break that motivated this lives in a
-      # cfg(test) initializer (src/trust_root_qa.rs), which a --lib build cannot
-      # see. Shipped past the --lib version of this very step once — the gate has
-      # to compile the same targets the QA wheel and the test suite do.
+      # test-only initializer (tests/trust_root_qa.rs — a `src/` module until
+      # CIRISServer#362 moved it out of the --lib binary), which a --lib build
+      # cannot see. Shipped past the --lib version of this very step once — the
+      # gate has to compile the same targets the QA wheel and the test suite do,
+      # and --all-targets is what reaches tests/.
       - name: clippy (test-anchor surface, Linux)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --features test-anchor -- -D warnings

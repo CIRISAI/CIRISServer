@@ -323,9 +323,43 @@ pub mod telemetry_logs;
 mod test_bless;
 // TEST-ANCHOR-ONLY QA — mint a portable trust root (accord + canonical) in
 // substrate test mode and USE it: the acceptance gate for the next persist
-// repin (CIRISPersist#486/#488). Test-only by construction.
-#[cfg(all(test, feature = "test-anchor"))]
-mod trust_root_qa;
+// repin (CIRISPersist#486/#488). It lives in `tests/trust_root_qa.rs`, NOT here,
+// and that is load-bearing: the fixture arms the process-global
+// `CIRIS_TEST_TRUST_ROOT*` vars that persist re-reads on EVERY
+// `Engine::with_signer`, so as a `#[cfg(test)]` module of this crate it raced
+// every other test in the `--lib` binary that builds an engine — silently
+// booting them against the QA roster instead of the baked genesis
+// (CIRISServer#362). An integration test is its own process, which is the only
+// scope in which those vars stop being shared. Do not move it back.
+
+/// **CIRISServer#362 tripwire.** Assert the test anchor is NOT armed in this
+/// process, so a test whose premise is "a fresh node ships the baked genesis"
+/// says *that* when the premise is violated.
+///
+/// Under `--features test-anchor`, an armed `CIRIS_TESTING_MODE` +
+/// `CIRIS_TEST_TRUST_ROOT` makes persist swap the whole accord roster and skip
+/// the baked 2-of-3 canonical seed. A test that then reads the genesis surface
+/// gets `{"servers":[]}`, or a `GenesisSeed("accord quorum unreachable: floor 1
+/// exceeds the 0 qualifying roster member(s)")` — verdicts that point at
+/// `canonical_seed.json` when the defect is in the harness. #362 cost exactly
+/// that misdirection once; this turns the next occurrence into its own name.
+///
+/// Inert without the feature (verify's `test_anchor_active` is a `false`
+/// constant there), so it costs nothing on the default surface.
+#[cfg(test)]
+pub(crate) fn assert_test_anchor_disarmed(context: &str) {
+    assert!(
+        !ciris_verify_core::test_anchor::test_anchor_active(),
+        "{context}: the test-anchor override is ARMED in this process, so persist \
+         will boot this engine against the synthesized QA roster and SKIP the baked \
+         canonical genesis seed. This is a test-harness env race, NOT a genesis \
+         defect — do not go looking in canonical_seed.json. Some test in this binary \
+         is setting CIRIS_TESTING_MODE / CIRIS_TEST_TRUST_ROOT*; those vars are \
+         process-global and persist re-reads them on every Engine::with_signer, so \
+         they belong in a dedicated integration-test binary (see \
+         tests/trust_root_qa.rs). CIRISServer#362."
+    );
+}
 /// **CC 4.1.4** — the `withdraws`:`recants` arbitrage countermeasure
 /// (CIRISServer#159). Consumer-policy behavioral analysis: per-attester
 /// precedence-collapsed `withdraws:recants` ratio over a rolling window, with a

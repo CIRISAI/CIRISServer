@@ -1119,7 +1119,7 @@ mod tests {
 // ── the v2 delegation-plane invariants ───────────────────────────────────────
 //
 // These run against hand-built bundles (no hardware): the point is the REFUSALS.
-// The signing half is exercised end-to-end by `trust_root_qa`, which mints a
+// The signing half is exercised end-to-end by `tests/trust_root_qa.rs`, which mints a
 // portable root in software and drives both trace-gate legs.
 
 #[cfg(test)]
@@ -1129,7 +1129,7 @@ mod v2_tests {
 
     /// Build records/attestations through serde rather than enumerating every
     /// substrate field — these fixtures exist to exercise the REFUSALS, and the
-    /// signing half is covered end-to-end by `trust_root_qa`.
+    /// signing half is covered end-to-end by `tests/trust_root_qa.rs`.
     fn record(key_id: &str, identity_type: &str, extra: serde_json::Value) -> SignedKeyRecord {
         let mut v = serde_json::json!({
             "key_id": key_id,
