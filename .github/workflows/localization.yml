@@ -1,8 +1,26 @@
 name: Localization
 
 on:
-  # PR-only — the squash-merge is identical to the passed PR; no main-only side effect.
   pull_request:
+  # ALSO on main. The PR-only comment this replaces said "the squash-merge is
+  # identical to the passed PR; no main-only side effect." That is true for a
+  # squash-merge of ONE branch, and false for a merge commit with two parents:
+  #
+  #   a54bb96  parent db9c698  ->  repaired 65 values in the CANONICAL bundle
+  #   b773c1f  parent db9c698  ->  synced the THREE MIRRORS to the pre-repair text
+  #   09ce708  = merge         ->  a state NEITHER branch was ever in
+  #
+  # Disjoint files, no conflict, both branches green alone. Byte-identity across
+  # four bundles is a CROSS-FILE invariant and git merges PER FILE, so two green
+  # branches touching different bundle files merge into a violation every time.
+  # The guard detects it perfectly and names all three files — it was simply
+  # never RUN on the tree where the breakage existed.
+  #
+  # Not a check that could not fail, and not a failing check nobody read: a check
+  # never run on the broken tree, because the breakage is created by an event the
+  # trigger did not cover.
+  push:
+    branches: [main]
 
 jobs:
   localization:

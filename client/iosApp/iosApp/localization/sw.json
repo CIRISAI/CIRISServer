@@ -3089,7 +3089,9 @@
       "descend": "Haiwezi kutenduliwa kwa muundo wake. Ushushaji haukomi kwenye sifuri kamwe — ukungu na alama ya kaburi hubaki — lakini kilichoondolewa hakirudi.",
       "quarantine": "Alama iliyosainiwa, si amri: hakuna kinachofutwa na hakuna kinachoandikwa upya. Njia za utoaji huduma za nodi hii huacha kuwakabidhi wenzao safu na mafungu ya data ya funguo zilizotajwa; mwenzako anayekunja tofauti hapokei tu kutoka kwetu.",
       "re_admit": "Imerekodiwa kama utenguzi wenye mwandishi anayejulikana. Safu ya ubatilishaji hubaki na kila msomaji bado huikunja: vizuizi hujumuika lakini vilegezo havijumuiki, na hakuna tabaka la msingi huu linalotoa kitendo cha kutengua ubatilishaji.",
-      "throttle": "Imerekodiwa kama hukumu yenye mwandishi tu. Msingi huu hauna bajeti ya uandikishaji kwa kila ufunguo iliyowekwa na mpokeaji: kiwango cha uandishi cha mwenzako ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao upunguzaji kasi unaweza kuutegemea. Hakuna kinachobadilika katika kile nodi hii inakubali kutoka kwa funguo zilizotajwa."
+      "throttle": "Imerekodiwa kama hukumu yenye mwandishi tu. Msingi huu hauna bajeti ya uandikishaji kwa kila ufunguo iliyowekwa na mpokeaji: kiwango cha uandishi cha mwenzako ni kinga isiyobadilika dhidi ya mizunguko iliyokimbia, si uso wa sera ambao upunguzaji kasi unaweza kuutegemea. Hakuna kinachobadilika katika kile nodi hii inakubali kutoka kwa funguo zilizotajwa.",
+      "accept_writes": "Nodi hii inaacha kukataa maandishi ya funguo zilizotajwa: uondoaji wa uandikishaji iliouandika unatenguliwa na msingi unakubali tena uandishi wao unaofuata. Uondoaji wa uandikishaji na utenguzi huu vyote hubaki kama historia inayosomeka.",
+      "refuse_writes": "Nodi hii inakataa uandishi unaofuata wa funguo zilizotajwa katika mkusanyiko wake yenyewe, katika mlango wa msingi wenyewe na kabla ya lango lingine lolote kufanya kazi. Ni ya KIENYEJI kwa muundo wake: hakuna nodi inayoamuru seti ya uandikishaji ya nodi nyingine, kwa sababu uondoaji wa uandikishaji wenye nguvu duniani kote wenyewe ungekuwa silaha ya udhibiti wa habari. Kutengwa kwa mtumiaji-vibaya wa kweli hujitokeza chenyewe — hufika pale nodi nyingi zinapofikia hitimisho lilelile kila moja kivyake — na kamwe hakuamuriwi kutoka hapa."
     },
     "preview": {
       "note": "Hiki ndicho hasa ambacho utekelezaji utakifanyia kazi. Wasilisha hashi ya uteuzi pamoja na utekelezaji; ikiwa uteuzi umebadilika, utekelezaji hukataa.",
@@ -3134,7 +3136,9 @@
       "session_absent": "Hakuna tokeni ya kipindi iliyowasilishwa. Operesheni za usimamizi zenye madaraja ni za mmiliki pekee.",
       "session_invalid": "Kipindi hicho si halali au kimeisha muda.",
       "store_unavailable": "Msingi haukuweza kusomwa.",
-      "subject_absent": "subject_key_id inahitajika: ukunjaji wa msomaji unahusu hukumu za mhusika mmoja, na mhusika asiyetajwa ni kila mhusika."
+      "subject_absent": "subject_key_id inahitajika: ukunjaji wa msomaji unahusu hukumu za mhusika mmoja, na mhusika asiyetajwa ni kila mhusika.",
+      "deadmission_gate_dormant": "Nodi hii haijatangaza utambulisho wake yenyewe kwa msingi, hivyo lango la uondoaji wa uandikishaji limelala: safu ingeandikwa na isingekataa chochote. Imekataliwa badala ya kurudishwa kama iliyokamilika — lango la adhabu ambalo kimyakimya halifanyi lolote ni baya zaidi kuliko kutokuwa na lango, kwa sababu opereta ataamini kwamba uondoaji wa uandikishaji unafanya kazi. Hili ni kosa la usanidi wa nodi, si kosa la ombi.",
+      "deadmission_gate_foreign_identity": "Utambulisho ambao nodi hii husainia nao na utambulisho ambao lango la uondoaji wa uandikishaji hulinganisha nao waandishi ni funguo mbili tofauti, hivyo uondoaji wa uandikishaji uliosainiwa hapa kamwe usingekunjwa kama wa nodi hii yenyewe na usingekataa chochote. Hili ni kosa la usanidi wa nodi, si kosa la ombi."
     },
     "reversal": {
       "evidence_only": "Safu ya awali hubaki na bado hukunjwa na kila msomaji. Utenguzi huu ni ushahidi uliorekodiwa, si kutendua — msingi hautoi njia yoyote ya kutengua ubatilishaji.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Nodi hii haijawahi kutangaza hili. Hilo si jambo lilelile na kuwa ilitangaza kisha ikaondoa, wala si jambo lilelile na kushindwa kusoma.",
         "unreadable": "Rekodi haikuweza kusomwa, hivyo nodi hii haijui hali yake yenyewe katika mhimili huu. Hii SI 'hakuna kinachotumika' — usiionyeshe hivyo."
       }
+    },
+    "accept_writes": {
+      "not_reached": "Hakirudishi chochote kilichokataliwa wakati uondoaji wa uandikishaji ulipokuwa unasimama. Maandishi hayo yalikataliwa mlangoni na hayakuwahi kutua hapa; ikiwa mwenza bado anayashikilia, ni lazima ayatume tena. Hakuna kingine chochote kuhusu ufunguo huu kinachobadilika.",
+      "not_refused": "Ufunguo huu haujaondolewa uandikishaji hapa, hivyo hakuna kizuizi cha kuondolewa."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Hakuna uondoaji hai wa uandikishaji ulioandikwa na nodi hii unaotaja ufunguo huu, hivyo maandishi yake yanakubaliwa hapa. Hili halisemi lolote kuhusu nodi nyingine yoyote: uondoaji wa uandikishaji ni wa kienyeji kwa mkusanyiko unaoutoa.",
+        "refused": "Nodi hii inashikilia uondoaji hai wa uandikishaji wa ufunguo huu ambao iliuandika yenyewe, hivyo uandishi unaofuata wa ufunguo huo katika mkusanyiko wa nodi hii unakataliwa katika mlango wa msingi wenyewe.",
+        "unreadable": "Nodi hii haikuweza kusoma hali yake yenyewe ya uandikishaji kwa ufunguo huu, hivyo haijui kama maandishi ya ufunguo huo yanakataliwa au la. Hii SI 'yamekubaliwa' — usiionyeshe hivyo."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Ufunguo huu tayari umeondolewa uandikishaji hapa, hivyo hakuna kilichoandikwa na hali haijabadilika.",
+      "not_reached": "Haifuti chochote kilichokwisha andikwa. Safu ambazo funguo hizi tayari ziliziandika hapa hazibadilishwi na bado zinatolewa — karantini ndiyo operesheni inayokomesha kuzitoa. Safu ambazo tayari zimejirudufu kwa wenza hazirejeshwi wala haziwezi kurejeshwa. Funguo hazijaondolewa, saini zao bado zinathibitika, na zinaendelea kuandika katika kila nodi nyingine, wakiwemo wenza wa nodi hii, ambako safu hizo zaweza kuwasili hapa tena kwa unakili. Msamaha mmoja unabaki kwa makusudi ili nodi iweze siku zote kuondoa katazo lake yenyewe, nao hauulizi ni nani anayeandika: ufunguo ulioondolewa uandikishaji bado waweza kuandika safu za uondoaji wa uandikishaji hapa (CIRISPersist#608).",
+      "reversal": "Inatenguka, na utenguzi hufika kwenye msingi badala ya kurekodi tu mabadiliko ya nia: POST /v1/admin/accept-writes huondoa uondoaji wa uandikishaji na maandishi ya ufunguo huo yanakubaliwa hapa tena. Mitenguo miwili ya ngazi hii hufika kwenye msingi — kuachilia karantini, ambako hurejesha kile ambacho nodi hii HUKITOA, na huu, ambao hurejesha kile ambacho HUKIKUBALI. Safu zote mbili hubaki na kuendelea kusomeka: 'ilikataliwa kisha ikaandikishwa tena' si jambo lilelile na 'haikuwahi kukataliwa'."
     }
   },
   "consent": {
@@ -3265,7 +3285,8 @@
     "escalation": {
       "awaiting": "Wasimamizi walioteuliwa bado wanaweza kujibu, au tayari wameamua kwa wakati. Kupanda ngazi hakujafunguliwa.",
       "not_adopted": "Jamii hii haikutangaza tabaka lolote la waangalizi, kwa hivyo hakuna muda wa mwisho wa wasimamizi wala kupanda ngazi. Ukimya haubadilishi chochote hapa.",
-      "nothing_to_escalate": "Tabaka la waangalizi limetangazwa na hakuna pingamizi hai linalolisubiri. Hakuna aliyekaa kimya, kwa sababu hakuna kilichoulizwa."
+      "nothing_to_escalate": "Tabaka la waangalizi limetangazwa na hakuna pingamizi hai linalolisubiri. Hakuna aliyekaa kimya, kwa sababu hakuna kilichoulizwa.",
+      "open": "Wasimamizi walioteuliwa hawakujibu kwa wakati, na uamuzi umepita kwa wale waliojibu. Kizingiti sasa huhesabu WALIOJIBU badala ya orodha nzima — jambo ambalo ndilo linaloiwezesha jamii tulivu kuendelea kufikia uamuzi — likiwa na sakafu ili 'inayofikika' isishuke kamwe kuwa 'mtu mmoja anaamua'."
     },
     "objection": {
       "admitted": "Pingamizi limeingia kwenye rekodi. Ni ALAMA, si amri: hakuna kilichobadilishwa kwa kuwasili kwake, na hujirudufu katika uwanda wa kawaida wa uthibitisho ili mwenza aliyekuwa ametenganishwa wakati wa dirisha bado hulihesabu linapowasili kwake. Mwanachama mmoja anatosha kuliweka; kuliondoa hugharimu kizingiti cha kundi lenyewe."
@@ -3297,7 +3318,15 @@
       "steward_tier_not_adopted": "Jamii hii haikutangaza tabaka lolote la waangalizi, kwa hivyo hakuna muda wa mwisho wa kukaa kimya kuupita wala bwawa lililopandishwa ngazi. Kura hapa ingehifadhiwa na kamwe isingesomwa.",
       "store_unavailable": "Msingi haukuweza kufikiwa.",
       "target_action_unknown": "Kitendo kilichopingwa si safu ambayo nodi hii inashikilia, kwa hivyo pingamizi lisingehesabika na dirisha lake lisingeweza kutatuliwa.",
-      "unverifiable_signature": "Saini ya safu haikuthibitika dhidi ya funguo za msaini kama zilivyosajiliwa katika nodi hii."
+      "unverifiable_signature": "Saini ya safu haikuthibitika dhidi ya funguo za msaini kama zilivyosajiliwa katika nodi hii.",
+      "action_absent": "action_id inahitajika. Pingamizi hutaja safu katika mali ya pamoja; lile lisilotaja chochote haliwezi kamwe kuhesabika.",
+      "action_unknown": "Nodi hii haishikilii kitendo kama hicho, hivyo safu inayokitaja ingewasilishwa mahali ambapo hakuna ukunjaji utakaoihesabu kamwe. Msingi hukataa jambo hilohilo katika mlango wake wenyewe.",
+      "cohort_absent": "cohort_key_id inahitajika: hutaja orodha ya nani na tamko la nani vinavyoongoza hesabu.",
+      "cohort_not_a_commons": "Kundi la `self` halina orodha ambayo akidi ingepimwa juu yake — wanachama wake ni vifaa vya utambulisho mmoja wenyewe — hivyo halina mali ya pamoja ya kusimamia.",
+      "grounds_absent": "grounds inahitajika. Pingamizi lililowekwa bila sababu iliyorekodiwa halitofautishiki na lile lililowekwa kwa sababu mbaya — na sababu hurekodiwa, kamwe hazifasiriwi.",
+      "node_unowned": "Nodi hii haina mwajibikaji (kifungo cha umiliki), hivyo haisomi wala haisemi katika mali ya pamoja ya mtu yeyote kwa niaba yake. Dai umiliki kwanza.",
+      "not_owner": "Uso wa mali ya pamoja unahitaji wadhifa wa mmiliki (SYSTEM_ADMIN).",
+      "objection_absent": "objection_id inahitajika: kura hujibu swali kuhusu pingamizi MOJA."
     },
     "standing": {
       "action_unknown": "Nodi hii haishikilii kitendo kama hicho. Pingamizi hutaja safu, na hapa hakuna safu ya kutajwa.",
@@ -3306,7 +3335,8 @@
       "quiet": "Uwanda ulisomwa na hakuna pingamizi lililowekwa dhidi ya kitendo hiki.",
       "reversed": "Wanachama tofautitofauti wa kutosha walipinga ndani ya dirisha. Kila nodi inayoshikilia safu hizi hukunja na kufikia jibu hilihili, bila uratibu wowote.",
       "stood": "Dirisha lilifungwa chini ya kizingiti cha utenguzi. Kitendo hiki kilipingwa na kinasimama.",
-      "unreadable": "Uwanda wa mapingamizi haukuweza kusomwa hapa. HII SI kauli kwamba hakuna aliyepinga — mapingamizi hayajulikani, si kwamba hayapo."
+      "unreadable": "Uwanda wa mapingamizi haukuweza kusomwa hapa. HII SI kauli kwamba hakuna aliyepinga — mapingamizi hayajulikani, si kwamba hayapo.",
+      "cohort_unknown": "Kundi hilo halipatikani katika nodi hii, hivyo halina orodha wala tamko ambalo nodi hii inaweza kulisoma. Mamlaka lazima yatoke katika hali ya kienyeji iliyothibitishwa."
     },
     "steward": {
       "awaiting": "Muda wa mwisho bado haujapita. Wasimamizi walioteuliwa bado wanaweza kujibu.",

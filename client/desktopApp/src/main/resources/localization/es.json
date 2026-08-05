@@ -3089,7 +3089,9 @@
       "descend": "Irreversible por diseño. El descenso nunca termina en cero —el difuminado y la lápida sobreviven—, pero lo que se desprendió no volverá.",
       "quarantine": "Un marcador firmado, no una orden: no se elimina ni se reescribe nada. Las rutas de servicio de este nodo dejan de entregar a los pares las filas y los blobs de las claves nombradas; un par que pliegue de otro modo sencillamente no los recibe de nosotros.",
       "re_admit": "Se registra como una reversión atribuida. La fila de revocación sobrevive y todo lector la sigue plegando: las restricciones se componen y las indulgencias no, y ninguna capa de este sustrato expone una des-revocación.",
-      "throttle": "Se registra únicamente como un juicio atribuido. Este sustrato no tiene un presupuesto de admisión por clave definido por el receptor: la cuota de escritura de pares es un tope fijo contra bucles descontrolados, no una superficie de política sobre la que pueda actuar una limitación. Nada cambia lo que este nodo acepta de las claves nombradas."
+      "throttle": "Se registra únicamente como un juicio atribuido. Este sustrato no tiene un presupuesto de admisión por clave definido por el receptor: la cuota de escritura de pares es un tope fijo contra bucles descontrolados, no una superficie de política sobre la que pueda actuar una limitación. Nada cambia lo que este nodo acepta de las claves nombradas.",
+      "accept_writes": "Este nodo deja de rechazar las escrituras de las claves nombradas: la desadmisión que él mismo escribió queda retirada y el sustrato vuelve a admitir su próxima escritura. Tanto la desadmisión como esta retirada sobreviven como historial legible.",
+      "refuse_writes": "Este nodo rechaza la próxima escritura de las claves nombradas en su propio corpus, en la puerta misma del sustrato y antes de que actúe ninguna otra puerta. Es LOCAL por diseño: ningún nodo decreta el conjunto de admisión de otro nodo, porque una desadmisión de efecto global sería en sí misma un arma de censura. El aislamiento de un abusador real es emergente —llega cuando muchos nodos alcanzan de forma independiente la misma conclusión— y nunca se decreta desde aquí."
     },
     "preview": {
       "note": "Esto es exactamente sobre lo que actuará una confirmación. Presenta el hash de la selección junto con la confirmación; si la selección ha cambiado, la confirmación se rechaza.",
@@ -3120,7 +3122,9 @@
       "session_absent": "No se presentó ningún token de sesión. Las operaciones de administración graduada son solo para el propietario.",
       "session_invalid": "Esa sesión no es válida o ha caducado.",
       "store_unavailable": "No se pudo leer el sustrato.",
-      "subject_absent": "subject_key_id es obligatorio: un plegado de lector trata de los juicios sobre un solo sujeto, y un sujeto sin nombrar son todos los sujetos."
+      "subject_absent": "subject_key_id es obligatorio: un plegado de lector trata de los juicios sobre un solo sujeto, y un sujeto sin nombrar son todos los sujetos.",
+      "deadmission_gate_dormant": "Este nodo no ha declarado su propia identidad al sustrato, así que la puerta de desadmisión está inactiva: la fila se escribiría y no rechazaría nada. Se rechaza en lugar de devolverse como hecha — una puerta de sanción que en silencio no hace nada es peor que no tener puerta, porque un operador creerá que la desadmisión funciona. Es un fallo de configuración del nodo, no un fallo de la solicitud.",
+      "deadmission_gate_foreign_identity": "La identidad con la que firma este nodo y la identidad con la que la puerta de desadmisión compara a los escritores son dos claves distintas, así que una desadmisión firmada aquí nunca se plegaría como propia de este nodo y no rechazaría nada. Es un fallo de configuración del nodo, no un fallo de la solicitud."
     },
     "reversal": {
       "evidence_only": "La fila original sobrevive y todo lector la sigue plegando. Esta reversión es evidencia registrada, no un deshacer: el sustrato no expone ninguna des-revocación.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Este nodo nunca ha declarado esto. Ese no es el mismo hecho que haberlo declarado y levantado, ni el mismo hecho que no poder leerlo.",
         "unreadable": "No se pudo leer el registro, así que este nodo no conoce su propia situación en este eje. Esto NO es «nada en vigor» — no lo presentes como tal."
       }
+    },
+    "accept_writes": {
+      "not_reached": "No restaura nada de lo que se rechazó mientras la desadmisión estuvo en vigor. Esas escrituras se rechazaron en la puerta y nunca llegaron aquí; si el par todavía las conserva, tiene que enviarlas de nuevo. Nada más respecto de la clave cambia.",
+      "not_refused": "Esta clave no está desadmitida aquí, así que no hay nada que levantar."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Ninguna desadmisión viva escrita por este nodo nombra esta clave, así que sus escrituras se admiten aquí. Esto no dice nada sobre ningún otro nodo: la desadmisión es local al corpus que la emite.",
+        "refused": "Este nodo mantiene una desadmisión viva de esta clave que él mismo escribió, así que la próxima escritura de la clave en el corpus de este nodo se rechaza en la puerta misma del sustrato.",
+        "unreadable": "Este nodo no pudo leer su propio estado de admisión para esta clave, así que no sabe si las escrituras de esa clave están rechazadas. Esto NO es «admitida» — no lo presentes como tal."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Esta clave ya está desadmitida aquí, así que no se escribió nada y la situación no ha cambiado.",
+      "not_reached": "No desescribe nada. Las filas que estas claves ya escribieron aquí quedan intactas y se siguen sirviendo — la cuarentena es la operación que deja de servirlas. Las filas que ya se replicaron a los pares no se retiran ni se pueden retirar. Las claves no se eliminan, sus firmas siguen verificando y continúan escribiendo en todos los demás nodos, incluidos los pares de este nodo, desde los cuales esas filas pueden volver a llegar aquí por replicación. Una única exención sobrevive a propósito para que un nodo siempre pueda levantar su propia denegación, y no pregunta quién escribe: una clave desadmitida todavía puede escribir aquí filas de desadmisión (CIRISPersist#608).",
+      "reversal": "Reversible, y la reversión alcanza el sustrato en lugar de limitarse a registrar un cambio de opinión: POST /v1/admin/accept-writes retira la desadmisión y las escrituras de la clave vuelven a admitirse aquí. Dos de las reversiones de esta escalera alcanzan el sustrato — liberar una cuarentena, que restaura lo que este nodo SIRVE, y esta, que restaura lo que ACEPTA. Ambas filas sobreviven y siguen siendo legibles: «rechazada y luego readmitida» no es el mismo hecho que «nunca rechazada»."
     }
   },
   "consent": {
@@ -3245,7 +3265,12 @@
       "authority_not_a_delegation": "El id de delegación indicado no es una fila delegates_to.",
       "not_owner": "La superficie de configuración de la malla requiere el rol de propietario (SYSTEM_ADMIN).",
       "session_absent": "No se presentó ningún token de sesión. La superficie de configuración de la malla es solo para el propietario.",
-      "session_invalid": "Esa sesión no es válida o ha caducado."
+      "session_invalid": "Esa sesión no es válida o ha caducado.",
+      "attribution_absent": "delegation_id es obligatorio. Un acto que no lleva consigo su propia autoridad no se puede distinguir de uno no autorizado una vez que el actor ya no está.",
+      "authority_unresolved": "La delegación nombrada no es una fila que este nodo mantenga, así que la autoridad que registraría no nombraría nada. Que autorice realmente este acto es el dictamen del sustrato, emitido en su propia puerta.",
+      "grounds_absent": "grounds es obligatorio. Un mando girado sin motivo registrado es indistinguible de uno girado por un mal motivo.",
+      "node_unowned": "Este nodo no tiene responsable (vinculación de propietario), así que ni informa ni cambia la configuración de la malla en nombre de nadie. Reclama primero la propiedad.",
+      "root_absent": "root_ref es obligatorio: una fila de mesh-config se emite bajo una raíz de confianza, y una fila que no nombra ninguna queda archivada donde ningún pliegue la contará jamás."
     }
   },
   "commons_surface": {
@@ -3260,7 +3285,8 @@
     "escalation": {
       "awaiting": "Los moderadores designados aún pueden responder, o ya resolvieron a tiempo. La escalada no se ha abierto.",
       "not_adopted": "Esta comunidad no declaró ningún nivel de custodios, así que no hay plazo para los moderadores ni escalada. Aquí el silencio no cambia nada.",
-      "nothing_to_escalate": "Hay un nivel de custodios declarado y ninguna objeción viva pendiente de él. Nadie guardó silencio, porque no se preguntó nada."
+      "nothing_to_escalate": "Hay un nivel de custodios declarado y ninguna objeción viva pendiente de él. Nadie guardó silencio, porque no se preguntó nada.",
+      "open": "Quienes tenían el deber no respondieron a tiempo, y la decisión ha pasado a quienes sí lo hicieron. Ahora el umbral cuenta a QUIENES RESPONDEN en lugar del padrón completo —que es lo que permite que una comunidad silenciosa aún pueda resolver—, con un piso para que «alcanzable» nunca degenere en «decide una sola persona»."
     },
     "objection": {
       "admitted": "La objeción queda registrada. Es un MARCADOR, no una orden: su llegada no cambió nada, y se replica en el plano ordinario de atestaciones, de modo que un par que estuvo particionado durante la ventana la cuenta igualmente cuando le llega. Basta un solo miembro para plantearla; levantarla cuesta el umbral propio de la cohorte."
@@ -3292,7 +3318,15 @@
       "steward_tier_not_adopted": "Esta comunidad no declaró ningún nivel de custodios, así que no hay plazo que dejar vencer en silencio ni conjunto escalado. Un voto aquí se almacenaría y no se leería jamás.",
       "store_unavailable": "No se pudo alcanzar el sustrato.",
       "target_action_unknown": "La acción objetada no es una fila que este nodo mantenga, así que la objeción sería incontable y su ventana, irresoluble.",
-      "unverifiable_signature": "La firma de la fila no se verificó contra las claves del firmante tal como están registradas en este nodo."
+      "unverifiable_signature": "La firma de la fila no se verificó contra las claves del firmante tal como están registradas en este nodo.",
+      "action_absent": "action_id es obligatorio. Una objeción nombra una fila del bien común; una que no nombra ninguna no se podrá contar jamás.",
+      "action_unknown": "Este nodo no mantiene tal acción, así que una fila que la nombrara quedaría archivada donde ningún pliegue la contará jamás. El sustrato rechaza el mismo caso en su propia puerta.",
+      "cohort_absent": "cohort_key_id es obligatorio: nombra qué padrón y qué declaración rigen el recuento.",
+      "cohort_not_a_commons": "La cohorte `self` no tiene padrón sobre el que formar un cuórum —sus miembros son los propios dispositivos de una sola identidad—, así que no tiene bien común que vigilar.",
+      "grounds_absent": "grounds es obligatorio. Una objeción planteada sin motivo registrado es indistinguible de una planteada por un mal motivo — y los motivos se registran, nunca se interpretan.",
+      "node_unowned": "Este nodo no tiene responsable (vinculación de propietario), así que ni lee ni habla en el bien común de nadie en su nombre. Reclama primero la propiedad.",
+      "not_owner": "La superficie del bien común requiere el rol de propietario (SYSTEM_ADMIN).",
+      "objection_absent": "objection_id es obligatorio: un voto responde a una pregunta sobre UNA sola objeción."
     },
     "standing": {
       "action_unknown": "Este nodo no mantiene tal acción. Una objeción nombra una fila, y aquí no hay ninguna fila que nombrar.",
@@ -3301,7 +3335,8 @@
       "quiet": "Se leyó el plano y no se ha planteado ninguna objeción contra esta acción.",
       "reversed": "Objetaron suficientes miembros distintos dentro de la ventana. Todo nodo que mantenga estas filas pliega a esta misma respuesta, sin coordinación alguna.",
       "stood": "La ventana se cerró por debajo del umbral de reversión. Esta acción fue objetada y se mantiene.",
-      "unreadable": "No se pudo leer aquí el plano de objeciones. Esto NO afirma que nadie haya objetado: las objeciones son desconocidas, no inexistentes."
+      "unreadable": "No se pudo leer aquí el plano de objeciones. Esto NO afirma que nadie haya objetado: las objeciones son desconocidas, no inexistentes.",
+      "cohort_unknown": "Esa cohorte no se resuelve en este nodo, así que no tiene padrón ni declaración que este nodo pueda leer. La autoridad debe provenir del estado local verificado."
     },
     "steward": {
       "awaiting": "El plazo no ha vencido. Los moderadores designados aún pueden responder.",
@@ -3314,42 +3349,102 @@
   },
   "operator": {
     "carriage": {
-      "moving": "Este nodo sirvió filas a sus pares y no retuvo ninguna."
+      "moving": "Este nodo sirvió filas a sus pares y no retuvo ninguna.",
+      "idle": "Terminaron rondas de replicación, y este nodo no sirvió nada ni retuvo nada: no tenía nada que sus pares aún necesitaran.",
+      "not_exercised": "Ninguna ronda de replicación ha terminado en este proceso, así que ninguna puerta de la ruta de servicio se ha ejecutado jamás y en el libro de registro de retenciones nunca se ha escrito nada. El cero está sin probar, no limpio.",
+      "unreadable": "No se pudieron leer los contadores de acarreo de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que sirvió. Esto no es «no se retuvo nada» — es «no pudimos preguntar».",
+      "withholding": "Este nodo declinó servir filas que mantenía. `withholds_by_reason` nombra la rama que declinó y `recent_withholds` nombra a quién — un nodo inactivo no informa de ninguno de los dos."
     },
     "consent_sla": {
       "none_overdue": "Toda revocación de consentimiento que este nodo prometió promover está dentro de su ventana de SLA.",
-      "unreadable": "No se pudo leer el atraso del SLA de consentimiento. Eso no es «nada vencido»."
+      "unreadable": "No se pudo leer el atraso del SLA de consentimiento. Eso no es «nada vencido».",
+      "overdue": "Este nodo va TARDE en promover revocaciones de consentimiento que se comprometió a promover. Los ids de atestación muestreados que figuran al lado son los asideros con los que se resuelve la condición."
     },
     "drill": {
       "green": "La raíz de confianza de este nodo probó su interruptor de emergencia en los últimos 90 días.",
-      "yellow": "La raíz de confianza de este nodo probó por última vez su interruptor de emergencia hace entre 90 y 180 días."
+      "yellow": "La raíz de confianza de este nodo probó por última vez su interruptor de emergencia hace entre 90 y 180 días.",
+      "never_drilled": "La raíz de confianza de este nodo NUNCA ha probado su interruptor de emergencia. Comparte la banda roja con una raíz abandonada hace mucho, y la diferencia es el instante del último simulacro, ausente aquí. La raíz sigue sirviendo: la frescura del simulacro es una señal de confianza, nunca una puerta.",
+      "no_root_walked": "No se recorrió ninguna raíz de confianza, así que no hay nada a lo que pueda faltarle un simulacro. Esto no es un simulacro caducado — no hay sujeto del simulacro.",
+      "stale": "La raíz de confianza de este nodo probó por última vez su interruptor de emergencia hace más de 180 días. Sigue sirviendo: la frescura del simulacro es una señal de confianza, nunca una puerta."
     },
     "headline": {
       "green": "Toda señal que este nodo puede calcular se lee sana.",
-      "yellow": "Este nodo está sirviendo, y algo de lo que hay aquí merece una mirada."
+      "yellow": "Este nodo está sirviendo, y algo de lo que hay aquí merece una mirada.",
+      "red": "Al menos una señal se lee como no sana. Lee también la lista de desconocidos: un titular rojo prevalece sobre uno desconocido y, si no, puede ocultar uno detrás de él.",
+      "unknown": "No se pudieron calcular una o más señales. Lee la lista de desconocidos — una señal sin calcular no es una señal sana."
     },
-    "ingest": {},
+    "ingest": {
+      "background": "Hay rechazos, pero no sostenidos desde un conjunto de identidades estable: sondeos ordinarios, clientes caducados y rotación. Lee `distinct_signers` y `unattributed_in_window` antes de descartarlo — una tasa ALTA repartida por un conjunto de identidades AMPLIO es un sondeo, y una tasa ALTA que casi no nombró a nadie es tráfico malformado con algún cliente caducado mezclado. Ninguno de los dos es rotación, y ninguno tiene un único productor al que ir a arreglar, y por eso se leen aquí y no como un productor atascado.",
+      "clean": "Se ofrecieron lotes a la ruta de ingesta HTTP y ninguno fue rechazado dentro de la ventana. El `refused_total` que figura al lado es el recuento de todo el proceso: una ventana limpia en un proceso que rechazó antes es una recuperación, no una ausencia.",
+      "http_path_only": "Esta lectura cubre únicamente la ruta de ingesta HTTP. Un lote que llega por el relé Reticulum lo verifica la misma puerta de persistencia, pero no se cuenta aquí, así que una lectura de ingesta limpia no es una afirmación sobre todas las vías por las que se puede ofrecer una traza a este nodo.",
+      "not_exercised": "No se ha ofrecido nada a la ruta de ingesta HTTP en este proceso — ningún lote aceptado y ninguno rechazado. El cero está sin probar, no limpio.",
+      "stuck_producer": "Una tasa SOSTENIDA de rechazos desde un conjunto de firmantes PEQUEÑO y ESTABLE: un productor está atascado en un bucle de reintentos y no puede corregirse solo. Cada uno de estos rechazos es correcto —la puerta funciona—, y justamente por eso el agregado necesita su propia lectura. `top_signers` nombra a quién hay que ir a arreglar.",
+      "unattributed": "Se rechazaron lotes y NI UNO SOLO nombró un firmante: fallaron antes de que hubiera una identidad que registrar — bytes malformados, una firma incorrecta, una versión de esquema no admitida. No hay ningún productor al que llamar, y esto deliberadamente no se informa como un productor atascado: cero firmantes distintos no es un conjunto de identidades pequeño y estable.",
+      "unreadable": "No se pudo leer el libro de registro de rechazos de ingesta de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que rechazó. Esto no es «no se rechazó nada» — es «no pudimos preguntar»."
+    },
     "key_statements": {
-      "stands": "Ninguna revocación que este nodo tenga cubre una declaración hecha ahora mismo."
+      "stands": "Ninguna revocación que este nodo tenga cubre una declaración hecha ahora mismo.",
+      "suspect_after_bound": "Una revocación ACOTADA en el historial cubre una declaración hecha ahora mismo: esta clave queda desadmitida a partir de ahora, y su pasado honesto sigue en pie. Ese límite es materialmente mejor que una revocación sin límite y no se lee igual.",
+      "suspect_unbounded": "Una revocación SIN LÍMITE cubre esta clave, así que todo lo que dijo alguna vez queda en duda — la revocación declinó decir otra cosa.",
+      "unreadable": "No se pudo calcular la situación de la clave de este nodo. Eso no es «se mantiene» — una pregunta que no se hace no tiene respuesta."
     },
-    "peer_quota": {},
+    "peer_quota": {
+      "clean": "La cuota de escritura de pares se ha ejercitado y su aritmética de denegación de ranuras sigue siendo válida.",
+      "denials": "La cuota de escritura de pares registró denegaciones de ranura. La derivación del tope de pares rastreados ya no es válida en esta compilación.",
+      "no_quota": "Este backend no mantiene ninguna cuota de escritura de pares, así que el disparador no informa de nada. Eso no es una lectura limpia.",
+      "not_exercised": "Ninguna escritura de par se ha imputado a la cuota en este proceso, así que su cero está sin probar, no limpio."
+    },
     "quarantine": {
       "not_quarantined": "Ningún marcador de cuarentena sobre la clave de este nodo ha surtido efecto aquí jamás.",
       "unreadable": "No se pudo leer el estado de cuarentena. Eso no es «sin cuarentena».",
-      "withheld": "La clave de este nodo está retenida del servicio por un marcador de cuarentena."
+      "withheld": "La clave de este nodo está retenida del servicio por un marcador de cuarentena.",
+      "released": "La clave de este nodo estuvo retenida y luego fue liberada. Ahora sirve, y no siempre fue así — un hecho distinto de no haber estado nunca retenida."
     },
     "receive": {
-      "clean": "Ninguna fila ofrecida por un par ha sido rechazada en este proceso."
+      "clean": "Ninguna fila ofrecida por un par ha sido rechazada en este proceso.",
+      "no_accepted_counter": "El sustrato cuenta los RECHAZOS de aplicación, no las aplicaciones aceptadas. Por eso una lectura limpia no puede separar «se aplicó todo lo ofrecido» de «no se ofreció nada» — lee `rounds_total` y la propia superficie del par para distinguirlos.",
+      "not_exercised": "Ninguna ronda de replicación ha terminado en este proceso, así que no se ha ofrecido nada a la ruta de aplicación de este nodo. El cero está sin probar, no limpio.",
+      "refusing": "Este nodo rechazó filas que le ofrecieron sus pares. `apply_refusals_by_kind` nombra el plano; `key_apply_refusals_by_reason` nombra el token de política que rechazó una clave.",
+      "unreadable": "No se pudieron leer los contadores de aplicación de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que aceptó. Esto no es «no se rechazó nada» — es «no pudimos preguntar»."
     },
     "source": {
-      "edge_metrics": {},
-      "ingest_refusals": {},
-      "node_state": {},
-      "trace_corpus": {}
+      "edge_metrics": {
+        "unavailable": "No se pudieron leer los contadores de acarreo de este nodo, así que nada de lo que hay aquí describe lo que sirvió, lo que retuvo ni lo que se negó a aplicar."
+      },
+      "ingest_refusals": {
+        "unavailable": "No se pudo leer el libro de registro de rechazos de ingesta de este nodo, así que nada de lo que hay aquí describe lo que rechazó la puerta de admisión. Una puerta sin lector es lo que permitió que 8.631 rechazos correctos al día pasaran inadvertidos durante 71 horas."
+      },
+      "node_state": {
+        "unavailable": "No se pudieron leer del sustrato las señales de estado de este nodo, así que nada de lo que hay aquí describe su raíz de confianza, la situación de su clave, su cuarentena, su SLA de consentimiento ni su cuota de pares. La ausencia de malas noticias desde una fuente no leída no es una buena noticia."
+      },
+      "trace_corpus": {
+        "unavailable": "No se pudo leer el corpus de trazas de este nodo, así que nada de lo que hay aquí describe lo que ha admitido. La ausencia de llegadas desde un corpus no leído no es ausencia de llegadas."
+      }
     },
-    "trace_plane": {},
-    "trust_root": {},
-    "volatility": {},
-    "withhold_class": {}
+    "trace_plane": {
+      "dark": "NO SE HA ADMITIDO NADA DURANTE MÁS TIEMPO QUE EL UMBRAL ROJO DE ESTE NODO. La llegada es lo único para lo que existe este nodo. Lee junto a esto la lectura de `ingest`: un plano a oscuras con una tasa de rechazos sostenida es un productor al que se está rechazando correctamente, y un plano a oscuras sin ningún rechazo significa que ni siquiera está llegando nada a este nodo.",
+      "future_dated": "La traza más reciente del corpus está sellada en el FUTURO. La marca de tiempo es el propio reloj de emisión del productor, así que esto es una afirmación sobre ese reloj — y se señala aparte en lugar de asignarle una banda porque una fila fechada en el futuro fija esta lectura en verde indefinidamente y ocultaría un plano que en realidad se ha detenido.",
+      "live": "Se admitió una traza recientemente: el plano en el que este nodo existe para recibir está siendo alimentado.",
+      "never_admitted": "Se leyó el corpus y no contiene ninguna traza en absoluto: nunca se ha admitido nada en este nodo. No hay instante de llegada al que asignar una banda, así que este es un cero sin probar, no uno sano — y en un nodo que lleva un tiempo sirviendo es la misma condición que un plano a oscuras.",
+      "producer_asserted_ts": "`last_admitted_at` es MAX(trace_events.ts) — el reloj de pared de emisión de la propia traza, afirmado por el productor. El sustrato no guarda en esta tabla ningún instante de admisión del lado del servidor, así que un productor con el reloj desviado mueve esta lectura; una fila muy lejana en el futuro se señala como `future_dated` en lugar de asignarle una banda exactamente por esa razón.",
+      "quiet": "No se ha admitido ninguna traza durante más tiempo del esperado, pero todavía no el suficiente para declarar el plano a oscuras. Un nodo genuinamente inactivo se lee así; también la primera mitad de una caída del productor.",
+      "unreadable": "No se pudo leer el corpus de trazas de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que ha admitido. Esto no es «no ha llegado ninguna traza» — es «no pudimos preguntar»."
+    },
+    "trust_root": {
+      "no_self_key": "El host nunca declaró el id de clave propio de este nodo, así que no se pudo recorrer nada de ámbito propio. Esto es una afirmación sobre el lector, no sobre el nodo: declara la clave en el arranque y toda señal de ámbito propio de las de abajo pasa a poder responderse.",
+      "no_trust_edges": "Este nodo se declaró y no mantiene ninguna arista de confianza viva hacia ninguna raíz: no se enraíza en nada. Un mal conocido, no una lectura ausente.",
+      "no_valid_root": "Este nodo confía en una o más raíces y ninguna de ellas valida. El veredicto por tramo que figura al lado nombra qué tramo falló.",
+      "unreadable": "No se pudo leer el recorrido de la raíz de confianza. Un directorio ilegible no es un directorio no fiable — no leas esto como un nodo sin raíz.",
+      "valid": "Este nodo se enraíza en una raíz de confianza que se comprueba por completo: una arista de confianza viva, una carta autodeclarativa con un compromiso de recuperación y ninguna detención enclavada."
+    },
+    "volatility": {
+      "clock_dependent_local": "Esta banda se calcula en ESTE nodo a partir de un instante almacenado frente al reloj de lectura, así que se mueve solo con el tiempo transcurrido — sin cambio de estado, sin fila nueva. Un nodo que deja de admitir trazas pasa de verde a amarillo y a rojo por sí solo, que es justamente el propósito: se pone rojo sin que nadie se lo pida.",
+      "process_local": "Los contadores de acarreo, de recepción y de ingesta son locales al proceso y acumulativos desde que este proceso arrancó. Se reinician al reiniciar, difieren entre procesos que sirven un mismo nodo y no se almacenan en ninguna parte. Son un indicador de este proceso, no un libro de registro de este nodo."
+    },
+    "withhold_class": {
+      "fault": "Falló una lectura o un paso de cableado y la ruta de servicio falló en cerrado. Esto NO es un veredicto sobre el par — es un fallo de este nodo, y a este nodo le toca arreglarlo.",
+      "integrity": "Una fila que este nodo mantiene no se pudo servir en absoluto: no se serializaba, su hash almacenado no se decodificaba, o los bytes anunciados no se podían obtener. Un defecto del estado local, no una política.",
+      "policy": "Una decisión que este nodo tomó a propósito — el ámbito del consentimiento, una capacidad de servicio que el par no tiene, o la propia restricción del productor. Funciona según lo configurado: cambia la configuración, no el código."
+    }
   }
 }

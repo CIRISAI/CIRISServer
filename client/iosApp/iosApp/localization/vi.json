@@ -3084,11 +3084,13 @@
       "not_reached": "Bản thân các hàng chứng thực đã chọn thì không bị hạ giáng. Mọi vật mang tải trên nền tảng này đều được niêm phong bên trong chữ ký của chính nó, nên không thể bỏ đi các byte của nó mà không khiến hàng đó bị đọc thành giả mạo; khả năng xóa được quyết định ngay lúc đúc, và không có thứ gì được đúc ở thời điểm hiện tại là có thể xóa được."
     },
     "enforcement": {
+      "accept_writes": "Nút này ngừng từ chối các lượt ghi của những khóa được nêu tên: lệnh hủy kết nạp do chính nó soạn ra được rút lại và nền tảng lại kết nạp lượt ghi kế tiếp của chúng. Cả lệnh hủy kết nạp lẫn việc rút lại này đều tồn tại tiếp như lịch sử có thể đọc được.",
       "annotate": "Một phán quyết đã ký, không có hiệu lực nào cho tới khi một bên đọc tôn trọng nó. Không có gì bị giữ lại, bị điều tiết hay bị gỡ bỏ.",
       "deadmit": "Một thu hồi đã ký trên mặt phẳng chỉ-ghi-thêm thông thường. Đó là bằng chứng để bên đọc gấp vào, không phải cánh cửa đóng sập: việc xác minh chữ ký, các con trỏ sao chép và việc nạp hàng đều cố ý tiếp tục hoạt động, vì từ chối các hàng cũ hơn của một khóa đã bị xâm phạm sẽ phá hủy chính bằng chứng cần để phân xử vụ xâm phạm đó.",
       "descend": "Không thể đảo ngược theo thiết kế. Việc hạ giáng không bao giờ kết thúc ở con số không — phần làm mờ và bia mộ vẫn còn — nhưng những gì đã bị loại bỏ thì không quay lại.",
       "quarantine": "Một dấu hiệu đã ký, không phải một mệnh lệnh: không có gì bị xóa và không có gì bị viết lại. Các đường phục vụ của nút này ngừng trao các hàng và blob của những khóa được nêu tên cho các nút ngang hàng; một nút ngang hàng gấp theo cách khác thì đơn giản là không nhận được chúng từ chúng ta.",
       "re_admit": "Được ghi lại như một sự đảo ngược có ghi nhận tác giả. Hàng thu hồi vẫn tồn tại và mọi bên đọc vẫn gấp nó vào: các hạn chế thì cộng dồn còn các nới lỏng thì không, và không tầng nào của nền tảng này cung cấp một thao tác hủy-thu-hồi.",
+      "refuse_writes": "Nút này từ chối lượt ghi kế tiếp của những khóa được nêu tên vào kho dữ liệu của chính nó, ngay tại cửa của nền tảng và trước khi bất kỳ cổng nào khác chạy. Điều này là CỤC BỘ theo thiết kế: không nút nào ra sắc lệnh về tập kết nạp của một nút khác, bởi một lệnh hủy kết nạp có hiệu lực toàn cục tự nó sẽ là một vũ khí kiểm duyệt. Việc cô lập một kẻ lạm dụng thực sự là điều nổi lên từ bên dưới — nó xảy đến khi nhiều nút một cách độc lập đi tới cùng một kết luận — chứ không bao giờ được ra sắc lệnh từ đây.",
       "throttle": "Chỉ được ghi lại như một phán quyết có ghi nhận tác giả. Nền tảng này không có hạn mức kết nạp theo từng khóa do bên nhận đặt ra: hạn ngạch ghi của nút ngang hàng là một chốt chặn cố định cho vòng lặp mất kiểm soát, không phải một bề mặt chính sách mà việc điều tiết có thể bám vào. Không có gì thay đổi trong những gì nút này chấp nhận từ các khóa được nêu tên."
     },
     "preview": {
@@ -3120,7 +3122,9 @@
       "session_absent": "Không có mã phiên nào được xuất trình. Các thao tác quản trị phân bậc chỉ dành cho chủ sở hữu.",
       "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
       "store_unavailable": "Không đọc được nền tảng.",
-      "subject_absent": "subject_key_id là bắt buộc: một phép gấp của bên đọc là về các phán quyết đối với một chủ thể, còn một chủ thể không được nêu tên thì là mọi chủ thể."
+      "subject_absent": "subject_key_id là bắt buộc: một phép gấp của bên đọc là về các phán quyết đối với một chủ thể, còn một chủ thể không được nêu tên thì là mọi chủ thể.",
+      "deadmission_gate_dormant": "Nút này chưa khai báo danh tính của chính nó với nền tảng, nên cổng hủy kết nạp đang nằm im: hàng sẽ được ghi ra và sẽ không từ chối được gì cả. Bị từ chối chứ không được trả về như đã hoàn tất — một cổng chế tài âm thầm không làm gì thì còn tệ hơn là không có cổng nào, bởi người vận hành sẽ tin rằng việc hủy kết nạp có hiệu lực. Đây là lỗi cấu hình của nút, không phải lỗi của yêu cầu.",
+      "deadmission_gate_foreign_identity": "Danh tính mà nút này dùng để ký và danh tính mà cổng hủy kết nạp dùng để đối chiếu với các bên ghi là hai khóa khác nhau, nên một lệnh hủy kết nạp được ký ở đây sẽ không bao giờ được gấp vào như của chính nút này và sẽ không từ chối được gì cả. Đây là lỗi cấu hình của nút, không phải lỗi của yêu cầu."
     },
     "reversal": {
       "evidence_only": "Hàng gốc vẫn tồn tại và vẫn được mọi bên đọc gấp vào. Sự đảo ngược này là bằng chứng được ghi lại, không phải một thao tác hoàn tác — nền tảng không cung cấp thao tác hủy-thu-hồi nào.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Nút này chưa bao giờ tuyên bố điều này. Đó không phải là cùng một sự việc với việc đã tuyên bố rồi gỡ bỏ, và cũng không phải là cùng một sự việc với việc không đọc được.",
         "unreadable": "Không đọc được bản ghi, nên nút này không biết trạng thái của chính mình trên trục này. Đây KHÔNG phải là “không có gì đang có hiệu lực” — đừng hiển thị nó như vậy."
       }
+    },
+    "accept_writes": {
+      "not_reached": "Nó không khôi phục bất cứ thứ gì đã bị từ chối trong khi lệnh hủy kết nạp còn hiệu lực. Những lượt ghi đó đã bị khước từ ngay tại cửa và chưa bao giờ đáp xuống đây; nếu nút ngang hàng vẫn còn giữ chúng thì nó phải gửi lại lần nữa. Không có gì khác về khóa này thay đổi.",
+      "not_refused": "Khóa này không bị hủy kết nạp ở đây, nên không có gì để gỡ bỏ."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Không có lệnh hủy kết nạp nào còn hiệu lực do nút này soạn ra mà nêu tên khóa này, nên các lượt ghi của nó được kết nạp ở đây. Điều này không nói lên bất cứ điều gì về bất kỳ nút nào khác: việc hủy kết nạp chỉ có tính cục bộ đối với kho dữ liệu phát ra nó.",
+        "refused": "Nút này đang giữ một lệnh hủy kết nạp còn hiệu lực đối với khóa này do chính nó soạn ra, nên lượt ghi kế tiếp của khóa đó vào kho dữ liệu của nút này sẽ bị từ chối ngay tại cửa của chính nền tảng.",
+        "unreadable": "Nút này không đọc được trạng thái kết nạp của chính nó đối với khóa này, nên nó không biết các lượt ghi của khóa đó có bị từ chối hay không. Đây KHÔNG phải là “được kết nạp” — đừng hiển thị nó như vậy."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Khóa này vốn đã bị hủy kết nạp ở đây, nên không có gì được ghi ra và tình trạng không thay đổi.",
+      "not_reached": "Nó không hủy ghi bất cứ thứ gì. Những hàng mà các khóa này đã ghi ra ở đây thì không bị đụng tới và vẫn được phục vụ — cách ly mới là thao tác ngừng phục vụ chúng. Những hàng đã sao chép sang các nút ngang hàng thì không được thu hồi và không thể thu hồi. Các khóa không bị gỡ bỏ, chữ ký của chúng vẫn xác minh được, và chúng vẫn tiếp tục ghi vào mọi nút khác, kể cả các nút ngang hàng của nút này, và từ đó những hàng ấy có thể lại đến đây qua đường sao chép. Một ngoại lệ duy nhất được cố ý giữ lại để một nút luôn có thể tự gỡ bỏ lệnh từ chối của chính mình, và nó không hỏi ai đang ghi: một khóa đã bị hủy kết nạp vẫn có thể ghi các hàng hủy kết nạp ở đây (CIRISPersist#608).",
+      "reversal": "Có thể đảo ngược, và việc đảo ngược chạm tới nền tảng chứ không chỉ ghi lại một sự đổi ý: POST /v1/admin/accept-writes rút lại lệnh hủy kết nạp và các lượt ghi của khóa lại được kết nạp ở đây. Hai trong số các thao tác đảo ngược của nấc thang này chạm tới nền tảng — việc giải phóng một lệnh cách ly, vốn khôi phục những gì nút này PHỤC VỤ, và thao tác này, vốn khôi phục những gì nó CHẤP NHẬN. Cả hai hàng đều tồn tại tiếp và vẫn đọc được: “đã bị từ chối rồi được kết nạp lại” không phải là cùng một sự việc với “chưa bao giờ bị từ chối”."
     }
   },
   "consent": {
@@ -3265,7 +3285,8 @@
     "escalation": {
       "awaiting": "Những người kiểm duyệt được chỉ định vẫn có thể trả lời, hoặc họ đã phán quyết đúng hạn. Việc leo thang chưa mở ra.",
       "not_adopted": "Cộng đồng này không tuyên bố tầng quản hộ (steward) nào, nên không có hạn chót cho người kiểm duyệt và không có leo thang. Ở đây, sự im lặng không thay đổi điều gì.",
-      "nothing_to_escalate": "Một tầng quản hộ (steward) đã được tuyên bố và không có phản đối nào còn hiệu lực đang chờ nó. Không ai im lặng cả, bởi vì không có gì được hỏi."
+      "nothing_to_escalate": "Một tầng quản hộ (steward) đã được tuyên bố và không có phản đối nào còn hiệu lực đang chờ nó. Không ai im lặng cả, bởi vì không có gì được hỏi.",
+      "open": "Những người có bổn phận đã không trả lời đúng hạn, và quyết định đã chuyển sang cho những ai đã trả lời. Giờ đây ngưỡng được tính trên NHỮNG NGƯỜI ĐÃ TRẢ LỜI chứ không phải trên toàn bộ danh sách thành viên — chính điều đó cho phép một cộng đồng trầm lặng vẫn ngã ngũ được — kèm một mức sàn để “có thể liên hệ được” không bao giờ suy thoái thành “một người quyết định”."
     },
     "objection": {
       "admitted": "Phản đối đã được ghi vào hồ sơ. Đó là một DẤU HIỆU, không phải một mệnh lệnh: sự xuất hiện của nó không thay đổi điều gì, và nó được sao chép trên mặt phẳng chứng thực thông thường, nên một nút ngang hàng bị chia cắt trong suốt cửa sổ vẫn tính nó khi nó tới nơi. Một thành viên là đủ để nêu nó lên; việc gỡ bỏ nó tốn đúng ngưỡng của chính nhóm."
@@ -3277,19 +3298,27 @@
       "upheld": "Những người đã trả lời phán quyết rằng phản đối này đứng vững."
     },
     "refusal": {
+      "action_absent": "action_id là bắt buộc. Một phản đối nêu tên một hàng trong tài sản chung; một phản đối không nêu tên gì cả thì không bao giờ đếm được.",
+      "action_unknown": "Nút này không giữ hành động nào như vậy, nên một hàng nêu tên nó sẽ được nộp vào nơi mà không phép gấp nào từng đếm tới. Nền tảng cũng từ chối chính trường hợp này ngay tại cửa của riêng nó.",
       "actor_recused": "Tác giả của hành động không bỏ phiếu về phản đối nhắm vào chính hành động của mình.",
       "bad_now": "Thời điểm đọc phải là một dấu thời gian RFC 3339.",
       "ballot_predates_action": "Một phán quyết không thể cũ hơn thứ mà nó phán xét.",
       "canonicalize_failed": "Không tạo ra được các byte chuẩn tắc của hàng này, nên không có gì để một người đồng ký có thể ký.",
+      "cohort_absent": "cohort_key_id là bắt buộc: nó nêu rõ danh sách thành viên của ai và tuyên bố của ai sẽ chi phối phép đếm.",
+      "cohort_not_a_commons": "Nhóm `self` không có danh sách thành viên nào để lấy túc số trên đó — các thành viên của nó là những thiết bị của chính một danh tính — nên nó không có tài sản chung nào để canh giữ.",
       "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên không có danh sách thành viên và không có tuyên bố nào để phán xét việc này. Thẩm quyền phải đến từ trạng thái đã xác minh tại chỗ.",
       "cohort_unrecognized": "Đó không phải một nhóm (cohort) có danh sách thành viên. Các phản đối sống trong một gia đình (family), một cộng đồng (community) hoặc một nhóm liên kết (affiliations).",
       "dimension_mismatch": "Hàng đó được trình ở sai cửa so với thứ mà nó mang.",
       "dismissal_quorum_short": "Số thành viên riêng biệt, đã được xác minh, cùng ký thì ít hơn mức ngưỡng của nhóm đòi hỏi. Con số đã đếm và con số yêu cầu nằm ngay bên cạnh thông báo này.",
       "duplicate_objection": "Bạn đã có sẵn một phản đối còn hiệu lực đối với hành động này. Một thành viên là một phản đối — nếu không, một thành viên đơn lẻ có thể tự mình đạt tới ngưỡng.",
+      "grounds_absent": "grounds là bắt buộc. Một phản đối nêu lên mà không có lý do được ghi lại thì không thể phân biệt được với một phản đối nêu lên vì lý do tồi — và grounds chỉ được ghi lại, không bao giờ được diễn giải.",
       "malformed_envelope": "Hàng này thiếu một tham chiếu mà phép đếm cần đến.",
+      "node_unowned": "Nút này không có bên chịu trách nhiệm (ràng buộc chủ sở hữu), nên nó không đọc mà cũng không phát biểu trong tài sản chung của bất kỳ ai thay mặt họ. Hãy nhận quyền sở hữu trước.",
       "not_a_cohort_member": "Chỉ thành viên của nhóm này mới được nói trong tài sản chung của nó. Đây là phép kiểm tra duy nhất mà phía bảo vệ áp dụng — và là lý do vì sao phản đối của một người lạ không bao giờ trở thành một dấu hiệu mà người khác có thể tôn trọng.",
       "not_filed_against_actor": "Hàng này được nộp vào nơi mà phép gấp không tìm tới, nên nó sẽ được lưu trữ, bền vững và trơ vĩnh viễn. Một dấu hiệu không ai tìm ra được thì không phải là một dấu hiệu.",
       "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên nó chưa áp dụng mặt phẳng phản đối. Từ chối chứ không lấy giá trị mặc định: tự bịa ra một cửa sổ và một ngưỡng cho một nhóm chưa tuyên bố cả hai thứ đó còn tệ hơn là nói không.",
+      "not_owner": "Bề mặt tài sản chung yêu cầu vai trò chủ sở hữu (SYSTEM_ADMIN).",
+      "objection_absent": "objection_id là bắt buộc: một lá phiếu trả lời câu hỏi về MỘT phản đối.",
       "objection_unknown": "Phản đối được nêu tên không phải là phản đối mà nút này đang giữ đối với hành động này.",
       "session_absent": "Không có token phiên nào được trình. Bề mặt tài sản chung chỉ dành cho chủ sở hữu.",
       "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
@@ -3301,6 +3330,7 @@
     },
     "standing": {
       "action_unknown": "Nút này không giữ hành động nào như vậy. Một phản đối nêu tên một hàng, mà ở đây không có hàng nào để nêu tên.",
+      "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên nó không có danh sách thành viên và không có tuyên bố nào mà nút này có thể đọc. Thẩm quyền phải đến từ trạng thái đã xác minh tại chỗ.",
       "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên mặt phẳng phản đối hoàn toàn không áp dụng cho tài sản chung của nó. Điều đó khác với việc không có ai phản đối.",
       "objected": "Ít nhất một thành viên đã phản đối và cửa sổ vẫn đang mở. Hành động tạm thời vẫn có hiệu lực; có thể chỉ cần thêm một phản đối nữa là đủ.",
       "quiet": "Mặt phẳng đã được đọc và chưa có phản đối nào được nêu lên đối với hành động này.",

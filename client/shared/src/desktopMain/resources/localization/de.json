@@ -3089,7 +3089,9 @@
       "descend": "Von Grund auf unumkehrbar. Der Abstieg endet nie bei null — die Unschärfe und der Grabstein bleiben bestehen —, aber was abgeworfen wurde, kommt nicht zurück.",
       "quarantine": "Eine signierte Markierung, kein Befehl: Nichts wird gelöscht und nichts umgeschrieben. Die Auslieferungspfade dieses Knotens geben die Zeilen und Blobs der genannten Schlüssel nicht mehr an Peers weiter; ein Peer, der anders einfaltet, erhält sie von uns schlicht nicht.",
       "re_admit": "Wird als zurechenbare Umkehrung erfasst. Die Widerrufszeile bleibt bestehen und jeder Leser faltet sie weiterhin ein: Einschränkungen setzen sich zusammen, Lockerungen nicht, und keine Schicht dieses Substrats bietet eine Aufhebung des Widerrufs.",
-      "throttle": "Wird nur als zurechenbares Urteil erfasst. Dieses Substrat kennt kein vom Empfänger verfasstes Zulassungsbudget je Schlüssel: Das Schreibkontingent für Peers ist eine feste Absicherung gegen Endlosschleifen, keine Richtlinienfläche, an der eine Drosselung ansetzen könnte. An dem, was dieser Knoten von den genannten Schlüsseln annimmt, ändert sich nichts."
+      "throttle": "Wird nur als zurechenbares Urteil erfasst. Dieses Substrat kennt kein vom Empfänger verfasstes Zulassungsbudget je Schlüssel: Das Schreibkontingent für Peers ist eine feste Absicherung gegen Endlosschleifen, keine Richtlinienfläche, an der eine Drosselung ansetzen könnte. An dem, was dieser Knoten von den genannten Schlüsseln annimmt, ändert sich nichts.",
+      "accept_writes": "Dieser Knoten weist die Schreibvorgänge der genannten Schlüssel nicht länger ab: Die von ihm verfasste Aberkennung der Zulassung wird zurückgenommen, und das Substrat lässt deren nächsten Schreibvorgang wieder zu. Sowohl die Aberkennung der Zulassung als auch diese Rücknahme bleiben als lesbare Historie bestehen.",
+      "refuse_writes": "Dieser Knoten weist den nächsten Schreibvorgang der genannten Schlüssel in seinen eigenen Korpus ab — an der Tür des Substrats selbst und bevor irgendein anderes Gate läuft. Er wirkt bewusst LOKAL: Kein Knoten verfügt über die Zulassungsmenge eines anderen Knotens, denn eine global wirksame Aberkennung der Zulassung wäre selbst eine Zensurwaffe. Die Isolation eines tatsächlichen Missbrauchers entsteht emergent — sie tritt ein, wenn viele Knoten unabhängig voneinander zum selben Schluss kommen — und wird niemals von hier aus verfügt."
     },
     "preview": {
       "note": "Genau darauf wird ein Commit wirken. Übergeben Sie den Auswahl-Hash zusammen mit dem Commit; hat sich die Auswahl geändert, verweigert der Commit.",
@@ -3120,7 +3122,9 @@
       "session_absent": "Es wurde kein Sitzungstoken vorgelegt. Abgestufte Admin-Vorgänge sind ausschließlich dem Eigentümer vorbehalten.",
       "session_invalid": "Diese Sitzung ist ungültig oder abgelaufen.",
       "store_unavailable": "Das Substrat konnte nicht gelesen werden.",
-      "subject_absent": "subject_key_id ist erforderlich: Eine Leserfaltung betrifft die Urteile über ein Subjekt, und ein ungenanntes Subjekt ist jedes Subjekt."
+      "subject_absent": "subject_key_id ist erforderlich: Eine Leserfaltung betrifft die Urteile über ein Subjekt, und ein ungenanntes Subjekt ist jedes Subjekt.",
+      "deadmission_gate_dormant": "Dieser Knoten hat dem Substrat seine eigene Identität nicht erklärt, daher ruht das Gate für die Aberkennung der Zulassung: Die Zeile würde geschrieben und würde nichts abweisen. Abgelehnt, statt als erledigt zurückgemeldet — ein Sanktions-Gate, das stillschweigend nichts tut, ist schlimmer als gar kein Gate, denn ein Betreiber wird glauben, die Aberkennung der Zulassung wirke. Das ist ein Fehler in der Konfiguration dieses Knotens, kein Fehler der Anfrage.",
+      "deadmission_gate_foreign_identity": "Die Identität, unter der dieser Knoten signiert, und die Identität, gegen die das Gate für die Aberkennung der Zulassung die Schreibenden abgleicht, sind zwei verschiedene Schlüssel; eine hier signierte Aberkennung der Zulassung würde daher nie als die eigene dieses Knotens eingefaltet und würde nichts abweisen. Das ist ein Fehler in der Konfiguration dieses Knotens, kein Fehler der Anfrage."
     },
     "reversal": {
       "evidence_only": "Die ursprüngliche Zeile bleibt bestehen und wird weiterhin von jedem Leser eingefaltet. Diese Umkehrung ist erfasstes Beweismaterial, kein Rückgängigmachen — das Substrat bietet keine Aufhebung des Widerrufs.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Dieser Knoten hat dies nie erklärt. Das ist nicht dieselbe Tatsache, wie es erklärt und wieder aufgehoben zu haben, und auch nicht dieselbe, wie es nicht lesen zu können.",
         "unreadable": "Der Datensatz konnte nicht gelesen werden, dieser Knoten kennt daher seinen eigenen Stand auf dieser Achse nicht. Das ist NICHT „nichts in Kraft“ — stellen Sie es nicht als solches dar."
       }
+    },
+    "accept_writes": {
+      "not_reached": "Es stellt nichts wieder her, was während der bestehenden Aberkennung der Zulassung abgewiesen wurde. Jene Schreibvorgänge wurden an der Tür zurückgewiesen und sind hier nie angekommen; hält der Peer sie noch, muss er sie erneut senden. An diesem Schlüssel ändert sich sonst nichts.",
+      "not_refused": "Für diesen Schlüssel besteht hier keine Aberkennung der Zulassung, es gibt also nichts aufzuheben."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Keine aktive, von diesem Knoten verfasste Aberkennung der Zulassung benennt diesen Schlüssel, seine Schreibvorgänge sind hier also zugelassen. Über irgendeinen anderen Knoten sagt das nichts aus: Die Aberkennung der Zulassung gilt nur lokal für den Korpus, der sie ausspricht.",
+        "refused": "Dieser Knoten hält eine aktive, von ihm selbst verfasste Aberkennung der Zulassung dieses Schlüssels; der nächste Schreibvorgang des Schlüssels in den Korpus dieses Knotens wird daher an der Tür des Substrats selbst abgewiesen.",
+        "unreadable": "Dieser Knoten konnte seinen eigenen Zulassungszustand für diesen Schlüssel nicht lesen und weiß daher nicht, ob die Schreibvorgänge dieses Schlüssels abgewiesen werden. Das ist NICHT „zugelassen“ — stellen Sie es nicht als solches dar."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Für diesen Schlüssel besteht hier bereits eine Aberkennung der Zulassung, es wurde also nichts geschrieben und der Zulassungsstand ist unverändert.",
+      "not_reached": "Es macht nichts ungeschrieben. Zeilen, die diese Schlüssel hier bereits geschrieben haben, bleiben unangetastet und werden weiterhin ausgeliefert — die Quarantäne ist der Vorgang, der das Ausliefern beendet. Zeilen, die bereits zu Peers repliziert sind, werden nicht zurückgerufen und können es auch nicht. Die Schlüssel werden nicht entfernt, ihre Signaturen verifizieren weiterhin, und sie schreiben auf jedem anderen Knoten weiter, auch auf den Peers dieses Knotens, von denen jene Zeilen durch Replikation erneut hier eintreffen können. Eine einzige Ausnahme besteht mit Absicht fort, damit ein Knoten seine eigene Verweigerung stets aufheben kann, und sie fragt nicht danach, wer schreibt: Ein nicht mehr zugelassener Schlüssel darf hier weiterhin Zeilen zur Aberkennung der Zulassung schreiben (CIRISPersist#608).",
+      "reversal": "Umkehrbar — und die Umkehrung erreicht das Substrat, statt bloß einen Sinneswandel zu protokollieren: POST /v1/admin/accept-writes nimmt die Aberkennung der Zulassung zurück, und die Schreibvorgänge des Schlüssels sind hier wieder zugelassen. Zwei Umkehrungen dieser Stufenleiter erreichen das Substrat — das Aufheben einer Quarantäne, das wiederherstellt, was dieser Knoten AUSLIEFERT, und diese hier, die wiederherstellt, was er ANNIMMT. Beide Zeilen bleiben bestehen und bleiben lesbar: „abgewiesen und danach wieder zugelassen“ ist nicht derselbe Sachverhalt wie „nie abgewiesen“."
     }
   },
   "consent": {
@@ -3265,7 +3285,8 @@
     "escalation": {
       "awaiting": "Die bestellten Moderatoren können noch antworten, oder sie haben bereits rechtzeitig entschieden. Die Eskalation ist nicht eröffnet.",
       "not_adopted": "Diese Gemeinschaft hat keine Steward-Stufe erklärt, daher gibt es keine Moderatorenfrist und keine Eskalation. Schweigen ändert hier nichts.",
-      "nothing_to_escalate": "Eine Steward-Stufe ist erklärt, und kein aktiver Einspruch wartet auf sie. Niemand hat geschwiegen, denn es wurde nichts gefragt."
+      "nothing_to_escalate": "Eine Steward-Stufe ist erklärt, und kein aktiver Einspruch wartet auf sie. Niemand hat geschwiegen, denn es wurde nichts gefragt.",
+      "open": "Die bestellten Moderatoren haben nicht rechtzeitig geantwortet, und die Entscheidung ist an diejenigen übergegangen, die geantwortet haben. Die Schwelle zählt nun die ANTWORTENDEN statt der gesamten Mitgliederliste — genau das lässt eine stille Gemeinschaft dennoch zu einem Ergebnis kommen — und ist mit einer Untergrenze versehen, damit „erreichbar“ niemals zu „eine einzelne Person entscheidet“ verkommt."
     },
     "objection": {
       "admitted": "Der Einspruch ist aktenkundig. Er ist eine MARKIERUNG, kein Befehl: Durch sein Eintreffen wurde nichts verändert, und er repliziert auf der gewöhnlichen Attestierungsebene, sodass ein Peer, der während des Fensters vom Netz getrennt war, ihn beim Eintreffen dennoch mitzählt. Ein einzelnes Mitglied genügt, um ihn zu erheben; ihn aufzuheben kostet die Schwelle der Kohorte selbst."
@@ -3297,7 +3318,15 @@
       "steward_tier_not_adopted": "Diese Gemeinschaft hat keine Steward-Stufe erklärt, daher gibt es keine Frist, über die hinaus geschwiegen werden könnte, und keinen eskalierten Pool. Eine Stimmabgabe würde hier gespeichert und nie gelesen.",
       "store_unavailable": "Das Substrat war nicht erreichbar.",
       "target_action_unknown": "Die beanstandete Handlung ist keine Zeile, die dieser Knoten hält, daher wäre der Einspruch nicht zählbar und sein Fenster nicht auflösbar.",
-      "unverifiable_signature": "Die Signatur der Zeile ließ sich nicht gegen die auf diesem Knoten registrierten Schlüssel des Unterzeichners verifizieren."
+      "unverifiable_signature": "Die Signatur der Zeile ließ sich nicht gegen die auf diesem Knoten registrierten Schlüssel des Unterzeichners verifizieren.",
+      "action_absent": "action_id ist erforderlich. Ein Einspruch benennt eine Zeile im Gemeingut; einer, der nichts benennt, kann nie gezählt werden.",
+      "action_unknown": "Dieser Knoten hält keine solche Handlung; eine Zeile, die sie benennt, würde daher dort abgelegt, wo keine Faltung sie je zählen wird. Das Substrat weist denselben Fall an seiner eigenen Tür ab.",
+      "cohort_absent": "cohort_key_id ist erforderlich: Sie benennt, wessen Mitgliederliste und wessen Erklärung die Zählung bestimmen.",
+      "cohort_not_a_commons": "Die Kohorte `self` hat keine Mitgliederliste, über der ein Quorum gebildet werden könnte — ihre Mitglieder sind die eigenen Geräte einer einzigen Identität —, sie hat also kein Gemeingut, über das zu wachen wäre.",
+      "grounds_absent": "grounds ist erforderlich. Ein Einspruch, der ohne erfassten Grund erhoben wird, ist von einem aus schlechtem Grund erhobenen nicht zu unterscheiden — und Gründe werden erfasst, niemals ausgelegt.",
+      "node_unowned": "Dieser Knoten hat keinen Verantwortlichen (Eigentümerbindung) und liest daher weder in irgendjemandes Gemeingut, noch spricht er dort in dessen Namen. Beanspruchen Sie zuerst die Eigentümerschaft.",
+      "not_owner": "Die Gemeingut-Oberfläche erfordert die Eigentümerrolle (SYSTEM_ADMIN).",
+      "objection_absent": "objection_id ist erforderlich: Eine Stimmabgabe beantwortet eine Frage zu EINEM Einspruch."
     },
     "standing": {
       "action_unknown": "Dieser Knoten hält keine solche Handlung. Ein Einspruch benennt eine Zeile, und hier gibt es keine Zeile, die benannt werden könnte.",
@@ -3306,7 +3335,8 @@
       "quiet": "Die Ebene wurde gelesen, und gegen diese Handlung wurde kein Einspruch erhoben.",
       "reversed": "Genügend verschiedene Mitglieder haben innerhalb des Fensters Einspruch erhoben. Jeder Knoten, der diese Zeilen hält, faltet ohne jede Koordination zur selben Antwort.",
       "stood": "Das Fenster schloss unterhalb der Umkehrschwelle. Gegen diese Handlung wurde Einspruch erhoben, und sie besteht.",
-      "unreadable": "Die Einspruchsebene konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass niemand Einspruch erhoben hat — die Einsprüche sind unbekannt, nicht etwa ausgeblieben."
+      "unreadable": "Die Einspruchsebene konnte hier nicht gelesen werden. Das ist KEINE Aussage darüber, dass niemand Einspruch erhoben hat — die Einsprüche sind unbekannt, nicht etwa ausgeblieben.",
+      "cohort_unknown": "Diese Kohorte lässt sich auf diesem Knoten nicht auflösen, daher hat sie weder eine Mitgliederliste noch eine Erklärung, die dieser Knoten lesen könnte. Autorität muss aus lokal verifiziertem Zustand stammen."
     },
     "steward": {
       "awaiting": "Die Frist ist noch nicht verstrichen. Die bestellten Moderatoren können noch antworten.",

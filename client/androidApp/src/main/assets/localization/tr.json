@@ -3089,7 +3089,9 @@
       "descend": "Tasarımı gereği geri alınamaz. İndirgeme asla sıfırda bitmez — bulanıklaştırma ve mezar taşı kaydı ayakta kalır — ama dökülen geri gelmez.",
       "quarantine": "Bir komut değil, imzalı bir işaret: hiçbir şey silinmez ve hiçbir şey yeniden yazılmaz. Bu düğümün sunum yolları, adı geçen anahtarların satırlarını ve blob'larını eşlere vermeyi bırakır; farklı katlayan bir eş, onları bizden almaz, o kadar.",
       "re_admit": "Kime ait olduğu belirtilmiş bir geri çevirme olarak kaydedilir. İptal satırı ayakta kalır ve her okuyucu onu katlamayı sürdürür: kısıtlamalar birleşir, müsamahalar birleşmez ve bu alt katmanın hiçbir katmanı iptali geri alan bir işlem sunmaz.",
-      "throttle": "Yalnızca, kime ait olduğu belirtilmiş bir hüküm olarak kaydedilir. Bu alt katmanda alıcının yazdığı, anahtar başına bir kabul bütçesi yoktur: eş yazma kotası, bir kısıtlamanın dayanabileceği bir politika yüzeyi değil, sabit bir kaçak döngü emniyetidir. Bu düğümün adı geçen anahtarlardan kabul ettiği şey değişmez."
+      "throttle": "Yalnızca, kime ait olduğu belirtilmiş bir hüküm olarak kaydedilir. Bu alt katmanda alıcının yazdığı, anahtar başına bir kabul bütçesi yoktur: eş yazma kotası, bir kısıtlamanın dayanabileceği bir politika yüzeyi değil, sabit bir kaçak döngü emniyetidir. Bu düğümün adı geçen anahtarlardan kabul ettiği şey değişmez.",
+      "accept_writes": "Bu düğüm, adı geçen anahtarların yazmalarını reddetmeyi bırakır: kendi yazdığı kabul iptali geri çekilir ve alt katman onların bir sonraki yazmasını yeniden kabul eder. Hem kabul iptali hem de bu geri çekme, okunabilir geçmiş olarak ayakta kalır.",
+      "refuse_writes": "Bu düğüm, adı geçen anahtarların kendi külliyatına yapacağı bir sonraki yazmayı, alt katmanın kendi kapısında ve başka herhangi bir kapı çalışmadan önce reddeder. Tasarımı gereği YERELDİR: hiçbir düğüm bir başka düğümün kabul kümesini buyurmaz, çünkü küresel olarak etkili bir kabul iptali başlı başına bir sansür silahı olurdu. Gerçek bir istismarcının yalıtılması kendiliğinden belirir — birçok düğüm birbirinden bağımsız olarak aynı sonuca vardığında ortaya çıkar — ve asla buradan buyrulmaz."
     },
     "preview": {
       "note": "Bir kesinleştirme tam olarak bunun üzerinde işlem yapacak. Seçim hash'ini kesinleştirmeyle birlikte sunun; seçim değiştiyse kesinleştirme reddeder.",
@@ -3120,7 +3122,9 @@
       "session_absent": "Hiçbir oturum jetonu sunulmadı. Dereceli yönetim işlemleri yalnızca sahibe açıktır.",
       "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş.",
       "store_unavailable": "Alt katman okunamadı.",
-      "subject_absent": "subject_key_id zorunludur: bir okuyucu katlaması tek bir öznenin hükümleriyle ilgilidir ve adlandırılmamış bir özne, bütün özneler demektir."
+      "subject_absent": "subject_key_id zorunludur: bir okuyucu katlaması tek bir öznenin hükümleriyle ilgilidir ve adlandırılmamış bir özne, bütün özneler demektir.",
+      "deadmission_gate_dormant": "Bu düğüm kendi kimliğini alt katmana beyan etmedi; dolayısıyla kabul iptali kapısı uykudadır: satır yazılır ve hiçbir şeyi reddetmezdi. Yapılmış gibi geri verilmedi, reddedildi — sessizce hiçbir şey yapmayan bir yaptırım kapısı, hiç kapı olmamasından daha kötüdür; çünkü bir operatör kabul iptalinin çalıştığına inanacaktır. Bu, isteğin değil, düğüm yapılandırmasının kusurudur.",
+      "deadmission_gate_foreign_identity": "Bu düğümün adına imza attığı kimlik ile kabul iptali kapısının yazanları karşılaştırdığı kimlik iki farklı anahtardır; dolayısıyla burada imzalanan bir kabul iptali asla bu düğümün kendi iptali olarak katlanmaz ve hiçbir şeyi reddetmez. Bu, isteğin değil, düğüm yapılandırmasının kusurudur."
     },
     "reversal": {
       "evidence_only": "Özgün satır ayakta kalır ve hâlâ her okuyucu tarafından katlanır. Bu geri çevirme bir geri alma değil, kayda geçmiş bir kanıttır — alt katman iptali geri alan bir işlem sunmaz.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Bu düğüm bunu hiç beyan etmedi. Bu, beyan edip kaldırmış olmakla aynı olgu değildir; okuyamıyor olmakla da aynı olgu değildir.",
         "unreadable": "Kayıt okunamadı; dolayısıyla bu düğüm bu eksendeki kendi durumunu bilmiyor. Bu, 'yürürlükte bir şey yok' DEĞİLDİR — onu öyle göstermeyin."
       }
+    },
+    "accept_writes": {
+      "not_reached": "Kabul iptali ayaktayken reddedilmiş olan hiçbir şeyi geri getirmez. O yazmalar kapıda geri çevrildi ve buraya hiç ulaşmadı; eş onları hâlâ tutuyorsa yeniden göndermek zorundadır. Anahtarla ilgili başka hiçbir şey değişmez.",
+      "not_refused": "Bu anahtarın kabulü burada iptal edilmiş değil; dolayısıyla kaldırılacak bir şey yok."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Bu düğümün yazdığı canlı hiçbir kabul iptali bu anahtarı adlandırmıyor; dolayısıyla anahtarın yazmaları burada kabul edilir. Bu, başka hiçbir düğüm hakkında hiçbir şey söylemez: kabul iptali, onu yayan külliyata yereldir.",
+        "refused": "Bu düğüm, bu anahtara ilişkin kendi yazdığı canlı bir kabul iptali tutuyor; dolayısıyla anahtarın bu düğümün külliyatına yapacağı bir sonraki yazma, alt katmanın kendi kapısında reddedilir.",
+        "unreadable": "Bu düğüm, bu anahtara ilişkin kendi kabul durumunu okuyamadı; dolayısıyla o anahtarın yazmalarının reddedilip reddedilmediğini bilmiyor. Bu 'kabul edilmiş' DEĞİLDİR — onu öyle göstermeyin."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Bu anahtarın kabulü burada zaten iptal edilmiş; dolayısıyla hiçbir şey yazılmadı ve durum değişmedi.",
+      "not_reached": "Hiçbir şeyi yazılmamış hâle getirmez. Bu anahtarların buraya daha önce yazdığı satırlara dokunulmaz ve sunulmaya devam edilir — onları sunmayı durduran işlem karantinadır. Eşlere çoktan çoğaltılmış satırlar geri çağrılmaz, çağrılamaz da. Anahtarlar kaldırılmaz, imzaları hâlâ doğrulanır ve bu düğümün eşleri dahil diğer her düğüme yazmayı sürdürürler; o satırlar oradan çoğaltma yoluyla buraya yeniden ulaşabilir. Bir düğümün kendi reddini her zaman kaldırabilmesi için bir muafiyet bilerek ayakta bırakılmıştır ve bu muafiyet kimin yazdığını sormaz: kabulü iptal edilmiş bir anahtar burada yine de kabul iptali satırları yazabilir (CIRISPersist#608).",
+      "reversal": "Geri çevrilebilir ve bu geri çevirme, yalnızca bir fikir değişikliğini kaydetmekle kalmaz, alt katmana ulaşır: POST /v1/admin/accept-writes kabul iptalini geri çeker ve anahtarın yazmaları burada yeniden kabul edilir. Bu basamağın geri çevirmelerinden ikisi alt katmana ulaşır — bu düğümün SUNDUĞU şeyi geri getiren karantina serbest bırakma ve KABUL ETTİĞİ şeyi geri getiren bu işlem. Her iki satır da ayakta kalır ve okunabilir olmayı sürdürür: 'reddedilip sonra yeniden kabul edilmiş', 'hiç reddedilmemiş' ile aynı olgu değildir."
     }
   },
   "consent": {
@@ -3245,7 +3265,12 @@
       "authority_not_a_delegation": "Adı geçen yetki devri kimliği bir delegates_to satırı değil.",
       "not_owner": "Mesh yapılandırma yüzeyi, sahip (SYSTEM_ADMIN) rolünü gerektirir.",
       "session_absent": "Hiçbir oturum jetonu sunulmadı. Mesh yapılandırma yüzeyi yalnızca sahibe açıktır.",
-      "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş."
+      "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş.",
+      "attribution_absent": "delegation_id zorunludur. Kendi yetkisini taşımayan bir eylem, aktör ortadan kalktıktan sonra yetkisiz bir eylemden ayırt edilemez.",
+      "authority_unresolved": "Adı geçen yetki devri, bu düğümün tuttuğu bir satır değil; dolayısıyla kaydettiği yetki hiçbir şeyi adlandırmazdı. Bu edimi gerçekten yetkilendirip yetkilendirmediği, alt katmanın kendi kapısında verdiği karardır.",
+      "grounds_absent": "grounds zorunludur. Kaydedilmiş bir gerekçesi olmadan çevrilen bir ayar düğmesi, kötü bir gerekçeyle çevrilenden ayırt edilemez.",
+      "node_unowned": "Bu düğümün sorumlu bir tarafı (owner-binding) yok; dolayısıyla kimse adına mesh yapılandırmasını ne bildirir ne de değiştirir. Önce sahipliği üstlenin.",
+      "root_absent": "root_ref zorunludur: bir mesh-config satırı bir güven kökü altında kaydedilir ve hiçbirini adlandırmayan bir satır, hiçbir katlamanın onu asla saymayacağı bir yere kaydedilmiş olur."
     }
   },
   "commons_surface": {
@@ -3260,7 +3285,8 @@
     "escalation": {
       "awaiting": "Atanmış moderatörler hâlâ yanıt verebilir ya da süresi içinde zaten karar vermişlerdir. Yükseltme açılmadı.",
       "not_adopted": "Bu topluluk hiçbir gözetmen katmanı ilan etmedi; dolayısıyla moderatörler için bir süre sınırı ve bir yükseltme yoktur. Burada sessizlik hiçbir şeyi değiştirmez.",
-      "nothing_to_escalate": "Bir gözetmen katmanı ilan edilmiş ve onu bekleyen canlı bir itiraz yok. Kimse sessiz kalmadı, çünkü hiçbir şey sorulmadı."
+      "nothing_to_escalate": "Bir gözetmen katmanı ilan edilmiş ve onu bekleyen canlı bir itiraz yok. Kimse sessiz kalmadı, çünkü hiçbir şey sorulmadı.",
+      "open": "Görev sahipleri süresi içinde yanıt vermedi ve karar, yanıt verenlere geçti. Eşik artık bütün üye listesini değil YANIT VERENLERİ sayıyor — sessiz bir topluluğun yine de sonuca varabilmesini sağlayan şey budur — ve 'ulaşılabilir' olanın asla 'tek kişi karar verir'e düşmemesi için bir taban konmuştur."
     },
     "objection": {
       "admitted": "İtiraz kayda geçti. Bu bir komut değil, bir İŞARETTİR: gelişiyle hiçbir şey değişmedi ve olağan tasdik düzleminde çoğaltılır; böylece pencere boyunca ağdan kopmuş bir eş, itiraz kendisine ulaştığında onu yine de sayar. Onu ortaya koymak için tek bir üye yeterlidir; kaldırmak ise kohortun kendi eşiğine mal olur."
@@ -3292,7 +3318,15 @@
       "steward_tier_not_adopted": "Bu topluluk hiçbir gözetmen katmanı ilan etmedi; dolayısıyla sessiz kalınarak aşılacak bir süre sınırı ve yükseltilmiş bir havuz yoktur. Buraya verilecek bir oy saklanır ve asla okunmaz.",
       "store_unavailable": "Alt katmana erişilemedi.",
       "target_action_unknown": "İtiraz edilen eylem, bu düğümün tuttuğu bir satır değil; dolayısıyla itiraz sayılamaz ve penceresi karara bağlanamaz olurdu.",
-      "unverifiable_signature": "Satırın imzası, imzalayanın bu düğümde kayıtlı anahtarlarına karşı doğrulanmadı."
+      "unverifiable_signature": "Satırın imzası, imzalayanın bu düğümde kayıtlı anahtarlarına karşı doğrulanmadı.",
+      "action_absent": "action_id zorunludur. Bir itiraz, müştereklerdeki bir satırı adlandırır; hiçbir şeyi adlandırmayan bir itiraz asla sayılamaz.",
+      "action_unknown": "Bu düğüm böyle bir eylem tutmuyor; dolayısıyla onu adlandıran bir satır, hiçbir katlamanın onu asla saymayacağı bir yere kaydedilirdi. Alt katman da aynı durumu kendi kapısında reddeder.",
+      "cohort_absent": "cohort_key_id zorunludur: sayımı hangi üye listesinin ve hangi ilanın yönettiğini o adlandırır.",
+      "cohort_not_a_commons": "`self` kohortunun, üzerinde yeter sayı aranacak bir üye listesi yoktur — üyeleri tek bir kimliğin kendi cihazlarıdır — dolayısıyla düzenleyeceği bir müşterek de yoktur.",
+      "grounds_absent": "grounds zorunludur. Kaydedilmiş bir gerekçesi olmadan ortaya konan bir itiraz, kötü bir gerekçeyle ortaya konandan ayırt edilemez — ve gerekçeler kaydedilir, asla yorumlanmaz.",
+      "node_unowned": "Bu düğümün sorumlu bir tarafı (owner-binding) yok; dolayısıyla kimse adına kimsenin müştereklerini ne okur ne de orada söz söyler. Önce sahipliği üstlenin.",
+      "not_owner": "Müşterekler yüzeyi sahip (SYSTEM_ADMIN) rolünü gerektirir.",
+      "objection_absent": "objection_id zorunludur: bir oy, TEK bir itiraz hakkındaki bir soruyu yanıtlar."
     },
     "standing": {
       "action_unknown": "Bu düğüm böyle bir eylem tutmuyor. Bir itiraz bir satırı adlandırır ve burada adlandırılacak bir satır yok.",
@@ -3301,7 +3335,8 @@
       "quiet": "Düzlem okundu ve bu eyleme karşı hiçbir itiraz ortaya konmadı.",
       "reversed": "Pencere içinde yeterli sayıda farklı üye itiraz etti. Bu satırları tutan her düğüm, hiçbir eşgüdüm olmadan aynı yanıta katlar.",
       "stood": "Pencere, geri çevirme eşiğinin altında kapandı. Bu eyleme itiraz edildi ve eylem ayakta kaldı.",
-      "unreadable": "İtiraz düzlemi burada okunamadı. Bu, kimsenin itiraz etmediği anlamına GELMEZ — itirazlar yok değil, bilinmiyor."
+      "unreadable": "İtiraz düzlemi burada okunamadı. Bu, kimsenin itiraz etmediği anlamına GELMEZ — itirazlar yok değil, bilinmiyor.",
+      "cohort_unknown": "Bu kohort bu düğümde çözümlenmiyor; dolayısıyla bu düğümün okuyabileceği bir üye listesi ve bir ilan yok. Yetki, yerel olarak doğrulanmış durumdan gelmelidir."
     },
     "steward": {
       "awaiting": "Süre sınırı henüz dolmadı. Atanmış moderatörler hâlâ yanıt verebilir.",
@@ -3314,42 +3349,102 @@
   },
   "operator": {
     "carriage": {
-      "moving": "Bu düğüm eşlerine satır sundu ve hiçbirini esirgemedi."
+      "moving": "Bu düğüm eşlerine satır sundu ve hiçbirini esirgemedi.",
+      "idle": "Çoğaltma turları tamamlandı ve bu düğüm ne bir şey sundu ne de bir şey esirgedi: eşlerinin hâlâ ihtiyaç duyduğu hiçbir şeyi yoktu.",
+      "not_exercised": "Bu süreçte hiçbir çoğaltma turu tamamlanmadı; dolayısıyla hiçbir sunum yolu kapısı hiç çalışmadı ve esirgeme defterine hiç yazılmadı. Bu sıfır temiz değil, sınanmamıştır.",
+      "unreadable": "Bu düğümün taşıma sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun ne sunduğuna dair bir beyan değildir. Bu 'hiçbir şey esirgenmedi' değildir — 'soramadık' demektir.",
+      "withholding": "Bu düğüm, elinde tuttuğu satırları sunmayı reddetti. `withholds_by_reason` reddeden dalı, `recent_withholds` ise kime karşı reddedildiğini adlandırır — boşta duran bir düğüm bunların hiçbirini bildirmez."
     },
     "consent_sla": {
       "none_overdue": "Bu düğümün yükseltmeye söz verdiği her rıza iptali, kendi SLA penceresi içindedir.",
-      "unreadable": "Rıza SLA birikimi okunamadı. Bu 'gecikmiş bir şey yok' demek değildir."
+      "unreadable": "Rıza SLA birikimi okunamadı. Bu 'gecikmiş bir şey yok' demek değildir.",
+      "overdue": "Bu düğüm, yükseltmeye söz verdiği rıza iptallerinde GECİKMİŞ durumda. Bunun yanındaki örneklenmiş tasdik kimlikleri, bu durumu gideren tutamaklardır."
     },
     "drill": {
       "green": "Bu düğümün güven kökü, son 90 gün içinde kill-switch'ini kanıtladı.",
-      "yellow": "Bu düğümün güven kökü, kill-switch'ini en son 90 ila 180 gün önce kanıtladı."
+      "yellow": "Bu düğümün güven kökü, kill-switch'ini en son 90 ila 180 gün önce kanıtladı.",
+      "never_drilled": "Bu düğümün güven kökü kill-switch'ini HİÇ kanıtlamadı. Kırmızı bandı, uzun süredir terk edilmiş bir kökle paylaşır; aradaki farkı, yanındaki eksik son tatbikat anı gösterir. Kök yine de hizmet vermeyi sürdürür: tatbikat tazeliği bir güven sinyalidir, asla bir kapı değildir.",
+      "no_root_walked": "Hiçbir güven kökü yürünmedi; dolayısıyla tatbikatı yapılmamış olacak bir şey de yok. Bu eskimiş bir tatbikat değildir — ortada bir tatbikat öznesi yoktur.",
+      "stale": "Bu düğümün güven kökü, kill-switch'ini en son 180 günden daha uzun süre önce kanıtladı. Yine de hizmet vermeyi sürdürür: tatbikat tazeliği bir güven sinyalidir, asla bir kapı değildir."
     },
     "headline": {
       "green": "Bu düğümün hesaplayabildiği her sinyal sağlıklı okunuyor.",
-      "yellow": "Bu düğüm hizmet veriyor ve burada bakılmayı hak eden bir şey var."
+      "yellow": "Bu düğüm hizmet veriyor ve burada bakılmayı hak eden bir şey var.",
+      "red": "En az bir sinyal sağlıksız okunuyor. Bilinmeyenler listesini de okuyun: kırmızı bir başlık, bilinmeyen bir sinyalin üstünde sıralanır ve aksi hâlde onu arkasına gizleyebilir.",
+      "unknown": "Bir veya daha fazla sinyal hesaplanamadı. Bilinmeyenler listesini okuyun — hesaplanamamış bir sinyal, sağlıklı bir sinyal değildir."
     },
-    "ingest": {},
+    "ingest": {
+      "background": "Retler var ama istikrarlı bir kimlik kümesinden süreklilik göstermiyor: sıradan yoklamalar, eskimiş istemciler ve dalgalanma. Bunu göz ardı etmeden önce `distinct_signers` ve `unattributed_in_window` değerlerini okuyun — GENİŞ bir kimlik kümesine yayılmış YÜKSEK bir oran bir yoklamadır; neredeyse hiç kimseyi adlandırmamış YÜKSEK bir oran ise araya eskimiş bir istemcinin karıştığı bozuk biçimli trafiktir. İkisi de dalgalanma değildir ve ikisinin de gidip düzeltilecek tek bir üreticisi yoktur; takılmış bir üretici olarak değil de burada okunmalarının nedeni budur.",
+      "clean": "HTTP alım yoluna toplu gönderimler sunuldu ve pencere içinde hiçbiri reddedilmedi. Bunun yanındaki `refused_total`, sürecin tamamına ait sayımdır: daha önce ret vermiş bir süreçteki temiz bir pencere, bir yokluk değil, bir toparlanmadır.",
+      "http_path_only": "Bu okuma yalnızca HTTP alım yolunu kapsar. Reticulum aktarıcısı üzerinden gelen bir toplu gönderim de alt katmanın aynı kapısınca doğrulanır ama burada sayılmaz; dolayısıyla temiz bir alım okuması, bir izin bu düğüme sunulabileceği her yol hakkında bir beyan değildir.",
+      "not_exercised": "Bu süreçte HTTP alım yoluna hiçbir şey sunulmadı — ne bir toplu gönderim kabul edildi ne de reddedildi. Bu sıfır temiz değil, sınanmamıştır.",
+      "stuck_producer": "KÜÇÜK ve İSTİKRARLI bir imzalayan kümesinden gelen SÜREKLİ bir ret oranı: bir üretici yeniden deneme döngüsüne takılmış ve kendini düzeltemiyor. Bu retlerin her biri doğrudur — kapı çalışıyor — toplamın kendi okumasına ihtiyaç duymasının nedeni de tam olarak budur. `top_signers`, kimin gidip düzeltileceğini adlandırır.",
+      "unattributed": "Toplu gönderimler reddedildi ve HİÇBİRİ bir imzalayan adlandırmadı: kaydedilecek bir kimlik ortaya çıkmadan önce başarısız oldular — bozuk baytlar, hatalı bir imza, desteklenmeyen bir şema sürümü. Aranacak bir üretici yok ve bu, bilerek takılmış bir üretici olarak bildirilmiyor: sıfır farklı imzalayan, küçük ve istikrarlı bir kimlik kümesi değildir.",
+      "unreadable": "Bu düğümün alım ret defteri okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi reddettiğine dair bir beyan değildir. Bu 'hiçbir şey reddedilmedi' değildir — 'soramadık' demektir."
+    },
     "key_statements": {
-      "stands": "Bu düğümün tuttuğu hiçbir iptal, şu anda yapılan bir beyanı kapsamıyor."
+      "stands": "Bu düğümün tuttuğu hiçbir iptal, şu anda yapılan bir beyanı kapsamıyor.",
+      "suspect_after_bound": "Geçmiş SINIRI taşıyan bir iptal, şu anda yapılan bir beyanı kapsıyor: bu anahtarın kabulü şu andan itibaren iptal edilmiştir ve dürüst geçmişi hâlâ ayaktadır. Bu sınır, sınırsız bir iptalden esaslı biçimde daha iyidir ve onunla aynı şekilde okunmaz.",
+      "suspect_unbounded": "SINIRSIZ bir iptal bu anahtarı kapsıyor; dolayısıyla anahtarın bugüne dek söylediği her şey şüphelidir — iptal, aksini söylemekten kaçınmıştır.",
+      "unreadable": "Bu düğümün anahtar durumu hesaplanamadı. Bu 'ayakta' demek değildir — sorulmamış bir sorunun yanıtı yoktur."
     },
-    "peer_quota": {},
+    "peer_quota": {
+      "clean": "Eş yazma kotası çalıştırıldı ve yuva reddi aritmetiği hâlâ geçerli.",
+      "denials": "Eş yazma kotası yuva redleri kaydetti. İzlenen eş sayısı tavanının türetimi bu derlemede artık geçerli değil.",
+      "no_quota": "Bu arka uç hiçbir eş yazma kotası tutmuyor; dolayısıyla tetik teli hiçbir şey bildirmez. Bu, temiz bir okuma değildir.",
+      "not_exercised": "Bu süreçte kotaya karşı hiçbir eş yazması işlenmedi; dolayısıyla sıfırı temiz değil, sınanmamıştır."
+    },
     "quarantine": {
       "not_quarantined": "Bu düğümün anahtarına ilişkin hiçbir karantina işareti burada hiçbir zaman yürürlüğe girmedi.",
       "unreadable": "Karantina durumu okunamadı. Bu 'karantinada değil' demek değildir.",
-      "withheld": "Bu düğümün anahtarı, bir karantina işaretiyle sunumdan alıkonuluyor."
+      "withheld": "Bu düğümün anahtarı, bir karantina işaretiyle sunumdan alıkonuluyor.",
+      "released": "Bu düğümün anahtarı esirgendi ve sonra serbest bırakıldı. Şimdi hizmet veriyor ama hep vermedi — bu, hiç esirgenmemiş olmaktan başka bir olgudur."
     },
     "receive": {
-      "clean": "Bu süreçte, bir eşin sunduğu hiçbir satır reddedilmedi."
+      "clean": "Bu süreçte, bir eşin sunduğu hiçbir satır reddedilmedi.",
+      "no_accepted_counter": "Alt katman, kabul edilen uygulamaları değil, uygulama REDLERİNİ sayar. Bu yüzden temiz bir okuma, 'sunulan her şey uygulandı' ile 'hiçbir şey sunulmadı' arasını ayıramaz — bunları birbirinden ayırmak için `rounds_total` değerini ve eşin kendi yüzeyini okuyun.",
+      "not_exercised": "Bu süreçte hiçbir çoğaltma turu tamamlanmadı; dolayısıyla bu düğümün uygulama yoluna hiçbir şey sunulmadı. Bu sıfır temiz değil, sınanmamıştır.",
+      "refusing": "Bu düğüm, eşlerinin sunduğu satırları reddetti. `apply_refusals_by_kind` düzlemi, `key_apply_refusals_by_reason` ise bir anahtarı reddeden politika jetonunu adlandırır.",
+      "unreadable": "Bu düğümün uygulama sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğine dair bir beyan değildir. Bu 'hiçbir şey reddedilmedi' değildir — 'soramadık' demektir."
     },
     "source": {
-      "edge_metrics": {},
-      "ingest_refusals": {},
-      "node_state": {},
-      "trace_corpus": {}
+      "edge_metrics": {
+        "unavailable": "Bu düğümün taşıma sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi sunduğunu, neyi esirgediğini veya neyi uygulamayı reddettiğini anlatmaz."
+      },
+      "ingest_refusals": {
+        "unavailable": "Bu düğümün alım ret defteri okunamadı; dolayısıyla buradaki hiçbir şey, kabul kapısının neyi reddettiğini anlatmaz. Günde 8.631 doğru reddin 71 saat boyunca fark edilmeden sürmesine izin veren şey, okuyucusu olmayan bir kapıydı."
+      },
+      "node_state": {
+        "unavailable": "Bu düğümün durum sinyalleri alt katmandan okunamadı; dolayısıyla buradaki hiçbir şey, onun güven kökünü, anahtar durumunu, karantinasını, rıza SLA'sını ya da eş kotasını anlatmaz. Okunmamış bir kaynaktan kötü haber gelmemesi, iyi haber değildir."
+      },
+      "trace_corpus": {
+        "unavailable": "Bu düğümün iz külliyatı okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğini anlatmaz. Okunmamış bir külliyatta varış görünmemesi, varış olmaması demek değildir."
+      }
     },
-    "trace_plane": {},
-    "trust_root": {},
-    "volatility": {},
-    "withhold_class": {}
+    "trace_plane": {
+      "dark": "BU DÜĞÜMÜN KIRMIZI EŞİĞİNDEN DAHA UZUN SÜREDİR HİÇBİR ŞEY KABUL EDİLMEDİ. Varış, bu düğümün var olmasının yegâne nedenidir. Bunun yanındaki `ingest` okumasını okuyun: sürekli bir ret oranıyla birlikte karanlık bir düzlem, doğru biçimde geri çevrilen bir üretici demektir; hiç ret olmadan karanlık bir düzlem ise bu düğüme hiçbir şeyin ulaşmadığı anlamına gelir.",
+      "future_dated": "Külliyattaki en yeni iz GELECEĞE tarihli. Zaman damgası üreticinin kendi yayın saatidir; dolayısıyla bu, o saat hakkında bir beyandır — ve banda alınmak yerine ayrıca belirtilir, çünkü geleceğe tarihli bir satır bu okumayı süresiz olarak yeşilde tutar ve gerçekten durmuş bir düzlemi gizlerdi.",
+      "live": "Yakın zamanda bir iz kabul edildi: bu düğümün üzerinde almak için var olduğu düzlem besleniyor.",
+      "never_admitted": "Külliyat okundu ve içinde hiç iz yok: bu düğümde bugüne dek hiçbir şey kabul edilmemiş. Banda alınacak bir varış anı olmadığından bu, sağlıklı değil sınanmamış bir sıfırdır — ve bir süredir hizmet vermekte olan bir düğümde karanlık bir düzlemle aynı durumdur.",
+      "producer_asserted_ts": "`last_admitted_at`, MAX(trace_events.ts) değeridir — izin, üreticinin kendi öne sürdüğü yayın duvar saati. Alt katman bu tabloda sunucu tarafında bir kabul anı saklamaz; dolayısıyla saati kaymış bir üretici bu okumayı oynatır; uzak gelecekteki bir satırın banda alınmak yerine `future_dated` olarak ayrıca belirtilmesinin nedeni tam olarak budur.",
+      "quiet": "Beklenenden uzun süredir hiçbir iz kabul edilmedi, ama düzleme karanlık demeye yetecek kadar uzun süredir değil. Gerçekten boşta duran bir düğüm de böyle okunur; bir üretici kesintisinin ilk yarısı da.",
+      "unreadable": "Bu düğümün iz külliyatı okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğine dair bir beyan değildir. Bu 'hiçbir iz gelmedi' değildir — 'soramadık' demektir."
+    },
+    "trust_root": {
+      "no_self_key": "Barındırıcı, bu düğümün kendi anahtar kimliğini hiç beyan etmedi; dolayısıyla kendi kapsamındaki hiçbir şey yürünemedi. Bu, düğüm hakkında değil, okuyucu hakkında bir beyandır: anahtarı başlangıçta beyan edin, aşağıdaki kendi kapsamlı her sinyal yanıtlanabilir hâle gelir.",
+      "no_trust_edges": "Bu düğüm kendini beyan etti ve hiçbir köke canlı bir güven kenarı tutmuyor: hiçbir şeye köklenmiyor. Bu, eksik bir okuma değil, bilinen bir kötü durumdur.",
+      "no_valid_root": "Bu düğüm bir veya daha fazla köke güveniyor ve bunların hiçbiri geçerli çıkmıyor. Bunun yanındaki ayak başına verilen karar, hangi ayağın başarısız olduğunu adlandırır.",
+      "unreadable": "Güven kökü yürüyüşü okunamadı. Okunamayan bir dizin, güvenilmeyen bir dizin değildir — bunu köksüz bir düğüm olarak okumayın.",
+      "valid": "Bu düğüm, tam anlamıyla geçerli çıkan bir güven köküne köklenir: canlı bir güven kenarı, kurtarma taahhüdü taşıyan kendini beyan eden bir tüzük ve mandallanmış hiçbir durdurma yok."
+    },
+    "volatility": {
+      "clock_dependent_local": "Bu bant, saklanmış bir andan okuma saatine karşı BU düğümde hesaplanır; dolayısıyla yalnızca geçen zamanla hareket eder — durum değişikliği yok, yeni satır yok. İz kabul etmeyi bırakan bir düğüm kendi kendine yeşilden sarıya, sarıdan kırmızıya yürür; asıl mesele de budur: kimse ondan istemeden kırmızıya döner.",
+      "process_local": "Taşıma, uygulama ve alım sayaçları sürece yereldir ve bu süreç başladığından beri birikimlidir. Yeniden başlatmada sıfırlanır, tek bir düğüme hizmet veren süreçler arasında farklılık gösterir ve hiçbir yerde saklanmaz. Bunlar bu düğümün defteri değil, bu sürecin göstergesidir."
+    },
+    "withhold_class": {
+      "fault": "Bir okuma ya da bir bağlama adımı başarısız oldu ve sunum yolu güvenli tarafta, kapalı kalarak durdu. Bu, eş hakkında bir hüküm DEĞİLDİR — düzeltilmesi bu düğüme düşen, bu düğümün kendi kusurudur.",
+      "integrity": "Bu düğümün tuttuğu bir satır hiçbir şekilde sunulamadı: serileştirilemedi, saklanan hash'i çözülemedi ya da ilan edilen baytlar getirilemedi. Bu bir politika değil, yerel durumdaki bir kusurdur.",
+      "policy": "Bu düğümün bilerek verdiği bir karar — rıza kapsamı, eşin sahip olmadığı bir sunum yetkisi ya da üreticinin kendi kısıtlaması. Yapılandırıldığı gibi çalışıyor: kodu değil, yapılandırmayı değiştirin."
+    }
   }
 }

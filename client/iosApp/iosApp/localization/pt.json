@@ -3089,7 +3089,9 @@
       "descend": "Irreversível por design. A descida nunca termina em zero — o desfoque e a lápide sobrevivem —, mas o que foi eliminado não volta.",
       "quarantine": "Um marcador assinado, não um comando: nada é apagado e nada é reescrito. Os caminhos de serviço deste nó deixam de entregar aos pares as linhas e os blobs das chaves indicadas; um par que incorpore de forma diferente simplesmente não os recebe de nós.",
       "re_admit": "Registrado como uma reversão atribuída. A linha de revogação sobrevive e todos os leitores continuam a incorporá-la: as restrições se compõem e as leniências não, e nenhuma camada deste substrato expõe uma anulação de revogação.",
-      "throttle": "Registrado apenas como um julgamento atribuído. Este substrato não tem um orçamento de admissão por chave definido pelo destinatário: a cota de escrita dos pares é uma proteção fixa contra loops descontrolados, não uma superfície de política em que uma limitação possa se apoiar. Nada muda naquilo que este nó aceita das chaves indicadas."
+      "throttle": "Registrado apenas como um julgamento atribuído. Este substrato não tem um orçamento de admissão por chave definido pelo destinatário: a cota de escrita dos pares é uma proteção fixa contra loops descontrolados, não uma superfície de política em que uma limitação possa se apoiar. Nada muda naquilo que este nó aceita das chaves indicadas.",
+      "accept_writes": "Este nó deixa de recusar as escritas das chaves indicadas: a desadmissão que ele próprio emitiu é retirada e o substrato volta a admitir a próxima escrita delas. Tanto a desadmissão quanto esta retirada sobrevivem como histórico legível.",
+      "refuse_writes": "Este nó recusa a próxima escrita das chaves indicadas em seu próprio corpus, na própria porta do substrato e antes que qualquer outra barreira seja executada. É LOCAL por design: nenhum nó decreta o conjunto de admissão de outro nó, porque uma desadmissão de efeito global seria, ela própria, uma arma de censura. O isolamento de um abusador genuíno é emergente — acontece quando muitos nós chegam de forma independente à mesma conclusão — e nunca é decretado a partir daqui."
     },
     "preview": {
       "note": "É exatamente sobre isto que uma confirmação irá atuar. Apresente o hash da seleção junto com a confirmação; se a seleção tiver mudado, a confirmação é recusada.",
@@ -3134,7 +3136,9 @@
       "session_absent": "Nenhum token de sessão foi apresentado. Operações administrativas graduadas são exclusivas do proprietário.",
       "session_invalid": "Essa sessão é inválida ou expirou.",
       "store_unavailable": "Não foi possível ler o substrato.",
-      "subject_absent": "subject_key_id é obrigatório: uma incorporação de leitor trata dos julgamentos sobre um único sujeito, e um sujeito não nomeado é todo sujeito."
+      "subject_absent": "subject_key_id é obrigatório: uma incorporação de leitor trata dos julgamentos sobre um único sujeito, e um sujeito não nomeado é todo sujeito.",
+      "deadmission_gate_dormant": "Este nó não declarou a própria identidade ao substrato, portanto a barreira de desadmissão está dormente: a linha seria escrita e não recusaria nada. Recusado em vez de devolvido como feito — uma barreira de sanção que silenciosamente não faz nada é pior do que nenhuma barreira, porque um operador acreditará que a desadmissão funciona. Esta é uma falha de configuração do nó, não uma falha da requisição.",
+      "deadmission_gate_foreign_identity": "A identidade com que este nó assina e a identidade com que a barreira de desadmissão compara os escritores são duas chaves diferentes, portanto uma desadmissão assinada aqui jamais seria incorporada como sendo do próprio nó e não recusaria nada. Esta é uma falha de configuração do nó, não uma falha da requisição."
     },
     "reversal": {
       "evidence_only": "A linha original sobrevive e continua a ser incorporada por todos os leitores. Esta reversão é prova registrada, não um desfazer — o substrato não expõe nenhuma anulação de revogação.",
@@ -3159,6 +3163,22 @@
         "never_declared": "Este nó nunca declarou isto. Esse não é o mesmo fato que ter declarado e levantado, nem o mesmo fato que não conseguir ler.",
         "unreadable": "Não foi possível ler o registro, portanto este nó não sabe qual é a própria situação neste eixo. Isto NÃO é 'nada em vigor' — não o apresente como tal."
       }
+    },
+    "accept_writes": {
+      "not_reached": "Não restaura nada do que foi recusado enquanto a desadmissão esteve de pé. Essas escritas foram rejeitadas na porta e nunca chegaram aqui; se o par ainda as mantiver, terá de enviá-las novamente. Nada mais a respeito da chave muda.",
+      "not_refused": "Esta chave não está desadmitida aqui, portanto não há nada a levantar."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "Nenhuma desadmissão viva de autoria deste nó nomeia esta chave, portanto as escritas dela são admitidas aqui. Isto nada diz sobre qualquer outro nó: a desadmissão é local ao corpus que a emite.",
+        "refused": "Este nó mantém uma desadmissão viva desta chave, de sua própria autoria, portanto a próxima escrita da chave no corpus deste nó é recusada na própria porta do substrato.",
+        "unreadable": "Este nó não conseguiu ler o próprio estado de admissão para esta chave, portanto não sabe se as escritas dessa chave estão recusadas. Isto NÃO é 'admitida' — não o apresente como se fosse."
+      }
+    },
+    "refuse_writes": {
+      "already_refused": "Esta chave já está desadmitida aqui, portanto nada foi escrito e a situação permanece inalterada.",
+      "not_reached": "Não desfaz escrita alguma. As linhas que essas chaves já escreveram aqui permanecem intactas e continuam sendo servidas — a quarentena é a operação que deixa de servi-las. As linhas que já se replicaram para os pares não são recolhidas e não podem ser. As chaves não são removidas, suas assinaturas continuam a verificar, e elas seguem escrevendo em todos os outros nós, inclusive nos pares deste nó, de onde essas linhas podem chegar aqui novamente por replicação. Uma isenção sobrevive de propósito, para que um nó possa sempre levantar a própria negativa, e ela não pergunta quem está escrevendo: uma chave desadmitida ainda pode escrever linhas de desadmissão aqui (CIRISPersist#608).",
+      "reversal": "Reversível, e a reversão alcança o substrato em vez de apenas registrar uma mudança de ideia: POST /v1/admin/accept-writes retira a desadmissão e as escritas da chave voltam a ser admitidas aqui. Duas das reversões desta escada alcançam o substrato — liberar uma quarentena, que restaura o que este nó SERVE, e esta, que restaura o que ele ACEITA. Ambas as linhas sobrevivem e permanecem legíveis: 'recusada e depois readmitida' não é o mesmo fato que 'nunca recusada'."
     }
   },
   "consent": {
@@ -3265,7 +3285,8 @@
     "escalation": {
       "awaiting": "Os moderadores nomeados ainda podem responder, ou já decidiram dentro do prazo. O escalonamento não foi aberto.",
       "not_adopted": "Esta comunidade não declarou nenhuma camada de curadores, portanto não há prazo para os moderadores nem escalonamento. Aqui o silêncio não muda nada.",
-      "nothing_to_escalate": "Há uma camada de curadores declarada e nenhuma objeção viva à espera dela. Ninguém ficou em silêncio, porque nada foi perguntado."
+      "nothing_to_escalate": "Há uma camada de curadores declarada e nenhuma objeção viva à espera dela. Ninguém ficou em silêncio, porque nada foi perguntado.",
+      "open": "Os titulares do dever não responderam a tempo, e a decisão passou para quem respondeu. O limiar agora conta os RESPONDENTES em vez de todo o quadro de membros — é isso que permite que uma comunidade silenciosa ainda assim resolva — com um piso, para que 'alcançável' jamais degenere em 'uma única pessoa decide'."
     },
     "objection": {
       "admitted": "A objeção está registrada. Ela é um MARCADOR, não um comando: nada foi alterado por sua chegada, e ela se replica pelo plano comum de atestação, de modo que um par que estava particionado durante a janela ainda a conta quando ela chega. Um único membro basta para levantá-la; retirá-la custa o limiar da própria coorte."
@@ -3297,7 +3318,15 @@
       "steward_tier_not_adopted": "Esta comunidade não declarou nenhuma camada de curadores, portanto não há prazo que se possa ultrapassar em silêncio nem conjunto escalonado. Um voto aqui seria armazenado e nunca lido.",
       "store_unavailable": "Não foi possível alcançar o substrato.",
       "target_action_unknown": "A ação objetada não é uma linha que este nó mantém, portanto a objeção seria incontável e sua janela não teria como se resolver.",
-      "unverifiable_signature": "A assinatura da linha não foi verificada contra as chaves do signatário tal como registradas neste nó."
+      "unverifiable_signature": "A assinatura da linha não foi verificada contra as chaves do signatário tal como registradas neste nó.",
+      "action_absent": "action_id é obrigatório. Uma objeção nomeia uma linha no bem comum; uma que não nomeia nada jamais poderá ser contada.",
+      "action_unknown": "Este nó não mantém tal ação, portanto uma linha que a nomeasse seria arquivada onde nenhuma incorporação jamais a contará. O substrato recusa o mesmo caso em sua própria porta.",
+      "cohort_absent": "cohort_key_id é obrigatório: ele nomeia qual quadro de membros e qual declaração governam a contagem.",
+      "cohort_not_a_commons": "A coorte `self` não tem quadro de membros sobre o qual haja quórum — seus membros são os próprios dispositivos de uma única identidade —, portanto não tem bem comum a policiar.",
+      "grounds_absent": "grounds é obrigatório. Uma objeção levantada sem motivo registrado é indistinguível de uma levantada por um motivo ruim — e os fundamentos são registrados, nunca interpretados.",
+      "node_unowned": "Este nó não tem responsável (vínculo de propriedade), portanto não lê nem fala no bem comum de ninguém em nome de outrem. Reivindique a propriedade primeiro.",
+      "not_owner": "A superfície do bem comum exige o papel de proprietário (SYSTEM_ADMIN).",
+      "objection_absent": "objection_id é obrigatório: um voto responde a uma pergunta sobre UMA objeção."
     },
     "standing": {
       "action_unknown": "Este nó não mantém tal ação. Uma objeção nomeia uma linha, e aqui não há linha alguma a nomear.",
@@ -3306,7 +3335,8 @@
       "quiet": "O plano foi lido e nenhuma objeção foi levantada contra esta ação.",
       "reversed": "Membros distintos em número suficiente objetaram dentro da janela. Em todo nó que mantém estas linhas, a incorporação chega a esta mesma resposta, sem coordenação alguma.",
       "stood": "A janela fechou abaixo do limiar de reversão. Esta ação foi objetada e permanece de pé.",
-      "unreadable": "O plano de objeções não pôde ser lido aqui. Isto NÃO é uma afirmação de que ninguém objetou — as objeções são desconhecidas, não inexistentes."
+      "unreadable": "O plano de objeções não pôde ser lido aqui. Isto NÃO é uma afirmação de que ninguém objetou — as objeções são desconhecidas, não inexistentes.",
+      "cohort_unknown": "Essa coorte não resolve neste nó, portanto não tem quadro de membros nem declaração que este nó possa ler. A autoridade precisa vir do estado local verificado."
     },
     "steward": {
       "awaiting": "O prazo ainda não venceu. Os moderadores nomeados ainda podem responder.",
