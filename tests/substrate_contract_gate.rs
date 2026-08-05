@@ -225,3 +225,144 @@ fn readme_substrate_pins_match_cargo_toml() {
         );
     }
 }
+
+// ───────────── redundancy.* : persist's CEILINGS vs edge's FLOORS ──────────
+
+/// **The reconciliation neither substrate can perform, and both asked for.**
+///
+/// persist v30.0.0 (CIRISPersist#602) split `redundancy.*` into four typed keys
+/// after two defects that a hand-transcription produced and nothing could see:
+/// `redundancy.k_repair_target` carried `n_source`'s **20** under `k_repair`'s
+/// name, and `redundancy.min_viable_floor`'s ceiling of **3** sat *below* the
+/// consumer's floor of **5** — under ceiling semantics (roots may only tighten)
+/// that made the knob **unsatisfiable**: no root could configure the planner to
+/// a value the planner itself considers viable.
+///
+/// Both substrates then said, in their own words, that the fix is incomplete
+/// from where they stand:
+///
+/// - persist's own `CONSUMER_FLOORS` table hand-records edge's constants — *"the
+///   same transcription that produced the bug"* — and is **blind to edge raising
+///   a floor past our ceiling**. It is a ratchet, not a reconciliation.
+/// - edge v15.18.0 (CIRISEdge#453) closed the half only edge can close: it EMITS
+///   the five planner constants from the same `pub const`s the planner runs on
+///   ([`fountain_floor_manifest`](ciris_edge::holonomic::fountain_defaults::fountain_floor_manifest)),
+///   byte-locked to `evidence/CIRISEdge.fountain_floors.json` by its own drift
+///   test. It cannot see persist's registry.
+///
+/// **This build links both**, so it is the only place the two halves meet. The
+/// gate reads persist's `MeshConfigKey::spec()` and calls edge's emitter — no
+/// number is written down here — and fails in **either** direction:
+///
+/// 1. a persist ceiling BELOW edge's operating value ⇒ the unsatisfiable-knob
+///    defect #602 fixed, recurring;
+/// 2. edge raising a floor past a persist ceiling ⇒ the direction persist states
+///    it cannot detect;
+/// 3. a redundancy key whose axis has no counterpart in the manifest ⇒ the
+///    axis-fusion defect returning under a new name.
+///
+/// It reads persist's numbers as CEILINGS and edge's as the operating values,
+/// which is persist's own instruction: *"do not treat persist's redundancy
+/// defaults as authoritative about what edge's planner will do."*
+///
+/// **Mutation-verified** in both directions: adding 1000 to every floor read
+/// turns arm 1 red naming `redundancy.k_repair_symbols`; deleting an `AXIS` row
+/// turns arm 3 red naming the unreconciled key.
+#[test]
+fn persist_redundancy_ceilings_clear_edges_emitted_floors() {
+    use ciris_persist::federation::{MeshConfigKey, MeshConfigUnit};
+
+    let manifest = ciris_edge::holonomic::fountain_defaults::fountain_floor_manifest();
+    assert_eq!(
+        manifest["schema_version"], 1,
+        "edge's floor-manifest SHAPE changed (CIRISEdge#453 versions the shape, not the values) \
+         — re-read the emitter before trusting the paths below"
+    );
+    // persist's registry names the consumer; edge's manifest names itself. If
+    // they ever disagree, this gate is reconciling two different processors.
+    assert_eq!(
+        manifest["consumer"], "repair_planner",
+        "edge's manifest names a different consumer than persist's registry does"
+    );
+
+    /// Where each registered key's operating value lives in edge's manifest.
+    /// The `knob` name is persist's own (`MeshConfigKeySpec::knob`), so this
+    /// table maps NAME→PATH and carries no numbers — the two things that can
+    /// drift are both read, never restated.
+    const AXIS: &[(&str, &str, &str)] = &[
+        ("redundancy.k_repair_symbols", "symbols", "k_repair"),
+        ("redundancy.min_viable_symbols", "symbols", "min_viable"),
+        ("redundancy.target_holders", "holders", "target"),
+        ("redundancy.min_viable_holders", "holders", "min_viable"),
+    ];
+
+    let mut checked = 0usize;
+    for &key in MeshConfigKey::ALL {
+        let spec = key.spec();
+        if !spec.wire_name.starts_with("redundancy.") {
+            continue;
+        }
+        // The axis must be TYPED — `Count` is the fusion #602 removed, and a
+        // redundancy key wearing it again means the split was undone.
+        assert!(
+            matches!(spec.unit, MeshConfigUnit::Symbols | MeshConfigUnit::Holders),
+            "`{}` is a redundancy knob typed `{}`; every one counts either fountain symbols or \
+             distinct holders",
+            spec.wire_name,
+            spec.unit.as_str()
+        );
+        let Some(&(_, group, leaf)) = AXIS.iter().find(|(w, _, _)| *w == spec.wire_name) else {
+            panic!(
+                "persist registers `{}` and this gate has no path into edge's manifest for it. A \
+                 redundancy knob with no reconciled consumer value is exactly how \
+                 `k_repair_target` came to carry `n_source`'s 20.",
+                spec.wire_name
+            );
+        };
+        // The group and the unit are two statements of one fact.
+        assert_eq!(
+            group == "symbols",
+            spec.unit == MeshConfigUnit::Symbols,
+            "`{}` is typed `{}` but this gate reconciles it against the manifest's `{group}` \
+             group — the axis and the source must agree",
+            spec.wire_name,
+            spec.unit.as_str()
+        );
+        let floor = manifest[group][leaf].as_i64().unwrap_or_else(|| {
+            panic!(
+                "edge's manifest has no integer at {group}.{leaf} — the emitter moved and this \
+                 gate is reading nothing"
+            )
+        });
+
+        assert!(
+            spec.owner_default >= floor,
+            "`{}` consent CEILING is {} but edge's planner runs {floor} ({group}.{leaf}). \
+             owner_default is a ceiling and roots may only tighten beneath it, so NO root can \
+             configure the planner to a value it considers viable — an unsatisfiable knob, which \
+             is worse than a wrong default because no operator action reaches the intended state. \
+             This is CIRISPersist#602's second defect, and the direction persist's own \
+             CONSUMER_FLOORS table cannot see (it is blind to edge raising a floor).",
+            spec.wire_name,
+            spec.owner_default
+        );
+        assert!(
+            spec.max >= floor && spec.min <= floor,
+            "`{}` domain is [{}, {}] but edge's planner runs {floor} — the operating value is not \
+             even expressible on the wire.",
+            spec.wire_name,
+            spec.min,
+            spec.max
+        );
+        checked += 1;
+    }
+
+    // Non-vacuity. A gate that reconciles nothing passes forever; this repo has
+    // shipped five of those this week.
+    assert_eq!(
+        checked,
+        AXIS.len(),
+        "expected to reconcile {} redundancy keys against edge's manifest, reconciled {checked}",
+        AXIS.len()
+    );
+}

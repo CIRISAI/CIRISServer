@@ -1122,15 +1122,42 @@ async fn property_5_after_is_a_real_push_down_and_bounds_the_judgement() {
         all_hash, bounded_hash,
         "a bounded judgement is a different judgement, and hashes differently"
     );
-    // The window is enforced HERE, not in the query, and the response says so —
-    // `list_attestations` does not read `AttestationFilter::window`. A preview
-    // that ignored `after:` silently would hand the operator a hash over twice
-    // the blast radius they asked to ratify.
+    // **persist v30.0.0 (CIRISPersist#596 item 2): the window is a PUSH-DOWN.**
+    //
+    // `list_attestations` accepted `AttestationFilter::window` and silently
+    // dropped it — a preview that ignored `after:` handed the operator a hash
+    // over twice the blast radius they asked to ratify — so this node filtered
+    // the page itself and said so. The axis binds now, and `window_enforced` is
+    // MEASURED rather than declared: the in-process filter is still applied and
+    // reports `application` if it ever has to drop a row, so this assertion goes
+    // red the moment the push-down stops binding (verified by removing
+    // `f.window = …` from `Selection::to_filter`, which flips it to
+    // `application` and fails here).
     assert_eq!(
-        bounded_json["window_enforced"], "application",
-        "the preview must name where the window was applied"
+        bounded_json["window_enforced"], "substrate",
+        "the window must bind in the query, and the preview must say where it bound"
     );
-    assert_localizable(&bounded_json["window_note"], "window enforcement note");
+    assert!(
+        bounded_json.get("window_note").is_none(),
+        "the note is the substrate-did-not-honour-it arm only: {bounded_json}"
+    );
+
+    // (a') **The open side of a one-sided window must be a sentinel the
+    // substrate's comparison can order.** persist stores and binds `asserted_at`
+    // as RFC-3339 TEXT, so `DateTime::MAX_UTC` (`+262143-12-31T…`, whose `'+'`
+    // sorts BELOW `'2'`) makes `asserted_at < end` false for every real row: an
+    // `after:`-only selection came back EMPTY the moment the push-down started
+    // binding. The `rows == 2` above is that regression pinned from the upper
+    // side; this is the lower side, which the mirror-image sentinel guards.
+    let mut before_sel = target_selection();
+    before_sel["before"] = serde_json::json!(t0().to_rfc3339());
+    let (_, before_json) = preview(&f, &before_sel).await;
+    assert_eq!(
+        before_json["counts"]["rows"], 2,
+        "a `before:`-only window must select the rows below the bound, not none and not all — \
+         an open LOWER sentinel outside the four-digit-year range would sort wrong the same way"
+    );
+    assert_eq!(before_json["window_enforced"], "substrate");
 
     // (b) a BOUNDED descent records its judgement and refuses the unbounded
     //     payload leg, naming why.

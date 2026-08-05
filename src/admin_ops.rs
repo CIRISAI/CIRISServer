@@ -156,7 +156,7 @@ use ciris_persist::federation::hard_case::{
 use ciris_persist::federation::quarantine;
 use ciris_persist::federation::trust_root::trusted_roots_of;
 use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, cohort_scope, Attestation, Revocation, SignedRevocation,
+    attestation_type, cohort_scope, Attestation, Revocation, SignedRevocation,
 };
 use ciris_persist::prelude::{CallerScope, Engine};
 
@@ -521,6 +521,10 @@ impl Selection {
     /// its shape and may add predicates — so this is build-then-set: a new
     /// field arrives as a default we did not have to notice, rather than as a
     /// compile break.
+    ///
+    /// **`window` is a closed pair, and the open side needs a sentinel that is
+    /// safe under a TEXT comparison** — see [`open_upper_bound`]. This mattered
+    /// the moment persist v30.0.0 made the axis bind and not one release before.
     fn to_filter(&self) -> AttestationFilter {
         let n = self.normalized();
         let mut f = AttestationFilter::default();
@@ -533,8 +537,8 @@ impl Selection {
         f.window = match (n.after, n.before) {
             (None, None) => None,
             (a, b) => Some((
-                a.unwrap_or(DateTime::<Utc>::MIN_UTC),
-                b.unwrap_or(DateTime::<Utc>::MAX_UTC),
+                a.unwrap_or_else(open_lower_bound),
+                b.unwrap_or_else(open_upper_bound),
             )),
         };
         f
@@ -576,32 +580,75 @@ pub struct Preview {
     pub selection_hash: String,
 }
 
-/// **Where the time window is enforced — stated, because it is not where it
-/// should be.**
+/// **The open-ended side of a one-sided window, as a value the substrate's
+/// comparison can actually order.**
 ///
-/// `AttestationFilter::window` is a v17.4.0 axis and `list_attestations` on
-/// sqlite does not read it: its predicate builder emits `attesting_key_id`,
-/// `attested_key_id`, `attestation_type`, `pqc_completed`,
-/// `dimension_prefixes`, `dimension_exact`, `valid_at`, `confidence_floor`,
-/// `subject_key_id` and the scope gate — and nothing for `window`, `tier` or
-/// `attester_filter`. Only the `list_scores` / `resolve_scores` handles run the
-/// shared builder that does, and those join the subject table, so they cannot
-/// serve a general selection.
+/// `AttestationFilter::window` is a CLOSED `(start, end)` pair, so `after:` with
+/// no `before:` has to supply an upper bound. The obvious sentinel —
+/// `DateTime::<Utc>::MAX_UTC` — is **wrong here, and silently**: persist stores
+/// `asserted_at` as `to_rfc3339()` TEXT and binds the window the same way, so
+/// the predicate is a *string* comparison. `MAX_UTC` formats as
+/// `+262143-12-31T…`, and `'+'` (0x2B) sorts BELOW `'2'` (0x32) — so
+/// `asserted_at < MAX_UTC` is false for **every** row with a four-digit year and
+/// an `after:`-only selection returns NOTHING.
 ///
-/// This is the same silent-narrowing class `dimension_exact` was in until
-/// v17.5.2 (#461): the caller sets a predicate, the substrate returns rows that
-/// do not satisfy it, and nothing says so. A preview that silently ignored
-/// `after:` would hand an operator a hash over a blast radius twice the size
-/// they asked to ratify — so the window IS enforced, in this process, and the
-/// response says which.
+/// This was harmless for as long as `list_attestations` ignored the axis, and
+/// became a fail-closed selection the moment persist v30.0.0 (#596 item 2) made
+/// it bind. It was caught by [`WindowEnforcement`] being measured rather than
+/// declared: the in-process filter is still the authority, so the *selection*
+/// was never wrong — the push-down over-narrowed, and the page came back empty.
+///
+/// The sentinels stay inside the four-digit-year range, where lexicographic
+/// order and chronological order agree. **The stated assumption:** a row whose
+/// `asserted_at` falls outside years 0000–9999 would sort outside these bounds
+/// and be missed. No producer in this federation can emit one — persist's own
+/// `list_scores` handle has compared this column as text since v17.4.0 — and the
+/// in-process filter would still be correct about every row that came back.
+fn open_upper_bound() -> DateTime<Utc> {
+    "9999-12-31T23:59:59Z".parse().expect("in-range sentinel")
+}
+
+/// The lower twin of [`open_upper_bound`]. `MIN_UTC` happens to compare
+/// correctly (`'-'` sorts below `'2'`, so `>=` admits everything), but relying
+/// on that is relying on an accident of two sign characters; this one is
+/// ordered for the same stated reason its twin is.
+fn open_lower_bound() -> DateTime<Utc> {
+    "0000-01-01T00:00:00Z".parse().expect("in-range sentinel")
+}
+
+/// **Where the time window was enforced — MEASURED, not asserted.**
+///
+/// `AttestationFilter::window` is a v17.4.0 axis that `list_attestations`
+/// accepted and silently dropped until persist v30.0.0 (CIRISPersist#596 item
+/// 2): its predicate builder emitted nine axes and nothing for `window`, `tier`
+/// or `attester_filter`, so a caller setting `window` got a bound that was never
+/// applied. That is the same silent-narrowing class `dimension_exact` was in
+/// until v17.5.2 (#461), and it mattered here specifically: a preview that
+/// ignored `after:` hands an operator a selection hash over a blast radius
+/// larger than the one they were shown and then ratify.
+///
+/// **The axis now binds, so the window is pushed DOWN** — which also fixes the
+/// page-bound interaction, because the substrate's `limit` now bounds the
+/// windowed set rather than the whole corpus.
+///
+/// The in-process filter is kept anyway, and this enum is how it earns its
+/// keep: it is no longer the enforcement, it is the WITNESS. A row the substrate
+/// returns that does not satisfy the window is dropped here and flips the report
+/// to [`Application`](Self::Application) — so if the push-down ever stops
+/// binding again, the blast radius still narrows correctly AND the response says
+/// out loud where it was narrowed. A value that is checked rather than declared
+/// cannot go stale the way the sentence this replaced did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowEnforcement {
     /// No window was asked for.
     None,
-    /// Enforced in this process over the substrate's page, because
-    /// `list_attestations` does not honour the axis. The page bound is applied
-    /// BEFORE this filter, so a windowed selection can come back short while
-    /// [`Preview::truncated`] is set.
+    /// Asked for, and every row the substrate returned already satisfied it —
+    /// the push-down bound (persist v30.0.0 / #596 item 2).
+    Substrate,
+    /// Asked for, and this node had to drop at least one row the substrate
+    /// returned. **The push-down did not bind**: the selection is still correct,
+    /// but the page bound was applied to a wider set, so a windowed selection
+    /// can come back short while [`Preview::truncated`] is set.
     Application,
 }
 
@@ -609,6 +656,7 @@ impl WindowEnforcement {
     fn token(self) -> &'static str {
         match self {
             Self::None => "none",
+            Self::Substrate => "substrate",
             Self::Application => "application",
         }
     }
@@ -677,19 +725,25 @@ async fn run_preview(
         .await
         .map_err(|e| format!("list attestations: {e}"))?;
 
-    // The page bound is the substrate's; `truncated` is measured BEFORE the
-    // window filter, so a short windowed page is never mistaken for a complete
-    // one.
+    // The page bound is the substrate's, and since persist v30.0.0 (#596 item
+    // 2) it bounds the WINDOWED set — the window is a real push-down. Measured
+    // before the in-process re-check for the same reason as before: a short
+    // page must never be mistaken for a complete one.
     let truncated = i64::try_from(page.items.len()).unwrap_or(i64::MAX) >= limit;
     let n = selection.normalized();
-    let window_enforced = if n.after.is_some() || n.before.is_some() {
-        WindowEnforcement::Application
-    } else {
-        WindowEnforcement::None
-    };
+    let asked_for_window = n.after.is_some() || n.before.is_some();
     let in_window = |a: &ciris_persist::federation::types::Attestation| {
         n.after.is_none_or(|start| a.asserted_at >= start)
             && n.before.is_none_or(|end| a.asserted_at < end)
+    };
+    // The witness: did the push-down actually bind? Counted over what came
+    // back, so the reported enforcement point is a measurement rather than a
+    // claim about persist's version.
+    let dropped_here = page.items.iter().filter(|a| !in_window(a)).count();
+    let window_enforced = match (asked_for_window, dropped_here) {
+        (false, _) => WindowEnforcement::None,
+        (true, 0) => WindowEnforcement::Substrate,
+        (true, _) => WindowEnforcement::Application,
     };
 
     let mut per_attester: BTreeMap<String, usize> = BTreeMap::new();
@@ -742,6 +796,11 @@ fn preview_json(p: &Preview) -> serde_json::Value {
         "targets": p.targets,
         "rows": p.rows,
     });
+    // Emitted ONLY on the Application arm, which since persist v30.0.0 (#596
+    // item 2) means the push-down did not bind and this node narrowed the page
+    // itself. The sentence is unchanged and still describes exactly that case —
+    // re-wording it would leave 28 locale bundles holding a translation of
+    // different content, which is worse than an id that renders raw.
     if p.window_enforced == WindowEnforcement::Application {
         out["window_note"] = m(
             "admin.preview.window_in_application",
@@ -782,20 +841,17 @@ struct AuthorityProof {
 /// The scope set a `delegates_to` envelope declares — bare string OR array, the
 /// two wire shapes the substrate walk accepts.
 ///
-/// Hand-parsed here because persist's own `delegation_scope_set` is
-/// `pub(crate)`: there is **no public predicate for "does THIS delegation row
-/// carry scope S"**, only the issuer-to-target walk, which answers a different
-/// question (see [`resolve_authority`]). This mirrors persist's parse exactly;
-/// if it is ever exported, delete this and compose it.
+/// **This is persist's own parse, called** (v30.0.0 / CIRISPersist#596 item 3b).
+/// It used to be a copy, because `delegation_scope_set` was `pub(crate)` and the
+/// only public authority predicate was the issuer-to-target walk, which answers
+/// a different question (see [`resolve_authority`]). A second implementation of
+/// an authority rule is the split-truth shape a rule stated in one place and
+/// re-derived in another always becomes, so the copy was marked for deletion the
+/// day it was exported. This is that deletion.
 fn delegation_scopes(envelope: &serde_json::Value) -> BTreeSet<String> {
-    match envelope.get("scope") {
-        Some(serde_json::Value::String(s)) => std::iter::once(s.clone()).collect(),
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect(),
-        _ => BTreeSet::new(),
-    }
+    ciris_persist::federation::admission::delegation_scope_set(envelope)
+        .into_iter()
+        .collect()
 }
 
 /// Resolve + re-derive one delegation under `scope`. Refusals are named.
@@ -1358,52 +1414,34 @@ struct QuarantineRequest {
 /// `record_quarantine_marker` takes an already-assembled, already-signed row
 /// and does the storing itself.
 ///
-/// Every sanctioned emit helper persist exposes (`emit_attestation_self`,
-/// `emit_with_local_signer`, `assemble_and_put`) canonicalizes, signs, assembles
-/// **and puts** in one step. There is no assemble-only variant, so the one door
-/// built for this op cannot be reached through the chokepoint built to stop
-/// hand-rolled rows. This is that hand-rolled row, kept to one function.
+/// **persist v30.0.0 (CIRISPersist#601 item 3 / #596 item 3) closed the gap this
+/// function was built around.** Every sanctioned emit helper
+/// (`emit_attestation_self`, `emit_with_local_signer`, `assemble_and_put`)
+/// canonicalized, signed, assembled **and put** in one step, so the one door
+/// built for this op could not be reached through the chokepoint built to stop
+/// hand-rolled rows — and this was that hand-rolled row. `assemble` now splits
+/// the recipe from the put, so the marker is produced by the same code path
+/// every other federation-tier row is, carrying the same admission gates (#293
+/// subject canonicality, #527 cohort_scope validate-never-default) that a
+/// hand-rolled row skipped by construction.
 async fn build_marker(
     engine: &Arc<Engine>,
     subject_key_id: &str,
     envelope: serde_json::Value,
 ) -> Result<Attestation, String> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-
-    let key_id = engine
-        .local_derived_key_id()
+    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+        .map_err(|e| format!("type the quarantine-marker envelope: {e}"))?;
+    let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
+        attestation_type::SCORES,
+        core,
+        cohort_scope::FEDERATION,
+    );
+    input.attested_key_id = Some(subject_key_id.to_owned());
+    engine
+        .assemble_attestation_self(input)
         .await
-        .map_err(|e| format!("derive acting key_id: {e}"))?;
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize marker: {e}"))?;
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .map_err(|e| format!("hybrid-sign marker: {e}"))?;
-    let now = Utc::now();
-    Ok(Attestation {
-        attestation_id: crate::ids::new_id(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: subject_key_id.to_owned(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-        additional_scrubs: Vec::new(),
-    })
+        .map(|s| s.attestation)
+        .map_err(|e| format!("assemble quarantine marker: {e}"))
 }
 
 /// Shared body for quarantine + un-quarantine: same gates, different marker.
@@ -2391,7 +2429,7 @@ async fn resolve_owner_authority(
     st: &AdminOpsState,
     delegation_id: &str,
 ) -> Result<AuthorityProof, Response> {
-    let node_key_id = self_key_id(&st).await?;
+    let node_key_id = self_key_id(st).await?;
     let proof = resolve_authority(
         &st.engine,
         &node_key_id,
@@ -2429,7 +2467,7 @@ async fn self_act_route(
     act: SelfAct,
     declaring: bool,
 ) -> Response {
-    let node_key_id = match self_key_id(&st).await {
+    let node_key_id = match self_key_id(st).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -3050,7 +3088,7 @@ async fn reader_decision_route(
     body: &axum::body::Bytes,
     declining: bool,
 ) -> Response {
-    let node_key_id = match self_key_id(&st).await {
+    let node_key_id = match self_key_id(st).await {
         Ok(v) => v,
         Err(r) => return r,
     };

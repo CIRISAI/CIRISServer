@@ -296,7 +296,6 @@ mod tests {
             scrub_signature_classical: "c2ln".to_owned(),
             scrub_signature_pqc: None,
             scrub_key_id: "test-key".to_owned(),
-            additional_scrubs: Vec::new(),
             scrub_timestamp: asserted_at,
             pqc_completed_at: None,
             persist_row_hash: String::new(),

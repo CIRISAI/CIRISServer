@@ -211,6 +211,27 @@ fn the_registry_answers_for_every_key_and_names_a_tracker_when_it_cannot() {
                     key.wire_name()
                 );
             }
+            Consumption::Unreachable {
+                owner,
+                blocker,
+                tracked_by,
+            } => {
+                assert!(!owner.is_empty(), "{} names no owner", key.wire_name());
+                // The arm's whole justification: it claims a consumer EXISTS
+                // and cannot be reached. An arm that says that without naming
+                // what blocks it is a `false` with no address, which is the
+                // shape this registry replaced.
+                assert!(
+                    blocker.len() > 40,
+                    "{} is unreachable but names no blocker an operator could act on",
+                    key.wire_name()
+                );
+                assert!(
+                    tracked_by.contains('#'),
+                    "{} names no tracking issue",
+                    key.wire_name()
+                );
+            }
             Consumption::Unbuilt { tracked_by } => {
                 assert!(
                     tracked_by.contains('#'),
@@ -250,6 +271,48 @@ fn every_consumption_message_resolves_in_the_canonical_bundle() {
              different ⇒ every translated locale is a translation of text this build no longer \
              sends)"
         );
+    }
+}
+
+#[test]
+fn the_four_redundancy_keys_stay_unconsumed_and_say_why() {
+    // persist v30.0.0 (CIRISPersist#602) removed the FIRST of #365's two
+    // blockers: `redundancy.*` is now four keys on two TYPED axes (`Symbols` /
+    // `Holders`), taken from edge's own four-tuple decomposition, so mapping a
+    // key onto a knob is no longer an axis choice made on our own authority.
+    //
+    // The second blocker stands. `FountainSwarmRuntime::start` takes
+    // `SwarmRuntimeConfig` by value and offers no setter, so the only place a
+    // value could land is `crate::holonomic::install_swarm_runtime`, once, at
+    // composition — after which a TTL-expired relief would keep applying until
+    // a restart. That is a NEW lie, not the existing gap, so these stay false.
+    //
+    // Pinned so a later pass cannot flip them on the strength of the axis split
+    // alone, which is the half that changed.
+    let keys: Vec<MeshConfigKey> = MeshConfigKey::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.wire_name().starts_with("redundancy."))
+        .collect();
+    assert_eq!(
+        keys.len(),
+        4,
+        "persist's registry carries four redundancy keys after #602's axis split; got {:?}",
+        keys.iter().map(|k| k.wire_name()).collect::<Vec<_>>()
+    );
+    for key in keys {
+        match consumption(key) {
+            Consumption::Unreachable {
+                owner, tracked_by, ..
+            } => {
+                assert_eq!(owner, "CIRISEdge", "{}", key.wire_name());
+                assert_eq!(tracked_by, "CIRISEdge#440", "{}", key.wire_name());
+            }
+            other => panic!(
+                "{} must stay unconsumed while edge's swarm runtime has no setter: got {other:?}",
+                key.wire_name()
+            ),
+        }
     }
 }
 

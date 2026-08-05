@@ -8,7 +8,7 @@
 //! paths, and every signal an operator had said the setting took effect: the
 //! row admitted, the fold ran, the provenance rendered, the TTL ticked. **And
 //! nothing read the value.** persist states plainly that it consumes none of
-//! the nine keys — every consumer is a downstream loop, here or in edge — and
+//! the eleven keys — every consumer is a downstream loop, here or in edge — and
 //! this repo had a caller for none of them.
 //!
 //! > An unbuilt plane refuses. **A plane with no consumer confirms.**
@@ -112,10 +112,12 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// **Does a loop in THIS build read this key?**
 ///
-/// Three arms, because "nobody reads it" is not one fact. A key whose consumer
+/// Four arms, because "nobody reads it" is not one fact. A key whose consumer
 /// lives in edge is a wiring gap in a component that exists; a key whose
-/// consumer does not exist anywhere is a design gap. An operator deciding
-/// whether to file a bug needs to know which.
+/// consumer runs HERE but cannot be reached from this plane is a missing setter
+/// in a component that ships; a key whose consumer does not exist anywhere is a
+/// design gap. An operator deciding whether to file a bug — and against which
+/// repo — needs to know which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consumption {
     /// A loop in this build reads the key through `site` and changes what it
@@ -134,6 +136,26 @@ pub enum Consumption {
         /// The component that owns the consumer.
         owner: &'static str,
         /// The issue tracking its adoption there.
+        tracked_by: &'static str,
+    },
+    /// v30.0.0 adoption (CIRISPersist#602) — **the consumer runs in THIS
+    /// process and this plane still cannot reach it.**
+    ///
+    /// Distinct from [`Elsewhere`](Self::Elsewhere), which points an operator
+    /// at another component's runtime: here the loop is composed by this
+    /// binary, so "it may still change something wherever the owner runs" is
+    /// false — there is nowhere else for it to take effect. Distinct from
+    /// [`Unbuilt`](Self::Unbuilt), which says no consumer exists; one does.
+    ///
+    /// The arm exists because the two facts an operator needs are different
+    /// bugs to file. `blocker` names the thing that must change.
+    Unreachable {
+        /// The component that owns the knob the consumer reads.
+        owner: &'static str,
+        /// **Why the value cannot reach it** — one sentence, addressed to
+        /// whoever would otherwise wire it.
+        blocker: &'static str,
+        /// The issue tracking the missing path.
         tracked_by: &'static str,
     },
     /// The consumer does not exist anywhere yet. Setting it admits a row and
@@ -157,6 +179,7 @@ impl Consumption {
         match self {
             Self::Wired { .. } => "wired",
             Self::Elsewhere { .. } => "elsewhere",
+            Self::Unreachable { .. } => "unreachable",
             Self::Unbuilt { .. } => "unbuilt",
         }
     }
@@ -179,6 +202,12 @@ impl Consumption {
             Self::Elsewhere { .. } => {
                 "No loop in this build reads this key — its consumer lives in another component. \
                  A row set here is admitted and folded, and changes nothing on this node."
+            }
+            Self::Unreachable { .. } => {
+                "This key's consumer runs in this process, but nothing carries a value from this \
+                 plane to it: the component that owns the knob takes it once when the loop is \
+                 composed and offers no way to change it afterwards. A row set here is admitted \
+                 and folded, and changes nothing anywhere."
             }
             Self::Unbuilt { .. } => {
                 "This key's consumer has not been built anywhere yet. A row set here is admitted \
@@ -233,26 +262,55 @@ pub const fn consumption(key: MeshConfigKey) -> Consumption {
             owner: "CIRISPersist",
             tracked_by: "CIRISServer#365",
         },
-        // The fountain repair planner. NOT wired, deliberately, and the reason
-        // is worth writing down rather than leaving as an omission:
+        // ── The fountain repair planner's four knobs (persist v30.0.0 /
+        //    CIRISPersist#602 split the two fused keys into their symbol and
+        //    holder axes). Still NOT wired, and the reason has CHANGED — which
+        //    is why it is restated rather than left as it stood.
         //
-        //  1. the only repair/eviction knobs this build owns are edge's
-        //     `SwarmRuntimeConfig { target_holders, min_viable }`, which count
-        //     HOLDERS, while persist's registry names this key's knob
-        //     `target_repair_symbols`. Holders and symbols are two axes, and
-        //     binding one name to both is this codebase's single most
-        //     productive defect class — nine instances across four repos, none
-        //     of them found by reading the code that contained them. Choosing
-        //     an axis here on our own authority is exactly how that happens;
-        //  2. edge exposes no runtime setter for either field, so a value read
-        //     from this plane would apply at the NEXT BOOT. A knob that
-        //     confirms and takes effect after a restart nobody performs is the
-        //     same false confirmation this whole module exists to remove.
-        MeshConfigKey::RedundancyKRepairTarget | MeshConfigKey::RedundancyMinViableFloor => {
-            Consumption::Unbuilt {
-                tracked_by: "CIRISServer#365",
-            }
-        }
+        // #365 gave two blockers. **The first is gone.** It was that this
+        // build's only repair/eviction knobs are edge's
+        // `SwarmRuntimeConfig { target_holders, min_viable }` + its
+        // `FountainPolicy { k_repair, min_viable_symbols }`, which count
+        // HOLDERS and SYMBOLS respectively, while persist's registry offered
+        // two keys typed `Count` — so binding either one meant choosing an
+        // axis on our own authority, which is this codebase's most productive
+        // defect class. persist now types them (`Symbols` / `Holders`) from
+        // edge's OWN four-tuple decomposition, so the mapping is no longer a
+        // judgement call: each key names exactly one field.
+        //
+        // **The second blocker stands, and it is the whole reason these stay
+        // `false`.** `FountainSwarmRuntime::start` takes `SwarmRuntimeConfig`
+        // BY VALUE and copies each field into its spawned publisher/converger
+        // tasks; there is no setter. The only place a value from this plane
+        // could be applied is `crate::holonomic::install_swarm_runtime`, once,
+        // at composition — and a boot-only consumer is strictly WORSE here
+        // than none:
+        //
+        //   * a relief filed after composition does not apply until a restart
+        //     nobody performs — the false confirmation #365 exists to remove;
+        //   * a relief whose TTL EXPIRES keeps applying until that restart.
+        //     The fold is TTL-evaluated at `now` and [`REFRESH_INTERVAL`]
+        //     exists precisely so an emergency stops applying without anyone
+        //     filing anything. Reading once at boot re-introduces the eternal
+        //     72-hour emergency, which is a NEW lie rather than the existing
+        //     gap.
+        //
+        // So the honest answer is `consumed: false` with the blocker named at
+        // the surface, not a `true` backed by a value the node applies once.
+        // `tests/substrate_contract_gate.rs` reconciles persist's ceilings
+        // against edge's EMITTED floor manifest, so the numbers on both sides
+        // of this gap stay checkable while the gap is open.
+        MeshConfigKey::RedundancyKRepairSymbols
+        | MeshConfigKey::RedundancyMinViableSymbols
+        | MeshConfigKey::RedundancyTargetHolders
+        | MeshConfigKey::RedundancyMinViableHolders => Consumption::Unreachable {
+            owner: "CIRISEdge",
+            blocker: "FountainSwarmRuntime::start consumes SwarmRuntimeConfig by value and \
+                      exposes no setter, so a value from this plane could only be applied at \
+                      composition — after which an expired relief would keep applying until a \
+                      restart.",
+            tracked_by: "CIRISEdge#440",
+        },
         // #239's descent operator does not exist, so there is nothing to
         // multiply. A `consumed: true` here would be precisely the lie.
         MeshConfigKey::DescentPressureMultiplier => Consumption::Unbuilt {
@@ -301,7 +359,7 @@ impl Reading {
 /// **How much of a row the serve path is willing to send.**
 /// `backpressure.summary_only`'s two states, named rather than passed as a
 /// bare `bool` — a `bool` at a call site three modules away says nothing about
-/// which way `true` points, and four of the nine keys on this plane invert.
+/// which way `true` points, and four of the eleven keys on this plane invert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServeFidelity {
     /// Serve whole rows, opaque per-score payload included. The owner default.
@@ -363,6 +421,32 @@ impl EffectiveMeshConfig {
     #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// **The subscribed roots this reading could not answer for** — persist
+    /// v30.0.0's [`MeshConfigFold::unreadable_roots`] (CIRISPersist#601 item 1),
+    /// carried onto the fold by [`crate::mesh_config_surface::resolve_fold`].
+    ///
+    /// Empty for a clean read AND for an unreadable one: nothing was subscribed
+    /// to fail. The two are told apart by [`Self::error`], which is `Some` only
+    /// for the second — the same distinct-zeroes rule the rest of this module
+    /// keeps, applied to the field that was added because persist was breaking
+    /// it one level down.
+    ///
+    /// **This is a report, not a decision.** A consumer still honours a partial
+    /// fold, for the reason in the module doc: the cross-root fold is
+    /// most-restrictive, so a root that could not be read can only ever have
+    /// made the answer tighter. What the field changes is that the log line
+    /// stops calling a partial read a clean one.
+    #[must_use]
+    pub fn unreadable_roots(&self) -> &[String] {
+        self.fold.as_ref().map_or(&[], |f| &f.unreadable_roots)
+    }
+
+    /// `true` when the plane WAS read and at least one subscribed root was not.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        !self.unreadable_roots().is_empty()
     }
 
     /// The generic reading for one key. **Private**: a consumer must go through
@@ -544,6 +628,13 @@ pub async fn spawn(
                 prev.serve_fidelity() != next.serve_fidelity()
                     || prev.trace_plane() != next.trace_plane()
                     || prev.error().is_some() != next.error().is_some()
+                    // v30.0.0 (#601 item 1): a read that stopped covering a
+                    // root, or started covering it again, is a change an
+                    // operator must see. Before `unreadable_roots` existed,
+                    // "backend cannot answer for root R" was indistinguishable
+                    // from "root R said nothing" and this loop stayed silent
+                    // through it.
+                    || prev.unreadable_roots() != next.unreadable_roots()
             };
             if moved {
                 log_reading(&next, "mesh-config reading CHANGED");
@@ -565,6 +656,19 @@ fn log_reading(reading: &EffectiveMeshConfig, headline: &str) {
             trace_plane = ?reading.trace_plane(),
             "{headline}: the mesh-config plane could NOT be read — every wired consumer keeps \
              its own default. This is not a statement that nothing is set."
+        ),
+        // v30.0.0 (CIRISPersist#601 item 1) — a PARTIAL read is its own line.
+        // The fold is still honoured (most-restrictive across roots means an
+        // unread root can only have tightened the answer), but "we could not
+        // ask root R" must not print as "root R had nothing to say".
+        None if reading.is_partial() => tracing::warn!(
+            unreadable_roots = ?reading.unreadable_roots(),
+            serve_fidelity = ?reading.serve_fidelity(),
+            trace_plane = ?reading.trace_plane(),
+            "{headline}: the mesh-config plane was read PARTIALLY — the named subscribed roots \
+             could not be answered for. The fold below is honoured because the cross-root fold \
+             is most-restrictive, so an unread root can only have made it tighter; it is NOT a \
+             statement that those roots said nothing."
         ),
         None => tracing::info!(
             serve_fidelity = ?reading.serve_fidelity(),
@@ -781,6 +885,67 @@ mod tests {
             },
             "asking for the baseline value is not a relief"
         );
+    }
+
+    /// **v30.0.0 adoption (CIRISPersist#601 item 1) — three states, not two.**
+    ///
+    /// "the plane could not be read", "the plane was read and one root could
+    /// not be answered for", and "the plane was read cleanly" are three facts,
+    /// and until persist added [`MeshConfigFold::unreadable_roots`] a consumer
+    /// holding a fold could only tell the first from the other two. The middle
+    /// one is the dangerous one on a restrict-only plane: a root that silently
+    /// contributes nothing renders as a node under FEWER restrictions than it
+    /// consented to.
+    ///
+    /// The partial reading is still HONOURED — asserted here, because reporting
+    /// it must not be confused with acting on it. Every accessor answers exactly
+    /// as it would on a clean read of the same rows.
+    ///
+    /// **persist ships this field with no automated witness on their side** (no
+    /// shipped backend can return `Unsupported`, and a `FederationDirectory`
+    /// double costs 78 required methods — CIRISPersist#603). This is the
+    /// consumer side of it, exercised here because we are the party that
+    /// reported it and the only one populating the field.
+    #[test]
+    fn a_partial_read_is_reported_without_being_downgraded() {
+        // Clean: nothing named, and NOT because the field is ignored — the
+        // partial case below moves it.
+        let clean = reading_over(vec![row(MeshConfigKey::FeatureTraceReplication, 0, None)]);
+        assert!(clean.unreadable_roots().is_empty());
+        assert!(!clean.is_partial());
+
+        // The same rows, with one subscribed root unread.
+        let baseline = MeshConfigBaseline::owner_defaults();
+        let mut fold = fold_mesh_config(
+            "node-1",
+            &baseline,
+            &[ROOT.to_string(), "root-down".to_string()],
+            &[row(MeshConfigKey::FeatureTraceReplication, 0, None)],
+            now(),
+        );
+        fold.unreadable_roots = vec!["root-down".to_string()];
+        let partial = EffectiveMeshConfig::folded(fold);
+
+        assert!(partial.is_partial());
+        assert_eq!(partial.unreadable_roots(), ["root-down".to_string()]);
+        // A partial read is NOT an unreadable one: `error()` stays None, so the
+        // two never collapse into one log line or one operator answer.
+        assert_eq!(partial.error(), None);
+        assert_ne!(
+            partial.error().is_some(),
+            EffectiveMeshConfig::unreadable("x").error().is_some()
+        );
+        // …and it is honoured, exactly as the clean read of the same rows is.
+        assert_eq!(partial.trace_plane(), PlaneAdmission::Paused);
+        assert_eq!(partial.trace_plane(), clean.trace_plane());
+        assert_eq!(partial.serve_fidelity(), ServeFidelity::Full);
+
+        // The unreadable arm names no roots — there is no fold to name them
+        // from, which is a different zero again.
+        let dead = EffectiveMeshConfig::unreadable("directory exploded");
+        assert!(dead.unreadable_roots().is_empty());
+        assert!(!dead.is_partial());
+        assert!(dead.error().is_some());
     }
 
     #[test]

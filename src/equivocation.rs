@@ -422,13 +422,20 @@ pub fn detect(rows: &[&Attestation]) -> DetectorReport {
 ///   NULL OR expires_at > now)`) and it is also the semantic bound: rows live at
 ///   one instant all overlap at that instant, which is the "overlapping
 ///   validity" leg of the predicate.
-/// - `tier` is filtered in RUST, on purpose. `AttestationFilter::tier` exists
-///   and `list_attestations` (sqlite) silently ignores it — the field is honored
-///   by the `list_scores` handles and dropped by this one, along with `window`,
-///   `lifecycle` and `attester_filter`. Setting it here would read as a bound
-///   and be none. Federation tier is the right restriction on its own merits: a
-///   local-tier row was never published to anyone, so it cannot be evidence that
-///   a key told two peers different things.
+/// - `tier` is a REAL pushdown as of persist v30.0.0 (CIRISPersist#596 item 2).
+///   It used to be filtered in Rust on purpose, because `list_attestations`
+///   accepted the field and silently ignored it — honoured by the `list_scores`
+///   handles and dropped by this one, along with `window` and `attester_filter`
+///   — so setting it here would have read as a bound and been none. It binds
+///   now, and it is set EXPLICITLY (`Tier::Federation`, never `None`, whose
+///   meaning on this handle is deliberately "no predicate"). The restriction is
+///   right on its own merits: a local-tier row was never published to anyone, so
+///   it cannot be evidence that a key told two peers different things.
+///
+///   Pushing it down also fixes what `cfg.max_rows` counts. The scan bound used
+///   to be spent on local-tier rows that were then thrown away, so a corpus with
+///   many local rows could report `truncated` having examined almost no
+///   federation evidence.
 ///
 /// The scope is the node authenticated AS ITSELF (`build_caller_admission` —
 /// the only public path to an admission, so this cannot fabricate reach it does
@@ -455,11 +462,26 @@ async fn live_rows(
         // predicate arrives as a default rather than a compile break.
         let mut filter = AttestationFilter::default();
         filter.valid_at = Some(now);
+        // EXPLICIT (persist v30.0.0 / #596 item 2). `None` on this handle keeps
+        // its historical "no predicate" meaning; an explicit tier is honoured
+        // identically across handles, which is what makes it safe to state.
+        filter.tier = Some(ciris_persist::ceg::list::federation::Tier::Federation);
         let page = engine
             .list_attestations(filter, cursor, cfg.page, scope.clone())
             .await
             .map_err(|e| anyhow::anyhow!("list live attestations: {e}"))?;
         scanned += page.items.len();
+        // The in-process re-check is kept as a WITNESS, not as the enforcement:
+        // a local-tier row surviving the push-down would mean the axis stopped
+        // binding, and this detector must narrow correctly either way. It is
+        // asserted rather than silently dropped, because "the filter came back
+        // wrong" is a substrate defect an operator has to be able to see.
+        debug_assert!(
+            page.items
+                .iter()
+                .all(|a| a.tier == attestation_tier::FEDERATION),
+            "AttestationFilter::tier did not bind on list_attestations"
+        );
         out.extend(
             page.items
                 .into_iter()

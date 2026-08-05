@@ -1118,6 +1118,61 @@ async fn an_act_that_names_no_resolvable_authority_is_refused_before_anything_is
     assert_eq!(history["total"], serde_json::json!(0));
 }
 
+/// **persist v30.0.0 (CIRISPersist#601 item 2): the id must name the conferral
+/// the author ACTUALLY acted under.**
+///
+/// The door has always required `delegation_id` to be non-empty, and this
+/// surface has always required it to name a `delegates_to` row this node holds
+/// — but neither required it to be one of the live `trust:confers:v1` edges by
+/// which the root authorises the author. `root_authorizes_author` returned
+/// `bool`, which is what threw the binding away, so a well-formed but unrelated
+/// id landed in a stored, SIGNED row and was reported downstream as verified
+/// provenance. Worse than naming no authority: it reads as attributed.
+///
+/// The negative here is the node's own `trust:accepts:v1` subscription edge —
+/// a real `delegates_to` row, held by this node, that clears every check this
+/// surface makes and confers nothing. The positive control is the same body
+/// with the real conferral, so "the write path broke" cannot pass this pair.
+#[tokio::test]
+async fn a_delegation_id_that_confers_nothing_is_refused_even_though_it_resolves() {
+    let f = fixture().await;
+
+    // The subscription edge: node -> ROOT on `trust:accepts:v1`. It is the row
+    // `subscribe` filed, so it exists, it is a delegates_to, and this node
+    // holds it — it simply is not a conferral FROM the root ONTO this author.
+    let not_a_conferral = format!("deleg-{}-{ROOT}-{TRUST_ACCEPTS_DIMENSION}", f.node_key);
+    assert_ne!(not_a_conferral, f.conferral);
+    assert!(
+        f.engine
+            .federation_directory()
+            .get_attestation(&not_a_conferral)
+            .await
+            .expect("read")
+            .is_some(),
+        "the negative must be a row this node really holds, or it would be refused by this \
+         surface's own `authority_unresolved` gate and prove nothing about the substrate's"
+    );
+
+    let mut body = relief_body(&f, restricting(), 6);
+    body["delegation_id"] = serde_json::json!(not_a_conferral);
+    let (status, resp) = post(&f, ROUTE_RELIEF, &body).await;
+    assert_eq!(status, 409, "{resp}");
+    assert_eq!(
+        resp["refusal"],
+        serde_json::json!(MeshConfigRefusalReason::DelegationIdNotConferring.as_str()),
+        "an act must name the conferral it acted under: {resp}"
+    );
+
+    // Nothing was stored — the refusal is at the door, not after the write.
+    let (_, history) = get(&f, ROUTE_HISTORY).await;
+    assert_eq!(history["total"], serde_json::json!(0));
+
+    // NEGATIVE CONTROL: the same body, naming the real conferral, admits. So
+    // "every relief is now refused" cannot pass this test.
+    let (status, resp) = post(&f, ROUTE_RELIEF, &relief_body(&f, restricting(), 6)).await;
+    assert_eq!(status, 200, "the real conferral must still admit: {resp}");
+}
+
 #[tokio::test]
 async fn the_dry_run_hands_a_cosigner_the_exact_bytes_without_writing_anything() {
     let f = fixture().await;
@@ -1184,7 +1239,7 @@ async fn the_surface_is_owner_gated_on_the_federation_admin_spine() {
 //  PROPERTY 6 — the surface says whether anything READS the value it prints
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// CIRISServer#365. The plane was operable and NOT effective: nine keys, and
+// CIRISServer#365. The plane was operable and NOT effective: eleven keys, and
 // this repo had a caller for none, so an operator could file a relief, watch it
 // admit, watch it fold, watch its TTL count down — and nothing changed. Every
 // signal said the setting took effect.
@@ -1225,6 +1280,14 @@ async fn property_6_every_key_says_whether_this_build_consumes_it() {
             }
             Consumption::Elsewhere { .. } => {
                 assert!(v["consumption"]["owner"].is_string(), "{v}");
+                assert!(v["consumption"]["tracked_by"].is_string(), "{v}");
+            }
+            // v30.0.0 adoption: the consumer runs HERE and this plane cannot
+            // reach it — the arm that has to name what would have to change,
+            // or it is a `false` with no address.
+            Consumption::Unreachable { .. } => {
+                assert!(v["consumption"]["owner"].is_string(), "{v}");
+                assert!(v["consumption"]["blocker"].is_string(), "{v}");
                 assert!(v["consumption"]["tracked_by"].is_string(), "{v}");
             }
             Consumption::Unbuilt { .. } => {
