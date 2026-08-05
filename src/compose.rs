@@ -752,12 +752,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     accord_peers.clone(),
                     cfg.home.clone(),
                 );
-                // CIRISServer#370 — ONE refusal ledger for this process, minted
-                // here so the ingest route that WRITES it and the operator
-                // surface that READS it hold the same handle. Two ledgers would
-                // be two answers to one question, which is the defect class
-                // this whole surface exists to avoid.
-                let ingest_refusals = crate::ingest_http::IngestRefusals::new();
                 let r = identity_router(identity_json)
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the
@@ -1109,12 +1103,32 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // two days), and `ingest` reads the refusal rate + the
                     // DISTINCT refused signers off the very ledger the ingest
                     // route below counts into. Same handle both sides — a
-                    // second ledger would be a second answer to one question.
-                    .merge(crate::operator_surface::router(
+                    // second ledger would be a second answer to one question,
+                    // which is why the two are no longer mounted separately:
+                    // `trace_plane_router` MINTS the ledger and hands it to
+                    // both halves, so a composition cannot give them different
+                    // ones. It also mounts the HTTP TRACE INGEST routes:
+                    // POST /lens-api/api/v1/accord/events (legacy path,
+                    // forwarded verbatim by the Caddy bridge) + POST
+                    // /v1/ingest/accord-events (canonical alias). The agent's
+                    // CIRIS-AccordMetrics/1.0 emitter ships a signed
+                    // AccordEventsBatch JSON; this feeds it to the SAME
+                    // Engine::receive_and_persist verify-before-persist path
+                    // the Reticulum relay uses (LensCoreHandler).
+                    // Unauthenticated like the relay — the per-trace CEG
+                    // signature IS the auth.
+                    //
+                    // CIRISServer#365: the ingest half carries the live
+                    // mesh-config reading, so a trust root that sets
+                    // `feature.trace_replication = 0` pauses this node's
+                    // heaviest inbound plane — refused before verification,
+                    // nothing persisted, lifting itself when the relief's TTL
+                    // closes.
+                    .merge(crate::operator_surface::trace_plane_router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                         Some(edge.metrics()),
-                        Some(ingest_refusals.clone()),
+                        mesh_config_effect.clone(),
                     ))
                     // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
                     // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
@@ -1129,30 +1143,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::telemetry_logs::router(cfg.home.join("logs")))
                     // Data page: owner-gated data wipe (reset-account = data-only;
                     // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
-                    .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()))
-                    // HTTP TRACE INGEST (the listen+1 relay runbook §3.4 promised):
-                    // POST /lens-api/api/v1/accord/events (legacy path, forwarded
-                    // verbatim by the Caddy bridge) + POST /v1/ingest/accord-events
-                    // (canonical alias). The agent's CIRIS-AccordMetrics/1.0 emitter
-                    // ships a signed AccordEventsBatch JSON; this feeds it to the
-                    // SAME Engine::receive_and_persist verify-before-persist path the
-                    // Reticulum relay uses (LensCoreHandler). Unauthenticated like the
-                    // relay — the per-trace CEG signature IS the auth.
-                    //
-                    // CIRISServer#370: it also COUNTS every refusal into
-                    // `ingest_refusals`, which the operator surface above reads.
-                    // Before this the gate refused correctly and told nobody.
-                    //
-                    // CIRISServer#365: and it carries the live mesh-config
-                    // reading, so a trust root that sets
-                    // `feature.trace_replication = 0` pauses this node's heaviest
-                    // inbound plane — refused before verification, nothing
-                    // persisted, lifting itself when the relief's TTL closes.
-                    .merge(crate::ingest_http::router(
-                        Arc::clone(&engine),
-                        ingest_refusals,
-                        mesh_config_effect.clone(),
-                    ));
+                    .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()));
                 // ── ADAPTER SEAM (get_services_to_register) ──────────────────
                 // Fold the downstream adapter's HTTP surface onto the SAME
                 // read-API listener, AFTER all built-in routers. NoopAdapter
@@ -1181,6 +1172,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // enforced BEFORE any dispatch, so mounting the full surface here
                 // widens nothing.
                 let _ = mesh_dispatch_router.set(r.clone());
+                // CIRISServer#369 follow-on — THE PERIODIC READER.
+                //
+                // #369 built the trace-plane liveness band and #370 the refusal
+                // reading, and `GET /v1/node/state` renders both. But that
+                // surface is PULL. This process runs seven periodic loops —
+                // retention, scorer, config reconcile, replication reconcile,
+                // federation delivery, equivocation, mesh-config refresh — and
+                // not one of them asks whether the plane this node exists to
+                // receive on is alive. A node running only those would hold a
+                // correct red band that nobody requested, which is the
+                // 2026-08-05 outage moved up one level: the signal exists and
+                // has no reader.
+                //
+                // Spawned HERE, after the router chain, because
+                // `ingest_http::router` publishes the ledger to `held()` at
+                // construction — asking earlier would hand the watch `None` and
+                // degrade an honest reading into `unreadable`.
+                crate::trace_plane_watch::spawn(Arc::clone(&engine), crate::ingest_http::held());
                 r
             },
             // CIRISServer#365 — `backpressure.summary_only`, the serve path's
