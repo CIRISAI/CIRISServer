@@ -561,10 +561,13 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     if traces.is_empty() {
         eprintln!(
             "FRONTIER: round completed and admitted {admitted} envelope(s), trace correctly \
-             placed, but no `trace:*` reached the canonical — expected while the fixture \
-             establishes conferral (leg A) but not trust-root rooting (leg B, \
-             capability_roots_to_trusted_root / CIRISEdge#386). Everything upstream of \
-             the serve gate is pinned by the assertions above."
+             placed, but no `trace:*` reached the canonical. CAUSE IS OPEN — see \
+             CIRISEdge#455. NOT leg B: #386/#414/#416/#423 are all CLOSED and leg B is \
+             green and asserted above. The row IS offered (it is among the refs the agent \
+             advertises) and is then neither admitted nor refused — edge's loud apply path \
+             never sees it — so it is not a gate decision, it is never delivered. That \
+             points at want/Diff computation or Deliver packing. Reproduced on persist \
+             v30.0.0 / edge v15.18.0."
         );
     }
 }
