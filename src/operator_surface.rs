@@ -8,6 +8,8 @@
 //! |---|---|
 //! | persist [`resolve_node_state`](ciris_persist::federation::node_state::resolve_node_state) | *how is this node* — trust root, drill freshness, key standing, quarantine, consent SLA, peer quota |
 //! | edge [`EdgeMetricsBundle`](ciris_edge::observability::EdgeMetricsBundle) | *did anything move, and if not, what stopped it* — the withhold ledger, apply refusals |
+//! | persist [`storage_summary`](ciris_persist::prelude::Engine::storage_summary) | **CIRISServer#369** — *is the trace plane alive* — when a trace was last admitted, banded |
+//! | [`IngestRefusals`](crate::ingest_http::IngestRefusals) | **CIRISServer#370** — *is the admission gate working overtime* — the refusal rate and WHO is being refused |
 //!
 //! **Draw from both. Re-derive neither.** Every band under `node` is persist's
 //! own [`StateBand`], carried verbatim; every count under `carriage` / `receive`
@@ -48,8 +50,33 @@
 //!   already bands this `unknown`; this surface names WHICH unknown).
 //! - `consent_sla` — `none_overdue` vs `unreadable`. `Some(0)` and `None` are
 //!   different facts and persist keeps them apart; so does this.
+//! - [`TracePlaneStanding`] — `unreadable` / `never_admitted` / `future_dated` /
+//!   `live` / `quiet` / `dark`. **CIRISServer#369.** A corpus that could not be
+//!   read and a corpus that holds nothing are not the same fact, and neither is
+//!   the same as a plane that admitted its last trace two days ago.
+//! - [`IngestStanding`] — `unreadable` / `not_exercised` / `clean` /
+//!   `unattributed` / `background` / `stuck_producer`. **CIRISServer#370**, and
+//!   the one INVERSE case on this surface: a large number of individually
+//!   correct outcomes must name its cause too.
 //! - Each SOURCE, whole: a missing source is `unavailable` with a reason, never
 //!   an absent key and never a healthy default.
+//!
+//! # The 2026-08-05 incident, and what it added here
+//!
+//! `FSD/RCA_INGEST_REJECTION_2026-08-05.md`: traces stopped arriving on the
+//! production canonical at `2026-08-03T23:30` and nobody knew for two days. The
+//! producer signed, the server verified, the admission gate refused **8,631
+//! times a day** with a precise diagnostic, and every layer was RIGHT. Nothing
+//! turned "nothing is arriving" into a signal.
+//!
+//! Two readings close that, and they are complementary rather than redundant —
+//! read together they distinguish the three ways a plane goes dark:
+//!
+//! | `trace_plane` | `ingest` | what it means |
+//! |---|---|---|
+//! | `dark` | `stuck_producer` | **the 2026-08-05 condition** — a producer is being correctly refused and cannot self-correct |
+//! | `dark` | `clean` / `not_exercised` | nothing is even reaching this node: routing, the bridge, or the producer stopped |
+//! | `live` | `stuck_producer` | one producer is broken while others still land — the 33-hour overlap window nobody was watching |
 //!
 //! # Strings are `{id, text}`, never sentences
 //!
@@ -85,6 +112,8 @@ use ciris_persist::federation::quarantine::QuarantineState;
 use ciris_persist::federation::register::KeyStatementStanding;
 use ciris_persist::federation::trust_root::DrillFreshness;
 use ciris_persist::prelude::Engine;
+
+use crate::ingest_http::IngestRefusalBundle;
 
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
@@ -393,6 +422,272 @@ impl ReceiveStanding {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CIRISServer#369 — the trace plane's own liveness.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upper bound (hours) of the **green** trace-plane band: a plane that admitted
+/// a trace inside this window is being fed.
+///
+/// Modelled on persist's [`DRILL_GREEN_MAX_DAYS`](ciris_persist::federation::trust_root::DRILL_GREEN_MAX_DAYS),
+/// which bands exactly this shape for the trust root — *when did this last
+/// happen, and is that long enough ago to worry?* — and carried onto the wire
+/// beside the band, so a reader never has to know this constant to interpret the
+/// colour beside it.
+pub const TRACE_GREEN_MAX_HOURS: i64 = 6;
+
+/// Upper bound (hours) of the **yellow** trace-plane band. At or beyond this the
+/// plane reads RED.
+///
+/// The 2026-08-05 incident is the calibration: the last trace was admitted at
+/// `2026-08-03T23:30` and a human first looked at `2026-08-05T13:55`, 38 hours
+/// later. At 24 h this signal is RED for the last fourteen of those hours and
+/// YELLOW for the thirty-two before that — which is the whole ask, since the RCA
+/// names a 33-hour window in which one producer was already being refused while
+/// another still succeeded and nothing compared the two.
+pub const TRACE_YELLOW_MAX_HOURS: i64 = 24;
+
+/// Tolerance before a newest-row timestamp in the FUTURE is called out rather
+/// than banded. Ordinary NTP skew between a producer and this node is seconds;
+/// five minutes is well outside it and well inside the green band.
+pub const TRACE_FUTURE_TOLERANCE_MINUTES: i64 = 5;
+
+/// CIRISServer#369 — **has this node admitted a trace lately, and if not, is
+/// that a fault or an unread instrument?**
+///
+/// The node exists to receive traces. Before this reading it had a scorer
+/// reporting `n_summaries`, a retention loop, an equivocation detector and four
+/// distinct carriage zeroes — and nothing at all that said *"no trace has been
+/// admitted in 48 hours."* Arrival was the one thing unwatched, and on
+/// 2026-08-03 it stopped for two days with every layer reporting success.
+///
+/// # Six tokens on four bands
+///
+/// The band is the judgement; the token is the cause. `unreadable` and
+/// `never_admitted` share the `unknown` band and are DIFFERENT FACTS — "we could
+/// not ask the corpus" is not "the corpus is empty", and collapsing them is the
+/// precise failure the RCA's third instrument failure describes (a grep that
+/// matched nothing read as a node with nothing wrong).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TracePlaneStanding {
+    /// The corpus could not be read at all. **Not** "nothing has been admitted".
+    Unreadable,
+    /// The corpus was read and holds no trace at all: nothing has EVER been
+    /// admitted here.
+    ///
+    /// Bands `unknown`, not `red`, and the difference from persist's
+    /// never-drilled arm is deliberate. A root always has a mint instant, so
+    /// "never drilled" is always a real omission; an empty trace corpus is the
+    /// ordinary state of every node between provisioning and its first batch. A
+    /// signal that fires red on the healthy steady state trains people to
+    /// ignore it — the standing 0.5.153 warning this module already cites — and
+    /// an instrument nobody reads is what the RCA is about. `unknown` is
+    /// non-green, is named individually in the surface's `unknown` list, and
+    /// therefore cannot render as health.
+    NeverAdmitted,
+    /// The newest row in the corpus is stamped in the FUTURE by more than
+    /// [`TRACE_FUTURE_TOLERANCE_MINUTES`].
+    ///
+    /// A statement about a clock, not about the plane — and it has to be its own
+    /// token because it otherwise defeats the whole instrument silently: a
+    /// producer stamping tomorrow pins this reading green forever, which is a
+    /// dead plane wearing a healthy colour.
+    FutureDated,
+    /// A trace was admitted inside [`TRACE_GREEN_MAX_HOURS`].
+    Live,
+    /// Quiet longer than expected, but plausibly idle.
+    Quiet,
+    /// **Nothing admitted in [`TRACE_YELLOW_MAX_HOURS`] or more.** The 2026-08-05
+    /// condition.
+    Dark,
+}
+
+impl TracePlaneStanding {
+    /// The stable wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::NeverAdmitted => "never_admitted",
+            Self::FutureDated => "future_dated",
+            Self::Live => "live",
+            Self::Quiet => "quiet",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// Every variant — the closed set.
+    pub const ALL: &'static [Self] = &[
+        Self::Unreadable,
+        Self::NeverAdmitted,
+        Self::FutureDated,
+        Self::Live,
+        Self::Quiet,
+        Self::Dark,
+    ];
+
+    /// The band. Three tokens sit on `unknown` and they are three different
+    /// facts — a band never replaces a token.
+    #[must_use]
+    pub const fn band(self) -> StateBand {
+        match self {
+            Self::Unreadable | Self::NeverAdmitted | Self::FutureDated => StateBand::Unknown,
+            Self::Live => StateBand::Green,
+            Self::Quiet => StateBand::Yellow,
+            Self::Dark => StateBand::Red,
+        }
+    }
+
+    /// The operator-facing explanation.
+    #[must_use]
+    pub const fn message(self) -> Msg {
+        match self {
+            Self::Unreadable => (
+                "operator.trace_plane.unreadable",
+                "This node's trace corpus could not be read, so nothing here is a statement about \
+                 what it has admitted. This is not 'no trace has arrived' — it is 'we could not \
+                 ask'.",
+            ),
+            Self::NeverAdmitted => (
+                "operator.trace_plane.never_admitted",
+                "The corpus was read and holds no trace at all: nothing has ever been admitted on \
+                 this node. There is no arrival instant to band, so this is an untested zero, not \
+                 a healthy one — and on a node that has been serving for a while it is the same \
+                 condition as a dark plane.",
+            ),
+            Self::FutureDated => (
+                "operator.trace_plane.future_dated",
+                "The newest trace in the corpus is stamped in the FUTURE. The timestamp is the \
+                 producer's own broadcast clock, so this is a statement about that clock — and it \
+                 is called out rather than banded because a future-dated row pins this reading \
+                 green indefinitely and would hide a plane that has actually stopped.",
+            ),
+            Self::Live => (
+                "operator.trace_plane.live",
+                "A trace was admitted recently: the plane this node exists to receive on is being \
+                 fed.",
+            ),
+            Self::Quiet => (
+                "operator.trace_plane.quiet",
+                "No trace has been admitted for longer than expected, but not yet long enough to \
+                 call the plane dark. A genuinely idle node reads this way; so does the first \
+                 half of a producer outage.",
+            ),
+            Self::Dark => (
+                "operator.trace_plane.dark",
+                "NOTHING HAS BEEN ADMITTED FOR LONGER THAN THIS NODE'S RED THRESHOLD. Arrival is \
+                 the single thing this node exists to do. Read the `ingest` reading beside this: a \
+                 dark plane with a sustained refusal rate is a producer being correctly rejected, \
+                 and a dark plane with no refusals at all means nothing is even reaching this \
+                 node.",
+            ),
+        }
+    }
+}
+
+/// What the corpus read returned. Carrying the row count beside the instant is
+/// free — it comes out of the same aggregate — and it is what makes
+/// `never_admitted` checkable rather than inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceCorpus {
+    /// `MAX(trace_events.ts)`, or `None` on an empty corpus.
+    pub last_admitted_at: Option<DateTime<Utc>>,
+    /// `COUNT(*)` over `trace_events`.
+    pub rows: u64,
+}
+
+/// Band the trace plane.
+///
+/// `Result` rather than `Option` on the input for the reason this whole module
+/// uses `Result`: a corpus that could not be read must carry that fact, and
+/// `Option` would erase it into the empty-corpus arm — the one collapse #369
+/// explicitly forbids.
+#[must_use]
+pub fn trace_plane_standing(
+    corpus: Result<TraceCorpus, &str>,
+    now: DateTime<Utc>,
+) -> TracePlaneStanding {
+    let Ok(c) = corpus else {
+        return TracePlaneStanding::Unreadable;
+    };
+    let Some(last) = c.last_admitted_at else {
+        return TracePlaneStanding::NeverAdmitted;
+    };
+    let age = now.signed_duration_since(last);
+    if age < -chrono::Duration::minutes(TRACE_FUTURE_TOLERANCE_MINUTES) {
+        return TracePlaneStanding::FutureDated;
+    }
+    if age < chrono::Duration::hours(TRACE_GREEN_MAX_HOURS) {
+        TracePlaneStanding::Live
+    } else if age < chrono::Duration::hours(TRACE_YELLOW_MAX_HOURS) {
+        TracePlaneStanding::Quiet
+    } else {
+        TracePlaneStanding::Dark
+    }
+}
+
+/// The producer of the trace-plane half, named on the wire.
+const TRACE_SOURCE: &str = "ciris_persist::Engine::storage_summary().trace_events";
+
+const TRACE_UNAVAILABLE: Msg = (
+    "operator.source.trace_corpus.unavailable",
+    "This node's trace corpus could not be read, so nothing here describes what it has admitted. \
+     Absence of arrivals from an unread corpus is not absence of arrivals.",
+);
+
+/// The limit of the trace-plane reading, carried IN the payload — the same
+/// discipline [`RECEIVE_NO_ACCEPTED_COUNTER`] follows, so a consumer that
+/// renders the struct without reading this source still shows it.
+pub const TRACE_PRODUCER_ASSERTED_TS: Msg = (
+    "operator.trace_plane.producer_asserted_ts",
+    "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-clock, asserted \
+     by the producer. The substrate stores no server-side admission instant on this table, so a \
+     producer with a skewed clock moves this reading; a far-future row is called out as \
+     `future_dated` rather than banded for exactly that reason.",
+);
+
+/// The trace-plane half as it appears on the wire.
+fn trace_plane_json(corpus: Result<&TraceCorpus, &String>, now: DateTime<Utc>) -> Value {
+    let standing = trace_plane_standing(
+        corpus.copied().map_err(std::string::String::as_str),
+        now,
+    );
+    let mut out = Map::new();
+    out.insert("band".into(), json!(standing.band().as_str()));
+    out.insert("standing".into(), json!(standing.as_str()));
+    out.insert("explains".into(), msg(standing.message()));
+    out.insert("source".into(), json!(TRACE_SOURCE));
+    out.insert("note".into(), msg(TRACE_PRODUCER_ASSERTED_TS));
+    // The thresholds ride WITH the band. A band whose edges are only in the
+    // source is a datum again: the reader cannot tell whether `quiet` means six
+    // hours or six days without leaving the payload.
+    out.insert(
+        "bands".into(),
+        json!({
+            "green_max_hours": TRACE_GREEN_MAX_HOURS,
+            "yellow_max_hours": TRACE_YELLOW_MAX_HOURS,
+            "future_tolerance_minutes": TRACE_FUTURE_TOLERANCE_MINUTES,
+        }),
+    );
+
+    let c = match corpus {
+        Ok(c) => c,
+        Err(detail) => {
+            out.insert("unavailable".into(), msg(TRACE_UNAVAILABLE));
+            out.insert("detail".into(), json!(detail));
+            return Value::Object(out);
+        }
+    };
+    out.insert("last_admitted_at".into(), json!(c.last_admitted_at));
+    out.insert(
+        "age_seconds".into(),
+        c.last_admitted_at
+            .map_or(Value::Null, |t| json!(now.signed_duration_since(t).num_seconds())),
+    );
+    out.insert("rows".into(), json!(c.rows));
+    Value::Object(out)
+}
+
 /// The limit of a clean receive reading, carried IN the payload rather than
 /// only in these docs — the same discipline persist's `PEER_QUOTA_NOTE` uses,
 /// so a consumer that renders the struct without reading the source still shows
@@ -404,16 +699,308 @@ pub const RECEIVE_NO_ACCEPTED_COUNTER: Msg = (
      and the peer's own surface to tell those apart.",
 );
 
-/// The carriage/receive counters' volatility, stated in the payload.
+/// The carriage/receive/ingest counters' volatility, stated in the payload.
 pub const PROCESS_LOCAL_NOTE: Msg = (
     "operator.volatility.process_local",
-    "The carriage and receive counters are process-local and cumulative since this process \
-     started. They reset on restart, differ between processes serving one node, and are stored \
-     nowhere. They are a gauge of this process, not a ledger of this node.",
+    "The carriage, receive and ingest counters are process-local and cumulative since this \
+     process started. They reset on restart, differ between processes serving one node, and are \
+     stored nowhere. They are a gauge of this process, not a ledger of this node.",
 );
 
 /// Which fields [`PROCESS_LOCAL_NOTE`] governs.
-pub const PROCESS_LOCAL_FIELDS: &[&str] = &["carriage", "receive"];
+pub const PROCESS_LOCAL_FIELDS: &[&str] = &["carriage", "receive", "ingest"];
+
+/// The trace plane's volatility, which is a DIFFERENT kind from either of the
+/// two already named.
+///
+/// It is not persist's clock-dependent list (that list is persist's own and this
+/// module carries it verbatim), and it is not a process-local counter (the
+/// corpus is durable and survives restart). It is a band computed here, over a
+/// stored instant, against the read clock — so it moves on elapsed time alone,
+/// with no state change and no new row.
+///
+/// That is not a caveat, it is the mechanism: a plane that stops being fed walks
+/// green → yellow → red by itself, which is what makes it a detector rather than
+/// a datum an operator has to already suspect something to go read.
+pub const CLOCK_DEPENDENT_LOCAL_NOTE: Msg = (
+    "operator.volatility.clock_dependent_local",
+    "This band is computed on THIS node from a stored instant against the read clock, so it moves \
+     on elapsed time alone — no state change, no new row. A node that stops admitting traces \
+     walks green to yellow to red on its own, which is the point: it goes red without anyone \
+     asking it to.",
+);
+
+/// Which fields [`CLOCK_DEPENDENT_LOCAL_NOTE`] governs.
+pub const CLOCK_DEPENDENT_LOCAL_FIELDS: &[&str] = &["trace_plane"];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CIRISServer#370 — the ingest refusal rate as its own reading.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Refusals inside the window at or above which the rate stops being churn.
+///
+/// One a minute, sustained for the whole window. The 2026-08-05 producer ran at
+/// ~6/min for 71 hours unbroken; a stale client retrying on a backoff does not
+/// reach this.
+pub const INGEST_SUSTAINED_MIN: u64 = 60;
+
+/// Distinct refused signers at or below which the identity set is STABLE — a
+/// small fixed set of producers stuck in a loop, rather than churn.
+///
+/// The incident had exactly two. The threshold is what separates the two
+/// opposite conditions that share one counter: 8,631 refusals a day from two
+/// identities is a misconfigured client that cannot self-correct; the same rate
+/// from eight thousand is a Sybil probe. Different responses, identical rate.
+pub const INGEST_STABLE_SIGNER_MAX: usize = 8;
+
+/// CIRISServer#370 — **what a rate of CORRECT refusals means.**
+///
+/// The inverse of this surface's distinct-zeroes rule. That rule says a zero
+/// must name its own cause; this says **a large number of individually-correct
+/// outcomes must also name its cause**, because "the gate is working" and "the
+/// gate is working overtime because something upstream is broken" are different
+/// conditions wearing the same success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestStanding {
+    /// The ledger could not be read at all — this process has no HTTP ingest
+    /// route mounted, or the ledger's lock was poisoned. **Not** "nothing was
+    /// refused".
+    Unreadable,
+    /// The ledger was read and NOTHING has been offered to this path on this
+    /// process: no accept, no refusal. The zero is untested, in exactly the
+    /// sense [`CarriageStanding::NotExercised`] is.
+    ///
+    /// This arm is why the ingest plane does not inherit
+    /// [`RECEIVE_NO_ACCEPTED_COUNTER`]'s limitation: the ledger counts accepts
+    /// as well as refusals, so "everything offered was admitted" and "nothing
+    /// was offered" do not have to share a reading here.
+    NotExercised,
+    /// Offers were made and none was refused inside the window.
+    Clean,
+    /// Refusals inside the window, and every one of them named NO signer:
+    /// malformed batches, bad signatures, unsupported schema versions — refusals
+    /// that failed before there was an identity to record.
+    ///
+    /// **This is the zero that must not collapse.** `distinct_signers == 0`
+    /// trivially satisfies "a small, stable identity set", so a stuck-producer
+    /// test written as `distinct <= MAX` alone reports a stuck producer that
+    /// does not exist and names nobody — an unactionable red. It is also not
+    /// clean and not ordinary churn. Its own token, checked first.
+    Unattributed,
+    /// Refusals, but not sustained, or sustained across a wide identity set:
+    /// ordinary background of probes, stale clients and churn.
+    ///
+    /// Read `distinct_signers` before dismissing it — a *wide* set at a *high*
+    /// rate is a probe, not churn, and it renders here because the RCA's
+    /// remedy for it is investigation rather than a phone call to one producer.
+    Background,
+    /// **Sustained refusals from a small, stable identity set.** Someone is
+    /// stuck in a retry loop and cannot self-correct. Every refusal is correct
+    /// and the condition is still a fault — someone else's, which is why it
+    /// needs a reader here and gets none from the gate that is doing its job.
+    StuckProducer,
+}
+
+impl IngestStanding {
+    /// The stable wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::NotExercised => "not_exercised",
+            Self::Clean => "clean",
+            Self::Unattributed => "unattributed",
+            Self::Background => "background",
+            Self::StuckProducer => "stuck_producer",
+        }
+    }
+
+    /// Every variant — the closed set.
+    pub const ALL: &'static [Self] = &[
+        Self::Unreadable,
+        Self::NotExercised,
+        Self::Clean,
+        Self::Unattributed,
+        Self::Background,
+        Self::StuckProducer,
+    ];
+
+    /// The band.
+    ///
+    /// `stuck_producer` is RED even though this node did nothing wrong: the band
+    /// answers "does someone need to act", and someone does. `background` is
+    /// yellow for the same reason `WithholdClass::Policy` is — a pull gauge has
+    /// no alarm to habituate to, and a refusal rate is what an operator hunting
+    /// a dark plane is looking for.
+    #[must_use]
+    pub const fn band(self) -> StateBand {
+        match self {
+            Self::Unreadable | Self::NotExercised => StateBand::Unknown,
+            Self::Clean => StateBand::Green,
+            Self::Unattributed | Self::Background => StateBand::Yellow,
+            Self::StuckProducer => StateBand::Red,
+        }
+    }
+
+    /// The operator-facing explanation.
+    #[must_use]
+    pub const fn message(self) -> Msg {
+        match self {
+            Self::Unreadable => (
+                "operator.ingest.unreadable",
+                "This node's ingest refusal ledger could not be read, so nothing here is a \
+                 statement about what it refused. This is not 'nothing was refused' — it is 'we \
+                 could not ask'.",
+            ),
+            Self::NotExercised => (
+                "operator.ingest.not_exercised",
+                "Nothing has been offered to the HTTP ingest path on this process — no batch \
+                 accepted and none refused. The zero is untested, not clean.",
+            ),
+            Self::Clean => (
+                "operator.ingest.clean",
+                "Batches were offered to the HTTP ingest path and none was refused inside the \
+                 window. `refused_total` beside this is the whole-process count: a clean window \
+                 on a process that refused earlier is a recovery, not an absence.",
+            ),
+            Self::Unattributed => (
+                "operator.ingest.unattributed",
+                "Batches were refused and NOT ONE named a signer: they failed before there was an \
+                 identity to record — malformed bytes, a bad signature, an unsupported schema \
+                 version. There is no producer to call, and this is deliberately not reported as \
+                 a stuck producer: zero distinct signers is not a small stable identity set.",
+            ),
+            Self::Background => (
+                "operator.ingest.background",
+                "Refusals are present but not sustained from a stable identity set: ordinary \
+                 probes, stale clients and churn. Read `distinct_signers` before dismissing it — \
+                 a HIGH rate spread across a WIDE identity set is a probe, not churn, and it \
+                 reads here because the same counter cannot tell those apart on its own.",
+            ),
+            Self::StuckProducer => (
+                "operator.ingest.stuck_producer",
+                "A SUSTAINED rate of refusals from a SMALL, STABLE set of signers: a producer is \
+                 stuck in a retry loop and cannot self-correct. Every one of these refusals is \
+                 correct — the gate is working — which is exactly why the aggregate needs its own \
+                 reading. `top_signers` names who to go fix.",
+            ),
+        }
+    }
+}
+
+/// Narrow an ingest refusal count to its cause. Every input comes from the SAME
+/// bundle — one source, one answer.
+///
+/// **The order of the arms is load-bearing.** `unattributed` is tested BEFORE
+/// the stable-set test, because `distinct_signers == 0` satisfies
+/// `<= INGEST_STABLE_SIGNER_MAX` and would otherwise report a stuck producer
+/// whose `top_signers` list is empty.
+#[must_use]
+pub fn ingest_standing(bundle: Option<&IngestRefusalBundle>) -> IngestStanding {
+    let Some(b) = bundle else {
+        return IngestStanding::Unreadable;
+    };
+    if !b.readable {
+        return IngestStanding::Unreadable;
+    }
+    if b.refusals_in_window == 0 {
+        // Nothing offered at all — the untested zero, distinct from a clean one.
+        if b.accepted_total == 0 && b.refused_total == 0 {
+            return IngestStanding::NotExercised;
+        }
+        return IngestStanding::Clean;
+    }
+    if b.distinct_signers_in_window == 0 {
+        return IngestStanding::Unattributed;
+    }
+    if b.refusals_in_window >= INGEST_SUSTAINED_MIN
+        && b.distinct_signers_in_window <= INGEST_STABLE_SIGNER_MAX
+    {
+        return IngestStanding::StuckProducer;
+    }
+    IngestStanding::Background
+}
+
+/// The producer of the ingest half, named on the wire.
+const INGEST_SOURCE: &str = "ciris_server::ingest_http::IngestRefusals::snapshot";
+
+const INGEST_UNAVAILABLE: Msg = (
+    "operator.source.ingest_refusals.unavailable",
+    "This node's ingest refusal ledger could not be read, so nothing here describes what the \
+     admission gate refused. A gate with no reader is what let 8,631 correct refusals a day run \
+     unnoticed for 71 hours.",
+);
+
+/// The scope limit of the ingest reading, carried IN the payload.
+pub const INGEST_HTTP_PATH_ONLY: Msg = (
+    "operator.ingest.http_path_only",
+    "This reading covers the HTTP ingest path only. A batch that arrives over the Reticulum relay \
+     is verified by the same persist gate but is not counted here, so a clean ingest reading is \
+     not a statement about every way a trace can be offered to this node.",
+);
+
+/// The ingest half as it appears on the wire.
+fn ingest_json(bundle: Option<&IngestRefusalBundle>) -> Value {
+    let standing = ingest_standing(bundle);
+    let mut out = Map::new();
+    out.insert("band".into(), json!(standing.band().as_str()));
+    out.insert("standing".into(), json!(standing.as_str()));
+    out.insert("explains".into(), msg(standing.message()));
+    out.insert("source".into(), json!(INGEST_SOURCE));
+    out.insert("note".into(), msg(INGEST_HTTP_PATH_ONLY));
+    // The thresholds ride WITH the token, for the same reason the trace bands do.
+    out.insert(
+        "thresholds".into(),
+        json!({
+            "sustained_min_refusals_in_window": INGEST_SUSTAINED_MIN,
+            "stable_signer_max": INGEST_STABLE_SIGNER_MAX,
+            "top_signers_cap": crate::ingest_http::REFUSAL_TOP_N,
+        }),
+    );
+
+    let Some(b) = bundle.filter(|b| b.readable) else {
+        out.insert("unavailable".into(), msg(INGEST_UNAVAILABLE));
+        return Value::Object(out);
+    };
+
+    out.insert("observed_since".into(), json!(b.observed_since));
+    out.insert("window_seconds".into(), json!(b.window_seconds));
+    out.insert("refusals_in_window".into(), json!(b.refusals_in_window));
+    // The rate, spelled out, so the reading is a rate rather than a count the
+    // reader has to divide by a window they also have to find.
+    out.insert(
+        "refusals_per_hour".into(),
+        json!(if b.window_seconds > 0 {
+            (b.refusals_in_window as f64) * 3600.0 / (b.window_seconds as f64)
+        } else {
+            0.0
+        }),
+    );
+    out.insert(
+        "distinct_signers".into(),
+        json!(b.distinct_signers_in_window),
+    );
+    out.insert(
+        "unattributed_in_window".into(),
+        json!(b.unattributed_in_window),
+    );
+    out.insert(
+        "top_signers".into(),
+        Value::Array(
+            b.top_signers
+                .iter()
+                .map(|(id, n)| json!({ "signer_id": id, "refusals": n }))
+                .collect(),
+        ),
+    );
+    out.insert("by_kind".into(), json!(b.by_kind_in_window));
+    out.insert("accepted_total".into(), json!(b.accepted_total));
+    out.insert("refused_total".into(), json!(b.refused_total));
+    // A truncated window under-reports, and says so: the counts above become a
+    // floor. Silence here would be the one thing worse than the under-report.
+    out.insert("window_truncated".into(), json!(b.window_truncated));
+    Value::Object(out)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The two sources.
@@ -429,6 +1016,15 @@ pub struct Sources<'a> {
     pub node: Result<&'a NodeState, String>,
     /// edge's metrics bundle, or the error text that stopped it.
     pub edge: Result<&'a EdgeMetricsBundle, String>,
+    /// CIRISServer#369 — the trace corpus aggregate, or the error text that
+    /// stopped it. A read failure MUST arrive here as `Err`, never as an empty
+    /// corpus: "we could not ask" and "nothing has ever arrived" are the pair
+    /// this reading exists to keep apart.
+    pub trace: Result<&'a TraceCorpus, String>,
+    /// CIRISServer#370 — this process's ingest refusal ledger, or `None` on a
+    /// node with no HTTP ingest route mounted. Rendered `unreadable`, never as a
+    /// clean zero.
+    pub ingest: Option<&'a IngestRefusalBundle>,
 }
 
 /// The producer of each half, named on the wire so an operator chasing a value
@@ -997,6 +1593,8 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
 
     let carriage = carriage_json(edge);
     let receive = receive_json(edge);
+    let trace_plane = trace_plane_json(sources.trace.as_ref().copied(), as_of);
+    let ingest = ingest_json(sources.ingest);
 
     // Bands. persist's own roll-up is carried, never recomputed; the two edge
     // halves contribute theirs.
@@ -1012,7 +1610,19 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         .get("band")
         .and_then(Value::as_str)
         .map_or(StateBand::Unknown, band_of);
-    let band = node_band.worse(carriage_band_v).worse(receive_band_v);
+    let trace_band_v = trace_plane
+        .get("band")
+        .and_then(Value::as_str)
+        .map_or(StateBand::Unknown, band_of);
+    let ingest_band_v = ingest
+        .get("band")
+        .and_then(Value::as_str)
+        .map_or(StateBand::Unknown, band_of);
+    let band = node_band
+        .worse(carriage_band_v)
+        .worse(receive_band_v)
+        .worse(trace_band_v)
+        .worse(ingest_band_v);
 
     // Every unknown, named individually. A roll-up may not swallow one — a
     // known red outranks an unknown, so without this list the unknown vanishes.
@@ -1027,11 +1637,22 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
     if receive_band_v == StateBand::Unknown {
         unknown.push("receive".into());
     }
+    if trace_band_v == StateBand::Unknown {
+        unknown.push("trace_plane".into());
+    }
+    if ingest_band_v == StateBand::Unknown {
+        unknown.push("ingest".into());
+    }
 
-    let composed_from: Vec<&str> = [node.map(|_| "node_state"), edge.map(|_| "edge_metrics")]
-        .into_iter()
-        .flatten()
-        .collect();
+    let composed_from: Vec<&str> = [
+        node.map(|_| "node_state"),
+        edge.map(|_| "edge_metrics"),
+        sources.trace.as_ref().ok().map(|_| "trace_corpus"),
+        sources.ingest.map(|_| "ingest_refusals"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     let mut node_source = Map::new();
     node_source.insert("produced_by".into(), json!(NODE_SOURCE));
@@ -1047,6 +1668,22 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         edge_source.insert("unavailable".into(), msg(EDGE_UNAVAILABLE));
         edge_source.insert("detail".into(), json!(detail));
     }
+    let mut trace_source = Map::new();
+    trace_source.insert("produced_by".into(), json!(TRACE_SOURCE));
+    trace_source.insert("present".into(), json!(sources.trace.is_ok()));
+    if let Err(detail) = &sources.trace {
+        trace_source.insert("unavailable".into(), msg(TRACE_UNAVAILABLE));
+        trace_source.insert("detail".into(), json!(detail));
+    }
+    let mut ingest_source = Map::new();
+    ingest_source.insert("produced_by".into(), json!(INGEST_SOURCE));
+    ingest_source.insert(
+        "present".into(),
+        json!(sources.ingest.is_some_and(|b| b.readable)),
+    );
+    if !sources.ingest.is_some_and(|b| b.readable) {
+        ingest_source.insert("unavailable".into(), msg(INGEST_UNAVAILABLE));
+    }
 
     json!({
         "as_of": as_of,
@@ -1055,15 +1692,32 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         "headline": msg(headline(band)),
         "unknown": unknown,
         "composed_from": composed_from,
-        "sources": { "node_state": node_source, "edge_metrics": edge_source },
+        "sources": {
+            "node_state": node_source,
+            "edge_metrics": edge_source,
+            "trace_corpus": trace_source,
+            "ingest_refusals": ingest_source,
+        },
         "node": node,
         "node_explains": node.map(node_explains),
         "carriage": carriage,
         "receive": receive,
+        // CIRISServer#369 — the one thing this node exists to do, watched.
+        "trace_plane": trace_plane,
+        // CIRISServer#370 — a rate of CORRECT refusals, read as the fault
+        // report about someone else that it is.
+        "ingest": ingest,
         "volatility": {
             // persist's own list, verbatim — bands that move on elapsed time
             // alone, with no state change and no new row.
             "clock_dependent": node.map(|s| s.clock_dependent.clone()).unwrap_or_default(),
+            // The same shape, computed HERE rather than by persist. Kept out of
+            // the list above so persist's stays verbatim and the two cannot be
+            // mistaken for one list with two authors.
+            "clock_dependent_local": {
+                "fields": CLOCK_DEPENDENT_LOCAL_FIELDS,
+                "note": msg(CLOCK_DEPENDENT_LOCAL_NOTE),
+            },
             "process_local": {
                 "fields": PROCESS_LOCAL_FIELDS,
                 "note": msg(PROCESS_LOCAL_NOTE),
@@ -1115,6 +1769,7 @@ pub struct OperatorStateOptions {
 pub async fn operator_state(
     engine: &Engine,
     metrics: Result<&ciris_edge::observability::EdgeMetrics, String>,
+    refusals: Option<&crate::ingest_http::IngestRefusals>,
     opts: &OperatorStateOptions,
 ) -> Value {
     use ciris_persist::federation::node_state::{resolve_node_state, NodeStateOptions};
@@ -1132,14 +1787,59 @@ pub async fn operator_state(
     )
     .await;
 
+    let trace = trace_corpus(engine).await;
     let bundle = metrics.map(ciris_edge::observability::EdgeMetrics::snapshot);
+    let refusals = refusals.map(|r| r.snapshot_at(now));
     compose(
         Sources {
             node: node.as_ref().map_err(std::string::ToString::to_string),
             edge: bundle.as_ref().map_err(Clone::clone),
+            trace: trace.as_ref().map_err(Clone::clone),
+            ingest: refusals.as_ref(),
         },
         now,
     )
+}
+
+/// CIRISServer#369 — **the corpus read behind `last_admitted_at`.**
+///
+/// `Engine::storage_summary` is persist's OWN aggregate over `trace_events`, and
+/// on both backends it is a single pushed-down `SELECT count(*), MIN(ts),
+/// MAX(ts)`. That is the whole reason it is the reader used here rather than any
+/// list-and-fold: the answer is computed by the store, no row is materialized,
+/// and — decisively — there is no second implementation of "when did a trace
+/// last arrive" that could disagree with persist's own. A hand-rolled scan would
+/// be the two-lists-that-disagree shape (#541) applied to the one signal this
+/// node's health hangs on.
+///
+/// A read failure comes back as `Err`, and the caller must keep it an `Err`:
+/// [`TracePlaneStanding::Unreadable`] and [`TracePlaneStanding::NeverAdmitted`]
+/// are different facts, and #369's whole ask is that they never render alike.
+async fn trace_corpus(engine: &Engine) -> Result<TraceCorpus, String> {
+    corpus_of(engine.storage_summary().await)
+}
+
+/// The pure half of [`trace_corpus`]: pick the trace-plane fields out of
+/// persist's aggregate, and **keep a failure a failure.**
+///
+/// Split out from the `await` for one reason: this `map_err` is the single line
+/// standing between #369 and the defect it exists to prevent. Fold the error
+/// into an empty corpus here and the surface reports `never_admitted` on a node
+/// whose database it could not open — a failed read rendering as a fact about
+/// the node. Behind an `await` it is untestable and therefore ungated; in front
+/// of one it is neither.
+fn corpus_of(
+    summary: Result<
+        ciris_persist::retention::StorageSummary,
+        ciris_persist::retention::RetentionError,
+    >,
+) -> Result<TraceCorpus, String> {
+    summary
+        .map(|s| TraceCorpus {
+            last_admitted_at: s.trace_events.newest_ts,
+            rows: s.trace_events.rows,
+        })
+        .map_err(|e| format!("read the trace corpus aggregate: {e}"))
 }
 
 /// The reason the edge half is missing on a node composed without a transport.
@@ -1172,9 +1872,14 @@ pub fn node_state_json(opts: &OperatorStateOptions) -> anyhow::Result<String> {
     let metrics = ciris_edge::current_edge()
         .map(|e| e.metrics())
         .map_err(|e| format!("{NO_EDGE_IN_PROCESS} (current_edge(): {e})"));
+    // Same rule as the edge half: a fold with no HTTP ingest route mounted has
+    // no gate to have refused anything, so the reading is `unreadable` and never
+    // a clean zero.
+    let refusals = crate::ingest_http::held();
     let view = rt.block_on(operator_state(
         &engine,
         metrics.as_ref().map_err(Clone::clone),
+        refusals.as_ref(),
         opts,
     ));
     serde_json::to_string(&view).context("node_state: serialize")
@@ -1197,6 +1902,9 @@ struct OperatorState {
     /// The live edge's counter bag, or `None` when this node runs with no
     /// transport. `None` is rendered as `unavailable`, never as a clean zero.
     metrics: Option<ciris_edge::observability::EdgeMetrics>,
+    /// The SAME ledger `ingest_http`'s route counts into, or `None` on a node
+    /// with no HTTP ingest route. `None` renders `unreadable`.
+    refusals: Option<crate::ingest_http::IngestRefusals>,
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -1309,6 +2017,7 @@ async fn get_state(
         st.metrics
             .as_ref()
             .ok_or_else(|| NO_EDGE_IN_PROCESS.to_owned()),
+        st.refusals.as_ref(),
         &opts,
     )
     .await;
@@ -1321,10 +2030,16 @@ async fn get_state(
 /// (a cheap `Arc` clone off `Edge::metrics()`), or `None` on a node running
 /// with no transport — in which case the carriage/receive halves render
 /// `unavailable` rather than a clean zero.
+///
+/// `refusals` is the SAME [`crate::ingest_http::IngestRefusals`] handle passed to
+/// [`crate::ingest_http::router`] (CIRISServer#370). A second ledger would be a
+/// second answer to one question; `None` renders `unreadable`, never a clean
+/// zero.
 pub fn router(
     engine: Arc<Engine>,
     node_key_id: String,
     metrics: Option<ciris_edge::observability::EdgeMetrics>,
+    refusals: Option<crate::ingest_http::IngestRefusals>,
 ) -> Router {
     Router::new()
         .route(ROUTE, axum::routing::get(get_state))
@@ -1332,6 +2047,7 @@ pub fn router(
             engine,
             node_key_id,
             metrics,
+            refusals,
         })
 }
 
@@ -1651,5 +2367,688 @@ mod tests {
         }
         // An unrecognised token is UNKNOWN, never green.
         assert_eq!(band_of("nonsense"), StateBand::Unknown);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CIRISServer#369 — the trace plane.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The incident clock, so every assertion below is a function of injected
+    /// time rather than of when the suite ran.
+    fn at(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("rfc3339 fixture")
+            .with_timezone(&Utc)
+    }
+
+    fn corpus(last: Option<&str>, rows: u64) -> TraceCorpus {
+        TraceCorpus {
+            last_admitted_at: last.map(at),
+            rows,
+        }
+    }
+
+    /// **THE TEST THAT MATTERS MOST.** `FSD/RCA_INGEST_REJECTION_2026-08-05.md`:
+    /// the last trace was admitted at `2026-08-03T23:30`, the condition was
+    /// found at `2026-08-05T13:55`, and nothing in between turned "nothing is
+    /// arriving" into a signal.
+    ///
+    /// The gate is not "does a stale corpus read red" — it is that a stale
+    /// corpus and an UNREADABLE one do not read the same. An instrument that
+    /// cannot tell the incident from a node it merely failed to ask would not
+    /// have caught this: the RCA's third and most expensive instrument failure
+    /// is exactly a check whose no-output read as no-problem.
+    #[test]
+    fn the_2026_08_05_incident_reads_red_and_an_unreadable_corpus_does_not() {
+        // The real instants, unrounded.
+        let last_admitted = "2026-08-03T23:30:00Z";
+        let found_at = at("2026-08-05T13:55:00Z");
+
+        let incident = trace_plane_standing(Ok(corpus(Some(last_admitted), 120_000)), found_at);
+        assert_eq!(
+            incident,
+            TracePlaneStanding::Dark,
+            "a plane whose newest trace is 38 hours old is the 2026-08-05 condition and must be \
+             DARK"
+        );
+        assert_eq!(incident.band(), StateBand::Red);
+
+        // The RCA's own wording — "a plane that has admitted nothing for two
+        // days must be RED" — at exactly two days.
+        let two_days = trace_plane_standing(
+            Ok(corpus(Some(last_admitted), 120_000)),
+            at("2026-08-05T23:30:00Z"),
+        );
+        assert_eq!(two_days, TracePlaneStanding::Dark);
+        assert_eq!(two_days.band(), StateBand::Red);
+
+        // A node that could not READ the corpus. Same absence of arrivals in
+        // the payload, categorically different fact.
+        let unreadable = trace_plane_standing(Err("sqlite: database is locked"), found_at);
+        assert_eq!(unreadable, TracePlaneStanding::Unreadable);
+        assert_eq!(unreadable.band(), StateBand::Unknown);
+
+        // THE discrimination. Neither the token nor the band may collapse.
+        assert_ne!(
+            incident, unreadable,
+            "the incident and an unread corpus must not be the same value"
+        );
+        assert_ne!(
+            incident.band(),
+            unreadable.band(),
+            "a dark plane is a known bad; an unread corpus is an unasked question. Same display, \
+             no detection."
+        );
+        assert_ne!(incident.message().0, unreadable.message().0);
+
+        // ...and neither is a healthy quiet node. This is the third value the
+        // gate has to keep apart: a node that admitted a trace an hour ago is
+        // GREEN, and if the incident could not be told from THAT, the reading
+        // would have been silent on 2026-08-04 exactly as the node was.
+        let healthy = trace_plane_standing(
+            Ok(corpus(Some("2026-08-05T13:00:00Z"), 120_000)),
+            found_at,
+        );
+        assert_eq!(healthy, TracePlaneStanding::Live);
+        assert_eq!(healthy.band(), StateBand::Green);
+        assert_ne!(healthy.band(), incident.band());
+        assert_ne!(healthy.band(), unreadable.band());
+
+        // WOULD IT HAVE FIRED ON 2026-08-04? The plane went silent at
+        // 2026-08-03T23:30. Walk the clock forward and pin when each band
+        // starts, because "it eventually goes red" is not a detection claim.
+        assert_eq!(
+            trace_plane_standing(
+                Ok(corpus(Some(last_admitted), 120_000)),
+                at("2026-08-04T05:29:00Z")
+            ),
+            TracePlaneStanding::Live,
+            "still inside the green window at +5h59m"
+        );
+        assert_eq!(
+            trace_plane_standing(
+                Ok(corpus(Some(last_admitted), 120_000)),
+                at("2026-08-04T05:31:00Z")
+            ),
+            TracePlaneStanding::Quiet,
+            "yellow from +6h — 2026-08-04, the morning after"
+        );
+        assert_eq!(
+            trace_plane_standing(
+                Ok(corpus(Some(last_admitted), 120_000)),
+                at("2026-08-04T23:31:00Z")
+            ),
+            TracePlaneStanding::Dark,
+            "RED from +24h, which is 2026-08-04 — fourteen hours before a human looked"
+        );
+    }
+
+    /// A FAILED CORPUS READ MUST STAY A FAILURE all the way from persist's
+    /// error to the surface's token. This is the one line where #369 could be
+    /// undone silently: folding the error into an empty corpus would report
+    /// `never_admitted` — a confident statement about a node whose database
+    /// could not be opened.
+    #[test]
+    fn a_failed_corpus_read_never_becomes_an_empty_corpus() {
+        use ciris_persist::retention::{RetentionError, StorageSummary, TableUsage};
+
+        let err = corpus_of(Err(RetentionError::Backend(
+            "sqlite: database is locked".into(),
+        )));
+        assert!(err.is_err(), "a backend failure must not be mapped to a corpus");
+        assert!(
+            err.as_ref()
+                .unwrap_err()
+                .contains("sqlite: database is locked"),
+            "the reason must survive to the wire: {err:?}"
+        );
+        assert_eq!(
+            trace_plane_standing(
+                err.as_ref().map(|c| *c).map_err(String::as_str),
+                at("2026-08-05T13:55:00Z")
+            ),
+            TracePlaneStanding::Unreadable
+        );
+
+        // ...and the happy path picks the trace-plane fields, not another
+        // table's. `trace_llm_calls` is deliberately populated with a DIFFERENT
+        // instant here: a field-selection slip would otherwise be invisible.
+        let last = at("2026-08-03T23:30:00Z");
+        let summary = StorageSummary {
+            trace_events: TableUsage {
+                bytes: 0,
+                rows: 120_000,
+                oldest_ts: Some(at("2026-01-01T00:00:00Z")),
+                newest_ts: Some(last),
+            },
+            trace_llm_calls: TableUsage {
+                bytes: 0,
+                rows: 7,
+                oldest_ts: None,
+                newest_ts: Some(at("2026-08-05T13:00:00Z")),
+            },
+            detection_events: TableUsage::default(),
+            audit_log: TableUsage::default(),
+            edge_outbound_queue: TableUsage::default(),
+            federation_keys: TableUsage::default(),
+            total_disk_bytes: 101 * 1024 * 1024,
+        };
+        let ok = corpus_of(Ok(summary)).expect("a readable summary is a readable corpus");
+        assert_eq!(
+            ok.last_admitted_at,
+            Some(last),
+            "the reading must come from trace_events, not from a neighbouring table"
+        );
+        assert_eq!(ok.rows, 120_000);
+        assert_eq!(
+            trace_plane_standing(Ok(ok), at("2026-08-05T13:55:00Z")),
+            TracePlaneStanding::Dark
+        );
+    }
+
+    #[test]
+    fn the_trace_plane_zeroes_do_not_share_a_token() {
+        let now = at("2026-08-05T13:55:00Z");
+
+        // Three ways to have no recent arrival, three tokens, two bands.
+        let unreadable = trace_plane_standing(Err("backend down"), now);
+        let never = trace_plane_standing(Ok(corpus(None, 0)), now);
+        let dark = trace_plane_standing(Ok(corpus(Some("2026-08-03T23:30:00Z"), 9)), now);
+        assert_eq!(unreadable, TracePlaneStanding::Unreadable);
+        assert_eq!(never, TracePlaneStanding::NeverAdmitted);
+        assert_eq!(dark, TracePlaneStanding::Dark);
+        assert_ne!(
+            unreadable.as_str(),
+            never.as_str(),
+            "'could not read the corpus' and 'the corpus is empty' must not render the same"
+        );
+        assert_ne!(never.as_str(), dark.as_str());
+        // The two unknowns share a band and NOT a token — a band never replaces
+        // a token, the rule the drill narrowing already enforces.
+        assert_eq!(unreadable.band(), StateBand::Unknown);
+        assert_eq!(never.band(), StateBand::Unknown);
+        assert_ne!(never.band(), dark.band());
+
+        // A fresh node's empty corpus is UNKNOWN and never GREEN: an untested
+        // zero is not a healthy one.
+        assert_ne!(never.band(), StateBand::Green);
+
+        // Every token and every message id is distinct across the closed set.
+        let tokens: std::collections::HashSet<&str> =
+            TracePlaneStanding::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(tokens.len(), TracePlaneStanding::ALL.len());
+        let ids: std::collections::HashSet<&str> = TracePlaneStanding::ALL
+            .iter()
+            .map(|s| s.message().0)
+            .collect();
+        assert_eq!(ids.len(), TracePlaneStanding::ALL.len());
+    }
+
+    #[test]
+    fn a_future_dated_corpus_is_called_out_rather_than_banded_green() {
+        let now = at("2026-08-05T13:55:00Z");
+        // Ordinary skew stays green — the reading must not flap on NTP jitter.
+        assert_eq!(
+            trace_plane_standing(Ok(corpus(Some("2026-08-05T13:56:00Z"), 5)), now),
+            TracePlaneStanding::Live
+        );
+        // A producer stamping tomorrow would otherwise pin this green forever,
+        // which is a dead plane wearing a healthy colour.
+        let skewed = trace_plane_standing(Ok(corpus(Some("2026-08-06T13:55:00Z"), 5)), now);
+        assert_eq!(skewed, TracePlaneStanding::FutureDated);
+        assert_ne!(
+            skewed.band(),
+            StateBand::Green,
+            "a future-dated newest row is a statement about a clock, not evidence of arrival"
+        );
+        assert_eq!(skewed.band(), StateBand::Unknown);
+    }
+
+    #[test]
+    fn the_trace_plane_band_edges_are_the_documented_ones() {
+        let last = at("2026-08-01T00:00:00Z");
+        let c = TraceCorpus {
+            last_admitted_at: Some(last),
+            rows: 1,
+        };
+        let g = chrono::Duration::hours(TRACE_GREEN_MAX_HOURS);
+        let y = chrono::Duration::hours(TRACE_YELLOW_MAX_HOURS);
+        assert_eq!(
+            trace_plane_standing(Ok(c), last + g - chrono::Duration::seconds(1)),
+            TracePlaneStanding::Live
+        );
+        assert_eq!(
+            trace_plane_standing(Ok(c), last + g),
+            TracePlaneStanding::Quiet,
+            "the green edge is EXCLUSIVE, matching persist's DrillFreshness::of"
+        );
+        assert_eq!(
+            trace_plane_standing(Ok(c), last + y - chrono::Duration::seconds(1)),
+            TracePlaneStanding::Quiet
+        );
+        assert_eq!(
+            trace_plane_standing(Ok(c), last + y),
+            TracePlaneStanding::Dark
+        );
+
+        // The thresholds ride ON the wire. A band whose edges live only in the
+        // source is a datum again — the reader cannot tell six hours from six
+        // days without leaving the payload.
+        let v = trace_plane_json(Ok(&c), last + y);
+        assert_eq!(v["bands"]["green_max_hours"], json!(TRACE_GREEN_MAX_HOURS));
+        assert_eq!(v["bands"]["yellow_max_hours"], json!(TRACE_YELLOW_MAX_HOURS));
+        assert_eq!(v["band"], json!("red"));
+        assert_eq!(v["standing"], json!("dark"));
+        assert_eq!(v["age_seconds"], json!(y.num_seconds()));
+        assert_eq!(v["note"]["id"], json!(TRACE_PRODUCER_ASSERTED_TS.0));
+
+        // The unreadable arm carries the REASON, not merely the absence.
+        let err = "sqlite: database is locked".to_owned();
+        let v = trace_plane_json(Err(&err), last);
+        assert_eq!(v["standing"], json!("unreadable"));
+        assert_eq!(v["band"], json!("unknown"));
+        assert_eq!(v["detail"], json!(err));
+        assert!(
+            v.get("last_admitted_at").is_none(),
+            "an unread corpus must not render a last_admitted_at at all — a null there would be \
+             indistinguishable from an empty corpus"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CIRISServer#370 — the ingest refusal reading.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use crate::ingest_http::IngestRefusals;
+    use ciris_persist::ingest::IngestError;
+    use ciris_persist::verify::Error as VerifyError;
+
+    /// A ledger fed `n` unknown-key refusals spread over `signers`, plus
+    /// `unattributed` refusals that name nobody.
+    fn ledger(
+        n: usize,
+        signers: &[&str],
+        unattributed: usize,
+        accepts: usize,
+    ) -> IngestRefusalBundle {
+        let t0 = at("2026-08-05T13:00:00Z");
+        let l = IngestRefusals::started_at(t0);
+        for _ in 0..accepts {
+            l.observe_accept_at(t0);
+        }
+        for i in 0..n {
+            let who = signers[i % signers.len()];
+            l.observe_refusal_at(
+                t0 + chrono::Duration::milliseconds(i as i64),
+                &IngestError::Verify(VerifyError::UnknownKey(who.to_owned())),
+            );
+        }
+        for i in 0..unattributed {
+            l.observe_refusal_at(
+                t0 + chrono::Duration::milliseconds(i as i64),
+                &IngestError::Verify(VerifyError::HybridRequired),
+            );
+        }
+        l.snapshot_at(t0 + chrono::Duration::minutes(1))
+    }
+
+    /// **THE ZERO-DISTINCTIONS GATE.** `distinct_signers == 0` trivially
+    /// satisfies "a small, stable identity set", so a stuck-producer test
+    /// written as `distinct <= MAX` alone reports a stuck producer that does not
+    /// exist and names nobody. It is also not clean and not ordinary churn.
+    #[test]
+    fn zero_distinct_signers_is_its_own_reading_and_never_a_stuck_producer() {
+        // A sustained flood in which NOT ONE refusal named a signer: every one
+        // failed before there was an identity to record.
+        let b = ledger(0, &[], 400, 0);
+        assert_eq!(b.refusals_in_window, 400);
+        assert_eq!(b.distinct_signers_in_window, 0);
+        assert_eq!(b.unattributed_in_window, 400);
+        assert!(
+            b.refusals_in_window >= INGEST_SUSTAINED_MIN
+                && b.distinct_signers_in_window <= INGEST_STABLE_SIGNER_MAX,
+            "the fixture must actually satisfy the naive stuck-producer predicate, or this test \
+             proves nothing"
+        );
+        let standing = ingest_standing(Some(&b));
+        assert_eq!(
+            standing,
+            IngestStanding::Unattributed,
+            "a sustained flood that names NOBODY must not be reported as a stuck producer — \
+             there is no producer to go fix and `top_signers` would be empty"
+        );
+        assert_ne!(standing, IngestStanding::StuckProducer);
+        assert_ne!(standing, IngestStanding::Clean);
+        assert!(
+            ingest_json(Some(&b))["top_signers"]
+                .as_array()
+                .expect("top_signers")
+                .is_empty(),
+            "the reading that names nobody must render nobody"
+        );
+    }
+
+    /// The RCA's own numbers: 8,631 refusals a day from two identities is a
+    /// stuck producer; the same rate from thousands is a probe. **Opposite
+    /// responses, identical counter** — which is why the distinct-signer
+    /// dimension is load-bearing and not decoration.
+    #[test]
+    fn the_same_refusal_rate_from_two_identities_and_from_thousands_do_not_render_the_same() {
+        // 360/h ≈ the incident's 6/min, from the two real key ids.
+        let stuck = ledger(360, &["agent-55fe8d181727", "agent-1ee871dcf31b"], 0, 0);
+        // The SAME count, spread across a wide identity set.
+        let wide_ids: Vec<String> = (0..360).map(|i| format!("probe-{i:04}")).collect();
+        let wide_refs: Vec<&str> = wide_ids.iter().map(String::as_str).collect();
+        let probe = ledger(360, &wide_refs, 0, 0);
+
+        assert_eq!(
+            stuck.refusals_in_window, probe.refusals_in_window,
+            "the two fixtures MUST have identical counts, or this proves nothing about the \
+             counter being insufficient"
+        );
+        assert_eq!(stuck.distinct_signers_in_window, 2);
+        assert_eq!(probe.distinct_signers_in_window, 360);
+
+        assert_eq!(ingest_standing(Some(&stuck)), IngestStanding::StuckProducer);
+        assert_eq!(ingest_standing(Some(&probe)), IngestStanding::Background);
+        assert_ne!(
+            ingest_standing(Some(&stuck)).as_str(),
+            ingest_standing(Some(&probe)).as_str(),
+            "one counter, two opposite conditions — the identity dimension is what separates them"
+        );
+        assert_eq!(
+            IngestStanding::StuckProducer.band(),
+            StateBand::Red,
+            "a producer that cannot self-correct is actionable, even though every refusal was \
+             correct"
+        );
+        assert_ne!(
+            IngestStanding::StuckProducer.band(),
+            IngestStanding::Background.band()
+        );
+
+        // ...and the stuck reading NAMES who to go fix, worst first.
+        let v = ingest_json(Some(&stuck));
+        assert_eq!(v["standing"], json!("stuck_producer"));
+        assert_eq!(v["distinct_signers"], json!(2));
+        assert_eq!(v["refusals_in_window"], json!(360));
+        let top = v["top_signers"].as_array().expect("top_signers");
+        assert_eq!(top.len(), 2);
+        let named: std::collections::HashSet<&str> = top
+            .iter()
+            .map(|t| t["signer_id"].as_str().expect("signer_id"))
+            .collect();
+        assert!(named.contains("agent-55fe8d181727"), "{v}");
+        assert!(named.contains("agent-1ee871dcf31b"), "{v}");
+        // The probe's list is CAPPED — naming 360 ids on a gauge is not a
+        // reading, and the distinct count beside it carries the width.
+        let v = ingest_json(Some(&probe));
+        assert_eq!(
+            v["top_signers"].as_array().expect("top_signers").len(),
+            crate::ingest_http::REFUSAL_TOP_N
+        );
+        assert_eq!(v["distinct_signers"], json!(360));
+    }
+
+    #[test]
+    fn ingest_zero_names_its_own_cause() {
+        // Four readings that all report zero refusals in the window.
+        assert_eq!(ingest_standing(None), IngestStanding::Unreadable);
+        assert_eq!(
+            ingest_standing(Some(&ledger(0, &[], 0, 0))),
+            IngestStanding::NotExercised,
+            "nothing offered at all is an UNTESTED zero, not a clean one"
+        );
+        assert_eq!(
+            ingest_standing(Some(&ledger(0, &[], 0, 12))),
+            IngestStanding::Clean,
+            "batches were offered and admitted — counting the ACCEPTS is what makes this \
+             distinguishable from 'nothing was offered'"
+        );
+
+        // ...and they do not share a token or a message.
+        let tokens: std::collections::HashSet<&str> =
+            IngestStanding::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(tokens.len(), IngestStanding::ALL.len());
+        let ids: std::collections::HashSet<&str> =
+            IngestStanding::ALL.iter().map(|s| s.message().0).collect();
+        assert_eq!(ids.len(), IngestStanding::ALL.len());
+        assert_ne!(
+            IngestStanding::Unreadable.as_str(),
+            IngestStanding::NotExercised.as_str(),
+            "'we could not ask the ledger' and 'nothing was ever offered' must not render alike"
+        );
+        assert_eq!(IngestStanding::Unreadable.band(), StateBand::Unknown);
+        assert_eq!(IngestStanding::NotExercised.band(), StateBand::Unknown);
+        assert_eq!(IngestStanding::Clean.band(), StateBand::Green);
+
+        // The unreadable arm renders NO counts at all. A zero there would be
+        // a manufactured clean reading — the RCA's false clean, in JSON.
+        let v = ingest_json(None);
+        assert_eq!(v["standing"], json!("unreadable"));
+        assert!(v.get("refusals_in_window").is_none(), "{v}");
+        assert_eq!(v["unavailable"]["id"], json!(INGEST_UNAVAILABLE.0));
+
+        // ...and the OTHER way to be unreadable: a ledger that IS present and
+        // whose lock could not be taken. It arrives as a bundle full of zeroes
+        // carrying `readable: false`, and the surface must read that flag
+        // BEFORE it reads a single count — otherwise a failed read renders
+        // exactly like a node that was offered nothing, which is the RCA's
+        // false clean.
+        let poisoned = IngestRefusalBundle::unreadable(at("2026-08-05T13:55:00Z"));
+        assert_eq!(poisoned.refusals_in_window, 0);
+        assert_eq!(poisoned.accepted_total, 0);
+        assert_eq!(poisoned.refused_total, 0);
+        assert_eq!(
+            ingest_standing(Some(&poisoned)),
+            IngestStanding::Unreadable,
+            "a bundle whose every count is a placeholder must NOT be narrowed by those counts — \
+             `not_exercised` here would be a statement about a node derived from a failed read"
+        );
+        let v = ingest_json(Some(&poisoned));
+        assert_eq!(v["standing"], json!("unreadable"));
+        assert_eq!(v["band"], json!("unknown"));
+        assert!(
+            v.get("refusals_in_window").is_none(),
+            "the placeholder zeroes must not reach the wire at all: {v}"
+        );
+        assert!(v.get("accepted_total").is_none(), "{v}");
+        assert_eq!(v["unavailable"]["id"], json!(INGEST_UNAVAILABLE.0));
+    }
+
+    #[test]
+    fn a_low_refusal_rate_is_background_and_does_not_cry_stuck_producer() {
+        // Two identities, but nowhere near sustained: a stale client, not a
+        // stuck one. An instrument that fires on this trains people to ignore it.
+        let quiet = ledger(3, &["agent-55fe8d181727", "agent-1ee871dcf31b"], 0, 40);
+        assert!(quiet.refusals_in_window < INGEST_SUSTAINED_MIN);
+        assert_eq!(ingest_standing(Some(&quiet)), IngestStanding::Background);
+        assert_eq!(IngestStanding::Background.band(), StateBand::Yellow);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The composed view.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The whole 2026-08-05 shape in ONE read, and the two neighbouring shapes
+    /// it must not be confused with. `trace_plane` says the plane is dead;
+    /// `ingest` says why. Neither alone distinguishes "a producer is being
+    /// correctly refused" from "nothing is reaching this node at all".
+    #[test]
+    fn the_incident_and_a_silent_pipe_are_both_dark_and_are_not_the_same_read() {
+        let now = at("2026-08-05T13:55:00Z");
+        let dark = corpus(Some("2026-08-03T23:30:00Z"), 120_000);
+        let stuck = ledger(360, &["agent-55fe8d181727", "agent-1ee871dcf31b"], 0, 4);
+        let silent = ledger(0, &[], 0, 0);
+
+        let incident = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Ok(&dark),
+                ingest: Some(&stuck),
+            },
+            now,
+        );
+        let pipe = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Ok(&dark),
+                ingest: Some(&silent),
+            },
+            now,
+        );
+
+        // Both planes are dark, and that reading is identical...
+        assert_eq!(incident["trace_plane"]["standing"], json!("dark"));
+        assert_eq!(pipe["trace_plane"]["standing"], json!("dark"));
+        assert_eq!(incident["trace_plane"], pipe["trace_plane"]);
+        // ...and the CAUSE is not.
+        assert_eq!(incident["ingest"]["standing"], json!("stuck_producer"));
+        assert_eq!(pipe["ingest"]["standing"], json!("not_exercised"));
+        assert_ne!(
+            incident["ingest"]["standing"], pipe["ingest"]["standing"],
+            "a dark plane with a stuck producer and a dark plane with nothing arriving are \
+             different faults with different owners"
+        );
+
+        // The roll-up carries the worst of them, and neither reading is hidden.
+        assert_eq!(incident["band"], json!("red"));
+
+        // **A DARK PLANE MUST REDDEN THE HEADLINE BY ITSELF.** With a clean
+        // ingest and no other source readable, the trace plane is the ONLY
+        // contributor that can be red — so if it does not reach the roll-up, a
+        // node whose whole purpose has stopped reports `unknown` and an
+        // operator scanning headlines walks past it. That is #369 restated as
+        // arithmetic.
+        let clean = ledger(0, &[], 0, 20);
+        let alone = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Ok(&dark),
+                ingest: Some(&clean),
+            },
+            now,
+        );
+        assert_eq!(alone["ingest"]["band"], json!("green"));
+        assert_eq!(
+            alone["band"],
+            json!("red"),
+            "the trace plane must be able to turn the headline red on its own: {alone}"
+        );
+        assert!(
+            incident["composed_from"]
+                .as_array()
+                .expect("composed_from")
+                .contains(&json!("trace_corpus")),
+            "{incident}"
+        );
+        // The silent-pipe read has an UNKNOWN ingest, and an unknown is named
+        // individually so a red headline cannot hide it.
+        let unknown = pipe["unknown"].as_array().expect("unknown");
+        assert!(unknown.contains(&json!("ingest")), "{pipe}");
+
+        // An unreadable corpus is a THIRD read, and it is not either of these.
+        let blind = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Err("sqlite: database is locked".into()),
+                ingest: Some(&stuck),
+            },
+            now,
+        );
+        assert_eq!(blind["trace_plane"]["standing"], json!("unreadable"));
+        assert_ne!(
+            blind["trace_plane"]["standing"],
+            incident["trace_plane"]["standing"]
+        );
+        assert!(
+            blind["unknown"]
+                .as_array()
+                .expect("unknown")
+                .contains(&json!("trace_plane")),
+            "an unread corpus must be NAMED as an unknown, not merely banded: {blind}"
+        );
+        assert_eq!(
+            blind["sources"]["trace_corpus"]["present"],
+            json!(false),
+            "{blind}"
+        );
+    }
+
+    /// Both new readings are localizable pairs, their ids are unique against
+    /// every OTHER id on the surface, and both are declared in the volatility
+    /// section under the right kind.
+    #[test]
+    fn the_new_readings_are_localizable_and_declare_their_own_volatility() {
+        let now = at("2026-08-05T13:55:00Z");
+        let dark = corpus(Some("2026-08-03T23:30:00Z"), 120_000);
+        let stuck = ledger(360, &["agent-55fe8d181727", "agent-1ee871dcf31b"], 0, 4);
+
+        for v in [trace_plane_json(Ok(&dark), now), ingest_json(Some(&stuck))] {
+            assert!(v["explains"]["id"].is_string(), "{v}");
+            assert!(v["explains"]["text"].is_string(), "{v}");
+            assert!(v["note"]["id"].is_string(), "{v}");
+            assert!(v["note"]["text"].is_string(), "{v}");
+        }
+
+        let mut ids: Vec<&str> = Vec::new();
+        ids.extend(TracePlaneStanding::ALL.iter().map(|s| s.message().0));
+        ids.extend(IngestStanding::ALL.iter().map(|s| s.message().0));
+        // ...against the ids that were already here.
+        ids.extend(CarriageStanding::ALL.iter().map(|s| s.message().0));
+        ids.extend(ReceiveStanding::ALL.iter().map(|s| s.message().0));
+        ids.extend(WithholdClass::ALL.iter().map(|c| c.message().0));
+        ids.extend(PeerQuotaCause::ALL.iter().map(|c| c.message().0));
+        ids.push(TRACE_PRODUCER_ASSERTED_TS.0);
+        ids.push(TRACE_UNAVAILABLE.0);
+        ids.push(INGEST_HTTP_PATH_ONLY.0);
+        ids.push(INGEST_UNAVAILABLE.0);
+        ids.push(CLOCK_DEPENDENT_LOCAL_NOTE.0);
+        ids.push(PROCESS_LOCAL_NOTE.0);
+        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate message id: {ids:?}");
+        for id in ids {
+            assert!(id.starts_with("operator."), "{id} is not namespaced");
+        }
+
+        // The volatility declaration: the ingest counters are process-local
+        // (they reset on restart), and the trace band is clock-dependent but
+        // computed HERE — not on persist's verbatim list.
+        let v = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Ok(&dark),
+                ingest: Some(&stuck),
+            },
+            now,
+        );
+        assert!(
+            PROCESS_LOCAL_FIELDS.contains(&"ingest"),
+            "a process-local counter that does not declare itself is the field an operator will \
+             read as durable node state"
+        );
+        assert_eq!(
+            v["volatility"]["process_local"]["fields"],
+            json!(PROCESS_LOCAL_FIELDS)
+        );
+        assert_eq!(
+            v["volatility"]["clock_dependent_local"]["fields"],
+            json!(["trace_plane"])
+        );
+        // persist's own list stays persist's — the trace plane must NOT have
+        // been folded into it, or the payload would claim persist computes a
+        // band this module computes.
+        assert!(
+            !v["volatility"]["clock_dependent"]
+                .as_array()
+                .expect("clock_dependent")
+                .contains(&json!("trace_plane")),
+            "{v}"
+        );
     }
 }

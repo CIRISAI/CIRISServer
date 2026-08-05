@@ -726,6 +726,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     accord_peers.clone(),
                     cfg.home.clone(),
                 );
+                // CIRISServer#370 — ONE refusal ledger for this process, minted
+                // here so the ingest route that WRITES it and the operator
+                // surface that READS it hold the same handle. Two ledgers would
+                // be two answers to one question, which is the defect class
+                // this whole surface exists to avoid.
+                let ingest_refusals = crate::ingest_http::IngestRefusals::new();
                 let r = identity_router(identity_json)
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the
@@ -1045,10 +1051,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // is never "nothing to report". Read-only on every arm —
                     // persist's fold uses the read-only overdue query, so a
                     // dashboard may poll it at any rate without writing a row.
+                    // CIRISServer#369/#370 — the two 2026-08-05 detection gaps
+                    // ride the same read: `trace_plane` bands when a trace was
+                    // last ADMITTED (the one thing this node exists to do, and
+                    // the one thing that was unwatched when the plane died for
+                    // two days), and `ingest` reads the refusal rate + the
+                    // DISTINCT refused signers off the very ledger the ingest
+                    // route below counts into. Same handle both sides — a
+                    // second ledger would be a second answer to one question.
                     .merge(crate::operator_surface::router(
                         Arc::clone(&engine),
                         cfg.key_id.clone(),
                         Some(edge.metrics()),
+                        Some(ingest_refusals.clone()),
                     ))
                     // MEMORY READ SURFACE (agent-compat Memory + GraphMemory cards):
                     // GET /v1/memory/stats, GET /v1/memory/timeline, POST /v1/memory/query,
@@ -1072,7 +1087,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // SAME Engine::receive_and_persist verify-before-persist path the
                     // Reticulum relay uses (LensCoreHandler). Unauthenticated like the
                     // relay — the per-trace CEG signature IS the auth.
-                    .merge(crate::ingest_http::router(Arc::clone(&engine)));
+                    //
+                    // CIRISServer#370: it also COUNTS every refusal into
+                    // `ingest_refusals`, which the operator surface above reads.
+                    // Before this the gate refused correctly and told nobody.
+                    .merge(crate::ingest_http::router(
+                        Arc::clone(&engine),
+                        ingest_refusals,
+                    ));
                 // ── ADAPTER SEAM (get_services_to_register) ──────────────────
                 // Fold the downstream adapter's HTTP surface onto the SAME
                 // read-API listener, AFTER all built-in routers. NoopAdapter
