@@ -648,10 +648,7 @@ pub const TRACE_PRODUCER_ASSERTED_TS: Msg = (
 
 /// The trace-plane half as it appears on the wire.
 fn trace_plane_json(corpus: Result<&TraceCorpus, &String>, now: DateTime<Utc>) -> Value {
-    let standing = trace_plane_standing(
-        corpus.copied().map_err(std::string::String::as_str),
-        now,
-    );
+    let standing = trace_plane_standing(corpus.copied().map_err(std::string::String::as_str), now);
     let mut out = Map::new();
     out.insert("band".into(), json!(standing.band().as_str()));
     out.insert("standing".into(), json!(standing.as_str()));
@@ -681,8 +678,9 @@ fn trace_plane_json(corpus: Result<&TraceCorpus, &String>, now: DateTime<Utc>) -
     out.insert("last_admitted_at".into(), json!(c.last_admitted_at));
     out.insert(
         "age_seconds".into(),
-        c.last_admitted_at
-            .map_or(Value::Null, |t| json!(now.signed_duration_since(t).num_seconds())),
+        c.last_admitted_at.map_or(Value::Null, |t| {
+            json!(now.signed_duration_since(t).num_seconds())
+        }),
     );
     out.insert("rows".into(), json!(c.rows));
     Value::Object(out)
@@ -873,9 +871,11 @@ impl IngestStanding {
             Self::Background => (
                 "operator.ingest.background",
                 "Refusals are present but not sustained from a stable identity set: ordinary \
-                 probes, stale clients and churn. Read `distinct_signers` before dismissing it — \
-                 a HIGH rate spread across a WIDE identity set is a probe, not churn, and it \
-                 reads here because the same counter cannot tell those apart on its own.",
+                 probes, stale clients and churn. Read `distinct_signers` and \
+                 `unattributed_in_window` before dismissing it — a HIGH rate spread across a WIDE \
+                 identity set is a probe, and a HIGH rate that named almost nobody is malformed \
+                 traffic with a stale client mixed into it. Neither is churn, and neither has one \
+                 producer to go fix, which is why they read here rather than as a stuck producer.",
             ),
             Self::StuckProducer => (
                 "operator.ingest.stuck_producer",
@@ -895,6 +895,12 @@ impl IngestStanding {
 /// the stable-set test, because `distinct_signers == 0` satisfies
 /// `<= INGEST_STABLE_SIGNER_MAX` and would otherwise report a stuck producer
 /// whose `top_signers` list is empty.
+///
+/// **And both halves of the stuck-producer test read one population.** The rate
+/// is measured over the ATTRIBUTED refusals, not over the window, because the
+/// identity set is drawn from the attributed refusals too — mixing the axes lets
+/// unattributable volume carry a named producer over the bar it never reached on
+/// its own.
 #[must_use]
 pub fn ingest_standing(bundle: Option<&IngestRefusalBundle>) -> IngestStanding {
     let Some(b) = bundle else {
@@ -913,7 +919,17 @@ pub fn ingest_standing(bundle: Option<&IngestRefusalBundle>) -> IngestStanding {
     if b.distinct_signers_in_window == 0 {
         return IngestStanding::Unattributed;
     }
-    if b.refusals_in_window >= INGEST_SUSTAINED_MIN
+    // BOTH halves of the stuck-producer test read the SAME population: the
+    // refusals that actually named a signer. Testing the rate against the whole
+    // window while testing the identity set against the attributed slice is one
+    // number answering two questions — 399 malformed bodies beside one stale
+    // client would clear a `>= SUSTAINED_MIN` bar the stale client contributed
+    // one event to, and `top_signers` would then name the wrong party as the
+    // thing to go fix. Naming the wrong producer is worse than naming none.
+    let attributed = b
+        .refusals_in_window
+        .saturating_sub(b.unattributed_in_window);
+    if attributed >= INGEST_SUSTAINED_MIN
         && b.distinct_signers_in_window <= INGEST_STABLE_SIGNER_MAX
     {
         return IngestStanding::StuckProducer;
@@ -1648,7 +1664,15 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         node.map(|_| "node_state"),
         edge.map(|_| "edge_metrics"),
         sources.trace.as_ref().ok().map(|_| "trace_corpus"),
-        sources.ingest.map(|_| "ingest_refusals"),
+        // A ledger that is HELD but could not be READ contributed nothing, so
+        // it is not composed from — the same `readable` test `present` below
+        // applies. Listing it here off `is_some()` alone would put the two
+        // fields in the one payload at odds: composed from a source the very
+        // next key calls absent.
+        sources
+            .ingest
+            .filter(|b| b.readable)
+            .map(|_| "ingest_refusals"),
     ]
     .into_iter()
     .flatten()
@@ -1803,14 +1827,25 @@ pub async fn operator_state(
 
 /// CIRISServer#369 — **the corpus read behind `last_admitted_at`.**
 ///
-/// `Engine::storage_summary` is persist's OWN aggregate over `trace_events`, and
-/// on both backends it is a single pushed-down `SELECT count(*), MIN(ts),
-/// MAX(ts)`. That is the whole reason it is the reader used here rather than any
+/// `Engine::storage_summary` is persist's OWN aggregate, and the trace-plane
+/// half of it is a pushed-down `SELECT count(*), MIN(ts), MAX(ts)` on both
+/// backends. That is why it is the reader used here rather than any
 /// list-and-fold: the answer is computed by the store, no row is materialized,
 /// and — decisively — there is no second implementation of "when did a trace
 /// last arrive" that could disagree with persist's own. A hand-rolled scan would
 /// be the two-lists-that-disagree shape (#541) applied to the one signal this
 /// node's health hangs on.
+///
+/// # What it costs, stated because the surface invites polling
+///
+/// `storage_summary` answers for SIX tables, not one, so a read is six of those
+/// aggregates plus (on SQLite) two `PRAGMA`s — five tables more than this
+/// reading uses. Every one is read-only, which is what
+/// `polling_the_surface_writes_nothing` pins, but `count(*)` is a scan on
+/// Postgres and the trace table is the largest on the node. That is an
+/// acceptable price for having one implementation instead of two; it is NOT a
+/// licence to poll this route at seconds' cadence, and it is written down here
+/// rather than discovered later.
 ///
 /// A read failure comes back as `Err`, and the caller must keep it an `Err`:
 /// [`TracePlaneStanding::Unreadable`] and [`TracePlaneStanding::NeverAdmitted`]
@@ -2445,10 +2480,8 @@ mod tests {
         // gate has to keep apart: a node that admitted a trace an hour ago is
         // GREEN, and if the incident could not be told from THAT, the reading
         // would have been silent on 2026-08-04 exactly as the node was.
-        let healthy = trace_plane_standing(
-            Ok(corpus(Some("2026-08-05T13:00:00Z"), 120_000)),
-            found_at,
-        );
+        let healthy =
+            trace_plane_standing(Ok(corpus(Some("2026-08-05T13:00:00Z"), 120_000)), found_at);
         assert_eq!(healthy, TracePlaneStanding::Live);
         assert_eq!(healthy.band(), StateBand::Green);
         assert_ne!(healthy.band(), incident.band());
@@ -2495,7 +2528,10 @@ mod tests {
         let err = corpus_of(Err(RetentionError::Backend(
             "sqlite: database is locked".into(),
         )));
-        assert!(err.is_err(), "a backend failure must not be mapped to a corpus");
+        assert!(
+            err.is_err(),
+            "a backend failure must not be mapped to a corpus"
+        );
         assert!(
             err.as_ref()
                 .unwrap_err()
@@ -2636,7 +2672,10 @@ mod tests {
         // days without leaving the payload.
         let v = trace_plane_json(Ok(&c), last + y);
         assert_eq!(v["bands"]["green_max_hours"], json!(TRACE_GREEN_MAX_HOURS));
-        assert_eq!(v["bands"]["yellow_max_hours"], json!(TRACE_YELLOW_MAX_HOURS));
+        assert_eq!(
+            v["bands"]["yellow_max_hours"],
+            json!(TRACE_YELLOW_MAX_HOURS)
+        );
         assert_eq!(v["band"], json!("red"));
         assert_eq!(v["standing"], json!("dark"));
         assert_eq!(v["age_seconds"], json!(y.num_seconds()));
@@ -2854,6 +2893,38 @@ mod tests {
         );
         assert!(v.get("accepted_total").is_none(), "{v}");
         assert_eq!(v["unavailable"]["id"], json!(INGEST_UNAVAILABLE.0));
+
+        // ...and the whole-payload accounting agrees with itself about it. A
+        // ledger that is HELD but could not be READ contributed nothing, so it
+        // must not appear in `composed_from` while `present` calls it absent —
+        // one payload cannot answer the same question two ways.
+        let composed = compose(
+            Sources {
+                node: Err("no node state in this fixture".into()),
+                edge: Err("no edge in this fixture".into()),
+                trace: Err("sqlite: database is locked".into()),
+                ingest: Some(&poisoned),
+            },
+            at("2026-08-05T13:55:00Z"),
+        );
+        assert_eq!(
+            composed["sources"]["ingest_refusals"]["present"],
+            json!(false)
+        );
+        assert!(
+            !composed["composed_from"]
+                .as_array()
+                .expect("composed_from")
+                .contains(&json!("ingest_refusals")),
+            "an unread ledger composed nothing: {composed}"
+        );
+        assert!(
+            composed["unknown"]
+                .as_array()
+                .expect("unknown")
+                .contains(&json!("ingest")),
+            "{composed}"
+        );
     }
 
     #[test]
@@ -2864,6 +2935,52 @@ mod tests {
         assert!(quiet.refusals_in_window < INGEST_SUSTAINED_MIN);
         assert_eq!(ingest_standing(Some(&quiet)), IngestStanding::Background);
         assert_eq!(IngestStanding::Background.band(), StateBand::Yellow);
+    }
+
+    /// **UNATTRIBUTABLE VOLUME MUST NOT CARRY A NAMED PRODUCER OVER THE BAR.**
+    ///
+    /// A scanner posting malformed bodies produces refusals that name nobody. If
+    /// the sustained-rate test counted the whole window while the identity test
+    /// counted only the attributed slice, one stale client with a single
+    /// unknown-key refusal would ride 399 malformed ones into `stuck_producer` —
+    /// and `top_signers` would then name that client as the thing to go fix,
+    /// against a rate it contributed 1/400th of.
+    ///
+    /// Naming the wrong producer is worse than naming none: it is an actionable
+    /// reading pointing at the wrong party, and the party it points at is the
+    /// one whose logs will show nothing wrong.
+    #[test]
+    fn a_flood_that_names_nobody_does_not_make_a_stuck_producer_of_one_stale_client() {
+        // 399 refusals that failed before there was an identity to record, plus
+        // ONE that named a signer.
+        let mixed = ledger(1, &["agent-55fe8d181727"], 399, 0);
+        assert_eq!(mixed.refusals_in_window, 400);
+        assert_eq!(mixed.unattributed_in_window, 399);
+        assert_eq!(mixed.distinct_signers_in_window, 1);
+        assert!(
+            mixed.refusals_in_window >= INGEST_SUSTAINED_MIN
+                && mixed.distinct_signers_in_window <= INGEST_STABLE_SIGNER_MAX,
+            "the fixture must satisfy the AXIS-MIXED predicate, or this test proves nothing"
+        );
+
+        assert_eq!(
+            ingest_standing(Some(&mixed)),
+            IngestStanding::Background,
+            "the named signer was refused ONCE — the volume is unattributable and there is no \
+             producer stuck in a retry loop"
+        );
+
+        // The same one signer, now actually sustained on its own, IS stuck —
+        // so the discrimination is about the attributed rate and not about the
+        // presence of unattributed noise beside it.
+        let really_stuck = ledger(120, &["agent-55fe8d181727"], 399, 0);
+        assert_eq!(really_stuck.unattributed_in_window, 399);
+        assert_eq!(
+            ingest_standing(Some(&really_stuck)),
+            IngestStanding::StuckProducer,
+            "unattributed noise beside a genuinely sustained producer must not SUPPRESS the \
+             reading either"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

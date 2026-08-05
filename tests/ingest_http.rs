@@ -385,7 +385,11 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
     let bytes = build_batch_bytes(&good_sk, GOOD, "trace-live-0001");
     let (status, body) =
         post_counted(Arc::clone(&engine), &refusals, LEGACY_INGEST_PATH, bytes).await;
-    assert_eq!(status, StatusCode::OK, "the good producer must land: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the good producer must land: {body}"
+    );
 
     // The instant the corpus now reports as its newest arrival. Read from
     // persist's own aggregate — the same reader the surface uses — so the clock
@@ -531,14 +535,12 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
         serde_json::json!("unreadable")
     );
     assert_ne!(
-        blind["trace_plane"]["standing"],
-        dark["trace_plane"]["standing"],
+        blind["trace_plane"]["standing"], dark["trace_plane"]["standing"],
         "'we could not ask the corpus' and 'the corpus has admitted nothing for two days' must \
          never be the same reading"
     );
     assert_ne!(
-        blind["trace_plane"]["band"],
-        dark["trace_plane"]["band"],
+        blind["trace_plane"]["band"], dark["trace_plane"]["band"],
         "an unasked question is not a known bad"
     );
     assert!(
@@ -554,8 +556,7 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
     // If the gate cannot tell the incident from a node that is simply being fed,
     // it would have been silent on 2026-08-04 exactly as the node was.
     assert_ne!(
-        live["trace_plane"]["band"],
-        dark["trace_plane"]["band"],
+        live["trace_plane"]["band"], dark["trace_plane"]["band"],
         "a fed plane and a dead one must not share a band"
     );
     assert_ne!(live["trace_plane"]["band"], blind["trace_plane"]["band"]);

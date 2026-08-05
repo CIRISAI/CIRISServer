@@ -130,9 +130,9 @@ pub const REFUSAL_WINDOW_SECS: i64 = 3_600;
 /// Hard cap on remembered refusal events, independent of the window. Bounds the
 /// ledger's memory against exactly the flood it exists to detect: at the
 /// incident's ~6/min this holds ~11 hours, and at 6/sec it still holds ~11
-/// minutes. When it bites, [`IngestRefusalBundle::window_truncated`] says so and
-/// every window count becomes a FLOOR rather than a fact — an under-report that
-/// announces itself is usable; a silent one is not.
+/// minutes. While it is biting, [`IngestRefusalBundle::window_truncated`] says
+/// so and every window count becomes a FLOOR rather than a fact — an
+/// under-report that announces itself is usable; a silent one is not.
 pub const REFUSAL_EVENT_CAP: usize = 4_096;
 
 /// How many refused signer ids the bundle names, worst first.
@@ -166,9 +166,18 @@ struct Ledger {
     accepted_total: u64,
     refused_total: u64,
     events: VecDeque<Refusal>,
-    /// Events dropped by [`REFUSAL_EVENT_CAP`] while still inside the window.
-    /// Non-zero ⇒ the window counts under-report.
-    capped_out: u64,
+    /// When the cap last evicted an event that was still inside the window.
+    ///
+    /// An INSTANT rather than a running total, because
+    /// [`IngestRefusalBundle::window_truncated`] is a statement about the window
+    /// being displayed and a total is a statement about the process. An eviction
+    /// at `T` dropped an event whose own instant lay somewhere in
+    /// `[T - window, T]`, so it can only still belong to the window ending now
+    /// if `T` itself is inside that window. A count here would latch the flag on
+    /// for the life of the process: a node that weathered a flood and recovered
+    /// would go on declaring its counts a FLOOR forever — true about an hour
+    /// that has already scrolled off, false about the one on screen.
+    last_capped_at: Option<DateTime<Utc>>,
 }
 
 /// CIRISServer#370 — **a bounded, process-local ledger of ingest refusals.**
@@ -218,7 +227,7 @@ impl IngestRefusals {
                 accepted_total: 0,
                 refused_total: 0,
                 events: VecDeque::new(),
-                capped_out: 0,
+                last_capped_at: None,
             })),
         }
     }
@@ -274,7 +283,7 @@ impl IngestRefusals {
             // the false-clean the RCA's third instrument failure is about.
             return IngestRefusalBundle::unreadable(now);
         };
-        prune(&mut l, now);
+        let floor = prune(&mut l, now);
 
         let mut by_kind: BTreeMap<&'static str, u64> = BTreeMap::new();
         let mut by_signer: HashMap<&str, u64> = HashMap::new();
@@ -307,7 +316,9 @@ impl IngestRefusals {
             unattributed_in_window: unattributed,
             top_signers: top,
             by_kind_in_window: by_kind,
-            window_truncated: l.capped_out > 0,
+            // Truncation of THIS window, not of any window this process ever
+            // showed. See [`Ledger::last_capped_at`].
+            window_truncated: l.last_capped_at.is_some_and(|t| t >= floor),
         }
     }
 
@@ -318,16 +329,18 @@ impl IngestRefusals {
     }
 }
 
-/// Drop everything older than the window, then everything over the cap.
-fn prune(l: &mut Ledger, now: DateTime<Utc>) {
+/// Drop everything older than the window, then everything over the cap, and
+/// return the window floor the caller needs to interpret `last_capped_at`.
+fn prune(l: &mut Ledger, now: DateTime<Utc>) -> DateTime<Utc> {
     let floor = now - Duration::seconds(REFUSAL_WINDOW_SECS);
     while l.events.front().is_some_and(|e| e.at < floor) {
         l.events.pop_front();
     }
     while l.events.len() > REFUSAL_EVENT_CAP {
         l.events.pop_front();
-        l.capped_out = l.capped_out.saturating_add(1);
+        l.last_capped_at = Some(now);
     }
+    floor
 }
 
 /// Truncate an attacker-supplied id on a char boundary.
@@ -396,21 +409,25 @@ pub struct IngestRefusalBundle {
     pub refused_total: u64,
     /// Batches refused inside the window.
     pub refusals_in_window: u64,
+    /// Refusals in the window that named no signer at all. Their existence is
+    /// why `distinct_signers_in_window == 0` is a state and not an impossibility.
+    pub unattributed_in_window: u64,
     /// **The load-bearing dimension.** Distinct signer ids among the refusals in
     /// the window. The same rate from two identities and from eight thousand are
     /// opposite conditions — a stuck producer and a Sybil probe — and the count
     /// alone cannot tell them apart.
-    pub unattributed_in_window: u64,
-    /// Refusals in the window that named no signer at all. Their existence is
-    /// why `distinct_signers_in_window == 0` is a state and not an impossibility.
     pub distinct_signers_in_window: usize,
     /// The most-refused signer ids in the window, worst first, capped at
     /// [`REFUSAL_TOP_N`].
     pub top_signers: Vec<(String, u64)>,
     /// Refusals in the window, by persist's own stable error token.
     pub by_kind_in_window: BTreeMap<&'static str, u64>,
-    /// [`REFUSAL_EVENT_CAP`] evicted events that were still inside the window ⇒
-    /// every window count above is a FLOOR.
+    /// [`REFUSAL_EVENT_CAP`] evicted events that could still belong to **this**
+    /// window ⇒ every window count above is a FLOOR.
+    ///
+    /// It falls back to `false` once the truncation itself has aged out, which
+    /// is the point: a node that weathered a flood and recovered reports
+    /// accurate counts again rather than disclaiming them forever.
     pub window_truncated: bool,
 }
 
@@ -707,6 +724,30 @@ mod tests {
             "a truncated window must declare itself — every count above it is a floor"
         );
         assert_eq!(b.refused_total as usize, REFUSAL_EVENT_CAP + 50);
+
+        // ...and the disclaimer is about THIS window, not about the process.
+        // The evictions happened seconds after t0, so a window whose floor has
+        // moved past them contains nothing they could have belonged to and its
+        // counts are exact again.
+        let edge = l.snapshot_at(t0 + Duration::seconds(REFUSAL_WINDOW_SECS));
+        assert!(
+            edge.window_truncated,
+            "the floor still stands while the truncation is inside the window"
+        );
+        let later =
+            l.snapshot_at(t0 + Duration::seconds(REFUSAL_WINDOW_SECS) + Duration::minutes(1));
+        assert_eq!(later.refusals_in_window, 0);
+        assert!(
+            !later.window_truncated,
+            "a latched flag would leave a node that weathered a flood and recovered disclaiming \
+             accurate counts for the life of the process — true about an hour that has already \
+             scrolled off, false about the one being displayed"
+        );
+        assert_eq!(
+            later.refused_total as usize,
+            REFUSAL_EVENT_CAP + 50,
+            "the window emptied; the process total must not"
+        );
     }
 
     /// A POISONED LOCK IS NOT A CLEAN LEDGER.

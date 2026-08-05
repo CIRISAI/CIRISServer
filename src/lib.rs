@@ -1606,12 +1606,20 @@ mod python {
     /// string. Read-only on every arm; it writes NOTHING and may be polled at
     /// any rate.
     ///
-    /// # This is the COMPOSED view, and it has two halves
+    /// # This is the COMPOSED view, and it has four halves
     ///
     /// | half | source | question |
     /// |---|---|---|
     /// | `node` | persist `Engine.node_state_json()` | *how is this node* — trust root + drill freshness, key standing, quarantine, consent SLA, peer quota |
     /// | `carriage` / `receive` | edge `metrics_snapshot()` | *did anything move, and if not, what stopped it* — the withhold ledger, apply refusals |
+    /// | `trace_plane` | persist `Engine.storage_summary()` | **#369** *is the plane this node exists to receive on alive* — `last_admitted_at`, banded `live` / `quiet` / `dark` |
+    /// | `ingest` | this process's HTTP admission gate | **#370** *is the gate working overtime* — the refusal rate, the DISTINCT signers behind it, and who they are |
+    ///
+    /// `trace_plane` and `ingest` are read together. A `dark` plane beside
+    /// `stuck_producer` is a producer being correctly refused and unable to
+    /// self-correct (the 2026-08-05 condition); a `dark` plane beside `clean` or
+    /// `not_exercised` means nothing is reaching this node at all. Different
+    /// faults, different owners, same colour on the roll-up.
     ///
     /// Persist's `Engine.node_state_json()` is ONE HALF of this, not a
     /// competitor to it: this call carries that value verbatim under `node` and
@@ -1628,6 +1636,18 @@ mod python {
     /// (`never_drilled` vs `stale` — persist bands both red on purpose), and
     /// for `peer_quota` (`no_quota` / `not_exercised` / `clean`).
     ///
+    /// It holds hardest on the two readings added by the 2026-08-05 RCA.
+    /// `trace_plane.standing` separates `unreadable` (the corpus could not be
+    /// asked) from `never_admitted` (it was asked and holds nothing) from `dark`
+    /// (it holds traces and none is recent) — three different facts that a bare
+    /// `last_admitted_at` renders identically. `ingest.standing` does the same
+    /// for a refusal count, and adds the inverse rule: a LARGE number of
+    /// individually-correct refusals must name its cause too, which is why
+    /// `stuck_producer` (sustained, small stable signer set) is a different
+    /// token from `background` (churn) and from `unattributed` (refusals that
+    /// failed before there was an identity to record — `distinct_signers == 0`
+    /// is a state, not a small identity set).
+    ///
     /// # A missing edge is a READING, not an exception
     ///
     /// If the in-process Edge is not up, this still returns: `sources.edge_metrics`
@@ -1635,6 +1655,13 @@ mod python {
     /// read `unavailable`. An exception is raised only when there is no persist
     /// engine or the delivery runtime has not started — i.e. when there is
     /// nothing to compose at all.
+    ///
+    /// The same holds for `ingest`: a process that has not mounted the HTTP
+    /// ingest route has no admission gate to have refused anything, so
+    /// `ingest.standing` is `unreadable` and `sources.ingest_refusals.present`
+    /// is `false`. That is a statement about this process, not a fault — and it
+    /// is deliberately not `clean`, because a gate that was never asked and a
+    /// gate that refused nothing are different facts.
     ///
     /// # The return is a TRUTHY Python string on every arm
     ///

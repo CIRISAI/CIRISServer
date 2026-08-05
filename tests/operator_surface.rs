@@ -303,7 +303,12 @@ async fn one_read_carries_both_sources_and_re_derives_neither() {
     // absent key and never a healthy default.
     assert_eq!(
         data["composed_from"],
-        serde_json::json!(["node_state", "edge_metrics", "trace_corpus", "ingest_refusals"]),
+        serde_json::json!([
+            "node_state",
+            "edge_metrics",
+            "trace_corpus",
+            "ingest_refusals"
+        ]),
         "the surface must compose EVERY source, not a subset of them: {data}"
     );
     assert_eq!(data["sources"]["node_state"]["present"], true);
@@ -675,7 +680,11 @@ async fn a_fresh_nodes_trace_and_ingest_zeroes_name_their_own_causes() {
     assert_eq!(data["sources"]["trace_corpus"]["present"], true);
 
     // The ledger could NOT be read. Same absence of refusals, different fact.
-    assert_eq!(data["ingest"]["standing"], "unreadable", "{}", data["ingest"]);
+    assert_eq!(
+        data["ingest"]["standing"], "unreadable",
+        "{}",
+        data["ingest"]
+    );
     assert_eq!(data["ingest"]["band"], "unknown");
     assert!(
         data["ingest"].get("refusals_in_window").is_none(),
