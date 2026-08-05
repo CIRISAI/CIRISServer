@@ -1,37 +1,84 @@
-//! RELEASE-GATE QA SUITE — the verify-7 → persist-10 → 0.6 countdown, as code.
+//! # The release gates — what CIRISServer 0.5 preserves
 //!
-//! One module per stage of the release plan. Every gate FAILS (red) until its
-//! stage's requisite is cleared in the mesh, and turns GREEN the moment reality
-//! satisfies it. Run the whole suite before executing each step:
+//! ```text
+//! cargo test --test release_gates                     # the whole live ladder
+//! cargo test --test release_gates -- --include-ignored # + the three RED-BY-DESIGN gates
+//! ```
 //!
-//!     cargo test --test release_gates
+//! 0.5.156 is intended as the last 0.5 release; 0.6 is the registry fold. This
+//! suite answers one question — **is it safe to tag?** — and it answers it from
+//! the tree, with no network, no peer, no YubiKey and no operator in the loop.
 //!
-//! Software keys + file/HTTP probes throughout — no YubiKey, no operator needed
-//! to RUN the suite (only to CLEAR the external-fact gates by deploying nodes,
-//! merging PRs, or dropping an evidence file under tests/release_gates/evidence/).
+//! ## What this replaced, and why
 //!
-//! NB: an integration-test file is its own crate root, so a bare `mod stageN;`
-//! would resolve to `tests/stageN.rs` (and each such top-level file would also
-//! compile as a STRAY separate test binary). We keep the modules in the
-//! `release_gates/` subdir — files there are NOT auto-compiled as binaries — and
-//! point at them with explicit `#[path]`. One binary, no strays.
+//! The previous ladder was a countdown written for 0.5.35: eight numbered stages
+//! stepping through "adopt verify 7.2", "node A upgraded to 0.5.35", "persist v10
+//! ships and we re-pin", "the agent reports adoption of 0.5.36". Nineteen tests,
+//! **ten `#[ignore]`d** against `evidence/stageN.json` files an operator was meant
+//! to write. None was ever written; the directory held only `.tsv`. Run with
+//! `--include-ignored`, eight failed — against conditions twenty releases stale.
+//!
+//! So the suite that was supposed to say "safe to release" measured a plan from
+//! months ago, had no gate at all for the thing this release is for, and its most
+//! important rungs defaulted to silence — which read as fine.
+//!
+//! That is this cut's own defect class turned on the instrument: **a check whose
+//! scope does not cover what it claims.** Five separate checks in this repo turned
+//! out unable to fail this week. This one mostly did not run.
+//!
+//! ## The rule
+//!
+//! **Hermetic, runnable, LOCAL invariants first.** Where an external fact really
+//! is the gate it stays, but as a small, clearly separated minority in
+//! [`boundary`], and its absence reads **BLOCKED, never as a pass**. A gate that
+//! cannot be evaluated must never be indistinguishable from one that passed.
+//!
+//! ## The shape
+//!
+//! | module | rungs |
+//! |---|---|
+//! | [`ladder`] | the registry of what 0.5 preserves, + the three ratchets that keep this ladder from rotting the way the last one did |
+//! | [`substrate`] | the pins are at target and move together; the envelope vocabulary is the one we adopted |
+//! | [`trust_root`] | genesis baked, kill switch 2-of-3, canonical seed is a ceremony bundle, custody floor still refuses software |
+//! | [`planes`] | trace flow (HTTP ingest), trace-plane liveness alarms, KEX, both consents, signed-row integrity, replication-by-consent, identity derived, erasure floor |
+//! | [`surfaces`] | distinct zeroes, localization reachable |
+//! | [`boundary`] | the 0.6 registry gate, trace flow over replication (CIRISEdge#455), and the one external probe — all RED BY DESIGN, all watched live |
+//!
+//! ## Two things worth knowing before reading a failure
+//!
+//! **Anchored rungs assert the proof is installed and armed, not that it passes.**
+//! Where an invariant is already proven in this repo, the rung names the covering
+//! file and test functions rather than re-implementing them — a forked proof
+//! drifts from the thing it covers. Whether those tests pass is answered by CI
+//! running them. What an anchored rung catches is a proof deleted, renamed, or
+//! quietly stripped of its `#[test]` attribute, which is how coverage actually
+//! disappears.
+//!
+//! **Two trace-flow rungs, on purpose.** HTTP ingest carries traces end to end and
+//! is gated live. Peer replication does NOT — CIRISEdge#455 — and is a separate,
+//! deliberately RED gate. Folding them together would let the working half vouch
+//! for the broken one.
+//!
+//! NB: an integration-test file is its own crate root, so a bare `mod x;` would
+//! resolve to `tests/x.rs` (and each such top-level file would ALSO compile as a
+//! stray separate test binary). The modules live in `release_gates/` — files there
+//! are not auto-compiled as binaries — and are pointed at with explicit `#[path]`.
+//! One binary, no strays.
 
-#[path = "release_gates/support.rs"]
-mod support;
+#[path = "release_gates/ladder.rs"]
+mod ladder;
 
-#[path = "release_gates/stage1.rs"]
-mod stage1; // adopt verify7.2/persist9.11/edge6.4 + bake kill-switch + #268 path
-#[path = "release_gates/stage2.rs"]
-mod stage2; // nodes A & B upgraded to 0.5.35 (probe /health)
-#[path = "release_gates/stage3.rs"]
-mod stage3; // owner delegates → I claim dgrant token → config write (software)
-#[path = "release_gates/stage4.rs"]
-mod stage4; // ciris-scores served on A & B (evidence)
-#[path = "release_gates/stage5.rs"]
-mod stage5; // Node A nodecode (transport key ciris-canonical-1) + PR evidence
-#[path = "release_gates/stage6.rs"]
-mod stage6; // persist bakes v10 with Node A
-#[path = "release_gates/stage7.rs"]
-mod stage7; // cut 0.5.36 (verify7 + persist10) + agent adoption evidence
-#[path = "release_gates/stage8.rs"]
-mod stage8; // agent 2.9.7 + registry present → cut 0.6
+#[path = "release_gates/substrate.rs"]
+mod substrate;
+
+#[path = "release_gates/trust_root.rs"]
+mod trust_root;
+
+#[path = "release_gates/planes.rs"]
+mod planes;
+
+#[path = "release_gates/surfaces.rs"]
+mod surfaces;
+
+#[path = "release_gates/boundary.rs"]
+mod boundary;
