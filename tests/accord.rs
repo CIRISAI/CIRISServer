@@ -908,6 +908,8 @@ async fn serve_haltable(
             home: Some(home.clone()),
             peers: Vec::new(),
             exit_on_halt: false, // never kill the test runner
+            // #347: what the latch's release binding names this node.
+            node_id: Some(format!("node-under-test-{tag}")),
         },
     );
     let (base, handle) = serve_app(app).await;
@@ -966,9 +968,223 @@ async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
         ciris_server::accord_halt::check_halt_gate(&home).is_err(),
         "a present halt latch must refuse startup"
     );
-    // Manual removal clears the gate (the only way back — CC 4.2.3).
+    // #347: the latch states WHAT WOULD LIFT IT — a dark machine's own disk names
+    // the exact payload the accord must cosign. Read it back off the file, not from
+    // the in-process record, because "an operator with only this file" is the
+    // scenario the release token exists for.
+    let record: ciris_server::accord_halt::HaltRecord =
+        serde_json::from_str(&std::fs::read_to_string(&latch).unwrap()).expect("latch parses");
+    assert_eq!(
+        record.node_id.as_deref(),
+        Some("node-under-test-halt"),
+        "the latch must name the node it is on"
+    );
+    assert_eq!(
+        record.halt_payload_sha256.as_deref(),
+        Some(hex::encode(Sha256::digest(b"halt-payload")).as_str()),
+        "the latch must name the halt payload it honored"
+    );
+    assert!(
+        record.latch_id.is_some(),
+        "every latch mints a fresh latch_id"
+    );
+    assert_eq!(
+        record.release_payload_sha256,
+        ciris_server::accord_release::ReleaseBinding::from_halt_record(&record)
+            .unwrap()
+            .payload_sha256()
+            .ok(),
+        "the stamped release digest must match the recomputed one"
+    );
+
+    // Manual removal clears the gate (the NON-conformant operator override — CC 4.2.3).
     std::fs::remove_file(&latch).unwrap();
     assert!(ciris_server::accord_halt::check_halt_gate(&home).is_ok());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// **CIRISServer#347 end-to-end** — a REAL 2-of-3 halt over HTTP, then the offline
+/// release round-trip against the resulting latch. Two properties in one arc:
+///
+/// 1. the **boot gate** verifies a presented token against the BAKED accord genesis
+///    and refuses anything else — proven by presenting a token that is perfectly
+///    valid except that it is signed by these test seats rather than the pinned
+///    founders. The latch survives and the refusal is journaled.
+/// 2. with the authority those signatures actually belong to, the same token
+///    releases: latch cleared, gate passes, honoured entry in the audit journal.
+///
+/// The split is honest about what a software test can reach: nothing in-process
+/// holds the real A1/B1/C1 private halves, so the *honouring* leg injects its
+/// authority while the *refusing* leg exercises the production one.
+#[tokio::test]
+async fn offline_release_token_round_trips_against_a_real_halt_latch() {
+    use ciris_server::accord_release::{
+        baked_release_authority, build_release_request, honor_release_token, read_release_journal,
+        release_token_path, ReleaseAuthority, ReleaseBinding, ReleaseToken,
+    };
+
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "release").await;
+    let client = reqwest::Client::new();
+
+    let holders = [
+        Holder::new("accord-holder-a", 0xD1),
+        Holder::new("accord-holder-b", 0xD2),
+        Holder::new("accord-holder-c", 0xD3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+
+    // ── The halt, for real: 2-of-3 CONSTITUTIONAL over /v1/accord/message ──────
+    let inv = constitutional_invocation("halt-release-001");
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let sigs = vec![
+        cosign_typed(&holders[0], &inv).await,
+        cosign_typed(&holders[1], &inv).await,
+    ];
+    let obj = invocation_object(&roster, &inv, &sigs);
+    let body = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("deliver halt")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(body["halted"], true, "the halt must latch; got {body}");
+    assert!(
+        ciris_server::accord_halt::check_halt_gate(&home).is_err(),
+        "a latched node must refuse to start"
+    );
+
+    // ── The release REQUEST: derived from the latch alone. No engine is opened, no
+    //    peer dialed — this is what an operator can run on a dark machine. ───────
+    let latch = home.join("HUMANITY_ACCORD_HALT");
+    let record: ciris_server::accord_halt::HaltRecord =
+        serde_json::from_str(&std::fs::read_to_string(&latch).unwrap()).unwrap();
+    let request = build_release_request(&record, 72).expect("release request from the latch");
+    assert_eq!(request["invocation"]["invocation_kind"], "lifecycle:active");
+    assert_eq!(request["invocation"]["resumes_halt_id"], "halt-release-001");
+    assert_eq!(request["binding"]["node_id"], "node-under-test-release");
+
+    // ── Mint the token the request asked for, cosigned by two seats. ───────────
+    let release_inv: Invocation = serde_json::from_value(request["invocation"].clone()).unwrap();
+    let token = ReleaseToken {
+        signatures: vec![
+            cosign_typed(&holders[0], &release_inv).await,
+            cosign_typed(&holders[1], &release_inv).await,
+        ],
+        binding: Some(request["binding"].clone()),
+        invocation: release_inv,
+    };
+
+    // ── (1) The PRODUCTION gate: drop the token where the boot gate looks. These
+    //    seats are not the baked founders, so it must be REFUSED and the latch must
+    //    survive. This is the check that proves the gate's authority is the pinned
+    //    genesis and not whatever the presenter supplies. ────────────────────────
+    std::fs::write(
+        release_token_path(&home),
+        serde_json::to_vec_pretty(&token).unwrap(),
+    )
+    .unwrap();
+    let refused = ciris_server::accord_halt::check_halt_gate(&home)
+        .expect_err("a token signed by non-baked keys must NOT release the node");
+    let refused = format!("{refused:#}");
+    assert!(refused.contains("REFUSED"), "{refused}");
+    assert!(
+        latch.exists(),
+        "a refused release must leave the latch in place"
+    );
+    let journal = read_release_journal(&home);
+    assert_eq!(
+        journal.len(),
+        1,
+        "the refusal must be journaled: {journal:?}"
+    );
+    assert_eq!(journal[0]["outcome"], "refused");
+    // And the production authority it was judged against really is the baked one.
+    let baked = baked_release_authority().expect("baked authority resolves offline");
+    assert!(
+        !baked
+            .roster
+            .iter()
+            .any(|m| m.member_id == "accord-holder-a"),
+        "the test seats must not be in the baked roster — otherwise (1) proves nothing"
+    );
+
+    // ── (2) The same token, judged against the authority those signatures DO
+    //    belong to: it releases. ─────────────────────────────────────────────────
+    let authority = ReleaseAuthority {
+        roster: vec![
+            holders[0].threshold_member(None).await,
+            holders[1].threshold_member(None).await,
+            holders[2].threshold_member(None).await,
+        ],
+        threshold: 2,
+        source: "test-seats".to_string(),
+    };
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let verdict = honor_release_token(&home, &record, &token, &authority, &now)
+        .expect("a 2-of-3 token bound to THIS latch must release it");
+    assert_eq!(verdict.valid_signers, 2);
+    assert_eq!(verdict.node_id, "node-under-test-release");
+    assert_eq!(verdict.latch_id, record.latch_id.clone().unwrap());
+    assert!(!latch.exists(), "the latch must be cleared");
+    assert!(
+        ciris_server::accord_halt::check_halt_gate(&home).is_ok(),
+        "released ⇒ the node may start"
+    );
+    assert!(
+        !release_token_path(&home).exists(),
+        "the honoured token must be consumed, not left to re-trip the gate"
+    );
+
+    // ── The trace: a release is a governance act, as auditable as the halt. ────
+    let journal = read_release_journal(&home);
+    assert_eq!(journal.len(), 2, "refusal then honour: {journal:?}");
+    assert_eq!(journal[1]["outcome"], "honored");
+    assert_eq!(
+        journal[1]["halt_record"]["invocation_id"],
+        "halt-release-001"
+    );
+    assert_eq!(
+        journal[1]["release_token"]["invocation"]["invocation_kind"],
+        "lifecycle:active"
+    );
+
+    // ── Replay across halts: the node is halted AGAIN by the same invocation. The
+    //    new latch mints a new latch_id, so the token just honoured is worthless. ─
+    let body = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("re-deliver halt")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(body["halted"], true, "the re-halt must latch; got {body}");
+    let record2: ciris_server::accord_halt::HaltRecord =
+        serde_json::from_str(&std::fs::read_to_string(&latch).unwrap()).unwrap();
+    assert_ne!(
+        record2.latch_id, record.latch_id,
+        "a re-latch mints a new instance"
+    );
+    let e = ciris_server::accord_release::verify_release_token(&record2, &token, &authority, &now)
+        .expect_err("a spent token must not release a LATER halt of the same invocation")
+        .to_string();
+    assert!(e.contains("not bound to THIS halt latch"), "{e}");
+    assert!(
+        ReleaseBinding::from_halt_record(&record2).unwrap()
+            != ReleaseBinding::from_halt_record(&record).unwrap()
+    );
+
     let _ = std::fs::remove_dir_all(&home);
 }
 

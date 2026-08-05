@@ -90,10 +90,15 @@ not a finding, but a *new exploitation path* on one of them is:
   peers at the same `asserted_at`; both verify; nothing compares them.
 - **Every removal is an append on a pull-only plane.** Revoke, purge, erase,
   de-admit and halt alike. Unreached holders never learn.
-- **The halt latch is not reversible in-band.** `src/accord_halt.rs` latches to
-  disk and `exit(42)`s; `check_halt_gate` refuses boot. A halted node is not
-  running, so the un-halt cannot reach it. There is no expiry and no severance
-  window.
+- **The halt latch is not reversible over the network.** `src/accord_halt.rs`
+  latches to disk and `exit(42)`s; `check_halt_gate` refuses boot. A halted node
+  is not running, so the un-halt cannot be *delivered* to it. Since
+  CIRISServer#347 it can be *found*: the latch records a release binding, and
+  `src/accord_release.rs` verifies an accord-cosigned `lifecycle:active` token
+  against the **baked** accord genesis with no network, peer, quorum or database
+  — bound to one node and one latch instance, journaled either way. A halt still
+  has **no TTL, no cohort scope, and no preview**, and a release still needs the
+  accord quorum (it is not an operator override).
 - **Ingest is deliberately open.** `src/ingest_http.rs` and
   `POST /v1/accord/canonical/gossip-partial` are unauthenticated by design —
   "ingest is open and cheap; admission is the gate" (`FSD/THREAT_MODEL.md`). A

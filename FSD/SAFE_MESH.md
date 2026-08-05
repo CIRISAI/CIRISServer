@@ -88,7 +88,7 @@ A mesh is safe iff ALL of these hold. Each is a falsifiable claim.
 | Inv | Mechanism | Where |
 |---|---|---|
 | I1 | `POST /v1/accord/message` → verify 2/3 CONSTITUTIONAL → `latch_halt` (disk latch) → process exit 42; startup `check_halt_gate` refuses to boot while latched | `src/accord.rs`, `src/accord_halt.rs` |
-| I2 | `accord reactivate` clears the latch ONLY on a verify-native `lifecycle:active` proof meeting the current M-of-N quorum **AND** ≥1 ORIGINAL (genesis version-1) seat; `rm` demoted to non-conformant break-glass | `src/accord_reactivate.rs`, `src/accord_halt.rs` (`check_halt_gate` msg) |
+| I2 | TWO accord-authorized ways back, `rm` demoted to non-conformant break-glass: (a) `accord reactivate` clears the latch ONLY on a verify-native `lifecycle:active` proof meeting the **live** M-of-N quorum **AND** ≥1 ORIGINAL (genesis version-1) seat; (b) `accord release` / the boot gate clear it on a `lifecycle:active` **release token** meeting M-of-N over the **BAKED** genesis — verified with no network, peer, quorum or DB (CIRISServer#347), and bound to `{node_id, halt_invocation_id, halt_payload_sha256, latch_id}` so it releases exactly one latch on one node | `src/accord_reactivate.rs`, `src/accord_release.rs`, `src/accord_halt.rs` (`check_halt_gate`) |
 | I3 | replicate-to-all-peers-FIRST, then latch + terminate (seen-set loop-stop) | `src/accord.rs` (the message/invocation halt path) |
 | I4 | kill-switch roster = the LIVE family SEATS (`family::active_threshold_roster`), NOT every `accord_holder` row; a registered spare is not a seat | `src/accord.rs` (`accord_roster`), `src/family.rs` |
 | I5 | `register_holder` routes through `Engine::register_federation_key` (persist refuses `SoftwareOnly`) + verifies `custody_attestation` against the **pinned** Yubico Attestation Root 1; provisioning uses `UsbWrappedMlDsa65Signer` + FIPS YubiKey (CIRISVerify#91/#62) | `src/accord.rs`, `src/accord_provision.rs`, `src/accord_custody.rs`, `src/accord_pki/` |
@@ -304,6 +304,16 @@ The blockers were fixed and re-checked by a second adversarial pass. Status:
   tamper-evident latch. These ride with **G2** (already the sequenced gate before 0.6),
   so B2 is not an *additional* blocker beyond G2 — but G2 must now also land the latch +
   current-roster hardening, not just the JSON paste.
+  **Update (CIRISServer#347):** residual (b) is now *partly* answered, in a way worth
+  stating precisely because it is easy to over-claim. The new offline release path
+  (`src/accord_release.rs`) judges its quorum against the **baked** genesis + persist's
+  **baked** holder pubkeys — neither operator-writable — so the *authority* leg no
+  longer depends on the local DB at all. The latch itself is still an ordinary file
+  and is still operator-writable: what #347 adds is that editing it cannot manufacture
+  an *authorized* release, because the expected binding is recomputed from the latch's
+  own fields and the signatures must still verify against the pinned seats. Deleting
+  the latch remains the same non-conformant break-glass it always was. A genuinely
+  tamper-evident latch (e.g. accord-signed at write time) is still open.
 
 ### Revised bottom line
 With B1/B3/B4/N1/N2 closed, the enforceable, hardware-custodied, mesh-propagating,

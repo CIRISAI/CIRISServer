@@ -183,6 +183,12 @@ pub struct AccordHalt {
     /// Whether a verified 2-of-3 `CONSTITUTIONAL` halt terminates the process after
     /// latching (`true` in prod; `false` in tests so the runner survives).
     pub exit_on_halt: bool,
+    /// This node's federation `key_id` (`cfg.key_id`, the FSD-003 fingerprinted
+    /// form) — stamped into the latch's **release binding** (CIRISServer#347) so a
+    /// release token is valid against this node and no other. `None` disables the
+    /// offline release path for this node (the latch carries no binding, and
+    /// [`crate::accord_release`] fails closed on it).
+    pub node_id: Option<String>,
 }
 
 impl AccordHalt {
@@ -193,6 +199,7 @@ impl AccordHalt {
             home: None,
             peers: Vec::new(),
             exit_on_halt: false,
+            node_id: None,
         }
     }
 }
@@ -1608,12 +1615,21 @@ async fn halt_status(State(st): State<AccordState>) -> Response {
     } else {
         None
     };
+    // CIRISServer#347 — a release is a governance act and is surfaced as such:
+    // the append-only journal of every honoured/refused offline release attempt.
+    // Read from disk (not memory) so it survives the restart the release caused,
+    // which is the only way a node can report on its own un-halt.
+    let releases = crate::accord_release::read_release_journal(home);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "halted": halted,
             "latch_path": path.display().to_string(),
             "record": record,
+            "releases": releases,
+            "release_token_path": crate::accord_release::release_token_path(home)
+                .display()
+                .to_string(),
         })),
     )
         .into_response()
@@ -1973,13 +1989,19 @@ async fn replicate_and_maybe_halt(
         // AFTER replicating to peers — a crash an auto-restarter must NOT silently
         // bring back, and the peers already hold the halt.
         if let Some(home) = &st.halt.home {
-            let record = HaltRecord {
-                invocation_kind: status.invocation_kind.clone(),
-                invocation_id: status.invocation_id.clone(),
-                valid_signers: status.valid_signers.clone(),
-                quorum_threshold: m,
-                latched_at: now.clone(),
-            };
+            // CIRISServer#347: the record carries the RELEASE BINDING — this node's
+            // id, this halt's payload hash, and a fresh per-latch id — so the dark
+            // machine's own disk states what would lift it, and a token minted for
+            // any other (node, halt, latch) triple is refused.
+            let record = HaltRecord::new(
+                status.invocation_kind.clone(),
+                status.invocation_id.clone(),
+                status.valid_signers.clone(),
+                m,
+                now.clone(),
+                st.halt.node_id.clone(),
+                Some(parsed.invocation.payload_sha256.clone()),
+            );
             let mut latched = None;
             for attempt in 1..=8u32 {
                 match latch_halt(home, &record) {
