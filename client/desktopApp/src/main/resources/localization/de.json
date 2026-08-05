@@ -3240,6 +3240,17 @@
       "elsewhere": "Keine Schleife in diesem Build liest diesen Schlüssel — sein Konsument liegt in einer anderen Komponente. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert auf diesem Knoten nichts.",
       "unreachable": "Der Konsument dieses Schlüssels läuft in diesem Prozess, aber nichts trägt einen Wert von dieser Ebene zu ihm hin: die Komponente, der dieser Regler gehört, nimmt ihn ein einziges Mal entgegen, wenn die Schleife zusammengesetzt wird, und bietet danach keine Möglichkeit mehr, ihn zu ändern. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert nirgends etwas.",
       "unbuilt": "Der Konsument dieses Schlüssels wurde noch nirgends gebaut. Eine hier gesetzte Zeile wird zugelassen und gefaltet und ändert nichts."
+    },
+    "refusal": {
+      "attribution_absent": "delegation_id ist erforderlich. Eine Handlung, die ihre eigene Autorität nicht mitführt, lässt sich, sobald der Handelnde fort ist, nicht mehr von einer unbefugten unterscheiden.",
+      "authority_not_a_delegation": "Die genannte Delegations-ID ist keine delegates_to-Zeile.",
+      "authority_unresolved": "Die genannte Delegation ist keine Zeile, die dieser Knoten hält, die darin festgehaltene Autorität würde also nichts benennen. Ob sie diese Handlung tatsächlich autorisiert, entscheidet das Substrat an seiner eigenen Tür.",
+      "grounds_absent": "grounds ist erforderlich. Ein Regler, der ohne festgehaltenen Grund verstellt wird, ist von einem aus schlechtem Grund verstellten nicht zu unterscheiden.",
+      "node_unowned": "Dieser Knoten hat keinen Verantwortlichen (Eigentümerbindung), daher meldet er die Mesh-Konfiguration weder in irgendjemandes Namen, noch ändert er sie. Beanspruchen Sie zuerst die Eigentümerschaft.",
+      "not_owner": "Die Mesh-Konfigurations-Oberfläche erfordert die Eigentümerrolle (SYSTEM_ADMIN).",
+      "root_absent": "root_ref ist erforderlich: Eine Mesh-Config-Zeile wird unter einer Vertrauenswurzel ausgestellt, und eine Zeile, die keine nennt, wird dort abgelegt, wo keine Faltung sie je mitzählt.",
+      "session_absent": "Es wurde kein Sitzungstoken vorgelegt. Die Mesh-Konfigurations-Oberfläche ist ausschließlich dem Eigentümer vorbehalten.",
+      "session_invalid": "Diese Sitzung ist ungültig oder abgelaufen."
     }
   },
   "commons_surface": {
@@ -3254,8 +3265,7 @@
     "escalation": {
       "awaiting": "Die bestellten Moderatoren können noch antworten, oder sie haben bereits rechtzeitig entschieden. Die Eskalation ist nicht eröffnet.",
       "not_adopted": "Diese Gemeinschaft hat keine Steward-Stufe erklärt, daher gibt es keine Moderatorenfrist und keine Eskalation. Schweigen ändert hier nichts.",
-      "nothing_to_escalate": "Eine Steward-Stufe ist erklärt, und kein aktiver Einspruch wartet auf sie. Niemand hat geschwiegen, denn es wurde nichts gefragt.",
-      "open": "Die Pflichtträger haben nicht rechtzeitig geantwortet, und die Entscheidung ist an jene übergegangen, die es taten. Die Schwelle zählt nun die ANTWORTENDEN statt der gesamten Mitgliederliste — genau das lässt auch eine stille Gemeinschaft noch zu einem Ergebnis kommen — mit einer Untergrenze, damit „erreichbar“ nie zu „eine Person entscheidet“ verkommt."
+      "nothing_to_escalate": "Eine Steward-Stufe ist erklärt, und kein aktiver Einspruch wartet auf sie. Niemand hat geschwiegen, denn es wurde nichts gefragt."
     },
     "objection": {
       "admitted": "Der Einspruch ist aktenkundig. Er ist eine MARKIERUNG, kein Befehl: Durch sein Eintreffen wurde nichts verändert, und er repliziert auf der gewöhnlichen Attestierungsebene, sodass ein Peer, der während des Fensters vom Netz getrennt war, ihn beim Eintreffen dennoch mitzählt. Ein einzelnes Mitglied genügt, um ihn zu erheben; ihn aufzuheben kostet die Schwelle der Kohorte selbst."
@@ -3267,27 +3277,19 @@
       "upheld": "Die Antwortenden haben entschieden, dass dieser Einspruch besteht."
     },
     "refusal": {
-      "action_absent": "Es muss eine Handlung benannt werden. Ein Einspruch benennt eine Zeile im Gemeingut; einer, der nichts benennt, kann niemals gezählt werden.",
-      "action_unknown": "Dieser Knoten hält keine solche Handlung, daher würde eine Zeile, die sie benennt, dort abgelegt, wo keine Faltung sie je zählt.",
       "actor_recused": "Der Urheber einer Handlung stimmt nicht über den Einspruch gegen das eigene Handeln ab.",
       "bad_now": "Der Lesezeitpunkt muss ein Zeitstempel nach RFC 3339 sein.",
       "ballot_predates_action": "Ein Urteil kann nicht älter sein als das, worüber es urteilt.",
       "canonicalize_failed": "Die kanonischen Bytes der Zeile konnten nicht erzeugt werden, daher gibt es nichts, was ein Mitunterzeichner signieren könnte.",
-      "cohort_absent": "Es muss eine Kohorte benannt werden: Sie bestimmt, wessen Mitgliederliste und wessen Erklärung die Zählung regeln.",
-      "cohort_not_a_commons": "Die Kohorte „selbst“ hat keine Mitgliederliste, über die ein Quorum gebildet werden könnte — ihre Mitglieder sind die eigenen Geräte einer einzigen Identität —, daher hat sie kein Gemeingut zu überwachen.",
       "cohort_unknown": "Diese Kohorte lässt sich auf diesem Knoten nicht auflösen, daher gibt es weder eine Mitgliederliste noch eine Erklärung, an der dies zu messen wäre. Autorität muss aus lokal verifiziertem Zustand stammen.",
       "cohort_unrecognized": "Das ist keine Kohorte mit Mitgliederliste. Einsprüche leben in einer Familie, einer Gemeinschaft oder einer Affiliationsgruppe.",
       "dimension_mismatch": "Diese Zeile wurde für das, was sie trägt, an der falschen Tür vorgelegt.",
       "dismissal_quorum_short": "Es haben weniger verschiedene verifizierte Mitglieder der Mitgliederliste mitsigniert, als die Schwelle der Kohorte verlangt. Die gezählte und die geforderte Zahl stehen neben dieser Meldung.",
       "duplicate_objection": "Sie halten bereits einen aktiven Einspruch gegen diese Handlung. Ein Mitglied ist ein Einspruch — sonst könnte ein einzelnes Mitglied die Schwelle allein erreichen.",
-      "grounds_absent": "Eine Begründung ist erforderlich. Ein Einspruch, der ohne festgehaltenen Grund erhoben wird, ist von einem aus schlechtem Grund erhobenen nicht zu unterscheiden — und die Begründung wird festgehalten, niemals ausgelegt.",
       "malformed_envelope": "Der Zeile fehlt ein Verweis, den die Zählung benötigt.",
-      "node_unowned": "Dieser Knoten hat keinen Verantwortlichen, daher liest er weder in irgendjemandes Gemeingut noch spricht er dort in dessen Namen. Beanspruchen Sie zuerst die Eigentümerschaft.",
       "not_a_cohort_member": "Nur ein Mitglied dieser Kohorte darf in ihrem Gemeingut sprechen. Das ist die einzige Prüfung, die die schützende Seite anwendet — und der Grund, warum der Einspruch eines Fremden nie zu einer Markierung wird, die andere beachten könnten.",
       "not_filed_against_actor": "Die Zeile ist dort abgelegt, wo die Faltung nicht nach ihr sucht; sie wäre gespeichert, dauerhaft und für immer wirkungslos. Eine Markierung, die niemand finden kann, ist keine Markierung.",
       "not_governed": "Diese Gemeinschaft erklärt keine Richtlinie für ein umgekehrtes Quorum, hat die Einspruchsebene also nicht übernommen. Abgelehnt statt mit Standardwerten belegt: Für eine Gruppe, die weder Fenster noch Schwelle erklärt hat, beides zu erfinden, ist schlimmer als ein Nein.",
-      "not_owner": "Die Gemeingut-Oberfläche erfordert die Eigentümerrolle.",
-      "objection_absent": "Es muss ein Einspruch benannt werden: Eine Stimmabgabe und eine Zurückweisung antworten jeweils auf genau einen.",
       "objection_unknown": "Der benannte Einspruch ist keiner, den dieser Knoten gegen diese Handlung hält.",
       "session_absent": "Es wurde kein Sitzungstoken vorgelegt. Die Gemeingut-Oberfläche ist ausschließlich dem Eigentümer vorbehalten.",
       "session_invalid": "Diese Sitzung ist ungültig oder abgelaufen.",
@@ -3299,7 +3301,6 @@
     },
     "standing": {
       "action_unknown": "Dieser Knoten hält keine solche Handlung. Ein Einspruch benennt eine Zeile, und hier gibt es keine Zeile, die benannt werden könnte.",
-      "cohort_unknown": "Diese Kohorte lässt sich auf diesem Knoten nicht auflösen, daher hat sie weder eine Mitgliederliste noch eine Erklärung, die dieser Knoten lesen kann.",
       "not_governed": "Diese Gemeinschaft erklärt keine Richtlinie für ein umgekehrtes Quorum, daher gilt die Einspruchsebene für ihr Gemeingut überhaupt nicht. Das ist etwas anderes, als wenn niemand Einspruch erhoben hätte.",
       "objected": "Mindestens ein Mitglied hat Einspruch erhoben, und das Fenster ist noch offen. Die Handlung besteht vorerst; ein weiterer Einspruch kann bereits genügen.",
       "quiet": "Die Ebene wurde gelesen, und gegen diese Handlung wurde kein Einspruch erhoben.",
@@ -3314,6 +3315,106 @@
       "overruled": "Die bestellten Moderatoren haben entschieden, dass dieser Einspruch nicht besteht — und die Eskalation wird dennoch eröffnet, denn eine Aufhebung steht ihnen niemals allein zu.",
       "silent": "Die Frist verstrich ohne Entscheidung in die eine oder andere Richtung.",
       "upheld": "Die bestellten Moderatoren haben rechtzeitig entschieden, dass dieser Einspruch besteht. Die Sache wurde von namentlich benannten Personen entschieden und ist aktenkundig."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "idle": "Replikationsrunden sind abgeschlossen, und dieser Knoten hat nichts ausgeliefert und nichts vorenthalten: Er hatte nichts, was seine Peers noch brauchten.",
+      "moving": "Dieser Knoten hat seinen Peers Zeilen ausgeliefert und keine vorenthalten.",
+      "not_exercised": "In diesem Prozess ist keine Replikationsrunde abgeschlossen worden, also ist nie ein Gate des Auslieferungspfads gelaufen und in das Vorenthaltungs-Register wurde nie geschrieben. Die Null ist ungeprüft, nicht sauber.",
+      "unreadable": "Die Beförderungszähler dieses Knotens konnten nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er ausgeliefert hat. Das heißt nicht „nichts wurde vorenthalten“ — es heißt „wir konnten nicht fragen“.",
+      "withholding": "Dieser Knoten hat es abgelehnt, Zeilen auszuliefern, die er hielt. `withholds_by_reason` benennt den Zweig, der abgelehnt hat, und `recent_withholds` benennt, gegenüber wem — ein untätiger Knoten meldet beides nicht."
+    },
+    "consent_sla": {
+      "none_overdue": "Jeder Zustimmungswiderruf, dessen Weitergabe dieser Knoten zugesagt hat, liegt innerhalb seines SLA-Fensters.",
+      "overdue": "Dieser Knoten ist mit der Weitergabe von Zustimmungswiderrufen, zu denen er sich verpflichtet hat, ÜBERFÄLLIG. Die daneben genannten Stichproben-Attestierungs-IDs sind die Handles, mit denen sich dieser Zustand beheben lässt.",
+      "unreadable": "Der Zustimmungs-SLA-Rückstand konnte nicht gelesen werden. Das heißt nicht „nichts ist überfällig“."
+    },
+    "drill": {
+      "green": "Die Vertrauenswurzel dieses Knotens hat ihren Kill-Switch innerhalb der letzten 90 Tage nachgewiesen.",
+      "never_drilled": "Die Vertrauenswurzel dieses Knotens hat ihren Kill-Switch NIE nachgewiesen. Sie teilt sich die rote Stufe mit einer längst aufgegebenen Wurzel; der fehlende Zeitpunkt der letzten Übung daneben ist der Unterschied. Die Wurzel dient weiterhin: Die Aktualität der Übung ist ein Vertrauenssignal, niemals ein Gate.",
+      "no_root_walked": "Es wurde keine Vertrauenswurzel durchlaufen, es gibt also nichts, was ungeübt sein könnte. Das ist keine veraltete Übung — es gibt gar kein Subjekt für eine Übung.",
+      "stale": "Die Vertrauenswurzel dieses Knotens hat ihren Kill-Switch zuletzt vor mehr als 180 Tagen nachgewiesen. Sie dient weiterhin: Die Aktualität der Übung ist ein Vertrauenssignal, niemals ein Gate.",
+      "yellow": "Die Vertrauenswurzel dieses Knotens hat ihren Kill-Switch zuletzt vor 90 bis 180 Tagen nachgewiesen."
+    },
+    "headline": {
+      "green": "Jedes Signal, das dieser Knoten berechnen kann, zeigt gesund an.",
+      "red": "Mindestens ein Signal zeigt ungesund an. Lesen Sie auch die Unbekannt-Liste: Eine rote Gesamtanzeige rangiert über einem Unbekannt und kann sonst eines hinter sich verbergen.",
+      "unknown": "Ein oder mehrere Signale konnten nicht berechnet werden. Lesen Sie die Unbekannt-Liste — ein nicht berechnetes Signal ist kein gesundes.",
+      "yellow": "Dieser Knoten ist in Betrieb, und etwas hier verdient einen Blick."
+    },
+    "ingest": {
+      "background": "Es liegen Ablehnungen vor, aber nicht anhaltend aus einer stabilen Identitätsmenge: gewöhnliche Sonden, veraltete Clients und Fluktuation. Lesen Sie `distinct_signers` und `unattributed_in_window`, bevor Sie das abtun — eine HOHE Rate, verteilt über eine BREITE Identitätsmenge, ist eine Sonde, und eine HOHE Rate, die fast niemanden benannt hat, ist fehlerhafter Verkehr mit einem veralteten Client darin. Keines von beidem ist Fluktuation, und keines hat einen einzelnen Produzenten, den man beheben könnte — genau deshalb erscheinen sie hier und nicht als feststeckender Produzent.",
+      "clean": "Dem HTTP-Ingest-Pfad wurden Batches angeboten, und innerhalb des Fensters wurde keiner abgelehnt. `refused_total` daneben ist der Zählwert des gesamten Prozesses: Ein sauberes Fenster auf einem Prozess, der zuvor abgelehnt hat, ist eine Erholung, keine Abwesenheit.",
+      "http_path_only": "Diese Anzeige erfasst ausschließlich den HTTP-Ingest-Pfad. Ein Batch, der über das Reticulum-Relay eintrifft, wird vom selben Persist-Gate geprüft, hier aber nicht mitgezählt; eine saubere Ingest-Anzeige ist daher keine Aussage über jeden Weg, auf dem diesem Knoten ein Trace angeboten werden kann.",
+      "not_exercised": "Dem HTTP-Ingest-Pfad wurde in diesem Prozess nichts angeboten — kein Batch angenommen und keiner abgelehnt. Die Null ist ungeprüft, nicht sauber.",
+      "stuck_producer": "Eine ANHALTENDE Ablehnungsrate aus einer KLEINEN, STABILEN Menge von Unterzeichnern: Ein Produzent steckt in einer Wiederholungsschleife fest und kann sich nicht selbst korrigieren. Jede einzelne dieser Ablehnungen ist richtig — das Gate arbeitet — und genau deshalb braucht die Summe eine eigene Anzeige. `top_signers` benennt, wen man beheben muss.",
+      "unattributed": "Batches wurden abgelehnt, und NICHT EIN EINZIGER hat einen Unterzeichner benannt: Sie sind gescheitert, bevor es überhaupt eine Identität zu erfassen gab — fehlerhafte Bytes, eine falsche Signatur, eine nicht unterstützte Schemaversion. Es gibt keinen Produzenten, den man anrufen könnte, und dies wird bewusst nicht als feststeckender Produzent gemeldet: null verschiedene Unterzeichner sind keine kleine, stabile Identitätsmenge.",
+      "unreadable": "Das Ingest-Ablehnungsregister dieses Knotens konnte nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er abgelehnt hat. Das heißt nicht „nichts wurde abgelehnt“ — es heißt „wir konnten nicht fragen“."
+    },
+    "key_statements": {
+      "stands": "Kein Widerruf, den dieser Knoten hält, erfasst eine Aussage, die jetzt gerade gemacht wird.",
+      "suspect_after_bound": "Ein historisch BEGRENZTER Widerruf erfasst eine Aussage, die jetzt gerade gemacht wird: Dieser Schlüssel ist ab jetzt nicht mehr zugelassen, und seine ehrliche Vergangenheit hat weiterhin Bestand. Diese Begrenzung ist wesentlich besser als ein unbegrenzter Widerruf und liest sich nicht gleich.",
+      "suspect_unbounded": "Ein UNBEGRENZTER Widerruf erfasst diesen Schlüssel, daher steht alles, was er je gesagt hat, in Zweifel — der Widerruf hat es abgelehnt, etwas anderes zu sagen.",
+      "unreadable": "Der Stand des Schlüssels dieses Knotens konnte nicht berechnet werden. Das heißt nicht „hat Bestand“ — eine nicht gestellte Frage hat keine Antwort."
+    },
+    "peer_quota": {
+      "clean": "Das Peer-Schreibkontingent wurde beansprucht, und seine Slot-Verweigerungsarithmetik gilt weiterhin.",
+      "denials": "Das Peer-Schreibkontingent hat Slot-Verweigerungen erfasst. Die Herleitung der Obergrenze für verfolgte Peers gilt in diesem Build nicht mehr.",
+      "no_quota": "Dieses Backend hält kein Peer-Schreibkontingent, daher meldet der Stolperdraht nichts. Das ist keine saubere Anzeige.",
+      "not_exercised": "In diesem Prozess wurde noch kein Peer-Schreibvorgang dem Kontingent angerechnet, seine Null ist daher ungeprüft statt sauber."
+    },
+    "quarantine": {
+      "not_quarantined": "Keine Quarantäne-Markierung zum Schlüssel dieses Knotens ist hier je wirksam geworden.",
+      "released": "Der Schlüssel dieses Knotens wurde vorenthalten und dann freigegeben. Er dient jetzt, und er hat es nicht immer getan — eine andere Tatsache als die, nie vorenthalten worden zu sein.",
+      "unreadable": "Der Quarantänezustand konnte nicht gelesen werden. Das heißt nicht „nicht unter Quarantäne“.",
+      "withheld": "Der Schlüssel dieses Knotens wird durch eine Quarantäne-Markierung von der Auslieferung zurückgehalten."
+    },
+    "receive": {
+      "clean": "Keine Zeile, die ein Peer angeboten hat, wurde in diesem Prozess abgelehnt.",
+      "no_accepted_counter": "Das Substrat zählt ABLEHNUNGEN beim Anwenden, nicht angenommene Anwendungen. Eine saubere Anzeige kann daher „alles Angebotene wurde angewendet“ nicht von „es wurde nichts angeboten“ trennen — lesen Sie `rounds_total` und die Oberfläche des Peers selbst, um beides auseinanderzuhalten.",
+      "not_exercised": "In diesem Prozess ist keine Replikationsrunde abgeschlossen worden, dem Anwendungspfad dieses Knotens wurde also nichts angeboten. Die Null ist ungeprüft, nicht sauber.",
+      "refusing": "Dieser Knoten hat Zeilen abgelehnt, die seine Peers angeboten haben. `apply_refusals_by_kind` benennt die Ebene; `key_apply_refusals_by_reason` benennt das Richtlinien-Token, das einen Schlüssel abgelehnt hat.",
+      "unreadable": "Die Anwendungszähler dieses Knotens konnten nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er angenommen hat. Das heißt nicht „nichts wurde abgelehnt“ — es heißt „wir konnten nicht fragen“."
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "Die Beförderungszähler dieses Knotens konnten nicht gelesen werden, daher beschreibt hier nichts, was er ausgeliefert, vorenthalten oder anzuwenden abgelehnt hat."
+      },
+      "ingest_refusals": {
+        "unavailable": "Das Ingest-Ablehnungsregister dieses Knotens konnte nicht gelesen werden, daher beschreibt hier nichts, was das Zulassungs-Gate abgelehnt hat. Ein Gate ohne Leser ist das, was 8.631 richtige Ablehnungen pro Tag 71 Stunden lang unbemerkt laufen ließ."
+      },
+      "node_state": {
+        "unavailable": "Die Zustandssignale dieses Knotens konnten nicht aus dem Substrat gelesen werden, daher beschreibt hier nichts seine Vertrauenswurzel, seinen Schlüsselstand, seine Quarantäne, sein Zustimmungs-SLA oder sein Peer-Kontingent. Das Ausbleiben schlechter Nachrichten aus einer ungelesenen Quelle ist keine gute Nachricht."
+      },
+      "trace_corpus": {
+        "unavailable": "Der Trace-Korpus dieses Knotens konnte nicht gelesen werden, daher beschreibt hier nichts, was er zugelassen hat. Das Ausbleiben von Eingängen aus einem ungelesenen Korpus ist kein Ausbleiben von Eingängen."
+      }
+    },
+    "trace_plane": {
+      "dark": "SEIT LÄNGER ALS DER ROTEN SCHWELLE DIESES KNOTENS WURDE NICHTS ZUGELASSEN. Der Eingang ist das Einzige, wofür dieser Knoten existiert. Lesen Sie die `ingest`-Anzeige daneben: Eine dunkle Ebene mit anhaltender Ablehnungsrate ist ein Produzent, der korrekt zurückgewiesen wird, und eine dunkle Ebene ganz ohne Ablehnungen bedeutet, dass diesen Knoten überhaupt nichts erreicht.",
+      "future_dated": "Der neueste Trace im Korpus ist in der ZUKUNFT gestempelt. Der Zeitstempel ist die eigene Sendeuhr des Produzenten, dies ist also eine Aussage über diese Uhr — und es wird hervorgehoben statt eingestuft, weil eine zukunftsdatierte Zeile diese Anzeige unbegrenzt auf Grün festnagelt und eine Ebene verbergen würde, die tatsächlich stehen geblieben ist.",
+      "live": "Kürzlich wurde ein Trace zugelassen: Die Ebene, für deren Empfang dieser Knoten existiert, wird gespeist.",
+      "never_admitted": "Der Korpus wurde gelesen und enthält überhaupt keinen Trace: Auf diesem Knoten wurde nie etwas zugelassen. Es gibt keinen Eingangszeitpunkt, den man einstufen könnte, dies ist also eine ungeprüfte Null, keine gesunde — und auf einem Knoten, der schon eine Weile in Betrieb ist, ist es derselbe Zustand wie eine dunkle Ebene.",
+      "producer_asserted_ts": "`last_admitted_at` ist MAX(trace_events.ts) — die eigene Sende-Wanduhrzeit des Traces, vom Produzenten behauptet. Das Substrat speichert zu dieser Tabelle keinen serverseitigen Zulassungszeitpunkt, ein Produzent mit verstellter Uhr verschiebt daher diese Anzeige; eine weit in der Zukunft liegende Zeile wird genau aus diesem Grund als `future_dated` hervorgehoben statt eingestuft.",
+      "quiet": "Seit länger als erwartet wurde kein Trace zugelassen, aber noch nicht lange genug, um die Ebene als dunkel zu bezeichnen. Ein wirklich untätiger Knoten liest sich so; die erste Hälfte eines Produzentenausfalls ebenso.",
+      "unreadable": "Der Trace-Korpus dieses Knotens konnte nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er zugelassen hat. Das heißt nicht „es ist kein Trace eingetroffen“ — es heißt „wir konnten nicht fragen“."
+    },
+    "trust_root": {
+      "no_self_key": "Der Host hat die eigene Schlüssel-ID dieses Knotens nie deklariert, daher konnte nichts Selbstbezogenes durchlaufen werden. Das ist eine Aussage über den Leser, nicht über den Knoten: Deklarieren Sie den Schlüssel beim Start, und jedes selbstbezogene Signal unten wird beantwortbar.",
+      "no_trust_edges": "Dieser Knoten hat sich selbst deklariert und hält keine aktive Vertrauenskante zu irgendeiner Wurzel: Er wurzelt in nichts. Ein bekannter Missstand, keine fehlende Anzeige.",
+      "no_valid_root": "Dieser Knoten vertraut einer oder mehreren Wurzeln, und keine davon validiert. Das Urteil je Teilstrecke daneben benennt, welche Teilstrecke fehlgeschlagen ist.",
+      "unreadable": "Der Vertrauenswurzel-Durchlauf konnte nicht gelesen werden. Ein unlesbares Verzeichnis ist kein nicht vertrauenswürdiges — lesen Sie dies nicht als wurzellosen Knoten.",
+      "valid": "Dieser Knoten wurzelt in einer Vertrauenswurzel, die in vollem Umfang standhält: eine aktive Vertrauenskante, eine selbstdeklarierende Charta mit einer Wiederherstellungszusage und kein eingerasteter Halt."
+    },
+    "volatility": {
+      "clock_dependent_local": "Diese Stufe wird auf DIESEM Knoten aus einem gespeicherten Zeitpunkt gegen die Leseuhr berechnet, sie bewegt sich also allein durch verstreichende Zeit — keine Zustandsänderung, keine neue Zeile. Ein Knoten, der keine Traces mehr zulässt, wandert von selbst von Grün über Gelb nach Rot, und das ist der Sinn: Er wird rot, ohne dass ihn jemand darum bittet.",
+      "process_local": "Die Zähler für Beförderung, Empfang und Ingest sind prozesslokal und kumulativ seit dem Start dieses Prozesses. Sie werden beim Neustart zurückgesetzt, unterscheiden sich zwischen Prozessen, die einen Knoten bedienen, und werden nirgends gespeichert. Sie sind ein Messwert dieses Prozesses, kein Register dieses Knotens."
+    },
+    "withhold_class": {
+      "fault": "Ein Lesevorgang oder ein Verdrahtungsschritt ist fehlgeschlagen, und der Auslieferungspfad ist geschlossen ausgefallen. Das ist KEIN Urteil über den Peer — es ist der Fehler dieses Knotens, den er beheben muss.",
+      "integrity": "Eine Zeile, die dieser Knoten hält, konnte überhaupt nicht ausgeliefert werden: Sie ließ sich nicht serialisieren, ihr gespeicherter Hash ließ sich nicht dekodieren, oder angekündigte Bytes waren nicht abrufbar. Ein Defekt im lokalen Zustand, keine Richtlinie.",
+      "policy": "Eine Entscheidung, die dieser Knoten absichtlich getroffen hat — Zustimmungsbereich, eine Auslieferungsfähigkeit, die der Peer nicht besitzt, oder die eigene Beschränkung des Produzenten. Funktioniert wie konfiguriert: Ändern Sie die Konfiguration, nicht den Code."
     }
   }
 }

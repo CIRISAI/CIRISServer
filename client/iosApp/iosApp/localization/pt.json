@@ -3240,6 +3240,17 @@
       "elsewhere": "Nenhum loop nesta compilação lê esta chave — seu consumidor vive em outro componente. Uma linha definida aqui é admitida e incorporada, e não muda nada neste nó.",
       "unreachable": "O consumidor desta chave é executado neste processo, mas nada leva um valor deste plano até ele: o componente dono do ajuste o recebe uma única vez, no momento em que o loop é composto, e não oferece nenhuma forma de alterá-lo depois. Uma linha definida aqui é admitida e incorporada, e não muda nada em lugar nenhum.",
       "unbuilt": "O consumidor desta chave ainda não foi construído em lugar nenhum. Uma linha definida aqui é admitida e incorporada, e não muda nada."
+    },
+    "refusal": {
+      "attribution_absent": "delegation_id é obrigatório. Um ato que não carrega a própria autoridade não pode ser distinguido de um ato não autorizado depois que o ator se foi.",
+      "authority_not_a_delegation": "O id de delegação indicado não é uma linha delegates_to.",
+      "authority_unresolved": "A delegação indicada não é uma linha que este nó detenha, portanto a autoridade que ela registra não nomearia nada. Se ela de fato autoriza este ato é uma decisão do substrato, tomada na porta dele.",
+      "grounds_absent": "grounds é obrigatório. Um controle ajustado sem motivo registrado é indistinguível de um ajustado por um motivo ruim.",
+      "node_unowned": "Este nó não tem responsável (vínculo de propriedade), portanto não relata nem altera a configuração da malha em nome de ninguém. Reivindique a propriedade primeiro.",
+      "not_owner": "A superfície de configuração da malha exige o papel de proprietário (SYSTEM_ADMIN).",
+      "root_absent": "root_ref é obrigatório: uma linha de mesh-config é emitida sob uma raiz de confiança, e uma linha que não nomeia nenhuma fica registrada onde nenhuma incorporação jamais a contará.",
+      "session_absent": "Nenhum token de sessão foi apresentado. A superfície de configuração da malha é exclusiva do proprietário.",
+      "session_invalid": "Essa sessão é inválida ou expirou."
     }
   },
   "commons_surface": {
@@ -3254,8 +3265,7 @@
     "escalation": {
       "awaiting": "Os moderadores nomeados ainda podem responder, ou já decidiram dentro do prazo. O escalonamento não foi aberto.",
       "not_adopted": "Esta comunidade não declarou nenhuma camada de curadores, portanto não há prazo para os moderadores nem escalonamento. Aqui o silêncio não muda nada.",
-      "nothing_to_escalate": "Há uma camada de curadores declarada e nenhuma objeção viva à espera dela. Ninguém ficou em silêncio, porque nada foi perguntado.",
-      "open": "Os titulares do dever não responderam a tempo, e a decisão passou a quem respondeu. O limiar agora conta os RESPONDENTES, e não todo o quadro de membros — é isso que permite que uma comunidade silenciosa ainda assim decida —, com um piso para que ‘alcançável’ nunca degenere em ‘uma pessoa decide’."
+      "nothing_to_escalate": "Há uma camada de curadores declarada e nenhuma objeção viva à espera dela. Ninguém ficou em silêncio, porque nada foi perguntado."
     },
     "objection": {
       "admitted": "A objeção está registrada. Ela é um MARCADOR, não um comando: nada foi alterado por sua chegada, e ela se replica pelo plano comum de atestação, de modo que um par que estava particionado durante a janela ainda a conta quando ela chega. Um único membro basta para levantá-la; retirá-la custa o limiar da própria coorte."
@@ -3267,27 +3277,19 @@
       "upheld": "Quem respondeu decidiu que esta objeção subsiste."
     },
     "refusal": {
-      "action_absent": "É preciso nomear uma ação. Uma objeção nomeia uma linha do bem comum; uma que não nomeia nada jamais poderá ser contada.",
-      "action_unknown": "Este nó não mantém tal ação, portanto uma linha que a nomeasse seria arquivada onde nenhuma incorporação jamais a contará.",
       "actor_recused": "O autor da ação não vota na objeção ao seu próprio ato.",
       "bad_now": "O instante de leitura precisa ser um carimbo de tempo RFC 3339.",
       "ballot_predates_action": "Um julgamento não pode ser mais antigo do que aquilo que julga.",
       "canonicalize_failed": "Não foi possível produzir os bytes canônicos da linha, portanto não há nada que um co-signatário pudesse assinar.",
-      "cohort_absent": "É preciso nomear uma coorte: é ela que decide qual quadro de membros e qual declaração regem a contagem.",
-      "cohort_not_a_commons": "A coorte self não tem quadro de membros sobre o qual possa haver quórum — seus membros são os próprios dispositivos de uma única identidade —, portanto não tem bem comum a policiar.",
       "cohort_unknown": "Essa coorte não resolve neste nó, portanto não há quadro de membros nem declaração pelos quais julgar isto. A autoridade precisa vir do estado local verificado.",
       "cohort_unrecognized": "Essa não é uma coorte com quadro de membros. As objeções vivem em uma família, em uma comunidade ou em um grupo de afiliações.",
       "dimension_mismatch": "Essa linha foi oferecida na porta errada para aquilo que ela carrega.",
       "dismissal_quorum_short": "Menos membros distintos e verificados do quadro cossinaram do que exige o limiar da coorte. Os números contados e exigidos estão ao lado desta mensagem.",
       "duplicate_objection": "Você já mantém uma objeção viva contra esta ação. Um membro é uma objeção — caso contrário, um único membro poderia alcançar o limiar sozinho.",
-      "grounds_absent": "É obrigatório apresentar fundamentos. Uma objeção levantada sem motivo registrado é indistinguível de uma levantada por um motivo ruim — e os fundamentos são registrados, nunca interpretados.",
       "malformed_envelope": "Falta à linha uma referência de que a contagem precisa.",
-      "node_unowned": "Este nó não tem responsável, portanto não lê nem fala no bem comum de ninguém em nome de ninguém. Reivindique a propriedade primeiro.",
       "not_a_cohort_member": "Somente um membro desta coorte pode falar em seu bem comum. Este é o único teste que o lado protetivo aplica — e a razão pela qual a objeção de um estranho nunca se torna um marcador que outros possam honrar.",
       "not_filed_against_actor": "A linha está arquivada onde a incorporação não a procura, portanto ela ficaria armazenada, durável e permanentemente inerte. Um marcador que ninguém consegue encontrar não é um marcador.",
       "not_governed": "Esta comunidade não declara nenhuma política de quórum reverso, portanto não adotou o plano de objeções. Recusado em vez de assumir um padrão: inventar uma janela e um limiar para um grupo que não declarou nem uma nem outro é pior do que dizer não.",
-      "not_owner": "A superfície do bem comum exige o papel de proprietário.",
-      "objection_absent": "É preciso nomear uma objeção: um voto e um indeferimento respondem, cada um, por exatamente uma.",
       "objection_unknown": "A objeção nomeada não é uma das que este nó mantém contra esta ação.",
       "session_absent": "Nenhum token de sessão foi apresentado. A superfície do bem comum é exclusiva do proprietário.",
       "session_invalid": "Essa sessão é inválida ou expirou.",
@@ -3299,7 +3301,6 @@
     },
     "standing": {
       "action_unknown": "Este nó não mantém tal ação. Uma objeção nomeia uma linha, e aqui não há linha alguma a nomear.",
-      "cohort_unknown": "Essa coorte não resolve neste nó, portanto não tem quadro de membros nem declaração que este nó possa ler.",
       "not_governed": "Esta comunidade não declara nenhuma política de quórum reverso, portanto o plano de objeções simplesmente não se aplica ao seu bem comum. Isso é diferente de ninguém ter objetado.",
       "objected": "Pelo menos um membro objetou e a janela ainda está aberta. Por ora a ação permanece de pé; mais uma objeção pode ser tudo o que falta.",
       "quiet": "O plano foi lido e nenhuma objeção foi levantada contra esta ação.",
@@ -3314,6 +3315,106 @@
       "overruled": "Os moderadores nomeados decidiram que esta objeção não subsiste — e o escalonamento abre mesmo assim, porque desfazer nunca é decisão só deles.",
       "silent": "O prazo venceu sem decisão em nenhum dos sentidos.",
       "upheld": "Os moderadores nomeados decidiram, dentro do prazo, que esta objeção subsiste. A questão foi julgada por pessoas nomeadas, e ficou registrada."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "idle": "Rodadas de replicação foram concluídas, e este nó não serviu nada e não reteve nada: ele não tinha nada de que seus pares ainda precisassem.",
+      "moving": "Este nó serviu linhas aos seus pares e não reteve nenhuma.",
+      "not_exercised": "Nenhuma rodada de replicação foi concluída neste processo, portanto nenhum portão do caminho de serviço chegou a ser executado e o registro de retenções nunca foi escrito. O zero é não testado, não limpo.",
+      "unreadable": "Os contadores de transporte deste nó não puderam ser lidos, portanto nada aqui é uma afirmação sobre o que ele serviu. Isto não é 'nada foi retido' — é 'não conseguimos perguntar'.",
+      "withholding": "Este nó recusou-se a servir linhas que detinha. `withholds_by_reason` nomeia o ramo que recusou e `recent_withholds` nomeia a quem — um nó ocioso não relata nenhum dos dois."
+    },
+    "consent_sla": {
+      "none_overdue": "Toda revogação de consentimento que este nó prometeu promover está dentro da sua janela de SLA.",
+      "overdue": "Este nó está ATRASADO em promover revogações de consentimento com que se comprometeu. Os ids de atestação amostrados ao lado são as alças que resolvem a condição.",
+      "unreadable": "A fila de SLA de consentimento não pôde ser lida. Isso não é 'nada em atraso'."
+    },
+    "drill": {
+      "green": "A raiz de confiança deste nó comprovou seu interruptor de emergência nos últimos 90 dias.",
+      "never_drilled": "A raiz de confiança deste nó NUNCA comprovou seu interruptor de emergência. Ela compartilha a faixa vermelha com uma raiz há muito abandonada, e o instante ausente do último exercício ao lado é a diferença. A raiz continua servindo: a atualidade do exercício é um sinal de confiança, nunca um portão.",
+      "no_root_walked": "Nenhuma raiz de confiança foi percorrida, portanto não há nada que possa estar sem exercício. Isto não é um exercício desatualizado — não existe sujeito de exercício.",
+      "stale": "A raiz de confiança deste nó comprovou seu interruptor de emergência pela última vez há mais de 180 dias. Ela continua servindo: a atualidade do exercício é um sinal de confiança, nunca um portão.",
+      "yellow": "A raiz de confiança deste nó comprovou seu interruptor de emergência pela última vez entre 90 e 180 dias atrás."
+    },
+    "headline": {
+      "green": "Todos os sinais que este nó consegue calcular indicam saúde.",
+      "red": "Pelo menos um sinal indica problema. Leia também a lista de desconhecidos: um cabeçalho vermelho tem precedência sobre um desconhecido e, de outro modo, pode esconder um atrás de si.",
+      "unknown": "Um ou mais sinais não puderam ser calculados. Leia a lista de desconhecidos — um sinal não calculado não é um sinal saudável.",
+      "yellow": "Este nó está servindo, e algo aqui merece uma olhada."
+    },
+    "ingest": {
+      "background": "Há recusas presentes, mas não sustentadas a partir de um conjunto estável de identidades: sondagens comuns, clientes desatualizados e rotatividade. Leia `distinct_signers` e `unattributed_in_window` antes de descartar isto — uma taxa ALTA espalhada por um conjunto AMPLO de identidades é uma sondagem, e uma taxa ALTA que quase não nomeou ninguém é tráfego malformado com um cliente desatualizado misturado. Nenhum dos dois é rotatividade, e nenhum tem um único produtor a corrigir, e é por isso que aparecem aqui em vez de como um produtor travado.",
+      "clean": "Lotes foram oferecidos ao caminho de ingestão HTTP e nenhum foi recusado dentro da janela. `refused_total` ao lado é a contagem de todo o processo: uma janela limpa num processo que recusou antes é uma recuperação, não uma ausência.",
+      "http_path_only": "Esta leitura cobre apenas o caminho de ingestão HTTP. Um lote que chega pelo relé Reticulum é verificado pelo mesmo portão de persistência, mas não é contado aqui, portanto uma leitura de ingestão limpa não é uma afirmação sobre todas as formas pelas quais um traço pode ser oferecido a este nó.",
+      "not_exercised": "Nada foi oferecido ao caminho de ingestão HTTP neste processo — nenhum lote aceito e nenhum recusado. O zero é não testado, não limpo.",
+      "stuck_producer": "Uma taxa SUSTENTADA de recusas vinda de um conjunto PEQUENO e ESTÁVEL de assinantes: um produtor está preso num laço de repetição e não consegue se corrigir. Cada uma dessas recusas está correta — o portão está funcionando — e é exatamente por isso que o agregado precisa da sua própria leitura. `top_signers` nomeia quem deve ser corrigido.",
+      "unattributed": "Lotes foram recusados e NENHUM nomeou um assinante: falharam antes de haver uma identidade a registrar — bytes malformados, uma assinatura inválida, uma versão de esquema não suportada. Não há produtor a quem recorrer, e isto deliberadamente não é relatado como um produtor travado: zero assinantes distintos não é um conjunto pequeno e estável de identidades.",
+      "unreadable": "O registro de recusas de ingestão deste nó não pôde ser lido, portanto nada aqui é uma afirmação sobre o que ele recusou. Isto não é 'nada foi recusado' — é 'não conseguimos perguntar'."
+    },
+    "key_statements": {
+      "stands": "Nenhuma revogação que este nó detém cobre uma declaração feita agora mesmo.",
+      "suspect_after_bound": "Uma revogação LIMITADA no histórico cobre uma declaração feita agora mesmo: esta chave está desadmitida a partir de agora, e seu passado honesto continua válido. Esse limite é materialmente melhor do que uma revogação ilimitada e não se lê da mesma forma.",
+      "suspect_unbounded": "Uma revogação ILIMITADA cobre esta chave, portanto tudo o que ela já disse está em dúvida — a revogação recusou-se a dizer o contrário.",
+      "unreadable": "A situação da chave deste nó não pôde ser calculada. Isso não é 'válida' — uma pergunta não feita não tem resposta."
+    },
+    "peer_quota": {
+      "clean": "A cota de escrita dos pares foi exercida e sua aritmética de negação de vagas continua válida.",
+      "denials": "A cota de escrita dos pares registrou negações de vagas. A derivação do limite de pares rastreados já não vale nesta compilação.",
+      "no_quota": "Este backend não tem cota de escrita de pares, portanto o fio de alarme não relata nada. Isso não é uma leitura limpa.",
+      "not_exercised": "Nenhuma escrita de par foi debitada da cota neste processo, portanto o zero dela é não testado em vez de limpo."
+    },
+    "quarantine": {
+      "not_quarantined": "Nenhum marcador de quarentena sobre a chave deste nó jamais entrou em vigor aqui.",
+      "released": "A chave deste nó foi retida e depois liberada. Ela serve agora, e nem sempre serviu — um fato diferente de nunca ter sido retida.",
+      "unreadable": "O estado de quarentena não pôde ser lido. Isso não é 'não está em quarentena'.",
+      "withheld": "A chave deste nó está retida de servir por um marcador de quarentena."
+    },
+    "receive": {
+      "clean": "Nenhuma linha oferecida por um par foi recusada neste processo.",
+      "no_accepted_counter": "O substrato conta as RECUSAS de aplicação, não as aplicações aceitas. Portanto, uma leitura limpa não consegue separar 'tudo o que foi oferecido foi aplicado' de 'nada foi oferecido' — leia `rounds_total` e a superfície do próprio par para distinguir os dois.",
+      "not_exercised": "Nenhuma rodada de replicação foi concluída neste processo, portanto nada foi oferecido ao caminho de aplicação deste nó. O zero é não testado, não limpo.",
+      "refusing": "Este nó recusou linhas que seus pares ofereceram. `apply_refusals_by_kind` nomeia o plano; `key_apply_refusals_by_reason` nomeia o token de política que recusou uma chave.",
+      "unreadable": "Os contadores de aplicação deste nó não puderam ser lidos, portanto nada aqui é uma afirmação sobre o que ele aceitou. Isto não é 'nada foi recusado' — é 'não conseguimos perguntar'."
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "Os contadores de transporte deste nó não puderam ser lidos, portanto nada aqui descreve o que ele serviu, reteve ou recusou aplicar."
+      },
+      "ingest_refusals": {
+        "unavailable": "O registro de recusas de ingestão deste nó não pôde ser lido, portanto nada aqui descreve o que o portão de admissão recusou. Um portão sem leitor foi o que deixou 8.631 recusas corretas por dia passarem despercebidas por 71 horas."
+      },
+      "node_state": {
+        "unavailable": "Os sinais de estado deste nó não puderam ser lidos do substrato, portanto nada aqui descreve sua raiz de confiança, a situação da chave, a quarentena, o SLA de consentimento ou a cota de pares. A ausência de más notícias vinda de uma fonte não lida não é boa notícia."
+      },
+      "trace_corpus": {
+        "unavailable": "O corpus de traços deste nó não pôde ser lido, portanto nada aqui descreve o que ele admitiu. A ausência de chegadas num corpus não lido não é ausência de chegadas."
+      }
+    },
+    "trace_plane": {
+      "dark": "NADA FOI ADMITIDO POR MAIS TEMPO DO QUE O LIMIAR VERMELHO DESTE NÓ. A chegada é a única coisa para a qual este nó existe. Leia a leitura de `ingest` ao lado desta: um plano escuro com uma taxa de recusas sustentada é um produtor sendo corretamente rejeitado, e um plano escuro sem recusa nenhuma significa que nada sequer está chegando a este nó.",
+      "future_dated": "O traço mais recente no corpus está carimbado no FUTURO. O carimbo de tempo é o relógio de transmissão do próprio produtor, portanto isto é uma afirmação sobre esse relógio — e é destacado em vez de classificado numa faixa porque uma linha datada no futuro fixa esta leitura em verde indefinidamente e esconderia um plano que de fato parou.",
+      "live": "Um traço foi admitido recentemente: o plano no qual este nó existe para receber está sendo alimentado.",
+      "never_admitted": "O corpus foi lido e não contém traço algum: nada jamais foi admitido neste nó. Não há instante de chegada para classificar numa faixa, portanto este é um zero não testado, não um zero saudável — e num nó que já serve há algum tempo é a mesma condição que um plano escuro.",
+      "producer_asserted_ts": "`last_admitted_at` é MAX(trace_events.ts) — o relógio de parede de transmissão do próprio traço, afirmado pelo produtor. O substrato não armazena nenhum instante de admissão do lado do servidor nesta tabela, portanto um produtor com relógio desviado move esta leitura; uma linha muito no futuro é destacada como `future_dated` em vez de classificada numa faixa exatamente por esse motivo.",
+      "quiet": "Nenhum traço foi admitido por mais tempo do que o esperado, mas ainda não por tempo suficiente para chamar o plano de escuro. Um nó genuinamente ocioso lê assim; a primeira metade de uma interrupção do produtor também.",
+      "unreadable": "O corpus de traços deste nó não pôde ser lido, portanto nada aqui é uma afirmação sobre o que ele admitiu. Isto não é 'nenhum traço chegou' — é 'não conseguimos perguntar'."
+    },
+    "trust_root": {
+      "no_self_key": "O host nunca declarou o id da chave própria deste nó, portanto nada de escopo próprio pôde ser percorrido. Isto é uma afirmação sobre o leitor, não sobre o nó: declare a chave na inicialização e todos os sinais de escopo próprio abaixo passam a ter resposta.",
+      "no_trust_edges": "Este nó declarou-se a si mesmo e não mantém nenhuma aresta de confiança ativa para nenhuma raiz: ele não se enraíza em nada. Um mau resultado conhecido, não uma leitura ausente.",
+      "no_valid_root": "Este nó confia numa ou mais raízes e nenhuma delas valida. O veredito por etapa ao lado nomeia qual etapa falhou.",
+      "unreadable": "A caminhada pela raiz de confiança não pôde ser lida. Um diretório ilegível não é um diretório não confiável — não leia isto como um nó sem raiz.",
+      "valid": "Este nó enraíza-se numa raiz de confiança que confere por completo: uma aresta de confiança ativa, uma carta autodeclarante com um compromisso de recuperação, e nenhuma interrupção travada."
+    },
+    "volatility": {
+      "clock_dependent_local": "Esta faixa é calculada NESTE nó a partir de um instante armazenado contra o relógio de leitura, portanto ela se move só com o tempo decorrido — sem mudança de estado, sem linha nova. Um nó que para de admitir traços caminha de verde a amarelo a vermelho sozinho, o que é justamente o objetivo: ele fica vermelho sem que ninguém precise pedir.",
+      "process_local": "Os contadores de transporte, aplicação e ingestão são locais ao processo e cumulativos desde que este processo começou. Eles zeram no reinício, diferem entre processos que servem um mesmo nó, e não são armazenados em lugar nenhum. São um medidor deste processo, não um registro deste nó."
+    },
+    "withhold_class": {
+      "fault": "Uma leitura ou uma etapa de ligação falhou e o caminho de serviço fechou por segurança. Isto NÃO é um veredito sobre o par — é uma falha deste nó, a ser corrigida por ele.",
+      "integrity": "Uma linha que este nó detém não pôde ser servida de forma alguma: ela não serializaria, seu hash armazenado não decodificaria, ou os bytes anunciados eram inobteníveis. Um defeito no estado local, não uma política.",
+      "policy": "Uma decisão que este nó tomou de propósito — escopo de consentimento, uma capacidade de serviço que o par não possui, ou a restrição do próprio produtor. Funcionando conforme configurado: mude a configuração, não o código."
     }
   }
 }

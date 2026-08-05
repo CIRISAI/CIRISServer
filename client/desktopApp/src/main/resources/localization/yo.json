@@ -3240,6 +3240,17 @@
       "elsewhere": "Kò sí ìyíká kankan nínú ìkọ́lé yìí tí ó ka kọ́kọ́rọ́ yìí — olùlò rẹ̀ ń gbé nínú ẹ̀ka mìíràn. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà lórí nódù yìí.",
       "unreachable": "Olùlò kọ́kọ́rọ́ yìí ń ṣiṣẹ́ nínú ìlànà-iṣẹ́ yìí gan-an, ṣùgbọ́n kò sí ohun tí ó ń gbé iye kan láti orí pẹpẹ yìí wá sí ọ̀dọ̀ rẹ̀: ẹ̀ka tí ó ni ìdarí yìí ń gba iye náà lẹ́ẹ̀kan ṣoṣo nígbà tí a bá ń ṣàkójọ ìyíká náà, kò sì fi ọ̀nà kankan sílẹ̀ láti yí i padà lẹ́yìn náà. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà níbikíbi rárá.",
       "unbuilt": "A kò tíì kọ́ olùlò kọ́kọ́rọ́ yìí níbikíbi rárá. Ìlà tí a gbé kalẹ̀ níbí ni a gbà wọlé, a sì káṣirò rẹ̀, ṣùgbọ́n kò yí ohunkóhun padà."
+    },
+    "refusal": {
+      "authority_not_a_delegation": "Id àṣẹ-ìfilọ́wọ́ tí a dárúkọ kì í ṣe ìlà delegates_to.",
+      "not_owner": "Ojú-ìṣàkóso mesh-config nílò ipò olówó (SYSTEM_ADMIN).",
+      "session_absent": "A kò gbé àmì-ìgbà (session token) kankan wá. Ojú-ìṣàkóso mesh-config jẹ́ ti olówó nìkan.",
+      "session_invalid": "Ìgbà (session) yẹn kò tọ́ tàbí ó ti pé àkókò rẹ̀.",
+      "attribution_absent": "delegation_id jẹ́ dandan. Ìṣe tí kò gbé àṣẹ tirẹ̀ dání kò ṣeé yà sọ́tọ̀ kúrò nínú ìṣe tí kò ní àṣẹ lẹ́yìn tí olùṣe náà bá ti lọ.",
+      "authority_unresolved": "Àṣẹ-ìfilọ́wọ́ tí a dárúkọ kì í ṣe ìlà tí nódù yìí ní, nítorí náà àṣẹ tí ó kọ sílẹ̀ kò ní tọ́ka sí ohunkóhun. Bóyá ó fún ìṣe yìí ní àṣẹ ní tòótọ́, ìpìlẹ̀ náà ni ó ń pinnu rẹ̀, ní ẹnu ọ̀nà tirẹ̀.",
+      "grounds_absent": "grounds jẹ́ dandan. Bọ́tìnì tí a yí láìsí ìdí tí a kọ sílẹ̀ kò yàtọ̀ sí èyí tí a yí fún ìdí burúkú.",
+      "node_unowned": "Nódù yìí kò ní ẹni tí ó ní ojúṣe fún un (owner-binding), nítorí náà kò ròyìn, kò sì yí ètò mesh padà fún ẹnikẹ́ni. Kọ́kọ́ gba ìní rẹ̀.",
+      "root_absent": "root_ref jẹ́ dandan: a ń gbé ìlà mesh-config jáde lábẹ́ gbòǹgbò ìgbẹ́kẹ̀lé, ìlà tí kò sì dárúkọ ọ̀kankan ń wọ inú ibi tí kò sí ìkáṣirò kan tí yóò kà á láé."
     }
   },
   "commons_surface": {
@@ -3254,8 +3265,7 @@
     "escalation": {
       "awaiting": "Àwọn alámòjútó tí a yàn ṣì lè dáhùn, tàbí wọ́n ti dájọ́ ní àkókò tẹ́lẹ̀. Ìgbéga kò tíì ṣí.",
       "not_adopted": "Àwùjọ yìí kò kéde ìpele alábòójútó kankan, nítorí náà kò sí ìparí-àkókò alámòjútó, kò sì sí ìgbéga. Ìdákẹ́jẹ́ẹ́ kò yí ohunkóhun padà níbí.",
-      "nothing_to_escalate": "A ti kéde ìpele alábòójútó, kò sì sí àtakò alààyè kankan tí ó ń dúró dè é. Kò sí ẹni tí ó dákẹ́, nítorí pé kò sí ohun tí a béèrè.",
-      "open": "Àwọn tí ó ní ojúṣe náà kò dáhùn ní àkókò, ìpinnu náà sì ti kọjá sí ọwọ́ àwọn tí ó dáhùn. Ààlà náà ń ka ÀWỌN TÍ Ó DÁHÙN nísinsìnyí dípò gbogbo àkójọ mẹ́ńbà — èyí ni ó ń jẹ́ kí àwùjọ tí ó dákẹ́ ṣì lè yanjú ọ̀ràn — a sì fi ilẹ̀ sí i kí ‘ó ṣeé dé’ má baà di ‘ẹnì kan ṣoṣo ni ó ń pinnu’."
+      "nothing_to_escalate": "A ti kéde ìpele alábòójútó, kò sì sí àtakò alààyè kankan tí ó ń dúró dè é. Kò sí ẹni tí ó dákẹ́, nítorí pé kò sí ohun tí a béèrè."
     },
     "objection": {
       "admitted": "Àtakò náà ti wọ inú àkọsílẹ̀. ÀMÌ ni, kì í ṣe àṣẹ: kò sí ohun tí ó yí padà nípa dídé rẹ̀, ó sì ń tàn kálẹ̀ lórí pẹpẹ ẹ̀rí gbogbogbò, nítorí náà ẹlẹ́gbẹ́ tí a ya sọ́tọ̀ nígbà fèrèsé àkókò náà ṣì ń kà á nígbà tí ó bá dé ọ̀dọ̀ rẹ̀. Mẹ́ńbà kan ṣoṣo tó láti gbé e sókè; gbígbé e kúrò ń ná ààlà ti cohort fúnra rẹ̀."
@@ -3267,27 +3277,19 @@
       "upheld": "Àwọn tí ó dáhùn dájọ́ pé àtakò yìí dúró."
     },
     "refusal": {
-      "action_absent": "A gbọ́dọ̀ dárúkọ ìṣe kan. Àtakò máa ń dárúkọ ilà kan nínú ohun-ìní àjọpín; èyí tí kò dárúkọ ohunkóhun kò lè kà láé.",
-      "action_unknown": "Nódù yìí kò ní irú ìṣe bẹ́ẹ̀, nítorí náà ilà tí ó bá dárúkọ rẹ̀ yóò wà níbi tí kò sí ìṣirò kankan tí yóò ká a sínú rẹ̀ láé.",
       "actor_recused": "Ẹni tí ó ṣe ìṣe náà kì í dìbò lórí àtakò sí ìṣe ara rẹ̀.",
       "bad_now": "Àkókò gan-an tí a fi ń kà gbọ́dọ̀ jẹ́ àmì-àkókò RFC 3339.",
       "ballot_predates_action": "Ìdájọ́ kò lè ti wà ṣáájú ohun tí ó ń dájọ́ rẹ̀.",
       "canonicalize_failed": "A kò lè mú àwọn báìtì canonical ti ilà náà jáde, nítorí náà kò sí ohun tí olùfọwọ́sí-papọ̀ lè fọwọ́ sí.",
-      "cohort_absent": "A gbọ́dọ̀ dárúkọ cohort kan: òun ni ó pinnu àkójọ mẹ́ńbà ta àti ìkéde ta ni ó ń ṣàkóso ìṣirò náà.",
-      "cohort_not_a_commons": "Cohort ara-ẹni kò ní àkójọ mẹ́ńbà tí kọ́rọ́mù lè wà lórí rẹ̀ — àwọn mẹ́ńbà rẹ̀ jẹ́ àwọn ẹ̀rọ ti ìdánimọ̀ kan ṣoṣo — nítorí náà kò ní ohun-ìní àjọpín kankan láti ṣọ́.",
       "cohort_unknown": "Cohort yẹn kò yanjú lórí nódù yìí, nítorí náà kò sí àkójọ mẹ́ńbà, kò sì sí ìkéde tí a lè fi dájọ́ èyí. Àṣẹ gbọ́dọ̀ wá láti inú ipò àdúgbò tí a ti jẹ́rìísí.",
       "cohort_unrecognized": "Ìyẹn kì í ṣe cohort tí ó ní àkójọ mẹ́ńbà. Àwọn àtakò ń gbé inú ìdílé, àwùjọ, tàbí ẹgbẹ́ ìbárẹ́.",
       "dimension_mismatch": "A gbé ilà yẹn wá sí ilẹ̀kùn tí kò tọ́ fún ohun tí ó ru.",
       "dismissal_quorum_short": "Iye àwọn mẹ́ńbà àkójọ ọ̀tọ̀ọ̀tọ̀ tí a ti jẹ́rìísí tí wọ́n fọwọ́ sí papọ̀ kéré sí èyí tí ààlà ti cohort náà béèrè. Iye tí a kà àti iye tí a nílò wà ní ẹ̀gbẹ́ ìhìn yìí.",
       "duplicate_objection": "O ti ní àtakò alààyè kan tẹ́lẹ̀ sí ìṣe yìí. Mẹ́ńbà kan jẹ́ àtakò kan — bí bẹ́ẹ̀ kọ́, mẹ́ńbà kan ṣoṣo ni ó lè dé ààlà náà fúnra rẹ̀.",
-      "grounds_absent": "A nílò àwọn ìdí. Àtakò tí a gbé sókè láìsí ìdí tí a kọ sílẹ̀ kò yàtọ̀ sí èyí tí a gbé sókè fún ìdí burúkú — a sì ń ṣàkọsílẹ̀ àwọn ìdí, a kì í túmọ̀ wọn láé.",
       "malformed_envelope": "Ilà náà kò ní ìtọ́ka kan tí ìṣirò nílò.",
-      "node_unowned": "Nódù yìí kò ní ẹni tí ó ní ojúṣe rẹ̀, nítorí náà kò kà bẹ́ẹ̀ ni kò sọ̀rọ̀ nínú ohun-ìní àjọpín ẹnikẹ́ni ní ipò wọn. Gba ìní rẹ̀ ní àkọ́kọ́.",
       "not_a_cohort_member": "Mẹ́ńbà cohort yìí nìkan ni ó lè sọ̀rọ̀ nínú ohun-ìní àjọpín rẹ̀. Èyí ni ìdánwò kan ṣoṣo tí ẹ̀gbẹ́ ààbò ń lò — ìdí sì nìyí tí àtakò àjèjì kì í fi di àmì tí àwọn ẹlòmíràn lè bọ̀wọ̀ fún.",
       "not_filed_against_actor": "Ibi tí ìṣirò kì í wò ni a fi ilà náà sí, nítorí náà a ó fi pamọ́, yóò wà pẹ́, yóò sì jẹ́ aláìṣiṣẹ́ títí láé. Àmì tí kò sí ẹni tí ó lè rí kì í ṣe àmì.",
       "not_governed": "Àwùjọ yìí kò kéde ìlànà kọ́rọ́mù-ìyípadà kankan, nítorí náà kò tíì gba pẹpẹ àtakò. A kọ̀ ọ́ dípò kí a lo iye ìpìlẹ̀: dídá fèrèsé àkókò àti ààlà kan sílẹ̀ fún ẹgbẹ́ tí kò kéde ọ̀kankan nínú wọn burú ju kíkọ̀ lọ.",
-      "not_owner": "Ojú ohun-ìní àjọpín nílò ipa olówó.",
-      "objection_absent": "A gbọ́dọ̀ dárúkọ àtakò kan: ìbò àti ìjùsílẹ̀ kọ̀ọ̀kan ń dáhùn fún ọ̀kan ṣoṣo.",
       "objection_unknown": "Àtakò tí a dárúkọ kì í ṣe ọ̀kan tí nódù yìí ní sí ìṣe yìí.",
       "session_absent": "A kò gbé àmì ìpàdé kankan kalẹ̀. Ojú ohun-ìní àjọpín jẹ́ ti olówó nìkan.",
       "session_invalid": "Ìpàdé yẹn kò tọ́ tàbí ó ti pé àkókò rẹ̀.",
@@ -3299,7 +3301,6 @@
     },
     "standing": {
       "action_unknown": "Nódù yìí kò ní irú ìṣe bẹ́ẹ̀. Àtakò máa ń dárúkọ ilà kan, kò sì sí ilà kankan níbí láti dárúkọ.",
-      "cohort_unknown": "Cohort yẹn kò yanjú lórí nódù yìí, nítorí náà kò ní àkójọ mẹ́ńbà, kò sì ní ìkéde tí nódù yìí lè kà.",
       "not_governed": "Àwùjọ yìí kò kéde ìlànà kọ́rọ́mù-ìyípadà kankan, nítorí náà pẹpẹ àtakò kò kan ohun-ìní àjọpín rẹ̀ rárá. Ìyẹn yàtọ̀ sí pé kò sí ẹni tí ó takò.",
       "objected": "Ó kéré tán mẹ́ńbà kan ti takò, fèrèsé àkókò náà sì ṣì ṣí. Ìṣe náà dúró fún ìsinsìnyí; àtakò kan sí i lè tó.",
       "quiet": "A ka pẹpẹ náà, kò sì sí àtakò kankan tí a gbé sókè sí ìṣe yìí.",
@@ -3314,6 +3315,106 @@
       "overruled": "Àwọn alámòjútó tí a yàn dájọ́ pé àtakò yìí kò dúró — ṣùgbọ́n ìgbéga ṣí bákan náà, nítorí pé ìmúkúrò kì í ṣe ti àwọn nìkan láé.",
       "silent": "Ìparí-àkókò kọjá láìsí ìdájọ́ kankan ní ọ̀nà kankan.",
       "upheld": "Àwọn alámòjútó tí a yàn dájọ́, ní àkókò, pé àtakò yìí dúró. Àwọn ènìyàn tí a dárúkọ ni wọ́n dájọ́ ọ̀ràn náà, ó sì wà nínú àkọsílẹ̀."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "moving": "Nódù yìí pèsè àwọn ìlà fún àwọn ẹlẹ́gbẹ́ rẹ̀, kò sì dá ọ̀kankan dúró.",
+      "idle": "Àwọn ìyípo àdàkọ ti parí, nódù yìí kò sì pèsè ohunkóhun bẹ́ẹ̀ ni kò dá ohunkóhun dúró: kò ní ohun tí àwọn ẹlẹ́gbẹ́ rẹ̀ ṣì nílò.",
+      "not_exercised": "Kò sí ìyípo àdàkọ tí ó ti parí lórí ìlànà yìí, nítorí náà kò sí ẹnu-ọ̀nà ọ̀nà-ìpèsè tí ó ti ṣiṣẹ́ rí, a kò sì kọ ohunkóhun sínú ìwé-ìdádúró rí. Òdo náà jẹ́ èyí tí a kò dánwò, kì í ṣe èyí tí ó mọ́.",
+      "unreadable": "A kò lè ka àwọn ìkànnì-ìkà ìgbékalẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó pèsè. Èyí KÌ Í ṢE 'kò sí ohun tí a dá dúró' — 'a kò lè béèrè' ni.",
+      "withholding": "Nódù yìí kọ̀ láti pèsè àwọn ìlà tí ó ní. `withholds_by_reason` ń dárúkọ ẹ̀ka tí ó kọ̀, `recent_withholds` sì ń dárúkọ ẹni tí a kọ̀ fún — nódù tí ó wà ní ìsinmi kò ròyìn ọ̀kankan nínú wọn."
+    },
+    "consent_sla": {
+      "none_overdue": "Gbogbo ìfagilé ìfọwọ́sí tí nódù yìí ṣèlérí láti gbé lọ wà nínú fèrèsé SLA rẹ̀.",
+      "unreadable": "A kò lè ka àkójọ-ìdúró consent-SLA. Èyí KÌ Í ṢE 'kò sí ohun tí ó ti pẹ́'.",
+      "overdue": "Nódù yìí ti PẸ́ ní gbígbé àwọn ìfagilé ìfọwọ́sí tí ó ṣèlérí lọ. Àwọn attestation id àpẹẹrẹ tí ó wà ní ẹ̀gbẹ́ rẹ̀ ni ohun tí a fi ń mú ipò yìí kúrò."
+    },
+    "drill": {
+      "green": "Gbòǹgbò ìgbẹ́kẹ̀lé nódù yìí fi hàn pé kill switch rẹ̀ ń ṣiṣẹ́ láàrin ọjọ́ 90 sẹ́yìn.",
+      "yellow": "Ìgbà tí ó gbẹ̀yìn tí gbòǹgbò ìgbẹ́kẹ̀lé nódù yìí fi hàn pé kill switch rẹ̀ ń ṣiṣẹ́ wà láàrin ọjọ́ 90 sí 180 sẹ́yìn.",
+      "never_drilled": "Gbòǹgbò ìgbẹ́kẹ̀lé nódù yìí KÒ TÍ Ì fi hàn rí pé kill switch rẹ̀ ń ṣiṣẹ́. Ó wà ní ìhà pupa kan náà pẹ̀lú gbòǹgbò tí a ti kọ̀ sílẹ̀ pẹ́, àìsí àkókò ìdánrawò tí ó gbẹ̀yìn ní ẹ̀gbẹ́ rẹ̀ sì ni ìyàtọ̀ náà. Gbòǹgbò náà ṣì ń sìn: ìtuntun ìdánrawò jẹ́ àmì ìgbẹ́kẹ̀lé, kì í ṣe ẹnu-ọ̀nà ìdíwọ̀ láé.",
+      "no_root_walked": "A kò rìn gbòǹgbò ìgbẹ́kẹ̀lé kankan, nítorí náà kò sí ohun tí a lè sọ pé kò ní ìdánrawò. Èyí kì í ṣe ìdánrawò tí ó ti pẹ́ — kò sí ẹni tí a bá ń dánrawò rárá.",
+      "stale": "Ìgbà tí ó gbẹ̀yìn tí gbòǹgbò ìgbẹ́kẹ̀lé nódù yìí fi hàn pé kill switch rẹ̀ ń ṣiṣẹ́ ti ju ọjọ́ 180 lọ. Ó ṣì ń sìn: ìtuntun ìdánrawò jẹ́ àmì ìgbẹ́kẹ̀lé, kì í ṣe ẹnu-ọ̀nà ìdíwọ̀ láé."
+    },
+    "headline": {
+      "green": "Gbogbo àmì tí nódù yìí lè ṣírò ń fi ìlera hàn.",
+      "yellow": "Nódù yìí ń sìn, ohun kan síbẹ̀ sì tọ́ sí àyẹ̀wò.",
+      "red": "Ó kéré tán, àmì kan ń fi àìlera hàn. Ka àkójọ àwọn tí a kò mọ̀ pẹ̀lú: àkọlé pupa ga ju èyí tí a kò mọ̀ lọ, ó sì lè fi ọ̀kan pamọ́ sẹ́yìn rẹ̀ bí bẹ́ẹ̀ kọ́.",
+      "unknown": "A kò lè ṣírò àmì kan tàbí jù bẹ́ẹ̀ lọ. Ka àkójọ àwọn tí a kò mọ̀ — àmì tí a kò ṣírò kì í ṣe àmì tí ó ní ìlera."
+    },
+    "ingest": {
+      "background": "Àwọn ìkọ̀ wà ṣùgbọ́n wọn kò tẹ̀síwájú láti ọ̀dọ̀ àkójọ ìdánimọ̀ tí ó dúró ṣinṣin: àwọn ìwádìí lásán, àwọn client tí ó ti pẹ́, àti ìyípadà. Ka `distinct_signers` àti `unattributed_in_window` kí o tó gbàgbé rẹ̀ — ìwọ̀n GÍGA tí ó tàn ká àkójọ ìdánimọ̀ TÍ Ó GBÒÒRÒ jẹ́ ìwádìí, ìwọ̀n GÍGA tí kò sì dárúkọ ẹnikẹ́ni fẹ́rẹ̀ẹ́ jẹ́ ọkọ̀-ìsọfúnni tí ó bàjẹ́ pẹ̀lú client tí ó ti pẹ́ tí ó dàpọ̀ mọ́ ọn. Kò sí ọ̀kan nínú wọn tí í ṣe ìyípadà lásán, kò sì sí ọ̀kan tí ó ní olùpèsè kan ṣoṣo tí a lè lọ tún ṣe, ìdí nìyẹn tí wọ́n fi ń kà síbí dípò gẹ́gẹ́ bí olùpèsè tí ó dí.",
+      "clean": "A gbé àwọn ìdì wá sí ọ̀nà ìgbàwọlé HTTP, a kò sì kọ ọ̀kankan nínú fèrèsé náà. `refused_total` ní ẹ̀gbẹ́ rẹ̀ jẹ́ iye gbogbo ìlànà náà: fèrèsé mímọ́ lórí ìlànà tí ó kọ̀ tẹ́lẹ̀ jẹ́ ìmúpadàbọ̀sípò, kì í ṣe àìsí.",
+      "http_path_only": "Ìkàwé yìí kan ọ̀nà ìgbàwọlé HTTP nìkan. Ìdì tí ó dé nípasẹ̀ relay Reticulum ni ẹnu-ọ̀nà persist kan náà ń fọwọ́sí, ṣùgbọ́n a kò kà á síbí, nítorí náà ìkàwé ìgbàwọlé tí ó mọ́ kì í ṣe ìtẹnumọ́ nípa gbogbo ọ̀nà tí a lè gbà gbé trace wá sí nódù yìí.",
+      "not_exercised": "A kò gbé ohunkóhun wá sí ọ̀nà ìgbàwọlé HTTP lórí ìlànà yìí — a kò gba ìdì kankan, a kò sì kọ ọ̀kankan. Òdo náà jẹ́ èyí tí a kò dánwò, kì í ṣe èyí tí ó mọ́.",
+      "stuck_producer": "Ìwọ̀n ìkọ̀ tí Ó TẸ̀SÍWÁJÚ láti ọ̀dọ̀ àkójọ àwọn olùfọwọ́sí TÍ Ó KÉRÉ, TÍ Ó SÌ DÚRÓ ṢINṢIN: olùpèsè kan ti dí nínú ìyípo ìgbìyànjú-àtúnṣe, kò sì lè tún ara rẹ̀ ṣe. Gbogbo ìkọ̀ wọ̀nyí tọ̀nà — ẹnu-ọ̀nà náà ń ṣiṣẹ́ — ìdí gan-an nìyẹn tí àpapọ̀ fi nílò ìkàwé tirẹ̀. `top_signers` ń dárúkọ ẹni tí a gbọ́dọ̀ lọ tún ṣe.",
+      "unattributed": "A kọ àwọn ìdì, KÒ SÌ SÍ Ọ̀KAN nínú wọn tí ó dárúkọ olùfọwọ́sí: wọ́n kùnà kí ìdánimọ̀ tí a lè kọ sílẹ̀ tó wà — àwọn báìtì tí ó bàjẹ́, ìfọwọ́sí tí kò tọ́, ẹ̀yà schema tí a kò tì lẹ́yìn. Kò sí olùpèsè tí a lè pè, a sì mọ̀ọ́mọ̀ kọ̀ láti ròyìn èyí gẹ́gẹ́ bí olùpèsè tí ó dí: òdo olùfọwọ́sí ọ̀tọ̀ọ̀tọ̀ kì í ṣe àkójọ ìdánimọ̀ kékeré tí ó dúró ṣinṣin.",
+      "unreadable": "A kò lè ka ìwé-ìkọ̀ ìgbàwọlé ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó kọ̀. Èyí KÌ Í ṢE 'a kò kọ ohunkóhun' — 'a kò lè béèrè' ni."
+    },
+    "key_statements": {
+      "stands": "Kò sí ìfagilé tí nódù yìí ní tí ó bo ìtẹnumọ́ tí a bá ṣe ní àkókò yìí gan-an.",
+      "suspect_after_bound": "Ìfagilé tí ó ní ÀÀLÀ ìtàn bo ìtẹnumọ́ tí a ṣe ní àkókò yìí gan-an: a ti mú kọ́kọ́rọ́ yìí kúrò nínú ìgbàwọlé láti ìsinsìnyí, ṣùgbọ́n ìtàn òtítọ́ rẹ̀ ṣì dúró. Ààlà yẹn sàn ju ìfagilé tí kò ní ààlà lọ ní tòótọ́, a kò sì gbọ́dọ̀ kà wọ́n bákan náà.",
+      "suspect_unbounded": "Ìfagilé TÍ KÒ NÍ ÀÀLÀ bo kọ́kọ́rọ́ yìí, nítorí náà gbogbo ohun tí ó sọ rí wà nínú iyèméjì — ìfagilé náà kọ̀ láti sọ bí bẹ́ẹ̀ kọ́.",
+      "unreadable": "A kò lè ṣírò ipò kọ́kọ́rọ́ nódù yìí. Èyí KÌ Í ṢE 'ó dúró' — ìbéèrè tí a kò bèèrè kò ní ìdáhùn."
+    },
+    "peer_quota": {
+      "clean": "A ti lo èèwọ̀n ìkọ̀wé-ẹlẹ́gbẹ́, ìṣirò ìkọ̀-ààyè rẹ̀ sì ṣì dúró.",
+      "denials": "Èèwọ̀n ìkọ̀wé-ẹlẹ́gbẹ́ kọ àwọn ìkọ̀-ààyè sílẹ̀. Ìṣírò ààlà àwọn ẹlẹ́gbẹ́ tí a ń tọpa kò dúró mọ́ nínú ìkọ́ yìí.",
+      "no_quota": "Backend yìí kò ní èèwọ̀n ìkọ̀wé-ẹlẹ́gbẹ́ kankan, nítorí náà okùn-ìkìlọ̀ kò ròyìn ohunkóhun. Èyí KÌ Í ṢE ìkàwé tí ó mọ́.",
+      "not_exercised": "A kò kọ ìkọ̀wé ẹlẹ́gbẹ́ kankan sí èèwọ̀n náà lórí ìlànà yìí, nítorí náà òdo rẹ̀ jẹ́ èyí tí a kò dánwò dípò èyí tí ó mọ́."
+    },
+    "quarantine": {
+      "not_quarantined": "Kò sí àmì ìyàsọ́tọ̀ nípa kọ́kọ́rọ́ nódù yìí tí ó ti wọlé ṣiṣẹ́ níbí rí.",
+      "unreadable": "A kò lè ka ipò ìyàsọ́tọ̀. Èyí KÌ Í ṢE 'kò sí nínú ìyàsọ́tọ̀'.",
+      "withheld": "Àmì ìyàsọ́tọ̀ kan ti dá kọ́kọ́rọ́ nódù yìí dúró kúrò nínú ìpèsè.",
+      "released": "A dá kọ́kọ́rọ́ nódù yìí dúró, lẹ́yìn náà a tú u sílẹ̀. Ó ń sìn báyìí, ṣùgbọ́n kì í ṣe nígbà gbogbo — òtítọ́ mìíràn ni èyí, kì í ṣe pé a kò dá a dúró rí."
+    },
+    "receive": {
+      "clean": "A kò kọ ìlà kankan tí ẹlẹ́gbẹ́ gbé wá lórí ìlànà yìí.",
+      "no_accepted_counter": "Ìpìlẹ̀ náà ń ka àwọn ÌKỌ̀ ìfilélẹ̀, kì í ṣe àwọn ìfilélẹ̀ tí a gbà. Nítorí náà ìkàwé tí ó mọ́ kò lè ya 'a fi gbogbo ohun tí a gbé wá lélẹ̀' sọ́tọ̀ kúrò nínú 'a kò gbé ohunkóhun wá' — ka `rounds_total` àti ojú-ìṣàkóso ẹlẹ́gbẹ́ náà fúnra rẹ̀ láti mọ ìyàtọ̀ wọn.",
+      "not_exercised": "Kò sí ìyípo àdàkọ tí ó ti parí lórí ìlànà yìí, nítorí náà a kò gbé ohunkóhun wá sí ọ̀nà ìfilélẹ̀ nódù yìí. Òdo náà jẹ́ èyí tí a kò dánwò, kì í ṣe èyí tí ó mọ́.",
+      "refusing": "Nódù yìí kọ àwọn ìlà tí àwọn ẹlẹ́gbẹ́ rẹ̀ gbé wá. `apply_refusals_by_kind` ń dárúkọ pẹpẹ náà; `key_apply_refusals_by_reason` ń dárúkọ àmì-òfin tí ó kọ kọ́kọ́rọ́ kan.",
+      "unreadable": "A kò lè ka àwọn ìkànnì-ìkà ìfilélẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó gbà. Èyí KÌ Í ṢE 'a kò kọ ohunkóhun' — 'a kò lè béèrè' ni."
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "A kò lè ka àwọn ìkànnì-ìkà ìgbékalẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó ṣàpèjúwe ohun tí ó pèsè, ohun tí ó dá dúró, tàbí ohun tí ó kọ̀ láti fi lélẹ̀."
+      },
+      "ingest_refusals": {
+        "unavailable": "A kò lè ka ìwé-ìkọ̀ ìgbàwọlé ti nódù yìí, nítorí náà kò sí ohun níbí tí ó ṣàpèjúwe ohun tí ẹnu-ọ̀nà ìgbàwọlé kọ̀. Ẹnu-ọ̀nà tí kò ní olùkàwé ni ó fà á tí ìkọ̀ 8,631 tí ó tọ̀nà lójúmọ́ fi ń ṣẹlẹ̀ láìsí ẹni tí ó kíyèsí fún wákàtí 71."
+      },
+      "node_state": {
+        "unavailable": "A kò lè ka àwọn àmì ipò nódù yìí láti inú ìpìlẹ̀, nítorí náà kò sí ohun níbí tí ó ṣàpèjúwe gbòǹgbò ìgbẹ́kẹ̀lé rẹ̀, ipò kọ́kọ́rọ́ rẹ̀, ìyàsọ́tọ̀, consent SLA tàbí èèwọ̀n ẹlẹ́gbẹ́ rẹ̀. Àìsí ìròyìn burúkú láti orísun tí a kò kà kì í ṣe ìròyìn rere."
+      },
+      "trace_corpus": {
+        "unavailable": "A kò lè ka àkójọ trace ti nódù yìí, nítorí náà kò sí ohun níbí tí ó ṣàpèjúwe ohun tí ó ti gbà wọlé. Àìrí ìdé láti inú àkójọ tí a kò kà kì í ṣe àìsí ìdé."
+      }
+    },
+    "trace_plane": {
+      "dark": "KÒ SÍ OHUN TÍ A TI GBÀ WỌLÉ FÚN ÀKÓKÒ TÍ Ó GÙN JU ÀÀLÀ PUPA NÓDÙ YÌÍ LỌ. Ìdé ni ohun kan ṣoṣo tí nódù yìí wà fún. Ka ìkàwé `ingest` tí ó wà ní ẹ̀gbẹ́ rẹ̀: pẹpẹ tí ó ṣú pẹ̀lú ìwọ̀n ìkọ̀ tí ó tẹ̀síwájú túmọ̀ sí pé a ń kọ olùpèsè kan ní ọ̀nà tí ó tọ́, pẹpẹ tí ó ṣú láìsí ìkọ̀ kankan sì túmọ̀ sí pé kò sí ohun tí ó tilẹ̀ ń dé ọ̀dọ̀ nódù yìí.",
+      "future_dated": "Trace tí ó ṣẹ̀ṣẹ̀ jùlọ nínú àkójọ náà ní àmì àkókò ỌJỌ́ IWÁJÚ. Àmì àkókò náà jẹ́ agogo ìgbóhùnsáfẹ́fẹ́ ti olùpèsè fúnra rẹ̀, nítorí náà ìtẹnumọ́ nípa agogo yẹn ni èyí — a sì pè é jáde dípò kí a fi sínú ìhà, nítorí ìlà tí ó ní ọjọ́ iwájú yóò dì ìkàwé yìí mọ́ àwọ̀ ewé láìlópin, yóò sì fi pẹpẹ tí ó ti dúró ní tòótọ́ pamọ́.",
+      "live": "A gba trace kan wọlé láìpẹ́: pẹpẹ tí nódù yìí wà láti gbà lára rẹ̀ ń gba ìpèsè.",
+      "never_admitted": "A ka àkójọ náà, kò sì ní trace kankan rárá: kò sí ohun tí a ti gbà wọlé lórí nódù yìí rí. Kò sí àkókò ìdé tí a lè fi sínú ìhà, nítorí náà òdo tí a kò dánwò ni èyí, kì í ṣe òdo tí ó ní ìlera — lórí nódù tí ó ti ń sìn fún ìgbà díẹ̀, ipò kan náà ni pẹ̀lú pẹpẹ tí ó ṣú.",
+      "producer_asserted_ts": "`last_admitted_at` jẹ́ MAX(trace_events.ts) — agogo ìgbóhùnsáfẹ́fẹ́ ti trace náà fúnra rẹ̀, tí olùpèsè fi ìdí rẹ̀ múlẹ̀. Ìpìlẹ̀ náà kò tọ́jú àkókò ìgbàwọlé tí sáfà fúnra rẹ̀ gbé kalẹ̀ lórí tábìlì yìí, nítorí náà olùpèsè tí agogo rẹ̀ kò tọ́ yóò yí ìkàwé yìí padà; ìdí gan-an nìyẹn tí a fi ń pe ìlà ọjọ́-iwájú-jíjìnnà jáde gẹ́gẹ́ bí `future_dated` dípò fífi sínú ìhà.",
+      "quiet": "Kò sí trace tí a ti gbà wọlé fún àkókò tí ó gùn ju bí a ṣe retí lọ, ṣùgbọ́n kò tí ì gùn tó láti pe pẹpẹ náà ní èyí tí ó ṣú. Nódù tí ó wà ní ìsinmi ní tòótọ́ ń kà bí èyí; ìdajì àkọ́kọ́ ìdádúró olùpèsè pẹ̀lú.",
+      "unreadable": "A kò lè ka àkójọ trace ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó ti gbà wọlé. Èyí KÌ Í ṢE 'kò sí trace tí ó dé' — 'a kò lè béèrè' ni."
+    },
+    "trust_root": {
+      "no_self_key": "Ilé-ìtọ́jú náà kò kéde key id ti nódù yìí fúnra rẹ̀ rí, nítorí náà a kò lè rin ohunkóhun tí ó jẹ mọ́ ara rẹ̀. Ìtẹnumọ́ nípa olùkàwé ni èyí, kì í ṣe nípa nódù náà: kéde kọ́kọ́rọ́ náà nígbà ìbẹ̀rẹ̀, gbogbo àmì tí ó jẹ mọ́ ara rẹ̀ nísàlẹ̀ yóò sì di èyí tí a lè dáhùn.",
+      "no_trust_edges": "Nódù yìí kéde ara rẹ̀, kò sì ní etí ìgbẹ́kẹ̀lé tí ó wà láàyè sí gbòǹgbò kankan: kò ní gbòǹgbò rárá. Àìdára tí a mọ̀ ni èyí, kì í ṣe ìkàwé tí ó sọnù.",
+      "no_valid_root": "Nódù yìí gbẹ́kẹ̀lé gbòǹgbò kan tàbí jù bẹ́ẹ̀ lọ, kò sì sí ọ̀kan nínú wọn tí ó kọjá àyẹ̀wò. Ìdájọ́ ẹsẹ̀-kọ̀ọ̀kan tí ó wà ní ẹ̀gbẹ́ rẹ̀ ń dárúkọ ẹsẹ̀ tí ó kùnà.",
+      "unreadable": "A kò lè ka ìrìn gbòǹgbò-ìgbẹ́kẹ̀lé náà. Ìwé-ìtọ́ka tí a kò lè kà kì í ṣe èyí tí a kò gbẹ́kẹ̀lé — má ṣe kà á gẹ́gẹ́ bí nódù tí kò ní gbòǹgbò.",
+      "valid": "Nódù yìí gbin ara rẹ̀ sínú gbòǹgbò ìgbẹ́kẹ̀lé tí ó kọjá àyẹ̀wò ní kíkún: etí ìgbẹ́kẹ̀lé tí ó wà láàyè, àdéhùn-ìdásílẹ̀ tí ó kéde ara rẹ̀ pẹ̀lú ìlérí ìmúpadàbọ̀sípò, àti pé kò sí ìdádúró tí a tì mọ́."
+    },
+    "volatility": {
+      "clock_dependent_local": "A ń ṣírò ìhà yìí lórí NÓDÙ YÌÍ gan-an, láti inú àkókò tí a tọ́jú tí a fi wé agogo ìgbà kíkà, nítorí náà ó ń yí padà nípasẹ̀ àkókò tí ó ń kọjá nìkan — kò sí ìyípadà ipò, kò sí ìlà tuntun. Nódù tí ó dá gbígba trace wọlé dúró yóò rìn láti ewé sí àwọ̀-ọ̀wọ̀ sí pupa fúnra rẹ̀, ìyẹn sì ni kókó rẹ̀: ó di pupa láìsí ẹnikẹ́ni tí ó ní kí ó ṣe bẹ́ẹ̀.",
+      "process_local": "Àwọn ìkànnì-ìkà ìgbékalẹ̀, ìgbàlà àti ìgbàwọlé jẹ́ ti ìlànà kọ̀ọ̀kan, wọ́n sì ń kójọ láti ìgbà tí ìlànà yìí ti bẹ̀rẹ̀. Wọ́n ń padà sí òdo nígbà ìbẹ̀rẹ̀ tuntun, wọ́n yàtọ̀ láàrin àwọn ìlànà tí ń sìn nódù kan náà, a kò sì tọ́jú wọn níbìkíbi. Òṣùwọ̀n ìlànà yìí ni wọ́n, kì í ṣe ìwé-ìṣírò nódù yìí."
+    },
+    "withhold_class": {
+      "fault": "Ìkàwé kan tàbí ìgbésẹ̀ ìsopọ̀ kan kùnà, ọ̀nà ìpèsè sì sé pa nígbà tí ó kùnà. Èyí KÌ Í ṢE ìdájọ́ nípa ẹlẹ́gbẹ́ náà — àṣìṣe nódù yìí ni, ó sì yẹ kí a tún un ṣe níbí.",
+      "integrity": "Ìlà kan tí nódù yìí ní ni a kò lè pèsè rárá: kò ṣeé ṣe sírí, hash tí a tọ́jú rẹ̀ kò ṣeé túmọ̀, tàbí àwọn báìtì tí a polówó kò ṣeé mú wá. Àbùkù nínú ipò àdúgbò ni èyí, kì í ṣe òfin.",
+      "policy": "Ìpinnu tí nódù yìí ṣe mọ̀ọ́mọ̀ — ààlà ìfọwọ́sí, agbára ìpèsè tí ẹlẹ́gbẹ́ náà kò ní, tàbí ìdíwọ̀ ti olùpèsè fúnra rẹ̀. Ó ń ṣiṣẹ́ gẹ́gẹ́ bí a ṣe ṣètò rẹ̀: yí ètò náà padà, kì í ṣe koodu."
     }
   }
 }

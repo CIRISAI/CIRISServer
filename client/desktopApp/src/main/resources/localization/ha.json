@@ -3240,6 +3240,12 @@
       "elsewhere": "Babu wani madauki a cikin wannan siga da yake karanta wannan maɓalli: mai amfani da shi yana cikin wani sashe na daban. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai a kan wannan kumburi.",
       "unreachable": "Mai amfani da wannan maɓalli yana gudana a cikin wannan tsari, amma babu abin da ke kai masa ƙima daga wannan filin: sashen da ke mallakar wannan saitin yana ɗaukar ƙimarsa sau ɗaya kaɗai lokacin da aka kafa madaukin, kuma daga baya ba ya ba da hanyar sauya ta. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai ko'ina.",
       "unbuilt": "Ba a gina mai amfani da wannan maɓalli ko'ina ba tukuna. Layin da aka sa a nan ana karbarsa kuma ana hada shi, amma ba ya sauya komai."
+    },
+    "refusal": {
+      "authority_not_a_delegation": "ID ɗin wakilcin da aka ambata ba layin delegates_to ba ne.",
+      "not_owner": "Fuskar saitin mesh tana buƙatar matsayin mai shi (SYSTEM_ADMIN).",
+      "session_absent": "Ba a gabatar da alamar zama ba. Fuskar saitin mesh ta mai shi ce kaɗai.",
+      "session_invalid": "Wannan zaman ba shi da inganci ko kuma ya ƙare."
     }
   },
   "commons_surface": {
@@ -3254,8 +3260,7 @@
     "escalation": {
       "awaiting": "Masu kula da aka naɗa na iya amsawa tukuna, ko kuma sun riga sun yanke hukunci cikin lokaci. Ɗaukakawa ba ta buɗe ba.",
       "not_adopted": "Wannan al'umma ba ta ayyana matakin masu kula ba, don haka babu wa'adin masu kula kuma babu ɗaukakawa. Shiru ba ya canza komai a nan.",
-      "nothing_to_escalate": "An ayyana matakin masu kula kuma babu wani ƙorafi mai rai da ke jiransa. Ba wanda ya yi shiru, domin ba a tambayi kome ba.",
-      "open": "Masu riƙe da hakki ba su amsa cikin lokaci ba, kuma hukuncin ya koma ga waɗanda suka amsa. Yanzu ƙofar tana ƙidaya MASU AMSAWA maimakon dukan jerin membobi — wannan shi ne abin da ke sa al'umma mai natsuwa ta iya warware batu duk da haka — tare da gindi domin ‘mai yiwuwar kaiwa’ kada ya taɓa lalacewa zuwa ‘mutum ɗaya ne ke yanke shawara’."
+      "nothing_to_escalate": "An ayyana matakin masu kula kuma babu wani ƙorafi mai rai da ke jiransa. Ba wanda ya yi shiru, domin ba a tambayi kome ba."
     },
     "objection": {
       "admitted": "An rubuta ƙorafin. ALAMA ce, ba umarni ba: babu abin da ya sauya saboda zuwansa, kuma yana yaɗuwa a filin tabbatarwa na yau da kullum, don haka takwaran da aka raba shi da hanyar sadarwa a lokacin tagar zai ƙidaya shi sa'ad da ya iso gare shi. Memba ɗaya ya isa ya ɗaga shi; ɗage shi kuwa yana kashe ƙofar ƙungiyar da kanta."
@@ -3267,27 +3272,19 @@
       "upheld": "Waɗanda suka amsa sun yanke hukuncin cewa wannan ƙorafi ya tsaya."
     },
     "refusal": {
-      "action_absent": "Dole ne a ambaci aiki. Ƙorafi yana ambaton layi ne a filin gama-gari; wanda bai ambaci kome ba, ba za a taɓa ƙidaya shi ba.",
-      "action_unknown": "Wannan kumburi bai riƙe irin wannan aiki ba, don haka layin da ya ambace shi za a shigar da shi inda babu naɗin da zai taɓa ƙidaya shi.",
       "actor_recused": "Marubucin aikin ba ya kaɗa kuri'a a kan ƙorafin da aka yi wa aikinsa.",
       "bad_now": "Lokacin karatu dole ne ya zama alamar lokaci ta RFC 3339.",
       "ballot_predates_action": "Hukunci ba zai iya girmi abin da yake hukunta ba.",
       "canonicalize_failed": "Ba a iya samar da baitocin canonical na layin ba, don haka babu abin da abokin sa hannu zai sa wa hannu.",
-      "cohort_absent": "Dole ne a ambaci ƙungiya: ita ce ke yanke wanne jerin membobi da wace sanarwa ce ke mulkin ƙidaya.",
-      "cohort_not_a_commons": "Ƙungiyar kai (self) ba ta da jerin membobi da za a yi ƙididdigar yanke shawara a kansa — membobinta na'urorin asali guda ɗaya ne — don haka ba ta da filin gama-gari da za a yi wa sa ido.",
       "cohort_unknown": "Wannan ƙungiya ba ta warware a wannan kumburi ba, don haka babu jerin membobi kuma babu sanarwa da za a yi hukunci da ita. Dole ne iko ya fito daga yanayin gida da aka tabbatar.",
       "cohort_unrecognized": "Wannan ba ƙungiya ce mai jerin membobi ba. Ƙorafe-ƙorafe suna zama ne a cikin iyali, a cikin al'umma ko a cikin ƙungiyar haɗin kai.",
       "dimension_mismatch": "An gabatar da wannan layi a ƙofar da ba ta dace da abin da yake ɗauke da shi ba.",
       "dismissal_quorum_short": "Membobin jerin da aka tabbatar kuma suka bambanta waɗanda suka sa hannu tare sun yi ƙasa da abin da ƙofar ƙungiyar ke buƙata. Adadin da aka ƙidaya da wanda ake buƙata suna gefen wannan saƙo.",
       "duplicate_objection": "Kuna riƙe da ƙorafi mai rai a kan wannan aiki tuni. Memba ɗaya ƙorafi ɗaya — in ba haka ba, memba guda zai iya kai ƙofa shi kaɗai.",
-      "grounds_absent": "Ana buƙatar dalilai. Ƙorafin da aka ɗaga ba tare da dalilin da aka rubuta ba, ba shi da bambanci da wanda aka ɗaga bisa mummunan dalili — kuma ana rubuta dalilai ne kawai, ba a taɓa fassara su ba.",
       "malformed_envelope": "Layin ya rasa madogarar da ƙidaya ke buƙata.",
-      "node_unowned": "Wannan kumburi ba shi da wanda ke da alhakinsa, don haka ba ya karatu kuma ba ya magana a filin gama-gari na kowa a madadinsa. Ku nemi mallaka tukuna.",
       "not_a_cohort_member": "Memba na wannan ƙungiya kaɗai ne zai iya magana a filin gama-garinta. Wannan ita ce kaɗai gwajin da ɓangaren kariya ke yi — kuma ita ce dalilin da ya sa ƙorafin baƙo ba ya taɓa zama alamar da wasu za su girmama.",
       "not_filed_against_actor": "An shigar da layin inda naɗi ba ya nemansa, don haka za a ajiye shi, mai dorewa kuma marar aiki har abada. Alamar da ba wanda zai iya samu, ba alama ba ce.",
       "not_governed": "Wannan al'umma ba ta ayyana wata ka'idar ƙididdigar yanke shawara ta juyawa (reverse-quorum) ba, don haka ba ta ɗauki filin ƙorafi ba. An ƙi maimakon a koma ga tsoho: ƙirƙira taga da ƙofa wa ƙungiyar da ba ta ayyana ko ɗaya daga cikinsu ba ya fi muni fiye da a ce a'a.",
-      "not_owner": "Fuskar filin gama-gari tana buƙatar matsayin mai shi.",
-      "objection_absent": "Dole ne a ambaci ƙorafi: kuri'a da kawarwa kowanne yana amsa wa guda ɗaya kacal.",
       "objection_unknown": "Ƙorafin da aka ambata ba ɗaya daga cikin waɗanda wannan kumburi ke riƙe da su a kan wannan aiki ba ne.",
       "session_absent": "Ba a gabatar da token na zaman ba. Fuskar filin gama-gari ta mai shi kaɗai ce.",
       "session_invalid": "Wannan zaman ba shi da inganci ko kuma ya ƙare.",
@@ -3299,7 +3296,6 @@
     },
     "standing": {
       "action_unknown": "Wannan kumburi bai riƙe irin wannan aiki ba. Ƙorafi yana ambaton layi ne, kuma babu layin da za a ambata a nan.",
-      "cohort_unknown": "Wannan ƙungiya ba ta warware a wannan kumburi ba, don haka ba ta da jerin membobi kuma ba ta da sanarwa da wannan kumburi zai iya karantawa.",
       "not_governed": "Wannan al'umma ba ta ayyana wata ka'idar ƙididdigar yanke shawara ta juyawa (reverse-quorum) ba, don haka filin ƙorafi bai shafi filin gama-garinta ko kaɗan ba. Wannan ya bambanta da cewa ba wanda ya yi ƙorafi.",
       "objected": "Aƙalla memba ɗaya ya yi ƙorafi kuma tagar na nan a buɗe. Aikin yana tsaye a yanzu; ƙorafi ɗaya kuma na iya zama duk abin da ake buƙata.",
       "quiet": "An karanta filin kuma ba a ɗaga wani ƙorafi a kan wannan aiki ba.",
@@ -3315,5 +3311,45 @@
       "silent": "Wa'adin ya wuce ba tare da an yanke wani hukunci ta kowane ɓangare ba.",
       "upheld": "Masu kula da aka naɗa sun yanke hukunci, cikin lokaci, cewa wannan ƙorafi ya tsaya. Mutane da aka ambaci sunayensu ne suka yanke hukuncin wannan batu, kuma an rubuta shi."
     }
+  },
+  "operator": {
+    "carriage": {
+      "moving": "Wannan kumburi ya bayar da layuka ga abokansa kuma bai hana ko ɗaya ba."
+    },
+    "consent_sla": {
+      "none_overdue": "Duk sokewar izinin da wannan kumburi ya yi alkawarin ɗaukakawa tana cikin tazarar SLA ɗinta.",
+      "unreadable": "Ba a iya karanta jerin jinkirin SLA na izini ba. Wannan ba «babu abin da ya makara» ba ne."
+    },
+    "drill": {
+      "green": "Tushen amincewar wannan kumburi ya tabbatar da maɓallin kashewarsa cikin kwanaki 90 da suka gabata.",
+      "yellow": "Tushen amincewar wannan kumburi ya tabbatar da maɓallin kashewarsa a ƙarshe tsakanin kwanaki 90 zuwa 180 da suka wuce."
+    },
+    "headline": {
+      "green": "Duk alamar da wannan kumburi zai iya lissafawa tana karantuwa lafiyayye.",
+      "yellow": "Wannan kumburi yana bautarwa, kuma akwai wani abu a nan da ya cancanci a duba."
+    },
+    "ingest": {},
+    "key_statements": {
+      "stands": "Babu wata sokewa da wannan kumburi yake da ita da ta shafi maganar da aka faɗa a yanzu."
+    },
+    "peer_quota": {},
+    "quarantine": {
+      "not_quarantined": "Babu alamar keɓewa game da maɓallin wannan kumburi da ta taɓa yin aiki a nan.",
+      "unreadable": "Ba a iya karanta yanayin keɓewa ba. Wannan ba «ba a keɓe ba» ba ne.",
+      "withheld": "An hana maɓallin wannan kumburi daga bautarwa ta hanyar alamar keɓewa."
+    },
+    "receive": {
+      "clean": "Babu layin da abokin ya gabatar da aka ƙi a kan wannan process."
+    },
+    "source": {
+      "edge_metrics": {},
+      "ingest_refusals": {},
+      "node_state": {},
+      "trace_corpus": {}
+    },
+    "trace_plane": {},
+    "trust_root": {},
+    "volatility": {},
+    "withhold_class": {}
   }
 }

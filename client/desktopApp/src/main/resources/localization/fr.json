@@ -3240,6 +3240,12 @@
       "elsewhere": "Aucune boucle de cette version ne lit cette clé : son consommateur réside dans un autre composant. Une ligne posée ici est admise et repliée, et ne change rien sur ce nœud.",
       "unreachable": "Le consommateur de cette clé s'exécute dans ce processus, mais rien n'y achemine de valeur depuis ce plan : le composant qui détient ce réglage en prend la valeur une seule fois, au moment où la boucle est composée, et n'offre ensuite aucun moyen de la changer. Une ligne posée ici est admise et repliée, et ne change rien nulle part.",
       "unbuilt": "Le consommateur de cette clé n'a encore été construit nulle part. Une ligne posée ici est admise et repliée, et ne change rien."
+    },
+    "refusal": {
+      "authority_not_a_delegation": "L'id de délégation nommé n'est pas une ligne delegates_to.",
+      "not_owner": "La surface de configuration du maillage exige le rôle de propriétaire (SYSTEM_ADMIN).",
+      "session_absent": "Aucun jeton de session n'a été présenté. La surface de configuration du maillage est réservée au propriétaire.",
+      "session_invalid": "Cette session est invalide ou expirée."
     }
   },
   "commons_surface": {
@@ -3254,8 +3260,7 @@
     "escalation": {
       "awaiting": "Les modérateurs désignés peuvent encore répondre, ou ils ont déjà tranché dans les délais. L'escalade ne s'est pas ouverte.",
       "not_adopted": "Cette communauté n'a déclaré aucun palier d'intendance : il n'y a donc ni délai de modération ni escalade. Le silence ne change rien ici.",
-      "nothing_to_escalate": "Un palier d'intendance est déclaré et aucune objection vivante n'est en attente devant lui. Personne n'a gardé le silence, car rien n'a été demandé.",
-      "open": "Les titulaires du devoir n'ont pas répondu à temps, et la décision est passée à ceux qui l'ont fait. Le seuil compte désormais les RÉPONDANTS plutôt que l'ensemble de la liste des membres — c'est ce qui permet à une communauté silencieuse de trancher malgré tout — avec un plancher, pour que « joignable » ne dégénère jamais en « une seule personne décide »."
+      "nothing_to_escalate": "Un palier d'intendance est déclaré et aucune objection vivante n'est en attente devant lui. Personne n'a gardé le silence, car rien n'a été demandé."
     },
     "objection": {
       "admitted": "L'objection est consignée. C'est un MARQUEUR, pas une commande : son arrivée n'a rien changé, et elle se réplique sur le plan d'attestation ordinaire, de sorte qu'un pair partitionné pendant la fenêtre la compte quand même à son arrivée. Un seul membre suffit à la soulever ; l'écarter coûte le seuil propre à la cohorte."
@@ -3267,27 +3272,19 @@
       "upheld": "Ceux qui ont répondu ont jugé que cette objection tient."
     },
     "refusal": {
-      "action_absent": "Une action doit être nommée. Une objection désigne une ligne du bien commun ; celle qui ne désigne rien ne pourra jamais être comptée.",
-      "action_unknown": "Ce nœud ne détient aucune action de ce type : une ligne la désignant serait déposée là où aucun repli ne la comptera jamais.",
       "actor_recused": "L'auteur de l'action ne vote pas sur l'objection visant son propre acte.",
       "bad_now": "L'instant de lecture doit être un horodatage RFC 3339.",
       "ballot_predates_action": "Un jugement ne peut pas être antérieur à ce qu'il juge.",
       "canonicalize_failed": "Les octets canoniques de la ligne n'ont pas pu être produits : il n'y a donc rien qu'un co-signataire puisse signer.",
-      "cohort_absent": "Une cohorte doit être nommée : c'est elle qui détermine quelle liste de membres et quelle déclaration régissent le décompte.",
-      "cohort_not_a_commons": "La cohorte « soi » n'a aucune liste de membres sur laquelle former un quorum — ses membres sont les appareils d'une seule et même identité — elle n'a donc aucun bien commun à policer.",
       "cohort_unknown": "Cette cohorte ne se résout pas sur ce nœud : il n'existe donc ni liste de membres ni déclaration permettant d'en juger. L'autorité doit provenir de l'état local vérifié.",
       "cohort_unrecognized": "Ce n'est pas une cohorte dotée d'une liste de membres. Les objections vivent dans une famille, une communauté ou un groupe d'affiliations.",
       "dimension_mismatch": "Cette ligne a été présentée à la mauvaise porte pour ce qu'elle transporte.",
       "dismissal_quorum_short": "Moins de membres vérifiés et distincts de la liste ont cosigné que ne l'exige le seuil de la cohorte. Le nombre compté et le nombre requis figurent à côté de ce message.",
       "duplicate_objection": "Vous détenez déjà une objection vivante contre cette action. Un membre vaut une objection — sinon un seul membre pourrait atteindre le seuil à lui seul.",
-      "grounds_absent": "Des motifs sont requis. Une objection soulevée sans raison consignée est indiscernable d'une objection soulevée pour une mauvaise raison — et les motifs sont consignés, jamais interprétés.",
       "malformed_envelope": "Il manque à la ligne une référence dont le décompte a besoin.",
-      "node_unowned": "Ce nœud n'a aucun responsable : il ne lit ni ne parle dans le bien commun de quiconque en son nom. Revendiquez-en d'abord la propriété.",
       "not_a_cohort_member": "Seul un membre de cette cohorte peut s'exprimer dans son bien commun. C'est le seul test qu'applique le côté protecteur — et la raison pour laquelle l'objection d'un inconnu ne devient jamais un marqueur que d'autres pourraient honorer.",
       "not_filed_against_actor": "La ligne est déposée là où le repli ne la cherche pas : elle serait stockée, durable et définitivement inerte. Un marqueur que personne ne peut trouver n'est pas un marqueur.",
       "not_governed": "Cette communauté ne déclare aucune politique de quorum inverse : elle n'a donc pas adopté le plan des objections. Refusé plutôt que réglé par défaut : inventer une fenêtre et un seuil pour un groupe qui n'a déclaré ni l'une ni l'autre est pire que de dire non.",
-      "not_owner": "La surface du bien commun exige le rôle de propriétaire.",
-      "objection_absent": "Une objection doit être nommée : un bulletin comme un rejet répondent chacun d'exactement une objection.",
       "objection_unknown": "L'objection nommée n'est pas une objection que ce nœud détient contre cette action.",
       "session_absent": "Aucun jeton de session n'a été présenté. La surface du bien commun est réservée au propriétaire.",
       "session_invalid": "Cette session est invalide ou expirée.",
@@ -3299,7 +3296,6 @@
     },
     "standing": {
       "action_unknown": "Ce nœud ne détient aucune action de ce type. Une objection désigne une ligne, et il n'y a ici aucune ligne à désigner.",
-      "cohort_unknown": "Cette cohorte ne se résout pas sur ce nœud : elle n'a donc ni liste de membres ni déclaration que ce nœud puisse lire.",
       "not_governed": "Cette communauté ne déclare aucune politique de quorum inverse : le plan des objections ne s'applique donc pas du tout à son bien commun. C'est différent du cas où personne n'aurait objecté.",
       "objected": "Au moins un membre a objecté et la fenêtre est encore ouverte. L'action tient pour l'instant ; une objection de plus pourrait suffire.",
       "quiet": "Le plan a été lu et aucune objection n'a été soulevée contre cette action.",
@@ -3315,5 +3311,45 @@
       "silent": "Le délai est passé sans décision dans un sens ni dans l'autre.",
       "upheld": "Les modérateurs désignés ont jugé, dans les délais, que cette objection tient. L'affaire a été tranchée par des personnes nommées, et cela est consigné."
     }
+  },
+  "operator": {
+    "carriage": {
+      "moving": "Ce nœud a servi des lignes à ses pairs et n'en a retenu aucune."
+    },
+    "consent_sla": {
+      "none_overdue": "Chaque révocation de consentement que ce nœud a promis de promouvoir est dans sa fenêtre de SLA.",
+      "unreadable": "L'arriéré du SLA de consentement n'a pas pu être lu. Ce n'est pas « rien en retard »."
+    },
+    "drill": {
+      "green": "La racine de confiance de ce nœud a éprouvé son coupe-circuit au cours des 90 derniers jours.",
+      "yellow": "La racine de confiance de ce nœud a éprouvé son coupe-circuit pour la dernière fois il y a entre 90 et 180 jours."
+    },
+    "headline": {
+      "green": "Tout signal que ce nœud sait calculer se lit sain.",
+      "yellow": "Ce nœud sert, et quelque chose ici mérite un coup d'œil."
+    },
+    "ingest": {},
+    "key_statements": {
+      "stands": "Aucune révocation détenue par ce nœud ne couvre une déclaration faite à l'instant."
+    },
+    "peer_quota": {},
+    "quarantine": {
+      "not_quarantined": "Aucun marqueur de quarantaine visant la clé de ce nœud n'a jamais pris effet ici.",
+      "unreadable": "L'état de quarantaine n'a pas pu être lu. Ce n'est pas « pas de quarantaine ».",
+      "withheld": "La clé de ce nœud est retenue du service par un marqueur de quarantaine."
+    },
+    "receive": {
+      "clean": "Aucune ligne proposée par un pair n'a été refusée sur ce processus."
+    },
+    "source": {
+      "edge_metrics": {},
+      "ingest_refusals": {},
+      "node_state": {},
+      "trace_corpus": {}
+    },
+    "trace_plane": {},
+    "trust_root": {},
+    "volatility": {},
+    "withhold_class": {}
   }
 }

@@ -705,7 +705,8 @@ _FIXTURE_EN = {
     "_meta": {"translator": "fixture"},
     "app_name": "CIRIS",
     "mobile": {"greeting": "Hello {name}", "count": "%d items"},
-    "nav": {"home": "Home"},
+    # Must equal _FIXTURE_RS's emitted text — `server-id-text` compares them.
+    "nav": {"home": "Home, the operator landing surface."},
 }
 _FIXTURE_DE = {
     "_meta": {"translator": "fixture"},
@@ -889,8 +890,19 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         """Zero denominator on the server side: the scan finds no emission sites."""
         shutil.rmtree(root / SERVER_SRC)
 
+    def server_id_text_truncated(root: Path) -> None:
+        """THE 2026-08-05 defect: en.json carries a PREFIX of what the server emits.
+
+        Key sets, resolvability, placeholder parity and bundle mirroring all stay
+        green over a value cut mid-word — 55 real ids shipped that way, because
+        the extractor's regex stopped at the first `\` of a continued Rust
+        literal. Nothing compared VALUES until `server-id-text`.
+        """
+        _truncate_nav_home(root)
+
     return [
         ("nested key -> flat dotted key (THE 0c728b1 bug)", "error", flatten_a_nested_key, "resolveKey"),
+        ("en.json value is a PREFIX of the emitted text (THE 80-char truncation)", "error", server_id_text_truncated, "TRUNCATED"),
         ("delete a key from de.json", "warning", del_key, "missing 1"),
         ("blank a value in de.json", "warning", blank_value, "empty 1"),
         ("extra key in de.json (not in en.json)", "warning", extra_key, "extra 1"),
@@ -914,6 +926,18 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         ("server id defined but flat (unreachable)", "error", server_id_defined_but_flat, "DEFINED in en.json"),
         ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
+def _truncate_nav_home(root: Path) -> None:
+    """The 2026-08-05 defect, reproduced: en.json carries a PREFIX of the text the
+    server actually emits. Key sets, resolvability, placeholders and mirroring all
+    stay green — 55 real ids shipped this way, cut mid-word at ~80 chars, because
+    the extractor's regex stopped at the first `\` of a continued Rust literal."""
+    canonical = root / MIRROR_BUNDLES[0]
+    path = canonical / "en.json"
+    doc = load_json(path)
+    doc["nav"]["home"] = doc["nav"]["home"][:4]
+    _write_json(path, doc)
+    _resync(root)
+
 
 
 def _flatten_nav_home(root: Path) -> None:

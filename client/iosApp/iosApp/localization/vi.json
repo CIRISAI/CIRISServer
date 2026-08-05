@@ -3240,6 +3240,17 @@
       "elsewhere": "Không vòng lặp nào trong bản dựng này đọc khóa này — bên tiêu thụ nó nằm ở một thành phần khác. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì trên nút này.",
       "unreachable": "Bên tiêu thụ của khóa này chạy ngay trong tiến trình này, nhưng không có gì mang giá trị từ mặt phẳng này đến nó: thành phần nắm núm điều chỉnh chỉ lấy giá trị một lần duy nhất khi vòng lặp được dựng lên và không cung cấp cách nào để thay đổi về sau. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì ở bất cứ đâu.",
       "unbuilt": "Bên tiêu thụ của khóa này chưa được xây dựng ở bất cứ đâu. Hàng đặt ở đây vẫn được kết nạp và gấp, nhưng không thay đổi điều gì."
+    },
+    "refusal": {
+      "authority_not_a_delegation": "Id ủy quyền được nêu tên không phải là một hàng delegates_to.",
+      "not_owner": "Bề mặt cấu hình mesh yêu cầu vai trò chủ sở hữu (SYSTEM_ADMIN).",
+      "session_absent": "Không có token phiên nào được xuất trình. Bề mặt cấu hình mesh chỉ dành cho chủ sở hữu.",
+      "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
+      "attribution_absent": "Bắt buộc phải có delegation_id. Một hành vi không mang theo thẩm quyền của chính nó thì, khi người thực hiện đã đi khỏi, không còn phân biệt được với một hành vi không được phép.",
+      "authority_unresolved": "Ủy quyền được nêu tên không phải là một hàng mà nút này đang giữ, nên thẩm quyền mà nó ghi lại sẽ chẳng chỉ tới đâu cả. Việc nó có thực sự cho phép hành vi này hay không là phán định của nền tảng, đưa ra ngay tại cửa của nền tảng.",
+      "grounds_absent": "Bắt buộc phải có grounds. Một núm vặn được xoay mà không có lý do nào được ghi lại thì không thể phân biệt với một núm được xoay vì lý do xấu.",
+      "node_unowned": "Nút này không có bên chịu trách nhiệm (owner-binding), nên nó không báo cáo cũng không thay đổi cấu hình mesh thay mặt cho bất kỳ ai. Hãy nhận quyền sở hữu trước.",
+      "root_absent": "Bắt buộc phải có root_ref: một hàng mesh-config được phát hành dưới một gốc tin cậy, và một hàng không nêu tên gốc nào sẽ được nộp vào nơi mà không phép gấp nào từng đếm tới nó."
     }
   },
   "commons_surface": {
@@ -3254,8 +3265,7 @@
     "escalation": {
       "awaiting": "Những người kiểm duyệt được chỉ định vẫn có thể trả lời, hoặc họ đã phán quyết đúng hạn. Việc leo thang chưa mở ra.",
       "not_adopted": "Cộng đồng này không tuyên bố tầng quản hộ (steward) nào, nên không có hạn chót cho người kiểm duyệt và không có leo thang. Ở đây, sự im lặng không thay đổi điều gì.",
-      "nothing_to_escalate": "Một tầng quản hộ (steward) đã được tuyên bố và không có phản đối nào còn hiệu lực đang chờ nó. Không ai im lặng cả, bởi vì không có gì được hỏi.",
-      "open": "Những người giữ nhiệm vụ đã không trả lời đúng hạn, và quyết định chuyển sang cho những ai đã trả lời. Ngưỡng bây giờ đếm NHỮNG NGƯỜI ĐÃ TRẢ LỜI thay vì toàn bộ danh sách thành viên — chính điều đó cho phép một cộng đồng ít lên tiếng vẫn giải quyết được việc — kèm một mức sàn để «có thể đạt tới» không bao giờ tụt xuống thành «một người quyết định»."
+      "nothing_to_escalate": "Một tầng quản hộ (steward) đã được tuyên bố và không có phản đối nào còn hiệu lực đang chờ nó. Không ai im lặng cả, bởi vì không có gì được hỏi."
     },
     "objection": {
       "admitted": "Phản đối đã được ghi vào hồ sơ. Đó là một DẤU HIỆU, không phải một mệnh lệnh: sự xuất hiện của nó không thay đổi điều gì, và nó được sao chép trên mặt phẳng chứng thực thông thường, nên một nút ngang hàng bị chia cắt trong suốt cửa sổ vẫn tính nó khi nó tới nơi. Một thành viên là đủ để nêu nó lên; việc gỡ bỏ nó tốn đúng ngưỡng của chính nhóm."
@@ -3267,27 +3277,19 @@
       "upheld": "Những người đã trả lời phán quyết rằng phản đối này đứng vững."
     },
     "refusal": {
-      "action_absent": "Phải nêu tên một hành động. Một phản đối nêu tên một hàng trong tài sản chung; phản đối không nêu tên gì cả thì không bao giờ có thể được đếm.",
-      "action_unknown": "Nút này không giữ hành động nào như vậy, nên một hàng nêu tên nó sẽ được nộp vào nơi mà không phép gấp nào từng đếm tới.",
       "actor_recused": "Tác giả của hành động không bỏ phiếu về phản đối nhắm vào chính hành động của mình.",
       "bad_now": "Thời điểm đọc phải là một dấu thời gian RFC 3339.",
       "ballot_predates_action": "Một phán quyết không thể cũ hơn thứ mà nó phán xét.",
       "canonicalize_failed": "Không tạo ra được các byte chuẩn tắc của hàng này, nên không có gì để một người đồng ký có thể ký.",
-      "cohort_absent": "Phải nêu tên một nhóm (cohort): chính nó quyết định danh sách thành viên của ai và tuyên bố của ai sẽ chi phối phép đếm.",
-      "cohort_not_a_commons": "Nhóm self không có danh sách thành viên nào để lập túc số bên trên — các thành viên của nó là những thiết bị của chính một danh tính — nên nó không có tài sản chung nào để tự quản.",
       "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên không có danh sách thành viên và không có tuyên bố nào để phán xét việc này. Thẩm quyền phải đến từ trạng thái đã xác minh tại chỗ.",
       "cohort_unrecognized": "Đó không phải một nhóm (cohort) có danh sách thành viên. Các phản đối sống trong một gia đình (family), một cộng đồng (community) hoặc một nhóm liên kết (affiliations).",
       "dimension_mismatch": "Hàng đó được trình ở sai cửa so với thứ mà nó mang.",
       "dismissal_quorum_short": "Số thành viên riêng biệt, đã được xác minh, cùng ký thì ít hơn mức ngưỡng của nhóm đòi hỏi. Con số đã đếm và con số yêu cầu nằm ngay bên cạnh thông báo này.",
       "duplicate_objection": "Bạn đã có sẵn một phản đối còn hiệu lực đối với hành động này. Một thành viên là một phản đối — nếu không, một thành viên đơn lẻ có thể tự mình đạt tới ngưỡng.",
-      "grounds_absent": "Bắt buộc phải có căn cứ. Một phản đối nêu lên mà không có lý do nào được ghi lại thì không thể phân biệt với một phản đối nêu lên vì lý do tồi — và căn cứ chỉ được ghi lại, không bao giờ được diễn giải.",
       "malformed_envelope": "Hàng này thiếu một tham chiếu mà phép đếm cần đến.",
-      "node_unowned": "Nút này không có bên chịu trách nhiệm nào, nên nó không đọc và cũng không nói thay ai trong tài sản chung của họ. Hãy nhận quyền sở hữu trước.",
       "not_a_cohort_member": "Chỉ thành viên của nhóm này mới được nói trong tài sản chung của nó. Đây là phép kiểm tra duy nhất mà phía bảo vệ áp dụng — và là lý do vì sao phản đối của một người lạ không bao giờ trở thành một dấu hiệu mà người khác có thể tôn trọng.",
       "not_filed_against_actor": "Hàng này được nộp vào nơi mà phép gấp không tìm tới, nên nó sẽ được lưu trữ, bền vững và trơ vĩnh viễn. Một dấu hiệu không ai tìm ra được thì không phải là một dấu hiệu.",
       "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên nó chưa áp dụng mặt phẳng phản đối. Từ chối chứ không lấy giá trị mặc định: tự bịa ra một cửa sổ và một ngưỡng cho một nhóm chưa tuyên bố cả hai thứ đó còn tệ hơn là nói không.",
-      "not_owner": "Bề mặt tài sản chung đòi hỏi vai trò chủ sở hữu.",
-      "objection_absent": "Phải nêu tên một phản đối: một lá phiếu và một quyết định bác bỏ, mỗi thứ chỉ trả lời cho đúng một phản đối.",
       "objection_unknown": "Phản đối được nêu tên không phải là phản đối mà nút này đang giữ đối với hành động này.",
       "session_absent": "Không có token phiên nào được trình. Bề mặt tài sản chung chỉ dành cho chủ sở hữu.",
       "session_invalid": "Phiên đó không hợp lệ hoặc đã hết hạn.",
@@ -3299,7 +3301,6 @@
     },
     "standing": {
       "action_unknown": "Nút này không giữ hành động nào như vậy. Một phản đối nêu tên một hàng, mà ở đây không có hàng nào để nêu tên.",
-      "cohort_unknown": "Nhóm đó không phân giải được trên nút này, nên nó không có danh sách thành viên và không có tuyên bố nào mà nút này đọc được.",
       "not_governed": "Cộng đồng này không tuyên bố chính sách túc số ngược nào, nên mặt phẳng phản đối hoàn toàn không áp dụng cho tài sản chung của nó. Điều đó khác với việc không có ai phản đối.",
       "objected": "Ít nhất một thành viên đã phản đối và cửa sổ vẫn đang mở. Hành động tạm thời vẫn có hiệu lực; có thể chỉ cần thêm một phản đối nữa là đủ.",
       "quiet": "Mặt phẳng đã được đọc và chưa có phản đối nào được nêu lên đối với hành động này.",
@@ -3314,6 +3315,106 @@
       "overruled": "Những người kiểm duyệt được chỉ định phán quyết rằng phản đối này không đứng vững — và việc leo thang vẫn cứ mở ra, bởi một quyết định gỡ bỏ không bao giờ là việc của riêng họ.",
       "silent": "Hạn chót đã trôi qua mà không có phán quyết nào theo cả hai chiều.",
       "upheld": "Những người kiểm duyệt được chỉ định đã phán quyết, đúng hạn, rằng phản đối này đứng vững. Vụ việc đã được phán xét bởi những người có tên, và được ghi vào hồ sơ."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "moving": "Nút này đã phục vụ các hàng cho đồng đẳng và không giữ lại hàng nào.",
+      "idle": "Các vòng nhân bản đã kết thúc, và nút này không phục vụ gì cũng không giữ lại gì: nó không có gì mà các đồng đẳng còn cần.",
+      "not_exercised": "Chưa có vòng nhân bản nào kết thúc trên tiến trình này, nên chưa cổng nào trên đường phục vụ từng chạy và sổ giữ-lại chưa từng được ghi. Số không này là chưa được thử, không phải là sạch.",
+      "unreadable": "Không thể đọc các bộ đếm vận chuyển của nút này, nên ở đây không có gì là khẳng định về những gì nó đã phục vụ. Đây không phải là 'không có gì bị giữ lại' — đây là 'chúng ta không hỏi được'.",
+      "withholding": "Nút này đã từ chối phục vụ những hàng nó đang giữ. `withholds_by_reason` nêu tên nhánh đã từ chối và `recent_withholds` nêu tên bên bị từ chối — một nút nhàn rỗi không báo cáo cả hai điều đó."
+    },
+    "consent_sla": {
+      "none_overdue": "Mọi lần thu hồi đồng ý mà nút này đã hứa sẽ đẩy đi đều nằm trong cửa sổ SLA của nó.",
+      "unreadable": "Không thể đọc tồn đọng consent-SLA. Điều đó không có nghĩa là 'không có gì quá hạn'.",
+      "overdue": "Nút này đang TRỄ trong việc đẩy đi các lần thu hồi đồng ý mà nó đã cam kết. Các attestation id được lấy mẫu bên cạnh đây chính là những đầu mối để giải quyết tình trạng này."
+    },
+    "drill": {
+      "green": "Gốc tin cậy của nút này đã chứng minh được công tắc ngắt của nó trong vòng 90 ngày qua.",
+      "yellow": "Gốc tin cậy của nút này lần cuối chứng minh công tắc ngắt của nó cách đây từ 90 đến 180 ngày.",
+      "never_drilled": "Gốc tin cậy của nút này CHƯA BAO GIỜ chứng minh công tắc ngắt của nó. Nó nằm cùng dải đỏ với một gốc đã bị bỏ hoang từ lâu, và điểm khác biệt chính là thời điểm diễn tập gần nhất bị khuyết bên cạnh. Gốc vẫn phục vụ: độ mới của diễn tập là một tín hiệu tin cậy, không bao giờ là một cổng chặn.",
+      "no_root_walked": "Không có gốc tin cậy nào được duyệt, nên chẳng có gì để nói là chưa diễn tập. Đây không phải một lần diễn tập đã cũ — không hề có đối tượng diễn tập nào.",
+      "stale": "Gốc tin cậy của nút này lần cuối chứng minh công tắc ngắt của nó cách đây hơn 180 ngày. Nó vẫn phục vụ: độ mới của diễn tập là một tín hiệu tin cậy, không bao giờ là một cổng chặn."
+    },
+    "headline": {
+      "green": "Mọi tín hiệu mà nút này có thể tính toán đều đọc ra là khỏe mạnh.",
+      "yellow": "Nút này đang phục vụ, và có điều gì đó ở đây đáng để xem xét.",
+      "red": "Ít nhất một tín hiệu đọc ra là không khỏe mạnh. Hãy đọc cả danh sách chưa xác định: một tiêu đề đỏ được xếp trên một mục chưa xác định và vì thế có thể che khuất một mục như vậy phía sau nó.",
+      "unknown": "Không thể tính toán được một hoặc nhiều tín hiệu. Hãy đọc danh sách chưa xác định — một tín hiệu chưa được tính không phải là một tín hiệu khỏe mạnh."
+    },
+    "ingest": {
+      "background": "Có các lần từ chối nhưng không kéo dài liên tục từ một tập danh tính ổn định: dò quét thông thường, client cũ và biến động. Hãy đọc `distinct_signers` và `unattributed_in_window` trước khi bỏ qua — một tỷ lệ CAO trải trên một tập danh tính RỘNG là dò quét, còn một tỷ lệ CAO mà hầu như không nêu tên ai là lưu lượng dị dạng có lẫn một client cũ. Cả hai đều không phải biến động, và cả hai đều không có một bên phát duy nhất để đi sửa, đó là lý do chúng đọc ra ở đây chứ không phải như một bên phát bị kẹt.",
+      "clean": "Các lô đã được đưa tới đường nạp HTTP và không lô nào bị từ chối trong cửa sổ này. `refused_total` bên cạnh là số đếm của toàn tiến trình: một cửa sổ sạch trên một tiến trình từng từ chối trước đó là sự hồi phục, không phải sự vắng mặt.",
+      "http_path_only": "Số đọc này chỉ bao gồm đường nạp HTTP. Một lô đến qua relay Reticulum vẫn được cùng cổng persist xác minh nhưng không được đếm ở đây, nên một số đọc nạp sạch không phải là khẳng định về mọi cách mà một trace có thể được đưa tới nút này.",
+      "not_exercised": "Chưa có gì được đưa tới đường nạp HTTP trên tiến trình này — không lô nào được chấp nhận và không lô nào bị từ chối. Số không này là chưa được thử, không phải là sạch.",
+      "stuck_producer": "Một tỷ lệ từ chối KÉO DÀI từ một tập người ký NHỎ và ỔN ĐỊNH: một bên phát đang kẹt trong vòng lặp thử lại và không thể tự sửa. Từng lần từ chối trong số này đều đúng — cổng đang hoạt động — và chính vì thế mà con số tổng hợp cần một số đọc riêng. `top_signers` nêu tên bên cần đi sửa.",
+      "unattributed": "Các lô đã bị từ chối và KHÔNG MỘT lô nào nêu tên người ký: chúng thất bại trước khi có một danh tính để ghi lại — byte dị dạng, chữ ký sai, phiên bản schema không được hỗ trợ. Không có bên phát nào để gọi, và điều này cố ý không được báo cáo là bên phát bị kẹt: không người ký riêng biệt nào cả thì không phải là một tập danh tính nhỏ và ổn định.",
+      "unreadable": "Không thể đọc sổ từ chối nạp của nút này, nên ở đây không có gì là khẳng định về những gì nó đã từ chối. Đây không phải là 'không có gì bị từ chối' — đây là 'chúng ta không hỏi được'."
+    },
+    "key_statements": {
+      "stands": "Không lần thu hồi nào mà nút này đang giữ bao trùm một tuyên bố được đưa ra ngay lúc này.",
+      "suspect_after_bound": "Một lần thu hồi CÓ GIỚI HẠN lịch sử bao trùm một tuyên bố được đưa ra ngay lúc này: khóa này bị loại khỏi diện kết nạp kể từ bây giờ, còn quá khứ trung thực của nó vẫn đứng vững. Giới hạn đó thực chất tốt hơn một lần thu hồi không giới hạn và không được đọc như nhau.",
+      "suspect_unbounded": "Một lần thu hồi KHÔNG GIỚI HẠN bao trùm khóa này, nên mọi điều nó từng nói đều đáng ngờ — lần thu hồi đó đã từ chối nói khác đi.",
+      "unreadable": "Không thể tính được tình trạng khóa của nút này. Điều đó không phải là 'vẫn đứng vững' — một câu hỏi chưa được hỏi thì không có câu trả lời."
+    },
+    "peer_quota": {
+      "clean": "Hạn mức ghi của đồng đẳng đã được sử dụng và phép tính từ chối slot của nó vẫn đúng.",
+      "denials": "Hạn mức ghi của đồng đẳng đã ghi nhận các lần từ chối slot. Cách suy ra trần số đồng đẳng được theo dõi không còn đúng trong bản dựng này.",
+      "no_quota": "Backend này không giữ hạn mức ghi của đồng đẳng, nên dây báo động không báo cáo gì. Đó không phải là một số đọc sạch.",
+      "not_exercised": "Chưa có lần ghi nào của đồng đẳng được tính vào hạn mức trên tiến trình này, nên số không của nó là chưa được thử chứ không phải sạch."
+    },
+    "quarantine": {
+      "not_quarantined": "Chưa từng có dấu cách ly nào về khóa của nút này có hiệu lực ở đây.",
+      "unreadable": "Không thể đọc trạng thái cách ly. Điều đó không có nghĩa là 'không bị cách ly'.",
+      "withheld": "Khóa của nút này đang bị một dấu cách ly giữ lại, không cho phục vụ.",
+      "released": "Khóa của nút này từng bị giữ lại rồi được giải phóng. Bây giờ nó phục vụ, và nó đã không luôn như vậy — một sự kiện khác với việc chưa từng bị giữ lại."
+    },
+    "receive": {
+      "clean": "Chưa có hàng nào do đồng đẳng đưa tới bị từ chối trên tiến trình này.",
+      "no_accepted_counter": "Nền tảng đếm các lần TỪ CHỐI áp dụng, không đếm các lần áp dụng được chấp nhận. Do đó một số đọc sạch không thể tách 'mọi thứ được đưa tới đều đã được áp dụng' khỏi 'chẳng có gì được đưa tới' — hãy đọc `rounds_total` và bề mặt của chính đồng đẳng để phân biệt hai điều đó.",
+      "not_exercised": "Chưa có vòng nhân bản nào kết thúc trên tiến trình này, nên chưa có gì được đưa tới đường áp dụng của nút này. Số không này là chưa được thử, không phải là sạch.",
+      "refusing": "Nút này đã từ chối các hàng mà đồng đẳng đưa tới. `apply_refusals_by_kind` nêu tên mặt phẳng; `key_apply_refusals_by_reason` nêu tên mã chính sách đã từ chối một khóa.",
+      "unreadable": "Không thể đọc các bộ đếm áp dụng của nút này, nên ở đây không có gì là khẳng định về những gì nó đã chấp nhận. Đây không phải là 'không có gì bị từ chối' — đây là 'chúng ta không hỏi được'."
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "Không thể đọc các bộ đếm vận chuyển của nút này, nên ở đây không có gì mô tả những gì nó đã phục vụ, đã giữ lại, hay đã từ chối áp dụng."
+      },
+      "ingest_refusals": {
+        "unavailable": "Không thể đọc sổ từ chối nạp của nút này, nên ở đây không có gì mô tả những gì cổng kết nạp đã từ chối. Chính một cái cổng không có ai đọc đã khiến 8,631 lần từ chối đúng đắn mỗi ngày trôi qua mà không ai để ý suốt 71 giờ."
+      },
+      "node_state": {
+        "unavailable": "Không thể đọc các tín hiệu trạng thái của nút này từ nền tảng, nên ở đây không có gì mô tả gốc tin cậy, tình trạng khóa, cách ly, consent SLA hay hạn mức đồng đẳng của nó. Việc không có tin xấu từ một nguồn chưa được đọc không phải là tin tốt."
+      },
+      "trace_corpus": {
+        "unavailable": "Không thể đọc kho trace của nút này, nên ở đây không có gì mô tả những gì nó đã kết nạp. Việc không thấy lượt đến từ một kho chưa được đọc không phải là việc không có lượt đến."
+      }
+    },
+    "trace_plane": {
+      "dark": "KHÔNG CÓ GÌ ĐƯỢC KẾT NẠP TRONG KHOẢNG THỜI GIAN DÀI HƠN NGƯỠNG ĐỎ CỦA NÚT NÀY. Việc tiếp nhận là điều duy nhất mà nút này tồn tại để làm. Hãy đọc số đọc `ingest` bên cạnh: một mặt phẳng tối kèm tỷ lệ từ chối kéo dài nghĩa là một bên phát đang bị loại đúng cách, còn một mặt phẳng tối mà hoàn toàn không có lần từ chối nào nghĩa là chẳng có gì đến được nút này.",
+      "future_dated": "Trace mới nhất trong kho được đóng dấu thời gian ở TƯƠNG LAI. Dấu thời gian là đồng hồ phát của chính bên phát, nên đây là một khẳng định về chiếc đồng hồ đó — và nó được nêu riêng thay vì xếp dải, bởi một hàng có ngày ở tương lai sẽ ghim số đọc này ở màu xanh vô thời hạn và sẽ che giấu một mặt phẳng thực sự đã dừng.",
+      "live": "Một trace vừa được kết nạp gần đây: mặt phẳng mà nút này tồn tại để tiếp nhận đang được nạp dữ liệu.",
+      "never_admitted": "Kho đã được đọc và không chứa trace nào cả: chưa từng có gì được kết nạp trên nút này. Không có thời điểm đến nào để xếp dải, nên đây là một số không chưa được thử chứ không phải một số không khỏe mạnh — và trên một nút đã phục vụ được một thời gian, đây chính là tình trạng giống hệt một mặt phẳng tối.",
+      "producer_asserted_ts": "`last_admitted_at` là MAX(trace_events.ts) — đồng hồ treo tường lúc phát của chính trace đó, do bên phát khẳng định. Nền tảng không lưu thời điểm kết nạp phía máy chủ trên bảng này, nên một bên phát có đồng hồ lệch sẽ làm dịch chuyển số đọc này; một hàng ở tương lai xa được nêu riêng là `future_dated` thay vì xếp dải chính vì lý do đó.",
+      "quiet": "Chưa có trace nào được kết nạp trong khoảng lâu hơn dự kiến, nhưng chưa đủ lâu để gọi mặt phẳng này là tối. Một nút thực sự nhàn rỗi cũng đọc ra như thế; nửa đầu của một đợt gián đoạn bên phát cũng vậy.",
+      "unreadable": "Không thể đọc kho trace của nút này, nên ở đây không có gì là khẳng định về những gì nó đã kết nạp. Đây không phải là 'chưa có trace nào đến' — đây là 'chúng ta không hỏi được'."
+    },
+    "trust_root": {
+      "no_self_key": "Máy chủ lưu trữ chưa bao giờ khai báo key id của chính nút này, nên không thể duyệt bất cứ thứ gì thuộc phạm vi bản thân. Đây là khẳng định về bên đọc, không phải về nút: hãy khai báo khóa lúc khởi động và mọi tín hiệu thuộc phạm vi bản thân bên dưới sẽ trở nên trả lời được.",
+      "no_trust_edges": "Nút này đã tự khai báo và không giữ cạnh tin cậy sống nào tới bất kỳ gốc nào: nó không bám vào gốc nào cả. Đây là một điều xấu đã biết, không phải một số đọc bị thiếu.",
+      "no_valid_root": "Nút này tin cậy một hoặc nhiều gốc và không gốc nào trong số đó hợp lệ. Phán quyết theo từng chặng bên cạnh đây nêu tên chặng đã thất bại.",
+      "unreadable": "Không thể đọc lượt duyệt gốc tin cậy. Một thư mục không đọc được không phải là một thư mục không đáng tin — đừng đọc điều này thành một nút không có gốc.",
+      "valid": "Nút này bám vào một gốc tin cậy hợp lệ trọn vẹn: một cạnh tin cậy sống, một hiến chương tự khai báo kèm cam kết khôi phục, và không có lệnh dừng nào bị chốt."
+    },
+    "volatility": {
+      "clock_dependent_local": "Dải này được tính trên CHÍNH nút này, từ một thời điểm đã lưu đối chiếu với đồng hồ lúc đọc, nên nó dịch chuyển chỉ nhờ thời gian trôi qua — không cần thay đổi trạng thái, không cần hàng mới. Một nút ngừng kết nạp trace sẽ tự đi từ xanh sang vàng rồi sang đỏ, và đó chính là điểm mấu chốt: nó chuyển đỏ mà không cần ai yêu cầu.",
+      "process_local": "Các bộ đếm vận chuyển, tiếp nhận và nạp là cục bộ theo tiến trình và cộng dồn kể từ khi tiến trình này khởi động. Chúng đặt lại khi khởi động lại, khác nhau giữa các tiến trình cùng phục vụ một nút, và không được lưu ở đâu cả. Chúng là một đồng hồ đo của tiến trình này, không phải một sổ cái của nút này."
+    },
+    "withhold_class": {
+      "fault": "Một bước đọc hoặc một bước nối dây đã thất bại và đường phục vụ đã đóng lại theo hướng an toàn. Đây KHÔNG phải là phán quyết về đồng đẳng — đây là lỗi của chính nút này, cần được sửa tại đây.",
+      "integrity": "Một hàng mà nút này đang giữ hoàn toàn không thể phục vụ được: nó không tuần tự hóa được, hash đã lưu của nó không giải mã được, hoặc các byte được quảng bá không lấy về được. Đây là một khiếm khuyết trong trạng thái cục bộ, không phải một chính sách.",
+      "policy": "Một quyết định mà nút này đưa ra có chủ đích — phạm vi đồng ý, một năng lực phục vụ mà đồng đẳng không có, hoặc hạn chế của chính bên phát. Đang hoạt động đúng như đã cấu hình: hãy thay đổi cấu hình, không phải mã nguồn."
     }
   }
 }

@@ -3262,13 +3262,13 @@
       "unbuilt": "This key's consumer has not been built anywhere yet. A row set here is admitted and folded, and changes nothing."
     },
     "refusal": {
-      "attribution_absent": "delegation_id is required. An act that does not carry its own authority cannot b",
+      "attribution_absent": "delegation_id is required. An act that does not carry its own authority cannot be told from an unauthorized one once the actor is gone.",
       "authority_not_a_delegation": "The named delegation id is not a delegates_to row.",
-      "authority_unresolved": "The named delegation is not a row this node holds, so the authority it records ",
-      "grounds_absent": "grounds is required. A knob turned for no recorded reason is indistinguishable f",
-      "node_unowned": "This node has no responsible party (owner-binding), so it neither reports nor ",
+      "authority_unresolved": "The named delegation is not a row this node holds, so the authority it records would name nothing. Whether it actually authorizes this act is the substrate's ruling, made at its own door.",
+      "grounds_absent": "grounds is required. A knob turned for no recorded reason is indistinguishable from one turned for a bad one.",
+      "node_unowned": "This node has no responsible party (owner-binding), so it neither reports nor changes mesh configuration on anyone's behalf. Claim ownership first.",
       "not_owner": "The mesh-configuration surface requires the owner (SYSTEM_ADMIN) role.",
-      "root_absent": "root_ref is required: a mesh-config row is issued under a trust root, and a row ",
+      "root_absent": "root_ref is required: a mesh-config row is issued under a trust root, and a row that names none is filed where no fold will ever count it.",
       "session_absent": "No session token was presented. The mesh-configuration surface is owner-only.",
       "session_invalid": "That session is invalid or expired."
     }
@@ -3286,7 +3286,7 @@
       "awaiting": "The appointed moderators may still answer, or they have already ruled in time. Escalation has not opened.",
       "not_adopted": "This community declared no steward tier, so there is no moderator deadline and no escalation. Silence changes nothing here.",
       "nothing_to_escalate": "A steward tier is declared and no live objection is waiting on it. Nobody was silent, because nothing was asked.",
-      "open": "The duty-holders did not answer in time, and the decision has passed to those who did. The threshold now counts RESPONDENTS rather than the whole roster — which is what lets a quiet community still resolve — floored so that ‘reachable’ never degrades to ‘one person decides’."
+      "open": "The duty-holders did not answer in time, and the decision has passed to those who did. The threshold now counts RESPONDENTS rather than the whole roster — which is what lets a quiet community still resolve — floored so that 'reachable' never degrades to 'one person decides'."
     },
     "objection": {
       "admitted": "The objection is on the record. It is a MARKER, not a command: nothing was changed by its arrival, and it replicates on the ordinary attestation plane so a peer that was partitioned during the window still counts it when it arrives. One member is enough to raise it; lifting it costs the cohort's own threshold."
@@ -3298,27 +3298,27 @@
       "upheld": "Those who answered ruled that this objection stands."
     },
     "refusal": {
-      "action_absent": "An action must be named. An objection names a row in the commons; one that names nothing can never be counted.",
-      "action_unknown": "This node holds no such action, so a row naming it would be filed where no fold will ever count it.",
+      "action_absent": "action_id is required. An objection names a row in the commons; one that names nothing can never be counted.",
+      "action_unknown": "This node holds no such action, so a row naming it would be filed where no fold will ever count it. The substrate refuses the same case at its own door.",
       "actor_recused": "The author of the action does not vote on the objection to their own act.",
       "bad_now": "The read-time instant must be an RFC 3339 timestamp.",
       "ballot_predates_action": "A judgement cannot be older than the thing it judges.",
       "canonicalize_failed": "The row's canonical bytes could not be produced, so there is nothing a co-signer could sign.",
-      "cohort_absent": "A cohort must be named: it decides whose roster and whose declaration govern the count.",
-      "cohort_not_a_commons": "The self cohort has no roster to be a quorum over — its members are one identity's own devices — so it has no commons to police.",
+      "cohort_absent": "cohort_key_id is required: it names whose roster and whose declaration govern the count.",
+      "cohort_not_a_commons": "The `self` cohort has no roster to be a quorum over — its members are one identity's own devices — so it has no commons to police.",
       "cohort_unknown": "That cohort does not resolve on this node, so there is no roster and no declaration to judge this by. Authority must come from local verified state.",
       "cohort_unrecognized": "That is not a rostered cohort. Objections live in a family, a community or an affiliations group.",
       "dimension_mismatch": "That row was offered at the wrong door for what it carries.",
       "dismissal_quorum_short": "Fewer distinct verified roster members co-signed than the cohort's threshold demands. The counted and required numbers are beside this message.",
       "duplicate_objection": "You already hold a live objection against this action. One member is one objection — otherwise a single member could reach the threshold alone.",
-      "grounds_absent": "Grounds are required. An objection raised for no recorded reason is indistinguishable from one raised for a bad one — and grounds are recorded, never interpreted.",
+      "grounds_absent": "grounds is required. An objection raised for no recorded reason is indistinguishable from one raised for a bad one — and grounds are recorded, never interpreted.",
       "malformed_envelope": "The row is missing a reference the count needs.",
-      "node_unowned": "This node has no responsible party, so it neither reads nor speaks in anyone's commons on their behalf. Claim ownership first.",
+      "node_unowned": "This node has no responsible party (owner-binding), so it neither reads nor speaks in anyone's commons on their behalf. Claim ownership first.",
       "not_a_cohort_member": "Only a member of this cohort may speak in its commons. This is the only test the protective side applies — and the reason a stranger's objection never becomes a marker others might honour.",
       "not_filed_against_actor": "The row is filed where the fold does not look for it, so it would be stored, durable and permanently inert. A marker nobody can find is not a marker.",
       "not_governed": "This community declares no reverse-quorum policy, so it has not adopted the objection plane. Refused rather than defaulted: inventing a window and a threshold for a group that declared neither is worse than saying no.",
-      "not_owner": "The commons surface requires the owner role.",
-      "objection_absent": "An objection must be named: a ballot and a dismissal each answer for exactly one.",
+      "not_owner": "The commons surface requires the owner (SYSTEM_ADMIN) role.",
+      "objection_absent": "objection_id is required: a ballot answers a question about ONE objection.",
       "objection_unknown": "The named objection is not one this node holds against this action.",
       "session_absent": "No session token was presented. The commons surface is owner-only.",
       "session_invalid": "That session is invalid or expired.",
@@ -3330,7 +3330,7 @@
     },
     "standing": {
       "action_unknown": "This node holds no such action. An objection names a row, and there is no row here to name.",
-      "cohort_unknown": "That cohort does not resolve on this node, so it has no roster and no declaration this node can read.",
+      "cohort_unknown": "That cohort does not resolve on this node, so it has no roster and no declaration this node can read. Authority must come from local verified state.",
       "not_governed": "This community declares no reverse-quorum policy, so the objection plane does not apply to its commons at all. That is different from nobody having objected.",
       "objected": "At least one member has objected and the window is still open. The action stands for now; one more objection may be all it takes.",
       "quiet": "The plane was read and no objection has been raised against this action.",
@@ -3349,102 +3349,102 @@
   },
   "operator": {
     "carriage": {
-      "idle": "Replication rounds finished, and this node served nothing and withheld nothing: ",
+      "idle": "Replication rounds finished, and this node served nothing and withheld nothing: it had nothing its peers still needed.",
       "moving": "This node served rows to its peers and withheld none.",
-      "not_exercised": "No replication round has finished on this process, so no serving-path gate has ",
-      "unreadable": "This node's carriage counters could not be read, so nothing here is a statement ",
-      "withholding": "This node declined to serve rows it held. `withholds_by_reason` names the branch"
+      "not_exercised": "No replication round has finished on this process, so no serving-path gate has ever run and the withhold ledger has never been written to. The zero is untested, not clean.",
+      "unreadable": "This node's carriage counters could not be read, so nothing here is a statement about what it served. This is not 'nothing was withheld' — it is 'we could not ask'.",
+      "withholding": "This node declined to serve rows it held. `withholds_by_reason` names the branch that declined and `recent_withholds` names to whom — an idle node reports neither."
     },
     "consent_sla": {
       "none_overdue": "Every consent revocation this node promised to promote is inside its SLA window.",
-      "overdue": "This node is LATE promoting consent revocations it committed to. The sampled ",
+      "overdue": "This node is LATE promoting consent revocations it committed to. The sampled attestation ids beside this are the handles that clear the condition.",
       "unreadable": "The consent-SLA backlog could not be read. That is not 'nothing overdue'."
     },
     "drill": {
       "green": "This node's trust root proved its kill switch within the last 90 days.",
-      "never_drilled": "This node's trust root has NEVER proved its kill switch. It shares the red band ",
-      "no_root_walked": "No trust root was walked, so there is nothing to be undrilled about. This is not",
-      "stale": "This node's trust root last proved its kill switch more than 180 days ago. It ",
+      "never_drilled": "This node's trust root has NEVER proved its kill switch. It shares the red band with a long-abandoned root, and the absent last-drill instant beside it is the difference. The root still serves: drill freshness is a trust signal, never a gate.",
+      "no_root_walked": "No trust root was walked, so there is nothing to be undrilled about. This is not a stale drill — there is no drill subject.",
+      "stale": "This node's trust root last proved its kill switch more than 180 days ago. It still serves: drill freshness is a trust signal, never a gate.",
       "yellow": "This node's trust root last proved its kill switch between 90 and 180 days ago."
     },
     "headline": {
       "green": "Every signal this node can compute reads healthy.",
-      "red": "At least one signal reads unhealthy. Read the unknown list too: a red headline ",
-      "unknown": "One or more signals could not be computed. Read the unknown list — an uncomputed",
+      "red": "At least one signal reads unhealthy. Read the unknown list too: a red headline ranks above an unknown and can otherwise hide one behind it.",
+      "unknown": "One or more signals could not be computed. Read the unknown list — an uncomputed signal is not a healthy one.",
       "yellow": "This node is serving, and something here warrants a look."
     },
     "ingest": {
-      "background": "Refusals are present but not sustained from a stable identity set: ordinary ",
-      "clean": "Batches were offered to the HTTP ingest path and none was refused inside the ",
-      "http_path_only": "This reading covers the HTTP ingest path only. A batch that arrives over the Ret",
-      "not_exercised": "Nothing has been offered to the HTTP ingest path on this process — no batch ",
-      "stuck_producer": "A SUSTAINED rate of refusals from a SMALL, STABLE set of signers: a producer is ",
-      "unattributed": "Batches were refused and NOT ONE named a signer: they failed before there was an",
-      "unreadable": "This node's ingest refusal ledger could not be read, so nothing here is a "
+      "background": "Refusals are present but not sustained from a stable identity set: ordinary probes, stale clients and churn. Read `distinct_signers` and `unattributed_in_window` before dismissing it — a HIGH rate spread across a WIDE identity set is a probe, and a HIGH rate that named almost nobody is malformed traffic with a stale client mixed into it. Neither is churn, and neither has one producer to go fix, which is why they read here rather than as a stuck producer.",
+      "clean": "Batches were offered to the HTTP ingest path and none was refused inside the window. `refused_total` beside this is the whole-process count: a clean window on a process that refused earlier is a recovery, not an absence.",
+      "http_path_only": "This reading covers the HTTP ingest path only. A batch that arrives over the Reticulum relay is verified by the same persist gate but is not counted here, so a clean ingest reading is not a statement about every way a trace can be offered to this node.",
+      "not_exercised": "Nothing has been offered to the HTTP ingest path on this process — no batch accepted and none refused. The zero is untested, not clean.",
+      "stuck_producer": "A SUSTAINED rate of refusals from a SMALL, STABLE set of signers: a producer is stuck in a retry loop and cannot self-correct. Every one of these refusals is correct — the gate is working — which is exactly why the aggregate needs its own reading. `top_signers` names who to go fix.",
+      "unattributed": "Batches were refused and NOT ONE named a signer: they failed before there was an identity to record — malformed bytes, a bad signature, an unsupported schema version. There is no producer to call, and this is deliberately not reported as a stuck producer: zero distinct signers is not a small stable identity set.",
+      "unreadable": "This node's ingest refusal ledger could not be read, so nothing here is a statement about what it refused. This is not 'nothing was refused' — it is 'we could not ask'."
     },
     "key_statements": {
       "stands": "No revocation this node holds covers a statement made right now.",
-      "suspect_after_bound": "A history-BOUNDED revocation covers a statement made right now: this key is ",
-      "suspect_unbounded": "An UNBOUNDED revocation covers this key, so everything it ever said is in doubt ",
-      "unreadable": "This node's key standing could not be computed. That is not 'stands' — an unaske"
+      "suspect_after_bound": "A history-BOUNDED revocation covers a statement made right now: this key is de-admitted as of now, and its honest past still stands. That bound is materially better than an unbounded revocation and does not read the same.",
+      "suspect_unbounded": "An UNBOUNDED revocation covers this key, so everything it ever said is in doubt — the revocation declined to say otherwise.",
+      "unreadable": "This node's key standing could not be computed. That is not 'stands' — an unasked question has no answer."
     },
     "peer_quota": {
-      "clean": "The peer-write quota has been exercised and its slot-denial arithmetic still ",
-      "denials": "The peer-write quota recorded slot denials. The tracked-peers cap derivation no ",
-      "no_quota": "This backend holds no peer-write quota, so the tripwire reports nothing. That is",
-      "not_exercised": "No peer write has been charged against the quota on this process, so its zero is"
+      "clean": "The peer-write quota has been exercised and its slot-denial arithmetic still holds.",
+      "denials": "The peer-write quota recorded slot denials. The tracked-peers cap derivation no longer holds in this build.",
+      "no_quota": "This backend holds no peer-write quota, so the tripwire reports nothing. That is not a clean reading.",
+      "not_exercised": "No peer write has been charged against the quota on this process, so its zero is untested rather than clean."
     },
     "quarantine": {
       "not_quarantined": "No quarantine marker about this node's key has ever taken effect here.",
-      "released": "This node's key was withheld and then released. It serves now, and it did not ",
+      "released": "This node's key was withheld and then released. It serves now, and it did not always — a different fact from never having been withheld.",
       "unreadable": "The quarantine state could not be read. That is not 'not quarantined'.",
       "withheld": "This node's key is withheld from serving by a quarantine marker."
     },
     "receive": {
       "clean": "No row a peer offered has been refused on this process.",
-      "no_accepted_counter": "The substrate counts apply REFUSALS, not accepted applies. A clean reading there",
-      "not_exercised": "No replication round has finished on this process, so nothing has been offered ",
-      "refusing": "This node refused rows its peers offered. `apply_refusals_by_kind` names the ",
-      "unreadable": "This node's apply counters could not be read, so nothing here is a statement "
+      "no_accepted_counter": "The substrate counts apply REFUSALS, not accepted applies. A clean reading therefore cannot separate 'everything offered was applied' from 'nothing was offered' — read `rounds_total` and the peer's own surface to tell those apart.",
+      "not_exercised": "No replication round has finished on this process, so nothing has been offered to this node's apply path. The zero is untested, not clean.",
+      "refusing": "This node refused rows its peers offered. `apply_refusals_by_kind` names the plane; `key_apply_refusals_by_reason` names the policy token that refused a key.",
+      "unreadable": "This node's apply counters could not be read, so nothing here is a statement about what it accepted. This is not 'nothing was refused' — it is 'we could not ask'."
     },
     "source": {
       "edge_metrics": {
-        "unavailable": "This node's carriage counters could not be read, so nothing here describes what "
+        "unavailable": "This node's carriage counters could not be read, so nothing here describes what it served, withheld, or refused to apply."
       },
       "ingest_refusals": {
-        "unavailable": "This node's ingest refusal ledger could not be read, so nothing here describes w"
+        "unavailable": "This node's ingest refusal ledger could not be read, so nothing here describes what the admission gate refused. A gate with no reader is what let 8,631 correct refusals a day run unnoticed for 71 hours."
       },
       "node_state": {
-        "unavailable": "This node's state signals could not be read from the substrate, so nothing here "
+        "unavailable": "This node's state signals could not be read from the substrate, so nothing here describes its trust root, key standing, quarantine, consent SLA or peer quota. Absence of bad news from an unread source is not good news."
       },
       "trace_corpus": {
-        "unavailable": "This node's trace corpus could not be read, so nothing here describes what it ha"
+        "unavailable": "This node's trace corpus could not be read, so nothing here describes what it has admitted. Absence of arrivals from an unread corpus is not absence of arrivals."
       }
     },
     "trace_plane": {
-      "dark": "NOTHING HAS BEEN ADMITTED FOR LONGER THAN THIS NODE'S RED THRESHOLD. Arrival is ",
-      "future_dated": "The newest trace in the corpus is stamped in the FUTURE. The timestamp is the ",
-      "live": "A trace was admitted recently: the plane this node exists to receive on is being",
-      "never_admitted": "The corpus was read and holds no trace at all: nothing has ever been admitted on",
-      "producer_asserted_ts": "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-cloc",
-      "quiet": "No trace has been admitted for longer than expected, but not yet long enough to ",
-      "unreadable": "This node's trace corpus could not be read, so nothing here is a statement about"
+      "dark": "NOTHING HAS BEEN ADMITTED FOR LONGER THAN THIS NODE'S RED THRESHOLD. Arrival is the single thing this node exists to do. Read the `ingest` reading beside this: a dark plane with a sustained refusal rate is a producer being correctly rejected, and a dark plane with no refusals at all means nothing is even reaching this node.",
+      "future_dated": "The newest trace in the corpus is stamped in the FUTURE. The timestamp is the producer's own broadcast clock, so this is a statement about that clock — and it is called out rather than banded because a future-dated row pins this reading green indefinitely and would hide a plane that has actually stopped.",
+      "live": "A trace was admitted recently: the plane this node exists to receive on is being fed.",
+      "never_admitted": "The corpus was read and holds no trace at all: nothing has ever been admitted on this node. There is no arrival instant to band, so this is an untested zero, not a healthy one — and on a node that has been serving for a while it is the same condition as a dark plane.",
+      "producer_asserted_ts": "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-clock, asserted by the producer. The substrate stores no server-side admission instant on this table, so a producer with a skewed clock moves this reading; a far-future row is called out as `future_dated` rather than banded for exactly that reason.",
+      "quiet": "No trace has been admitted for longer than expected, but not yet long enough to call the plane dark. A genuinely idle node reads this way; so does the first half of a producer outage.",
+      "unreadable": "This node's trace corpus could not be read, so nothing here is a statement about what it has admitted. This is not 'no trace has arrived' — it is 'we could not ask'."
     },
     "trust_root": {
-      "no_self_key": "The host never declared this node's own key id, so nothing self-scoped could be ",
-      "no_trust_edges": "This node declared itself and holds no live trust edge to any root: it roots to ",
-      "no_valid_root": "This node trusts one or more roots and none of them validates. The per-leg verdi",
-      "unreadable": "The trust-root walk could not be read. An unreadable directory is not an untrust",
-      "valid": "This node roots to a trust root that checks out in full: a live trust edge, a "
+      "no_self_key": "The host never declared this node's own key id, so nothing self-scoped could be walked. This is a statement about the reader, not about the node: declare the key at startup and every self-scoped signal below becomes answerable.",
+      "no_trust_edges": "This node declared itself and holds no live trust edge to any root: it roots to nothing. A known bad, not a missing reading.",
+      "no_valid_root": "This node trusts one or more roots and none of them validates. The per-leg verdict beside this names which leg failed.",
+      "unreadable": "The trust-root walk could not be read. An unreadable directory is not an untrusted one — do not read this as a rootless node.",
+      "valid": "This node roots to a trust root that checks out in full: a live trust edge, a self-declaring charter with a recovery commitment, and no halt latched."
     },
     "volatility": {
-      "clock_dependent_local": "This band is computed on THIS node from a stored instant against the read clock,",
-      "process_local": "The carriage, receive and ingest counters are process-local and cumulative since"
+      "clock_dependent_local": "This band is computed on THIS node from a stored instant against the read clock, so it moves on elapsed time alone — no state change, no new row. A node that stops admitting traces walks green to yellow to red on its own, which is the point: it goes red without anyone asking it to.",
+      "process_local": "The carriage, receive and ingest counters are process-local and cumulative since this process started. They reset on restart, differ between processes serving one node, and are stored nowhere. They are a gauge of this process, not a ledger of this node."
     },
     "withhold_class": {
-      "fault": "A read or a wiring step failed and the serve path failed closed. This is NOT a ",
-      "integrity": "A row this node holds could not be served at all: it would not serialize, its ",
-      "policy": "A decision this node made on purpose — consent scope, a serve capability the "
+      "fault": "A read or a wiring step failed and the serve path failed closed. This is NOT a verdict about the peer — it is this node's fault to fix.",
+      "integrity": "A row this node holds could not be served at all: it would not serialize, its stored hash would not decode, or advertised bytes were unfetchable. A defect in local state, not a policy.",
+      "policy": "A decision this node made on purpose — consent scope, a serve capability the peer does not hold, or the producer's own restriction. Working as configured: change the configuration, not the code."
     }
   }
 }

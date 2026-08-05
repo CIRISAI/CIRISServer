@@ -3240,6 +3240,12 @@
       "elsewhere": "Bu derlemede bu anahtarı okuyan hiçbir döngü yok — tüketicisi başka bir bileşende yaşıyor. Burada belirlenen bir satır kabul edilir ve katlanır, ancak bu düğümde hiçbir şeyi değiştirmez.",
       "unreachable": "Bu anahtarın tüketicisi bu süreçte çalışıyor, ancak bu düzlemden ona değer taşıyan hiçbir şey yok: bu ayar düğmesine sahip bileşen, değeri yalnızca döngü kurulurken bir kez alır ve sonrasında onu değiştirmenin hiçbir yolunu sunmaz. Burada belirlenen bir satır kabul edilir ve katlanır, ancak hiçbir yerde hiçbir şeyi değiştirmez.",
       "unbuilt": "Bu anahtarın tüketicisi henüz hiçbir yerde geliştirilmedi. Burada belirlenen bir satır kabul edilir ve katlanır, ancak hiçbir şeyi değiştirmez."
+    },
+    "refusal": {
+      "authority_not_a_delegation": "Adı geçen yetki devri kimliği bir delegates_to satırı değil.",
+      "not_owner": "Mesh yapılandırma yüzeyi, sahip (SYSTEM_ADMIN) rolünü gerektirir.",
+      "session_absent": "Hiçbir oturum jetonu sunulmadı. Mesh yapılandırma yüzeyi yalnızca sahibe açıktır.",
+      "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş."
     }
   },
   "commons_surface": {
@@ -3254,8 +3260,7 @@
     "escalation": {
       "awaiting": "Atanmış moderatörler hâlâ yanıt verebilir ya da süresi içinde zaten karar vermişlerdir. Yükseltme açılmadı.",
       "not_adopted": "Bu topluluk hiçbir gözetmen katmanı ilan etmedi; dolayısıyla moderatörler için bir süre sınırı ve bir yükseltme yoktur. Burada sessizlik hiçbir şeyi değiştirmez.",
-      "nothing_to_escalate": "Bir gözetmen katmanı ilan edilmiş ve onu bekleyen canlı bir itiraz yok. Kimse sessiz kalmadı, çünkü hiçbir şey sorulmadı.",
-      "open": "Görev sahipleri süresi içinde yanıt vermedi ve karar, yanıt verenlere geçti. Eşik artık tüm üye listesini değil YANIT VERENLERİ sayıyor — sessiz bir topluluğun yine de bir sonuca varmasını sağlayan şey budur — ve \"ulaşılabilir\" olanın asla \"tek kişi karar verir\"e düşmemesi için bir alt sınırla korunmuştur."
+      "nothing_to_escalate": "Bir gözetmen katmanı ilan edilmiş ve onu bekleyen canlı bir itiraz yok. Kimse sessiz kalmadı, çünkü hiçbir şey sorulmadı."
     },
     "objection": {
       "admitted": "İtiraz kayda geçti. Bu bir komut değil, bir İŞARETTİR: gelişiyle hiçbir şey değişmedi ve olağan tasdik düzleminde çoğaltılır; böylece pencere boyunca ağdan kopmuş bir eş, itiraz kendisine ulaştığında onu yine de sayar. Onu ortaya koymak için tek bir üye yeterlidir; kaldırmak ise kohortun kendi eşiğine mal olur."
@@ -3267,27 +3272,19 @@
       "upheld": "Yanıt verenler bu itirazın geçerli olduğuna karar verdi."
     },
     "refusal": {
-      "action_absent": "Bir eylem adlandırılmalıdır. Bir itiraz, müştereklerdeki bir satırı adlandırır; hiçbir şeyi adlandırmayan bir itiraz asla sayılamaz.",
-      "action_unknown": "Bu düğüm böyle bir eylem tutmuyor; dolayısıyla onu adlandıran bir satır, hiçbir katlamanın onu asla saymayacağı bir yere kaydedilirdi.",
       "actor_recused": "Eylemin sahibi, kendi eylemine yapılan itirazda oy kullanmaz.",
       "bad_now": "Okuma anı, RFC 3339 biçiminde bir zaman damgası olmalıdır.",
       "ballot_predates_action": "Bir hüküm, hükmettiği şeyden daha eski olamaz.",
       "canonicalize_failed": "Satırın kanonik baytları üretilemedi; dolayısıyla bir ortak imzacının imzalayabileceği hiçbir şey yok.",
-      "cohort_absent": "Bir kohort adlandırılmalıdır: sayımda kimin üye listesinin ve kimin ilanının geçerli olacağını o belirler.",
-      "cohort_not_a_commons": "Self kohortunun, üzerinde nisap aranacak bir üye listesi yoktur — üyeleri tek bir kimliğin kendi cihazlarıdır — dolayısıyla denetleyeceği bir müşterek de yoktur.",
       "cohort_unknown": "Bu kohort bu düğümde çözümlenmiyor; dolayısıyla bunu değerlendirecek bir üye listesi ve bir ilan yok. Yetki, yerel olarak doğrulanmış durumdan gelmelidir.",
       "cohort_unrecognized": "Bu, üye listesi olan bir kohort değil. İtirazlar bir ailede, bir toplulukta ya da bir aidiyet grubunda yaşar.",
       "dimension_mismatch": "Bu satır, taşıdığı içerik için yanlış kapıda sunuldu.",
       "dismissal_quorum_short": "Kohortun eşiğinin gerektirdiğinden daha az sayıda farklı, doğrulanmış üye listesi mensubu birlikte imzaladı. Sayılan ve gereken sayılar bu iletinin yanında belirtilmiştir.",
       "duplicate_objection": "Bu eyleme karşı zaten canlı bir itirazınız var. Bir üye, bir itiraz demektir — aksi hâlde tek bir üye eşiğe tek başına ulaşabilirdi.",
-      "grounds_absent": "Gerekçe zorunludur. Kaydedilmiş bir gerekçe olmadan ortaya konan bir itiraz, kötü bir gerekçeyle ortaya konandan ayırt edilemez — ve gerekçeler kaydedilir, asla yorumlanmaz.",
       "malformed_envelope": "Satırda, sayımın ihtiyaç duyduğu bir referans eksik.",
-      "node_unowned": "Bu düğümün sorumlu bir sahibi yok; dolayısıyla kimsenin müştereklerinde onun adına ne okuma yapar ne de söz söyler. Önce sahipliği talep edin.",
       "not_a_cohort_member": "Bu kohortun müştereklerinde yalnızca kohortun bir üyesi söz söyleyebilir. Koruyucu tarafın uyguladığı tek sınama budur — ve bir yabancının itirazının, başkalarının uyabileceği bir işarete asla dönüşmemesinin nedeni de budur.",
       "not_filed_against_actor": "Satır, katlamanın onu aramadığı bir yere kaydedilmiş; bu yüzden saklanır, kalıcı olur ve sonsuza dek etkisiz kalırdı. Kimsenin bulamadığı bir işaret, işaret değildir.",
       "not_governed": "Bu topluluk hiçbir ters nisap politikası ilan etmiyor; dolayısıyla itiraz düzlemini benimsememiştir. Varsayılana düşülmedi, reddedildi: ikisini de ilan etmemiş bir grup için bir pencere ve bir eşik uydurmak, hayır demekten daha kötüdür.",
-      "not_owner": "Müşterekler yüzeyi, sahip rolünü gerektirir.",
-      "objection_absent": "Bir itiraz adlandırılmalıdır: bir oy da bir ret de tam olarak tek bir itiraza karşılık gelir.",
       "objection_unknown": "Adı geçen itiraz, bu düğümün bu eyleme karşı tuttuğu itirazlardan biri değil.",
       "session_absent": "Hiçbir oturum jetonu sunulmadı. Müşterekler yüzeyi yalnızca sahibe açıktır.",
       "session_invalid": "Bu oturum geçersiz ya da süresi dolmuş.",
@@ -3299,7 +3296,6 @@
     },
     "standing": {
       "action_unknown": "Bu düğüm böyle bir eylem tutmuyor. Bir itiraz bir satırı adlandırır ve burada adlandırılacak bir satır yok.",
-      "cohort_unknown": "Bu kohort bu düğümde çözümlenmiyor; dolayısıyla bu düğümün okuyabileceği bir üye listesi ve bir ilanı yok.",
       "not_governed": "Bu topluluk hiçbir ters nisap politikası ilan etmiyor; dolayısıyla itiraz düzlemi onun müştereklerinde hiç geçerli değil. Bu, kimsenin itiraz etmemiş olmasından farklı bir şeydir.",
       "objected": "En az bir üye itiraz etti ve pencere hâlâ açık. Eylem şimdilik ayakta; bir itiraz daha yetebilir.",
       "quiet": "Düzlem okundu ve bu eyleme karşı hiçbir itiraz ortaya konmadı.",
@@ -3315,5 +3311,45 @@
       "silent": "Süre sınırı, iki yönde de hiçbir karar verilmeden doldu.",
       "upheld": "Atanmış moderatörler, süresi içinde, bu itirazın geçerli olduğuna karar verdi. Mesele, adı belli kişilerce ve kayda geçerek karara bağlandı."
     }
+  },
+  "operator": {
+    "carriage": {
+      "moving": "Bu düğüm eşlerine satır sundu ve hiçbirini esirgemedi."
+    },
+    "consent_sla": {
+      "none_overdue": "Bu düğümün yükseltmeye söz verdiği her rıza iptali, kendi SLA penceresi içindedir.",
+      "unreadable": "Rıza SLA birikimi okunamadı. Bu 'gecikmiş bir şey yok' demek değildir."
+    },
+    "drill": {
+      "green": "Bu düğümün güven kökü, son 90 gün içinde kill-switch'ini kanıtladı.",
+      "yellow": "Bu düğümün güven kökü, kill-switch'ini en son 90 ila 180 gün önce kanıtladı."
+    },
+    "headline": {
+      "green": "Bu düğümün hesaplayabildiği her sinyal sağlıklı okunuyor.",
+      "yellow": "Bu düğüm hizmet veriyor ve burada bakılmayı hak eden bir şey var."
+    },
+    "ingest": {},
+    "key_statements": {
+      "stands": "Bu düğümün tuttuğu hiçbir iptal, şu anda yapılan bir beyanı kapsamıyor."
+    },
+    "peer_quota": {},
+    "quarantine": {
+      "not_quarantined": "Bu düğümün anahtarına ilişkin hiçbir karantina işareti burada hiçbir zaman yürürlüğe girmedi.",
+      "unreadable": "Karantina durumu okunamadı. Bu 'karantinada değil' demek değildir.",
+      "withheld": "Bu düğümün anahtarı, bir karantina işaretiyle sunumdan alıkonuluyor."
+    },
+    "receive": {
+      "clean": "Bu süreçte, bir eşin sunduğu hiçbir satır reddedilmedi."
+    },
+    "source": {
+      "edge_metrics": {},
+      "ingest_refusals": {},
+      "node_state": {},
+      "trace_corpus": {}
+    },
+    "trace_plane": {},
+    "trust_root": {},
+    "volatility": {},
+    "withhold_class": {}
   }
 }
