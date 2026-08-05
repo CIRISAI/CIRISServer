@@ -170,7 +170,18 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
 
 /// POST `body` to `path` on the ingest router; return (status, parsed JSON body).
 async fn post(engine: Arc<Engine>, path: &str, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
-    let app = ingest_http::router(engine);
+    post_counted(engine, &ingest_http::IngestRefusals::new(), path, body).await
+}
+
+/// [`post`] against an explicit refusal ledger (CIRISServer#370), so a test can
+/// read what the gate counted.
+async fn post_counted(
+    engine: Arc<Engine>,
+    refusals: &ingest_http::IngestRefusals,
+    path: &str,
+    body: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
+    let app = ingest_http::router(engine, refusals.clone());
     let req = Request::builder()
         .method("POST")
         .uri(path)
@@ -386,4 +397,222 @@ async fn the_credits_namespace_incident_is_refused_by_name() {
         !body.to_string().contains(CREDITS_KEY_ID),
         "the offending key id belongs in the log, not the body: {body}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CIRISServer#369 + #370 — THE 2026-08-05 INCIDENT, REPRODUCED END TO END.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **The test that decides whether this work was worth doing.**
+///
+/// `FSD/RCA_INGEST_REJECTION_2026-08-05.md`: a producer signed with an identity
+/// from the wrong derivation namespace, the canonical refused it 8,631 times a
+/// day for 71 hours, the last trace was admitted at `2026-08-03T23:30`, and the
+/// mesh was dead for two days with every layer reporting success.
+///
+/// This drives the REAL routes — the real verify-before-persist gate, the real
+/// corpus, the real refusal ledger — and asserts that one read of the operator
+/// surface would have said so:
+///
+/// 1. a good producer's trace lands, and the plane reads green;
+/// 2. 48 hours later, with nothing new admitted, the SAME corpus reads **red**;
+/// 3. the two real incident key ids are refused 401 by the gate — correctly —
+///    and the surface reads **`stuck_producer`** and NAMES them;
+/// 4. and a node that cannot READ the corpus reads `unknown`, which is not the
+///    same value as (2). An instrument that cannot tell the incident from a node
+///    it merely failed to ask would not have caught this.
+#[tokio::test]
+async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
+    use ciris_server::operator_surface::{self, OperatorStateOptions};
+
+    // The two identities from the RCA, verbatim. `agent-{hash[:12]}` is the
+    // agent-credits key id — a DIFFERENT namespace from the federation key id,
+    // so neither exists in `federation_keys` and the gate is right to refuse.
+    const STUCK: [&str; 2] = ["agent-55fe8d181727", "agent-1ee871dcf31b"];
+    const GOOD: &str = "ciris-agent-bootstrap-25uzoxtlro";
+
+    let engine = node(0xD0, "node-canonical-1").await;
+    let refusals = ingest_http::IngestRefusals::new();
+
+    // ── (1) A good producer lands a trace through the real gate ─────────────
+    let good_sk = SigningKey::from_bytes(&[0x21; 32]);
+    cross_register(&engine, GOOD, &good_sk).await;
+    let bytes = build_batch_bytes(&good_sk, GOOD, "trace-live-0001");
+    let (status, body) =
+        post_counted(Arc::clone(&engine), &refusals, LEGACY_INGEST_PATH, bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the good producer must land: {body}"
+    );
+
+    // The instant the corpus now reports as its newest arrival. Read from
+    // persist's own aggregate — the same reader the surface uses — so the clock
+    // below is anchored to the row that actually landed.
+    let last_admitted = engine
+        .storage_summary()
+        .await
+        .expect("storage summary")
+        .trace_events
+        .newest_ts
+        .expect("a trace landed, so the corpus has a newest instant");
+
+    let opts = |now: chrono::DateTime<Utc>| OperatorStateOptions {
+        self_key_id: Some("node-canonical-1".to_owned()),
+        root_key_id: None,
+        now: Some(now),
+        sla_seconds: None,
+    };
+
+    // ── The plane is GREEN while it is being fed ────────────────────────────
+    let live = operator_surface::operator_state(
+        &engine,
+        Err("no edge in this fixture".to_owned()),
+        Some(&refusals),
+        &opts(last_admitted + chrono::Duration::minutes(5)),
+    )
+    .await;
+    assert_eq!(
+        live["trace_plane"]["standing"],
+        serde_json::json!("live"),
+        "a plane that admitted a trace five minutes ago is being fed: {}",
+        live["trace_plane"]
+    );
+    assert_eq!(live["trace_plane"]["band"], serde_json::json!("green"));
+    // ...and the gate counted the ACCEPT, which is the only thing that lets
+    // this read `clean` rather than `not_exercised`. Without it, "everything
+    // offered was admitted" and "nothing was ever offered" collapse — the exact
+    // limitation `RECEIVE_NO_ACCEPTED_COUNTER` documents on the replication
+    // plane, and the one this plane does not have to inherit.
+    assert_eq!(
+        live["ingest"]["accepted_total"],
+        serde_json::json!(1),
+        "the real route must count what it admitted: {}",
+        live["ingest"]
+    );
+    assert_eq!(
+        live["ingest"]["standing"],
+        serde_json::json!("clean"),
+        "a gate that has admitted a batch and refused none is CLEAN, not untested: {}",
+        live["ingest"]
+    );
+
+    // ── (3) The stuck producer: correct 401s, at a sustained rate ───────────
+    let stuck_sk = SigningKey::from_bytes(&[0x31; 32]);
+    for i in 0..60 {
+        let who = STUCK[i % STUCK.len()];
+        let bytes = build_batch_bytes(&stuck_sk, who, &format!("trace-stuck-{i:04}"));
+        let (status, body) =
+            post_counted(Arc::clone(&engine), &refusals, LEGACY_INGEST_PATH, bytes).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the gate is RIGHT to refuse an unregistered signer: {body}"
+        );
+        assert_eq!(body["error"].as_str(), Some("verify_unknown_key"));
+    }
+
+    // ── (2) 48 hours later, with nothing new admitted ───────────────────────
+    let found_at = last_admitted + chrono::Duration::hours(48);
+    let dark = operator_surface::operator_state(
+        &engine,
+        Err("no edge in this fixture".to_owned()),
+        Some(&refusals),
+        &opts(found_at),
+    )
+    .await;
+
+    assert_eq!(
+        dark["trace_plane"]["standing"],
+        serde_json::json!("dark"),
+        "NOTHING has been admitted for 48 hours — this is the whole condition: {}",
+        dark["trace_plane"]
+    );
+    assert_eq!(
+        dark["trace_plane"]["band"],
+        serde_json::json!("red"),
+        "a plane that admitted nothing in two days must be RED, not absent from the display"
+    );
+    assert_eq!(
+        dark["trace_plane"]["last_admitted_at"],
+        serde_json::json!(last_admitted),
+        "the reading must name WHEN, not only that it is late"
+    );
+    assert_eq!(dark["band"], serde_json::json!("red"), "{dark}");
+
+    // ── ...and the ingest reading says WHY, and who to go fix ───────────────
+    assert_eq!(
+        dark["ingest"]["standing"],
+        serde_json::json!("stuck_producer"),
+        "60 correct refusals from two stable identities is a fault report about someone else: {}",
+        dark["ingest"]
+    );
+    assert_eq!(dark["ingest"]["band"], serde_json::json!("red"));
+    assert_eq!(dark["ingest"]["distinct_signers"], serde_json::json!(2));
+    let named: std::collections::HashSet<&str> = dark["ingest"]["top_signers"]
+        .as_array()
+        .expect("top_signers")
+        .iter()
+        .map(|t| t["signer_id"].as_str().expect("signer_id"))
+        .collect();
+    for who in STUCK {
+        assert!(
+            named.contains(who),
+            "the reading must NAME the stuck producer — that is what makes it actionable: {}",
+            dark["ingest"]
+        );
+    }
+    assert_eq!(
+        dark["ingest"]["by_kind"]["verify_unknown_key"],
+        serde_json::json!(60),
+        "persist's own stable token, carried: {}",
+        dark["ingest"]
+    );
+
+    // ── (4) The unreadable arm is NOT the same value ────────────────────────
+    //
+    // Composed directly, because the only honest way to produce it is a corpus
+    // read that failed. If this rendered like (2), the surface could not tell
+    // the incident from a node it simply failed to ask — the RCA's third and
+    // most expensive instrument failure, in a different costume.
+    let bundle = refusals.snapshot_at(found_at);
+    let blind = operator_surface::compose(
+        operator_surface::Sources {
+            node: Err("not read in this fixture".to_owned()),
+            edge: Err("no edge in this fixture".to_owned()),
+            trace: Err("sqlite: database is locked".to_owned()),
+            ingest: Some(&bundle),
+        },
+        found_at,
+    );
+    assert_eq!(
+        blind["trace_plane"]["standing"],
+        serde_json::json!("unreadable")
+    );
+    assert_ne!(
+        blind["trace_plane"]["standing"], dark["trace_plane"]["standing"],
+        "'we could not ask the corpus' and 'the corpus has admitted nothing for two days' must \
+         never be the same reading"
+    );
+    assert_ne!(
+        blind["trace_plane"]["band"], dark["trace_plane"]["band"],
+        "an unasked question is not a known bad"
+    );
+    assert!(
+        blind["unknown"]
+            .as_array()
+            .expect("unknown")
+            .contains(&serde_json::json!("trace_plane")),
+        "an unread corpus must be NAMED as an unknown so a red headline cannot hide it: {blind}"
+    );
+
+    // ── The healthy-quiet control ───────────────────────────────────────────
+    //
+    // If the gate cannot tell the incident from a node that is simply being fed,
+    // it would have been silent on 2026-08-04 exactly as the node was.
+    assert_ne!(
+        live["trace_plane"]["band"], dark["trace_plane"]["band"],
+        "a fed plane and a dead one must not share a band"
+    );
+    assert_ne!(live["trace_plane"]["band"], blind["trace_plane"]["band"]);
 }

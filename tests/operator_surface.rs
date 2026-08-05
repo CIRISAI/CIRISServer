@@ -43,6 +43,7 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 
 use ciris_server::auth::store;
+use ciris_server::ingest_http::IngestRefusals;
 use ciris_server::operator_surface;
 
 const NODE_KEY_ALIAS: &str = "ciris-server";
@@ -224,8 +225,18 @@ async fn serve(
     engine: Arc<Engine>,
     metrics: Option<EdgeMetrics>,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    serve_with(engine, metrics, None).await
+}
+
+/// [`serve`] plus an explicit ingest refusal ledger (CIRISServer#370). `None`
+/// is a node with no HTTP ingest route — the `unreadable` arm.
+async fn serve_with(
+    engine: Arc<Engine>,
+    metrics: Option<EdgeMetrics>,
+    refusals: Option<IngestRefusals>,
+) -> (String, tokio::task::JoinHandle<()>) {
     let key_id = node_key_id(&engine).await;
-    let app = operator_surface::router(engine, key_id, metrics);
+    let app = operator_surface::router(engine, key_id, metrics, refusals);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -277,18 +288,33 @@ async fn one_read_carries_both_sources_and_re_derives_neither() {
     register_self(&engine).await;
     bind_owner(&engine).await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
-    let (base, _h) = serve(Arc::clone(&engine), Some(withholding_metrics())).await;
+    let (base, _h) = serve_with(
+        Arc::clone(&engine),
+        Some(withholding_metrics()),
+        Some(IngestRefusals::new()),
+    )
+    .await;
 
     let data = read_state(&base, &owner).await;
 
-    // (1) BOTH sources are present and named.
+    // (1) EVERY source is present and named. The list grew with #369/#370: the
+    // trace corpus and the ingest ledger are sources in exactly the same sense
+    // the first two are — each present-or-unavailable-with-a-reason, never an
+    // absent key and never a healthy default.
     assert_eq!(
         data["composed_from"],
-        serde_json::json!(["node_state", "edge_metrics"]),
-        "the surface must compose BOTH sources, not one of them: {data}"
+        serde_json::json!([
+            "node_state",
+            "edge_metrics",
+            "trace_corpus",
+            "ingest_refusals"
+        ]),
+        "the surface must compose EVERY source, not a subset of them: {data}"
     );
     assert_eq!(data["sources"]["node_state"]["present"], true);
     assert_eq!(data["sources"]["edge_metrics"]["present"], true);
+    assert_eq!(data["sources"]["trace_corpus"]["present"], true);
+    assert_eq!(data["sources"]["ingest_refusals"]["present"], true);
     assert!(
         data["sources"]["node_state"]["produced_by"]
             .as_str()
@@ -361,8 +387,23 @@ async fn one_read_carries_both_sources_and_re_derives_neither() {
     assert!(data["volatility"]["process_local"]["note"]["id"].is_string());
     assert_eq!(
         data["volatility"]["process_local"]["fields"],
-        serde_json::json!(["carriage", "receive"])
+        serde_json::json!(["carriage", "receive", "ingest"]),
+        "the #370 refusal ledger resets on restart exactly as the carriage counters do, and a \
+         process-local counter that does not declare itself is the field an operator reads as \
+         durable node state"
     );
+    // ...and a THIRD kind, added with #369: a band computed HERE that moves on
+    // elapsed time alone. It must NOT have been folded into persist's list —
+    // that list is persist's, carried verbatim, and a second author on it is
+    // exactly the two-lists-that-disagree shape.
+    assert_eq!(
+        data["volatility"]["clock_dependent_local"]["fields"],
+        serde_json::json!(["trace_plane"])
+    );
+    assert!(!data["volatility"]["clock_dependent"]
+        .as_array()
+        .expect("clock_dependent")
+        .contains(&serde_json::json!("trace_plane")));
 
     // (5) The persist signals are EXPLAINED, with the token persist minted and
     //     the band persist computed — never a band of ours.
@@ -606,6 +647,85 @@ async fn polling_the_surface_writes_nothing() {
     }
 }
 
+/// CIRISServer#369/#370 — **the two new readings over the REAL route, and their
+/// zeroes.**
+///
+/// A fresh node has admitted no trace and mounted no ingest gate. Both facts are
+/// zeroes, and the failure mode this whole surface exists to prevent is that
+/// they render as health. Neither may read green, neither may read as the other,
+/// and both must be NAMED in the `unknown` list — a red headline outranks an
+/// unknown and would otherwise hide one behind it.
+#[tokio::test]
+async fn a_fresh_nodes_trace_and_ingest_zeroes_name_their_own_causes() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+
+    // No ingest ledger: this process mounted no HTTP ingest gate, so there is no
+    // gate to have refused anything.
+    let (base, _h) = serve_with(Arc::clone(&engine), Some(idle_metrics()), None).await;
+    let data = read_state(&base, &owner).await;
+
+    // The corpus was READ, and it is empty. That is not "we could not ask", and
+    // it is emphatically not green.
+    assert_eq!(
+        data["trace_plane"]["standing"], "never_admitted",
+        "{}",
+        data["trace_plane"]
+    );
+    assert_eq!(data["trace_plane"]["band"], "unknown");
+    assert_eq!(data["trace_plane"]["rows"], 0);
+    assert_eq!(data["trace_plane"]["last_admitted_at"], Value::Null);
+    assert_eq!(data["sources"]["trace_corpus"]["present"], true);
+
+    // The ledger could NOT be read. Same absence of refusals, different fact.
+    assert_eq!(
+        data["ingest"]["standing"], "unreadable",
+        "{}",
+        data["ingest"]
+    );
+    assert_eq!(data["ingest"]["band"], "unknown");
+    assert!(
+        data["ingest"].get("refusals_in_window").is_none(),
+        "an unread ledger must render NO counts — a zero there is a manufactured clean reading: {}",
+        data["ingest"]
+    );
+    assert_eq!(data["sources"]["ingest_refusals"]["present"], false);
+
+    // Both are named individually, so neither can hide behind the roll-up.
+    let unknown = data["unknown"].as_array().expect("unknown");
+    assert!(unknown.contains(&Value::from("trace_plane")), "{data}");
+    assert!(unknown.contains(&Value::from("ingest")), "{data}");
+
+    // Now the same node WITH a gate that has never been offered anything: the
+    // ingest zero changes token, because "we could not ask" and "nothing was
+    // ever offered" are different answers.
+    let (base, _h) = serve_with(
+        Arc::clone(&engine),
+        Some(idle_metrics()),
+        Some(IngestRefusals::new()),
+    )
+    .await;
+    let data2 = read_state(&base, &owner).await;
+    assert_eq!(data2["ingest"]["standing"], "not_exercised");
+    assert_eq!(data2["ingest"]["refusals_in_window"], 0);
+    assert_eq!(data2["ingest"]["accepted_total"], 0);
+    assert_ne!(
+        data2["ingest"]["standing"], data["ingest"]["standing"],
+        "an unread ledger and an unexercised one are two facts and must not share a token"
+    );
+    // ...and a gate that HAS admitted something reads clean, which the zero
+    // refusal count alone could never have said.
+    let fed = IngestRefusals::new();
+    fed.observe_accept();
+    let (base, _h) = serve_with(Arc::clone(&engine), Some(idle_metrics()), Some(fed)).await;
+    let data3 = read_state(&base, &owner).await;
+    assert_eq!(data3["ingest"]["standing"], "clean");
+    assert_eq!(data3["ingest"]["band"], "green");
+    assert_ne!(data3["ingest"]["standing"], data2["ingest"]["standing"]);
+}
+
 /// Every operator-facing string is a `{id, text}` pair, and the payload declares
 /// which locale the `text` fields fall back TO.
 #[tokio::test]
@@ -623,7 +743,12 @@ async fn every_string_on_the_wire_is_localizable() {
         &data["carriage"]["explains"],
         &data["receive"]["explains"],
         &data["receive"]["note"],
+        &data["trace_plane"]["explains"],
+        &data["trace_plane"]["note"],
+        &data["ingest"]["explains"],
+        &data["ingest"]["note"],
         &data["volatility"]["process_local"]["note"],
+        &data["volatility"]["clock_dependent_local"]["note"],
     ] {
         assert!(pair["id"].is_string(), "not a localizable pair: {pair}");
         assert!(pair["text"].is_string(), "not a localizable pair: {pair}");
