@@ -127,6 +127,20 @@ jobs:
       # `extension-module` (libpython-no-link) into the test binary.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # CIRISServer#373 — `cargo test` above tests the ROOT PACKAGE ONLY. With a
+      # root package present and no `default-members`, the workspace member is
+      # never built as a test target, so ciris-lens-core's 364 unit tests — the
+      # hybrid seal, the batch round-trip, tamper detection for the trace plane —
+      # had NEVER run in CI. The gap proved itself: those targets did not compile
+      # against persist v29.0.0 on main, and CI was green through the whole
+      # adoption. Test code that does not compile is the loudest possible
+      # failure, and nothing heard it.
+      #
+      # Deliberately a SEPARATE step rather than `--workspace` or a
+      # `default-members` entry: both of those also change what a bare local
+      # `cargo test` builds, and on the maintainer's box a workspace-wide build
+      # OOMs. This keeps the local command untouched and names the package.
+      - run: cargo test -p ciris-lens-core --lib
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
