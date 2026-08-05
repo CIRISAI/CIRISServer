@@ -1175,3 +1175,130 @@ async fn the_surface_is_owner_gated_on_the_federation_admin_spine() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PROPERTY 6 — the surface says whether anything READS the value it prints
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// CIRISServer#365. The plane was operable and NOT effective: nine keys, and
+// this repo had a caller for none, so an operator could file a relief, watch it
+// admit, watch it fold, watch its TTL count down — and nothing changed. Every
+// signal said the setting took effect.
+//
+// An unbuilt plane refuses. A plane with no consumer CONFIRMS. `effective: 10`
+// alone is a false statement about such a key; `effective: 10, consumed: false`
+// is a true one.
+
+#[tokio::test]
+async fn property_6_every_key_says_whether_this_build_consumes_it() {
+    use ciris_server::mesh_config_effect::{consumption, Consumption};
+
+    let f = fixture().await;
+    let (status, body) = get(&f, ROUTE_READ).await;
+    assert_eq!(status, 200, "read surface must succeed: {body}");
+
+    // ── The registry half. Every key, every time. ───────────────────────────
+    let served = body["registry"].as_array().expect("registry array");
+    assert_eq!(served.len(), MeshConfigKey::ALL.len());
+    for (v, k) in served.iter().zip(MeshConfigKey::ALL.iter()) {
+        let c = consumption(*k);
+        assert_eq!(
+            v["consumed"],
+            serde_json::json!(c.consumed()),
+            "{} must carry the consumption flag",
+            k.wire_name()
+        );
+        assert_eq!(v["consumption"]["state"], serde_json::json!(c.as_str()));
+        // Localizable {id, text}, like every other string on this surface.
+        assert!(v["consumption"]["message"]["id"].is_string(), "{v}");
+        assert!(v["consumption"]["message"]["text"].is_string(), "{v}");
+        // "no consumer here" without saying WHERE sends an operator hunting in
+        // the wrong repo.
+        match c {
+            Consumption::Wired { .. } => {
+                assert!(v["consumption"]["site"].is_string(), "{v}");
+                assert!(v["consumption"]["effect"].is_string(), "{v}");
+            }
+            Consumption::Elsewhere { .. } => {
+                assert!(v["consumption"]["owner"].is_string(), "{v}");
+                assert!(v["consumption"]["tracked_by"].is_string(), "{v}");
+            }
+            Consumption::Unbuilt { .. } => {
+                assert!(v["consumption"]["tracked_by"].is_string(), "{v}");
+            }
+        }
+    }
+
+    // ── The settings half — where `effective` actually appears. ─────────────
+    // This is the field that made the false statement, so this is the one that
+    // must never be printed alone.
+    let settings = body["settings"].as_array().expect("settings array");
+    assert_eq!(settings.len(), MeshConfigKey::ALL.len());
+    for s in settings {
+        assert!(
+            s["effective"].is_i64(),
+            "every setting reports an effective value: {s}"
+        );
+        assert!(
+            s["consumed"].is_boolean(),
+            "a setting that prints `effective` MUST print `consumed` beside it — that pairing \
+             is the whole of CIRISServer#365's honest interim: {s}"
+        );
+        let key = MeshConfigKey::from_wire(s["key"].as_str().expect("key")).expect("registered");
+        assert_eq!(
+            s["consumed"],
+            serde_json::json!(consumption(key).consumed()),
+            "the flag must be the effect registry's answer, never a second opinion: {s}"
+        );
+    }
+
+    // ── At least one of each, so neither arm is vacuous. ────────────────────
+    let consumed: Vec<&str> = MeshConfigKey::ALL
+        .iter()
+        .filter(|k| consumption(**k).consumed())
+        .map(|k| k.wire_name())
+        .collect();
+    assert!(
+        !consumed.is_empty(),
+        "landing #365 means at least one key is genuinely consumed"
+    );
+    assert!(
+        consumed.len() < MeshConfigKey::ALL.len(),
+        "if every key were consumed the false-statement arm would go untested"
+    );
+}
+
+#[tokio::test]
+async fn property_6_a_relieved_value_still_admits_and_still_says_who_reads_it() {
+    // The exact scenario #365 opens with, end to end: a root files a relief, the
+    // substrate admits it, the fold binds it — and the surface now also says
+    // whether anything on this node will act on it.
+    let f = fixture().await;
+    let (status, body) = post(&f, ROUTE_RELIEF, &relief_body(&f, restricting(), 4)).await;
+    assert_eq!(status, 200, "the relief must admit: {body}");
+    assert_eq!(body["admitted"], serde_json::json!(true), "{body}");
+
+    let (_, read) = get(&f, ROUTE_READ).await;
+    let s = read["settings"]
+        .as_array()
+        .expect("settings")
+        .iter()
+        .find(|s| s["key"] == serde_json::json!(knob().wire_name()))
+        .expect("the relieved key");
+    assert_eq!(s["effective"], serde_json::json!(restricting()), "{s}");
+    assert_eq!(s["relieved"], serde_json::json!(true), "{s}");
+    // `antientropy.round_secs` is edge's consumer, so this node reports the
+    // relief as REAL and NOT acted on here — which is the true statement, and
+    // the one the tab could not make before.
+    assert_eq!(s["consumed"], serde_json::json!(false), "{s}");
+    assert_eq!(
+        s["consumption"]["state"],
+        serde_json::json!("elsewhere"),
+        "{s}"
+    );
+    assert_eq!(
+        s["consumption"]["owner"],
+        serde_json::json!("CIRISEdge"),
+        "{s}"
+    );
+}

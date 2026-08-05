@@ -305,6 +305,11 @@ mod tests {
             cohort_scope: "federation".to_owned(),
             tier: "federation".to_owned(),
             promoted_at: None,
+            // Added upstream (persist's hybrid co-signature set). This fixture
+            // had gone stale, so `cargo test -p ciris-lens-core --lib` did not
+            // COMPILE — every test in the crate silently unrunnable, which is
+            // its own version of a gate that cannot fail.
+            additional_scrubs: Vec::new(),
         }
     }
 

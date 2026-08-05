@@ -122,6 +122,13 @@ pub(crate) struct NodeState {
     pub(crate) ratchet_version: i32,
     /// Frozen API root path prefix (e.g. `/lens/api/v1`).
     pub(crate) api_root: String,
+    /// **How much of a row this node is willing to serve right now**
+    /// (CIRISServer#365). Supplied by the composing host and re-invoked
+    /// PER REQUEST, so a backpressure relief that arrives — or whose
+    /// TTL closes — is observed with no restart. `None` = the host
+    /// wires no such policy and every row is served whole, which is
+    /// what this API did before the knob existed.
+    pub(crate) fidelity: Option<ServeFidelityProvider>,
 }
 
 impl NodeState {
@@ -134,7 +141,58 @@ impl NodeState {
         self.hybrid_policy = policy;
         self
     }
+
+    /// What fidelity to serve this request at. `None` provider ⇒
+    /// [`RowFidelity::Full`] — the pre-knob behaviour, and the one an
+    /// unreadable policy must also produce (the host decides that; this
+    /// crate never guesses at a plane it does not read).
+    fn row_fidelity(&self) -> RowFidelity {
+        self.fidelity.as_ref().map_or(RowFidelity::Full, |f| f())
+    }
 }
+
+/// **How much of a row the read API serves.**
+///
+/// The consumer half of `mesh_config`'s `backpressure.summary_only`
+/// (CIRISServer#365 / `FSD/MESH_CONFIG_AND_ADMIN_OPS.md`: *"trace
+/// serving — serve summaries, not raw traces"*). A congested node
+/// under a trust root's relief keeps answering — the row's identity,
+/// detector, severity, calibration version and timestamp still cross —
+/// and stops shipping the opaque per-score payload, which is the bulk.
+///
+/// Two states named rather than a bare `bool`, because a `bool` three
+/// modules from its definition says nothing about which way `true`
+/// points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowFidelity {
+    /// Whole rows, opaque payload included. The default, and what every
+    /// pre-0.5.156 node serves.
+    #[default]
+    Full,
+    /// Summary fields only; `conformity_payload` is withheld and the
+    /// response says so.
+    SummaryOnly,
+}
+
+impl RowFidelity {
+    /// Serde skip predicate: the marker is ABSENT on a full response, so
+    /// the frozen v0.5.0 wire shape is byte-identical in the normal case
+    /// and the marker's presence always means something.
+    #[must_use]
+    pub const fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+/// A live read of [`RowFidelity`], supplied by the composing host and
+/// invoked once per request.
+///
+/// Lens-core deliberately owns no mesh-config plane: it is handed a
+/// verdict, not a corpus. The host that DOES own the plane
+/// (`ciris_server::mesh_config_effect`) folds it, decides what an
+/// unreadable plane means, and hands the answer down.
+pub type ServeFidelityProvider = Arc<dyn Fn() -> RowFidelity + Send + Sync>;
 
 // ─── Wire response types (frozen at v0.5.0 per #18) ───────────────
 
@@ -152,11 +210,49 @@ pub struct ScoreResponse {
     pub conformity_variant: String,
     /// Opaque JSON — the per-score payload persist stores. Shape is
     /// detector-specific; consumers should treat it as extensible.
+    ///
+    /// **`null` is two different facts**, which is why
+    /// [`Self::row_fidelity`] rides beside it: a detector that emitted
+    /// nothing, and a node under backpressure that DECLINED to ship what
+    /// it has. Read the fidelity marker before concluding the former.
     pub conformity_payload: serde_json::Value,
     /// RATCHET calibration bundle version applied to this score.
     pub ratchet_calibration_version: i32,
     pub lens_core_version: String,
     pub ts: DateTime<Utc>,
+    /// `summary_only` when this row was thinned by a backpressure
+    /// relief (CIRISServer#365); **absent** otherwise, so the frozen
+    /// v0.5.0 shape is byte-identical on the normal path and the
+    /// marker's presence always carries information.
+    #[serde(default, skip_serializing_if = "RowFidelity::is_full")]
+    pub row_fidelity: RowFidelity,
+}
+
+impl ScoreResponse {
+    /// Thin this row to its summary: drop the opaque per-score payload —
+    /// the bulk of the row — and MARK that it was dropped.
+    ///
+    /// Everything that identifies the finding survives (`detection_id`,
+    /// `trace_id`, `detector`, `severity`, `conformity_variant`,
+    /// `ratchet_calibration_version`, `ts`), so a viewer under relief
+    /// still learns THAT something fired and can come back for the
+    /// payload when the relief lifts.
+    #[must_use]
+    fn into_summary(mut self) -> Self {
+        self.conformity_payload = serde_json::Value::Null;
+        self.row_fidelity = RowFidelity::SummaryOnly;
+        self
+    }
+
+    /// Project at the requested fidelity. One function so the four
+    /// row-serving handlers cannot disagree about what a summary is.
+    #[must_use]
+    fn at(self, fidelity: RowFidelity) -> Self {
+        match fidelity {
+            RowFidelity::Full => self,
+            RowFidelity::SummaryOnly => self.into_summary(),
+        }
+    }
 }
 
 impl From<DetectionEvent> for ScoreResponse {
@@ -177,6 +273,7 @@ impl From<DetectionEvent> for ScoreResponse {
             ratchet_calibration_version: e.ratchet_calibration_version,
             lens_core_version: e.lens_core_version,
             ts: e.ts,
+            row_fidelity: RowFidelity::Full,
         }
     }
 }
@@ -187,6 +284,13 @@ pub struct ScoreListResponse {
     pub items: Vec<ScoreResponse>,
     /// Opaque cursor for the next page. `None` = last page.
     pub next_cursor: Option<String>,
+    /// `summary_only` when this page was served under a backpressure
+    /// relief; absent otherwise. Carried on the ENVELOPE as well as on
+    /// each item so an **empty** page under relief is still
+    /// distinguishable from an empty page on a healthy node — the same
+    /// zero, two causes.
+    #[serde(default, skip_serializing_if = "RowFidelity::is_full")]
+    pub row_fidelity: RowFidelity,
 }
 
 /// Manifold-conformity aggregate returned by
@@ -352,6 +456,7 @@ async fn get_scores(
         since: params.since,
     };
 
+    let fidelity = state.row_fidelity();
     match engine.get_detection_events(filter).await {
         Err(e) => internal_error(e.to_string()).into_response(),
         Ok(events) => {
@@ -369,6 +474,7 @@ async fn get_scores(
                 })
                 .take(page_size + 1)
                 .map(ScoreResponse::from)
+                .map(|r| r.at(fidelity))
                 .collect();
 
             // Basic pagination: if we got page_size+1 items there's
@@ -383,7 +489,12 @@ async fn get_scores(
                 (filtered, None)
             };
 
-            Json(ScoreListResponse { items, next_cursor }).into_response()
+            Json(ScoreListResponse {
+                items,
+                next_cursor,
+                row_fidelity: fidelity,
+            })
+            .into_response()
         }
     }
 }
@@ -405,17 +516,22 @@ async fn get_score_by_trace(
         since: None,
     };
 
+    let fidelity = state.row_fidelity();
     match engine.get_detection_events(filter).await {
         Err(e) => internal_error(e.to_string()).into_response(),
         Ok(events) => {
             if events.is_empty() {
                 not_found(format!("trace_id {trace_id} not found")).into_response()
             } else {
-                let items: Vec<ScoreResponse> =
-                    events.into_iter().map(ScoreResponse::from).collect();
+                let items: Vec<ScoreResponse> = events
+                    .into_iter()
+                    .map(ScoreResponse::from)
+                    .map(|r| r.at(fidelity))
+                    .collect();
                 Json(ScoreListResponse {
                     items,
                     next_cursor: None,
+                    row_fidelity: fidelity,
                 })
                 .into_response()
             }
@@ -459,6 +575,7 @@ async fn get_detection_events(
         since: params.since,
     };
 
+    let fidelity = state.row_fidelity();
     match engine.get_detection_events(filter).await {
         Err(e) => internal_error(e.to_string()).into_response(),
         Ok(events) => {
@@ -474,6 +591,7 @@ async fn get_detection_events(
                 })
                 .take(page_size + 1)
                 .map(ScoreResponse::from)
+                .map(|r| r.at(fidelity))
                 .collect();
 
             let (items, next_cursor) = if filtered.len() > page_size {
@@ -485,7 +603,12 @@ async fn get_detection_events(
                 (filtered, None)
             };
 
-            Json(ScoreListResponse { items, next_cursor }).into_response()
+            Json(ScoreListResponse {
+                items,
+                next_cursor,
+                row_fidelity: fidelity,
+            })
+            .into_response()
         }
     }
 }
@@ -529,11 +652,12 @@ async fn get_detection_event_by_id(
         since: None,
     };
 
+    let fidelity = state.row_fidelity();
     match engine.get_detection_events(filter).await {
         Err(e) => internal_error(e.to_string()).into_response(),
         Ok(events) => match events.into_iter().find(|e| e.detection_id == uuid) {
             None => not_found(format!("detection_id {detection_id} not found")).into_response(),
-            Some(event) => Json(ScoreResponse::from(event)).into_response(),
+            Some(event) => Json(ScoreResponse::from(event).at(fidelity)).into_response(),
         },
     }
 }
@@ -874,6 +998,10 @@ impl LensCore {
     /// fabric-node surface (e.g. `GET /v1/identity`) on the same port as the
     /// frozen `GET /lens/api/v1/*` read API. The lens routes win on conflict
     /// (merge order); `extra` should use non-`/lens/api/v1` paths.
+    ///
+    /// Serves every row WHOLE. A host that wants the read API to thin its rows
+    /// under backpressure passes a provider to
+    /// [`Self::read_api_with_extra_at_fidelity`].
     pub async fn read_api_with_extra(
         engine: Arc<Engine>,
         listen_addr: SocketAddr,
@@ -881,6 +1009,38 @@ impl LensCore {
         scoring: ScoringConfig,
         ux: UxConfig,
         extra: Router,
+    ) -> Result<ReadApiHandle, NodeError> {
+        Self::read_api_with_extra_at_fidelity(
+            engine,
+            listen_addr,
+            peer_acl,
+            scoring,
+            ux,
+            extra,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::read_api_with_extra`] plus the **serve-fidelity policy**
+    /// (CIRISServer#365): a host-supplied provider, invoked once per request,
+    /// that says whether this node is currently willing to ship whole rows or
+    /// only their summaries.
+    ///
+    /// This is the consumer half of `mesh_config`'s
+    /// `backpressure.summary_only`. Lens-core reads no mesh-config plane of its
+    /// own — the host folds it (most-restrictive across trust roots, TTL
+    /// applied), decides what an unreadable plane means, and hands down a
+    /// verdict. `None` = no policy, every row whole, the pre-0.5.156 behaviour.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_api_with_extra_at_fidelity(
+        engine: Arc<Engine>,
+        listen_addr: SocketAddr,
+        peer_acl: PeerAcl,
+        scoring: ScoringConfig,
+        ux: UxConfig,
+        extra: Router,
+        fidelity: Option<ServeFidelityProvider>,
     ) -> Result<ReadApiHandle, NodeError> {
         let state = NodeState {
             engine: Some(engine),
@@ -890,6 +1050,7 @@ impl LensCore {
             hybrid_policy: HybridPolicy::Strict,
             ratchet_version: scoring.ratchet_calibration_version,
             api_root: ux.api_root.clone(),
+            fidelity,
         };
         let router = extra.merge(build_read_router(state));
         let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
@@ -1115,11 +1276,17 @@ mod tests {
         let list = ScoreListResponse {
             items: vec![ScoreResponse::from(event)],
             next_cursor: Some("cursor-abc".into()),
+            row_fidelity: RowFidelity::Full,
         };
         let json = serde_json::to_string(&list).unwrap();
+        // The frozen v0.5.0 shape is unchanged on the full path: the
+        // fidelity marker is skipped, so a pre-0.5.156 reader sees the
+        // same bytes it always did.
+        assert!(!json.contains("row_fidelity"), "{json}");
         let back: ScoreListResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.items.len(), 1);
         assert_eq!(back.next_cursor.as_deref(), Some("cursor-abc"));
+        assert_eq!(back.row_fidelity, RowFidelity::Full);
     }
 
     #[test]
@@ -1189,6 +1356,7 @@ mod tests {
             hybrid_policy: HybridPolicy::Strict,
             ratchet_version,
             api_root: "/lens/api/v1".to_string(),
+            fidelity: None,
         }
     }
 
@@ -1203,6 +1371,7 @@ mod tests {
             hybrid_policy: HybridPolicy::Strict,
             ratchet_version,
             api_root: "/lens/api/v1".to_string(),
+            fidelity: None,
         }
     }
 
@@ -1424,6 +1593,7 @@ mod tests {
             hybrid_policy: HybridPolicy::Strict,
             ratchet_version: 0,
             api_root: "/lens/api/v1".to_string(),
+            fidelity: None,
         };
         let router = build_read_router(state);
 
@@ -1444,5 +1614,210 @@ mod tests {
             .unwrap();
         let err: LensQueryError = serde_json::from_slice(&body).unwrap();
         assert_eq!(err.error, "unauthorized_signature");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  `backpressure.summary_only` — the serve path (CIRISServer#365)
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // The bug being fixed is a config that is READ and IGNORED, so a
+    // test that asserts the provider was consulted proves nothing. What
+    // these prove is that the SAME stored row comes back whole under
+    // `Full` and thinned under `SummaryOnly`, over the real router.
+
+    /// An in-memory Engine holding one detection event with a non-empty
+    /// opaque `conformity_payload` — the part a summary withholds.
+    async fn engine_with_one_score(trace_id: &str) -> Arc<ciris_persist::prelude::Engine> {
+        use ciris_persist::derived::DerivedSchema;
+        use ciris_persist::prelude::{Engine, LocalSigner};
+        use ed25519_dalek::SigningKey;
+
+        let signer = Arc::new(LocalSigner::from_parts(
+            SigningKey::from_bytes(&[0x5Au8; 32]),
+            "fidelity-engine-signer".to_string(),
+            None,
+            None,
+        ));
+        let engine = Engine::with_signer(signer, "sqlite::memory:")
+            .await
+            .expect("in-memory Engine");
+        let mut event = synthetic_event(
+            trace_id,
+            "manifold_conformity_outlier",
+            DetectionSeverity::Warning,
+            ConformityVariant::Numeric,
+        );
+        // The storage CHECKs want real-length signature bytes.
+        event.canonical_bytes = b"canon".to_vec();
+        engine
+            .sqlite_backend()
+            .expect("sqlite backend")
+            .put_detection_event(event)
+            .await
+            .expect("seed one detection event");
+        Arc::new(engine)
+    }
+
+    fn state_at(engine: Arc<ciris_persist::prelude::Engine>, fidelity: RowFidelity) -> NodeState {
+        NodeState {
+            engine: Some(engine),
+            peer_acl: Arc::new(PeerAcl::AllowAll),
+            hybrid_policy: HybridPolicy::Strict,
+            ratchet_version: 0,
+            api_root: "/lens/api/v1".to_string(),
+            fidelity: Some(Arc::new(move || fidelity)),
+        }
+    }
+
+    async fn get_json(state: NodeState, uri: &str) -> serde_json::Value {
+        let resp = build_read_router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn a_backpressure_relief_thins_the_rows_this_node_serves() {
+        let engine = engine_with_one_score("tr-fidelity-1").await;
+
+        // ── Full: the whole row, and NO marker (the frozen v0.5.0 shape
+        //    is byte-identical on the normal path).
+        let full = get_json(
+            state_at(Arc::clone(&engine), RowFidelity::Full),
+            "/lens/api/v1/scores",
+        )
+        .await;
+        assert_eq!(full["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            full["items"][0]["conformity_payload"]["mahalanobis"],
+            serde_json::json!(1.23),
+            "a full response must carry the opaque per-score payload: {full}"
+        );
+        assert!(
+            full.get("row_fidelity").is_none() && full["items"][0].get("row_fidelity").is_none(),
+            "the fidelity marker must be ABSENT on a full response, so its presence always \
+             means something: {full}"
+        );
+
+        // ── SummaryOnly: the SAME stored row, thinned — and marked.
+        let summary = get_json(
+            state_at(Arc::clone(&engine), RowFidelity::SummaryOnly),
+            "/lens/api/v1/scores",
+        )
+        .await;
+        assert_eq!(
+            summary["items"].as_array().map(Vec::len),
+            Some(1),
+            "a relief thins rows; it does not stop answering: {summary}"
+        );
+        assert_eq!(
+            summary["items"][0]["conformity_payload"],
+            serde_json::Value::Null,
+            "the opaque payload — the bulk of the row — must be withheld: {summary}"
+        );
+        // The finding still crosses: a viewer under relief learns THAT
+        // something fired and can come back for the payload later.
+        assert_eq!(
+            summary["items"][0]["trace_id"],
+            full["items"][0]["trace_id"]
+        );
+        assert_eq!(
+            summary["items"][0]["detector"],
+            full["items"][0]["detector"]
+        );
+        assert_eq!(
+            summary["items"][0]["severity"],
+            full["items"][0]["severity"]
+        );
+        assert_eq!(summary["items"][0]["ts"], full["items"][0]["ts"]);
+        // `null` because a detector emitted nothing and `null` because
+        // this node declined to ship it are DIFFERENT facts.
+        assert_eq!(
+            summary["items"][0]["row_fidelity"],
+            serde_json::json!("summary_only"),
+            "a withheld payload must say it was withheld: {summary}"
+        );
+        assert_eq!(
+            summary["row_fidelity"],
+            serde_json::json!("summary_only"),
+            "the ENVELOPE carries the marker too, so an EMPTY page under relief is still \
+             distinguishable from an empty page on a healthy node: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_row_serving_route_honours_the_relief() {
+        // Four handlers project rows; all four must go through the one
+        // projection, or the relief leaks out of whichever was missed.
+        let engine = engine_with_one_score("tr-fidelity-2").await;
+        let id = {
+            let full = get_json(
+                state_at(Arc::clone(&engine), RowFidelity::Full),
+                "/lens/api/v1/scores",
+            )
+            .await;
+            full["items"][0]["detection_id"]
+                .as_str()
+                .expect("detection_id")
+                .to_string()
+        };
+
+        for uri in [
+            "/lens/api/v1/scores".to_string(),
+            "/lens/api/v1/scores/tr-fidelity-2".to_string(),
+            "/lens/api/v1/detection_events".to_string(),
+        ] {
+            let v = get_json(
+                state_at(Arc::clone(&engine), RowFidelity::SummaryOnly),
+                &uri,
+            )
+            .await;
+            assert_eq!(
+                v["items"][0]["conformity_payload"],
+                serde_json::Value::Null,
+                "{uri} leaked the opaque payload under a backpressure relief: {v}"
+            );
+        }
+
+        // The single-row route answers a BARE ScoreResponse, so its
+        // marker rides on the item itself.
+        let one = get_json(
+            state_at(engine, RowFidelity::SummaryOnly),
+            &format!("/lens/api/v1/detection_events/{id}"),
+        )
+        .await;
+        assert_eq!(one["conformity_payload"], serde_json::Value::Null, "{one}");
+        assert_eq!(
+            one["row_fidelity"],
+            serde_json::json!("summary_only"),
+            "{one}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_policy_means_whole_rows() {
+        // A host that wires no fidelity provider gets exactly what this
+        // API served before the knob existed — including the absent
+        // marker, so no consumer sees a shape change.
+        let engine = engine_with_one_score("tr-fidelity-3").await;
+        let state = NodeState {
+            engine: Some(engine),
+            peer_acl: Arc::new(PeerAcl::AllowAll),
+            hybrid_policy: HybridPolicy::Strict,
+            ratchet_version: 0,
+            api_root: "/lens/api/v1".to_string(),
+            fidelity: None,
+        };
+        let v = get_json(state, "/lens/api/v1/scores").await;
+        assert_eq!(
+            v["items"][0]["conformity_payload"]["mahalanobis"],
+            serde_json::json!(1.23)
+        );
+        assert!(v.get("row_fidelity").is_none(), "{v}");
     }
 }

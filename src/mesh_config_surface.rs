@@ -113,6 +113,7 @@ use ciris_persist::prelude::Engine;
 use crate::auth::gate::CapabilityVerb;
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
+use crate::mesh_config_effect::{consumption, Consumption};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Routes + vocabulary
@@ -297,9 +298,49 @@ pub fn registry_json() -> Vec<Value> {
                 "owner_default": s.owner_default,
                 "consumer": s.consumer,
                 "knob": s.knob,
+                "consumed": consumption(*k).consumed(),
+                "consumption": consumption_json(*k),
             })
         })
         .collect()
+}
+
+/// **Whether a consumer for this key exists in THIS build** (CIRISServer#365).
+///
+/// persist names each key's consumer processor and says plainly that it runs
+/// none of them; this field answers the only question persist cannot — does the
+/// binary the operator is looking at have a caller? Without it the surface makes
+/// a false statement: `effective: 10` reads as *"this node is running 10"* when
+/// nothing reads the 10.
+///
+/// It is **not** a literal maintained beside the registry. It is
+/// [`crate::mesh_config_effect::consumption`], whose `Wired` arm names the
+/// accessor a consumer reads through — and the folded value is reachable ONLY
+/// through those accessors, so a key with no consumer is unreadable by
+/// construction. `tests/mesh_config_consumers.rs` closes the loop from the other
+/// side: every accessor named here must actually be CALLED in non-test code.
+/// The restated-value defect this repo keeps hitting (see `src/location.rs`) is
+/// refused structurally rather than promised in a comment.
+fn consumption_json(key: MeshConfigKey) -> Value {
+    let c = consumption(key);
+    let mut out = json!({
+        "state": c.as_str(),
+        "message": m(&c.message_id(), c.message_text()),
+    });
+    match c {
+        Consumption::Wired { site, effect } => {
+            out["site"] = json!(site);
+            out["effect"] = json!(effect);
+        }
+        Consumption::Elsewhere { owner, tracked_by } => {
+            out["owner"] = json!(owner);
+            out["tracked_by"] = json!(tracked_by);
+        }
+        Consumption::Unbuilt { tracked_by } => {
+            out["tracked_by"] = json!(tracked_by);
+        }
+    }
+    out
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -691,6 +732,24 @@ async fn snapshot(
     })
 }
 
+/// **The one read path a CONSUMER takes** (CIRISServer#365).
+///
+/// Returns exactly the fold this surface renders — same snapshot, same gather,
+/// persist's same pure `fold_mesh_config`. [`crate::mesh_config_effect`] calls
+/// this and nothing else, so a consumer's value and the operator surface's
+/// value cannot come from two code paths that drift; two lists that disagree is
+/// the `#541` shape, and the cure is to have one list.
+///
+/// An `Err` is *"the plane could not be read"* and never an empty fold — the
+/// consumer's unreadable arm depends on that distinction.
+pub(crate) async fn resolve_fold(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    now: DateTime<Utc>,
+) -> Result<MeshConfigFold, String> {
+    snapshot(engine, node_key_id, now).await.map(|s| s.fold)
+}
+
 /// The roots that could not be read, as the wire carries them.
 fn unreadable_roots_json(s: &Snapshot) -> Vec<Value> {
     s.unreadable_roots
@@ -717,6 +776,13 @@ fn setting_json(s: &MeshConfigSetting, now: DateTime<Utc>) -> Value {
         "baseline": s.baseline,
         "effective": s.effective,
         "relieved": s.relieved,
+        // CIRISServer#365. `effective` is what the fold RESOLVED; `consumed`
+        // is whether anything in this build reads it. Printed together because
+        // `effective: 10` on its own is a false statement about a key nothing
+        // consumes, and this surface is the one place an operator is asked to
+        // trust the reading.
+        "consumed": consumption(s.key).consumed(),
+        "consumption": consumption_json(s.key),
         "provenance": {
             "source": provenance.as_str(),
             "message": provenance.message(),
