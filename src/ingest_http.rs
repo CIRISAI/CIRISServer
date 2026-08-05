@@ -98,6 +98,17 @@ struct IngestErr {
     /// Optional closed-set detail (e.g. the missing field name).
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Which **derivation namespace** the refused signer id belongs to, present
+    /// only on a directory miss (RCA 2026-08-05 fix 6 — see
+    /// [`refused_key_namespace`]).
+    ///
+    /// A separate field rather than a second meaning for `detail`: `detail`
+    /// answers *"what was wrong with the payload"* and this answers *"which of
+    /// your identities did you sign with"*. Folding them would be the very
+    /// one-field-two-axes shape CIRISServer#371 exists to retire, committed in
+    /// the response body of the fix for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id_namespace: Option<&'static str>,
 }
 
 /// Merge the HTTP trace-ingest routes onto the read-API listener.
@@ -147,31 +158,17 @@ async fn ingest(State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
         }
         Err(e) => {
             let status = ingest_status(&e);
-            let namespace = refused_key_namespace(&e);
+            let body = ingest_error_body(&e);
             // AV-15: surface the stable token, never the verbose Display (which
             // could echo payload bytes). The Display goes to the tracing log only.
             tracing::warn!(
                 error = %e,
                 kind = e.kind(),
-                key_id_namespace = ?namespace.map(KeyIdNamespace::as_str),
+                key_id_namespace = ?body.key_id_namespace,
                 %status,
                 "HTTP ingest rejected"
             );
-            (
-                status,
-                Json(IngestErr {
-                    error: e.kind(),
-                    // The namespace WINS over persist's detail when both exist:
-                    // persist returns `None` for every Verify variant, so there
-                    // is nothing to lose, and the namespace is the only field
-                    // that tells the producer which of their two identities they
-                    // signed with (RCA 2026-08-05 fix 6).
-                    detail: namespace
-                        .map(|n| n.as_str().to_owned())
-                        .or_else(|| e.detail()),
-                }),
-            )
-                .into_response()
+            (status, Json(body)).into_response()
         }
     }
 }
@@ -223,12 +220,42 @@ fn ingest_status(e: &IngestError) -> StatusCode {
 /// here", which is the honest answer for a key that IS derive_key_id-shaped:
 /// this node cannot tell a typo from a pending registration, and guessing would
 /// be the same class of error one level up.
+///
+/// # The match is exhaustive on purpose
+///
+/// `UnknownKey` is the only verify variant that carries a signer id today. A
+/// wildcard arm would answer `None` for a *future* persist variant that carries
+/// one — silently, and in the direction of saying less. The exhaustive arm makes
+/// that a compile error at the next substrate bump, which is the same
+/// registry-of-record discipline the CEG replication chokepoint uses.
 fn refused_key_namespace(e: &IngestError) -> Option<KeyIdNamespace> {
-    match e {
-        IngestError::Verify(ciris_persist::verify::Error::UnknownKey(key_id)) => {
-            Some(classify_key_id(key_id))
-        }
-        _ => None,
+    use ciris_persist::verify::Error as VerifyError;
+
+    let IngestError::Verify(verify) = e else {
+        return None;
+    };
+    match verify {
+        VerifyError::UnknownKey(key_id) => Some(classify_key_id(key_id)),
+        // None of these say anything about a derivation namespace: a signature
+        // mismatch, a malformed encoding, a missing PQC half and a canonicalizer
+        // bug are all conditions a correctly-namespaced id reaches.
+        VerifyError::SignatureMismatch
+        | VerifyError::Canonicalization(_)
+        | VerifyError::InvalidSignature(_)
+        | VerifyError::Internal(_)
+        | VerifyError::UnsupportedSchemaVersion(_)
+        | VerifyError::HybridRequired
+        | VerifyError::HybridVerify(_) => None,
+    }
+}
+
+/// The refusal body the producer receives — the ONE construction, so the test
+/// below pins what the handler actually sends rather than a copy of it.
+fn ingest_error_body(e: &IngestError) -> IngestErr {
+    IngestErr {
+        error: e.kind(),
+        detail: e.detail(),
+        key_id_namespace: refused_key_namespace(e).map(KeyIdNamespace::as_str),
     }
 }
 
@@ -284,8 +311,9 @@ mod tests {
         // A well-formed federation id that simply is not registered here reads
         // as its own namespace — "unknown key", not "wrong namespace". Merging
         // the two would send every honest new peer chasing the producer fix.
-        let unregistered =
-            IngestError::Verify(VerifyError::UnknownKey("ciris-agent-bootstrap-25uzoxtlro".into()));
+        let unregistered = IngestError::Verify(VerifyError::UnknownKey(
+            "ciris-agent-bootstrap-25uzoxtlro".into(),
+        ));
         assert_eq!(
             refused_key_namespace(&unregistered).map(KeyIdNamespace::as_str),
             Some("federation_derive_key_id"),
@@ -300,7 +328,50 @@ mod tests {
 
         // A refusal that is NOT a directory miss must not claim a namespace —
         // a signature mismatch says nothing about which derivation was used.
-        assert!(refused_key_namespace(&IngestError::Verify(VerifyError::SignatureMismatch)).is_none());
+        assert!(
+            refused_key_namespace(&IngestError::Verify(VerifyError::SignatureMismatch)).is_none()
+        );
         assert!(refused_key_namespace(&IngestError::Verify(VerifyError::HybridRequired)).is_none());
+        assert!(
+            refused_key_namespace(&IngestError::Verify(VerifyError::HybridVerify(
+                "pqc_len".into()
+            )))
+            .is_none()
+        );
+    }
+
+    /// The namespace must reach the **wire**, not merely the classifier.
+    ///
+    /// `refused_key_namespace` being right buys nothing if the handler drops the
+    /// value on the way out — that is the shape of a gate that passes while the
+    /// producer still receives one uninformative token. So this asserts on the
+    /// serialized body, built by the same `ingest_error_body` the handler sends.
+    #[test]
+    fn the_serialized_refusal_body_carries_the_namespace() {
+        use ciris_persist::verify::Error as VerifyError;
+
+        let credits = IngestError::Verify(VerifyError::UnknownKey("agent-55fe8d181727".into()));
+        let json = serde_json::to_value(ingest_error_body(&credits)).expect("serialize");
+        assert_eq!(json["error"], "verify_unknown_key");
+        assert_eq!(
+            json["key_id_namespace"], "agent_credits",
+            "the producer's only actionable field must be ON the response: {json}"
+        );
+
+        // AV-15: the offending value never rides the body — it stays in the log.
+        assert!(
+            !json.to_string().contains("agent-55fe8d181727"),
+            "the refused key id must not be echoed back: {json}"
+        );
+
+        // A non-directory-miss refusal omits the field entirely rather than
+        // sending a null or a guess.
+        let mismatch = IngestError::Verify(VerifyError::SignatureMismatch);
+        let json = serde_json::to_value(ingest_error_body(&mismatch)).expect("serialize");
+        assert_eq!(json["error"], "verify_signature_mismatch");
+        assert!(
+            json.get("key_id_namespace").is_none(),
+            "a signature mismatch carries no namespace information: {json}"
+        );
     }
 }

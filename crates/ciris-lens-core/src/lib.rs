@@ -109,7 +109,7 @@ pub use config::{
     UxConfig,
 };
 pub use detector::CoherenceRatchetDetector;
-pub use key_id::{FederationKeyId, KeyIdNamespace, KeyIdNamespaceError};
+pub use key_id::{FederationKeyId, KeyIdNamespace, KeyIdNamespaceError, NotEd25519};
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use retention::{
     evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary,

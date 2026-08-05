@@ -927,7 +927,11 @@ mod tests {
 
         let msg = canonical_bytes(&t).expect("canonicalize 3.0.0");
         let sig = sk.sign(&msg);
-        apply_signature(&mut t, &sig.to_bytes(), &FederationKeyId::derive("jcs-test", &vk));
+        apply_signature(
+            &mut t,
+            &sig.to_bytes(),
+            &FederationKeyId::derive("jcs-test", &vk),
+        );
 
         assert!(
             verify_trace_signature(&t, &vk),

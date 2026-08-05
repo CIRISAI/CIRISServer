@@ -371,7 +371,7 @@ pub use config::{Mode, PeerB, ServerConfig, Slices};
 /// ```
 pub use ciris_lens_core::key_id;
 pub use ciris_lens_core::key_id::{
-    classify as classify_key_id, FederationKeyId, KeyIdNamespace, KeyIdNamespaceError,
+    classify as classify_key_id, FederationKeyId, KeyIdNamespace, KeyIdNamespaceError, NotEd25519,
 };
 
 /// The config-as-CEG schema types (Server 0.5 Phase 1) — re-exported at the crate

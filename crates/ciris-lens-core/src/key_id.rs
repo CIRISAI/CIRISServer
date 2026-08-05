@@ -210,6 +210,30 @@ fn is_sanitized_label(label: &str) -> bool {
     true
 }
 
+/// An Ed25519 public key is exactly 32 bytes — the only input
+/// [`fedcode::derive_key_id`] produces a *resolvable* id from.
+const ED25519_PUBLIC_KEY_LEN: usize = 32;
+
+/// The derivation was handed something that is not an Ed25519 public key.
+///
+/// A fifth way to get the wrong namespace, and the quietest: `derive_key_id`
+/// hashes whatever bytes it is given, so a 65-byte ECDSA P-256 key or an
+/// ML-DSA-65 key yields a *perfectly well-formed* `<label>-<10 base32>` that no
+/// `federation_keys` row can ever match. persist hardened its own accessor
+/// against exactly this (`Engine::local_derived_key_id`, CIRISPersist#275 third
+/// surface); [`FederationKeyId::try_derive`] is the same guard for the two sites
+/// in this repo that derive from a runtime `Vec<u8>` rather than a `[u8; 32]`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "federation key id derivation needs a 32-byte Ed25519 public key, got {len} bytes — a \
+     non-Ed25519 signer has no federation identity, and deriving over its key would mint a \
+     well-formed id that no federation_keys row can match"
+)]
+pub struct NotEd25519 {
+    /// The length actually supplied.
+    pub len: usize,
+}
+
 /// Why an arbitrary string is not a federation key id.
 ///
 /// Carries the namespace it *is*, so a refusal can tell the producer which
@@ -302,6 +326,25 @@ impl FederationKeyId {
     #[must_use]
     pub fn derive(label: &str, ed25519_pubkey: &[u8]) -> Self {
         Self(fedcode::derive_key_id(label, ed25519_pubkey))
+    }
+
+    /// [`derive`](Self::derive) for a pubkey whose length is not known at
+    /// compile time — a `Vec<u8>` off a `HardwareSigner` or a base64 decode.
+    ///
+    /// Every other caller holds a `[u8; 32]` (`VerifyingKey::as_bytes`,
+    /// `LocalSigner::ed25519_public_key_bytes`) and cannot get this wrong, which
+    /// is why [`derive`](Self::derive) stays infallible. These two can, and
+    /// silently: see [`NotEd25519`].
+    ///
+    /// # Errors
+    /// [`NotEd25519`] when `ed25519_pubkey` is not exactly 32 bytes.
+    pub fn try_derive(label: &str, ed25519_pubkey: &[u8]) -> Result<Self, NotEd25519> {
+        if ed25519_pubkey.len() != ED25519_PUBLIC_KEY_LEN {
+            return Err(NotEd25519 {
+                len: ed25519_pubkey.len(),
+            });
+        }
+        Ok(Self::derive(label, ed25519_pubkey))
     }
 
     /// The federation key id of a persist [`LocalSigner`] — persist's own
@@ -468,9 +511,12 @@ mod tests {
     /// (`abcdef2345` is legal in both alphabets).
     #[test]
     fn the_discriminator_is_the_fingerprint_length() {
-        assert_eq!(classify("agent-abcdef2345"), KeyIdNamespace::Federation); // 10 chars
-        assert_eq!(classify("agent-abcdef234567"), KeyIdNamespace::AgentCredits); // 12 hex
-        assert_eq!(classify("agent-abcdef23456"), KeyIdNamespace::Unrecognized); // 11: neither
+        // 10 base32 chars → a derived fingerprint.
+        assert_eq!(classify("agent-abcdef2345"), KeyIdNamespace::Federation);
+        // 12 hex chars → the credits shape.
+        assert_eq!(classify("agent-abcdef234567"), KeyIdNamespace::AgentCredits);
+        // 11 → neither namespace mints that length.
+        assert_eq!(classify("agent-abcdef23456"), KeyIdNamespace::Unrecognized);
         // Base32 excludes 0/1/8/9, so a tail carrying them is not a fingerprint
         // however long it is.
         assert_eq!(classify("node-0189abcdef"), KeyIdNamespace::Unrecognized);
@@ -482,16 +528,16 @@ mod tests {
     fn a_malformed_label_is_not_a_derived_id() {
         for bad in [
             "",
-            "abcdefghij",           // no dash at all
-            "-abcdefghij",          // empty label
-            "node--abcdefghij",     // double dash
-            "NODE-abcdefghij",      // uppercase label
-            "no de-abcdefghij",     // space
-            "node_x-abcdefghij",    // underscore
-            "node-abcdefghij-",     // trailing dash → empty fingerprint
-            "node-abcdefghi",       // 9 chars
-            "node-abcdefghijk",     // 11 chars
-            "node-abcdefghi1",      // `1` is not in the base32 alphabet
+            "abcdefghij",        // no dash at all
+            "-abcdefghij",       // empty label
+            "node--abcdefghij",  // double dash
+            "NODE-abcdefghij",   // uppercase label
+            "no de-abcdefghij",  // space
+            "node_x-abcdefghij", // underscore
+            "node-abcdefghij-",  // trailing dash → empty fingerprint
+            "node-abcdefghi",    // 9 chars
+            "node-abcdefghijk",  // 11 chars
+            "node-abcdefghi1",   // `1` is not in the base32 alphabet
         ] {
             assert_eq!(
                 classify(bad),
@@ -507,7 +553,10 @@ mod tests {
     fn the_wire_is_one_plain_string() {
         let id = FederationKeyId::derive("ciris-agent-bootstrap", &[3u8; 32]);
         let json = serde_json::to_string(&id).expect("serialize");
-        assert_eq!(json, serde_json::to_string(id.as_str()).expect("serialize str"));
+        assert_eq!(
+            json,
+            serde_json::to_string(id.as_str()).expect("serialize str")
+        );
         assert!(json.starts_with('"') && json.ends_with('"'));
 
         // Round-trip, and a wrong-namespace string cannot ride in.
@@ -526,6 +575,37 @@ mod tests {
             })
             .expect("serialize"),
             format!(r#"{{"signature_key_id":"{}"}}"#, id.as_str())
+        );
+    }
+
+    /// A non-Ed25519 key derives to something that LOOKS right and can never
+    /// resolve — the quietest way left to mint the wrong namespace.
+    #[test]
+    fn a_non_ed25519_pubkey_cannot_mint_a_federation_id() {
+        // 65 bytes: an uncompressed SEC1 ECDSA P-256 key, the keystore fallback
+        // persist#275 hardened against.
+        let p256 = [4u8; 65];
+        assert_eq!(
+            FederationKeyId::try_derive("ciris-client", &p256),
+            Err(NotEd25519 { len: 65 })
+        );
+        // And it would have been accepted: the shape check cannot catch this,
+        // which is exactly why the LENGTH has to be checked at the derivation.
+        assert_eq!(
+            classify(&fedcode::derive_key_id("ciris-client", &p256)),
+            KeyIdNamespace::Federation,
+            "a P-256 key derives to a well-formed federation id — the defect is \
+             invisible downstream, so it must be refused here"
+        );
+
+        assert_eq!(
+            FederationKeyId::try_derive("ciris-client", &[]),
+            Err(NotEd25519 { len: 0 })
+        );
+        assert_eq!(
+            FederationKeyId::try_derive("ciris-client", &[7u8; 32]),
+            Ok(FederationKeyId::derive("ciris-client", &[7u8; 32])),
+            "try_derive must agree with derive on a real Ed25519 key"
         );
     }
 

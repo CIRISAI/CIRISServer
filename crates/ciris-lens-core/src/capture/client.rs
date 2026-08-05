@@ -249,6 +249,7 @@ pub enum PrepareSealOutcome {
 /// Factored out as a standalone async function (not a method) so it
 /// is directly unit-testable without a full `CaptureClient` — see
 /// the `tests` module below.
+///
 /// # The stamp is the DERIVED id, not `current_alias()`
 ///
 /// This stamped `signer.current_alias()` until CIRISServer#371 typed
@@ -257,7 +258,13 @@ pub enum PrepareSealOutcome {
 /// *output* (`ciris-client-cjgfikxxd5`), so an alias-stamped trace is refused
 /// with `verify_unknown_key` — CIRISServer#118, and the same axis as the
 /// 2026-08-05 outage. The derivation is verify's, called through
-/// [`FederationKeyId::derive`] with the signer's own alias + public key.
+/// [`FederationKeyId::try_derive`] with the signer's own alias + public key.
+///
+/// `try_derive` and not `derive`: `HardwareSigner` is a P-256-capable trait
+/// (`ClassicalAlgorithm::EcdsaP256` is the mobile-HSM case its own docs name
+/// first), and deriving over a 65-byte SEC1 key mints a well-formed id no
+/// directory can resolve. persist guards its own accessor identically
+/// (CIRISPersist#275).
 pub async fn sign_trace_via_hardware_signer(
     signer: &dyn HardwareSigner,
     trace: &mut CompleteTrace,
@@ -271,7 +278,8 @@ pub async fn sign_trace_via_hardware_signer(
         .public_key()
         .await
         .map_err(|e| SealSignError::HardwareSign(e.to_string()))?;
-    let key_id = FederationKeyId::derive(signer.current_alias(), &pubkey);
+    let key_id = FederationKeyId::try_derive(signer.current_alias(), &pubkey)
+        .map_err(|e| SealSignError::HardwareSign(e.to_string()))?;
     apply_signature(trace, &sig, &key_id);
     Ok(())
 }

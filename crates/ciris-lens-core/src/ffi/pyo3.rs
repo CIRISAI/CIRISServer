@@ -66,6 +66,11 @@ use uuid::Uuid;
 /// Returns a [`FederationKeyId`], not a `String`: this function's whole purpose
 /// is to be the *other* namespace from `local_key_id()`, and returning the same
 /// type as the wrong answer is what let #118 recur as CIRISServer#371.
+///
+/// The pubkey arrives as base64 **from Python** and is length-checked via
+/// [`FederationKeyId::try_derive`]: a host that hands back a P-256 key would
+/// otherwise get a well-formed federation id that no directory can resolve —
+/// the same silent-mint persist#275 closed on its own accessor.
 fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<FederationKeyId> {
     use base64::Engine as _;
     let alias: String = engine
@@ -79,7 +84,9 @@ fn engine_federation_key_id(engine: &Bound<'_, PyAny>) -> PyResult<FederationKey
     let pubkey = base64::engine::general_purpose::STANDARD
         .decode(pub_b64.trim())
         .map_err(|e| PyRuntimeError::new_err(format!("decode local_public_key_b64: {e}")))?;
-    Ok(FederationKeyId::derive(&alias, &pubkey))
+    FederationKeyId::try_derive(&alias, &pubkey).map_err(|e| {
+        PyRuntimeError::new_err(format!("engine.local_public_key_b64() is not usable: {e}"))
+    })
 }
 
 use crate::capture::client::{CaptureClient, CaptureEventOutcome};

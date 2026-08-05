@@ -20,6 +20,9 @@
 //!      not a rubber stamp; the CEG signature IS the auth, identical to the RET
 //!      relay's `LensCoreHandler` posture).
 //!   4. **An UNKNOWN-KEY batch is REJECTED** — `401`, nothing persists.
+//!   5. **The refusal NAMES the derivation namespace** (CIRISServer#371 / RCA
+//!      2026-08-05 fix 6) — an agent-credits id comes back `agent_credits`, a
+//!      bare label comes back `unrecognized`, and neither echoes the value.
 //!
 //! The fixture (a hybrid-signed `CompleteTrace` wrapped in a `BatchEnvelope`) is
 //! the SAME shape `tests/replication.rs` uses — exactly what the emitter ships
@@ -330,5 +333,57 @@ async fn unknown_key_batch_is_rejected() {
         body["error"].as_str(),
         Some("verify_unknown_key"),
         "rejection must be an unknown-key verify failure: {body}"
+    );
+    // `agent-alpha` is neither derivation — a bare label, the CIRISServer#118
+    // shape. Naming it `agent_credits` would send the producer chasing the wrong
+    // fix, so the refusal says only what it can prove.
+    assert_eq!(
+        body["key_id_namespace"].as_str(),
+        Some("unrecognized"),
+        "{body}"
+    );
+}
+
+/// **The 2026-08-05 incident, end to end** (RCA fix 6, CIRISServer#371).
+///
+/// The producer held a real Ed25519 key and signed correctly — it just named
+/// itself with its **agent-credits** identity, `agent-{sha256(pubkey)[:12]}`,
+/// which is not a federation identity. canonical-server-1 refused it 8,631 times
+/// a day for 71 hours and the only thing the producer ever received back was the
+/// token `verify_unknown_key` — equally true of a typo, a revoked key, a pending
+/// registration, and this. Four different fixes; one word.
+///
+/// This drives the real router, the real `receive_and_persist` verify gate and
+/// the real response body, so it fails if ANY link drops the namespace — which
+/// the unit tests in `src/ingest_http.rs` cannot tell you.
+#[tokio::test]
+async fn the_credits_namespace_incident_is_refused_by_name() {
+    // The exact id from FSD/RCA_INGEST_REJECTION_2026-08-05.md (4,317/24h).
+    const CREDITS_KEY_ID: &str = "agent-55fe8d181727";
+
+    let engine = node(0xC1, "node-c").await;
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    // No cross_register — exactly the production condition: the credits id is
+    // not in `federation_keys`, because it never could be.
+
+    let bytes = build_batch_bytes(&agent_sk, CREDITS_KEY_ID, "trace-http-credits-0001");
+    let (status, body) = post(engine, LEGACY_INGEST_PATH, bytes).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the admission gate was always right and must not soften: {status}: {body}"
+    );
+    assert_eq!(body["error"].as_str(), Some("verify_unknown_key"), "{body}");
+    assert_eq!(
+        body["key_id_namespace"].as_str(),
+        Some("agent_credits"),
+        "the producer is the only party who can fix this, and the namespace is \
+         the only thing that tells them what to fix: {body}"
+    );
+    // AV-15: the refused value itself never rides the response.
+    assert!(
+        !body.to_string().contains(CREDITS_KEY_ID),
+        "the offending key id belongs in the log, not the body: {body}"
     );
 }

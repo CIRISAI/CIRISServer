@@ -28,7 +28,9 @@
 
 use ciris_lens_core::capture::partial::{CompleteTrace, TraceComponent};
 use ciris_lens_core::capture::seal;
-use ciris_server::{classify_key_id, FederationKeyId, KeyIdNamespace, KeyIdNamespaceError};
+use ciris_server::{
+    classify_key_id, FederationKeyId, KeyIdNamespace, KeyIdNamespaceError, NotEd25519,
+};
 
 /// The two producer ids from `FSD/RCA_INGEST_REJECTION_2026-08-05.md`, refused
 /// by namespace rather than by shrug.
@@ -85,6 +87,41 @@ fn every_derive_key_id_output_parses() {
             "the newtype's constructor must BE verify's derivation, not a copy of it"
         );
     }
+}
+
+/// **The remaining way to mint the wrong namespace, and the quietest.**
+///
+/// `derive_key_id` hashes whatever bytes it is handed, so a 65-byte SEC1 ECDSA
+/// P-256 key — the mobile-HSM case `HardwareSigner`'s own docs name first —
+/// produces a *perfectly well-formed* `<label>-<10 base32>` id that no
+/// `federation_keys` row can ever match. Nothing downstream can tell: shape,
+/// parse and classify all say `Federation`. Only the derivation site can refuse
+/// it, which is why the two sites in this repo that derive from a runtime
+/// `Vec<u8>` (`sign_trace_via_hardware_signer`, the pyo3
+/// `engine_federation_key_id`) go through `try_derive`.
+///
+/// persist closed the identical hole on `Engine::local_derived_key_id`
+/// (CIRISPersist#275, third surface).
+#[test]
+fn a_non_ed25519_key_cannot_mint_a_federation_id() {
+    let p256 = [4u8; 65];
+    assert_eq!(
+        FederationKeyId::try_derive("ciris-client", &p256),
+        Err(NotEd25519 { len: 65 }),
+    );
+
+    // The proof that the guard is load-bearing: without it the value passes
+    // every other check this file makes.
+    let unguarded = FederationKeyId::derive("ciris-client", &p256);
+    assert_eq!(
+        classify_key_id(unguarded.as_str()),
+        KeyIdNamespace::Federation,
+        "a P-256-derived id is indistinguishable from an honest one — the shape \
+         checks cannot catch this, so the length check at the derivation is the \
+         only place it can be caught"
+    );
+
+    assert!(FederationKeyId::try_derive("ciris-client", &[7u8; 32]).is_ok());
 }
 
 /// A type-system change, not a wire change.
