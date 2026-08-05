@@ -69,7 +69,10 @@ address them:
   peers at the same `asserted_at`; both verify; nothing compares them
 - **every removal is an append on a pull-only plane** — revoke, purge, erase,
   de-admit and halt alike; unreached holders never learn
-- **authority propagates automatically; recovery does not** — the halt latch
+- **authority propagates automatically; recovery does not** — the halt latch.
+  Structural and permanent for *delivery* (a dark node pulls nothing); §3 records
+  how #347 routes around it by making recovery something the node **finds on
+  disk** rather than something the mesh delivers
 
 ### Corrections to earlier drafts of this document
 
@@ -165,17 +168,62 @@ Every op remains a signed, attributed CEG object. What changes is the rungs.
 | 2 | **quarantine** — withhold from serving, retain locally | row set | **`un-quarantine`** | `moderate` |
 | 3 | **force descent** — CC 6.1.2 pressure; blur + tombstone remain | row set | no, by design | `slash` + **quorum** |
 | 4 | **de-admit** — key may no longer write | key | **`re-admit`** | `slash` |
-| 5 | **halt** — kill switch | node | **NO — see below** | accord quorum |
+| 5 | **halt** — kill switch | node | **offline release token — see below** | accord quorum |
 | **S** | **self-directed** — shed my own load, stop accepting, descend my own corpus, declare legal compulsion | **self** | yes | owner |
 | **R** | **subject-side** — a reader's own accept/refuse policy over others' judgements | **the reader's view** | yes | reader |
 
-**Tier 5 is not reversible, and the prior draft said it was.** `accord_halt.rs`
-replicates the halt to all known peers, latches it to disk, and `exit(42)`s;
-`check_halt_gate` then refuses boot. A halted node is not running, so the un-halt
-cannot be delivered to it. Recovery is O(nodes) manual physical acts. Until a
-halt carries an expiry or a locally-verifiable release token, tier 5 is the most
-irreversible operation in the system — not the most reversible — and it must be
-gated and previewed accordingly.
+**Tier 5 is not reversible over the network, and the prior draft said it was.**
+`accord_halt.rs` replicates the halt to all known peers, latches it to disk, and
+`exit(42)`s; `check_halt_gate` then refuses boot. A halted node is not running,
+so the un-halt cannot be *delivered* to it — replication is pull-based and a dark
+node pulls nothing. That is a permanent property of the mechanism and no amount
+of protocol work changes it.
+
+**What changed (CIRISServer#347): the un-halt is no longer delivered, it is
+found.** The latch now records **what would lift it** — a release binding naming
+`{node_id, halt_invocation_id, halt_payload_sha256, latch_id}` — and
+`src/accord_release.rs` verifies an accord-cosigned `accord:lifecycle:active`
+token against that binding **entirely offline**: the family and its `quorum:M/N`
+from verify's baked `humanity_accord_genesis()`, the holders' hybrid pubkeys from
+persist's baked `accord_holder_genesis_records()`, the binding from the latch
+file. No network, no peer, no live quorum, no database. Any transport works — file
+drop, USB, QR, operator paste — because the token is read off disk by the boot
+gate, not delivered to a process. Recovery therefore costs one act *per mesh
+ceremony* plus a file copy per node, not a physical visit per node.
+
+It does not soften the halt. The token needs the same authority class that fires
+one (an accord quorum, never a single party, never the operator), it is bound so
+narrowly that it is not a skeleton key (another node, another halt, or an earlier
+latch of the *same* halt all fail: the `latch_id` is fresh CSPRNG per latch, so a
+token cannot even be minted against a halt that has not happened), and every
+attempt — honoured or refused — lands in an append-only journal surfaced at
+`GET /v1/accord/halt-status`. A release is a governance act and is as auditable
+as the halt.
+
+Two paths back now exist, and they are the same rung reached with different
+material — not two ladders:
+
+| | `accord release` (#347) | `accord reactivate` |
+|---|---|---|
+| authority | **baked** genesis family, M-of-N | **live** family from persist, M-of-N + ≥1 original seat |
+| needs | two files in `home` | the DB + the keystore |
+| handles | a family that still has its founders | a family that has rotated past them |
+
+The offline path deliberately uses the *pinned* half of the reactivation floor
+and drops the DB half, because the DB half is the forgeable one on a captured
+host — that is the same B2 reasoning that put the genesis floor into
+`accord_reactivate` in the first place.
+
+**Still open from #347.** The release token is ask (1) of four. A halt still
+carries **no TTL** (ask 2), still has **no cohort scope** (ask 3, arguably a CC
+4.2 change), and still has **no dry-run/preview** (ask 4). Tier 5 remains the
+op with the largest blast radius and the thinnest ceremony, and must be gated and
+previewed accordingly.
+
+One thing the release token explicitly does **not** claim: durability against an
+operator with filesystem write. Deleting the latch was always possible and still
+is. The property is narrower and checkable — *nobody without an accord quorum can
+produce a release the node will honour and log as authorized.*
 
 Four further corrections embedded there:
 

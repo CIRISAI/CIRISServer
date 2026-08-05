@@ -42,6 +42,9 @@ pub async fn run(report: &mut Report) {
             home: Some(home.clone()),
             peers: Vec::new(),
             exit_on_halt: false,
+            // #347: the QA runner exercises the halt path, not the offline
+            // release; a `None` node_id latches with no release binding.
+            node_id: None,
         },
     )
     .await;
@@ -247,6 +250,9 @@ pub async fn run_membership(report: &mut Report) {
             home: None,
             peers: Vec::new(),
             exit_on_halt: false,
+            // #347: the QA runner exercises the halt path, not the offline
+            // release; a `None` node_id latches with no release binding.
+            node_id: None,
         },
     )
     .await;
@@ -437,6 +443,9 @@ pub async fn run_ceremony(report: &mut Report) {
             home: None,
             peers: Vec::new(),
             exit_on_halt: false,
+            // #347: the QA runner exercises the halt path, not the offline
+            // release; a `None` node_id latches with no release binding.
+            node_id: None,
         },
     )
     .await;

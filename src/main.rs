@@ -123,9 +123,21 @@ async fn main() -> Result<()> {
         // node may boot. NOT an operator restart — the quorum brings it back.
         Some("accord") => match args.next().as_deref() {
             Some("reactivate") => run_accord_reactivate(args).await,
+            // `ciris-server accord release-request --home <path> [--ttl-hours N]` /
+            // `ciris-server accord release --home <path> --token <file>` — the
+            // OFFLINE way back (CIRISServer#347). `release-request` reads the halt
+            // latch and prints the exact `accord:lifecycle:active` invocation + the
+            // bytes for the accord seats to cosign; `release` verifies the returned
+            // token against the BAKED accord genesis and clears the latch. Neither
+            // opens a socket, a peer connection, or the database — which is the
+            // point: a halted node cannot be reached, only read.
+            Some("release-request") => run_accord_release_request(args),
+            Some("release") => run_accord_release(args),
             other => Err(anyhow::anyhow!(
                 "usage: ciris-server accord reactivate --home <path> [--key-id <name>] \
-                 --proof <file.json> (got {:?})",
+                 --proof <file.json>\n       ciris-server accord release-request --home <path> \
+                 [--ttl-hours <n>] [--out <file.json>]\n       ciris-server accord release --home <path> --token \
+                 <file.json> (got {:?})",
                 other
             )),
         },
@@ -198,6 +210,127 @@ async fn run_accord_reactivate(mut args: impl Iterator<Item = String>) -> Result
         serde_json::from_slice(&proof_bytes).context("parse reactivation proof JSON")?;
 
     ciris_server::accord_reactivate::reactivate_accord(&cfg, proof).await
+}
+
+/// Read the halt latch out of `--home` — the ONE input both offline release
+/// subcommands need. No engine, no keystore, no network: a halted node's latch is
+/// just a file, and that is exactly why this path works when nothing else does.
+fn read_halt_latch(home: &std::path::Path) -> Result<ciris_server::accord_halt::HaltRecord> {
+    let latch = ciris_server::accord_halt::halt_latch_path(home);
+    if !latch.exists() {
+        return Err(anyhow::anyhow!(
+            "no HUMANITY_ACCORD halt latch at {} — this node is not halted; there is nothing to \
+             release",
+            latch.display()
+        ));
+    }
+    let body = std::fs::read_to_string(&latch)
+        .with_context(|| format!("read the halt latch {}", latch.display()))?;
+    serde_json::from_str(&body)
+        .with_context(|| format!("parse the halt latch {} as a HaltRecord", latch.display()))
+}
+
+/// `--home` (defaulting like the serve path), plus whatever else the caller wants.
+fn home_from(arg: Option<String>) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        arg.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
+    )
+}
+
+/// `accord release-request` — print what the accord must cosign to release THIS
+/// latch. Pure function of the latch + the baked genesis.
+fn run_accord_release_request(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut home: Option<String> = None;
+    let mut ttl_hours: i64 = 72;
+    let mut out: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--ttl-hours" => {
+                ttl_hours = args
+                    .next()
+                    .context("--ttl-hours needs a number")?
+                    .parse()
+                    .context("--ttl-hours must be an integer")?;
+            }
+            // The request is a ceremony INPUT, so it must be pipeable. stdout also
+            // carries the tracing sink on every subcommand, so `--out` (the shape
+            // `bench-results` already uses) is the clean way to get exact bytes.
+            "--out" => out = Some(args.next().context("--out needs a file")?),
+            // Accepted and ignored: this path opens no keystore, so the alias is
+            // irrelevant. Taking it keeps the flag shape uniform with `reactivate`.
+            "--key-id" => {
+                let _ = args.next();
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unknown accord-release-request arg: {other}"
+                ))
+            }
+        }
+    }
+    let home = home_from(home);
+    let record = read_halt_latch(&home)?;
+    let request = ciris_server::accord_release::build_release_request(&record, ttl_hours)?;
+    let json = serde_json::to_string_pretty(&request)?;
+    match out {
+        Some(path) => {
+            std::fs::write(&path, &json)
+                .with_context(|| format!("write the release request to {path}"))?;
+            eprintln!("wrote {path}");
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+/// `accord release` — verify a cosigned release token OFFLINE and clear the latch.
+fn run_accord_release(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut home: Option<String> = None;
+    let mut token_path: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = Some(args.next().context("--home needs a path")?),
+            "--token" => token_path = Some(args.next().context("--token needs a file")?),
+            "--key-id" => {
+                let _ = args.next();
+            }
+            other => return Err(anyhow::anyhow!("unknown accord-release arg: {other}")),
+        }
+    }
+    let home = home_from(home);
+    let record = read_halt_latch(&home)?;
+    // Default to the drop-site the boot gate watches, so `--token` is optional
+    // when the operator has already placed the file.
+    let token_path = token_path.map_or_else(
+        || ciris_server::accord_release::release_token_path(&home),
+        std::path::PathBuf::from,
+    );
+    let bytes = std::fs::read(&token_path)
+        .with_context(|| format!("read the release token {}", token_path.display()))?;
+    let token: ciris_server::accord_release::ReleaseToken =
+        serde_json::from_slice(&bytes).context("parse the release token JSON")?;
+    let authority = ciris_server::accord_release::baked_release_authority()?;
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let verdict = ciris_server::accord_release::honor_release_token(
+        &home, &record, &token, &authority, &now,
+    )?;
+    println!(
+        "✅ HUMANITY_ACCORD halt RELEASED — {} of {} accord seats authorized \
+         accord:lifecycle:active {} for latch {} on node {} (authority: {}, verified OFFLINE: no \
+         network, no peer, no database). The latch is cleared; the node may now start.\n   \
+         audit: {}",
+        verdict.valid_signers,
+        verdict.roster_size,
+        verdict.release_invocation_id,
+        verdict.latch_id,
+        verdict.node_id,
+        verdict.authority_source,
+        ciris_server::accord_release::release_journal_path(&home).display(),
+    );
+    Ok(())
 }
 
 use anyhow::Context as _;

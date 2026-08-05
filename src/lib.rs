@@ -46,6 +46,12 @@ pub mod accord_provision;
 /// `accord reactivate` op: a verified 2/3 `accord:lifecycle:active` clears the halt
 /// latch (the quorum brings the node back, never an operator restart).
 pub mod accord_reactivate;
+/// **Offline-verifiable halt release** (CIRISServer#347) — an accord-cosigned
+/// token, bound to one node and one latch instance, that a dark node verifies at
+/// boot against the BAKED accord genesis: no network, no peer, no live quorum, no
+/// database. Removes the O(nodes) physical recovery from a mistaken tier-5 halt
+/// without softening the halt (the same accord quorum authorizes both).
+pub mod accord_release;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become

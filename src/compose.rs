@@ -985,6 +985,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             // must not make it gossip/halt-loop back to itself).
                             peers: accord_peers.clone(),
                             exit_on_halt: true,
+                            // #347: the latch's release binding names THIS node,
+                            // so an offline release token is not replayable
+                            // against any other node in the mesh. `cfg.key_id` is
+                            // the FSD-003 fingerprinted federation identity by
+                            // this point (derived above from the ed25519 pubkey).
+                            node_id: Some(cfg.key_id.clone()),
                         },
                     ))
                     // ACCORD-HOLDER PROVISIONING (CIRISServer#41, the safe-mesh
