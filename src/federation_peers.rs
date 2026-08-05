@@ -109,12 +109,31 @@ const PEER_IDENTITY_TYPES: &[&str] = &[
 #[derive(Clone)]
 struct PeersState {
     engine: Arc<Engine>,
-    /// The node's own derived federation `key_id` — excluded from the peer list.
-    self_key_id: String,
 }
 
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
+/// The node's own derived federation `key_id` — the key excluded from the peer
+/// list, the node whose owner-binding gates the sideband writes, and the
+/// granter of the reciprocal consent below.
+///
+/// **Resolved from the engine, never accepted as a parameter**
+/// (CIRISServer#372 Level 2). This module already knew the difference: the
+/// test-anchor admit path derived it explicitly and warned in a comment that
+/// "passing `st.self_key_id` (the composed `cfg.key_id`) risks a mismatch that
+/// would make the idempotency read miss and the grant land under the wrong
+/// granter". With no parameter left there is no second value to mismatch.
+async fn self_key_id(st: &PeersState) -> Result<String, Response> {
+    crate::self_identity::resolve(&st.engine, "federation_peers")
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
+            )
+        })
 }
 
 /// The agent's 404 body for a sideband write on an unknown peer — mirrors
@@ -184,7 +203,8 @@ pub(crate) async fn require_owner_session(
 /// The serve-only-floor gate (CC 3.2 / CC 1.13.5) — an owner-UNBOUND node
 /// refuses every sideband write. Mirrors the config handler's check.
 async fn require_owner_bound(st: &PeersState) -> Result<(), Response> {
-    if crate::auth::gate::require_owner_bound(&st.engine, &st.self_key_id)
+    let self_key_id = self_key_id(st).await?;
+    if crate::auth::gate::require_owner_bound(&st.engine, &self_key_id)
         .await
         .is_err()
     {
@@ -365,6 +385,7 @@ fn to_peer(rec: KeyRecord, sideband: Option<&PeerSideband>) -> LocalPeerState {
 /// de-duped by `key_id`, EXCLUDING the node's own self key. The owner's
 /// sideband rows are overlaid per peer (trust override + appearance).
 async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response> {
+    let self_key_id = self_key_id(st).await?;
     let sidebands = load_all_sidebands(st).await;
     let dir = st.engine.federation_directory();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -375,7 +396,7 @@ async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response>
             .await
             .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")))?;
         for rec in rows {
-            if rec.key_id == st.self_key_id {
+            if rec.key_id == self_key_id {
                 continue; // exclude self
             }
             if !seen.insert(rec.key_id.clone()) {
@@ -741,10 +762,14 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
 /// Compile-fenced with the rest of the harness surface; never in prod.
 #[cfg(feature = "test-anchor")]
 async fn test_blessed_self_record(State(st): State<PeersState>) -> Response {
+    let self_key_id = match self_key_id(&st).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let rec = match st
         .engine
         .federation_directory()
-        .lookup_public_key(&st.self_key_id)
+        .lookup_public_key(&self_key_id)
         .await
     {
         Ok(Some(rec)) => rec,
@@ -906,17 +931,14 @@ async fn test_admit_peer(
 
     // `node_key_id` MUST be `engine.local_derived_key_id()` — the EXACT #247-derived
     // attester `emit_attestation_self` stamps AND the value edge resolves its
-    // `local_key_id` send-set against; passing `st.self_key_id` (the composed
-    // `cfg.key_id`) risks a mismatch that would make the idempotency read miss and
-    // the grant land under the wrong granter (invisible to `list_consent_peers`).
-    let node_key_id = match st.engine.local_derived_key_id().await {
+    // `local_key_id` send-set against. This used to warn that passing
+    // `st.self_key_id` (the composed `cfg.key_id`) risks a mismatch; since
+    // CIRISServer#372 Level 2 there IS no `st.self_key_id` to pass, and every
+    // route on this surface reads the same [`self_key_id`] the way this one
+    // always did.
+    let node_key_id = match self_key_id(&st).await {
         Ok(id) => id,
-        Err(e) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("reciprocal consent: local_derived_key_id: {e}"),
-            )
-        }
+        Err(resp) => return resp,
     };
     // The single narrow trust-graph prefix — see the block comment above.
     let consent_prefixes = ["self:delegates_to:".to_string()];
@@ -1004,13 +1026,13 @@ async fn test_admit_peer(
         .into_response()
 }
 
-/// The federation-peers read router. `self_key_id` is the node's own derived
-/// federation `key_id` (excluded from the listing).
-pub fn router(engine: Arc<Engine>, self_key_id: String) -> Router {
-    let state = PeersState {
-        engine,
-        self_key_id,
-    };
+/// The federation-peers read router.
+///
+/// **It takes no key id** (CIRISServer#372 Level 2): the node's own derived
+/// federation `key_id` (the one excluded from the listing) is resolved from the
+/// engine at request time — see [`self_key_id`].
+pub fn router(engine: Arc<Engine>) -> Router {
+    let state = PeersState { engine };
     let router = Router::new()
         .route("/v1/federation/peers", axum::routing::get(list_peers))
         .route(

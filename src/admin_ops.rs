@@ -322,9 +322,30 @@ fn err(code: StatusCode, token: &str, id: &str, text: String) -> Response {
 #[derive(Clone)]
 struct AdminOpsState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` — the ACTING key of every op here, and
-    /// the key whose delegated authority is re-walked.
-    node_key_id: String,
+}
+
+/// THIS node's federation `key_id` — the ACTING key of every op here, the key
+/// whose delegated authority is re-walked, and the identity every tombstone is
+/// signed under.
+///
+/// **Resolved from the engine, never accepted as a parameter**
+/// (CIRISServer#372 Level 2). It used to ride in [`AdminOpsState`] from
+/// `compose`'s `cfg.key_id`, which begins life as the `--key-id` CLI *label*.
+/// The key whose authority is walked and the key that signs the resulting
+/// revocation must be ONE identity — in the embedded fold the label and the
+/// engine signer differ, and an op authorised under one key but signed under
+/// another is exactly the producer/attester disagreement `scorer.rs` names.
+async fn self_key_id(st: &AdminOpsState) -> Result<String, Response> {
+    crate::self_identity::resolve(&st.engine, "admin_ops")
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::self_identity::REFUSAL_TOKEN,
+                crate::self_identity::MESSAGE_ID,
+                format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
+            )
+        })
 }
 
 /// Owner-authority gate. Identical spine to
@@ -376,8 +397,14 @@ async fn require_owner(st: &AdminOpsState, headers: &HeaderMap) -> Result<Sessio
 /// The gate stack every route in this module runs, in this order: serve-only
 /// floor (an unowned node performs no judgement on anyone's behalf) → owner
 /// session → the never-delegatable `Wipe` verb.
-async fn gate(st: &AdminOpsState, headers: &HeaderMap) -> Result<(), Response> {
-    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+///
+/// **Returns THIS node's resolved signing identity** so every route runs on the
+/// one value the gate itself was evaluated against — the node whose
+/// owner-binding was walked here and the node whose delegated authority is
+/// re-walked below cannot be two different keys (CIRISServer#372 Level 2).
+async fn gate(st: &AdminOpsState, headers: &HeaderMap) -> Result<String, Response> {
+    let node_key_id = self_key_id(st).await?;
+    if crate::auth::gate::require_owner_bound(&st.engine, &node_key_id)
         .await
         .is_err()
     {
@@ -393,7 +420,7 @@ async fn gate(st: &AdminOpsState, headers: &HeaderMap) -> Result<(), Response> {
     if let Some(resp) = crate::auth::gate::require_verb(&caller, CapabilityVerb::Wipe) {
         return Err(resp);
     }
-    Ok(())
+    Ok(node_key_id)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -884,8 +911,13 @@ struct Committed {
 /// The shared commit gate: attribution → authority → **re-preview and compare
 /// the hash**. In that order, so an unattributed call is refused before any
 /// substrate work happens.
+///
+/// `node_key_id` is the value [`gate`] resolved from the engine — passed down
+/// rather than re-derived so the authority walked here is provably walked from
+/// the same identity the gate authorised (CIRISServer#372 Level 2).
 async fn commit_gate(
     st: &AdminOpsState,
+    node_key_id: &str,
     c: &Commit,
     scope: &str,
     extra_delegation_ids: &[String],
@@ -910,12 +942,12 @@ async fn commit_gate(
         ));
     }
 
-    let authority = resolve_authority(&st.engine, &st.node_key_id, &c.delegation_id, scope).await?;
+    let authority = resolve_authority(&st.engine, node_key_id, &c.delegation_id, scope).await?;
     let mut quorum_roots: BTreeSet<String> = BTreeSet::new();
     quorum_roots.insert(authority.issuer_key_id.clone());
     let mut quorum_delegation_ids = vec![authority.delegation_id.clone()];
     for extra in extra_delegation_ids {
-        let proof = resolve_authority(&st.engine, &st.node_key_id, extra, scope).await?;
+        let proof = resolve_authority(&st.engine, node_key_id, extra, scope).await?;
         quorum_roots.insert(proof.issuer_key_id);
         quorum_delegation_ids.push(proof.delegation_id);
     }
@@ -939,7 +971,7 @@ async fn commit_gate(
             .into_response());
     }
 
-    let preview = run_preview(&st.engine, &st.node_key_id, &c.selection)
+    let preview = run_preview(&st.engine, node_key_id, &c.selection)
         .await
         .map_err(|e| {
             err(
@@ -1103,9 +1135,10 @@ async fn preview(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let selection: Selection = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
@@ -1117,7 +1150,7 @@ async fn preview(
             )
         }
     };
-    match run_preview(&st.engine, &st.node_key_id, &selection).await {
+    match run_preview(&st.engine, &node_key_id, &selection).await {
         Ok(p) => {
             let mut out = preview_json(&p);
             out["source_locale"] = serde_json::json!(SOURCE_LOCALE);
@@ -1165,9 +1198,10 @@ async fn judgement_only(
         enforcement,
         reversal,
     } = spec;
-    if let Err(resp) = gate(st, headers).await {
-        return resp;
-    }
+    let node_key_id = match gate(st, headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let c: Commit = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -1179,7 +1213,7 @@ async fn judgement_only(
             )
         }
     };
-    let committed = match commit_gate(st, &c, scope, &[], 1).await {
+    let committed = match commit_gate(st, &node_key_id, &c, scope, &[], 1).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1379,9 +1413,10 @@ async fn quarantine_op(
     body: &axum::body::Bytes,
     release: bool,
 ) -> Response {
-    if let Err(resp) = gate(st, headers).await {
-        return resp;
-    }
+    let node_key_id = match gate(st, headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let req: QuarantineRequest = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -1403,7 +1438,8 @@ async fn quarantine_op(
         );
     }
     let c = req.commit;
-    let committed = match commit_gate(st, &c, REQUIRED_SCOPE_QUARANTINE, &[], 1).await {
+    let committed = match commit_gate(st, &node_key_id, &c, REQUIRED_SCOPE_QUARANTINE, &[], 1).await
+    {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1573,9 +1609,10 @@ async fn descend(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let req: DescendRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -1590,6 +1627,7 @@ async fn descend(
     let c = req.commit;
     let committed = match commit_gate(
         &st,
+        &node_key_id,
         &c,
         REQUIRED_SCOPE_DESCEND,
         &req.quorum_delegation_ids,
@@ -1731,9 +1769,10 @@ async fn deadmit(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = gate(&st, &headers).await {
-        return resp;
-    }
+    let node_key_id = match gate(&st, &headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let req: DeadmitRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -1746,7 +1785,7 @@ async fn deadmit(
         }
     };
     let c = req.commit;
-    let committed = match commit_gate(&st, &c, REQUIRED_SCOPE_DEADMIT, &[], 1).await {
+    let committed = match commit_gate(&st, &node_key_id, &c, REQUIRED_SCOPE_DEADMIT, &[], 1).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2274,6 +2313,10 @@ fn partition_note() -> serde_json::Value {
 /// purpose: a client that reads only the status and a client that reads only
 /// the body must each be unable to conclude "nothing in force".
 async fn self_standing(State(st): State<AdminOpsState>, headers: HeaderMap) -> Response {
+    let node_key_id = match self_key_id(&st).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     if let Err(resp) = gate(&st, &headers).await {
         return resp;
     }
@@ -2281,7 +2324,7 @@ async fn self_standing(State(st): State<AdminOpsState>, headers: HeaderMap) -> R
     let mut standings = serde_json::Map::new();
     let mut errors = serde_json::Map::new();
     for &act in SelfAct::ALL {
-        let fold = match read_self_axis(&st.engine, &st.node_key_id, act, now).await {
+        let fold = match read_self_axis(&st.engine, &node_key_id, act, now).await {
             Ok(f) => f,
             Err(e) => {
                 errors.insert(act.axis().to_owned(), serde_json::json!(e));
@@ -2294,7 +2337,7 @@ async fn self_standing(State(st): State<AdminOpsState>, headers: HeaderMap) -> R
     let mut out = serde_json::json!({
         "source_locale": SOURCE_LOCALE,
         "tier": "S",
-        "node_key_id": st.node_key_id,
+        "node_key_id": node_key_id,
         "standings": standings,
         "partition": partition_note(),
         "distinct_zeroes": m(
@@ -2348,14 +2391,15 @@ async fn resolve_owner_authority(
     st: &AdminOpsState,
     delegation_id: &str,
 ) -> Result<AuthorityProof, Response> {
+    let node_key_id = self_key_id(&st).await?;
     let proof = resolve_authority(
         &st.engine,
-        &st.node_key_id,
+        &node_key_id,
         delegation_id,
         REQUIRED_SCOPE_SELF_DIRECTED,
     )
     .await?;
-    let Some(owner) = is_steward_bound(&st.engine, &st.node_key_id).await else {
+    let Some(owner) = is_steward_bound(&st.engine, &node_key_id).await else {
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "node_unowned",
@@ -2385,6 +2429,10 @@ async fn self_act_route(
     act: SelfAct,
     declaring: bool,
 ) -> Response {
+    let node_key_id = match self_key_id(&st).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     if let Err(resp) = gate(st, headers).await {
         return resp;
     }
@@ -2442,7 +2490,7 @@ async fn self_act_route(
     }
     let ev = tombstone(
         op,
-        &st.node_key_id,
+        &node_key_id,
         &authority.delegation_id,
         &c.reason,
         now,
@@ -2471,7 +2519,7 @@ async fn self_act_route(
     // Re-read the axis so the caller sees the standing this act produced,
     // folded by the same function the standing route runs — never a second
     // answer assembled from what we just wrote.
-    let standing = match read_self_axis(&st.engine, &st.node_key_id, act, now).await {
+    let standing = match read_self_axis(&st.engine, &node_key_id, act, now).await {
         Ok(f) => f,
         Err(_) => self_axis_unreadable(act),
     };
@@ -2932,6 +2980,10 @@ async fn reader_fold_route(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let node_key_id = match self_key_id(&st).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     if let Err(resp) = gate(&st, &headers).await {
         return resp;
     }
@@ -2956,7 +3008,7 @@ async fn reader_fold_route(
              an unnamed subject is every subject.",
         );
     }
-    match run_reader_fold(&st.engine, &st.node_key_id, subject, Utc::now()).await {
+    match run_reader_fold(&st.engine, &node_key_id, subject, Utc::now()).await {
         Ok(f) => (StatusCode::OK, Json(reader_fold_json(subject, &f))).into_response(),
         // The unreadable standing is rendered on BOTH halves: a 503 a client
         // ignores must not leave it a body that reads like an empty policy.
@@ -2998,6 +3050,10 @@ async fn reader_decision_route(
     body: &axum::body::Bytes,
     declining: bool,
 ) -> Response {
+    let node_key_id = match self_key_id(&st).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     if let Err(resp) = gate(st, headers).await {
         return resp;
     }
@@ -3152,7 +3208,7 @@ async fn reader_decision_route(
     });
     // Show the state this decision produced, through the same read the fold
     // route runs.
-    match run_reader_fold(&st.engine, &st.node_key_id, subject, now).await {
+    match run_reader_fold(&st.engine, &node_key_id, subject, now).await {
         Ok(f) => out["standing"] = reader_fold_json(subject, &f),
         Err(e) => {
             out["standing"] = serde_json::json!({
@@ -3185,14 +3241,16 @@ async fn reader_decline(
 //  Router
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// The graded admin-op router. `node_key_id` is THIS node's #247 DERIVED
+/// The graded admin-op router.
+///
+/// **It takes no key id** (CIRISServer#372 Level 2). THIS node's #247 DERIVED
 /// federation key id — the ACTING key whose delegated authority every op
-/// re-walks, and the identity `emit_attestation_self` / `sign_hybrid` sign as.
-pub fn router(engine: Arc<Engine>, node_key_id: String) -> Router {
-    let state = AdminOpsState {
-        engine,
-        node_key_id,
-    };
+/// re-walks, and the identity `emit_attestation_self` / `sign_hybrid` sign as —
+/// is resolved per request from the engine that will actually sign (see
+/// [`self_key_id`]). There is no argument here for a caller, a harness or a CLI
+/// label to disagree with.
+pub fn router(engine: Arc<Engine>) -> Router {
+    let state = AdminOpsState { engine };
     Router::new()
         .route("/v1/admin/preview", axum::routing::post(preview))
         .route("/v1/admin/annotate", axum::routing::post(annotate))

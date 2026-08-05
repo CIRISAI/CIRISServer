@@ -255,7 +255,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     // Seed the node's federation identity into the graph so the client's Graph page
     // is never empty on a fresh install (mirrors the agent's agent/identity seed).
-    crate::memory_api::seed_identity_graph(&engine, &cfg.key_id, "node").await;
+    // No key id is passed: the identity written into the graph is resolved from
+    // the ENGINE that will sign as it (CIRISServer#372 Level 2). `cfg.key_id` is
+    // that same value on this path — it was re-derived above — but a value that
+    // *happens* to agree is not the same fact as a value that *cannot* disagree.
+    crate::memory_api::seed_identity_graph(&engine, "node").await;
 
     // Project persist's rich CEG state (owner-binding, owned nodes, the humanity
     // accord family + holders, canonical servers, every config:* value, and the
@@ -263,7 +267,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // nodes + edges — so the client's Graph page is a contextual mesh of
     // AttestationCards, not a single lonely identity node (CIRISServer#127++).
     // Idempotent, version-safe, fail-secure (a projection error only logs).
-    crate::memory_api::seed_ceg_graph(&engine, &cfg.key_id).await;
+    crate::memory_api::seed_ceg_graph(&engine).await;
 
     crate::compose_status::phase("config_resolution");
     // ── CONFIG-AS-CEG resolution (Server 0.5 Phase 2) ─────────────────────────
@@ -881,7 +885,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(
                         crate::auth::portable_occurrence::router(
                             Arc::clone(&engine),
-                            node_code.key_id.clone(),
                             Arc::new(cfg.clone()),
                         )
                         .layer(axum::middleware::from_fn(
@@ -952,10 +955,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // /v1/admin/reader/*, this reader's own accept/refuse
                     // policy over other parties' judgements. Both take the
                     // OWNER's own `infra:serve` grant, not a third party's.
-                    .merge(crate::admin_ops::router(
-                        Arc::clone(&engine),
-                        cfg.key_id.clone(),
-                    ))
+                    //
+                    // #372: takes no key id. The surface resolves the identity
+                    // its own signer uses; a CLI label cannot disagree with it.
+                    .merge(crate::admin_ops::router(Arc::clone(&engine)))
                     // THE MESH CONFIGURATION SURFACE (CIRISServer#346, the
                     // fourth tab): GET /v1/mesh-config (effective values,
                     // provenance, counting-down TTLs, the closed key registry)
@@ -967,10 +970,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // substrate reversal needs no edit here. Reads are gated on
                     // the delegatable `read_node_state` verb; writes on the
                     // never-delegatable `wipe` verb, as the graded ladder is.
-                    .merge(crate::mesh_config_surface::router(
-                        Arc::clone(&engine),
-                        cfg.key_id.clone(),
-                    ))
+                    .merge(crate::mesh_config_surface::router(Arc::clone(&engine)))
                     // THE COMMONS SURFACE (CIRISServer#367): GET
                     // /v1/commons/standing + POST /v1/commons/{objections,
                     // ballots,dismissals}. Consent protects the private plane
@@ -1074,10 +1074,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // data was there; the route was missing → 404). Read-only,
                     // unauthenticated like the other directory read surfaces;
                     // excludes the node's own self key.
-                    .merge(crate::federation_peers::router(
-                        Arc::clone(&engine),
-                        cfg.key_id.clone(),
-                    ))
+                    .merge(crate::federation_peers::router(Arc::clone(&engine)))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -1092,7 +1089,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // agent's SYSTEM_ADMIN gate.
                     .merge(crate::federation_surface::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
                         Arc::clone(&edge),
                     ))
                     // THE OPERATOR SURFACE (CIRISServer#356): GET /v1/node/state

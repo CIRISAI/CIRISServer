@@ -89,7 +89,26 @@ use ciris_persist::prelude::Engine;
 /// Idempotent and **refreshes `updated_at` every boot** (so it stays inside the
 /// timeline's `updated_after` window). Best-effort: a Postgres-only node (no sqlite
 /// backend) is a no-op, and any write error is logged, never fatal to boot.
-pub async fn seed_identity_graph(engine: &Engine, node_key_id: &str, identity_type: &str) {
+///
+/// # It takes no key id (CIRISServer#372 Level 2)
+///
+/// This function **writes the node's identity into the graph**, so the id it
+/// writes must be the id the node signs as — not the `--key-id` CLI *label*
+/// that used to be threaded here through `cfg.key_id`. It is resolved from the
+/// engine ([`crate::self_identity::resolve`]); if it cannot be resolved the
+/// seed is **skipped loudly** rather than written under a guess, because a
+/// wrong `node/identity` row is worse than an absent one — the Graph page would
+/// then confidently name a key this node has never signed with, which is the
+/// 2026-08-05 outage's failure shape rendered in a UI.
+pub async fn seed_identity_graph(engine: &Engine, identity_type: &str) {
+    // `resolve` already logged at ERROR naming this surface; there is nothing
+    // to fall back TO, and a guessed identity is the defect itself.
+    let Ok(node_key_id) =
+        crate::self_identity::resolve(engine, "memory_api::seed_identity_graph").await
+    else {
+        return;
+    };
+    let node_key_id = node_key_id.as_str();
     let Some(sq) = engine.sqlite_backend() else {
         return;
     };
@@ -257,10 +276,22 @@ async fn upsert_ceg_edge(
 /// Project persist's CEG state into `cirisgraph_nodes` / `cirisgraph_edges` at boot,
 /// right after [`seed_identity_graph`]. Idempotent, version-safe, fail-secure
 /// (SQLite-only; a Postgres-only node is a no-op). See the module-level schema note.
-pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>, node_key_id: &str) {
+///
+/// **Takes no key id** (CIRISServer#372 Level 2) — the "self" every projected
+/// edge is anchored on is the identity the engine signs as, resolved here, not
+/// a threaded CLI label. A projection anchored on the wrong self would draw the
+/// owner-binding, the accord membership and every authored row against a key
+/// this node does not hold.
+pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>) {
     use ciris_persist::federation::types::attestation_type;
     use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
 
+    // Same rule as `seed_identity_graph`: no fallback, and the refusal is loud.
+    let Ok(node_key_id) = crate::self_identity::resolve(engine, "memory_api::seed_ceg_graph").await
+    else {
+        return;
+    };
+    let node_key_id = &node_key_id;
     let Some(sq) = engine.sqlite_backend() else {
         return;
     };

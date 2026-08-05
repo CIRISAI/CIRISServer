@@ -272,8 +272,8 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
 /// Serve the federation-peers router on an ephemeral port; return its base URL
 /// + the JoinHandle (dropped at test end).
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let node_key_id = node_a_key_id(&engine).await;
-    let app = federation_peers::router(engine, node_key_id);
+    // No key id is handed to the router (CIRISServer#372 Level 2).
+    let app = federation_peers::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

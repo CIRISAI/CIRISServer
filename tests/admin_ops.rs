@@ -248,8 +248,8 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
 }
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let nk = node_key_id(&engine).await;
-    let app = admin_ops::router(engine, nk);
+    // No key id is handed to the router (CIRISServer#372 Level 2).
+    let app = admin_ops::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

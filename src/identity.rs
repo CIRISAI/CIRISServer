@@ -960,9 +960,25 @@ use crate::auth::session::{resolve_bearer, SessionCaller};
 #[derive(Clone)]
 struct SelfIdentityState {
     engine: Arc<Engine>,
-    /// THIS node's federation `key_id` — the user alias defaults to `<node>-user`
-    /// when the request doesn't pin one.
-    node_key_id: String,
+    /// The node's **KEYSTORE ALIAS** — the raw `--key-id` label, NOT a
+    /// federation key id.
+    ///
+    /// # Why this one is not resolved from the engine (CIRISServer#372 Level 2)
+    ///
+    /// Every other self-identity threader on this node was converted to ask
+    /// `Engine::local_derived_key_id()`. This one is deliberately left, because
+    /// it is a **different axis**: it names a keystore BLOB
+    /// (`<alias>-user`), which is the input to `derive_key_id`, not its
+    /// output. `compose` passes `cfg.keystore_alias` for exactly this reason —
+    /// "pass the RAW label so the minted blob matches what
+    /// `user_identity_signer` re-opens". Deriving here would mint the user's
+    /// keyset under `<label>-<fingerprint>-user` and the re-open would never
+    /// find it.
+    ///
+    /// It was previously called `node_key_id`, which is precisely the
+    /// one-name-two-axes spelling this issue exists to remove; the field now
+    /// says which axis it is on.
+    keystore_alias: String,
     /// The per-user seed dir (distinct from the node steward's identity dir).
     seed_dir: PathBuf,
 }
@@ -977,7 +993,7 @@ struct SelfIdentityRequest {
     /// The human's display name → the FSD-002 `label-fingerprint` key_id.
     #[serde(default)]
     label: Option<String>,
-    /// The user-identity alias (defaults to `<node_key_id>-user`).
+    /// The user-identity alias (defaults to `<keystore_alias>-user`).
     #[serde(default)]
     key_id: Option<String>,
     /// For the `pkcs11` backend: provision an empty PIV slot via `ykman`.
@@ -1106,7 +1122,7 @@ async fn self_identity_handler(
     // alias (the `derive_key_id` input → `<alias>-<fp>`) is the slug of the label
     // the wizard sent (e.g. "eric-moore-v1" → key_id `eric-moore-v1-<fp>`). An
     // explicit `key_id` in the request still wins; only when NEITHER is given do we
-    // fall back to the node-derived `<node_key_id>-user`. (Before this, the name went
+    // fall back to the node-derived `<keystore_alias>-user`. (Before this, the name went
     // ONLY into the fedcode alias_hint and every identity became `<node>-user-<fp>`.)
     let alias = req
         .key_id
@@ -1118,7 +1134,7 @@ async fn self_identity_handler(
                 .map(slug_alias)
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| format!("{}-user", st.node_key_id));
+        .unwrap_or_else(|| format!("{}-user", st.keystore_alias));
 
     if let Err(e) = std::fs::create_dir_all(&st.seed_dir) {
         return http_err(
@@ -1234,10 +1250,14 @@ pub(crate) fn read_user_backend_marker(seed_dir: &std::path::Path, alias: &str) 
 /// The `POST /v1/self/identity` router — provision/ensure the local node's USER
 /// federation identity, returning `{ key_id, fedcode, identity_type, … }`.
 /// Owner/operator-gated. Merge onto the read-API listener.
-pub fn router(engine: Arc<Engine>, node_key_id: String, seed_dir: PathBuf) -> Router {
+///
+/// `keystore_alias` is the node's RAW keystore label (`cfg.keystore_alias`), not
+/// a federation key id — see [`SelfIdentityState::keystore_alias`] for why this
+/// surface is exempt from CIRISServer#372's derive-don't-thread rule.
+pub fn router(engine: Arc<Engine>, keystore_alias: String, seed_dir: PathBuf) -> Router {
     let state = SelfIdentityState {
         engine,
-        node_key_id,
+        keystore_alias,
         seed_dir,
     };
     Router::new()
