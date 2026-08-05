@@ -42,9 +42,16 @@
 //!    which is exactly how coverage disappears in practice.
 //!
 //! [`gate0_no_anchored_proof_is_an_empty_instrument`] closes the remaining hole in
-//! that scope: a proof file behind `#![cfg(feature = "…")]` compiles to ZERO tests
-//! without the feature and reports `test result: ok. 0 passed`. Anchoring such a
-//! file would be anchoring to a proof that never runs.
+//! that scope. A proof file behind `#![cfg(feature = "…")]` compiles to ZERO tests
+//! without the feature and reports `test result: ok. 0 passed`, so such a file is
+//! anchorable **only if a CI step actually runs it with that feature** — the gate
+//! checks `.github/workflows/` for one. Compilation coverage is not execution
+//! coverage, and this repo has now been caught by that distinction twice:
+//! CIRISServer#373 (a bare `cargo test` tests the ROOT PACKAGE only, so a
+//! workspace member's 364 tests never ran) and the eleven `test-anchor` tests that
+//! were compiled by `clippy --all-targets --features test-anchor` and executed by
+//! nothing. Both times the gap was in CI's SELECTION, not in any assertion.
+//! [`DARK_TEST_FILES`] is the standing count of that debt.
 
 #![allow(dead_code)]
 
@@ -239,6 +246,23 @@ pub const TRUST_ROOT: Invariant = Invariant {
                 "claim_pin_is_consumed_after_successful_claim",
             ],
         },
+        // The CEREMONY side, as opposed to the baked-artifact side above: mint a
+        // portable accord+canonical root in substrate test mode and then USE it.
+        // Behind `--features test-anchor`, which is only anchorable because
+        // ci.yml now RUNS that target with the feature — until it did, these
+        // seven reported as passing without ever executing.
+        Proof {
+            file: "tests/trust_root_qa.rs",
+            tests: &[
+                "qa_mints_and_produces_a_portable_genesis",
+                "qa_envelope_carries_the_conferral",
+                "qa_leg_a_serve_resolves",
+                "qa_root_minimum_is_serve_and_attest",
+                "qa_end_to_end_two_leg_gate",
+                "qa_expired_trust_edge_is_dead",
+                "qa_reblesses_an_unblessed_canonical_in_ceremony",
+            ],
+        },
     ],
 };
 
@@ -305,6 +329,16 @@ pub const REPLICATION_BY_CONSENT: Invariant = Invariant {
                 "persist_replication_policy_hash_pinned",
                 "edge_serve_advertise_policy_hash_pinned",
             ],
+        },
+        // The fail-secure half of the two-node round: with NO consent grant the
+        // producer must offer NOTHING. This is the arm of `trace_round_e2e` that
+        // genuinely passes today — the arrival arm does not (CIRISEdge#455), and
+        // is carried by `boundary::gate_trace_flow_over_replication` instead. The
+        // negative is anchored here because "replicates only by consent" is
+        // exactly what it proves.
+        Proof {
+            file: "tests/trace_round_e2e.rs",
+            tests: &["without_a_grant_the_producer_offers_nothing"],
         },
     ],
 };
@@ -421,14 +455,23 @@ pub const LOCALIZATION_REACHABLE: Invariant = Invariant {
             file: "tests/mesh_config_consumers.rs",
             tests: &["every_consumption_message_resolves_in_the_canonical_bundle"],
         },
-        // PENDING (CIRISServer#366): `tests/localization_gate.rs` adds the
-        // server-side census — every id the Rust emitters actually produce,
-        // resolved through the loader's rules, with a floor on the scraped
-        // population so a scraper that stopped seeing emission sites cannot
-        // report zero findings and read green. It exists and passes 5/5, but on
-        // a branch. Add it to this rung's proofs when it merges; until then this
-        // rung covers reachability of what the bundle DEFINES, which is the
-        // release-blocking half.
+        // CIRISServer#366 — the server-side census: every id the Rust emitters
+        // actually produce, resolved through the loader's own rules, with a FLOOR
+        // on the scraped population so a scraper that stopped seeing emission
+        // sites cannot report zero findings and read green. `..._proves_it_can_fail`
+        // is the falsifiability arm, and it is named in this anchor deliberately:
+        // it is the difference between a guard and a guard someone has shown able
+        // to fail.
+        Proof {
+            file: "tests/localization_gate.rs",
+            tests: &[
+                "server_emitted_message_ids_resolve_under_loader_semantics",
+                "server_emitted_message_id_coverage_does_not_regress",
+                "localization_bundles_pass_the_guard",
+                "localization_guard_self_test_proves_it_can_fail",
+                "rust_and_python_resolvers_agree_on_the_bundle",
+            ],
+        },
     ],
 };
 
@@ -474,6 +517,39 @@ pub const UNPROVEN: &[(&str, &str, &str, &str)] = &[(
      construction — a number, not a proof. So the '1/N gist bound' half of the erasure claim \
      is currently DESIGN INTENT, not a measurement, and 0.5.156 must not say otherwise.",
 )];
+
+/// **The dark test files** — compiled by CI, never executed by it.
+///
+/// A file opening `#![cfg(feature = "…")]` contains zero tests under a plain
+/// `cargo test` and prints `test result: ok. 0 passed`. Worse, `ci.yml` DOES
+/// compile this surface (`cargo clippy --all-targets --features test-anchor`), so
+/// these files cannot rot into a compile error — which is exactly why nobody
+/// noticed they never run. Compiled, never executed, reported as passing.
+///
+/// [`gate0_no_anchored_proof_is_an_empty_instrument`] stops the ladder ANCHORING
+/// to them. This list is the other half: the set is pinned, so a fifth instance
+/// cannot appear quietly, and a file that starts being run cannot stay declared
+/// dark.
+///
+/// `(file, feature, live test count, what is dark)`
+///
+/// **Currently EMPTY, and that is a fact worth its own sentence.** Both entries
+/// this list was created to hold — `tests/trace_round_e2e.rs` (4 tests) and
+/// `tests/trust_root_qa.rs` (7) — were compiled by CI and executed by nothing:
+/// `ci.yml` built the surface with `clippy --all-targets --features test-anchor`,
+/// so they could never rot into a compile error, which is exactly why eleven
+/// tests reported as passing for as long as they did. Among them was the
+/// in-process two-node round harness — the instrument for the very outage main's
+/// RCA commit is named after.
+///
+/// `ci.yml` now runs `cargo test --features test-anchor --test trace_round_e2e
+/// --test trust_root_qa`, so both are live and both are anchored by rungs below.
+/// The list stays, empty, because
+/// [`gate0_the_dark_test_files_are_exactly_the_ones_we_know_about`] is what stops
+/// a third instance appearing quietly — twice now the gap has been in CI's
+/// SELECTION (which targets, which features) rather than in any assertion, and
+/// compilation coverage is not execution coverage.
+pub const DARK_TEST_FILES: &[(&str, &str, usize, &str)] = &[];
 
 /// Every rung, in ladder order. The gates below iterate this; a rung that is not
 /// here is not gated.
@@ -669,13 +745,17 @@ pub fn assert_proven(inv: &Invariant) {
             lost.push(format!("  {} — FILE ABSENT", p.file));
             continue;
         };
+        // A feature-gated proof is anchorable only if CI actually RUNS it with
+        // that feature. Compilation coverage is not execution coverage.
         if let Some(feat) = feature_gate_of(&src) {
-            lost.push(format!(
-                "  {} — behind #![cfg(feature = \"{feat}\")]: without that feature this file \
-                 compiles to ZERO tests and reports `ok. 0 passed`",
-                p.file
-            ));
-            continue;
+            if !ci_runs_with_feature(&feat) {
+                lost.push(format!(
+                    "  {} — behind #![cfg(feature = \"{feat}\")] and NO CI step runs it with \
+                     that feature: it compiles to ZERO tests and reports `ok. 0 passed`",
+                    p.file
+                ));
+                continue;
+            }
         }
         for name in p.tests {
             if let Err(why) = armed_test(&src, name) {
@@ -892,6 +972,160 @@ fn gate0_the_unproven_gaps_are_still_gaps() {
     );
 }
 
+/// Every test function in `src` that carries a live test attribute.
+fn live_test_count(src: &str) -> usize {
+    let lines: Vec<&str> = src.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let t = t.strip_prefix("async ").unwrap_or(t);
+            if !t.starts_with("fn ") {
+                return false;
+            }
+            let Some(name) = t[3..].split('(').next() else {
+                return false;
+            };
+            let _ = i;
+            attribute_block(src, name.trim()).is_some_and(|b| {
+                (b.contains("#[test]") || b.contains("#[tokio::test")) && !b.contains("#[ignore")
+            })
+        })
+        .count()
+}
+
+/// Does any CI workflow RUN `file` with `feature`?
+fn ci_runs_with_feature(feature: &str) -> bool {
+    let dir = repo().join(".github/workflows");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        let Ok(src) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        for line in src.lines() {
+            let code = line.split('#').next().unwrap_or("");
+            if code.contains("cargo test")
+                && (code.contains(&format!("--features {feature}"))
+                    || code.contains(&format!("--features={feature}"))
+                    || code.contains("--all-features"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// **The dark set is exactly the one we know about.**
+///
+/// Pins [`DARK_TEST_FILES`] against the tree and against CI, in both directions:
+///
+///   * a NEW feature-gated test file is a fifth instance of the pattern and must
+///     be declared, not discovered later;
+///   * a declared file that gains or loses tests changes how much is dark, and
+///     the number is the whole point — "two tests" and "eleven tests" are
+///     different propositions about this release;
+///   * a declared file that CI STARTS running is no longer dark, and leaving it
+///     on the list would understate the suite exactly as badly as omitting it
+///     overstates it.
+///
+/// This gate is deliberately not the fix. Adding `--features test-anchor` to CI
+/// means shipping a step nobody has run — the harness may well be red today (the
+/// serve-gate leg-B fixture wants a trust-root ceremony `test_bless` never
+/// performs), and shipping an unrun CI step is the same sin one level up. This
+/// gate makes the debt VISIBLE and countable, and stops it growing, which is what
+/// a release gate can honestly do about it.
+#[test]
+fn gate0_the_dark_test_files_are_exactly_the_ones_we_know_about() {
+    let mut found: Vec<(String, String, usize)> = Vec::new();
+    for e in std::fs::read_dir(repo().join("tests")).expect("tests/ readable") {
+        let p = e.expect("dir entry").path();
+        if p.extension().and_then(|x| x.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&p).expect("test source");
+        // Dark = compiles but never EXECUTES. Feature-gated is only half of it;
+        // a feature-gated file that CI runs with its feature is perfectly live.
+        // Conflating the two is the same scope error one level up.
+        if let Some(feat) = feature_gate_of(&src) {
+            if ci_runs_with_feature(&feat) {
+                continue;
+            }
+            found.push((
+                format!(
+                    "tests/{}",
+                    p.file_name().and_then(|f| f.to_str()).unwrap_or_default()
+                ),
+                feat,
+                live_test_count(&src),
+            ));
+        }
+    }
+    found.sort();
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (file, feat, n) in &found {
+        match DARK_TEST_FILES
+            .iter()
+            .find(|(f, _, _, _)| f == file && *n > 0)
+        {
+            None if DARK_TEST_FILES.iter().all(|(f, _, _, _)| f != file) => wrong.push(format!(
+                "  UNDECLARED: {file} is behind #![cfg(feature = \"{feat}\")] with {n} test(s) \
+                 that never run under `cargo test`"
+            )),
+            _ => {}
+        }
+        if let Some((_, want_feat, want_n, _)) =
+            DARK_TEST_FILES.iter().find(|(f, _, _, _)| f == file)
+        {
+            if want_feat != feat {
+                wrong.push(format!(
+                    "  {file}: declared behind \"{want_feat}\", actually behind \"{feat}\""
+                ));
+            }
+            if want_n != n {
+                wrong.push(format!(
+                    "  {file}: declared {want_n} dark test(s), tree now has {n} — the size of \
+                     what never runs has changed"
+                ));
+            }
+        }
+    }
+    for (file, feat, _, _) in DARK_TEST_FILES {
+        if !found.iter().any(|(f, _, _)| f == file) {
+            wrong.push(format!(
+                "  {file}: declared dark, but it now RUNS — either CI gained a `cargo test \
+                 --features {feat}` step for it, or the file is no longer feature-gated (or no \
+                 longer exists). Take it off DARK_TEST_FILES and anchor the rungs it proves; \
+                 leaving it declared understates the suite exactly as badly as omitting a real \
+                 one overstates it."
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "\n\
+         🔔 RELEASE LADDER — the set of tests that never run has changed.\n\
+         \n\
+         Unsafe to ship: a test file behind `#![cfg(feature = \"…\")]` compiles to ZERO\n\
+         tests and prints `test result: ok. 0 passed`. CI DOES compile this surface\n\
+         (`cargo clippy --all-targets --features test-anchor`), so it never rots into a\n\
+         compile error — which is precisely why nobody notices it never executes.\n\
+         Compiled, never run, reported as passing.\n\
+         \n\
+         {}\n\
+         \n\
+         Declare it in DARK_TEST_FILES with its count and what is dark about it, or —\n\
+         better — get it running and anchor a rung to it.\n",
+        wrong.join("\n"),
+    );
+}
+
 /// **An anchored proof must actually run.**
 ///
 /// `tests/trace_round_e2e.rs` and `tests/trust_root_qa.rs` open with
@@ -909,10 +1143,13 @@ fn gate0_no_anchored_proof_is_an_empty_instrument() {
                 continue; // assert_proven reports the absence; not this gate's job.
             };
             if let Some(feat) = feature_gate_of(&src) {
-                dead.push(format!(
-                    "  [{}] anchors {} — behind #![cfg(feature = \"{feat}\")]",
-                    inv.id, p.file
-                ));
+                if !ci_runs_with_feature(&feat) {
+                    dead.push(format!(
+                        "  [{}] anchors {} — behind #![cfg(feature = \"{feat}\")], and no CI \
+                         step runs it with that feature",
+                        inv.id, p.file
+                    ));
+                }
             }
         }
     }
