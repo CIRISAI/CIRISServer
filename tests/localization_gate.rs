@@ -390,10 +390,37 @@ fn rust_and_python_resolvers_agree_on_the_bundle() {
         .output()
         .expect("python3 not available to run the localization guard");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let python_ids = stdout
+
+    // EXACTLY ONE line may name the check. A `find()` here — first match wins —
+    // is correct today only because `_print_report` happens to emit the
+    // check-summary block before the ERRORS block, so the summary is always the
+    // first hit. That is ordering luck, not construction: the day an error
+    // message quotes the check name, the parse reads a number off the wrong line
+    // and this test goes on reporting that the two scrapers agree.
+    //
+    // The failure mode is worth naming because this suite has now produced it
+    // twice from two directions. The release ladder's own mutation harness read
+    // the FIRST `test result:` line out of cargo's output and reported PASS for
+    // runs that had failed — because the gate's failure MESSAGE quotes the string
+    // "test result: ok. 0 passed". An instrument that locates its input by
+    // first-match text search is measuring position, not content.
+    let named: Vec<&str> = stdout
         .lines()
-        .find(|l| l.contains("server-id-reachable"))
-        .and_then(|l| l.split("over ").nth(1))
+        .filter(|l| l.contains("server-id-reachable"))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "the guard's output names `server-id-reachable` on {} lines, so there is no single \
+         denominator to read. Whichever line a first-match parse picked would be a number this \
+         test then compared with confidence it had not earned.\n\
+         lines:\n{}\n\nfull output:\n{stdout}",
+        named.len(),
+        named.join("\n"),
+    );
+    let python_ids = named[0]
+        .split("over ")
+        .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|n| n.parse::<usize>().ok())
         .unwrap_or_else(|| {

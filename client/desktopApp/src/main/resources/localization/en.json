@@ -3079,16 +3079,29 @@
   "wa_service_status": "Service Status",
   "wa_status": "Status",
   "admin": {
+    "accept_writes": {
+      "not_reached": "It restores nothing that was refused while the de-admission stood. Those writes were rejected at the door and never landed here; if the peer still holds them it has to send them again. Nothing else about the key changes.",
+      "not_refused": "This key is not de-admitted here, so there is nothing to lift."
+    },
+    "admission": {
+      "standing": {
+        "admitted": "No live de-admission authored by this node names this key, so its writes are admitted here. This says nothing about any other node: de-admission is local to the corpus that emits it.",
+        "refused": "This node holds a live de-admission of this key that it authored itself, so the key's next write into this node's corpus is refused at the substrate's own door.",
+        "unreadable": "This node could not read its own admission state for this key, so it does not know whether that key's writes are refused. This is NOT 'admitted' — do not render it as one."
+      }
+    },
     "descend": {
       "bounded_unsupported": "A time-bounded judgement cannot drive an unbounded eviction. The substrate's only actor-keyed descent takes the whole corpus, which would destroy the history this bound deliberately leaves standing. The time-bounded removal that IS implemented is de-admission with a history bound.",
       "not_reached": "The selected attestation rows themselves are not descended. Every payload carrier on this substrate is sealed inside its own signature, so its bytes cannot be dropped without making the row read as forged; erasability is decided at mint and nothing minted today is erasable."
     },
     "enforcement": {
+      "accept_writes": "This node stops refusing the named keys' writes: the de-admission it authored is withdrawn and the substrate admits their next write again. Both the de-admission and this withdrawal survive as readable history.",
       "annotate": "A signed judgement with no effect until a reader honours it. Nothing is withheld, throttled or removed.",
       "deadmit": "A signed revocation on the ordinary append-only plane. It is evidence a reader folds, not a door that slams: signature verification, the replication cursors and row ingest all deliberately keep working, because refusing a compromised key's older rows would destroy the evidence needed to adjudicate the compromise.",
       "descend": "Irreversible by design. Descent never terminates at zero — the blur and the tombstone survive — but what was shed is not coming back.",
       "quarantine": "A signed marker, not a command: nothing is deleted and nothing is rewritten. This node's serve paths stop handing the named keys' rows and blobs to peers; a peer that folds differently simply does not receive them from us.",
       "re_admit": "Recorded as an attributed reversal. The revocation row survives and every reader still folds it: restrictions compose and leniencies do not, and no layer of this substrate exposes an un-revoke.",
+      "refuse_writes": "This node refuses the named keys' next write into its own corpus, at the substrate's own door and before any other gate runs. It is LOCAL by design: no node decrees another node's admission set, because a globally-effective de-admission would itself be a censorship weapon. Isolation of a genuine abuser is emergent — it arrives when many nodes independently reach the same conclusion — and is never decreed from here.",
       "throttle": "Recorded as an attributed judgement only. This substrate has no recipient-authored per-key admission budget: the peer write quota is a fixed runaway-loop backstop, not a policy surface a throttle can key on. Nothing changes what this node accepts from the named keys."
     },
     "preview": {
@@ -3122,6 +3135,8 @@
       "authority_unresolved": "The named delegation is not a row this node holds, so its scope cannot be checked. This node does not act on an authority it cannot verify.",
       "bad_request": "The request body could not be parsed.",
       "community_absent": "community_id is required: a quarantine is filed under a community's authority, and a marker that names no community names no authority.",
+      "deadmission_gate_dormant": "This node has not declared its own identity to the substrate, so the de-admission gate is dormant: the row would be written and would refuse nothing. Refused rather than handed back as done — a sanction gate that silently does nothing is worse than no gate, because an operator will believe de-admission works. This is a node-configuration fault, not a fault of the request.",
+      "deadmission_gate_foreign_identity": "The identity this node signs as and the identity the de-admission gate compares writers against are two different keys, so a de-admission signed here would never be folded as this node's own and would refuse nothing. This is a node-configuration fault, not a fault of the request.",
       "judgement_subjectless": "That judgement names no subject, so honouring or declining it would change nothing about anyone. This node does not record a decision it cannot apply.",
       "judgement_unresolved": "That judgement is not a row this node holds, so this reader has nothing to decide about. A reader decides what it HOLDS; it does not pre-refuse what it has never seen.",
       "node_unowned": "This node has no responsible party (owner-binding), so it performs no graded admin operation on anyone's behalf. Claim ownership first.",
@@ -3135,6 +3150,11 @@
       "session_invalid": "That session is invalid or expired.",
       "store_unavailable": "The substrate could not be read.",
       "subject_absent": "subject_key_id is required: a reader fold is about one subject's judgements, and an unnamed subject is every subject."
+    },
+    "refuse_writes": {
+      "already_refused": "This key is already de-admitted here, so nothing was written and the standing is unchanged.",
+      "not_reached": "It unwrites nothing. Rows these keys already wrote here are untouched and still served — quarantine is the op that stops serving them. Rows that already replicated to peers are not recalled and cannot be. The keys are not removed, their signatures still verify, and they go on writing to every other node, including this node's peers, from which those rows may arrive here again by replication. One exemption survives on purpose so that a node can always lift its own denial, and it does not ask who is writing: a de-admitted key may still write de-admission rows here (CIRISPersist#608).",
+      "reversal": "Reversible, and the reversal reaches the substrate rather than merely recording a change of mind: POST /v1/admin/accept-writes withdraws the de-admission and the key's writes are admitted here again. Two of this ladder's reversals reach the substrate — releasing a quarantine, which restores what this node SERVES, and this one, which restores what it ACCEPTS. Both rows survive and stay readable: 'refused and then re-admitted' is not the same fact as 'never refused'."
     },
     "reversal": {
       "evidence_only": "The original row survives and is still folded by every reader. This reversal is recorded evidence, not an undo — the substrate exposes no un-revoke.",
@@ -3240,6 +3260,17 @@
       "elsewhere": "No loop in this build reads this key — its consumer lives in another component. A row set here is admitted and folded, and changes nothing on this node.",
       "unreachable": "This key's consumer runs in this process, but nothing carries a value from this plane to it: the component that owns the knob takes it once when the loop is composed and offers no way to change it afterwards. A row set here is admitted and folded, and changes nothing anywhere.",
       "unbuilt": "This key's consumer has not been built anywhere yet. A row set here is admitted and folded, and changes nothing."
+    },
+    "refusal": {
+      "attribution_absent": "delegation_id is required. An act that does not carry its own authority cannot b",
+      "authority_not_a_delegation": "The named delegation id is not a delegates_to row.",
+      "authority_unresolved": "The named delegation is not a row this node holds, so the authority it records ",
+      "grounds_absent": "grounds is required. A knob turned for no recorded reason is indistinguishable f",
+      "node_unowned": "This node has no responsible party (owner-binding), so it neither reports nor ",
+      "not_owner": "The mesh-configuration surface requires the owner (SYSTEM_ADMIN) role.",
+      "root_absent": "root_ref is required: a mesh-config row is issued under a trust root, and a row ",
+      "session_absent": "No session token was presented. The mesh-configuration surface is owner-only.",
+      "session_invalid": "That session is invalid or expired."
     }
   },
   "commons_surface": {
@@ -3314,6 +3345,106 @@
       "overruled": "The appointed moderators ruled that this objection does not stand — and escalation opens anyway, because an undo is never theirs alone to make.",
       "silent": "The deadline passed with no ruling either way.",
       "upheld": "The appointed moderators ruled, in time, that this objection stands. The matter was judged by named people, on the record."
+    }
+  },
+  "operator": {
+    "carriage": {
+      "idle": "Replication rounds finished, and this node served nothing and withheld nothing: ",
+      "moving": "This node served rows to its peers and withheld none.",
+      "not_exercised": "No replication round has finished on this process, so no serving-path gate has ",
+      "unreadable": "This node's carriage counters could not be read, so nothing here is a statement ",
+      "withholding": "This node declined to serve rows it held. `withholds_by_reason` names the branch"
+    },
+    "consent_sla": {
+      "none_overdue": "Every consent revocation this node promised to promote is inside its SLA window.",
+      "overdue": "This node is LATE promoting consent revocations it committed to. The sampled ",
+      "unreadable": "The consent-SLA backlog could not be read. That is not 'nothing overdue'."
+    },
+    "drill": {
+      "green": "This node's trust root proved its kill switch within the last 90 days.",
+      "never_drilled": "This node's trust root has NEVER proved its kill switch. It shares the red band ",
+      "no_root_walked": "No trust root was walked, so there is nothing to be undrilled about. This is not",
+      "stale": "This node's trust root last proved its kill switch more than 180 days ago. It ",
+      "yellow": "This node's trust root last proved its kill switch between 90 and 180 days ago."
+    },
+    "headline": {
+      "green": "Every signal this node can compute reads healthy.",
+      "red": "At least one signal reads unhealthy. Read the unknown list too: a red headline ",
+      "unknown": "One or more signals could not be computed. Read the unknown list — an uncomputed",
+      "yellow": "This node is serving, and something here warrants a look."
+    },
+    "ingest": {
+      "background": "Refusals are present but not sustained from a stable identity set: ordinary ",
+      "clean": "Batches were offered to the HTTP ingest path and none was refused inside the ",
+      "http_path_only": "This reading covers the HTTP ingest path only. A batch that arrives over the Ret",
+      "not_exercised": "Nothing has been offered to the HTTP ingest path on this process — no batch ",
+      "stuck_producer": "A SUSTAINED rate of refusals from a SMALL, STABLE set of signers: a producer is ",
+      "unattributed": "Batches were refused and NOT ONE named a signer: they failed before there was an",
+      "unreadable": "This node's ingest refusal ledger could not be read, so nothing here is a "
+    },
+    "key_statements": {
+      "stands": "No revocation this node holds covers a statement made right now.",
+      "suspect_after_bound": "A history-BOUNDED revocation covers a statement made right now: this key is ",
+      "suspect_unbounded": "An UNBOUNDED revocation covers this key, so everything it ever said is in doubt ",
+      "unreadable": "This node's key standing could not be computed. That is not 'stands' — an unaske"
+    },
+    "peer_quota": {
+      "clean": "The peer-write quota has been exercised and its slot-denial arithmetic still ",
+      "denials": "The peer-write quota recorded slot denials. The tracked-peers cap derivation no ",
+      "no_quota": "This backend holds no peer-write quota, so the tripwire reports nothing. That is",
+      "not_exercised": "No peer write has been charged against the quota on this process, so its zero is"
+    },
+    "quarantine": {
+      "not_quarantined": "No quarantine marker about this node's key has ever taken effect here.",
+      "released": "This node's key was withheld and then released. It serves now, and it did not ",
+      "unreadable": "The quarantine state could not be read. That is not 'not quarantined'.",
+      "withheld": "This node's key is withheld from serving by a quarantine marker."
+    },
+    "receive": {
+      "clean": "No row a peer offered has been refused on this process.",
+      "no_accepted_counter": "The substrate counts apply REFUSALS, not accepted applies. A clean reading there",
+      "not_exercised": "No replication round has finished on this process, so nothing has been offered ",
+      "refusing": "This node refused rows its peers offered. `apply_refusals_by_kind` names the ",
+      "unreadable": "This node's apply counters could not be read, so nothing here is a statement "
+    },
+    "source": {
+      "edge_metrics": {
+        "unavailable": "This node's carriage counters could not be read, so nothing here describes what "
+      },
+      "ingest_refusals": {
+        "unavailable": "This node's ingest refusal ledger could not be read, so nothing here describes w"
+      },
+      "node_state": {
+        "unavailable": "This node's state signals could not be read from the substrate, so nothing here "
+      },
+      "trace_corpus": {
+        "unavailable": "This node's trace corpus could not be read, so nothing here describes what it ha"
+      }
+    },
+    "trace_plane": {
+      "dark": "NOTHING HAS BEEN ADMITTED FOR LONGER THAN THIS NODE'S RED THRESHOLD. Arrival is ",
+      "future_dated": "The newest trace in the corpus is stamped in the FUTURE. The timestamp is the ",
+      "live": "A trace was admitted recently: the plane this node exists to receive on is being",
+      "never_admitted": "The corpus was read and holds no trace at all: nothing has ever been admitted on",
+      "producer_asserted_ts": "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-cloc",
+      "quiet": "No trace has been admitted for longer than expected, but not yet long enough to ",
+      "unreadable": "This node's trace corpus could not be read, so nothing here is a statement about"
+    },
+    "trust_root": {
+      "no_self_key": "The host never declared this node's own key id, so nothing self-scoped could be ",
+      "no_trust_edges": "This node declared itself and holds no live trust edge to any root: it roots to ",
+      "no_valid_root": "This node trusts one or more roots and none of them validates. The per-leg verdi",
+      "unreadable": "The trust-root walk could not be read. An unreadable directory is not an untrust",
+      "valid": "This node roots to a trust root that checks out in full: a live trust edge, a "
+    },
+    "volatility": {
+      "clock_dependent_local": "This band is computed on THIS node from a stored instant against the read clock,",
+      "process_local": "The carriage, receive and ingest counters are process-local and cumulative since"
+    },
+    "withhold_class": {
+      "fault": "A read or a wiring step failed and the serve path failed closed. This is NOT a ",
+      "integrity": "A row this node holds could not be served at all: it would not serialize, its ",
+      "policy": "A decision this node made on purpose — consent scope, a serve capability the "
     }
   }
 }
