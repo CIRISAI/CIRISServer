@@ -528,9 +528,27 @@ jobs:
           ls -la "dist/ciris-server-v${VERSION}-ios.tar.gz"
           # Prove the layout the client indexes into (`{device_dir}/{dylib_filename}`)
           # actually exists inside the tar, here, where a mistake is cheap.
-          tar -tzf "dist/ciris-server-v${VERSION}-ios.tar.gz" | sort
+          # List ONCE into a variable, then match against that.
+          #
+          # `tar -tzf … | grep -qx …` looks obvious and is wrong under
+          # `set -o pipefail`: grep -q exits on its FIRST match, tar is killed by
+          # SIGPIPE writing to the closed pipe, and pipefail propagates tar's
+          # non-zero status — so the check reports the member MISSING at the
+          # exact moment it is PRESENT. The first CI run failed this way over a
+          # tarball whose own listing, printed two lines above the error, showed
+          # both members. A false negative in a verification gate is worse than
+          # no gate: it sends you looking for a defect in a correct artifact.
+          #
+          # Mechanism INFERRED, not reproduced: an 8,003-entry / 335 KB listing
+          # locally would not induce tar's death, so this is read off CI's log
+          # (`tar: stdout: write error` on the line before the verdict) plus the
+          # shape of `if ! (tar | grep -q)`, which treats ANY non-zero pipeline —
+          # tar dying included — as "no match". Listing once removes the pipeline,
+          # so the fix holds whichever component actually died.
+          IOS_TAR_LISTING="$(tar -tzf "dist/ciris-server-v${VERSION}-ios.tar.gz")"
+          printf '%s\n' "$IOS_TAR_LISTING" | sort
           for MEMBER in ios-device/_native.abi3.so ios-simulator/_native.abi3.so; do
-            if ! tar -tzf "dist/ciris-server-v${VERSION}-ios.tar.gz" | grep -qx "$MEMBER"; then
+            if ! printf '%s\n' "$IOS_TAR_LISTING" | grep -qx "$MEMBER"; then
               echo "::error::tarball is missing ${MEMBER} — CIRISAgent update_substrate_libs.py indexes exactly this path"
               exit 1
             fi
