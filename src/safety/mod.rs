@@ -110,7 +110,7 @@ pub mod watchlist;
 ///   `consent:state:granted {scope:view}` is on the graph (then 200 allow).
 /// - `POST /v1/safety/flag` — the CC 4.5.13 PRODUCER hook (CIRISServer#181): a
 ///   `moderate`-duty holder flags a subject and the node's `substrate_persist`
-///   identity emits the reserved `content_class:{class}` flag that makes
+///   identity emits the `content_class:{class}` flag that makes
 ///   `/v1/safety/reveal` fire. `substrate_signer` is that node-scoped identity
 ///   (minted + registered at boot); `None` leaves the flag endpoint 503-inert.
 pub fn router(

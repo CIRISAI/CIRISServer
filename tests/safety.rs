@@ -42,6 +42,10 @@ use ciris_server::safety::watchlist::{
     self, SeamOutcome, WatchlistClass, WatchlistEnable, WatchlistMode,
 };
 
+#[path = "support/revocation.rs"]
+mod revocation;
+use revocation::revoke;
+
 const NODE_KEY_ID: &str = "ciris-safety-node";
 
 // ─── substrate + identity helpers (mirror tests/ownership.rs) ───────────────
@@ -1532,9 +1536,21 @@ use axum::http::{Request, StatusCode};
 use ciris_server::safety::infohazard;
 use tower::ServiceExt as _;
 
-/// Emit a substrate-reserved `content_class:{class}` flag on `subject`, signed by
-/// a `substrate_persist`-typed flagger — the ONLY identity_type persist's
-/// reserved-prefix rule admits for `content_class:` (a viewer/agent is refused).
+/// The [`infohazard::FlagAuthority`] for a suite whose flags are put directly by
+/// `flagger` rather than through the router's substrate signer (CIRISServer#363
+/// — the reader has to be told whose withdrawal it believes, and these fixtures
+/// name their own emitter).
+fn authority_of(flagger: &LocalSigner) -> infohazard::FlagAuthority {
+    infohazard::FlagAuthority::from_key_ids([flagger.key_id().to_string()])
+}
+
+/// Emit a `content_class:{class}` flag on `subject`, signed by a
+/// `substrate_persist`-typed flagger.
+///
+/// **The identity_type is fixture colour, not a gate** (CIRISServer#363): at
+/// persist v30.2.0 the family is open vocabulary, so this row would be admitted
+/// from ANY key. What decides whether a reader believes it is the reader's own
+/// [`infohazard::FlagAuthority`] — see `authority_of`.
 async fn flag_subject(engine: &Engine, flagger: &LocalSigner, subject: &str, class: &str) {
     let flagger_key = flagger.key_id().to_string();
     let now = chrono::Utc::now();
@@ -1773,23 +1789,30 @@ async fn reveal_flagged_subject_gates_then_allows_after_consent_and_recloses_on_
     );
 
     // sanity: the pure decision fn agrees with the substrate resolution.
-    let d = infohazard::reveal_decision(&engine, other.key_id(), subject, None)
-        .await
-        .unwrap();
+    let d = infohazard::reveal_decision(
+        &engine,
+        other.key_id(),
+        subject,
+        None,
+        &authority_of(&flagger),
+    )
+    .await
+    .unwrap();
     assert!(matches!(d, infohazard::RevealDecision::Interstitial { .. }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // (8) PRODUCER HOOK (CC 4.5.13, CIRISServer#181) — POST /v1/safety/flag: a
 //     `moderate`-duty holder flags a subject and the NODE's substrate_persist
-//     identity emits the reserved `content_class` flag → the #161 reveal gate
+//     identity emits the `content_class` flag → the #161 reveal gate
 //     fires. The producer→gate link, over the REAL /v1/safety/flag endpoint.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Build + register a node-scoped `substrate_persist` signer under its DERIVED
 /// federation key_id (what `Engine::emit_attestation` FKs against) — the
 /// production shape `compose::register_substrate_key` uses. Returns the signer
-/// the flag router holds to author the reserved `content_class:*` flag.
+/// the flag router holds to author the `content_class:*` flag — and, since
+/// CIRISServer#363, the emitter its own reveal gate allowlists.
 async fn substrate_signer(engine: &Engine, alias: &str) -> Arc<LocalSigner> {
     let signer = party_signer(alias);
     let key_id = signer.derived_key_id();
@@ -1886,7 +1909,7 @@ async fn post_flag(
 }
 
 /// THE HEADLINE: a Moderate-duty holder flags a subject via the REAL
-/// `/v1/safety/flag` endpoint → the substrate emits the reserved `content_class`
+/// `/v1/safety/flag` endpoint → the substrate emits the `content_class`
 /// flag → `subject_flag` now returns `Some(class)` → `/v1/safety/reveal` returns
 /// the 403 interstitial for a non-consented viewer. The producer→gate link.
 #[tokio::test]
@@ -1898,8 +1921,11 @@ async fn flag_endpoint_makes_the_reveal_gate_fire() {
     make_owner_bound(&engine, founder).await;
     put_community(&engine, community, &[(founder, "founder")]).await;
 
-    // The node's substrate_persist producer identity (what the router holds).
+    // The node's substrate_persist producer identity (what the router holds) —
+    // and, since CIRISServer#363, the ONE emitter whose withdrawal the reveal
+    // gate believes. `router` derives the same authority internally.
     let substrate = substrate_signer(&engine, "producer-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
     let app = ciris_server::safety::router(
         Arc::clone(&engine),
         HybridPolicy::Strict,
@@ -1913,7 +1939,7 @@ async fn flag_endpoint_makes_the_reveal_gate_fire() {
 
     // BEFORE the flag: the subject is unflagged ⇒ reveal ALLOWS (the gate is inert).
     assert!(
-        infohazard::subject_flag(&engine, subject, None)
+        infohazard::subject_flag(&engine, subject, None, &authority)
             .await
             .unwrap()
             .is_none(),
@@ -1982,12 +2008,14 @@ async fn flag_endpoint_makes_the_reveal_gate_fire() {
     assert_eq!(
         substrate_id_type,
         identity_type::SUBSTRATE_PERSIST,
-        "the emitter is identity_type = substrate_persist (the reserved-prefix rule)"
+        "the emitter is identity_type = substrate_persist — the production shape. \
+         NB this is no longer a persist gate (CIRISServer#363): the family is open \
+         vocabulary at v30.2.0 and it is the READ-side FlagAuthority that binds."
     );
 
     // THE LINK: subject_flag now resolves + the reveal gate FIRES (403).
     assert_eq!(
-        infohazard::subject_flag(&engine, subject, None)
+        infohazard::subject_flag(&engine, subject, None, &authority)
             .await
             .unwrap(),
         Some(infohazard::ContentFlag::Infohazard),
@@ -2021,7 +2049,7 @@ async fn flag_endpoint_makes_the_reveal_gate_fire() {
     );
     assert_eq!(body["action"], "clear");
     assert!(
-        infohazard::subject_flag(&engine, subject, None)
+        infohazard::subject_flag(&engine, subject, None, &authority)
             .await
             .unwrap()
             .is_none(),
@@ -2047,6 +2075,7 @@ async fn flag_endpoint_rejects_a_non_duty_caller() {
     put_community(&engine, community, &[(founder, "founder")]).await;
 
     let substrate = substrate_signer(&engine, "producer-substrate-2").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
     let app =
         ciris_server::safety::router(Arc::clone(&engine), HybridPolicy::Strict, Some(substrate));
 
@@ -2072,7 +2101,7 @@ async fn flag_endpoint_rejects_a_non_duty_caller() {
     );
     // No flag landed on the subject (fail-secure — the gate stays inert).
     assert!(
-        infohazard::subject_flag(&engine, subject, None)
+        infohazard::subject_flag(&engine, subject, None, &authority)
             .await
             .unwrap()
             .is_none(),
@@ -2187,9 +2216,15 @@ async fn cc_243_blanket_revoke_re_closes_the_infohazard_gate() {
     .await;
     assert!(
         matches!(
-            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
-                .await
-                .unwrap(),
+            infohazard::reveal_decision(
+                &engine,
+                viewer.key_id(),
+                subject,
+                None,
+                &authority_of(&flagger),
+            )
+            .await
+            .unwrap(),
             infohazard::RevealDecision::Allow
         ),
         "a scoped view-grant must open the gate"
@@ -2200,9 +2235,15 @@ async fn cc_243_blanket_revoke_re_closes_the_infohazard_gate() {
     emit_consent_scoped(&engine, &viewer, subject, "revoked", None, None, 20).await;
     assert!(
         matches!(
-            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
-                .await
-                .unwrap(),
+            infohazard::reveal_decision(
+                &engine,
+                viewer.key_id(),
+                subject,
+                None,
+                &authority_of(&flagger),
+            )
+            .await
+            .unwrap(),
             infohazard::RevealDecision::Interstitial { .. }
         ),
         "a BLANKET consent:state:revoked MUST re-close the infohazard gate — a viewer \
@@ -2249,9 +2290,15 @@ async fn cc_243_an_unrelated_scope_revoke_does_not_re_close_the_gate() {
     .await;
     assert!(
         matches!(
-            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
-                .await
-                .unwrap(),
+            infohazard::reveal_decision(
+                &engine,
+                viewer.key_id(),
+                subject,
+                None,
+                &authority_of(&flagger),
+            )
+            .await
+            .unwrap(),
             infohazard::RevealDecision::Allow
         ),
         "revoking an unrelated scope must NOT re-close the view gate"
@@ -2277,11 +2324,440 @@ async fn cc_243_a_scope_less_grant_cannot_back_into_a_view_consent() {
     emit_consent_scoped(&engine, &viewer, subject, "granted", None, None, 10).await;
     assert!(
         matches!(
-            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None)
+            infohazard::reveal_decision(
+                &engine,
+                viewer.key_id(),
+                subject,
+                None,
+                &authority_of(&flagger),
+            )
+            .await
+            .unwrap(),
+            infohazard::RevealDecision::Interstitial { .. }
+        ),
+        "a bare consent:state:granted must NOT back into a scoped view-consent"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// (9) THE READ-SIDE EMITTER PREDICATE (CIRISServer#363) — `content_class:` is
+//     OPEN VOCABULARY at persist v30.2.0's write door (CC 3.3.12), so nothing
+//     upstream stops an arbitrary admitted key from authoring a flag row. The
+//     discrimination is ours, on READ, and it is asymmetric: anyone may impose
+//     an interstitial, only an authorised emitter may lift one.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Put a `content_class:{class}:v1` `scores` row on `subject`, authored by
+/// `emitter` under its REGISTERED `emitter_key_id`, with `withdrawn` and an
+/// `asserted_at` offset of `secs` (so a later withdrawal supersedes an earlier
+/// flag under the latest-wins fold).
+///
+/// This goes through the REAL `put_attestation` door, which re-verifies the
+/// hybrid signature against `attesting_key_id`'s registered pubkeys — so every
+/// row here is one the substrate actually admits, not a hand-written fixture.
+async fn put_content_class_row(
+    engine: &Engine,
+    emitter: &LocalSigner,
+    emitter_key_id: &str,
+    subject: &str,
+    class: &str,
+    withdrawn: bool,
+    secs: i64,
+) {
+    let now = chrono::Utc::now() + chrono::Duration::seconds(secs);
+    let dimension = format!("content_class:{class}:v1");
+    let mut envelope = serde_json::json!({ "dimension": dimension, "content_class": class });
+    if withdrawn {
+        envelope["withdrawn"] = serde_json::Value::Bool(true);
+    }
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize content_class row");
+    let sig = emitter
+        .sign_hybrid(&canonical)
+        .await
+        .expect("sign content_class row");
+    let attestation = Attestation {
+        attestation_id: format!("cc-{emitter_key_id}-{subject}-{class}-{withdrawn}-{secs}"),
+        attesting_key_id: emitter_key_id.to_string(),
+        attested_key_id: subject.to_string(),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        asserted_at: now,
+        expires_at: None,
+        attestation_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_key_id: emitter_key_id.to_string(),
+        additional_scrubs: Vec::new(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        subject_key_ids: vec![subject.to_string()],
+        withdraws_admission_rule: None,
+        cohort_scope: "federation".to_string(),
+        tier: attestation_tier::FEDERATION.to_string(),
+        promoted_at: None,
+    };
+    engine
+        .federation_directory()
+        .put_attestation(SignedAttestation { attestation })
+        .await
+        .expect("put content_class row");
+}
+
+/// Flag `subject` from the node's own authorised substrate emitter.
+async fn authorised_flag(engine: &Engine, substrate: &LocalSigner, subject: &str, secs: i64) {
+    put_content_class_row(
+        engine,
+        substrate,
+        &substrate.derived_key_id(),
+        subject,
+        "infohazard",
+        false,
+        secs,
+    )
+    .await;
+}
+
+/// **THE ATTACK (CIRISServer#363).** An ordinary admitted `agent`-typed key
+/// authors `content_class:infohazard:v1 {"withdrawn": true}` naming a subject it
+/// never flagged. The flag MUST survive, and the reveal gate MUST stay closed.
+///
+/// Verified RED against the pre-fix fold, driven end-to-end through the real
+/// `put_attestation` door: the attacker's row was ADMITTED by persist v30.2.0
+/// (the family is open vocabulary) and `subject_flag` returned `None`.
+#[tokio::test]
+async fn cc363_an_agent_key_cannot_clear_a_flag_it_did_not_set() {
+    let engine = node().await;
+    let subject = "cc363-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let viewer = register_party(&engine, "cc363-viewer", identity_type::USER).await;
+
+    // The node's own substrate flag producer — the one authorised emitter.
+    let substrate = substrate_signer(&engine, "cc363-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+    authorised_flag(&engine, &substrate, subject, 0).await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "the authorised emitter's flag resolves"
+    );
+
+    // THE ATTACK: a plain admitted agent key withdraws a flag it did not set.
+    // Note the row is ADMITTED by the substrate — nothing upstream refuses it.
+    let attacker = register_party(&engine, "cc363-attacker", identity_type::AGENT).await;
+    put_content_class_row(
+        &engine,
+        &attacker,
+        "cc363-attacker",
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "an agent-typed stranger CLEARED a child-safety flag it did not set \
+         (CIRISServer#363 — the fail-open)"
+    );
+    // And the whole gate, not just the flag resolver, stays closed.
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None, &authority)
                 .await
                 .unwrap(),
             infohazard::RevealDecision::Interstitial { .. }
         ),
-        "a bare consent:state:granted must NOT back into a scoped view-consent"
+        "the reveal gate must not open on a forged withdrawal"
+    );
+}
+
+/// The escape hatch an `identity_type` check would have left open: at v30.2.0
+/// `substrate_persist` is SELF-ASSERTED (`conferral_mode` =
+/// `DerivedFromVerifiedState`, and the only enforcement loop covers
+/// `AccordCoScrubbed` claims — an empty set at this version). So an attacker
+/// simply registers under that identity_type instead of `agent`. The predicate
+/// is `attesting_key_id` membership, which this cannot fake.
+#[tokio::test]
+async fn cc363_a_self_declared_substrate_persist_key_cannot_clear_either() {
+    let engine = node().await;
+    let subject = "cc363-idtype-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let substrate = substrate_signer(&engine, "cc363-idtype-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+    authorised_flag(&engine, &substrate, subject, 0).await;
+
+    // The attacker registers itself as `substrate_persist` — self-assertable,
+    // and persist admits the registration.
+    let impostor =
+        register_party(&engine, "cc363-impostor", identity_type::SUBSTRATE_PERSIST).await;
+    assert_eq!(
+        engine
+            .federation_directory()
+            .lookup_public_key("cc363-impostor")
+            .await
+            .unwrap()
+            .expect("impostor registered")
+            .identity_type,
+        identity_type::SUBSTRATE_PERSIST,
+        "the impostor really does carry the privileged identity_type"
+    );
+    put_content_class_row(
+        &engine,
+        &impostor,
+        "cc363-impostor",
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "a key that merely CALLS ITSELF substrate_persist cleared the flag — \
+         the predicate must be key identity, not a self-asserted identity_type"
+    );
+}
+
+/// Not a fix-by-breaking-the-feature: the authorised emitter can still SET and
+/// still CLEAR, and the gate follows both ways.
+#[tokio::test]
+async fn cc363_the_authorised_emitter_can_still_set_and_clear() {
+    let engine = node().await;
+    let subject = "cc363-legit-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let viewer = register_party(&engine, "cc363-legit-viewer", identity_type::USER).await;
+    let substrate = substrate_signer(&engine, "cc363-legit-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+
+    // SET.
+    authorised_flag(&engine, &substrate, subject, 0).await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "the authorised emitter can still flag"
+    );
+    assert!(matches!(
+        infohazard::reveal_decision(&engine, viewer.key_id(), subject, None, &authority)
+            .await
+            .unwrap(),
+        infohazard::RevealDecision::Interstitial { .. }
+    ));
+
+    // CLEAR — the same emitter, a newer row.
+    put_content_class_row(
+        &engine,
+        &substrate,
+        &substrate.derived_key_id(),
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        None,
+        "the authorised emitter can still CLEAR — the feature is intact"
+    );
+    assert_eq!(
+        infohazard::reveal_decision(&engine, viewer.key_id(), subject, None, &authority)
+            .await
+            .unwrap(),
+        infohazard::RevealDecision::Allow,
+        "a legitimately cleared subject reveals again"
+    );
+}
+
+/// **FAIL CLOSED.** A node with no substrate flag signer wired has an EMPTY
+/// authority — it cannot evaluate ANY emitter as authorised. The subject stays
+/// flagged: "we could not check" is not "it is fine". This is the real
+/// production shape (`router(.., None)` leaves `/v1/safety/flag` 503-inert).
+#[tokio::test]
+async fn cc363_an_unevaluable_emitter_leaves_the_subject_flagged() {
+    let engine = node().await;
+    let subject = "cc363-failclosed-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let viewer = register_party(&engine, "cc363-failclosed-viewer", identity_type::USER).await;
+    let substrate = substrate_signer(&engine, "cc363-failclosed-substrate").await;
+
+    authorised_flag(&engine, &substrate, subject, 0).await;
+    // The withdrawal is from the emitter that WOULD be authorised on a wired
+    // node — the only thing missing is our ability to evaluate it.
+    put_content_class_row(
+        &engine,
+        &substrate,
+        &substrate.derived_key_id(),
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+
+    let unevaluable = infohazard::FlagAuthority::none();
+    assert!(unevaluable.is_empty());
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &unevaluable)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "an unevaluable emitter must NOT clear — the subject stays flagged"
+    );
+    assert!(
+        matches!(
+            infohazard::reveal_decision(&engine, viewer.key_id(), subject, None, &unevaluable)
+                .await
+                .unwrap(),
+            infohazard::RevealDecision::Interstitial { .. }
+        ),
+        "and the gate stays closed"
+    );
+    // The SAME rows under a wired authority DO clear — so the assertion above
+    // is about the authority, not about some unrelated defect in the fixture.
+    let wired = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &wired)
+            .await
+            .unwrap(),
+        None,
+        "the identical rows clear once the emitter CAN be evaluated"
+    );
+}
+
+/// An authorised emitter whose key has been REVOKED loses the authority: a
+/// rotated-out substrate key must not keep clearing child-safety flags.
+#[tokio::test]
+async fn cc363_a_revoked_authority_key_can_no_longer_clear() {
+    let engine = node().await;
+    let subject = "cc363-revoked-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let substrate = substrate_signer(&engine, "cc363-revoked-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+
+    authorised_flag(&engine, &substrate, subject, 0).await;
+    put_content_class_row(
+        &engine,
+        &substrate,
+        &substrate.derived_key_id(),
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+    // Before the revocation the clear lands (the control).
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        None,
+        "control: the live authorised emitter clears"
+    );
+
+    // The substrate emitter's key is revoked, effective now.
+    let revoker = register_party(&engine, "cc363-revoker", identity_type::USER).await;
+    revoke(
+        &engine,
+        &revoker,
+        &substrate.derived_key_id(),
+        chrono::Utc::now(),
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "a REVOKED emitter's withdrawal must stop clearing — the flag returns"
+    );
+}
+
+/// The deliberate asymmetry, pinned as a property so it cannot drift silently:
+/// an UNauthorised emitter's flag still protects (over-withholding is this
+/// gate's safe direction, and dropping peer-replicated flags would open it),
+/// while the local authorised emitter can always lift what a stranger imposed.
+#[tokio::test]
+async fn cc363_an_unauthorised_set_still_protects_and_stays_liftable() {
+    let engine = node().await;
+    let subject = "cc363-asym-subject";
+    register_party(&engine, subject, identity_type::USER).await;
+    let substrate = substrate_signer(&engine, "cc363-asym-substrate").await;
+    let authority = infohazard::FlagAuthority::of_substrate_signer(&substrate);
+
+    // A stranger FLAGS. Protective, so it counts.
+    let stranger = register_party(&engine, "cc363-asym-stranger", identity_type::AGENT).await;
+    put_content_class_row(
+        &engine,
+        &stranger,
+        "cc363-asym-stranger",
+        subject,
+        "infohazard",
+        false,
+        0,
+    )
+    .await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "an unauthorised SET still withholds — the safe direction"
+    );
+
+    // ...and the stranger cannot undo its own flag.
+    put_content_class_row(
+        &engine,
+        &stranger,
+        "cc363-asym-stranger",
+        subject,
+        "infohazard",
+        true,
+        60,
+    )
+    .await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        Some(infohazard::ContentFlag::Infohazard),
+        "clearing is STRICTER than flagging — not even the setter may lift it"
+    );
+
+    // The local duty-holder's emitter CAN lift it — the censorship residual is
+    // remediable, which is what makes the asymmetry acceptable.
+    put_content_class_row(
+        &engine,
+        &substrate,
+        &substrate.derived_key_id(),
+        subject,
+        "infohazard",
+        true,
+        120,
+    )
+    .await;
+    assert_eq!(
+        infohazard::subject_flag(&engine, subject, None, &authority)
+            .await
+            .unwrap(),
+        None,
+        "the authorised emitter lifts what a stranger imposed"
     );
 }
