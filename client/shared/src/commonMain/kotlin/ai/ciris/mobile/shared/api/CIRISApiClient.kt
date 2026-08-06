@@ -2204,6 +2204,346 @@ class CIRISApiClient(
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  THE MESH-CONFIG + COMMONS SURFACES (CIRISServer #346/#365 + #367)
+    //  src/mesh_config_surface.rs · src/commons_surface.rs
+    //
+    //  Both surfaces answer with a BODY on non-2XX statuses, and the body is
+    //  the answer rather than an error page:
+    //
+    //    GET /v1/mesh-config      503 + {standing:"unreadable", settings:null}
+    //    GET /v1/commons/standing 404 + {standing:"action_unknown", fold:null}
+    //                             503 + {standing:"unreadable",    fold:null}
+    //    POST (any write door)    409 + {refused:true, refusal:"<token>"}
+    //
+    //  So these calls decode the body FIRST and only throw when it will not
+    //  parse. Treating a 404 here as a transport failure would erase the very
+    //  distinction the two surfaces were built to preserve — "we could not
+    //  ask" is a different fact from "nobody objected", and both are 200-shaped
+    //  answers arriving on non-200 statuses.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Decode a surface body that may arrive on any status. Throws only when the
+     * body is absent or unparseable — a refusal/absence body is a real answer.
+     */
+    private fun <T> decodeSurfaceBody(
+        method: String,
+        raw: String,
+        status: HttpStatusCode,
+        serializer: kotlinx.serialization.KSerializer<T>,
+    ): T {
+        if (raw.isBlank()) {
+            throw RuntimeException("$method: empty body (status=$status)")
+        }
+        return try {
+            jsonConfig.decodeFromString(serializer, raw)
+        } catch (e: Exception) {
+            logException(method, e, "status=$status, body=${raw.take(200)}")
+            throw RuntimeException("$method failed: $status: ${raw.take(200)}")
+        }
+    }
+
+    /**
+     * The effective mesh-config values, their provenance, their counting-down
+     * TTLs, the closed key registry and — the point of #365 — each key's
+     * `consumption` label. `GET {nodeUrl}/v1/mesh-config`.
+     *
+     * [now] pins the instant every TTL counts down from (RFC 3339), so a replay
+     * of an incident reads the same numbers twice.
+     */
+    suspend fun getMeshConfig(
+        now: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.MeshConfigRead {
+        val method = "getMeshConfig"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/mesh-config") {
+                token?.let { header("Authorization", "Bearer $it") }
+                now?.let { parameter("now", it) }
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigRead.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Every mesh-config row this node holds, newest first — `GET {nodeUrl}/v1/mesh-config/history`. */
+    suspend fun getMeshConfigHistory(
+        limit: Int? = null,
+        now: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.MeshConfigHistory {
+        val method = "getMeshConfigHistory"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/mesh-config/history") {
+                token?.let { header("Authorization", "Bearer $it") }
+                limit?.let { parameter("limit", it) }
+                now?.let { parameter("now", it) }
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigHistory.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The durable path — `POST {nodeUrl}/v1/mesh-config/durable`. Owner-gated
+     * on the never-delegatable `wipe` verb.
+     *
+     * With `dry_run` the node signs and submits NOTHING and hands back the
+     * canonical envelope + `payload_sha256` a co-signer must sign. Which acts
+     * earn a durable setting is the substrate's ruling, re-read per call.
+     */
+    suspend fun postMeshConfigDurable(
+        request: ai.ciris.mobile.shared.models.surfaces.MeshConfigDurableRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.MeshConfigWriteResult {
+        val method = "postMeshConfigDurable"
+        logInfo(method, "POST $nodeUrl/v1/mesh-config/durable key=${request.key} dry_run=${request.dryRun}")
+        val client = federationHttpClient()
+        return try {
+            val body = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigDurableRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/mesh-config/durable") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigWriteResult.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, key=${request.key}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The emergency relief path — `POST {nodeUrl}/v1/mesh-config/relief`.
+     * `ttl_hours` is mandatory: relief that does not expire is not relief. The
+     * BOUND is the substrate's (`ttl_too_long`); this client never clamps.
+     */
+    suspend fun postMeshConfigRelief(
+        request: ai.ciris.mobile.shared.models.surfaces.MeshConfigReliefRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.MeshConfigWriteResult {
+        val method = "postMeshConfigRelief"
+        logInfo(method, "POST $nodeUrl/v1/mesh-config/relief key=${request.key} ttl_hours=${request.ttlHours}")
+        val client = federationHttpClient()
+        return try {
+            val body = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigReliefRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/mesh-config/relief") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.MeshConfigWriteResult.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, key=${request.key}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * The commons' live answer about ONE action —
+     * `GET {nodeUrl}/v1/commons/standing`.
+     *
+     * [cohort] is `family` | `community` | `affiliations`; `self` is refused
+     * with its own token because one identity's own devices are not a commons.
+     */
+    suspend fun getCommonsStanding(
+        cohort: String,
+        cohortKeyId: String,
+        actionId: String,
+        now: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.CommonsStanding {
+        val method = "getCommonsStanding"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/commons/standing") {
+                token?.let { header("Authorization", "Bearer $it") }
+                parameter("cohort", cohort)
+                parameter("cohort_key_id", cohortKeyId)
+                parameter("action_id", actionId)
+                now?.let { parameter("now", it) }
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.CommonsStanding.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, cohort=$cohort, action=$actionId")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Raise the brake** — `POST {nodeUrl}/v1/commons/objections`. One member
+     * is enough; there is no threshold to reach. `grounds` is mandatory and is
+     * recorded, never interpreted.
+     */
+    suspend fun postCommonsObjection(
+        request: ai.ciris.mobile.shared.models.surfaces.CommonsObjectionRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult {
+        val method = "postCommonsObjection"
+        logInfo(method, "POST $nodeUrl/v1/commons/objections action=${request.actionId}")
+        val client = federationHttpClient()
+        return try {
+            val body = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.surfaces.CommonsObjectionRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/commons/objections") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, action=${request.actionId}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Cast an upholding / overruling ballot — `POST {nodeUrl}/v1/commons/ballots`.
+     *
+     * A ballot has NO force on its own: its price is paid at read time against
+     * a denominator that does not exist yet when it is cast. A member may change
+     * their mind; the latest ballot governs.
+     */
+    suspend fun postCommonsBallot(
+        request: ai.ciris.mobile.shared.models.surfaces.CommonsBallotRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult {
+        val method = "postCommonsBallot"
+        logInfo(method, "POST $nodeUrl/v1/commons/ballots objection=${request.objectionId} upholds=${request.upholds}")
+        val client = federationHttpClient()
+        return try {
+            val body = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.surfaces.CommonsBallotRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/commons/ballots") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, objection=${request.objectionId}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Lift a brake** — `POST {nodeUrl}/v1/commons/dismissals`. This one costs
+     * the cohort's m-of-n, and the returned `quorum` names what was counted
+     * against what was required on BOTH arms.
+     *
+     * With `dry_run` nothing is signed or submitted: the response carries the
+     * canonical envelope and the `payload_sha256` every co-signer must sign.
+     * The m-of-n is unreachable without that step.
+     */
+    suspend fun postCommonsDismissal(
+        request: ai.ciris.mobile.shared.models.surfaces.CommonsDismissalRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult {
+        val method = "postCommonsDismissal"
+        logInfo(
+            method,
+            "POST $nodeUrl/v1/commons/dismissals objection=${request.objectionId} " +
+                "dry_run=${request.dryRun} co_signers=${request.additionalScrubs.size}",
+        )
+        val client = federationHttpClient()
+        return try {
+            val body = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.surfaces.CommonsDismissalRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl/v1/commons/dismissals") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            decodeSurfaceBody(
+                method,
+                response.bodyAsText(),
+                response.status,
+                ai.ciris.mobile.shared.models.surfaces.CommonsWriteResult.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, objection=${request.objectionId}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     // ─── HUMANITY_ACCORD surface (/v1/accord*) — CIRISServer #41 (src/accord.rs) ─
     //
     // The constitutional safe-mesh floor: a hardware-attested holder roster that
