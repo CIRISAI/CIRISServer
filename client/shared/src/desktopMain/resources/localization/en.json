@@ -2714,7 +2714,126 @@
     }
   },
   "network_ops": {
-    "open_federation_hub": "Open federation hub →"
+    "open_federation_hub": "Open federation hub →",
+    "self": {
+      "title": "Self-directed (tier S)",
+      "subtitle": "Acts on this node and nobody else",
+      "partition_only": "The only rung that still works while partitioned — every other rung has to reach someone.",
+      "records_only": "Each act records an attributed declaration and nothing more. No loop on this node reads them, so nothing is throttled, gated or stopped by the act itself.",
+      "axes_never_folded": "Three separate axes, three separate acts. A node that CHOSE to stop and a node that was MADE to stop are the same observable with opposite meanings, so they are never one switch.",
+      "node_key": "This node",
+      "refresh": "Re-read standings",
+      "since": "Since",
+      "reason_label": "Reason recorded",
+      "delegation": "Under delegation",
+      "event": "Event",
+      "counts": "Declared {declarations}× · lifted {lifts}×",
+      "lift_disabled_hint": "Nothing has been declared on this axis, so there is nothing to lift.",
+      "unreachable_title": "This node could not be reached",
+      "unreachable_body": "The three standings are unknown — which is not 'nothing in force'. Tier S acts are local to this node, so they are available again the moment it answers.",
+      "refused_title": "The node refused this read",
+      "refused_body": "The standings are unknown. A refused read is not a clear one.",
+      "unreadable_axes_title": "Some standings could not be read",
+      "unreadable_axes_body": "The node answered, but it could not read the axes marked below. It does not know its own standing there — do not read that as clear.",
+      "recorded_title": "Recorded",
+      "act_refused_title": "The act was refused",
+      "act_refused_body": "Nothing was recorded. The standings above are unchanged.",
+      "act_unreachable_title": "This node could not be reached",
+      "act_unreachable_body": "It is not known whether the act was recorded. Re-read the standings once the node answers.",
+      "axis": {
+        "load_shed": {
+          "title": "Shed load",
+          "question": "Is this node carrying less on purpose?",
+          "declare": "Shed load",
+          "lift": "Carry a full load again"
+        },
+        "accepting": {
+          "title": "Stop accepting",
+          "question": "Did this node CHOOSE to take on nothing new?",
+          "declare": "Stop accepting",
+          "lift": "Accept again"
+        },
+        "legal_compulsion": {
+          "title": "Legal compulsion",
+          "question": "Is force being applied to this node from outside the mesh? Not a choice, and never recorded as one.",
+          "declare": "Declare compulsion",
+          "lift": "Compulsion ended"
+        }
+      },
+      "standing": {
+        "in_force": "In force",
+        "in_force_meaning": "This node declared it and has not lifted it.",
+        "lifted": "Declared, then lifted",
+        "lifted_meaning": "Not in force now — and not the same fact as never having declared it.",
+        "never_declared": "Never declared",
+        "never_declared_meaning": "No act on this axis was ever recorded here.",
+        "unreadable": "Standing unknown — could not read",
+        "unreadable_meaning": "The record could not be read, so this node does not know its own standing. This is NOT 'nothing in force'.",
+        "unknown": "Unrecognised standing",
+        "unknown_meaning": "The node reported a standing this app does not recognise. Treat it as unknown, never as clear."
+      },
+      "dialog": {
+        "delegation_label": "Owner delegation id",
+        "delegation_hint": "The owner's own delegates_to id. A self-directed act is the owner's own: a third party's serve grant will not do.",
+        "reason_label": "Reason (required)",
+        "reason_hint": "Recorded verbatim and never interpreted. An act with no recorded reason is indistinguishable from an unauthorised one once the actor is gone.",
+        "compelled_by_label": "Compelled by (optional)",
+        "compelled_by_hint": "Only the compulsion carries this. Leave it blank if you cannot say — 'compelled, cannot say by whom' is a real answer, and a gagged operator can still leave the trace.",
+        "confirm": "Record",
+        "cancel": "Cancel",
+        "working": "Recording…"
+      }
+    },
+    "reader": {
+      "title": "What this reader honours (tier R)",
+      "subtitle": "Other parties' judgements, and what THIS node's reader policy makes of them",
+      "advisory": "An issued judgement is advisory to each reader. Declining one is a first-class outcome, not an error: two readers with different policies reaching different, both-valid states from the same judgement is the design working.",
+      "subject_label": "Subject key id",
+      "read": "Read this reader's fold",
+      "reading": "Reading…",
+      "held": "Judgements held",
+      "subscription": "Subscribed roots",
+      "judgement": "Judgement",
+      "signer": "Signed by",
+      "dimension": "Dimension",
+      "asserted": "Asserted",
+      "honour": "Honour",
+      "decline": "Decline",
+      "unreachable_title": "This node could not be reached",
+      "unreachable_body": "Tier R reads what this node holds, so nothing can be said about the subject until it answers. Unlike tier S, this rung needs the node.",
+      "refused_title": "The node refused this read",
+      "refused_body": "Nothing can be concluded about what this reader honours.",
+      "decision_recorded": "Decision recorded",
+      "decision_refused": "The decision was refused",
+      "decision_refused_body": "Nothing was recorded, and this reader's policy is unchanged.",
+      "decision_unreachable_body": "It is not known whether the decision was recorded. Read the fold again once the node answers.",
+      "standing": {
+        "decided": "Judgements classified",
+        "none_held": "No judgements held here",
+        "unreadable": "This reader could not read its own state",
+        "unreadable_meaning": "NOT 'no judgements' and NOT 'nothing withheld' — an unreadable policy shown as an empty one silently drops every restriction it carried.",
+        "unknown": "Unrecognised standing"
+      },
+      "decision": {
+        "honoured_explicit": "Honoured — this reader adopted it",
+        "honoured_by_subscription": "Honoured by subscription",
+        "undecided_unsubscribed": "No decision yet",
+        "declined": "Declined by this reader",
+        "unknown": "Unrecognised decision"
+      },
+      "fold": {
+        "reader": "This reader's fold",
+        "node": "This node's serve paths",
+        "diverges": "These differ — which is the reader deciding. The decline is recorded and reported; it does not yet stop this node withholding.",
+        "agrees": "These agree."
+      },
+      "dialog": {
+        "honour_title": "Honour this judgement",
+        "honour_note": "This reader adopts the judgement deliberately. The signer need not be subscribed.",
+        "decline_title": "Decline this judgement",
+        "decline_note": "A normal outcome. Nothing about the judgement is deleted or contested: this records that THIS reader does not adopt it."
+      }
+    }
   },
   "prompts": {
     "dma": {
