@@ -11136,6 +11136,84 @@ class CIRISApiClient(
         }
     }
 
+    // ─── The operator surface (/v1/node/state) — CIRISServer #356/#369/#370 ───
+    //
+    // One read that answers "how is this node?": persist's node-state fold, edge's
+    // withhold ledger, the trace-plane liveness band (#369) and the ingest refusal
+    // rate (#370). `src/operator_surface.rs`. OWNER-gated.
+    //
+    // WHY THIS ONE RETURNS A RESULT INSTEAD OF THROWING, unlike its neighbours:
+    // the surface's entire purpose is that "could not ask" and "there is nothing"
+    // must not render the same. An unreachable node and a `red` node are exactly
+    // that pair one level up — `red` is a real reading FROM A REACHABLE NODE — and
+    // an exception erases which one happened by the time the UI sees it. So the
+    // read outcome is modelled, not thrown: NodeStateReadout has five arms and the
+    // caller must handle each.
+
+    /**
+     * Read the composed operator surface — `GET {nodeUrl}/v1/node/state`.
+     *
+     * Never throws for a reachable-but-unhappy node: a refusal (401/403/owner
+     * unbound) is [NodeStateReadout.Refused], an undecodable body is
+     * [NodeStateReadout.Malformed], and no answer at all is
+     * [NodeStateReadout.Unreachable]. Only [NodeStateReadout.Present] carries a
+     * band, and only then does `green`/`yellow`/`red`/`unknown` mean anything.
+     */
+    suspend fun getNodeOperatorState(
+        nodeUrl: String = baseUrl,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.NodeStateReadout {
+        val method = "getNodeOperatorState"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/node/state") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            val status = response.status.value
+            when {
+                // The node answered and declined. It is UP. Not a health reading,
+                // and emphatically not `red`.
+                status == 401 || status == 403 ->
+                    ai.ciris.mobile.shared.models.NodeStateReadout.Refused(
+                        status = status,
+                        detail = raw.take(300),
+                    )
+                // No such route: an older build with no operator surface. A
+                // version gap, not a refusal and not ill health.
+                status == 404 -> ai.ciris.mobile.shared.models.NodeStateReadout.NotOffered
+                !response.status.isSuccess() ->
+                    ai.ciris.mobile.shared.models.NodeStateReadout.Unreachable(
+                        detail = "HTTP $status: ${raw.take(300)}",
+                    )
+                raw.isBlank() ->
+                    ai.ciris.mobile.shared.models.NodeStateReadout.Malformed("empty body")
+                else -> try {
+                    ai.ciris.mobile.shared.models.NodeStateReadout.Present(
+                        decodeFederationEnvelope(
+                            raw,
+                            ai.ciris.mobile.shared.models.NodeOperatorState.serializer(),
+                        ),
+                    )
+                } catch (e: Exception) {
+                    logException(method, e, "nodeUrl=$nodeUrl, decode")
+                    ai.ciris.mobile.shared.models.NodeStateReadout.Malformed(
+                        "${e::class.simpleName}: ${e.message}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // No answer at all: transport, DNS, refused connection, timeout. THE
+            // fifth state — it must not be dressed as a band.
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.NodeStateReadout.Unreachable(
+                detail = "${e::class.simpleName}: ${e.message ?: "no response"}",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
     override fun close() {
     logInfo("close", "Closing CIRISApiClient")
     }

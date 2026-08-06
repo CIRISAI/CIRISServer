@@ -2830,6 +2830,8 @@ fun CIRISApp(
                 val systemData by systemViewModel.systemData.collectAsState()
                 val isSystemLoading by systemViewModel.isLoading.collectAsState()
                 val systemError by systemViewModel.error.collectAsState()
+                // The operator surface (GET /v1/node/state) — CIRISServer#369/#370.
+                val nodeStateReadout by systemViewModel.nodeState.collectAsState()
 
                 // Start/stop polling based on screen visibility
                 DisposableEffect(Unit) {
@@ -2865,7 +2867,8 @@ fun CIRISApp(
                         PlatformLogger.i("CIRISApp", "[Screen.System] User triggered refresh")
                         systemViewModel.refresh()
                     },
-                    onNavigateBack = { currentScreen = Screen.Interact }
+                    onNavigateBack = { currentScreen = Screen.Interact },
+                    nodeState = nodeStateReadout
                 )
             }
 
