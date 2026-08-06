@@ -860,6 +860,132 @@ class CIRISApiClient(
         return jsonConfig.decodeFromString(deserializer, dataElement.toString())
     }
 
+    // ─── GRADED ENFORCEMENT LADDER (/v1/admin/*) — CIRISServer #346/#361/#375 ───
+    //
+    // The owner's actual recourse against an admitted-but-hostile peer, in
+    // src/admin_ops.rs. Every mutating call is preview → commit-with-hash: the
+    // hash covers the normalized selection AND the exact row-id set it returned,
+    // so what was previewed is what executes and anything else is refused with
+    // `preview_hash_mismatch`. `{delegation_id, reason}` are mandatory in every
+    // tombstone; the route refuses without them.
+    //
+    // A REFUSAL IS RETURNED, NOT THROWN. Its `{id, text}` message is the whole
+    // point of these routes — "this reaches X and does not reach Y" — and a
+    // client that turned a 403 into a bare exception would throw away the
+    // sentence the operator needs. Only transport/parse faults throw.
+
+    /** Parse the shared `{refused, refusal, message:{id,text}, …}` refusal body. */
+    private fun parseAdminRefusal(raw: String, status: HttpStatusCode): AdminRefusal =
+        try {
+            jsonConfig.decodeFromString(AdminRefusal.serializer(), raw)
+        } catch (e: Exception) {
+            // A body this module did not author (a proxy's 502 page, an empty
+            // 500). Named as its own refusal token rather than mislabelled as
+            // one of the ladder's — an unparsed refusal is a distinct fact.
+            //
+            // The synthesized text carries NO status code: the bundle entry it
+            // resolves to could not carry one, and a fallback that says more
+            // than its translation would make the sentence change with the
+            // reader's language. The status goes to the log instead.
+            logWarn("parseAdminRefusal", "unparsable refusal body (${status.value}): ${e.message}")
+            AdminRefusal(
+                refusal = "unparsable_response",
+                message = AdminMessage(
+                    id = "moderation.ladder.unparsable_response",
+                    text = "The node answered with a body this app could not read.",
+                ),
+            )
+        }
+
+    /**
+     * **The blast-radius check** — `POST {nodeUrl}/v1/admin/preview`.
+     *
+     * Read-only. Returns the exact row set a commit would act on, the per-key
+     * counts, whether the page was truncated, where the time window was actually
+     * enforced, and the SELECTION HASH the commit must present.
+     */
+    suspend fun adminPreview(
+        selection: AdminSelectionDto,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): AdminPreviewOutcome {
+        val method = "adminPreview"
+        logInfo(method, "POST $nodeUrl/v1/admin/preview")
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(AdminSelectionDto.serializer(), selection)
+            val response = client.post("$nodeUrl/v1/admin/preview") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                AdminPreviewOutcome.Refused(
+                    response.status.value,
+                    parseAdminRefusal(raw, response.status),
+                )
+            } else {
+                AdminPreviewOutcome.Ok(
+                    jsonConfig.decodeFromString(AdminPreviewResponse.serializer(), raw),
+                )
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Commit one rung of the ladder — `POST {nodeUrl}{op.route}`.
+     *
+     * [op] carries the route, so a caller cannot send a tier-4 body down a
+     * tier-0 door. [request] must carry the selection that was PREVIEWED
+     * together with the hash that preview returned; passing the form's current
+     * selection instead is exactly what the hash exists to refuse.
+     */
+    suspend fun adminLadderCommit(
+        op: AdminLadderOp,
+        request: AdminLadderCommitRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): AdminOpOutcome {
+        val method = "adminLadderCommit"
+        logInfo(
+            method,
+            "POST $nodeUrl${op.route} tier=${op.tier} scope=${op.requiredScope} " +
+                "hash=${request.selectionHash.take(12)}…",
+        )
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                AdminLadderCommitRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl${op.route}") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                AdminOpOutcome.Refused(
+                    response.status.value,
+                    parseAdminRefusal(raw, response.status),
+                )
+            } else {
+                AdminOpOutcome.Ok(jsonConfig.decodeFromString(AdminOpResponse.serializer(), raw))
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, route=${op.route}")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     /**
      * Federation identity card — local agent's signer_key_id, crate
      * version, peer counts, and advertised capabilities.
