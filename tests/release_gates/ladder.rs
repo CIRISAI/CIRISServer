@@ -117,6 +117,40 @@ pub const TRACE_FLOW_INGEST: Invariant = Invariant {
     ],
 };
 
+pub const TRACE_FLOW_REPLICATION: Invariant = Invariant {
+    id: "trace-flow-replication",
+    preserves: "An agent-shaped node's sealed, consent-scoped `trace:*` reaches a \
+                canonical-shaped node over a REAL anti-entropy round — and with no consent \
+                grant, the same producer offers nothing.",
+    unsafe_to_ship: "Peer replication is the plane the mesh is made of; HTTP ingest covers only \
+                     the one node you posted to. Every predicate in this arc was found the same \
+                     expensive way — a mesh run surfaced one silent gate, it got fixed, the next \
+                     run surfaced the next — because nothing on this side ever drove an actual \
+                     ROUND, and every defect lived in the seam between our surfaces and the \
+                     substrate's. Shipping without this instrument means the next one is found by \
+                     a peer operator whose plane went quiet, on a node they cannot debug.",
+    // Behind `--features test-anchor` — conferring `infra:serve` is an ACCORD act
+    // and the signing helpers that can perform a genuine 2-of-3 co-scrub live
+    // behind that feature. Anchorable ONLY because ci.yml runs
+    // `cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa`;
+    // `assert_proven` re-derives that from `.github/workflows/` rather than
+    // trusting this comment, and refuses the anchor if the step ever goes away.
+    // Without the feature this file compiles to ZERO tests and prints
+    // `test result: ok. 0 passed` — a green line for an empty instrument, which
+    // is what it was for as long as CI only CLIPPY'd the surface.
+    proofs: &[Proof {
+        file: "tests/trace_round_e2e.rs",
+        tests: &[
+            "agent_trace_reaches_canonical_over_a_real_round",
+            // The negative is named here as well as under REPLICATION_BY_CONSENT,
+            // deliberately: an arrival proof that could be satisfied by a widened
+            // send gate would prove the wrong thing. The positive is only worth
+            // what the negative costs it.
+            "without_a_grant_the_producer_offers_nothing",
+        ],
+    }],
+};
+
 pub const TRACE_PLANE_LIVENESS: Invariant = Invariant {
     id: "trace-plane-liveness",
     preserves: "The trace plane has a reader: dark for two days is RED, a sustained rate of \
@@ -331,11 +365,13 @@ pub const REPLICATION_BY_CONSENT: Invariant = Invariant {
             ],
         },
         // The fail-secure half of the two-node round: with NO consent grant the
-        // producer must offer NOTHING. This is the arm of `trace_round_e2e` that
-        // genuinely passes today — the arrival arm does not (CIRISEdge#455), and
-        // is carried by `boundary::gate_trace_flow_over_replication` instead. The
-        // negative is anchored here because "replicates only by consent" is
-        // exactly what it proves.
+        // producer must offer NOTHING, which is exactly what "replicates only by
+        // consent" means. The ARRIVAL half of that same file is a separate rung
+        // ([`TRACE_FLOW_REPLICATION`]) because it answers a different question —
+        // and for most of this cut it was a separate rung for a blunter reason:
+        // it was RED, carried #[ignore]d in `boundary` against CIRISEdge#455, so
+        // that the half which passed could not vouch for the half which did not.
+        // Both are live now; they stay apart for the first reason.
         Proof {
             file: "tests/trace_round_e2e.rs",
             tests: &["without_a_grant_the_producer_offers_nothing"],
@@ -555,6 +591,7 @@ pub const DARK_TEST_FILES: &[(&str, &str, usize, &str)] = &[];
 /// here is not gated.
 pub const LADDER: &[&Invariant] = &[
     &TRACE_FLOW_INGEST,
+    &TRACE_FLOW_REPLICATION,
     &TRACE_PLANE_LIVENESS,
     &KEX,
     &BOTH_CONSENTS,
@@ -821,14 +858,16 @@ fn gate_sources() -> Vec<(String, String)> {
 /// [`crate::boundary::gate0_no_forward_rung_has_quietly_become_satisfiable`], so
 /// an ignored gate cannot sit here after reality has moved past it — which is
 /// precisely how the previous ladder rotted.
+///
+/// This list is one shorter than it was. `gate_trace_flow_over_replication` sat
+/// here against CIRISEdge#455; persist v30.1.0 / edge v15.18.3 closed the last
+/// cause, the watcher fired in the same commit that made it true, and the rung
+/// went live as [`crate::planes::gate_trace_flow_over_replication`]. An entry
+/// leaving this list is the intended end state of every entry on it.
 pub const IGNORE_ALLOWLIST: &[(&str, &str)] = &[
     (
         "gate_registry_surface_present",
         "the 0.6 boundary — RED by design while we are on 0.5.X",
-    ),
-    (
-        "gate_trace_flow_over_replication",
-        "CIRISEdge#455 — the anti-entropy round does not carry a trace yet",
     ),
     (
         "gate_peer_nodes_on_the_shipping_floor",

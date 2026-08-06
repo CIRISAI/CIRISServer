@@ -1,10 +1,10 @@
-//! **The boundary** — the two forward gates that are RED BY DESIGN, the one
-//! external-fact gate, and the live watcher that keeps all three honest.
+//! **The boundary** — the one forward gate that is RED BY DESIGN, the one
+//! external-fact gate, and the live watcher that keeps both honest.
 //!
 //! This module is the whole of the ladder's non-hermetic surface, kept small and
-//! kept separate on purpose. Everything in it is `#[ignore]`d, and every
-//! `#[ignore]` here is on [`crate::ladder::IGNORE_ALLOWLIST`] — so
-//! [`crate::ladder::gate0_no_gate_is_silently_ignored`] fails the moment a fourth
+//! kept separate on purpose. The two `#[ignore]`d gates in it are the only two
+//! entries on [`crate::ladder::IGNORE_ALLOWLIST`] — so
+//! [`crate::ladder::gate0_no_gate_is_silently_ignored`] fails the moment a third
 //! one appears anywhere in the suite.
 //!
 //! The previous ladder's ignored gates rotted because nothing watched them:
@@ -13,6 +13,15 @@
 //! [`gate0_no_forward_rung_has_quietly_become_satisfiable`] — which runs on every
 //! `cargo test --test release_gates` and FAILS the moment the forward condition
 //! is met. An ignored gate that has come true cannot stay ignored.
+//!
+//! **That mechanism has now fired once, which is why this module is one gate
+//! smaller.** `gate_trace_flow_over_replication` lived here, RED against
+//! CIRISEdge#455: a sealed `trace:*` did not reach the canonical over an
+//! anti-entropy round. Persist v30.1.0 / edge v15.18.3 closed the last cause
+//! (CIRISPersist#610), the round test flipped its soft frontier to an `assert!`,
+//! and the watcher below went red the same commit — not months later. The rung
+//! now runs live as [`crate::planes::gate_trace_flow_over_replication`]. The
+//! watcher never got to be wrong about it, which is the whole design.
 
 use std::path::PathBuf;
 
@@ -26,19 +35,6 @@ use crate::ladder::{blocked, repo};
 fn registry_surface_present() -> bool {
     let src = repo().join("src");
     src.join("registry.rs").exists() || src.join("registry").is_dir()
-}
-
-/// Does the two-node replication round ASSERT that a trace arrived?
-///
-/// It currently does not. `tests/trace_round_e2e.rs` ends with a named soft
-/// frontier — `if traces.is_empty() { eprintln!("FRONTIER: …") }` — which keeps
-/// the suite green while the gap stays visible. That is the right call for that
-/// file and the wrong thing for a release gate to read as "traces flow".
-fn replication_round_asserts_arrival() -> bool {
-    let Ok(src) = std::fs::read_to_string(repo().join("tests/trace_round_e2e.rs")) else {
-        return false;
-    };
-    !src.contains("if traces.is_empty() {")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,15 +59,6 @@ fn gate0_no_forward_rung_has_quietly_become_satisfiable() {
              \x20   this cut is still 0.5.",
         );
     }
-    if replication_round_asserts_arrival() {
-        ripe.push(
-            "  `gate_trace_flow_over_replication` — tests/trace_round_e2e.rs no longer carries\n\
-             \x20   the soft frontier, so the round now ASSERTS a trace arrives. CIRISEdge#455\n\
-             \x20   is closed. Promote the gate to a live rung and add trace_round_e2e to the\n\
-             \x20   ladder registry — noting it is behind `--features test-anchor`, so CI must\n\
-             \x20   run it WITH that feature or it is an empty instrument.",
-        );
-    }
     assert!(
         ripe.is_empty(),
         "\n\
@@ -87,7 +74,7 @@ fn gate0_no_forward_rung_has_quietly_become_satisfiable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Forward gate 1 — the 0.6 boundary
+// The forward gate — the 0.6 boundary
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// **The 0.6 boundary, carried forward from the previous ladder unchanged.**
@@ -111,46 +98,6 @@ fn gate_registry_surface_present() {
          \n\
          (This is expected and correct on 0.5.X. It is here so 0.6 cannot be tagged by\n\
          momentum.)\n"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward gate 2 — trace delivery over an anti-entropy round
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// **Traces do not yet cross a replication round, and this gate says so.**
-///
-/// HTTP ingest carries traces end to end and is gated live
-/// (`planes::gate_trace_flow_over_http_ingest`). Peer replication does NOT: on
-/// persist v30 / edge v15.18 a sealed `trace:*` still does not reach the
-/// canonical over an anti-entropy round, filed as **CIRISEdge#455**. The round
-/// test names that as a soft frontier so the suite stays green and the gap stays
-/// visible, which is right for that file — but a release gate that read it as
-/// "traces flow" would be false, and it would let the working half vouch for the
-/// broken one.
-///
-/// So the two paths are two rungs. This one is red, and its being red is the most
-/// important thing the new ladder encodes.
-#[test]
-#[ignore = "RED BY DESIGN — CIRISEdge#455: a sealed trace does not reach the canonical over an anti-entropy round. Watched live by gate0_no_forward_rung_has_quietly_become_satisfiable. Run with --include-ignored."]
-fn gate_trace_flow_over_replication() {
-    assert!(
-        replication_round_asserts_arrival(),
-        "\n\
-         🚫 RELEASE GATE [trace-flow-replication] — RED, and correctly so.\n\
-         \n\
-         Unsafe to claim: traces do NOT flow over an anti-entropy replication round.\n\
-         `tests/trace_round_e2e.rs` still ends in the soft frontier\n\
-         `if traces.is_empty() {{ eprintln!(\"FRONTIER: …\") }}` — it drives the round,\n\
-         asserts everything upstream of the serve gate, and does NOT assert the trace\n\
-         arrived, because on persist v30 / edge v15.18 it does not (CIRISEdge#455).\n\
-         \n\
-         What 0.5.156 may honestly claim: traces flow over HTTP ingest, proven end to end.\n\
-         What it may not claim: peer-to-peer trace replication.\n\
-         \n\
-         When CIRISEdge#455 lands, flip that frontier to an `assert!`, then promote this\n\
-         gate — and note the file is behind `#![cfg(feature = \"test-anchor\")]`, so CI\n\
-         must run it WITH that feature or the promotion buys an empty instrument.\n"
     );
 }
 

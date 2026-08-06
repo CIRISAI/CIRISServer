@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo test --test release_gates                     # the whole live ladder
-//! cargo test --test release_gates -- --include-ignored # + the three RED-BY-DESIGN gates
+//! cargo test --test release_gates -- --include-ignored # + the two RED-BY-DESIGN gates
 //! ```
 //!
 //! 0.5.156 is intended as the last 0.5 release; 0.6 is the registry fold. This
@@ -40,9 +40,9 @@
 //! | [`ladder`] | the registry of what 0.5 preserves, + the ratchets that keep this ladder from rotting the way the last one did |
 //! | [`substrate`] | the pins are at target and move together; the envelope vocabulary is the one we adopted |
 //! | [`trust_root`] | genesis baked, kill switch 2-of-3, canonical seed is a ceremony bundle, custody floor still refuses software |
-//! | [`planes`] | trace flow (HTTP ingest), trace-plane liveness alarms, KEX, both consents, signed-row integrity, replication-by-consent, identity derived, erasure floor |
+//! | [`planes`] | trace flow (HTTP ingest **and** over a replication round), trace-plane liveness alarms, KEX, both consents, signed-row integrity, replication-by-consent, identity derived, erasure floor |
 //! | [`surfaces`] | distinct zeroes, localization reachable |
-//! | [`boundary`] | the 0.6 registry gate, trace flow over replication (CIRISEdge#455), and the one external probe — all RED BY DESIGN, all watched live |
+//! | [`boundary`] | the 0.6 registry gate and the one external probe — RED BY DESIGN, watched live |
 //!
 //! ## Two things worth knowing before reading a failure
 //!
@@ -55,10 +55,14 @@
 //! feature no CI step passes to `cargo test` — which is how coverage actually
 //! disappears.
 //!
-//! **Two trace-flow rungs, on purpose.** HTTP ingest carries traces end to end and
-//! is gated live. Peer replication does NOT — CIRISEdge#455 — and is a separate,
-//! deliberately RED gate. Folding them together would let the working half vouch
-//! for the broken one.
+//! **Two trace-flow rungs, on purpose.** HTTP ingest proves a trace posted to a
+//! node lands on THAT node; the replication round proves one crosses to a peer.
+//! They are different claims over different code, and they became two rungs
+//! because for most of this cut the second was RED (CIRISEdge#455, then
+//! CIRISPersist#610) while the first was green — folding them would have let the
+//! working half vouch for the broken one. Both are live as of persist v30.1.0 /
+//! edge v15.18.3, and they stay two rungs: the reason they must not be folded
+//! does not go away when both are passing, it just stops being visible.
 //!
 //! NB: an integration-test file is its own crate root, so a bare `mod x;` would
 //! resolve to `tests/x.rs` (and each such top-level file would ALSO compile as a

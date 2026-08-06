@@ -11,20 +11,84 @@ use ciris_verify_core::fedcode::derive_key_id;
 
 use crate::ladder::{
     assert_proven, repo, BOTH_CONSENTS, ERASURE_NOISE_FLOOR, IDENTITY_DERIVED, KEX,
-    REPLICATION_BY_CONSENT, SIGNED_ROW_INTEGRITY, TRACE_FLOW_INGEST, TRACE_PLANE_LIVENESS,
+    REPLICATION_BY_CONSENT, SIGNED_ROW_INTEGRITY, TRACE_FLOW_INGEST, TRACE_FLOW_REPLICATION,
+    TRACE_PLANE_LIVENESS,
 };
 
 /// Traces arrive over HTTP ingest, and a batch that should not arrive does not.
 ///
 /// **Scope note, deliberately narrow.** This rung covers the HTTP ingest path
-/// only, which is the path that genuinely works end to end. Trace delivery over
-/// an anti-entropy replication round is a SEPARATE rung and is currently RED —
-/// see `boundary::gate_trace_flow_over_replication` and CIRISEdge#455. Folding
-/// the two together would let the working half vouch for the broken one, which is
-/// how "traces flow" became a claim nobody could locate.
+/// only. Trace delivery over an anti-entropy replication round is a SEPARATE
+/// rung — [`gate_trace_flow_over_replication`], directly below. The two were
+/// split while replication was red and they stay split now that it is green:
+/// folding them would let either half vouch for the other, which is how "traces
+/// flow" became a claim nobody could locate.
 #[test]
 fn gate_trace_flow_over_http_ingest() {
     assert_proven(&TRACE_FLOW_INGEST);
+}
+
+/// **A sealed trace crosses a real anti-entropy round** — the rung this cut is
+/// for, live since persist v30.1.0 / edge v15.18.3.
+///
+/// The direct half reads `tests/trace_round_e2e.rs` and answers one question the
+/// anchored half cannot: does the round test still ASSERT that the trace
+/// arrived? That file spent the whole trace arc ending in a named soft frontier
+/// (`if traces.is_empty() { eprintln!("FRONTIER: …") }`) — present, armed,
+/// passing, and asserting nothing about the one outcome it exists to prove. An
+/// anchored rung cannot see that difference: the test is there and it is armed
+/// either way. So the arrival assertion is checked as a source fact here, and
+/// the proof's execution is CI's job (`--features test-anchor`, without which
+/// the file compiles to zero tests).
+#[test]
+fn gate_trace_flow_over_replication() {
+    assert!(
+        replication_round_asserts_arrival(),
+        "\n\
+         🚫 RELEASE GATE [trace-flow-replication] — DO NOT TAG.\n\
+         \n\
+         Unsafe to ship: `tests/trace_round_e2e.rs` no longer asserts that the agent's\n\
+         `trace:*` reached the canonical. Peer-to-peer trace delivery is the claim this\n\
+         node's whole reason for existing rests on, and this is the only instrument that\n\
+         drives a real two-node round end to end. Without the assertion the test still\n\
+         runs, still passes, and covers everything EXCEPT arrival.\n\
+         \n\
+         If you are here because the round went red and softening it looked like the way\n\
+         through: it is not. Diagnose it, and start at the SENDER.\n\
+         \n\
+         \x20 1. The sender's ledger first — edge's `withholds_by_reason` (surfaced on\n\
+         \x20    our operator surface under `carriage`). A serve-gate WITHHOLD and a\n\
+         \x20    Deliver-pack DROP are indistinguishable from the receiver: in both cases\n\
+         \x20    the row is advertised and then simply never arrives, with no refusal\n\
+         \x20    anywhere. Reading the receiver first is what made the original hunt cost\n\
+         \x20    two days.\n\
+         \x20 2. Then the pack accounting on the sending side (`wanted=N packed=N-1\n\
+         \x20    dropped=1`): a ref advertised from a hash the wire index cannot serve\n\
+         \x20    packs short and says so THERE, and nowhere else.\n\
+         \x20 3. Only then the receiver's apply path, which has been loud since\n\
+         \x20    CIRISEdge#423 — if it never names the row, the row never got there.\n\
+         \n\
+         Prior art, both CLOSED — named so a recurrence is recognised, not re-derived:\n\
+         \x20 * CIRISEdge#455 — the serve gate withheld at per-peer advertise when\n\
+         \x20   `infra:serve` was claimed but not accord-conferred.\n\
+         \x20 * CIRISPersist#610 (closed in v30.1.0) — `set_attestation_cohort_scope`\n\
+         \x20   updated the row without upserting `signed_wire_index`, so a promoted\n\
+         \x20   trace advertised a hash the index could not serve: `wanted=6 packed=5\n\
+         \x20   dropped=1`, and the one dropped ref was the trace.\n"
+    );
+    assert_proven(&TRACE_FLOW_REPLICATION);
+}
+
+/// Does the two-node replication round ASSERT that a trace arrived?
+///
+/// Both halves matter. The frontier form must be GONE, and the arrival assertion
+/// must be PRESENT — checking only the first would pass a file that had deleted
+/// the check outright, which is the same hole one step further along.
+fn replication_round_asserts_arrival() -> bool {
+    let Ok(src) = std::fs::read_to_string(repo().join("tests/trace_round_e2e.rs")) else {
+        return false;
+    };
+    !src.contains("if traces.is_empty() {") && src.contains("!traces.is_empty(),")
 }
 
 /// If the trace plane stops, something says so — and the readings that must stay
