@@ -65,6 +65,57 @@ the surfaces that state what an op does **not** reach, the insistence that a
 zero name its cause. Persist can return `Err`; a node has to render that to a
 tired human at 2am who then does something irreversible.
 
+## What we uniquely claim to solve
+
+The siblings do nothing on their own. They are libraries: verify decides whether
+evidence is believable, persist decides what becomes state, edge decides who may
+learn a claim exists — and none of them runs, holds a corpus, or answers to
+anyone. **Server makes the net-claims for the mesh.** It is the thing with an
+operator, a running loop, and a row it will defend.
+
+So the claim is not "signed claims" or "post-quantum" or "consent-based routing".
+Those have prior art and the section below says so. It is this:
+
+> **A decentralized mesh that is manageable and moderatable *at scale*, with no
+> privileged party anywhere in the path. We posit that the ALM tree plus a
+> CEG-native operator surface is what makes those two compatible.**
+
+Pick any two of {scale, decentralization, moderation} and there is prior art.
+All three is the open problem:
+
+- **A CDN scales and is moderatable — because it is privileged.** Someone owns
+  the middle, sees the traffic, and can be compelled. That is the property being
+  refused here.
+- **A flat P2P mesh is decentralized but does not scale.** Everyone-to-everyone
+  at 720p30 caps around **13 participants** on a home uplink; the bandwidth is
+  N², and no amount of protocol fixes that.
+- **Most decentralized systems that do scale gave up moderation** to get there,
+  and then discovered the commons was the product.
+
+**ALM is the scale half.** One sealed copy enters a tree of relays; per-node
+fan-out is bounded by *measured* uplink, depth is O(log_f N). At f≈12 and
+N=2,000 that is four tiers — 2000 → 167 → 14 → 2 → root — deterministic,
+leaderless, primary plus two backup parents, healing when a subtree goes dark.
+Each hop opens the inbound per-link AEAD and re-seals for its downstream link
+**without ever touching the epoch DEK**, so a relay carries payload it cannot
+read. That last part is not a design intention: `tests/alm_chain.rs` recovers the
+publisher's plaintext byte-identical at the viewer after an arbitrary number of
+relay hops, and it is a gate.
+
+**The operator surfaces are the moderation half.** Because no relay is
+privileged, every hop is just another node — with an owner, a consent edge, and
+the same graded ladder as any peer. Moderation is not applied *to* the tree from
+outside it; it is available at every point *in* it, by authoring claims other
+nodes may fold. That is why the ladder states what each op does not reach, and
+why the commons resolves by reverse quorum rather than by an admin: **there is
+no seat to appeal to, so the mechanism has to work without one.**
+
+The honest status: the E2E-through-N-hops property is **proven and gated**; the
+2,000-participant topology is **modelled** from measured per-core egress and is
+not yet run at that size; and the claim that this composition *solves*
+manageable-and-moderatable-at-scale is a **posit** we are building to, not a
+result we are reporting.
+
 ## Near peers, and where the resemblance stops
 
 Server is a **federated node you run and are responsible for**, so its nearest
