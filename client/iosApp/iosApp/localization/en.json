@@ -3521,8 +3521,10 @@
       "withheld": "This node's key is withheld from serving by a quarantine marker."
     },
     "receive": {
-      "clean": "No row a peer offered has been refused on this process.",
-      "no_accepted_counter": "The substrate counts apply REFUSALS, not accepted applies. A clean reading therefore cannot separate 'everything offered was applied' from 'nothing was offered' — read `rounds_total` and the peer's own surface to tell those apart.",
+      "applying": "Rows a peer offered were admitted here and changed this node's state, and none was refused. `applied_by_kind` names the planes that moved; `duplicate_total` beside it counts the offered rows this node already held.",
+      "converged": "Peers offered rows and this node already held every one of them, so nothing changed state and nothing was refused. This is anti-entropy at rest — traffic is arriving and there is nothing left to learn from it.",
+      "decided_denominator": "`decided_total` is every row a peer offered that reached an apply decision here: applied plus duplicate plus refused. Bytes this node could not decode reach no decision and are counted nowhere, so they are missing from this total rather than folded into it.",
+      "idle": "Replication rounds finished and no peer offered this node a single row: nothing was applied, nothing was already held, nothing was refused. Its peers had nothing for it, which is not the same fact as having applied everything they sent.",
       "not_exercised": "No replication round has finished on this process, so nothing has been offered to this node's apply path. The zero is untested, not clean.",
       "refusing": "This node refused rows its peers offered. `apply_refusals_by_kind` names the plane; `key_apply_refusals_by_reason` names the policy token that refused a key.",
       "unreadable": "This node's apply counters could not be read, so nothing here is a statement about what it accepted. This is not 'nothing was refused' — it is 'we could not ask'."
@@ -3607,6 +3609,9 @@
     "served": "Served",
     "rounds": "Replication rounds",
     "apply_refusals": "Apply refusals",
+    "applied": "Applied",
+    "duplicates": "Already held",
+    "decided": "Rows decided",
     "node_signals": "Node signals",
     "uncomputed": "Could not be computed ({count})",
     "sources_absent": "Sources that contributed nothing"

@@ -535,12 +535,28 @@ async fn every_zero_carriage_reading_names_its_own_cause() {
                 assert_eq!(carriage["withholds_total"], serde_json::json!(0));
                 assert_eq!(carriage["rounds_total"], serde_json::json!(1));
                 assert_eq!(carriage["band"], serde_json::json!("green"));
-                assert_eq!(data["receive"]["standing"], serde_json::json!("clean"));
-                // ...and the clean receive reading admits what it cannot know.
-                assert!(data["receive"]["note"]["text"]
-                    .as_str()
-                    .expect("note")
-                    .contains("cannot"));
+                // CIRISEdge#457 — `clean` until edge shipped an accepted-applies
+                // counter, and `clean` meant three things. Rounds ran and NOTHING
+                // was offered to the apply path is `idle`, the receive mirror of
+                // the carriage token beside it.
+                assert_eq!(data["receive"]["standing"], serde_json::json!("idle"));
+                assert_eq!(data["receive"]["applied_total"], serde_json::json!(0));
+                assert_eq!(data["receive"]["duplicate_total"], serde_json::json!(0));
+                assert_eq!(data["receive"]["decided_total"], serde_json::json!(0));
+                assert_eq!(data["receive"]["rounds_total"], serde_json::json!(1));
+                // ...and the reading states what its denominator does NOT count,
+                // rather than the old caveat about a counter that now exists.
+                let note = data["receive"]["note"]["text"].as_str().expect("note");
+                assert!(
+                    note.contains("decided_total") && note.contains("decode"),
+                    "the note must define the denominator and name the class it \
+                     excludes: {note}"
+                );
+                assert!(
+                    !note.contains("not accepted applies"),
+                    "the CIRISEdge#457 caveat must be GONE, not softened — it tells \
+                     a reader not to trust a number that is now trustworthy: {note}"
+                );
             }
             // The node chose not to serve. Same zero rows delivered; an
             // entirely different thing to do about it.

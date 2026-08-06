@@ -3521,8 +3521,6 @@
       "released": "Bu düğümün anahtarı esirgendi ve sonra serbest bırakıldı. Şimdi hizmet veriyor ama hep vermedi — bu, hiç esirgenmemiş olmaktan başka bir olgudur."
     },
     "receive": {
-      "clean": "Bu süreçte, bir eşin sunduğu hiçbir satır reddedilmedi.",
-      "no_accepted_counter": "Alt katman, kabul edilen uygulamaları değil, uygulama REDLERİNİ sayar. Bu yüzden temiz bir okuma, 'sunulan her şey uygulandı' ile 'hiçbir şey sunulmadı' arasını ayıramaz — bunları birbirinden ayırmak için `rounds_total` değerini ve eşin kendi yüzeyini okuyun.",
       "not_exercised": "Bu süreçte hiçbir çoğaltma turu tamamlanmadı; dolayısıyla bu düğümün uygulama yoluna hiçbir şey sunulmadı. Bu sıfır temiz değil, sınanmamıştır.",
       "refusing": "Bu düğüm, eşlerinin sunduğu satırları reddetti. `apply_refusals_by_kind` düzlemi, `key_apply_refusals_by_reason` ise bir anahtarı reddeden politika jetonunu adlandırır.",
       "unreadable": "Bu düğümün uygulama sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğine dair bir beyan değildir. Bu 'hiçbir şey reddedilmedi' değildir — 'soramadık' demektir."

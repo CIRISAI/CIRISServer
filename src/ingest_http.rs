@@ -272,9 +272,11 @@ impl IngestRefusals {
     ///
     /// Counting the ACCEPTS is what lets a zero refusal count name its own
     /// cause: without it, "nothing was refused" and "nothing was ever offered"
-    /// are the same reading — the precise limit
-    /// [`crate::operator_surface::RECEIVE_NO_ACCEPTED_COUNTER`] documents on the
-    /// replication plane, which this plane does not have to inherit.
+    /// are the same reading. The replication plane spent a release proving the
+    /// point from the other side — it counted refusals and nothing else, so its
+    /// `clean` arm was three facts wearing one token until CIRISEdge#457 gave it
+    /// this counter's equivalent (see
+    /// [`crate::operator_surface::ReceiveStanding`]).
     pub fn observe_accept(&self) {
         self.observe_accept_at(Utc::now());
     }

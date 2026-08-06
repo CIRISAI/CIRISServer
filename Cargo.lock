@@ -841,8 +841,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "15.20.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v15.20.0#f712510ab8d2b55dbfe860e2d779146bad37884d"
+version = "15.20.3"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v15.20.3#a712caaf14afeb16e3cdf4170c0812d2e693ea24"
 dependencies = [
  "async-trait",
  "axum",
@@ -3090,8 +3090,8 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviculum-core"
-version = "0.12.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.12.0%2Bciris.1#674f9e4c3dd33f5db481ce40a59e6f162c4ab4f4"
+version = "0.14.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.14.0%2Bciris.1#5f6bb3981701e77d4385a5d752f9d3e06a635f01"
 dependencies = [
  "aes",
  "cbc",
@@ -3108,8 +3108,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.12.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.12.0%2Bciris.1#674f9e4c3dd33f5db481ce40a59e6f162c4ab4f4"
+version = "0.14.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.14.0%2Bciris.1#5f6bb3981701e77d4385a5d752f9d3e06a635f01"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -3119,8 +3119,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.12.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.12.0%2Bciris.1#674f9e4c3dd33f5db481ce40a59e6f162c4ab4f4"
+version = "0.14.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.14.0%2Bciris.1#5f6bb3981701e77d4385a5d752f9d3e06a635f01"
 dependencies = [
  "clap 4.6.1",
  "hmac 0.12.1",

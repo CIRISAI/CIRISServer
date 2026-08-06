@@ -3521,8 +3521,6 @@
       "withheld": "Der Schlüssel dieses Knotens wird durch eine Quarantäne-Markierung von der Auslieferung zurückgehalten."
     },
     "receive": {
-      "clean": "Keine Zeile, die ein Peer angeboten hat, wurde in diesem Prozess abgelehnt.",
-      "no_accepted_counter": "Das Substrat zählt ABLEHNUNGEN beim Anwenden, nicht angenommene Anwendungen. Eine saubere Anzeige kann daher „alles Angebotene wurde angewendet“ nicht von „es wurde nichts angeboten“ trennen — lesen Sie `rounds_total` und die Oberfläche des Peers selbst, um beides auseinanderzuhalten.",
       "not_exercised": "In diesem Prozess ist keine Replikationsrunde abgeschlossen worden, dem Anwendungspfad dieses Knotens wurde also nichts angeboten. Die Null ist ungeprüft, nicht sauber.",
       "refusing": "Dieser Knoten hat Zeilen abgelehnt, die seine Peers angeboten haben. `apply_refusals_by_kind` benennt die Ebene; `key_apply_refusals_by_reason` benennt das Richtlinien-Token, das einen Schlüssel abgelehnt hat.",
       "unreadable": "Die Anwendungszähler dieses Knotens konnten nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er angenommen hat. Das heißt nicht „nichts wurde abgelehnt“ — es heißt „wir konnten nicht fragen“."

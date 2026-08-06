@@ -3521,8 +3521,6 @@
       "withheld": "Ufunguo wa nodi hii umezuiliwa kuhudumia kwa alama ya karantini."
     },
     "receive": {
-      "clean": "Hakuna safu aliyoitoa mwenza iliyokataliwa kwenye mchakato huu.",
-      "no_accepted_counter": "Msingi huhesabu VIKATAA vya utekelezaji, si utekelezaji uliokubaliwa. Kwa hivyo usomaji safi hauwezi kutenganisha 'kila kilichotolewa kilitekelezwa' na 'hakuna kilichotolewa' — soma `rounds_total` na uso wa mwenza mwenyewe ili kuvitofautisha.",
       "not_exercised": "Hakuna raundi ya unakili iliyokamilika kwenye mchakato huu, hivyo hakuna kilichotolewa kwa njia ya utekelezaji ya nodi hii. Sifuri hii haijajaribiwa, si safi.",
       "refusing": "Nodi hii ilikataa safu ambazo wenza wake walizitoa. `apply_refusals_by_kind` hutaja uwanda; `key_apply_refusals_by_reason` hutaja tokeni ya sera iliyokataa ufunguo.",
       "unreadable": "Vihesabu vya utekelezaji vya nodi hii havikuweza kusomwa, hivyo hakuna kitu hapa kinachoeleza kile ilichokikubali. Hii si 'hakuna kilichokataliwa' — ni 'hatukuweza kuuliza'."

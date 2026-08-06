@@ -3521,8 +3521,6 @@
       "released": "La clé de ce nœud a été retenue, puis libérée. Elle sert désormais, et il n'en a pas toujours été ainsi — un fait différent de n'avoir jamais été retenue."
     },
     "receive": {
-      "clean": "Aucune ligne proposée par un pair n'a été refusée sur ce processus.",
-      "no_accepted_counter": "Le substrat compte les REFUS d'application, non les applications acceptées. Une lecture sans refus ne peut donc pas distinguer « tout ce qui a été proposé a été appliqué » de « rien n'a été proposé » — lisez `rounds_total` et la surface propre au pair pour les départager.",
       "not_exercised": "Aucun cycle de réplication ne s'est achevé sur ce processus : rien n'a donc été proposé au chemin d'application de ce nœud. Ce zéro est non éprouvé, et non pas sain.",
       "refusing": "Ce nœud a refusé des lignes proposées par ses pairs. `apply_refusals_by_kind` nomme le plan ; `key_apply_refusals_by_reason` nomme le jeton de politique qui a refusé une clé.",
       "unreadable": "Les compteurs d'application de ce nœud n'ont pas pu être lus : rien ici n'est donc un énoncé sur ce qu'il a accepté. Ce n'est pas « rien n'a été refusé » — c'est « nous n'avons pas pu poser la question »."

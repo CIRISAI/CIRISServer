@@ -17,6 +17,14 @@
 //! harness probes what our surface emits, and that no zero on this surface is
 //! reported bare.
 //!
+//! **CIRISEdge#457 (edge v15.20.1) closed the receive half of the same arc.**
+//! `apply_refusals_by_kind` booked refusals and nothing booked an accepted apply,
+//! so `receive.standing: "clean"` was three facts under one token — nothing
+//! offered, everything offered applied, everything offered already held. The
+//! `applied`/`converged`/`idle` arms below are that split, and the field-presence
+//! test pins the #377 mechanism itself: a probe matching NOTHING and a probe
+//! matching ZERO must not read the same.
+//!
 //! Every test drives edge's REAL incrementers through `EdgeMetrics` and
 //! snapshots — never a hand-built bundle — so a change to which counter edge
 //! bumps is visible here rather than mocked away.
@@ -179,7 +187,202 @@ fn a_zero_with_no_rounds_reads_not_exercised_not_idle() {
     );
     assert_eq!(
         v["replication_plane"]["receive"]["standing"],
-        json!("clean")
+        json!("idle"),
+        "rounds finished and nothing was offered to the apply path ⇒ idle. This read \
+         `clean` until CIRISEdge#457, which is the same collapse one direction over: \
+         `clean` also meant 'we applied every row we were handed'"
+    );
+}
+
+/// **CIRISEdge#457 — the receive half's three-way split.** Three nodes, all with
+/// zero apply refusals, in three genuinely different conditions. Until edge
+/// v15.20.1 booked `Admitted` and `Duplicate` they produced one token and one
+/// payload, so an operator watching a stalled trace could not tell "nothing is
+/// reaching us" from "everything reaching us already landed".
+#[test]
+fn nothing_offered_all_applied_and_all_duplicates_are_three_readings_not_one() {
+    /// A node that ran a round and then saw `n` of `outcome`.
+    fn node(f: impl Fn(&EdgeMetrics)) -> serde_json::Value {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        f(&m);
+        round_diagnostics_json(&m.snapshot(), true, true, false)
+    }
+
+    let nothing = node(|_| {});
+    let applied = node(|m| {
+        for _ in 0..15 {
+            m.inc_applied(EnvelopeKind::Attestation);
+        }
+    });
+    let held = node(|m| {
+        for _ in 0..15 {
+            m.inc_duplicate(EnvelopeKind::Attestation);
+        }
+    });
+
+    let recv = |v: &serde_json::Value| v["replication_plane"]["receive"].clone();
+    for v in [&nothing, &applied, &held] {
+        assert_eq!(
+            recv(v)["apply_refusals_total"],
+            json!(0),
+            "all three are honestly zero-refusal — that is what made them collapse"
+        );
+    }
+
+    let tokens: std::collections::HashSet<String> = [&nothing, &applied, &held]
+        .iter()
+        .map(|v| recv(v)["standing"].as_str().expect("standing").to_owned())
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        3,
+        "identical zero refusals, three different causes — the tokens must differ: {tokens:?}"
+    );
+    assert_eq!(recv(&nothing)["standing"], json!("idle"));
+    assert_eq!(recv(&applied)["standing"], json!("applying"));
+    assert_eq!(recv(&held)["standing"], json!("converged"));
+
+    // The counts, each beside its denominator.
+    assert_eq!(recv(&applied)["applied_total"], json!(15));
+    assert_eq!(recv(&applied)["applied_by_kind"]["attestation"], json!(15));
+    assert_eq!(recv(&applied)["duplicate_total"], json!(0));
+    assert_eq!(recv(&held)["duplicate_total"], json!(15));
+    assert_eq!(recv(&held)["duplicate_by_kind"]["attestation"], json!(15));
+    assert_eq!(
+        recv(&held)["applied_total"],
+        json!(0),
+        "a duplicate is not an apply — it is its own fact and books its own axis"
+    );
+    assert_eq!(recv(&nothing)["decided_total"], json!(0));
+    assert_eq!(recv(&applied)["decided_total"], json!(15));
+    assert_eq!(recv(&held)["decided_total"], json!(15));
+    for v in [&nothing, &applied, &held] {
+        assert_eq!(
+            recv(v)["rounds_total"],
+            json!(1),
+            "a decided_total of 0 against 0 rounds is not a receive statement at all, \
+             so the round count rides with it"
+        );
+    }
+
+    // And the caveat that asserted this was impossible is GONE from the wire.
+    assert!(
+        recv(&applied)["accepted_total_unavailable"].is_null(),
+        "`accepted_total_unavailable` said edge counts refusals and not accepted \
+         applies (CIRISEdge#457). It does count them now, so the string must not \
+         survive: a stale caveat tells a reader not to trust a number that is \
+         trustworthy. Got {}",
+        recv(&applied)["accepted_total_unavailable"]
+    );
+}
+
+/// **A probe matching nothing and a probe matching zero must not read the same.**
+///
+/// This is the exact mechanism that blinded the #377 `ship` rung: stage 5 grepped
+/// `"envelopes_sent_total":[1-9]`, the field was emitted and always 0, and a
+/// no-match was indistinguishable from a zero. Every field the receive half now
+/// adds is a candidate for the same failure, so each one is asserted PRESENT and
+/// numeric on a node that has done nothing — because an absent key and a key
+/// reading 0 must be different states for a consumer, and only one of them can be
+/// "we have no counter for this".
+#[test]
+fn every_receive_field_is_present_and_numeric_even_when_it_reads_zero() {
+    let m = EdgeMetrics::new();
+    m.inc_round_outcome(RoundOutcome::Completed);
+    let idle = round_diagnostics_json(&m.snapshot(), true, true, false);
+    let recv = &idle["replication_plane"]["receive"];
+
+    for field in [
+        "applied_total",
+        "duplicate_total",
+        "apply_refusals_total",
+        "decided_total",
+        "rounds_total",
+    ] {
+        assert!(
+            recv[field].is_u64(),
+            "`{field}` must be emitted as a number even when it is 0. A consumer that \
+             greps for it and finds NOTHING has learned that this build has no such \
+             counter; one that finds 0 has learned the counter is live and reads zero. \
+             Collapsing those two is CIRISServer#377's blind rung exactly. Got: {}",
+            recv[field]
+        );
+    }
+    for field in ["applied_by_kind", "duplicate_by_kind", "by_kind"] {
+        assert!(
+            recv[field].is_object(),
+            "`{field}` must be an (empty) object, not absent: {}",
+            recv[field]
+        );
+    }
+
+    // The other half of the same rule: a field this surface does NOT emit must
+    // read as absent rather than as a plausible zero.
+    assert!(
+        recv["accepted_total"].is_null(),
+        "nothing emits `receive.accepted_total`; the counted field is `applied_total` \
+         and a consumer looking for the wrong name must find nothing, not 0"
+    );
+
+    // And the value moves off zero when the thing it counts happens — the check
+    // that proves the field is wired to the counter rather than hard-zero.
+    m.inc_applied(EnvelopeKind::Key);
+    let moved = round_diagnostics_json(&m.snapshot(), true, true, false);
+    assert_eq!(
+        moved["replication_plane"]["receive"]["applied_total"],
+        json!(1)
+    );
+    assert_ne!(
+        moved["replication_plane"]["receive"]["standing"], recv["standing"],
+        "one applied row must change the standing; a field that only ever reads its \
+         idle value is a probe that can never fail"
+    );
+}
+
+/// The hint ladder's carriage branch could not tell a ONE-WAY path from a
+/// two-way one, because "nothing was offered back to us" was not a statement
+/// this node could make. CIRISEdge#457 made it one, and the two conditions have
+/// different remedies: a reverse-path/NAT gap, versus a round that is reaching us
+/// and failing to complete.
+#[test]
+fn a_one_way_carriage_and_a_two_way_one_get_different_hints() {
+    let one_way = {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        m.inc_replication_served(EnvelopeKind::Attestation);
+        round_diagnostics_json(&m.snapshot(), true, true, true)
+    };
+    let two_way = {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        m.inc_replication_served(EnvelopeKind::Attestation);
+        m.inc_applied(EnvelopeKind::IdentityOccurrence);
+        round_diagnostics_json(&m.snapshot(), true, true, true)
+    };
+
+    let h1 = one_way["hint"].as_str().unwrap_or_default();
+    let h2 = two_way["hint"].as_str().unwrap_or_default();
+    assert_ne!(
+        h1, h2,
+        "served rows with nothing coming back, and served rows with rows coming back, \
+         are different diagnoses and must not share a hint"
+    );
+    assert!(
+        h1.contains("one-way"),
+        "rows out and nothing in is a one-way path and the hint must say so; got: {h1}"
+    );
+    assert!(
+        h2.contains("BOTH directions"),
+        "rows moving both ways rules the reverse path out; got: {h2}"
+    );
+    assert_eq!(
+        one_way["replication_plane"]["receive"]["decided_total"],
+        json!(0)
+    );
+    assert_eq!(
+        two_way["replication_plane"]["receive"]["decided_total"],
+        json!(1)
     );
 }
 

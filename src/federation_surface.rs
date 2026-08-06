@@ -244,6 +244,21 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
         .collect();
+    // CIRISEdge#457 — the receive plane's ACCEPTED-apply axes. Without these,
+    // `receive_standing` below could only ever say `clean`, and this endpoint
+    // reported the same `{}` for a node that applied everything a peer offered
+    // and a node that was offered nothing. #377 shipped with three stale readers
+    // of one counter; this is the reader that must not become a fourth.
+    let applied: serde_json::Map<_, _> = bundle
+        .replication_applied_total
+        .iter()
+        .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
+        .collect();
+    let duplicates: serde_json::Map<_, _> = bundle
+        .replication_duplicate_total
+        .iter()
+        .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
+        .collect();
     let round_outcomes: serde_json::Map<_, _> = bundle
         .replication_round_outcomes_total
         .iter()
@@ -268,10 +283,13 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_envelopes_served_total": replication_served,
                 "withholds_by_reason": withholds,
                 "apply_refusals_by_kind": apply_refusals,
+                "replication_applied_total": applied,
+                "replication_duplicate_total": duplicates,
                 "replication_round_outcomes_total": round_outcomes,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
                 "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
-                "plane_note": "envelopes_sent_total / envelopes_received_total / send_failures_total are the APPLICATION plane (edge.rs send_*/dispatch_inbound). Anti-entropy replication increments none of them, so 0 there says nothing about carriage — read replication_envelopes_served_total and carriage_standing (CIRISEdge#434).",
+                "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),
+                "plane_note": "envelopes_sent_total / envelopes_received_total / send_failures_total are the APPLICATION plane (edge.rs send_*/dispatch_inbound). Anti-entropy replication increments none of them, so 0 there says nothing about carriage — read replication_envelopes_served_total and carriage_standing for the send direction (CIRISEdge#434), and replication_applied_total / replication_duplicate_total / apply_refusals_by_kind with receive_standing for the receive direction (CIRISEdge#457). receive_decided_total is their sum: every offered row that reached an apply decision. Undecodable bytes reach no decision and edge counts them nowhere, so they are absent from it rather than folded in.",
             }
         })),
     )

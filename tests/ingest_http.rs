@@ -456,9 +456,10 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
     assert_eq!(live["trace_plane"]["band"], serde_json::json!("green"));
     // ...and the gate counted the ACCEPT, which is the only thing that lets
     // this read `clean` rather than `not_exercised`. Without it, "everything
-    // offered was admitted" and "nothing was ever offered" collapse — the exact
-    // limitation `RECEIVE_NO_ACCEPTED_COUNTER` documents on the replication
-    // plane, and the one this plane does not have to inherit.
+    // offered was admitted" and "nothing was ever offered" collapse — which is
+    // precisely what happened on the replication plane, whose `clean` arm carried
+    // that collapse until CIRISEdge#457 gave it an accepted-applies counter of
+    // its own (see `ReceiveStanding::Applying` / `Converged` / `Idle`).
     assert_eq!(
         live["ingest"]["accepted_total"],
         serde_json::json!(1),

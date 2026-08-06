@@ -3521,8 +3521,6 @@
       "released": "Kunci node ini pernah ditahan lalu dilepaskan. Sekarang ia melayani, dan dahulu tidak selalu begitu — sebuah fakta yang berbeda dari tidak pernah ditahan sama sekali."
     },
     "receive": {
-      "clean": "Tidak ada baris yang ditawarkan peer yang ditolak pada proses ini.",
-      "no_accepted_counter": "Substrat menghitung PENOLAKAN penerapan, bukan penerapan yang diterima. Karena itu pembacaan yang bersih tidak dapat memisahkan 'semua yang ditawarkan telah diterapkan' dari 'tidak ada yang ditawarkan' — baca `rounds_total` dan permukaan milik peer itu sendiri untuk membedakan keduanya.",
       "not_exercised": "Belum ada ronde replikasi yang selesai pada proses ini, sehingga belum ada apa pun yang ditawarkan ke jalur penerapan node ini. Nol ini belum teruji, bukan bersih.",
       "refusing": "Node ini menolak baris-baris yang ditawarkan para peer-nya. `apply_refusals_by_kind` menyebut bidangnya; `key_apply_refusals_by_reason` menyebut token kebijakan yang menolak sebuah kunci.",
       "unreadable": "Penghitung penerapan node ini tidak dapat dibaca, sehingga tidak ada apa pun di sini yang merupakan pernyataan tentang apa yang diterimanya. Ini bukan 'tidak ada yang ditolak' — ini 'kami tidak dapat menanyakannya'."

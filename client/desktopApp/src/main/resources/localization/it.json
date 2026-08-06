@@ -3521,8 +3521,6 @@
       "released": "La chiave di questo nodo è stata trattenuta e poi rilasciata. Ora serve, e non è sempre stato così — un fatto diverso dal non essere mai stata trattenuta."
     },
     "receive": {
-      "clean": "In questo processo non è stata rifiutata nessuna riga offerta da un peer.",
-      "no_accepted_counter": "Il substrato conta i RIFIUTI di applicazione, non le applicazioni accettate. Una lettura pulita non è quindi in grado di distinguere «tutto ciò che è stato offerto è stato applicato» da «non è stato offerto nulla» — leggi `rounds_total` e la superficie del peer stesso per distinguere i due casi.",
       "not_exercised": "Nessun ciclo di replica si è concluso in questo processo, quindi nulla è stato offerto al percorso di applicazione di questo nodo. Quello zero non è pulito: non è mai stato messo alla prova.",
       "refusing": "Questo nodo ha rifiutato righe offerte dai suoi peer. `apply_refusals_by_kind` indica il piano; `key_apply_refusals_by_reason` indica il token di policy che ha rifiutato una chiave.",
       "unreadable": "Non è stato possibile leggere i contatori di applicazione di questo nodo, quindi nulla qui è un'affermazione su ciò che ha accettato. Questo non significa «non è stato rifiutato nulla» — significa «non è stato possibile chiedere»."

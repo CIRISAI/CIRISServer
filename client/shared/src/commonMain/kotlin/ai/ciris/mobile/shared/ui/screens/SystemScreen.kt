@@ -1575,6 +1575,19 @@ private fun EdgeHalfCard(title: String, reading: EdgeHalfReading, testTagName: S
                 reading.applyRefusalsTotal?.let {
                     OperatorFactRow(localizedString("operator_ui.apply_refusals"), it.toString())
                 }
+                // CIRISEdge#457 — the accepted-apply axes. Without these the
+                // receive half showed refusals only, so "refused 1 of 50" and
+                // "refused the only row it was ever offered" rendered alike.
+                reading.appliedTotal?.let {
+                    OperatorFactRow(localizedString("operator_ui.applied"), it.toString())
+                }
+                reading.duplicateTotal?.let {
+                    OperatorFactRow(localizedString("operator_ui.duplicates"), it.toString())
+                }
+                // The denominator, last — every count above divides it.
+                reading.decidedTotal?.let {
+                    OperatorFactRow(localizedString("operator_ui.decided"), it.toString())
+                }
             }
             reading.note?.let {
                 Text(

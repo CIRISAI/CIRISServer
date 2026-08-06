@@ -3521,8 +3521,6 @@
       "released": "La clave de este nodo estuvo retenida y luego fue liberada. Ahora sirve, y no siempre fue así — un hecho distinto de no haber estado nunca retenida."
     },
     "receive": {
-      "clean": "Ninguna fila ofrecida por un par ha sido rechazada en este proceso.",
-      "no_accepted_counter": "El sustrato cuenta los RECHAZOS de aplicación, no las aplicaciones aceptadas. Por eso una lectura limpia no puede separar «se aplicó todo lo ofrecido» de «no se ofreció nada» — lee `rounds_total` y la propia superficie del par para distinguirlos.",
       "not_exercised": "Ninguna ronda de replicación ha terminado en este proceso, así que no se ha ofrecido nada a la ruta de aplicación de este nodo. El cero está sin probar, no limpio.",
       "refusing": "Este nodo rechazó filas que le ofrecieron sus pares. `apply_refusals_by_kind` nombra el plano; `key_apply_refusals_by_reason` nombra el token de política que rechazó una clave.",
       "unreadable": "No se pudieron leer los contadores de aplicación de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que aceptó. Esto no es «no se rechazó nada» — es «no pudimos preguntar»."

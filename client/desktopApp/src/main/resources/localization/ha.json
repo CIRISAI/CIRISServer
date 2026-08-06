@@ -3521,8 +3521,6 @@
       "released": "An hana maɓallin wannan kumburi sannan aka sake shi. Yana bautarwa yanzu, kuma ba koyaushe yake haka ba — gaskiya ce ta daban da rashin taɓa hana shi."
     },
     "receive": {
-      "clean": "Babu layin da abokin ya gabatar da aka ƙi a kan wannan process.",
-      "no_accepted_counter": "Substrate yana ƙidaya ƘIN aiwatarwa ne, ba aiwatarwar da aka karɓa ba. Saboda haka karatu mai tsabta ba zai iya raba «an aiwatar da duk abin da aka gabatar» da «ba a gabatar da komai ba» — ka karanta `rounds_total` da fuskar takwarar da kanta domin ka bambanta su.",
       "not_exercised": "Babu wani zagayen kwafi da ya ƙare a kan wannan process, don haka ba a gabatar da komai ga hanyar aiwatarwa ta wannan kumburi ba. Sifilin ba a gwada shi ba ne, ba mai tsabta ba.",
       "refusing": "Wannan kumburi ya ƙi layukan da takwarorinsa suka gabatar. `apply_refusals_by_kind` yana ambaton filin; `key_apply_refusals_by_reason` yana ambaton alamar manufar da ta ƙi maɓalli.",
       "unreadable": "Ba a iya karanta masu ƙidayar aiwatarwa na wannan kumburi ba, don haka babu abin da ke nan da yake magana a kan abin da ya karɓa. Wannan ba «ba a ƙi komai ba» ba ne — «ba mu iya tambaya ba» ne."

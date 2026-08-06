@@ -39,8 +39,12 @@
 //!   `withholding`. An empty withhold ledger is *three different facts*
 //!   depending on whether the counters could be read at all, whether a
 //!   replication round has ever finished, and whether anything was served.
-//! - [`ReceiveStanding`] — `unreadable` / `not_exercised` / `clean` / `refusing`,
-//!   for the same reason on the other direction.
+//! - [`ReceiveStanding`] — `unreadable` / `not_exercised` / `idle` / `converged` /
+//!   `applying` / `refusing`, for the same reason on the other direction. The
+//!   middle three were ONE token (`clean`) until CIRISEdge#457 gave the receive
+//!   plane an accepted-applies counter: "nothing was offered to us", "everything
+//!   offered was a row we already held" and "rows arrived and changed state here"
+//!   are three facts that all report zero refusals.
 //! - `trust_root.drill` — persist bands a NEVER-drilled root and a 200-day-stale
 //!   root identically `Red` **on purpose** (its doc says the distinction is
 //!   carried by `last_drill_at` being `None`). So this surface reads that field
@@ -361,18 +365,48 @@ impl CarriageStanding {
 }
 
 /// CIRISServer#356 — **what a zero apply-refusal count MEANS.**
+///
+/// # CIRISEdge#457 — the `clean` arm split three ways
+///
+/// Until edge v15.20.1 this enum had a single healthy arm, `clean`, and it was
+/// overloaded: edge booked `ApplyOutcome::Refused` and booked neither `Admitted`
+/// nor `Duplicate`, so *nothing was offered to us*, *everything offered applied*
+/// and *everything offered was a row we already held* all produced the same
+/// reading. That is the collapsed zero this module exists to prevent, sitting in
+/// the module's own enum, and it survived because the counter that would have
+/// separated the arms did not exist to be read.
+///
+/// It exists now — `replication_applied_total` and `replication_duplicate_total`,
+/// booked at the same #425 apply choke as the refusals — so the three are three
+/// tokens. They deliberately mirror [`CarriageStanding`]'s arms on the other
+/// direction: `idle` is "nothing moved and nothing was owed", and the arm above
+/// it names what moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveStanding {
-    /// The counters could not be read at all.
+    /// The counters could not be read at all. **Not** "nothing was refused" —
+    /// "we could not ask".
     Unreadable,
     /// No replication round has finished on this process, so nothing has been
     /// offered to the apply path. Untested, not clean.
     NotExercised,
-    /// Rounds finished and no offered row was refused. See
-    /// [`RECEIVE_NO_ACCEPTED_COUNTER`] for what this reading still cannot
-    /// separate — the edge bundle counts refusals, not accepted applies.
-    Clean,
-    /// At least one offered row was refused.
+    /// Rounds finished and the apply path was never reached: no row was applied,
+    /// none was a duplicate, none was refused. Our peers offered us nothing.
+    ///
+    /// The receive mirror of [`CarriageStanding::Idle`], and a REAL state — but
+    /// not the same fact as [`Self::Converged`], where rows were offered and
+    /// every one was already held.
+    Idle,
+    /// Rows were offered and every one was a row this node already held
+    /// (`ApplyOutcome::Duplicate`): nothing was refused and nothing changed
+    /// state. The healthy steady state of anti-entropy, and the arm that used to
+    /// be indistinguishable from having been offered nothing at all.
+    Converged,
+    /// Rows were offered, at least one was ADMITTED and changed local state, and
+    /// none was refused. The reading that `clean` could never assert.
+    Applying,
+    /// At least one offered row was refused. Outranks every arm above it: a node
+    /// that applied fifty rows and refused one is `refusing`, and the counts
+    /// beside the token say which of those two numbers is the large one.
     Refusing,
 }
 
@@ -383,7 +417,9 @@ impl ReceiveStanding {
         match self {
             Self::Unreadable => "unreadable",
             Self::NotExercised => "not_exercised",
-            Self::Clean => "clean",
+            Self::Idle => "idle",
+            Self::Converged => "converged",
+            Self::Applying => "applying",
             Self::Refusing => "refusing",
         }
     }
@@ -392,18 +428,21 @@ impl ReceiveStanding {
     pub const ALL: &'static [Self] = &[
         Self::Unreadable,
         Self::NotExercised,
-        Self::Clean,
+        Self::Idle,
+        Self::Converged,
+        Self::Applying,
         Self::Refusing,
     ];
 
-    /// The band. `unreadable` and `not_exercised` are both `unknown` — and they
-    /// are DIFFERENT TOKENS on that one band, which is the whole discipline: a
-    /// band never replaces a token, it only accompanies one.
+    /// The band. `unreadable` and `not_exercised` are both `unknown`, and
+    /// `idle` / `converged` / `applying` are all `green` — and each is a
+    /// DIFFERENT TOKEN on its shared band, which is the whole discipline: a band
+    /// never replaces a token, it only accompanies one.
     #[must_use]
     pub const fn band(self) -> StateBand {
         match self {
             Self::Unreadable | Self::NotExercised => StateBand::Unknown,
-            Self::Clean => StateBand::Green,
+            Self::Idle | Self::Converged | Self::Applying => StateBand::Green,
             Self::Refusing => StateBand::Red,
         }
     }
@@ -423,9 +462,24 @@ impl ReceiveStanding {
                 "No replication round has finished on this process, so nothing has been offered \
                  to this node's apply path. The zero is untested, not clean.",
             ),
-            Self::Clean => (
-                "operator.receive.clean",
-                "No row a peer offered has been refused on this process.",
+            Self::Idle => (
+                "operator.receive.idle",
+                "Replication rounds finished and no peer offered this node a single row: nothing \
+                 was applied, nothing was already held, nothing was refused. Its peers had \
+                 nothing for it, which is not the same fact as having applied everything they \
+                 sent.",
+            ),
+            Self::Converged => (
+                "operator.receive.converged",
+                "Peers offered rows and this node already held every one of them, so nothing \
+                 changed state and nothing was refused. This is anti-entropy at rest — traffic \
+                 is arriving and there is nothing left to learn from it.",
+            ),
+            Self::Applying => (
+                "operator.receive.applying",
+                "Rows a peer offered were admitted here and changed this node's state, and none \
+                 was refused. `applied_by_kind` names the planes that moved; `duplicate_total` \
+                 beside it counts the offered rows this node already held.",
             ),
             Self::Refusing => (
                 "operator.receive.refusing",
@@ -650,7 +704,7 @@ const TRACE_UNAVAILABLE: Msg = (
 );
 
 /// The limit of the trace-plane reading, carried IN the payload — the same
-/// discipline [`RECEIVE_NO_ACCEPTED_COUNTER`] follows, so a consumer that
+/// discipline [`RECEIVE_DECIDED_DENOMINATOR`] follows, so a consumer that
 /// renders the struct without reading this source still shows it.
 pub const TRACE_PRODUCER_ASSERTED_TS: Msg = (
     "operator.trace_plane.producer_asserted_ts",
@@ -700,25 +754,33 @@ fn trace_plane_json(corpus: Result<&TraceCorpus, &String>, now: DateTime<Utc>) -
     Value::Object(out)
 }
 
-/// The limit of a clean receive reading, carried IN the payload rather than
-/// only in these docs — the same discipline persist's `PEER_QUOTA_NOTE` uses,
-/// so a consumer that renders the struct without reading the source still shows
-/// it.
+/// What the receive plane's denominator counts, carried IN the payload rather
+/// than only in these docs — the same discipline persist's `PEER_QUOTA_NOTE`
+/// uses, so a consumer that renders the struct without reading the source still
+/// shows it.
 ///
-/// **Blocked on CIRISEdge#457** (filed from CIRISServer#377). `ApplyOutcome::Refused`
-/// books at edge's apply choke point; `Admitted` and `Duplicate` book nowhere, so
-/// there is no accepted-applies counter to read. The send direction's twin of this
-/// gap was CIRISEdge#434 and is closed — `replication_envelopes_served_total` — which
-/// is why [`carriage_standing`] can separate `idle` from `moving` and
-/// [`receive_standing`] cannot yet separate `clean` from "nothing was offered".
-/// When #457 lands, that split becomes expressible and this note's caveat narrows.
+/// **CIRISEdge#457 closed the gap this slot used to describe.** The old note here
+/// said the substrate counted refusals and not accepted applies, so `clean` could
+/// not separate "everything offered was applied" from "nothing was offered". Edge
+/// v15.20.1 books `replication_applied_total` and `replication_duplicate_total` at
+/// the same #425 choke as the refusals, so that separation is now
+/// [`ReceiveStanding::Applying`] / [`ReceiveStanding::Converged`] /
+/// [`ReceiveStanding::Idle`] and the caveat is gone rather than softened — a stale
+/// caveat tells a reader not to trust a number that is now trustworthy.
+///
+/// What remains is not a limit on the standing but a fact about the denominator,
+/// and it is stated because a total that silently excludes a class is the same
+/// defect one level down: edge counts `ApplyOutcome::Deserialize` NOWHERE, on
+/// purpose — undecodable bytes are wire corruption, not a policy decision, and
+/// folding them into a per-kind apply count would conflate the two.
+///
 /// The message TEXT is localized across 29 bundles — extend the docs here, not the
 /// string, unless you are re-translating.
-pub const RECEIVE_NO_ACCEPTED_COUNTER: Msg = (
-    "operator.receive.no_accepted_counter",
-    "The substrate counts apply REFUSALS, not accepted applies. A clean reading therefore cannot \
-     separate 'everything offered was applied' from 'nothing was offered' — read `rounds_total` \
-     and the peer's own surface to tell those apart.",
+pub const RECEIVE_DECIDED_DENOMINATOR: Msg = (
+    "operator.receive.decided_denominator",
+    "`decided_total` is every row a peer offered that reached an apply decision here: applied \
+     plus duplicate plus refused. Bytes this node could not decode reach no decision and are \
+     counted nowhere, so they are missing from this total rather than folded into it.",
 );
 
 /// The carriage/receive/ingest counters' volatility, stated in the payload.
@@ -792,10 +854,11 @@ pub enum IngestStanding {
     /// process: no accept, no refusal. The zero is untested, in exactly the
     /// sense [`CarriageStanding::NotExercised`] is.
     ///
-    /// This arm is why the ingest plane does not inherit
-    /// [`RECEIVE_NO_ACCEPTED_COUNTER`]'s limitation: the ledger counts accepts
-    /// as well as refusals, so "everything offered was admitted" and "nothing
-    /// was offered" do not have to share a reading here.
+    /// This arm exists because the ledger counts ACCEPTS as well as refusals, so
+    /// "everything offered was admitted" and "nothing was offered" never had to
+    /// share a reading here. The replication plane spent one release unable to
+    /// make the same distinction for want of that counter — see
+    /// [`ReceiveStanding`], where CIRISEdge#457 finally supplied it.
     NotExercised,
     /// Offers were made and none was refused inside the window.
     Clean,
@@ -1141,19 +1204,55 @@ pub fn carriage_band(standing: CarriageStanding, worst_class: Option<WithholdCla
     }
 }
 
-/// Narrow a zero apply-refusal count to its cause.
+/// Narrow a zero apply-refusal count to its cause. **The ONE derivation of this
+/// question in this repo** — `federation_delivery::round_diagnostics_json` and
+/// `GET /v1/federation/metrics` both call this rather than re-deriving it, because
+/// #377 was two readers of one bundle, one right and one wrong.
+///
+/// Every input comes from the SAME bundle — one source, one answer — and reaches
+/// it through [`total`], so a present-but-zero key can never make a standing
+/// disagree with the count rendered beside it.
 #[must_use]
 pub fn receive_standing(bundle: Option<&EdgeMetricsBundle>) -> ReceiveStanding {
     let Some(b) = bundle else {
         return ReceiveStanding::Unreadable;
     };
+    // A refusal outranks every healthy arm: it is the only one that is a fault,
+    // and a node that applied fifty rows and refused one still refused one.
     if total(&b.apply_refusals_by_kind) > 0 || total(&b.key_apply_refusals_by_reason) > 0 {
         return ReceiveStanding::Refusing;
     }
+    // No terminal round ⇒ the apply path has never been asked anything ⇒ every
+    // zero below is UNTESTED rather than clean. Same predicate as the carriage
+    // half, for the same reason.
     if total(&b.replication_round_outcomes_total) == 0 {
         return ReceiveStanding::NotExercised;
     }
-    ReceiveStanding::Clean
+    // CIRISEdge#457 — the three arms that were one. Order matters: an admit is
+    // the loudest fact of the three (local state changed), a duplicate says
+    // traffic arrived and taught us nothing, and only the absence of BOTH means
+    // the apply path was never handed a row.
+    if total(&b.replication_applied_total) > 0 {
+        return ReceiveStanding::Applying;
+    }
+    if total(&b.replication_duplicate_total) > 0 {
+        return ReceiveStanding::Converged;
+    }
+    ReceiveStanding::Idle
+}
+
+/// Every row a peer offered that reached an apply DECISION — applied, duplicate
+/// or refused, summed. The denominator [`RECEIVE_DECIDED_DENOMINATOR`] describes,
+/// computed once here so no caller invents a second definition of "offered".
+///
+/// `ApplyOutcome::Deserialize` is deliberately absent — edge books it nowhere,
+/// and a total that quietly absorbed undecodable bytes would report wire
+/// corruption as a policy outcome.
+#[must_use]
+pub fn receive_decided_total(bundle: &EdgeMetricsBundle) -> u64 {
+    total(&bundle.replication_applied_total)
+        + total(&bundle.replication_duplicate_total)
+        + total(&bundle.apply_refusals_by_kind)
 }
 
 /// The worst withhold class present in the ledger, or `None` when it is empty.
@@ -1271,7 +1370,7 @@ fn receive_json(bundle: Option<&EdgeMetricsBundle>) -> Value {
     out.insert("standing".into(), json!(standing.as_str()));
     out.insert("explains".into(), msg(standing.message()));
     out.insert("source".into(), json!(EDGE_SOURCE));
-    out.insert("note".into(), msg(RECEIVE_NO_ACCEPTED_COUNTER));
+    out.insert("note".into(), msg(RECEIVE_DECIDED_DENOMINATOR));
 
     let Some(b) = bundle else {
         out.insert("unavailable".into(), msg(EDGE_UNAVAILABLE));
@@ -1288,11 +1387,40 @@ fn receive_json(bundle: Option<&EdgeMetricsBundle>) -> Value {
     for (token, n) in &b.key_apply_refusals_by_reason {
         by_reason.insert(token.clone(), json!(n));
     }
+    // CIRISEdge#457 — the two accepted-apply axes, rendered through edge's own
+    // `as_wire_str` so the kind token here is the kind token on the wire (one
+    // vocabulary, never a hand-mirrored copy — SRV-1/#322). They are separate
+    // maps because an admit and a duplicate are separate facts: collapsing them
+    // would re-create, one level down, exactly the overload #457 removed.
+    let mut applied_by_kind = Map::new();
+    let mut applied_total: u64 = 0;
+    for (kind, n) in &b.replication_applied_total {
+        applied_by_kind.insert(kind.as_wire_str().into(), json!(n));
+        applied_total += n;
+    }
+    let mut duplicate_by_kind = Map::new();
+    let mut duplicate_total: u64 = 0;
+    for (kind, n) in &b.replication_duplicate_total {
+        duplicate_by_kind.insert(kind.as_wire_str().into(), json!(n));
+        duplicate_total += n;
+    }
+    out.insert("applied_total".into(), json!(applied_total));
+    out.insert("applied_by_kind".into(), Value::Object(applied_by_kind));
+    out.insert("duplicate_total".into(), json!(duplicate_total));
+    out.insert("duplicate_by_kind".into(), Value::Object(duplicate_by_kind));
     out.insert("apply_refusals_total".into(), json!(refusals_total));
     out.insert("apply_refusals_by_kind".into(), Value::Object(by_kind));
     out.insert(
         "key_apply_refusals_by_reason".into(),
         Value::Object(by_reason),
+    );
+    // The denominators. `decided_total` says how many rows the three counts
+    // above divide up; `rounds_total` says whether this node was ever asked at
+    // all, which is what makes a `decided_total` of 0 readable rather than bare.
+    out.insert("decided_total".into(), json!(receive_decided_total(b)));
+    out.insert(
+        "rounds_total".into(),
+        json!(total(&b.replication_round_outcomes_total)),
     );
     Value::Object(out)
 }
@@ -2307,6 +2435,27 @@ mod tests {
         );
     }
 
+    /// A bundle from a node that APPLIED `n` rows of `kind` (edge's real
+    /// `ApplyOutcome::Admitted` counter, CIRISEdge#457).
+    fn applying(kind: EnvelopeKind, n: u64) -> EdgeMetricsBundle {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        for _ in 0..n {
+            m.inc_applied(kind);
+        }
+        m.snapshot()
+    }
+
+    /// A bundle from a node offered `n` rows of `kind` it ALREADY HELD.
+    fn converged(kind: EnvelopeKind, n: u64) -> EdgeMetricsBundle {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        for _ in 0..n {
+            m.inc_duplicate(kind);
+        }
+        m.snapshot()
+    }
+
     #[test]
     fn receive_zero_names_its_own_cause() {
         assert_eq!(receive_standing(None), ReceiveStanding::Unreadable);
@@ -2314,7 +2463,7 @@ mod tests {
             receive_standing(Some(&fresh())),
             ReceiveStanding::NotExercised
         );
-        assert_eq!(receive_standing(Some(&idle())), ReceiveStanding::Clean);
+        assert_eq!(receive_standing(Some(&idle())), ReceiveStanding::Idle);
 
         let m = EdgeMetrics::new();
         m.inc_round_outcome(RoundOutcome::Completed);
@@ -2325,20 +2474,160 @@ mod tests {
 
         assert_eq!(ReceiveStanding::Unreadable.band(), StateBand::Unknown);
         assert_eq!(ReceiveStanding::NotExercised.band(), StateBand::Unknown);
-        assert_eq!(ReceiveStanding::Clean.band(), StateBand::Green);
+        assert_eq!(ReceiveStanding::Idle.band(), StateBand::Green);
+        assert_eq!(ReceiveStanding::Converged.band(), StateBand::Green);
+        assert_eq!(ReceiveStanding::Applying.band(), StateBand::Green);
         assert_eq!(ReceiveStanding::Refusing.band(), StateBand::Red);
         let tokens: std::collections::HashSet<&str> =
             ReceiveStanding::ALL.iter().map(|s| s.as_str()).collect();
         assert_eq!(tokens.len(), ReceiveStanding::ALL.len());
 
-        // The clean reading carries its own limit IN the payload.
+        // The idle reading carries its denominators IN the payload.
         let v = receive_json(Some(&idle()));
-        assert_eq!(v["note"]["id"], json!(RECEIVE_NO_ACCEPTED_COUNTER.0));
+        assert_eq!(v["note"]["id"], json!(RECEIVE_DECIDED_DENOMINATOR.0));
         assert_eq!(v["apply_refusals_total"], json!(0));
+        assert_eq!(v["decided_total"], json!(0));
+        assert_eq!(
+            v["rounds_total"],
+            json!(1),
+            "a decided_total of 0 is only readable beside the count of rounds that \
+             could have produced one"
+        );
         // ...and the refusing one names the plane AND the policy token.
         let v = receive_json(Some(&refusing));
         assert_eq!(v["apply_refusals_by_kind"]["key"], json!(1));
         assert_eq!(v["key_apply_refusals_by_reason"]["pubkey_swap"], json!(1));
+    }
+
+    /// **CIRISEdge#457, the property the counter was filed for.** Three nodes,
+    /// all reporting zero refusals, in three different conditions. Before the
+    /// accepted-apply counters existed they were one token (`clean`) and one
+    /// sentence; a `clean` node that had applied every row a peer sent and a
+    /// `clean` node that had never been handed one were literally the same
+    /// payload.
+    #[test]
+    fn nothing_offered_all_applied_and_all_duplicates_do_not_render_the_same() {
+        let nothing = receive_json(Some(&idle()));
+        let all_applied = receive_json(Some(&applying(EnvelopeKind::Attestation, 15)));
+        let all_held = receive_json(Some(&converged(EnvelopeKind::Attestation, 15)));
+
+        // All three are honestly zero-refusal and honestly green...
+        for v in [&nothing, &all_applied, &all_held] {
+            assert_eq!(v["apply_refusals_total"], json!(0));
+            assert_eq!(v["band"], json!("green"));
+        }
+        // ...and no two of them share a token or a sentence.
+        let tokens: std::collections::HashSet<&str> = [&nothing, &all_applied, &all_held]
+            .iter()
+            .map(|v| v["standing"].as_str().expect("standing"))
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            3,
+            "identical zero refusals, three different causes — the tokens must differ: \
+             {tokens:?}"
+        );
+        assert_eq!(nothing["standing"], json!("idle"));
+        assert_eq!(all_applied["standing"], json!("applying"));
+        assert_eq!(all_held["standing"], json!("converged"));
+        let sentences: std::collections::HashSet<&str> = [&nothing, &all_applied, &all_held]
+            .iter()
+            .map(|v| v["explains"]["id"].as_str().expect("explains id"))
+            .collect();
+        assert_eq!(sentences.len(), 3, "each arm needs its own sentence");
+
+        // Every count sits beside its denominator, and the denominator SEPARATES
+        // the arms rather than reading 0 for all three.
+        assert_eq!(nothing["decided_total"], json!(0));
+        assert_eq!(all_applied["decided_total"], json!(15));
+        assert_eq!(all_held["decided_total"], json!(15));
+        assert_eq!(all_applied["applied_total"], json!(15));
+        assert_eq!(all_applied["applied_by_kind"]["attestation"], json!(15));
+        assert_eq!(all_applied["duplicate_total"], json!(0));
+        assert_eq!(all_held["duplicate_total"], json!(15));
+        assert_eq!(all_held["duplicate_by_kind"]["attestation"], json!(15));
+        assert_eq!(
+            all_held["applied_total"],
+            json!(0),
+            "a duplicate is not an apply: it books the duplicate axis and only that one"
+        );
+    }
+
+    /// A node that applied most of what it was offered and refused one row is
+    /// `refusing` — and the counts beside the token say which number is large.
+    /// Before #457 the `refusing` arm could report only the refusals, so
+    /// "refused one of fifty" and "refused the only row it was ever offered"
+    /// were the same reading.
+    #[test]
+    fn a_mostly_applying_node_that_refused_one_row_still_reads_refusing() {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        for _ in 0..49 {
+            m.inc_applied(EnvelopeKind::Attestation);
+        }
+        m.inc_apply_refusal_kind(EnvelopeKind::Key);
+        let mostly = m.snapshot();
+
+        assert_eq!(receive_standing(Some(&mostly)), ReceiveStanding::Refusing);
+        let v = receive_json(Some(&mostly));
+        assert_eq!(v["standing"], json!("refusing"));
+        assert_eq!(v["band"], json!("red"));
+        assert_eq!(v["applied_total"], json!(49));
+        assert_eq!(v["apply_refusals_total"], json!(1));
+        assert_eq!(
+            v["decided_total"],
+            json!(50),
+            "the denominator is what makes 1 refusal readable as 1-in-50 rather \
+             than as everything this node was ever offered"
+        );
+
+        // The same single refusal, with nothing applied beside it, is the OTHER
+        // condition and the payload distinguishes them on the counts.
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        m.inc_apply_refusal_kind(EnvelopeKind::Key);
+        let only = receive_json(Some(&m.snapshot()));
+        assert_eq!(only["standing"], json!("refusing"));
+        assert_eq!(only["apply_refusals_total"], json!(1));
+        assert_ne!(
+            only["decided_total"], v["decided_total"],
+            "one refusal out of one and one out of fifty must not read the same"
+        );
+    }
+
+    /// The denominator excludes what edge excludes, and says so on the wire.
+    /// `ApplyOutcome::Deserialize` is booked by no counter in the bundle, so a
+    /// `decided_total` that claimed to be "everything offered" would be a total
+    /// silently missing a class — the same defect one level down.
+    #[test]
+    fn the_decided_denominator_is_the_sum_of_the_three_booked_outcomes() {
+        let m = EdgeMetrics::new();
+        m.inc_round_outcome(RoundOutcome::Completed);
+        m.inc_applied(EnvelopeKind::Key);
+        m.inc_applied(EnvelopeKind::Attestation);
+        m.inc_duplicate(EnvelopeKind::Attestation);
+        m.inc_apply_refusal_kind(EnvelopeKind::Key);
+        // The Key plane's typed token axis mirrors a refusal ALREADY counted on
+        // the kind axis (edge books both for one refused key), so it must not be
+        // summed into the denominator a second time.
+        m.inc_key_apply_refusal("pubkey_swap");
+        let b = m.snapshot();
+
+        assert_eq!(receive_decided_total(&b), 4);
+        let v = receive_json(Some(&b));
+        assert_eq!(v["decided_total"], json!(4));
+        assert_eq!(v["applied_total"], json!(2));
+        assert_eq!(v["duplicate_total"], json!(1));
+        assert_eq!(v["apply_refusals_total"], json!(1));
+        assert_eq!(v["key_apply_refusals_by_reason"]["pubkey_swap"], json!(1));
+        assert_eq!(
+            v["decided_total"].as_u64().expect("decided_total"),
+            v["applied_total"].as_u64().expect("applied")
+                + v["duplicate_total"].as_u64().expect("duplicate")
+                + v["apply_refusals_total"].as_u64().expect("refusals"),
+            "the denominator must be the sum of exactly the three rendered axes — \
+             double-counting the Key token axis would inflate it by every refused key"
+        );
     }
 
     #[test]
@@ -2399,7 +2688,7 @@ mod tests {
             .into_iter()
             .map(|(f, d)| drill_narrowing(f, d).1 .0),
         );
-        ids.push(RECEIVE_NO_ACCEPTED_COUNTER.0);
+        ids.push(RECEIVE_DECIDED_DENOMINATOR.0);
         ids.push(PROCESS_LOCAL_NOTE.0);
         ids.push(NODE_UNAVAILABLE.0);
         ids.push(EDGE_UNAVAILABLE.0);

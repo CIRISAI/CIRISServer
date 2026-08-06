@@ -3521,8 +3521,6 @@
       "released": "Khóa của nút này từng bị giữ lại rồi được giải phóng. Bây giờ nó phục vụ, và nó đã không luôn như vậy — một sự kiện khác với việc chưa từng bị giữ lại."
     },
     "receive": {
-      "clean": "Chưa có hàng nào do đồng đẳng đưa tới bị từ chối trên tiến trình này.",
-      "no_accepted_counter": "Nền tảng đếm các lần TỪ CHỐI áp dụng, không đếm các lần áp dụng được chấp nhận. Do đó một số đọc sạch không thể tách 'mọi thứ được đưa tới đều đã được áp dụng' khỏi 'chẳng có gì được đưa tới' — hãy đọc `rounds_total` và bề mặt của chính đồng đẳng để phân biệt hai điều đó.",
       "not_exercised": "Chưa có vòng nhân bản nào kết thúc trên tiến trình này, nên chưa có gì được đưa tới đường áp dụng của nút này. Số không này là chưa được thử, không phải là sạch.",
       "refusing": "Nút này đã từ chối các hàng mà đồng đẳng đưa tới. `apply_refusals_by_kind` nêu tên mặt phẳng; `key_apply_refusals_by_reason` nêu tên mã chính sách đã từ chối một khóa.",
       "unreadable": "Không thể đọc các bộ đếm áp dụng của nút này, nên ở đây không có gì là khẳng định về những gì nó đã chấp nhận. Đây không phải là 'không có gì bị từ chối' — đây là 'chúng ta không hỏi được'."

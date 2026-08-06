@@ -3521,8 +3521,6 @@
       "released": "A dá kọ́kọ́rọ́ nódù yìí dúró, lẹ́yìn náà a tú u sílẹ̀. Ó ń sìn báyìí, ṣùgbọ́n kì í ṣe nígbà gbogbo — òtítọ́ mìíràn ni èyí, kì í ṣe pé a kò dá a dúró rí."
     },
     "receive": {
-      "clean": "A kò kọ ìlà kankan tí ẹlẹ́gbẹ́ gbé wá lórí ìlànà yìí.",
-      "no_accepted_counter": "Ìpìlẹ̀ náà ń ka àwọn ÌKỌ̀ ìfilélẹ̀, kì í ṣe àwọn ìfilélẹ̀ tí a gbà. Nítorí náà ìkàwé tí ó mọ́ kò lè ya 'a fi gbogbo ohun tí a gbé wá lélẹ̀' sọ́tọ̀ kúrò nínú 'a kò gbé ohunkóhun wá' — ka `rounds_total` àti ojú-ìṣàkóso ẹlẹ́gbẹ́ náà fúnra rẹ̀ láti mọ ìyàtọ̀ wọn.",
       "not_exercised": "Kò sí ìyípo àdàkọ tí ó ti parí lórí ìlànà yìí, nítorí náà a kò gbé ohunkóhun wá sí ọ̀nà ìfilélẹ̀ nódù yìí. Òdo náà jẹ́ èyí tí a kò dánwò, kì í ṣe èyí tí ó mọ́.",
       "refusing": "Nódù yìí kọ àwọn ìlà tí àwọn ẹlẹ́gbẹ́ rẹ̀ gbé wá. `apply_refusals_by_kind` ń dárúkọ pẹpẹ náà; `key_apply_refusals_by_reason` ń dárúkọ àmì-òfin tí ó kọ kọ́kọ́rọ́ kan.",
       "unreadable": "A kò lè ka àwọn ìkànnì-ìkà ìfilélẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó gbà. Èyí KÌ Í ṢE 'a kò kọ ohunkóhun' — 'a kò lè béèrè' ni."

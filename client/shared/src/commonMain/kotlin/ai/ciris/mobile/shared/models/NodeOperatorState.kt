@@ -270,7 +270,15 @@ data class IngestReading(
 @Serializable
 data class EdgeHalfReading(
     val band: String = "unknown",
-    /** carriage: `unreadable`/`not_exercised`/`idle`/`moving`/`withholding`. receive: `unreadable`/`not_exercised`/`clean`/`refusing`. */
+    /**
+     * carriage: `unreadable`/`not_exercised`/`idle`/`moving`/`withholding`.
+     * receive: `unreadable`/`not_exercised`/`idle`/`converged`/`applying`/`refusing`.
+     *
+     * The receive half carried a single `clean` arm until CIRISEdge#457 gave it
+     * an accepted-applies counter; `idle` (nothing was offered to us),
+     * `converged` (offered, all already held) and `applying` (offered, admitted
+     * here) were one token and one sentence before that.
+     */
     val standing: String = "unreadable",
     val explains: OperatorMessage? = null,
     val note: OperatorMessage? = null,
@@ -283,6 +291,21 @@ data class EdgeHalfReading(
     val roundsTotal: Long? = null,
     @SerialName("apply_refusals_total")
     val applyRefusalsTotal: Long? = null,
+    /** CIRISEdge#457 — rows admitted here that changed local state. */
+    @SerialName("applied_total")
+    val appliedTotal: Long? = null,
+    /** CIRISEdge#457 — offered rows this node already held. Not a failure and
+     *  not an apply: its own fact, on its own axis. */
+    @SerialName("duplicate_total")
+    val duplicateTotal: Long? = null,
+    /**
+     * The denominator the three receive counts divide up: every offered row that
+     * reached an apply decision. Undecodable bytes reach no decision and the
+     * substrate counts them nowhere, so they are absent from this rather than
+     * folded into it — the `note` beside the reading says so on the wire.
+     */
+    @SerialName("decided_total")
+    val decidedTotal: Long? = null,
 ) {
     val parsedBand: OperatorBand? get() = OperatorBand.of(band)
 }

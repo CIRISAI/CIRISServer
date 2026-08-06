@@ -638,16 +638,26 @@ async fn gather_delivery_status(
 /// `withholding` are distinguished here too, and `rounds_total` rides along as
 /// the denominator that makes a zero interpretable.
 ///
-/// # What this still cannot say
+/// # The receive half, and the gap that closed (CIRISEdge#457)
 ///
-/// There is no accepted-applies counter anywhere in edge: `ApplyOutcome::Refused`
-/// is counted (`inc_apply_refusal_kind`), `Admitted` and `Duplicate` are not. So
-/// `receive.standing: "clean"` cannot separate "everything offered was applied"
-/// from "nothing was offered" — the gap
-/// [`crate::operator_surface::RECEIVE_NO_ACCEPTED_COUNTER`] already names, filed
-/// upstream as CIRISEdge#457. `receive.accepted_total` is therefore absent
-/// rather than defaulted to 0: a field that does not exist is a loud gap, a
-/// field reading 0 is the very defect this function exists to remove.
+/// This function used to carry a caveat here and an `accepted_total_unavailable`
+/// string on the wire: edge booked `ApplyOutcome::Refused` and booked neither
+/// `Admitted` nor `Duplicate`, so `receive.standing: "clean"` could not separate
+/// "everything offered was applied" from "nothing was offered". Edge v15.20.1
+/// closed it — `replication_applied_total` and `replication_duplicate_total`,
+/// booked at the same #425 apply choke as the refusals — so the caveat is DELETED
+/// rather than softened. A stale caveat is worse than none: it tells a reader not
+/// to trust a number that is now trustworthy.
+///
+/// `receive.standing` accordingly splits `clean` into `idle` (rounds ran, nothing
+/// was offered to us), `converged` (rows arrived and we already held every one)
+/// and `applying` (rows arrived and changed state here), and `applied_total` /
+/// `duplicate_total` / `decided_total` ride beside the refusal count. The one
+/// thing `decided_total` still does NOT include is `ApplyOutcome::Deserialize`,
+/// which edge books nowhere on purpose — undecodable bytes are wire corruption,
+/// not a policy decision. That exclusion is stated on the operator surface's
+/// `note` rather than left for a reader to discover from a total that does not
+/// add up.
 ///
 /// Pure over the metrics bundle + the two peer predicates, so the hint ladder
 /// and every plane assignment are unit-testable without an Edge
@@ -718,9 +728,26 @@ pub fn round_diagnostics_json(
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
+    // CIRISEdge#457 — the accepted-apply axes. THE thing this surface could not
+    // say until edge v15.20.1: whether anything a peer offered actually landed.
+    // Two maps, never one: an admit changed local state and a duplicate did not.
+    let applied_total: u64 = snap.replication_applied_total.values().sum();
+    let mut applied_by_kind: std::collections::BTreeMap<String, u64> = Default::default();
+    for (kind, n) in &snap.replication_applied_total {
+        applied_by_kind.insert(kind.as_wire_str().to_string(), *n);
+    }
+    let duplicate_total: u64 = snap.replication_duplicate_total.values().sum();
+    let mut duplicate_by_kind: std::collections::BTreeMap<String, u64> = Default::default();
+    for (kind, n) in &snap.replication_duplicate_total {
+        duplicate_by_kind.insert(kind.as_wire_str().to_string(), *n);
+    }
 
     let carriage = carriage_standing(Some(snap));
     let receive = receive_standing(Some(snap));
+    // The receive denominator, from `operator_surface` — NOT re-summed here.
+    // #377 was two readers of one bundle, one right and one wrong; a second
+    // definition of "offered" would be that defect with a new name.
+    let decided_total = crate::operator_surface::receive_decided_total(snap);
 
     // The differential — read straight off the counters. Each branch names the
     // layer + the doc to open, so an operator doesn't re-derive the ladder.
@@ -752,14 +779,20 @@ pub fn round_diagnostics_json(
         "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with replication_plane.round_outcomes.timed_out. NOTE the plane: send_failures_by_class is the APPLICATION plane (announce/durable sends), so it corroborates transport health, it does not measure replication carriage"
     } else if failures_by_class.get("unreachable").copied().unwrap_or(0) > 0 {
         "kex missing + unreachable — transport/routing gap: the responder has no Reticulum destination for us (not rooted at the peer, or path lost), NOT a round-servicing problem"
-    } else if served_total > 0 {
+    } else if served_total > 0 && decided_total == 0 {
         // CIRISServer#377 — the plane-correct form of the old `sent_total > 0 &&
         // recv_total == 0` branch, which asked the APPLICATION plane a question
         // only the replication plane could answer and so never fired on a real
-        // carriage stall. The receive half is deliberately NOT asserted: edge
-        // counts apply refusals, not accepted applies (CIRISEdge#457), so
-        // "none received" is not a statement this node can make.
-        "kex missing, but this node's replication plane HAS served rows (replication_plane.carriage.envelopes_served_total > 0) — carriage works and the reverse IdentityOccurrence round specifically is not landing back. One-way reply path (reverse-path to a NAT'd peer; see #353 / leviculum#27)"
+        // carriage stall. The receive half used to be unassertable — edge counted
+        // apply refusals and not accepted applies — so "none received" was not a
+        // statement this node could make. CIRISEdge#457 made it one, and this is
+        // the branch that needed it: rows out, NOTHING in, is one-way carriage.
+        "kex missing: this node's replication plane HAS served rows (replication_plane.carriage.envelopes_served_total > 0) and NOTHING has been offered back to its apply path (replication_plane.receive.decided_total == 0, CIRISEdge#457) — carriage is one-way. The reverse IdentityOccurrence round is not landing back at all (reverse-path to a NAT'd peer; see #353 / leviculum#27)"
+    } else if served_total > 0 {
+        // Rows moved BOTH ways, so the reverse path is not dead — which makes
+        // this a different diagnosis from the branch above and, before #457, an
+        // indistinguishable one.
+        "kex missing, but rows have moved in BOTH directions (carriage.envelopes_served_total > 0 and receive.decided_total > 0) — the transport is not one-way, so this is the IdentityOccurrence round specifically failing to complete rather than a reverse-path gap. Read replication_plane.receive.standing: `applying`/`converged` means peers are reaching us; check round_outcomes.timed_out for contention"
     } else {
         "kex missing, peer rooted, no round timeouts, withholds or send failures yet — round may be mid-first-cycle; if it persists, watch replication_plane.round_outcomes for timed_out (contention) vs refused (malformed/out-of-state peer)"
     };
@@ -784,13 +817,27 @@ pub fn round_diagnostics_json(
                 "by_reason": withholds_by_reason,
             },
             "receive": {
+                // Standing FIRST, same as carriage: `idle` (rounds ran, nothing
+                // was offered), `converged` (offered, all already held) and
+                // `applying` (offered, admitted here) all report zero refusals
+                // and are three different facts — one token until CIRISEdge#457.
                 "standing": receive.as_str(),
                 "apply_refusals_total": apply_refusals_total,
                 "by_kind": apply_refusals_by_kind,
                 "key_refusals_by_reason": key_refusals,
-                // Stated, not implied: there is no accepted-applies counter to
-                // report (CIRISEdge#457). Absent beats a defaulted 0.
-                "accepted_total_unavailable": "edge counts apply REFUSALS, not accepted applies (CIRISEdge#457) — `clean` cannot separate 'all applied' from 'nothing offered'",
+                // CIRISEdge#457 — the accepted-apply axes, kept apart because an
+                // admit changed local state and a duplicate did not.
+                "applied_total": applied_total,
+                "applied_by_kind": applied_by_kind,
+                "duplicate_total": duplicate_total,
+                "duplicate_by_kind": duplicate_by_kind,
+                // The denominator the three counts above divide up: every offered
+                // row that reached an apply decision. Undecodable bytes reach no
+                // decision and edge books them nowhere, so they are absent from
+                // this rather than folded into it.
+                "decided_total": decided_total,
+                // The outer denominator — whether this node was ever asked.
+                "rounds_total": rounds_total,
             },
             // CIRISEdge#370 Ask 2 (v13.5.0): anti-entropy round outcome counts —
             // timed_out climbing vs completed is the direct KEX-none signal.

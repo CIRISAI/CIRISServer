@@ -3521,8 +3521,6 @@
       "withheld": "A chave deste nó está retida de servir por um marcador de quarentena."
     },
     "receive": {
-      "clean": "Nenhuma linha oferecida por um par foi recusada neste processo.",
-      "no_accepted_counter": "O substrato conta as RECUSAS de aplicação, não as aplicações aceitas. Portanto, uma leitura limpa não consegue separar 'tudo o que foi oferecido foi aplicado' de 'nada foi oferecido' — leia `rounds_total` e a superfície do próprio par para distinguir os dois.",
       "not_exercised": "Nenhuma rodada de replicação foi concluída neste processo, portanto nada foi oferecido ao caminho de aplicação deste nó. O zero é não testado, não limpo.",
       "refusing": "Este nó recusou linhas que seus pares ofereceram. `apply_refusals_by_kind` nomeia o plano; `key_apply_refusals_by_reason` nomeia o token de política que recusou uma chave.",
       "unreadable": "Os contadores de aplicação deste nó não puderam ser lidos, portanto nada aqui é uma afirmação sobre o que ele aceitou. Isto não é 'nada foi recusado' — é 'não conseguimos perguntar'."
