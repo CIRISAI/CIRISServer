@@ -684,6 +684,11 @@ fun CIRISApp(
     val moderationViewModel: ai.ciris.mobile.shared.viewmodels.ModerationViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.ModerationViewModel(apiClient)
     }
+    // The graded enforcement ladder (/v1/admin/*, tiers 0-4) — the owner's
+    // recourse against an admitted-but-hostile peer. Preview -> commit-with-hash.
+    val adminLadderViewModel: ai.ciris.mobile.shared.viewmodels.AdminLadderViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.AdminLadderViewModel(apiClient)
+    }
     val identityManagementViewModel: ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel(apiClient)
     }
@@ -3035,6 +3040,8 @@ fun CIRISApp(
                 PlatformLogger.d(TAG, "[Screen.Moderation] Rendering moderation screen")
                 ModerationScreen(
                     viewModel = safetyViewModel,
+                    // Tiers 0-4 of /v1/admin/* — the enforcement ladder.
+                    ladderViewModel = adminLadderViewModel,
                     onBack = { currentScreen = Screen.Interact },
                     // The delegate-moderate-duty flow lives on Family → Delegation.
                     onOpenDelegation = { currentScreen = Screen.Delegation },
