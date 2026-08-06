@@ -563,62 +563,10 @@ async fn gather_delivery_status(
     // differential instead of an archaeology dig — whatever the cause turns out
     // to be.
     let snap = edge.metrics().snapshot();
-    let mut failures_by_class: std::collections::BTreeMap<String, u64> = Default::default();
-    for ((_transport, class), n) in &snap.send_failures_total {
-        *failures_by_class.entry(class.clone()).or_insert(0) += n;
-    }
-    // CIRISEdge#370 Ask 2 (edge v13.5.0): anti-entropy round outcomes are now
-    // counted in EdgeMetrics — so the round-not-completing case is queryable
-    // (round_timed_out climbing) instead of a log grep.
-    let mut round_outcomes: std::collections::BTreeMap<String, u64> = Default::default();
-    for (outcome, n) in &snap.replication_round_outcomes_total {
-        round_outcomes.insert(outcome.as_str().to_string(), *n);
-    }
-    let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
-    let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
-    // CIRISEdge#373 (edge v13.6.0): inbound frames dropped because a stalled
-    // responder reply parked the coordinator drain. The tripwire — should sit at
-    // 0. Non-zero = the trace is being actively LOST (a reply is still stalling
-    // long enough to fill the channel), even for a deliverable peer.
-    let backpressure_drops = snap.replication_inbound_backpressure_drops;
-    let sent_total: u64 = snap.envelopes_sent_total.values().sum();
-    let recv_total: u64 = snap.envelopes_received_total.values().sum();
     let any_knows_peer = peers.iter().any(|p| p["knows_peer"] == json!(true));
     let any_kex_missing = peers
         .iter()
         .any(|p| p["knows_peer"] == json!(true) && p["kex_present"] == json!(false));
-    let timeouts = failures_by_class.get("timeout").copied().unwrap_or(0);
-    let unreachable = failures_by_class.get("unreachable").copied().unwrap_or(0);
-    // The differential — read straight off the counters. Each branch names the
-    // layer + the doc to open, so an operator doesn't re-derive the ladder.
-    let hint = if !started {
-        "delivery not started — call start_federation_delivery / reprime_federation_delivery"
-    } else if !any_knows_peer {
-        "no peer rooted (knows_peer all false) — prime never seeded a canonical; check canonical_bootstrap_hints + prime_canonicals"
-    } else if backpressure_drops > 0 {
-        // The #373 backstop is firing: a responder reply stalled long enough to
-        // fill the coordinator drain, so inbound TRACE frames are being dropped.
-        // Highest-signal failure when present — the trace is actively being lost
-        // even if the peer is deliverable.
-        "inbound frames DROPPED (round_diagnostics.inbound_backpressure_drops > 0, CIRISEdge#373) — a responder reply is stalling long enough to park the coordinator drain and the trace is being LOST. The reverse-path reply is not reaching the peer's current live link (#353); escalate (reply-over-arrival-link is the held follow-up). Watch round_outcomes.timed_out and the node log for `responder reply send TIMED OUT`"
-    } else if !any_kex_missing {
-        "peers deliverable (or no kex gap) — if a deliverable peer still isn't receiving, grep the node log for `frames=` (leviculum#25 in-flight loss)"
-    } else if round_timed_out > 0 && round_timed_out >= round_completed {
-        // The direct signal now that edge v13.5.0 counts round outcomes: rounds
-        // are timing out more than completing → the reverse IdentityOccurrence
-        // round isn't being serviced. This is the FSD KEX-none RCA (canonical
-        // round contention under concurrent-peer load, transport-layer ceiling —
-        // CIRISEdge#370 / leviculum concurrency).
-        "kex missing + round_timed_out >= round_completed — the reverse IdentityOccurrence round is TIMING OUT, not completing. This is canonical round contention under concurrent-peer load (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA; transport-layer ceiling per CIRISEdge#370). Check the canonical's live peer count — advisory/low-legitimacy peers starving real ones"
-    } else if timeouts > 0 {
-        "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with round_diagnostics.round_outcomes.timed_out"
-    } else if unreachable > 0 {
-        "kex missing + unreachable — transport/routing gap: the responder has no Reticulum destination for us (not rooted at the peer, or path lost), NOT a round-servicing problem"
-    } else if sent_total > 0 && recv_total == 0 {
-        "kex missing, envelopes sent but NONE received — one-way reply path (reverse-path to a NAT'd peer; see #353 / leviculum#27)"
-    } else {
-        "kex missing, peer rooted, no round timeouts or send failures yet — round may be mid-first-cycle; if it persists, watch round_diagnostics.round_outcomes for timed_out (contention) vs refused (malformed/out-of-state peer)"
-    };
 
     json!({
         "delivery_started": started,
@@ -634,22 +582,233 @@ async fn gather_delivery_status(
         "trace_plane": trace_plane,
         // Round-servicing diagnostics — read these when a peer is knows_peer:true
         // but kex_present:false. `hint` names the layer + the doc to open.
-        "round_diagnostics": {
-            "send_failures_by_class": failures_by_class,
-            // CIRISEdge#370 Ask 2 (v13.5.0): anti-entropy round outcome counts —
-            // timed_out climbing vs completed is the direct KEX-none signal.
-            "round_outcomes": round_outcomes,
-            // CIRISEdge#373 (v13.6.0): the trace-loss tripwire — should be 0.
-            "inbound_backpressure_drops": backpressure_drops,
-            "envelopes_sent_total": sent_total,
-            "envelopes_received_total": recv_total,
-            "hint": hint,
-        },
+        "round_diagnostics": round_diagnostics_json(&snap, started, any_knows_peer, any_kex_missing),
         // FramesDropped (in-flight loss on an interface disconnect) is emitted as
         // an edge WARN + NodeEvent (leviculum v0.9.3+ciris.1 / edge v13.3.1) — grep
         // the node log for `frames=` on the peer's iface if a deliverable peer
         // still isn't receiving.
         "note": "frames-dropped surfaces as an edge WARN/NodeEvent; see leviculum#25",
+    })
+}
+
+/// **CIRISServer#377 — the round diagnostics, split BY PLANE.**
+///
+/// # The defect this closes
+///
+/// `envelopes_sent_total` / `envelopes_received_total` sat at the top of
+/// `round_diagnostics` reading as totals for the carriage this node performs.
+/// They are not. Edge's `inc_sent` / `inc_received` are called **only** from
+/// `src/edge.rs` — the application/durable send path — and the anti-entropy
+/// replication plane, which is what actually carries `trace:*` rows to a
+/// canonical, touches neither. So a run that landed 15 `trace_events` on the
+/// canonical, summarized and scored, reported `envelopes_sent_total: 0`.
+/// Reporting broken while working. That is CIRISEdge#434, root-caused and
+/// CLOSED upstream: `replication_envelopes_served_total` (CIRISEdge#433, live
+/// since edge v15.x and present in v15.20.0) is the plane-correct counter, and
+/// #434's own closing guidance was explicit — *"do not key trace-pipeline
+/// health on `envelopes_sent_total`; it measures the application/durable plane
+/// only."* [`crate::operator_surface`] adopted that. This surface did not, and
+/// `harness/mesh-repro/scenarios/traceflow.sh` greps THIS one. Its stage 5
+/// `ship` rung therefore could never pass — a check that could not fail, inside
+/// the instrument built to catch exactly that.
+///
+/// # Why the split, and not merely a corrected field
+///
+/// The same misreading produced the issue's second complaint: `round_outcomes`
+/// counted 4 `error`s while `send_failures_by_class` stayed `{}`, which looks
+/// like "failures tallied but never classified". It is not. `send_failures_total`
+/// is the **application** plane and `replication_round_outcomes_total` is the
+/// **replication** plane — two different planes under one heading, which is why
+/// they can read `4` and `{}` at once without either being wrong. Renaming one
+/// field would have left that trap in place. Nesting each counter under the
+/// plane that writes it makes the category error unstateable.
+///
+/// The replication plane's own refusal axis — the classification the issue
+/// actually wanted — exists and is now surfaced: `apply_refusals_by_kind` and
+/// `key_apply_refusals_by_reason`.
+///
+/// # Every zero names its cause
+///
+/// Per this repo's [`crate::operator_surface`] discipline, no count is emitted
+/// bare. `carriage.standing` and `receive.standing` come from
+/// [`crate::operator_surface::carriage_standing`] /
+/// [`crate::operator_surface::receive_standing`] — the SAME functions
+/// `GET /v1/node/state` answers with, not a second derivation of the same
+/// question — so `unreadable` / `not_exercised` / `idle` / `moving` /
+/// `withholding` are distinguished here too, and `rounds_total` rides along as
+/// the denominator that makes a zero interpretable.
+///
+/// # What this still cannot say
+///
+/// There is no accepted-applies counter anywhere in edge: `ApplyOutcome::Refused`
+/// is counted (`inc_apply_refusal_kind`), `Admitted` and `Duplicate` are not. So
+/// `receive.standing: "clean"` cannot separate "everything offered was applied"
+/// from "nothing was offered" — the gap
+/// [`crate::operator_surface::RECEIVE_NO_ACCEPTED_COUNTER`] already names, filed
+/// upstream as CIRISEdge#457. `receive.accepted_total` is therefore absent
+/// rather than defaulted to 0: a field that does not exist is a loud gap, a
+/// field reading 0 is the very defect this function exists to remove.
+///
+/// Pure over the metrics bundle + the two peer predicates, so the hint ladder
+/// and every plane assignment are unit-testable without an Edge
+/// (`tests/delivery_round_diagnostics.rs`).
+#[must_use]
+pub fn round_diagnostics_json(
+    snap: &ciris_edge::observability::EdgeMetricsBundle,
+    started: bool,
+    any_knows_peer: bool,
+    any_kex_missing: bool,
+) -> serde_json::Value {
+    use crate::operator_surface::{carriage_standing, receive_standing};
+    use serde_json::json;
+
+    // ── application plane (edge.rs `send_*` / `dispatch_inbound`) ────────────
+    let mut failures_by_class: std::collections::BTreeMap<String, u64> = Default::default();
+    for ((_transport, class), n) in &snap.send_failures_total {
+        *failures_by_class.entry(class.clone()).or_insert(0) += n;
+    }
+    let app_sent_total: u64 = snap.envelopes_sent_total.values().sum();
+    let app_recv_total: u64 = snap.envelopes_received_total.values().sum();
+
+    // ── replication plane (bridge serve exit / apply choke point) ────────────
+    // CIRISEdge#370 Ask 2 (edge v13.5.0): anti-entropy round outcomes are
+    // counted in EdgeMetrics — so the round-not-completing case is queryable
+    // (round_timed_out climbing) instead of a log grep.
+    let mut round_outcomes: std::collections::BTreeMap<String, u64> = Default::default();
+    for (outcome, n) in &snap.replication_round_outcomes_total {
+        round_outcomes.insert(outcome.as_str().to_string(), *n);
+    }
+    let rounds_total: u64 = snap.replication_round_outcomes_total.values().sum();
+    let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
+    let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
+    // CIRISEdge#373 (edge v13.6.0): inbound frames dropped because a stalled
+    // responder reply parked the coordinator drain. The tripwire — should sit at
+    // 0. Non-zero = the trace is being actively LOST (a reply is still stalling
+    // long enough to fill the channel), even for a deliverable peer.
+    let backpressure_drops = snap.replication_inbound_backpressure_drops;
+
+    // CIRISEdge#433 — THE send counter for this plane. Keyed by the same
+    // `EnvelopeKind` the replication wire uses, rendered through edge's own
+    // `as_wire_str` so the token here is the token on the wire (one vocabulary,
+    // never a hand-mirrored copy — SRV-1/#322).
+    let served_total: u64 = snap.replication_envelopes_served_total.values().sum();
+    let mut served_by_kind: std::collections::BTreeMap<String, u64> = Default::default();
+    for (kind, n) in &snap.replication_envelopes_served_total {
+        served_by_kind.insert(kind.as_wire_str().to_string(), *n);
+    }
+    // CIRISEdge#433 — the withhold ledger: "served nothing" vs "REFUSED to serve"
+    // reported identically before this existed, and the difference is the whole
+    // diagnosis when a trace does not cross.
+    let withholds_total: u64 = snap.withholds_by_reason.values().sum();
+    let mut withholds_by_reason: std::collections::BTreeMap<String, u64> = Default::default();
+    for (reason, n) in &snap.withholds_by_reason {
+        withholds_by_reason.insert(reason.as_str().to_string(), *n);
+    }
+    // persist v24.2.0 / CIRISPersist#565 — the receive-plane refusal axes. THIS
+    // is the classification the #377 report asked for: the WARN it quoted
+    // (`delivered envelope REFUSED — not applied`, CIRISEdge#425 choke point)
+    // books here, on the replication plane, next to the rounds that carried it.
+    let apply_refusals_total: u64 = snap.apply_refusals_by_kind.values().sum();
+    let mut apply_refusals_by_kind: std::collections::BTreeMap<String, u64> = Default::default();
+    for (kind, n) in &snap.apply_refusals_by_kind {
+        apply_refusals_by_kind.insert(kind.as_wire_str().to_string(), *n);
+    }
+    let key_refusals: std::collections::BTreeMap<String, u64> = snap
+        .key_apply_refusals_by_reason
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
+    let carriage = carriage_standing(Some(snap));
+    let receive = receive_standing(Some(snap));
+
+    // The differential — read straight off the counters. Each branch names the
+    // layer + the doc to open, so an operator doesn't re-derive the ladder.
+    let hint = if !started {
+        "delivery not started — call start_federation_delivery / reprime_federation_delivery"
+    } else if !any_knows_peer {
+        "no peer rooted (knows_peer all false) — prime never seeded a canonical; check canonical_bootstrap_hints + prime_canonicals"
+    } else if backpressure_drops > 0 {
+        // The #373 backstop is firing: a responder reply stalled long enough to
+        // fill the coordinator drain, so inbound TRACE frames are being dropped.
+        // Highest-signal failure when present — the trace is actively being lost
+        // even if the peer is deliverable.
+        "inbound frames DROPPED (round_diagnostics.replication_plane.inbound_backpressure_drops > 0, CIRISEdge#373) — a responder reply is stalling long enough to park the coordinator drain and the trace is being LOST. The reverse-path reply is not reaching the peer's current live link (#353); escalate (reply-over-arrival-link is the held follow-up). Watch replication_plane.round_outcomes.timed_out and the node log for `responder reply send TIMED OUT`"
+    } else if withholds_total > 0 {
+        // CIRISEdge#433 — the loudest thing a node can say about its own
+        // carriage, and it outranks every transport branch below: nothing left
+        // because THIS node declined to serve it. No transport fix applies.
+        "this node WITHHELD rows it holds (replication_plane.withholds.total > 0, CIRISEdge#433) — carriage is being refused at a serving-path gate, not lost in transport. `withholds.by_reason` names the branch that decided; the serve gate's legs A+B (#379/#386: the role on the key record AND the delegates_to trust-root walk) are the usual pair"
+    } else if !any_kex_missing {
+        "peers deliverable (or no kex gap) — if a deliverable peer still isn't receiving, grep the node log for `frames=` (leviculum#25 in-flight loss)"
+    } else if round_timed_out > 0 && round_timed_out >= round_completed {
+        // The direct signal now that edge v13.5.0 counts round outcomes: rounds
+        // are timing out more than completing → the reverse IdentityOccurrence
+        // round isn't being serviced. This is the FSD KEX-none RCA (canonical
+        // round contention under concurrent-peer load, transport-layer ceiling —
+        // CIRISEdge#370 / leviculum concurrency).
+        "kex missing + round_timed_out >= round_completed — the reverse IdentityOccurrence round is TIMING OUT, not completing. This is canonical round contention under concurrent-peer load (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA; transport-layer ceiling per CIRISEdge#370). Check the canonical's live peer count — advisory/low-legitimacy peers starving real ones"
+    } else if failures_by_class.get("timeout").copied().unwrap_or(0) > 0 {
+        "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with replication_plane.round_outcomes.timed_out. NOTE the plane: send_failures_by_class is the APPLICATION plane (announce/durable sends), so it corroborates transport health, it does not measure replication carriage"
+    } else if failures_by_class.get("unreachable").copied().unwrap_or(0) > 0 {
+        "kex missing + unreachable — transport/routing gap: the responder has no Reticulum destination for us (not rooted at the peer, or path lost), NOT a round-servicing problem"
+    } else if served_total > 0 {
+        // CIRISServer#377 — the plane-correct form of the old `sent_total > 0 &&
+        // recv_total == 0` branch, which asked the APPLICATION plane a question
+        // only the replication plane could answer and so never fired on a real
+        // carriage stall. The receive half is deliberately NOT asserted: edge
+        // counts apply refusals, not accepted applies (CIRISEdge#457), so
+        // "none received" is not a statement this node can make.
+        "kex missing, but this node's replication plane HAS served rows (replication_plane.carriage.envelopes_served_total > 0) — carriage works and the reverse IdentityOccurrence round specifically is not landing back. One-way reply path (reverse-path to a NAT'd peer; see #353 / leviculum#27)"
+    } else {
+        "kex missing, peer rooted, no round timeouts, withholds or send failures yet — round may be mid-first-cycle; if it persists, watch replication_plane.round_outcomes for timed_out (contention) vs refused (malformed/out-of-state peer)"
+    };
+
+    json!({
+        // ── the plane that carries `trace:*` to a canonical ──────────────────
+        // Read THIS to answer "did this node ship anything?". CIRISEdge#433/#434.
+        "replication_plane": {
+            "carriage": {
+                // Standing FIRST: the count below is uninterpretable without it.
+                // `idle` (rounds ran, nothing was owed) and `not_exercised` (no
+                // round has ever finished) both show 0 and are different facts.
+                "standing": carriage.as_str(),
+                "envelopes_served_total": served_total,
+                "by_kind": served_by_kind,
+                // The denominator. A zero served count against zero rounds is
+                // not a carriage statement at all.
+                "rounds_total": rounds_total,
+            },
+            "withholds": {
+                "total": withholds_total,
+                "by_reason": withholds_by_reason,
+            },
+            "receive": {
+                "standing": receive.as_str(),
+                "apply_refusals_total": apply_refusals_total,
+                "by_kind": apply_refusals_by_kind,
+                "key_refusals_by_reason": key_refusals,
+                // Stated, not implied: there is no accepted-applies counter to
+                // report (CIRISEdge#457). Absent beats a defaulted 0.
+                "accepted_total_unavailable": "edge counts apply REFUSALS, not accepted applies (CIRISEdge#457) — `clean` cannot separate 'all applied' from 'nothing offered'",
+            },
+            // CIRISEdge#370 Ask 2 (v13.5.0): anti-entropy round outcome counts —
+            // timed_out climbing vs completed is the direct KEX-none signal.
+            "round_outcomes": round_outcomes,
+            // CIRISEdge#373 (v13.6.0): the trace-loss tripwire — should be 0.
+            "inbound_backpressure_drops": backpressure_drops,
+        },
+        // ── the application/durable plane (edge.rs `send_*`) ─────────────────
+        // These counters do NOT observe replication carriage. Keying trace-plane
+        // health on them is the #377 defect; the `note` travels with them so a
+        // reader who arrives at this object alone cannot repeat it.
+        "application_plane": {
+            "envelopes_sent_total": app_sent_total,
+            "envelopes_received_total": app_recv_total,
+            "send_failures_by_class": failures_by_class,
+            "note": "APPLICATION plane only (edge.rs send_*/dispatch_inbound). Anti-entropy replication — the plane that carries trace:* — increments none of these, so 0 here says nothing about carriage. Read replication_plane.carriage instead (CIRISEdge#434).",
+        },
+        "hint": hint,
     })
 }
 

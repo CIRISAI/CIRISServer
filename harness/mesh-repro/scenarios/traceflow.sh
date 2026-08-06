@@ -56,18 +56,31 @@ HINT_converge="the grant was authored but the reconciler never converged to a pe
 EXIT_converge=13
 
 # ── 4. ship — the agent actually put envelopes on the wire ───────────────────
-# KNOWN-WEAK PROBE. `envelopes_sent_total` has been observed at 0 on runs where
-# envelopes provably crossed (stage 5 = 15 trace_events at the canonical). So the
-# counter under-reports, and this stage reading 0 does NOT mean shipping failed.
-# The monotonic ladder in lib/harness.sh handles that: stage 6+ being positive
-# proves stage 4 happened. Left in place because when it IS positive it is useful
-# early evidence, and its disagreement with stage 5 is itself a finding worth
-# seeing rather than smoothing over (the delivery counter wants fixing).
-stage_ship() { harness_log_count agent '"envelopes_sent_total":[1-9]'; }
-HINT_ship="rounds ran but carried nothing. Check the serve gate (#379/#386 legs A+B: role on the key record AND the delegates_to trust-root walk) and covers_trace in the trace_plane diagnostic."
+# CIRISServer#377. This rung was blind for its whole life: it probed
+# `envelopes_sent_total`, which is edge's APPLICATION-plane counter (`inc_sent`,
+# called only from edge's `src/edge.rs`). The anti-entropy replication plane that
+# actually carries `trace:*` increments it never — so the rung read 0 on every
+# run, including runs that landed 15 trace_events and scored them. It could not
+# pass, therefore it could not fail, and a genuine send failure was
+# indistinguishable from perfect health. It duly corroborated one wrong
+# conclusion (a "replication regression" that was not one).
+#
+# `replication_envelopes_served_total` (CIRISEdge#433, and #434's own closing
+# guidance: do NOT key trace-pipeline health on `envelopes_sent_total`) is the
+# plane-correct counter. `round_diagnostics.replication_plane.carriage` carries
+# it, alongside the `standing` token that separates `idle` from `not_exercised`
+# from `withholding` — so 0 here is now a real, readable failure.
+#
+# tests/delivery_round_diagnostics.rs pins that this probe names a field the
+# server actually emits: a probe matching nothing and a probe matching zero read
+# the same, which is how this rung went blind in the first place.
+stage_ship() { harness_log_count agent '"envelopes_served_total":[1-9]'; }
+HINT_ship="rounds ran but carried nothing. Read round_diagnostics.replication_plane: carriage.standing separates 'idle' (nothing owed) from 'not_exercised' (no round finished) from 'withholding' (this node REFUSED — withholds.by_reason names the branch). If withholding, check the serve gate (#379/#386 legs A+B: role on the key record AND the delegates_to trust-root walk) and covers_trace in the trace_plane diagnostic."
 EXIT_ship=14
 DIAG_ship() {
   compose logs agent 2>/dev/null | grep -oE '"trace_plane":\{[^}]*\}' | tail -1
+  compose logs agent 2>/dev/null | grep -oE '"carriage":\{[^{}]*(\{[^{}]*\})?[^{}]*\}' | tail -1
+  compose logs agent 2>/dev/null | grep -oE '"withholds":\{[^{}]*(\{[^{}]*\})?[^{}]*\}' | tail -1
   compose logs agent 2>/dev/null | grep -oE "trace attestation (withheld|permitted)[^\"]{0,110}" | sort | uniq -c | tail -5
 }
 
@@ -105,4 +118,8 @@ harness_scenario_evidence() {
   echo "· agent trace:* attestations:  $(stage_trace_att)"
   echo "· trace_plane diagnostic:"
   compose logs agent 2>/dev/null | grep -oE '"trace_plane":\{[^}]*\}' | tail -1
+  # CIRISServer#377 — the agent's own carriage reading, with the standing token
+  # that says what its zero (if any) MEANS.
+  echo "· agent carriage (replication plane):"
+  compose logs agent 2>/dev/null | grep -oE '"carriage":\{[^{}]*(\{[^{}]*\})?[^{}]*\}' | tail -1
 }

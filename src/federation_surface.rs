@@ -222,6 +222,34 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .map(|((peer, medium), v)| (format!("{peer}:{medium}"), serde_json::json!(v)))
         .collect();
 
+    // CIRISServer#377 / CIRISEdge#433+#434 — the REPLICATION plane's own counters.
+    // Everything above this line is the application/durable plane (edge's
+    // `inc_sent` / `inc_received` / `inc_send_failure`, all called only from
+    // edge's `src/edge.rs`). Anti-entropy replication — the plane that carries
+    // `trace:*` to a canonical — increments none of them, so an operator reading
+    // this endpoint saw `envelopes_sent_total: {}` on a node that had just moved
+    // 15 trace rows. Same defect as the mesh-repro `ship` rung, one surface over.
+    let replication_served: serde_json::Map<_, _> = bundle
+        .replication_envelopes_served_total
+        .iter()
+        .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
+        .collect();
+    let withholds: serde_json::Map<_, _> = bundle
+        .withholds_by_reason
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), serde_json::json!(v)))
+        .collect();
+    let apply_refusals: serde_json::Map<_, _> = bundle
+        .apply_refusals_by_kind
+        .iter()
+        .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
+        .collect();
+    let round_outcomes: serde_json::Map<_, _> = bundle
+        .replication_round_outcomes_total
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), serde_json::json!(v)))
+        .collect();
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -235,6 +263,15 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "transport_bytes_out_total": bytes_out,
                 "peer_reachability_ratio": reachability,
                 "inline_text_subscriber_count": st.edge.verified_feed_subscriber_count(),
+                // The plane that carries trace:*. Read THESE for carriage health;
+                // the four counters above observe the application plane only.
+                "replication_envelopes_served_total": replication_served,
+                "withholds_by_reason": withholds,
+                "apply_refusals_by_kind": apply_refusals,
+                "replication_round_outcomes_total": round_outcomes,
+                "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
+                "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
+                "plane_note": "envelopes_sent_total / envelopes_received_total / send_failures_total are the APPLICATION plane (edge.rs send_*/dispatch_inbound). Anti-entropy replication increments none of them, so 0 there says nothing about carriage — read replication_envelopes_served_total and carriage_standing (CIRISEdge#434).",
             }
         })),
     )

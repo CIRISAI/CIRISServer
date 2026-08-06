@@ -704,6 +704,16 @@ fn trace_plane_json(corpus: Result<&TraceCorpus, &String>, now: DateTime<Utc>) -
 /// only in these docs — the same discipline persist's `PEER_QUOTA_NOTE` uses,
 /// so a consumer that renders the struct without reading the source still shows
 /// it.
+///
+/// **Blocked on CIRISEdge#457** (filed from CIRISServer#377). `ApplyOutcome::Refused`
+/// books at edge's apply choke point; `Admitted` and `Duplicate` book nowhere, so
+/// there is no accepted-applies counter to read. The send direction's twin of this
+/// gap was CIRISEdge#434 and is closed — `replication_envelopes_served_total` — which
+/// is why [`carriage_standing`] can separate `idle` from `moving` and
+/// [`receive_standing`] cannot yet separate `clean` from "nothing was offered".
+/// When #457 lands, that split becomes expressible and this note's caveat narrows.
+/// The message TEXT is localized across 29 bundles — extend the docs here, not the
+/// string, unless you are re-translating.
 pub const RECEIVE_NO_ACCEPTED_COUNTER: Msg = (
     "operator.receive.no_accepted_counter",
     "The substrate counts apply REFUSALS, not accepted applies. A clean reading therefore cannot \
