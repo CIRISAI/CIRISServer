@@ -3512,6 +3512,7 @@ fun CIRISApp(
                 ai.ciris.mobile.shared.ui.screens.NetworkOpsScreen(
                     viewModel = networkViewModel,
                     onOpenFederationHub = { currentScreen = Screen.LayerGlobalCommons },
+                    apiClient = apiClient,
                 )
             }
             Screen.Storage -> {

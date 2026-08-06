@@ -3701,6 +3701,428 @@ class CIRISApiClient(
         }
     }
 
+    // ─── Tier S (self-directed) + tier R (per-reader) — CIRISServer#345 ───────
+    //
+    // `src/admin_ops.rs`, the two rungs that act on NOBODY else: tier S is this
+    // node's own three standings (shed load / stop accepting / legal
+    // compulsion), tier R is what THIS reader makes of judgements other parties
+    // issued. Owner session only (Bearer), and every act carries the owner's own
+    // `delegation_id` + a free-text `reason`.
+    //
+    // Three properties this block is written to preserve:
+    //
+    //  1. **A failed read is never a clean one.** `GET /v1/admin/self` answers
+    //     503 *with the standings still in the body* when an axis is unreadable,
+    //     and `POST /v1/admin/reader/fold` does the same, precisely so a client
+    //     reading only one half cannot conclude "nothing in force". Both halves
+    //     are decoded here; neither is thrown away.
+    //  2. **Unreachable is an answer.** Tier S is the only rung available under
+    //     partition, so a transport failure returns `Unreachable` rather than
+    //     throwing — the operator wants these controls exactly when the network
+    //     is gone, and "could not reach the node" is not "nothing in force".
+    //  3. **`compelled_by` rides on the compulsion alone.** Only
+    //     [selfDeclareCompelled] takes it; the other five acts have no parameter
+    //     that could carry it, so a voluntary stop cannot wear a compelled one's
+    //     marks.
+
+    /** The one refusal shape `refusal()` / `err()` emit, or null if this body is
+     *  not one (e.g. the 503 that still carries standings). */
+    private fun adminRefusalOrNull(
+        raw: String,
+    ): ai.ciris.mobile.shared.models.selfreader.AdminRefusalDto? = try {
+        val obj = jsonConfig.parseToJsonElement(raw).jsonObject
+        if (obj["refused"]?.jsonPrimitive?.booleanOrNull == true) {
+            jsonConfig.decodeFromString(
+                ai.ciris.mobile.shared.models.selfreader.AdminRefusalDto.serializer(),
+                raw,
+            )
+        } else {
+            null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** A body we could not read at all. Carries no `id`, so the UI falls back to
+     *  the raw text — and, being a refusal, is never rendered as a clean state. */
+    private fun adminOpaqueRefusal(
+        raw: String,
+    ): ai.ciris.mobile.shared.models.selfreader.AdminRefusalDto =
+        ai.ciris.mobile.shared.models.selfreader.AdminRefusalDto(
+            refused = true,
+            refusal = "unreadable_response",
+            message = ai.ciris.mobile.shared.models.selfreader.AdminMessage(
+                id = "",
+                text = raw.take(240).ifBlank { "The node returned no body." },
+            ),
+        )
+
+    /** Does this body carry the named object? Used to tell the tier S / tier R
+     *  503-with-content halves from a plain refusal at the same status. */
+    private fun bodyHasKey(raw: String, key: String): Boolean = try {
+        jsonConfig.parseToJsonElement(raw).jsonObject[key] != null
+    } catch (_: Exception) {
+        false
+    }
+
+    /**
+     * The three self-directed standings, side by side —
+     * `GET {nodeUrl}/v1/admin/self`.
+     *
+     * A 503 whose body still carries `standings` is a READ, flagged
+     * [ai.ciris.mobile.shared.models.selfreader.SelfStandingOutcome.Read.partiallyUnreadable]:
+     * the unreadable axes are present and marked `unreadable`, and must not be
+     * shown as "nothing in force".
+     */
+    suspend fun getSelfStanding(
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfStandingOutcome {
+        val method = "getSelfStanding"
+        val client = federationHttpClient()
+        return try {
+            val response = client.get("$nodeUrl/v1/admin/self") {
+                token?.let { header("Authorization", "Bearer $it") }
+            }
+            val raw = response.bodyAsText()
+            val carriesStandings = bodyHasKey(raw, "standings")
+            if (response.status.isSuccess() || carriesStandings) {
+                val decoded = jsonConfig.decodeFromString(
+                    ai.ciris.mobile.shared.models.selfreader.SelfStandingResponse.serializer(),
+                    raw,
+                )
+                ai.ciris.mobile.shared.models.selfreader.SelfStandingOutcome.Read(
+                    response = decoded,
+                    partiallyUnreadable = !response.status.isSuccess() ||
+                        !decoded.unreadableAxes.isNullOrEmpty(),
+                )
+            } else {
+                ai.ciris.mobile.shared.models.selfreader.SelfStandingOutcome.Refused(
+                    refusal = adminRefusalOrNull(raw) ?: adminOpaqueRefusal(raw),
+                    httpStatus = response.status.value,
+                )
+            }
+        } catch (e: Exception) {
+            // Deliberately NOT rethrown: see property 2 above.
+            logException(method, e, "nodeUrl=$nodeUrl")
+            ai.ciris.mobile.shared.models.selfreader.SelfStandingOutcome.Unreachable(
+                e.message ?: e::class.simpleName ?: "unreachable",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Shared body for all six tier S acts. */
+    private suspend fun postSelfAct(
+        method: String,
+        path: String,
+        request: ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest,
+        nodeUrl: String,
+        token: String?,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome {
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl$path") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (response.status.isSuccess()) {
+                ai.ciris.mobile.shared.models.selfreader.SelfActOutcome.Recorded(
+                    jsonConfig.decodeFromString(
+                        ai.ciris.mobile.shared.models.selfreader.SelfActResponse.serializer(),
+                        raw,
+                    ),
+                )
+            } else {
+                ai.ciris.mobile.shared.models.selfreader.SelfActOutcome.Refused(
+                    refusal = adminRefusalOrNull(raw) ?: adminOpaqueRefusal(raw),
+                    httpStatus = response.status.value,
+                )
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, path=$path")
+            ai.ciris.mobile.shared.models.selfreader.SelfActOutcome.Unreachable(
+                e.message ?: e::class.simpleName ?: "unreachable",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Shed my own load — `POST {nodeUrl}/v1/admin/self/shed`. Axis `load_shed`. */
+    suspend fun selfShedLoad(
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfShedLoad",
+        path = "/v1/admin/self/shed",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /** Carry a full load again — `POST {nodeUrl}/v1/admin/self/resume-load`. */
+    suspend fun selfResumeLoad(
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfResumeLoad",
+        path = "/v1/admin/self/resume-load",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /**
+     * Take on nothing new — `POST {nodeUrl}/v1/admin/self/stop-accepting`.
+     * Axis `accepting`. **A CHOICE this node made**, and never a flavour of
+     * compulsion: it takes no `compelled_by`.
+     */
+    suspend fun selfStopAccepting(
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfStopAccepting",
+        path = "/v1/admin/self/stop-accepting",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /** Accept again — `POST {nodeUrl}/v1/admin/self/resume-accepting`. */
+    suspend fun selfResumeAccepting(
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfResumeAccepting",
+        path = "/v1/admin/self/resume-accepting",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /**
+     * Declare legal compulsion — `POST {nodeUrl}/v1/admin/self/compelled`.
+     * Axis `legal_compulsion`, and its own act: force applied from OUTSIDE the
+     * mesh, never recorded as a choice.
+     *
+     * @param compelledBy optional, and the ONLY act that carries it. Blank is a
+     *   real answer — an operator under a gag order may be unable to name the
+     *   authority, and a compulsion nobody can attribute still deserves a trace.
+     */
+    suspend fun selfDeclareCompelled(
+        delegationId: String,
+        reason: String,
+        compelledBy: String? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfDeclareCompelled",
+        path = "/v1/admin/self/compelled",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+            compelledBy = compelledBy?.trim()?.takeIf { it.isNotEmpty() },
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /**
+     * The compulsion ended — `POST {nodeUrl}/v1/admin/self/compulsion-lifted`.
+     * A distinct act: a compulsion that ENDED is not a compulsion that never
+     * happened, and both rows survive.
+     */
+    suspend fun selfCompulsionLifted(
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.SelfActOutcome = postSelfAct(
+        method = "selfCompulsionLifted",
+        path = "/v1/admin/self/compulsion-lifted",
+        request = ai.ciris.mobile.shared.models.selfreader.SelfCommitRequest(
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /**
+     * What THIS reader makes of the judgements it holds about one subject —
+     * `POST {nodeUrl}/v1/admin/reader/fold`. Read-only.
+     *
+     * The 503 half is decoded too, as
+     * [ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome.Unreadable]:
+     * an unreadable policy rendered as an empty one silently drops every
+     * restriction it carried.
+     */
+    suspend fun readerFold(
+        subjectKeyId: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome {
+        val method = "readerFold"
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.selfreader.ReaderFoldRequest.serializer(),
+                ai.ciris.mobile.shared.models.selfreader.ReaderFoldRequest(
+                    subjectKeyId = subjectKeyId,
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/admin/reader/fold") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            val decodeFold = {
+                jsonConfig.decodeFromString(
+                    ai.ciris.mobile.shared.models.selfreader.ReaderFoldResponse.serializer(),
+                    raw,
+                )
+            }
+            when {
+                response.status.isSuccess() ->
+                    ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome.Read(decodeFold())
+                // The unreadable standing rendered on BOTH halves.
+                bodyHasKey(raw, "standing") && adminRefusalOrNull(raw) == null ->
+                    ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome.Unreadable(decodeFold())
+                else -> ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome.Refused(
+                    refusal = adminRefusalOrNull(raw) ?: adminOpaqueRefusal(raw),
+                    httpStatus = response.status.value,
+                )
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, subject=$subjectKeyId")
+            ai.ciris.mobile.shared.models.selfreader.ReaderFoldOutcome.Unreachable(
+                e.message ?: e::class.simpleName ?: "unreachable",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Shared body for honour + decline: same gates, opposite decision, SAME
+     *  success shape — a decline is not an error path. */
+    private suspend fun postReaderDecision(
+        method: String,
+        path: String,
+        request: ai.ciris.mobile.shared.models.selfreader.ReaderCommitRequest,
+        nodeUrl: String,
+        token: String?,
+    ): ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome {
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.selfreader.ReaderCommitRequest.serializer(),
+                request,
+            )
+            val response = client.post("$nodeUrl$path") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (response.status.isSuccess()) {
+                ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome.Recorded(
+                    jsonConfig.decodeFromString(
+                        ai.ciris.mobile.shared.models.selfreader.ReaderDecisionResponse.serializer(),
+                        raw,
+                    ),
+                )
+            } else {
+                ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome.Refused(
+                    refusal = adminRefusalOrNull(raw) ?: adminOpaqueRefusal(raw),
+                    httpStatus = response.status.value,
+                )
+            }
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, path=$path")
+            ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome.Unreachable(
+                e.message ?: e::class.simpleName ?: "unreachable",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Adopt one judgement — `POST {nodeUrl}/v1/admin/reader/honour`. */
+    suspend fun readerHonour(
+        judgementId: String,
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome = postReaderDecision(
+        method = "readerHonour",
+        path = "/v1/admin/reader/honour",
+        request = ai.ciris.mobile.shared.models.selfreader.ReaderCommitRequest(
+            judgementId = judgementId,
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
+    /**
+     * Refuse one judgement — `POST {nodeUrl}/v1/admin/reader/decline`.
+     *
+     * **A normal outcome, not an error.** An issued judgement is advisory to
+     * each reader; two readers with different policies reaching different,
+     * both-valid states from the same judgement is the design working. This
+     * returns the same
+     * [Recorded][ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome.Recorded]
+     * a honour does.
+     */
+    suspend fun readerDecline(
+        judgementId: String,
+        delegationId: String,
+        reason: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.selfreader.ReaderDecisionOutcome = postReaderDecision(
+        method = "readerDecline",
+        path = "/v1/admin/reader/decline",
+        request = ai.ciris.mobile.shared.models.selfreader.ReaderCommitRequest(
+            judgementId = judgementId,
+            delegationId = delegationId,
+            reason = reason,
+        ),
+        nodeUrl = nodeUrl,
+        token = token,
+    )
+
     // ─── Holistic SAFETY surface (/v1/safety/*) — CIRISServer v0.4.6 ──────────
     //
     // The safety cards drive THIS device's local node only. The app holds NO
