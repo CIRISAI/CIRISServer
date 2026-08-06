@@ -44,11 +44,40 @@ class TestAutomationServer(
     // Updated by Compose via registerElement() calls
     private val elements = ConcurrentHashMap<String, ElementInfo>()
 
-    // Window position offset (for converting window coords to screen coords)
+    // Window position offset (for converting window coords to screen coords).
+    //
+    // These are only the LAST-KNOWN values. `Main.kt` seeds them from a
+    // `LaunchedEffect(Unit)` that reads `frame.x/frame.y` before the window
+    // manager has placed the window, and its `componentMoved` listener never
+    // fires for that initial placement — so on any WM that positions windows
+    // itself (i.e. every tiling/desktop Linux WM) they stayed 0 and every
+    // Robot-driven click landed off-target by the window origin, silently.
+    // `originX`/`originY` below therefore prefer the LIVE AWT bounds and treat
+    // these as a fallback for the window-not-yet-attached case.
     @Volatile
     var windowX: Int = 0
     @Volatile
     var windowY: Int = 0
+
+    /**
+     * The screen origin of the Compose CONTENT area, read live so a WM-placed
+     * or user-dragged window cannot desynchronise the element registry.
+     *
+     * Compose reports element positions via `positionInWindow()`, which is
+     * relative to the content area — so the frame's decoration insets have to
+     * be added too, or every click is short by the title-bar height. Insets are
+     * zero for an undecorated window, which makes this a no-op there.
+     */
+    private fun contentOrigin(): Pair<Int, Int> {
+        val w = awtWindow ?: return windowX to windowY
+        return runCatching {
+            val ins = w.insets
+            (w.x + (ins?.left ?: 0)) to (w.y + (ins?.top ?: 0))
+        }.getOrDefault(windowX to windowY)
+    }
+
+    private val originX: Int get() = contentOrigin().first
+    private val originY: Int get() = contentOrigin().second
 
     // Current screen name
     @Volatile
@@ -91,9 +120,10 @@ class TestAutomationServer(
      * Coordinates are converted to absolute screen position using window offset
      */
     fun registerElement(testTag: String, x: Int, y: Int, width: Int, height: Int, text: String? = null) {
-        // Convert window-relative to screen-absolute coordinates
-        val screenX = x + windowX
-        val screenY = y + windowY
+        // Convert window-relative to screen-absolute coordinates, against the
+        // window's LIVE origin (see originX/originY).
+        val screenX = x + originX
+        val screenY = y + originY
         elements[testTag] = ElementInfo(
             testTag = testTag,
             x = screenX,
