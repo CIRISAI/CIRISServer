@@ -120,3 +120,23 @@ CIRISServer#122 (FSD-004 live-quorum Phase 3).
 | 5.3.6.1 | CLM-envelope-error | `CONSISTENCY_PROOF_INVALID` (422) is absent from `CegErrorCode` |
 | 5.4.4 | CLM-welcome-wrap | the ML-DSA-65 inviter signature **is** implemented and verified before `open_base`; `unwrap_welcome` still falls back to the message's **inline** inviter pubkey when the directory misses (TOFU ⇒ no real sender authentication) — **CIRISEdge#331** |
 | 5.4.5 | CLM-witness-content | the rate-hiding cover leaf ships; the per-tier witness-content scoping discipline does not |
+
+---
+
+## Also in this directory — `blocked_upstream.tsv` (a different manifest, a different gate)
+
+[`blocked_upstream.tsv`](blocked_upstream.tsv) is **not** part of the `impl:` tier. It is
+the adoption manifest for issues labelled `state:blocked-upstream`: one row per blocking
+predicate, naming the upstream fact the issue waits on in a form a test can evaluate
+against the substrate revisions `Cargo.lock` pins.
+
+Where `cc_impl.tsv` asserts that a symbol we DEPEND on still resolves, this one asserts
+that a capability we are WAITING FOR still does not — and goes red when it lands, so the
+relabel to `state:unwired` happens on the substrate bump that caused it rather than at the
+next hand audit. CIRISServer#361 asked for this three times: filing an upstream issue
+creates a tracked obligation *there* and nothing *here*.
+
+- gate: [`tests/blocked_upstream_gate.rs`](../tests/blocked_upstream_gate.rs) — offline,
+  reads the pinned rev out of `Cargo.lock`
+- label reconciliation (needs the GitHub API, so it cannot be a test):
+  [`tools/check_blocked_upstream.sh`](../tools/check_blocked_upstream.sh)

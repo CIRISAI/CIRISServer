@@ -1,0 +1,44 @@
+# CIRIS evidence registry — the `state:blocked-upstream` adoption manifest (CIRISServer#361 §"one thing to fix").
+#
+# THE PROBLEM THIS FILE EXISTS FOR. Filing an upstream issue creates a tracked
+# obligation THERE and nothing HERE. #361 said so, three separate issues restated
+# it, and both adoption waves this year were driven by hand re-enumeration — which
+# is not a mechanism. This file is the machine-readable half: every issue carrying
+# `state:blocked-upstream` names the upstream fact it waits on, in a form
+# `tests/blocked_upstream_gate.rs` can evaluate against the substrate revisions
+# Cargo.lock actually pins.
+#
+# WHAT THE GATE DOES WITH EACH ROW. It resolves `repo`'s pinned rev out of
+# Cargo.lock, opens `scan_root` inside that checkout, counts the files and lines
+# matching `needle`, and compares against `files` / `lines`:
+#
+#   kind = absence  (files = 0)  — the marker MUST NOT resolve. If it appears, the
+#                                  thing this issue waits on has landed: relabel
+#                                  `state:blocked-upstream` → `state:unwired` and
+#                                  adopt it. This is the arm that pays for the file.
+#   kind = drift    (files > 0)  — the blocked AREA is pinned as it stands today.
+#                                  Upstream touching it turns this red, which forces
+#                                  a re-read of the blocker on the substrate bump
+#                                  that moved it, rather than a year later. Re-pin
+#                                  only after reading the issue.
+#   kind = untestable            — no symbol can express it (see `predicate`). The
+#                                  row still exists so the manifest's denominator is
+#                                  the real one; `tools/check_blocked_upstream.sh`
+#                                  is the reconciliation these rows get instead.
+#
+# A NAME MATCH IS NOT AN ADOPTION. #361 closed tracking `fold_reverse_quorum`, which
+# still has zero callers — correctly, because the adoption went through persist's
+# RESOLVER, not its fold. A red row here is an instruction to READ, never a licence
+# to relabel on the strength of the grep.
+#
+# needle: a substring; `|` separates alternatives, any one of which matches.
+# scan_root: a directory (walked) or a single file, relative to the checkout root.
+# glob: filename suffix filter applied when scan_root is a directory.
+issue	repo	scan_root	glob	needle	files	lines	kind	predicate
+115	CIRISPersist	src	*.rs	oversight_mode	0	0	absence	CC 2.1 normatively defines oversight_mode (HITL|HOTL|HOOTL, default null) and verify carries it as a wire field, but no admission or visibility decision anywhere reads it. persist is one of the two crates that makes those decisions, and the field's own name is fixed by CC — so its first appearance in persist src IS the enforcer landing, with no name to guess. Upstream obligation: CIRISNodeCore#18 (open).
+115	CIRISEdge	src	*.rs	oversight_mode	0	0	absence	The other decision-making crate. Same reasoning: edge gating admission or visibility on oversight_mode necessarily mentions oversight_mode.
+285	CIRISEdge	.github/workflows	*.yml	SCCACHE_BUCKET|SCCACHE_WEBDAV|SCCACHE_REDIS|SCCACHE_S3|SCCACHE_ENDPOINT	0	0	absence	CIRISEdge#216 — only an object-level, BACKEND-SHARED sccache can reuse edge's compiled objects across repos; GitHub scopes the Actions cache per repository, so edge's objects are unreachable from here. Any remote-backend env var in edge's workflows means #216 landed and this repo can point at the same bucket. The cargo checkout carries the full repo tree, so a test can read edge's CI config directly.
+333	CIRISPersist	src/federation/trust_root.rs	*.rs	INFRA_ATTEST_SCOPE	1	3	drift	infra:attest is conferred with no processor gating a SUBJECT. Today the const is defined here and read once, by charter_shaped — a charter-VALIDITY requirement (the root must self-declare it), a different axis from "may this subject exercise attest", and easy to mistake for coverage. A subject gate lands as a new read of this const. The gate must be the DELEGATION-plane walk (capability_roots_to_trusted_root), never the roles vector, or the canonical stops being a bootstrap and becomes a permanent authority.
+333	CIRISPersist	src/federation	*.rs	INFRA_STORE	2	4	drift	The infra:store half. The const exists (types.rs) and is referenced only by a test; custody of bulk content on behalf of the mesh is unbuilt. A store processor necessarily references the scope const.
+114	-	-	-	-	-	-	untestable	Waits on CIRISRegistry shipping a drivable authority surface. CIRISRegistry is NOT in this repo's dependency graph — no Cargo.lock entry, no cargo checkout — so there is no tree for a test to read. Blocked on CIRISRegistry#76 (open); registry-core still pins persist v5.5.5 against our v30.3.0.
+2	-	-	-	-	-	-	untestable	Same artifact, same absence from the dependency graph: registry-core's data layer is a standalone Postgres-locked sqlx store that must be ported onto persist's Engine. Nothing to scan until CIRISRegistry#76 makes it build on the triple.
