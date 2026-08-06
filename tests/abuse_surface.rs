@@ -426,7 +426,7 @@ async fn a_self_asserted_detector_can_forge_detection_rows_about_a_third_party_t
 /// So a stranger who self-registers as `substrate_persist` can author rows on
 /// the plane the ladder's own accountability rests on.
 #[tokio::test]
-async fn a_self_asserted_substrate_persist_can_author_hard_case_rows_today() {
+async fn a_self_asserted_substrate_persist_cannot_author_hard_case_rows() {
     let engine = node().await;
     register_self(&engine).await;
     self_register(&engine, "abuse-victim-2", identity_type::AGENT)
@@ -461,11 +461,36 @@ async fn a_self_asserted_substrate_persist_can_author_hard_case_rows_today() {
     )
     .await;
 
+    // CLOSED by persist v30.3.0 (CIRISPersist#607/#611). This pin was written
+    // asserting `verdict.is_ok()` — that the hole was OPEN — with the note "if
+    // this is now refused the hole is CLOSED and this pin should be deleted".
+    // It was refused, so it is flipped rather than deleted: the same fixture
+    // that demonstrated the hole is the cheapest regression guard against its
+    // return, and deleting it would discard the one thing that proves the door
+    // shut for the reason we think it did.
+    //
+    // The refusal must be the RESERVED-PREFIX gate specifically. A generic
+    // `Err` would also satisfy `is_err()` while meaning something else entirely
+    // — a malformed envelope, a missing key — and would let the hole reopen
+    // under a gate that had stopped running.
     let verdict = put(&engine, row).await;
+    let err = verdict.expect_err(
+        "REGRESSION: a self-asserted `substrate_persist` landed a `hard_case:*` row about a \
+         third party. persist v30.3.0 closed this (CIRISPersist#607/#611); `hard_case:` is the \
+         prefix `admin_ops` writes every tier 0-4 tombstone under, so an open door here lets a \
+         stranger forge de-admissions and quarantines about anyone.",
+    );
+    let msg = format!("{err:?}");
     assert!(
-        verdict.is_ok(),
-        "PIN: a self-asserted substrate_persist lands a hard_case:* row about a third party. If \
-         this is now refused the hole is CLOSED and this pin should be deleted. Got: {verdict:?}"
+        msg.contains("ReservedPrefixEmitterMismatch") && msg.contains("hard_case:"),
+        "the refusal must come from the reserved-prefix gate on `hard_case:`, not from some \
+         other failure that happens to be an Err — otherwise this test passes while the gate \
+         it guards has stopped running. Got: {msg}"
+    );
+    assert!(
+        msg.contains("infra:record_hard_case"),
+        "the refusal should name the delegated scope that WOULD authorise this, because the \
+         emitter is the only party who can fix it. Got: {msg}"
     );
 }
 
