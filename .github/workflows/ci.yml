@@ -20,6 +20,12 @@ on:
       - "**/*.md"
       - "FSD/**"
       - "docs/**"
+  # Manual trigger — the recovery path for the iOS release asset. `release.yml`
+  # publishes the `ciris-server-ios` artifact THIS workflow produces, looked up
+  # by commit SHA. A commit that matched paths-ignore above (a docs-only release
+  # commit) has no CI run and therefore no artifact, and the release job says so
+  # by name. Re-running CI on that SHA from here fixes it without a re-tag.
+  workflow_dispatch:
 
 # Cancel a superseded run on the same ref (PR re-push / newer main commit). A tag
 # ref is distinct, so this never cancels a release pipeline.
@@ -219,3 +225,322 @@ jobs:
       # conformance's RELEASE `-s<version>` blob (same key). The release `-s` is
       # populated by conformance (on main) + build-wheels (on tags); CI only
       # RESTORES (the centipede above) and lets cargo do the cheap debug delta.
+      # (The `ios-build` job below is the ONE exception — see its save step.)
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # iOS — device + simulator PyO3 abi3 slices.
+  #
+  # PORTED FROM CIRISPersist `.github/workflows/ci.yml` (`ios-build` +
+  # `ios-package`, persist v2.0.4+). All three substrate siblings build these
+  # two targets in their OWN ci.yml — CIRISVerify, CIRISPersist, CIRISEdge —
+  # and CIRISServer built neither. That gap is why the client's iOS substrate
+  # refresh has been red since June: CIRISAgent's
+  # `.github/workflows/refresh-ios-substrate.yml` greps a release's
+  # `.assets[].name` for /ios/i before refreshing, found no match on
+  # CIRISAI/CIRISServer, and correctly refused to refresh from an asset that
+  # does not exist. The workflow was right; the asset was missing.
+  #
+  # ── THE PUBLISHED CONTRACT (the consumer is in ANOTHER REPO) ──────────────
+  # Consumer: CIRISAgent `tools/update_substrate_libs.py` (its CIRISServer
+  # entry) + `client/iosApp/scripts/embed_native_frameworks.sh`. Tracking
+  # issue for the client half: CIRISAI/CIRISAgent#1011. Everything below is
+  # load-bearing on the OTHER side of that repo boundary — change one, change
+  # both:
+  #
+  #   release asset   ciris-server-v<version>-ios.tar.gz
+  #                   ← `{tarball_prefix}-v{version}-ios.tar.gz`; <version> is
+  #                     the Cargo.toml/PyPI version, which is what the client
+  #                     resolves from its requirements.txt pin.
+  #   tar layout      ios-device/_native.abi3.so
+  #                   ios-simulator/_native.abi3.so
+  #                   ← `{device_dir}/{dylib_filename}` and
+  #                     `{simulator_dir}/{dylib_filename}`.
+  #   slice filename  _native.abi3.so   NOT ciris_server.abi3.so.
+  #                   ← our PyO3 module is the IN-PACKAGE submodule
+  #                     `ciris_server._native` (pyproject
+  #                     `module-name = "ciris_server._native"`, `#[pymodule] fn
+  #                     _native`), so the only init symbol in the cdylib is
+  #                     `PyInit__native`. A file named `ciris_server.abi3.so`
+  #                     would need `PyInit_ciris_server` and fail to import.
+  #                     This is where we differ from persist/edge, whose
+  #                     modules are top-level and same-named as their package.
+  #   install_name    @rpath/ciris_server._native.framework/ciris_server._native
+  #                   ← `embed_native_frameworks.sh` derives the framework name
+  #                     from the path under `app_packages_native`: strip
+  #                     `.abi3.so`, then `/` → `.`. The client lays the slice
+  #                     down at `app_packages_native/ciris_server/_native.abi3.so`,
+  #                     so the framework it builds is `ciris_server._native`.
+  #                     (CIRISAgent#1011 fixes the matching `.fwork` redirect,
+  #                     which is currently hardcoded to `{pkg}.{pkg}`.)
+  #
+  # ── Why cargo build and not maturin ───────────────────────────────────────
+  # maturin 1.13's platform check rejects a darwin→iOS cross-compile outright
+  # (persist's lane records the same). So: plain `cargo build` with the PyO3
+  # cross-compilation env vars, plus BeeWare's Python-Apple-support for the
+  # target libpython and `_sysconfigdata` — PyO3 PR #5605 requires libpython
+  # LINKING on iOS, so `extension-module` does not suppress it there the way it
+  # does on desktop.
+  # ══════════════════════════════════════════════════════════════════════════
+  ios-build:
+    name: ios PyO3 abi3 (${{ matrix.dir }})
+    runs-on: macos-14
+    # The two targets are a 2-entry MATRIX, not one job building both: cargo's
+    # target-dir lock prevents in-job parallelism, so a matrix is the only way
+    # to overlap them (persist measured a ~20m sequential job before the split).
+    # `ios-package` below recombines the slices into the single tar.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-ios,     dir: ios-device,    lib_dir_out: device_lib_dir }
+          - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir }
+    env:
+      # 3.10 is not arbitrary: the client's iOS app embeds CPython 3.10
+      # (client/iosApp Resources carry `python3.10` +
+      # `_sysconfigdata__ios_arm64-iphoneos.py`, and its native modules are
+      # `*.cpython-310-iphoneos.so`). Same pin as persist's lane.
+      PYTHON_IOS_VER: "3.10"
+      PYTHON_IOS_BUILD: "b13"
+      # DEVIATION from persist, deliberate: persist passes a long explicit
+      # feature list because ITS pyproject `[tool.maturin] features` is long.
+      # Ours is exactly `["extension-module"]` — so this mirrors OUR wheel, per
+      # the same rule. `extension-module` implies `python` (pyo3 +
+      # ciris-verify-ffi + the persist/edge/lens pyo3 surfaces), and cargo's
+      # default features stay ON (`default = ["pkcs11"]`), which is precisely
+      # what `maturin build` compiles for the published wheel.
+      IOS_PYO3_FEATURES: extension-module
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: ${{ matrix.target }}
+      # DEVIATION from persist in FORM, not in key: persist calls its local
+      # `./.github/actions/ciriscache` composite; this repo has no
+      # `.github/actions/` at all and inlines the 4-layer centipede in every
+      # job (ci.yml above, build-wheels.yml, release.yml). Inlined here too, so
+      # the iOS lane looks like every other CIRISServer cache block.
+      #
+      # PLAT=ios-<target triple> is byte-identical to verify's and persist's
+      # token (`ios-${{ matrix.target }}` → ios-aarch64-apple-ios /
+      # ios-aarch64-apple-ios-sim). Persist's #316 comment records why this
+      # matters: its earlier `ios-aarch64` NEVER matched verify's
+      # `ios-aarch64-apple-ios` blob, so the cross-repo restore always missed.
+      # (CIRISEdge still uses the short `ios-aarch64` form in its ios-pyo3
+      # matrix — persist and verify are the aligned pair; follow those.)
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT="ios-${{ matrix.target }}"
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
+          KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
+          KEY_EDGE="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+          KEY_SERVER="${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+          {
+            echo "key-verify=${KEY_VERIFY}"
+            echo "key-persist=${KEY_PERSIST}"
+            echo "key-edge=${KEY_EDGE}"
+            echo "key=${KEY_SERVER}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-any=${BASE}-p"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+          echo "::notice::${KEY_VERIFY}"
+          echo "::notice::${KEY_PERSIST}"
+          echo "::notice::${KEY_EDGE}"
+          echo "::notice::${KEY_SERVER}"
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+            ${{ steps.cachekey.outputs.key-any }}*
+      # Ported verbatim from persist's lane. macOS runners can restore a
+      # `~/.cargo/bin/cargo` that IS the rustup-init shim: it passes
+      # `cargo --version` through (any CLI accepts --version) but fails
+      # `cargo build` with "unexpected argument 'build' found". Probe via
+      # `cargo build --help`, then nuke + reinstall. Kept because this job
+      # restores the same CIRISCache blobs persist's does.
+      - name: Repair toolchain if rustup-init shadow (cache-poison heal)
+        shell: bash
+        run: |
+          if cargo build --help 2>&1 | grep -q "rustup-init"; then
+            echo "::warning::Detected rustup-init shadow in ~/.cargo/bin; reinstalling toolchain"
+            rm -rf "$HOME/.cargo/bin"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain 1.97.0 --profile minimal --no-modify-path
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup default 1.97.0
+          cargo --version
+          cargo build --help >/dev/null
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: download Python-Apple-support (iOS)
+        id: python-ios
+        run: |
+          set -euo pipefail
+          SUPPORT_URL="https://github.com/beeware/Python-Apple-support/releases/download/${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD}/Python-${PYTHON_IOS_VER}-iOS-support.${PYTHON_IOS_BUILD}.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/python-ios"
+          curl -sL "${SUPPORT_URL}" -o "${RUNNER_TEMP}/python-ios-support.tar.gz"
+          tar xzf "${RUNNER_TEMP}/python-ios-support.tar.gz" -C "${RUNNER_TEMP}/python-ios"
+
+          XCFW="${RUNNER_TEMP}/python-ios/Python.xcframework"
+
+          # PyO3 cross-compilation wants libpython + _sysconfigdata in ONE
+          # directory (PYO3_CROSS_LIB_DIR). Stage them out of the xcframework.
+          DEVICE_DIR="${RUNNER_TEMP}/pyo3-ios-device"
+          mkdir -p "$DEVICE_DIR"
+          cp "$XCFW/ios-arm64/Python.framework/Python" \
+             "$DEVICE_DIR/libpython${PYTHON_IOS_VER}.dylib"
+          cp "$XCFW/ios-arm64/lib-arm64/python${PYTHON_IOS_VER}/_sysconfigdata__ios_arm64-iphoneos.py" \
+             "$DEVICE_DIR/"
+          echo "device_lib_dir=${DEVICE_DIR}" >> "$GITHUB_OUTPUT"
+
+          SIM_DIR="${RUNNER_TEMP}/pyo3-ios-sim"
+          mkdir -p "$SIM_DIR"
+          cp "$XCFW/ios-arm64_x86_64-simulator/Python.framework/Python" \
+             "$SIM_DIR/libpython${PYTHON_IOS_VER}.dylib"
+          cp "$XCFW/ios-arm64_x86_64-simulator/lib-arm64/python${PYTHON_IOS_VER}/_sysconfigdata__ios_arm64-iphonesimulator.py" \
+             "$SIM_DIR/"
+          echo "sim_lib_dir=${SIM_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "✓ Python-Apple-support ${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD} staged"
+          ls -la "$DEVICE_DIR/" "$SIM_DIR/"
+      # DEVIATION from persist: `--lib`. persist's crate has no `[[bin]]`; ours
+      # does (`ciris-server`, src/main.rs), and Cargo.toml is explicit that the
+      # BINARY must never link libpython. A bare `cargo build --features
+      # extension-module` would also build that bin for iOS — meaningless on
+      # the platform and the one link configuration this crate forbids. `--lib`
+      # builds exactly the cdylib the wheel/app loads.
+      - name: cargo build (ios — ${{ matrix.target }})
+        env:
+          PYO3_CROSS: "1"
+          # Tied to PYTHON_IOS_VER above (kept literal, as persist does).
+          PYO3_CROSS_PYTHON_VERSION: "3.10"
+          PYO3_CROSS_LIB_DIR: ${{ steps.python-ios.outputs[matrix.lib_dir_out] }}
+        run: >-
+          cargo build --release --lib
+          --target ${{ matrix.target }}
+          --features "$IOS_PYO3_FEATURES"
+      - name: strip + stage ios cdylib (${{ matrix.dir }})
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.dir }}"
+          # cdylib output is libciris_server.dylib → _native.abi3.so (see THE
+          # PUBLISHED CONTRACT above for why the name is `_native`, not
+          # `ciris_server`). The install-name fix matters: cargo embeds the
+          # runner's absolute path, and the iOS app resolves the module through
+          # an @rpath framework built by embed_native_frameworks.sh.
+          SRC="target/${{ matrix.target }}/release/libciris_server.dylib"
+          DST="dist/${{ matrix.dir }}/_native.abi3.so"
+          if [ ! -f "$SRC" ]; then
+            echo "::error::${SRC} not found"
+            ls -la "target/${{ matrix.target }}/release/" | grep ciris || true
+            exit 1
+          fi
+          strip -x "$SRC"
+          install_name_tool -id \
+            "@rpath/ciris_server._native.framework/ciris_server._native" \
+            "$SRC"
+          cp "$SRC" "$DST"
+          echo "✓ ${{ matrix.dir }}: $(ls -la "$DST" | awk '{print $5}') bytes"
+          otool -D "$DST"
+          file "$DST"
+          # The import surface is the whole point of shipping this slice: if
+          # PyInit__native is absent the app gets a framework that dlopens and
+          # then fails `from ._native import *` at launch — the exact silent-
+          # until-device failure this lane exists to prevent.
+          if ! nm -gU "$DST" | grep -q "_PyInit__native"; then
+            echo "::error::${DST} does not export PyInit__native — the module would not import on device"
+            nm -gU "$DST" | grep -i pyinit || true
+            exit 1
+          fi
+          echo "✓ exports PyInit__native"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-ios-${{ matrix.dir }}
+          path: dist/${{ matrix.dir }}/_native.abi3.so
+          if-no-files-found: error
+      # The ONE CI job that SAVES a CIRISCache blob, and it does not contradict
+      # the "CI does NOT save" note on clippy-test above: that note is about
+      # DEBUG target/ dirs colliding with conformance's RELEASE `-s<version>`
+      # blob under the same key. This job builds RELEASE, and no other
+      # CIRISServer job uses an `ios-*` PLAT token — so there is nothing to
+      # collide with, and the next run (and CIRISAgent's refresh) restores a
+      # warm iOS target/ instead of cold-compiling the substrate. Persist saves
+      # from its iOS lane for exactly this reason. continue-on-error, so a
+      # missing package scope can never turn the build red.
+      - uses: CIRISAI/CIRISCache/save@v1
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # LRU-prune target/ to 4GB before tar (persist v1/ff52ca3): breaks the
+          # fat-blob ratchet where superseded dep generations are re-saved forever.
+          max-size-mb: "4096"
+
+  # Recombine the two parallel slices into the single tar the release publishes.
+  # Mirrors persist's `ios-package`. Runs on EVERY push/PR, not just releases:
+  # the recombine is validated long before a tag needs it, and `release.yml`
+  # consumes this artifact rather than rebuilding on a second macOS runner.
+  ios-package:
+    name: package ios artifacts
+    runs-on: ubuntu-latest
+    needs: [ios-build]
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: download both iOS target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-server-ios-*
+          path: artifacts/
+      - name: package ios tarball
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist/ios-device dist/ios-simulator
+          cp artifacts/ciris-server-ios-ios-device/_native.abi3.so    dist/ios-device/
+          cp artifacts/ciris-server-ios-ios-simulator/_native.abi3.so dist/ios-simulator/
+          echo "=== ios-device ===";    ls -la dist/ios-device/;    file dist/ios-device/_native.abi3.so
+          echo "=== ios-simulator ==="; ls -la dist/ios-simulator/; file dist/ios-simulator/_native.abi3.so
+          # THE asset name the client resolves — see THE PUBLISHED CONTRACT above.
+          tar -czf "dist/ciris-server-v${VERSION}-ios.tar.gz" -C dist ios-device ios-simulator
+          echo "✓ packaged ciris-server-v${VERSION}-ios.tar.gz"
+          ls -la "dist/ciris-server-v${VERSION}-ios.tar.gz"
+          # Prove the layout the client indexes into (`{device_dir}/{dylib_filename}`)
+          # actually exists inside the tar, here, where a mistake is cheap.
+          tar -tzf "dist/ciris-server-v${VERSION}-ios.tar.gz" | sort
+          for MEMBER in ios-device/_native.abi3.so ios-simulator/_native.abi3.so; do
+            if ! tar -tzf "dist/ciris-server-v${VERSION}-ios.tar.gz" | grep -qx "$MEMBER"; then
+              echo "::error::tarball is missing ${MEMBER} — CIRISAgent update_substrate_libs.py indexes exactly this path"
+              exit 1
+            fi
+          done
+          echo "✓ tar layout matches the published contract"
+      # NO retention-days override: release.yml downloads this artifact from the
+      # CI run of the tagged commit, which can be days later. The 90-day default
+      # is the window that makes that possible.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-ios
+          path: dist/ciris-server-v*-ios.tar.gz
+          if-no-files-found: error

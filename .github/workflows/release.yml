@@ -297,12 +297,119 @@ jobs:
           key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # The iOS release asset — FETCHED from CI, not rebuilt here.
+  #
+  # ci.yml (`ios-build` matrix → `ios-package`) builds the device + simulator
+  # slices and packages `ciris-server-v<version>-ios.tar.gz` on every push and
+  # PR. This job pulls that exact artifact for the tagged commit and hands it
+  # to `create-release`, which hashes, signs and uploads it alongside the
+  # binaries. CI proves the build every run; the release publishes what CI
+  # already showed can be built. (Persist runs the same split inside one
+  # workflow — `ios-package` → `mobile-release`; CIRISServer keeps CI and
+  # release in separate files, so the handoff is a cross-run artifact fetch
+  # instead of a `needs:`.)
+  #
+  # Why fetch rather than rebuild: a second ~20m macOS lane on every tag would
+  # publish a DIFFERENT binary from the one CI verified, for the same commit.
+  #
+  # Failure here does NOT sink the release (`create-release` is `!cancelled()`),
+  # but it does turn the run red — which is the point. The iOS asset going
+  # missing silently is precisely the failure that left the client's substrate
+  # refresh red since June.
+  # ══════════════════════════════════════════════════════════════════════════
+  ios-asset:
+    name: Fetch iOS asset from CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read   # gh run list / gh run download, across workflow runs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate the CI run for this commit and download ciris-server-ios
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # ci.yml triggers on push:main + pull_request (NOT on tags), so the
+          # artifact belongs to the CI run of this same SHA on main. If that run
+          # is still in flight (tag pushed right behind the branch push), wait
+          # for it — up to 30 minutes, which covers the macOS iOS legs.
+          RUN_ID=""
+          for attempt in $(seq 1 30); do
+            RUN_JSON=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
+                        --repo "$GITHUB_REPOSITORY" --limit 20 \
+                        --json databaseId,status,conclusion 2>/dev/null || echo '[]')
+            RUN_ID=$(echo "$RUN_JSON" | jq -r '[.[] | select(.conclusion == "success")][0].databaseId // empty')
+            if [ -n "$RUN_ID" ]; then
+              echo "✓ CI run ${RUN_ID} for ${GITHUB_SHA} is green"
+              break
+            fi
+            PENDING=$(echo "$RUN_JSON" | jq -r '[.[] | select(.status != "completed")] | length')
+            if [ "$PENDING" = "0" ]; then
+              echo "::error::No successful ci.yml run for ${GITHUB_SHA}. The iOS release asset is BUILT BY CI (ci.yml: ios-build → ios-package) and published from here. Fix: run the CI workflow on this commit (Actions → CI → Run workflow, or push the commit to main), wait for it to go green, then re-run this job. Do not re-tag."
+              exit 1
+            fi
+            echo "CI run for ${GITHUB_SHA} still in progress (${attempt}/30) — waiting 60s"
+            sleep 60
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Timed out after 30 minutes waiting for the ci.yml run on ${GITHUB_SHA} to finish. Re-run this job once CI is green."
+            exit 1
+          fi
+          mkdir -p ios
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name ciris-server-ios --dir ios
+          ls -la ios/
+      - name: Verify the asset name matches what the client resolves
+        run: |
+          set -euo pipefail
+          # THE cross-file invariant, made executable. CIRISAgent's
+          # tools/update_substrate_libs.py downloads
+          # `{tarball_prefix}-v{version}-ios.tar.gz` where <version> is the
+          # ciris-server version pinned in its requirements.txt — i.e. OUR
+          # Cargo.toml/PyPI version. Its
+          # .github/workflows/refresh-ios-substrate.yml additionally requires
+          # some asset name to match /ios/i before it will refresh at all.
+          # Both are checked here rather than assumed. (Consumer-side tracking
+          # issue: CIRISAI/CIRISAgent#1011.)
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          WANT="ciris-server-v${VERSION}-ios.tar.gz"
+          if [ ! -f "ios/${WANT}" ]; then
+            echo "::error::CI produced $(ls ios/ | tr '\n' ' ') but the client resolves '${WANT}' (Cargo.toml version ${VERSION})."
+            exit 1
+          fi
+          # The tag must agree too: the client forms the release tag as
+          # v{version} from the same pin, so a tag that disagrees with
+          # Cargo.toml means it downloads from a release that does not hold
+          # this asset. PREFIX, not equality — this workflow supports
+          # prerelease tags (`prerelease:` below keys off -rc/-spec/-beta), and
+          # `v0.5.155-rc1` off Cargo.toml 0.5.155 is a legitimate cut. Only a
+          # genuinely different version is an error.
+          case "${GITHUB_REF_NAME}" in
+            "v${VERSION}"|"v${VERSION}-"*) : ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${VERSION} — the client looks up tag v${VERSION} and asset ${WANT}."
+              exit 1
+              ;;
+          esac
+          echo "✓ ${WANT} matches the client's expected asset name, and tag ${GITHUB_REF_NAME} matches"
+          tar -tzf "ios/${WANT}" | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          # `create-release` globs artifacts/ciris-server-* and special-cases
+          # this name — keep the two in step.
+          name: ciris-server-ios
+          path: ios/*.tar.gz
+          if-no-files-found: error
+
   create-release:
     name: Create Release
-    needs: [build-native, build-musl]
+    needs: [build-native, build-musl, ios-asset]
     # Run as long as the build stage finished (not cancelled) — the allowed-to-fail
     # ARM lanes (armv7 cross, aarch64 musl) must not skip the release; it ships
-    # whatever built (x86_64 linux/mac/win + aarch64-linux-gnu native).
+    # whatever built (x86_64 linux/mac/win + aarch64-linux-gnu native). Same
+    # applies to ios-asset: a missing iOS artifact is loud (that job goes red)
+    # but never blocks the binaries.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -316,8 +423,25 @@ jobs:
           for dir in artifacts/ciris-server-*; do
             [ -d "$dir" ] || continue
             target=$(basename "$dir" | sed 's/ciris-server-//')
+            # The iOS artifact is ALREADY a packaged tarball (ci.yml's
+            # `ios-package` combined the device + simulator slices, and the
+            # client indexes into `ios-device/` / `ios-simulator/` inside it).
+            # Copy it through — re-taring would bury a .tar.gz inside a .tar.gz
+            # and rename it out of the contract. It still gets hashed into
+            # SHA256SUMS, cosign-signed and uploaded by the steps below, exactly
+            # like every binary asset.
+            if [ "$target" = "ios" ]; then
+              cp "$dir"/*.tar.gz release/
+              continue
+            fi
             tar -czvf "release/ciris-server-${{ github.ref_name }}-${target}.tar.gz" -C "$dir" .
           done
+          # The client's release-existence check greps `.assets[].name` for
+          # /ios/i and refuses to refresh when nothing matches — which is how
+          # this went unnoticed. Say so out loud when the asset is absent.
+          if ! ls release/*-ios.tar.gz >/dev/null 2>&1; then
+            echo "::warning::No iOS asset in this release — see the ios-asset job. CIRISAgent's refresh-ios-substrate.yml will skip CIRISServer until one is published."
+          fi
           cd release && sha256sum *.tar.gz > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
