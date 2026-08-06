@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Babu wani zagayen kwafi da ya ƙare a kan wannan process, don haka ba a gabatar da komai ga hanyar aiwatarwa ta wannan kumburi ba. Sifilin ba a gwada shi ba ne, ba mai tsabta ba.",
       "refusing": "Wannan kumburi ya ƙi layukan da takwarorinsa suka gabatar. `apply_refusals_by_kind` yana ambaton filin; `key_apply_refusals_by_reason` yana ambaton alamar manufar da ta ƙi maɓalli.",
-      "unreadable": "Ba a iya karanta masu ƙidayar aiwatarwa na wannan kumburi ba, don haka babu abin da ke nan da yake magana a kan abin da ya karɓa. Wannan ba «ba a ƙi komai ba» ba ne — «ba mu iya tambaya ba» ne."
+      "unreadable": "Ba a iya karanta masu ƙidayar aiwatarwa na wannan kumburi ba, don haka babu abin da ke nan da yake magana a kan abin da ya karɓa. Wannan ba «ba a ƙi komai ba» ba ne — «ba mu iya tambaya ba» ne.",
+      "applying": "An karɓi layukan da wani takwara ya gabatar a nan kuma sun canja yanayin wannan kumburi, kuma ba a ƙi ko ɗaya ba. `applied_by_kind` yana ambaton filayen da suka motsa; `duplicate_total` kusa da shi yana ƙidaya layukan da aka gabatar waɗanda wannan kumburi ya riga ya riƙe.",
+      "converged": "Takwarori sun gabatar da layuka kuma wannan kumburi ya riga ya riƙe kowanne ɗaya daga cikinsu, don haka babu yanayin da ya canja kuma ba a ƙi komai ba. Wannan anti-entropy ne a hutu — zirga-zirga na iso amma babu sauran abin da za a koya daga gare ta.",
+      "decided_denominator": "`decided_total` shi ne kowane layin da takwara ya gabatar wanda ya kai ga hukuncin aiwatarwa a nan: waɗanda aka aiwatar tare da waɗanda suka maimaita tare da waɗanda aka ƙi. Baitocin da wannan kumburi bai iya warwarewa ba ba sa kaiwa ga wani hukunci kuma ba a ƙidaya su ko'ina, don haka sun ɓace daga wannan jimlar maimakon a haɗa su cikinta.",
+      "idle": "Zagayen kwafi sun ƙare kuma babu wani takwara da ya gabatar wa wannan kumburi ko layi ɗaya: ba a aiwatar da komai ba, babu abin da aka riga aka riƙe, ba a ƙi komai ba. Takwarorinsa ba su da komai a gare shi, wanda ba abu ɗaya ba ne da cewa an aiwatar da duk abin da suka aika."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Ƙin aiwatarwa",
     "node_signals": "Alamun kumburi",
     "uncomputed": "Ba a iya lissafawa ba ({count})",
-    "sources_absent": "Tushen da ba su ba da gudummawar komai ba"
+    "sources_absent": "Tushen da ba su ba da gudummawar komai ba",
+    "applied": "An aiwatar",
+    "duplicates": "An riga an riƙe",
+    "decided": "Layukan da aka yanke hukunci"
   },
   "moderation": {
     "ladder": {

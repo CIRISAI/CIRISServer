@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Kò sí ìyípo àdàkọ tí ó ti parí lórí ìlànà yìí, nítorí náà a kò gbé ohunkóhun wá sí ọ̀nà ìfilélẹ̀ nódù yìí. Òdo náà jẹ́ èyí tí a kò dánwò, kì í ṣe èyí tí ó mọ́.",
       "refusing": "Nódù yìí kọ àwọn ìlà tí àwọn ẹlẹ́gbẹ́ rẹ̀ gbé wá. `apply_refusals_by_kind` ń dárúkọ pẹpẹ náà; `key_apply_refusals_by_reason` ń dárúkọ àmì-òfin tí ó kọ kọ́kọ́rọ́ kan.",
-      "unreadable": "A kò lè ka àwọn ìkànnì-ìkà ìfilélẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó gbà. Èyí KÌ Í ṢE 'a kò kọ ohunkóhun' — 'a kò lè béèrè' ni."
+      "unreadable": "A kò lè ka àwọn ìkànnì-ìkà ìfilélẹ̀ ti nódù yìí, nítorí náà kò sí ohun níbí tí ó jẹ́ ìtẹnumọ́ nípa ohun tí ó gbà. Èyí KÌ Í ṢE 'a kò kọ ohunkóhun' — 'a kò lè béèrè' ni.",
+      "applying": "A gba àwọn ìlà tí ẹlẹ́gbẹ́ kan gbé wá níbí, wọ́n sì yí ipò nódù yìí padà, a kò sì kọ ọ̀kankan. `applied_by_kind` ń dárúkọ àwọn pẹpẹ tí ó yí padà; lẹ́gbẹ̀ẹ́ rẹ̀, `duplicate_total` ń ka àwọn ìlà tí a gbé wá tí nódù yìí ti ní tẹ́lẹ̀.",
+      "converged": "Àwọn ẹlẹ́gbẹ́ gbé àwọn ìlà wá, nódù yìí sì ti ní gbogbo wọn tẹ́lẹ̀, nítorí náà kò sí ohun tí ó yí ipò padà, kò sì sí ohun tí a kọ̀. Èyí ni anti-entropy tí ó wà ní ìsinmi — ìṣàn ìbánisọ̀rọ̀ ń dé, kò sì sí ohun tí ó kù láti kọ́ nínú rẹ̀.",
+      "decided_denominator": "`decided_total` ni gbogbo ìlà tí ẹlẹ́gbẹ́ kan gbé wá tí ó dé ìpinnu ìfilélẹ̀ níbí: èyí tí a filélẹ̀ pọ̀ mọ́ èyí tí ó jẹ́ àdàkọ pọ̀ mọ́ èyí tí a kọ̀. Àwọn bytes tí nódù yìí kò lè túmọ̀ kò dé ìpinnu kankan, a kò sì kà wọ́n níbìkíbi, nítorí náà wọ́n kù nínú àpapọ̀ yìí dípò kí a kó wọn sínú rẹ̀.",
+      "idle": "Àwọn ìyípo àdàkọ parí, kò sì sí ẹlẹ́gbẹ́ kan tí ó gbé ìlà kan ṣoṣo wá fún nódù yìí: kò sí ohun tí a filélẹ̀, kò sí ohun tí ó ti wà tẹ́lẹ̀, kò sí ohun tí a kọ̀. Àwọn ẹlẹ́gbẹ́ rẹ̀ kò ní ohunkóhun fún un, èyí kì í sì í ṣe òtítọ́ kan náà pẹ̀lú pé a ti filélẹ̀ gbogbo ohun tí wọ́n rán."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Àwọn ìkọ̀ ìfilélẹ̀",
     "node_signals": "Àwọn àmì nódù",
     "uncomputed": "A kò lè ṣírò rẹ̀ ({count})",
-    "sources_absent": "Àwọn orísun tí kò pèsè ohunkóhun"
+    "sources_absent": "Àwọn orísun tí kò pèsè ohunkóhun",
+    "applied": "Èyí tí a filélẹ̀",
+    "duplicates": "Èyí tí ó ti wà tẹ́lẹ̀",
+    "decided": "Àwọn ìlà tí ó dé ìpinnu"
   },
   "moderation": {
     "ladder": {

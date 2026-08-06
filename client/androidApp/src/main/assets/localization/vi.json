@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Chưa có vòng nhân bản nào kết thúc trên tiến trình này, nên chưa có gì được đưa tới đường áp dụng của nút này. Số không này là chưa được thử, không phải là sạch.",
       "refusing": "Nút này đã từ chối các hàng mà đồng đẳng đưa tới. `apply_refusals_by_kind` nêu tên mặt phẳng; `key_apply_refusals_by_reason` nêu tên mã chính sách đã từ chối một khóa.",
-      "unreadable": "Không thể đọc các bộ đếm áp dụng của nút này, nên ở đây không có gì là khẳng định về những gì nó đã chấp nhận. Đây không phải là 'không có gì bị từ chối' — đây là 'chúng ta không hỏi được'."
+      "unreadable": "Không thể đọc các bộ đếm áp dụng của nút này, nên ở đây không có gì là khẳng định về những gì nó đã chấp nhận. Đây không phải là 'không có gì bị từ chối' — đây là 'chúng ta không hỏi được'.",
+      "applying": "Các hàng mà một đồng đẳng đưa tới đã được nhận vào đây và đã làm thay đổi trạng thái của nút này, và không hàng nào bị từ chối. `applied_by_kind` nêu tên các mặt phẳng đã thay đổi; bên cạnh nó, `duplicate_total` đếm những hàng được đưa tới mà nút này vốn đã có.",
+      "converged": "Các đồng đẳng đã đưa tới các hàng và nút này vốn đã có tất cả chúng, nên không có gì thay đổi trạng thái và không có gì bị từ chối. Đây là chống-entropy ở trạng thái nghỉ — lưu lượng vẫn đang đến và không còn gì để học từ nó nữa.",
+      "decided_denominator": "`decided_total` là mọi hàng do một đồng đẳng đưa tới mà đã đi đến một quyết định áp dụng ở đây: đã áp dụng cộng trùng lặp cộng bị từ chối. Những byte mà nút này không giải mã được thì không đi đến quyết định nào và không được đếm ở đâu cả, nên chúng thiếu khỏi tổng này chứ không được gộp vào trong đó.",
+      "idle": "Các vòng nhân bản đã kết thúc và không đồng đẳng nào đưa tới nút này dù chỉ một hàng: không có gì được áp dụng, không có gì vốn đã có, không có gì bị từ chối. Các đồng đẳng của nó không có gì cho nó, và đó không phải là cùng một sự việc với việc đã áp dụng mọi thứ chúng gửi."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Số lần từ chối áp dụng",
     "node_signals": "Tín hiệu của nút",
     "uncomputed": "Không tính được ({count})",
-    "sources_absent": "Các nguồn không đóng góp gì"
+    "sources_absent": "Các nguồn không đóng góp gì",
+    "applied": "Đã áp dụng",
+    "duplicates": "Vốn đã có",
+    "decided": "Số hàng đã được quyết định"
   },
   "moderation": {
     "ladder": {

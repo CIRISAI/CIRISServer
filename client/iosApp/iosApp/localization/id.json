@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Belum ada ronde replikasi yang selesai pada proses ini, sehingga belum ada apa pun yang ditawarkan ke jalur penerapan node ini. Nol ini belum teruji, bukan bersih.",
       "refusing": "Node ini menolak baris-baris yang ditawarkan para peer-nya. `apply_refusals_by_kind` menyebut bidangnya; `key_apply_refusals_by_reason` menyebut token kebijakan yang menolak sebuah kunci.",
-      "unreadable": "Penghitung penerapan node ini tidak dapat dibaca, sehingga tidak ada apa pun di sini yang merupakan pernyataan tentang apa yang diterimanya. Ini bukan 'tidak ada yang ditolak' — ini 'kami tidak dapat menanyakannya'."
+      "unreadable": "Penghitung penerapan node ini tidak dapat dibaca, sehingga tidak ada apa pun di sini yang merupakan pernyataan tentang apa yang diterimanya. Ini bukan 'tidak ada yang ditolak' — ini 'kami tidak dapat menanyakannya'.",
+      "applying": "Baris-baris yang ditawarkan peer diterima di sini dan mengubah keadaan node ini, dan tidak ada satu pun yang ditolak. `applied_by_kind` menyebut bidang-bidang yang berubah; di sebelahnya `duplicate_total` menghitung baris yang ditawarkan yang memang sudah dipegang node ini.",
+      "converged": "Para peer menawarkan baris dan node ini sudah memegang setiap satu di antaranya, sehingga tidak ada yang berubah keadaannya dan tidak ada yang ditolak. Inilah anti-entropi dalam keadaan diam — lalu lintas tetap berdatangan dan tidak ada lagi yang bisa dipelajari darinya.",
+      "decided_denominator": "`decided_total` adalah setiap baris yang ditawarkan peer dan mencapai keputusan penerapan di sini: diterapkan ditambah duplikat ditambah ditolak. Byte yang tidak dapat didekode node ini tidak mencapai keputusan apa pun dan tidak dihitung di mana pun, sehingga byte itu absen dari total ini, bukan dilebur ke dalamnya.",
+      "idle": "Ronde replikasi selesai dan tidak ada peer yang menawarkan satu baris pun kepada node ini: tidak ada yang diterapkan, tidak ada yang terhitung sudah dipegang, tidak ada yang ditolak. Para peer-nya memang tidak punya apa pun untuknya, dan itu bukan fakta yang sama dengan telah menerapkan semua yang mereka kirim."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Penolakan penerapan",
     "node_signals": "Sinyal node",
     "uncomputed": "Tidak dapat dihitung ({count})",
-    "sources_absent": "Sumber yang tidak menyumbang apa pun"
+    "sources_absent": "Sumber yang tidak menyumbang apa pun",
+    "applied": "Diterapkan",
+    "duplicates": "Sudah dipegang",
+    "decided": "Baris yang mencapai keputusan"
   },
   "moderation": {
     "ladder": {

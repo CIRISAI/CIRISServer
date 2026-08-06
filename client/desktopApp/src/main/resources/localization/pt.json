@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Nenhuma rodada de replicação foi concluída neste processo, portanto nada foi oferecido ao caminho de aplicação deste nó. O zero é não testado, não limpo.",
       "refusing": "Este nó recusou linhas que seus pares ofereceram. `apply_refusals_by_kind` nomeia o plano; `key_apply_refusals_by_reason` nomeia o token de política que recusou uma chave.",
-      "unreadable": "Os contadores de aplicação deste nó não puderam ser lidos, portanto nada aqui é uma afirmação sobre o que ele aceitou. Isto não é 'nada foi recusado' — é 'não conseguimos perguntar'."
+      "unreadable": "Os contadores de aplicação deste nó não puderam ser lidos, portanto nada aqui é uma afirmação sobre o que ele aceitou. Isto não é 'nada foi recusado' — é 'não conseguimos perguntar'.",
+      "applying": "Linhas oferecidas por um par foram admitidas aqui e mudaram o estado deste nó, e nenhuma foi recusada. `applied_by_kind` nomeia os planos que se moveram; `duplicate_total` ao lado conta as linhas oferecidas que este nó já possuía.",
+      "converged": "Os pares ofereceram linhas e este nó já possuía todas elas, portanto nada mudou de estado e nada foi recusado. Isto é antientropia em repouso — o tráfego está chegando e não resta mais nada a aprender com ele.",
+      "decided_denominator": "`decided_total` é toda linha oferecida por um par que chegou a uma decisão de aplicação aqui: aplicadas mais duplicadas mais recusadas. Os bytes que este nó não conseguiu decodificar não chegam a decisão alguma e não são contados em lugar nenhum, portanto estão ausentes deste total em vez de incluídos nele.",
+      "idle": "As rodadas de replicação foram concluídas e nenhum par ofereceu a este nó uma única linha: nada foi aplicado, nada já era possuído, nada foi recusado. Seus pares não tinham nada para ele, o que não é o mesmo fato que ter aplicado tudo o que enviaram."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Recusas de aplicação",
     "node_signals": "Sinais do nó",
     "uncomputed": "Não foi possível calcular ({count})",
-    "sources_absent": "Fontes que não contribuíram com nada"
+    "sources_absent": "Fontes que não contribuíram com nada",
+    "applied": "Aplicadas",
+    "duplicates": "Já possuídas",
+    "decided": "Linhas decididas"
   },
   "moderation": {
     "ladder": {

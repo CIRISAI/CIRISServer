@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Nessun ciclo di replica si è concluso in questo processo, quindi nulla è stato offerto al percorso di applicazione di questo nodo. Quello zero non è pulito: non è mai stato messo alla prova.",
       "refusing": "Questo nodo ha rifiutato righe offerte dai suoi peer. `apply_refusals_by_kind` indica il piano; `key_apply_refusals_by_reason` indica il token di policy che ha rifiutato una chiave.",
-      "unreadable": "Non è stato possibile leggere i contatori di applicazione di questo nodo, quindi nulla qui è un'affermazione su ciò che ha accettato. Questo non significa «non è stato rifiutato nulla» — significa «non è stato possibile chiedere»."
+      "unreadable": "Non è stato possibile leggere i contatori di applicazione di questo nodo, quindi nulla qui è un'affermazione su ciò che ha accettato. Questo non significa «non è stato rifiutato nulla» — significa «non è stato possibile chiedere».",
+      "applying": "Le righe offerte da un peer sono state ammesse qui e hanno cambiato lo stato di questo nodo, e nessuna è stata rifiutata. `applied_by_kind` indica i piani che si sono mossi; accanto, `duplicate_total` conta le righe offerte che questo nodo già deteneva.",
+      "converged": "I peer hanno offerto righe e questo nodo le deteneva già tutte, quindi nulla ha cambiato stato e nulla è stato rifiutato. È anti-entropia a riposo — il traffico continua ad arrivare e non c'è più nulla da imparare da esso.",
+      "decided_denominator": "`decided_total` è ogni riga offerta da un peer che qui è arrivata a una decisione di applicazione: applicate più duplicate più rifiutate. I byte che questo nodo non ha potuto decodificare non arrivano ad alcuna decisione e non vengono conteggiati da nessuna parte, quindi mancano da questo totale invece di esservi inglobati.",
+      "idle": "I cicli di replica si sono conclusi e nessun peer ha offerto a questo nodo una sola riga: nulla è stato applicato, nulla risultava già detenuto, nulla è stato rifiutato. I suoi peer non avevano nulla per lui, il che non è lo stesso fatto dell'aver applicato tutto ciò che hanno inviato."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Rifiuti di applicazione",
     "node_signals": "Segnali del nodo",
     "uncomputed": "Non è stato possibile calcolare ({count})",
-    "sources_absent": "Fonti che non hanno contribuito nulla"
+    "sources_absent": "Fonti che non hanno contribuito nulla",
+    "applied": "Applicate",
+    "duplicates": "Già detenute",
+    "decided": "Righe giunte a decisione"
   },
   "moderation": {
     "ladder": {

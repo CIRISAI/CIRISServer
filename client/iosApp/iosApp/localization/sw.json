@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Hakuna raundi ya unakili iliyokamilika kwenye mchakato huu, hivyo hakuna kilichotolewa kwa njia ya utekelezaji ya nodi hii. Sifuri hii haijajaribiwa, si safi.",
       "refusing": "Nodi hii ilikataa safu ambazo wenza wake walizitoa. `apply_refusals_by_kind` hutaja uwanda; `key_apply_refusals_by_reason` hutaja tokeni ya sera iliyokataa ufunguo.",
-      "unreadable": "Vihesabu vya utekelezaji vya nodi hii havikuweza kusomwa, hivyo hakuna kitu hapa kinachoeleza kile ilichokikubali. Hii si 'hakuna kilichokataliwa' — ni 'hatukuweza kuuliza'."
+      "unreadable": "Vihesabu vya utekelezaji vya nodi hii havikuweza kusomwa, hivyo hakuna kitu hapa kinachoeleza kile ilichokikubali. Hii si 'hakuna kilichokataliwa' — ni 'hatukuweza kuuliza'.",
+      "applying": "Safu ambazo mwenza alizitoa zilikubaliwa hapa na zikabadilisha hali ya nodi hii, na hakuna iliyokataliwa. `applied_by_kind` hutaja nyanda zilizosonga; `duplicate_total` iliyo kando yake huhesabu safu zilizotolewa ambazo nodi hii ilikuwa tayari inazishikilia.",
+      "converged": "Wenza walitoa safu na nodi hii ilikuwa tayari inashikilia kila moja kati yazo, hivyo hakuna kilichobadilisha hali na hakuna kilichokataliwa. Hii ni kupinga-entropia katika hali ya utulivu — trafiki inawasili na hakuna kilichobaki cha kujifunza kutoka kwake.",
+      "decided_denominator": "`decided_total` ni kila safu ambayo mwenza aliitoa na ikafikia uamuzi wa utekelezaji hapa: zilizotekelezwa pamoja na nakala pamoja na zilizokataliwa. Baiti ambazo nodi hii haikuweza kuzisimbua hazifikii uamuzi wowote na hazihesabiwi popote, hivyo hazipo kwenye jumla hii badala ya kujumuishwa ndani yake.",
+      "idle": "Raundi za unakili zilikamilika na hakuna mwenza aliyeipa nodi hii hata safu moja: hakuna kilichotekelezwa, hakuna kilichokuwa tayari kimeshikiliwa, hakuna kilichokataliwa. Wenza wake hawakuwa na chochote kwa ajili yake, jambo ambalo si sawa na kuwa imetekeleza kila kitu walichotuma."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Vikataa vya utekelezaji",
     "node_signals": "Ishara za nodi",
     "uncomputed": "Havikuweza kukokotolewa ({count})",
-    "sources_absent": "Vyanzo ambavyo havikuchangia chochote"
+    "sources_absent": "Vyanzo ambavyo havikuchangia chochote",
+    "applied": "Zilizotekelezwa",
+    "duplicates": "Tayari zilishikiliwa",
+    "decided": "Safu zilizoamuliwa"
   },
   "moderation": {
     "ladder": {

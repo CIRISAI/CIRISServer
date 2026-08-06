@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "In diesem Prozess ist keine Replikationsrunde abgeschlossen worden, dem Anwendungspfad dieses Knotens wurde also nichts angeboten. Die Null ist ungeprüft, nicht sauber.",
       "refusing": "Dieser Knoten hat Zeilen abgelehnt, die seine Peers angeboten haben. `apply_refusals_by_kind` benennt die Ebene; `key_apply_refusals_by_reason` benennt das Richtlinien-Token, das einen Schlüssel abgelehnt hat.",
-      "unreadable": "Die Anwendungszähler dieses Knotens konnten nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er angenommen hat. Das heißt nicht „nichts wurde abgelehnt“ — es heißt „wir konnten nicht fragen“."
+      "unreadable": "Die Anwendungszähler dieses Knotens konnten nicht gelesen werden, daher ist hier nichts eine Aussage darüber, was er angenommen hat. Das heißt nicht „nichts wurde abgelehnt“ — es heißt „wir konnten nicht fragen“.",
+      "applying": "Zeilen, die ein Peer angeboten hat, wurden hier zugelassen und haben den Zustand dieses Knotens verändert, und keine wurde abgelehnt. `applied_by_kind` benennt die Ebenen, die sich bewegt haben; `duplicate_total` daneben zählt die angebotenen Zeilen, die dieser Knoten bereits hielt.",
+      "converged": "Peers haben Zeilen angeboten, und dieser Knoten hielt bereits jede einzelne davon; deshalb hat sich kein Zustand geändert und nichts wurde abgelehnt. Das ist Anti-Entropie im Ruhezustand — es kommt Verkehr an, und daraus ist nichts mehr zu lernen.",
+      "decided_denominator": "`decided_total` ist jede von einem Peer angebotene Zeile, die hier zu einer Anwendungsentscheidung gelangt ist: angewendet plus Duplikat plus abgelehnt. Bytes, die dieser Knoten nicht dekodieren konnte, gelangen zu keiner Entscheidung und werden nirgends gezählt; sie fehlen daher in dieser Summe, statt in ihr aufzugehen.",
+      "idle": "Replikationsrunden sind abgeschlossen, und kein Peer hat diesem Knoten auch nur eine einzige Zeile angeboten: Es wurde nichts angewendet, nichts war bereits vorhanden, nichts wurde abgelehnt. Seine Peers hatten nichts für ihn — das ist eine andere Tatsache, als alles angewendet zu haben, was sie geschickt haben."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Anwendungs-Ablehnungen",
     "node_signals": "Knotensignale",
     "uncomputed": "Nicht berechenbar ({count})",
-    "sources_absent": "Quellen, die nichts beigetragen haben"
+    "sources_absent": "Quellen, die nichts beigetragen haben",
+    "applied": "Angewendet",
+    "duplicates": "Bereits vorhanden",
+    "decided": "Entschiedene Zeilen"
   },
   "moderation": {
     "ladder": {

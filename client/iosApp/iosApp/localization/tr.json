@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Bu süreçte hiçbir çoğaltma turu tamamlanmadı; dolayısıyla bu düğümün uygulama yoluna hiçbir şey sunulmadı. Bu sıfır temiz değil, sınanmamıştır.",
       "refusing": "Bu düğüm, eşlerinin sunduğu satırları reddetti. `apply_refusals_by_kind` düzlemi, `key_apply_refusals_by_reason` ise bir anahtarı reddeden politika jetonunu adlandırır.",
-      "unreadable": "Bu düğümün uygulama sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğine dair bir beyan değildir. Bu 'hiçbir şey reddedilmedi' değildir — 'soramadık' demektir."
+      "unreadable": "Bu düğümün uygulama sayaçları okunamadı; dolayısıyla buradaki hiçbir şey, onun neyi kabul ettiğine dair bir beyan değildir. Bu 'hiçbir şey reddedilmedi' değildir — 'soramadık' demektir.",
+      "applying": "Bir eşin sunduğu satırlar burada kabul edildi ve bu düğümün durumunu değiştirdi; hiçbiri reddedilmedi. `applied_by_kind` hareket eden düzlemleri adlandırır; yanındaki `duplicate_total` ise sunulan satırlardan bu düğümün zaten tuttuklarını sayar.",
+      "converged": "Eşler satır sundu ve bu düğüm bunların her birini zaten tutuyordu; dolayısıyla hiçbir durum değişmedi ve hiçbiri reddedilmedi. Bu, durağan hâldeki anti-entropidir — trafik gelmeye devam ediyor ve ondan öğrenilecek bir şey kalmadı.",
+      "decided_denominator": "`decided_total`, bir eşin sunduğu ve burada bir uygulama kararına ulaşan her satırdır: uygulananlar artı zaten tutulanlar artı reddedilenler. Bu düğümün çözemediği baytlar hiçbir karara ulaşmaz ve hiçbir yerde sayılmaz; dolayısıyla bu toplamın içine katılmış değil, ondan eksiktirler.",
+      "idle": "Çoğaltma turları tamamlandı ve hiçbir eş bu düğüme tek bir satır bile sunmadı: hiçbir şey uygulanmadı, zaten tutulan hiçbir şey olmadı, hiçbir şey reddedilmedi. Eşlerinin ona verecek bir şeyi yoktu; bu, onların gönderdiği her şeyin uygulanmış olmasıyla aynı olgu değildir."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Uygulama redleri",
     "node_signals": "Düğüm sinyalleri",
     "uncomputed": "Hesaplanamadı ({count})",
-    "sources_absent": "Hiçbir katkı sunmayan kaynaklar"
+    "sources_absent": "Hiçbir katkı sunmayan kaynaklar",
+    "applied": "Uygulanan",
+    "duplicates": "Zaten tutulan",
+    "decided": "Karara bağlanan satır"
   },
   "moderation": {
     "ladder": {

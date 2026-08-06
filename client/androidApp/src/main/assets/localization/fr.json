@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Aucun cycle de réplication ne s'est achevé sur ce processus : rien n'a donc été proposé au chemin d'application de ce nœud. Ce zéro est non éprouvé, et non pas sain.",
       "refusing": "Ce nœud a refusé des lignes proposées par ses pairs. `apply_refusals_by_kind` nomme le plan ; `key_apply_refusals_by_reason` nomme le jeton de politique qui a refusé une clé.",
-      "unreadable": "Les compteurs d'application de ce nœud n'ont pas pu être lus : rien ici n'est donc un énoncé sur ce qu'il a accepté. Ce n'est pas « rien n'a été refusé » — c'est « nous n'avons pas pu poser la question »."
+      "unreadable": "Les compteurs d'application de ce nœud n'ont pas pu être lus : rien ici n'est donc un énoncé sur ce qu'il a accepté. Ce n'est pas « rien n'a été refusé » — c'est « nous n'avons pas pu poser la question ».",
+      "applying": "Des lignes proposées par un pair ont été admises ici et ont changé l'état de ce nœud, et aucune n'a été refusée. `applied_by_kind` nomme les plans qui ont bougé ; `duplicate_total`, à côté, compte les lignes proposées que ce nœud détenait déjà.",
+      "converged": "Des pairs ont proposé des lignes et ce nœud les détenait déjà toutes, si bien que rien n'a changé d'état et que rien n'a été refusé. C'est l'anti-entropie au repos — du trafic arrive et il n'y a plus rien à en apprendre.",
+      "decided_denominator": "`decided_total`, c'est toute ligne proposée par un pair qui a abouti ici à une décision d'application : appliquées plus doublons plus refusées. Les octets que ce nœud n'a pas pu décoder n'aboutissent à aucune décision et ne sont comptés nulle part : ils manquent donc à ce total au lieu d'y être intégrés.",
+      "idle": "Des cycles de réplication se sont achevés et aucun pair n'a proposé à ce nœud la moindre ligne : rien n'a été appliqué, rien n'était déjà détenu, rien n'a été refusé. Ses pairs n'avaient rien pour lui, ce qui n'est pas le même fait qu'avoir appliqué tout ce qu'ils ont envoyé."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Refus d'application",
     "node_signals": "Signaux du nœud",
     "uncomputed": "N'a pas pu être calculé ({count})",
-    "sources_absent": "Sources n'ayant rien apporté"
+    "sources_absent": "Sources n'ayant rien apporté",
+    "applied": "Appliquées",
+    "duplicates": "Déjà détenues",
+    "decided": "Lignes décidées"
   },
   "moderation": {
     "ladder": {

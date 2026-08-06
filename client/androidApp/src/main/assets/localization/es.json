@@ -3523,7 +3523,11 @@
     "receive": {
       "not_exercised": "Ninguna ronda de replicación ha terminado en este proceso, así que no se ha ofrecido nada a la ruta de aplicación de este nodo. El cero está sin probar, no limpio.",
       "refusing": "Este nodo rechazó filas que le ofrecieron sus pares. `apply_refusals_by_kind` nombra el plano; `key_apply_refusals_by_reason` nombra el token de política que rechazó una clave.",
-      "unreadable": "No se pudieron leer los contadores de aplicación de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que aceptó. Esto no es «no se rechazó nada» — es «no pudimos preguntar»."
+      "unreadable": "No se pudieron leer los contadores de aplicación de este nodo, así que nada de lo que hay aquí es una afirmación sobre lo que aceptó. Esto no es «no se rechazó nada» — es «no pudimos preguntar».",
+      "applying": "Filas que ofreció un par fueron admitidas aquí y cambiaron el estado de este nodo, y ninguna fue rechazada. `applied_by_kind` nombra los planos que se movieron; `duplicate_total`, junto a él, cuenta las filas ofrecidas que este nodo ya tenía.",
+      "converged": "Los pares ofrecieron filas y este nodo ya tenía todas y cada una de ellas, así que nada cambió de estado y nada fue rechazado. Esto es antientropía en reposo — está llegando tráfico y ya no queda nada que aprender de él.",
+      "decided_denominator": "`decided_total` es toda fila ofrecida por un par que aquí llegó a una decisión de aplicación: aplicadas más duplicadas más rechazadas. Los bytes que este nodo no pudo descodificar no llegan a ninguna decisión y no se cuentan en ninguna parte, así que faltan en este total en lugar de estar incluidos en él.",
+      "idle": "Las rondas de replicación terminaron y ningún par ofreció a este nodo ni una sola fila: no se aplicó nada, nada se tenía ya, nada fue rechazado. Sus pares no tenían nada para él, lo cual no es el mismo hecho que haber aplicado todo lo que enviaron."
     },
     "source": {
       "edge_metrics": {
@@ -3607,7 +3611,10 @@
     "apply_refusals": "Rechazos al aplicar",
     "node_signals": "Señales del nodo",
     "uncomputed": "No se pudo calcular ({count})",
-    "sources_absent": "Fuentes que no aportaron nada"
+    "sources_absent": "Fuentes que no aportaron nada",
+    "applied": "Aplicadas",
+    "duplicates": "Ya se tenían",
+    "decided": "Filas decididas"
   },
   "moderation": {
     "ladder": {
