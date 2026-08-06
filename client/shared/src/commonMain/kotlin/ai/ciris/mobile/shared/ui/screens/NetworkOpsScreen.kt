@@ -150,7 +150,11 @@ private fun OpsPathRow(label: String, value: String, testTag: String) {
 @Composable
 private fun OpsRow(label: String, value: String, testTag: String, mono: Boolean = false) {
     Row(
-        modifier = Modifier.fillMaxWidth().testable(testTag),
+        // The VALUE is published to the automation tree, not just the row's
+        // existence: "a mode row rendered" is true whether it shows a real
+        // reading or a ViewModel default, and telling those apart is the whole
+        // point of walking this surface.
+        modifier = Modifier.fillMaxWidth().testable(testTag, value),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {

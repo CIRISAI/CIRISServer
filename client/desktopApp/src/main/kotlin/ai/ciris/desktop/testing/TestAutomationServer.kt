@@ -90,6 +90,33 @@ class TestAutomationServer(
     // AWT Robot for screen capture (lazy init)
     private val robot: Robot by lazy { Robot() }
 
+    /**
+     * Bring the app window to the front and let the compositor settle.
+     *
+     * `Robot.createScreenCapture` grabs a REGION OF THE SCREEN, not the window's
+     * own buffer — so whatever is stacked above the app is what lands in the
+     * PNG. Before this, `/screenshot` could return a pixel-perfect capture of
+     * somebody else's terminal while reporting `success: true`, which makes it
+     * worse than no screenshot at all: a green automation run with evidence
+     * attached that is not evidence of the app. Raising here keeps the endpoint
+     * self-sufficient, so a walk-test needs no external window manager tooling.
+     */
+    private fun raiseWindow() {
+        val w = awtWindow ?: return
+        runCatching {
+            javax.swing.SwingUtilities.invokeAndWait {
+                w.toFront()
+                w.requestFocus()
+                (w as? java.awt.Frame)?.let { f ->
+                    if (f.state == java.awt.Frame.ICONIFIED) f.state = java.awt.Frame.NORMAL
+                }
+            }
+            // The WM raise is asynchronous to the AWT call; without a settle the
+            // capture can still catch the previous stacking order.
+            Thread.sleep(450)
+        }
+    }
+
     // Callback for navigation requests
     var onNavigationRequest: ((String) -> Unit)? = null
 
@@ -563,6 +590,7 @@ class TestAutomationServer(
                     }
 
                     try {
+                        raiseWindow()
                         val bounds = window.bounds
                         val screenRect = Rectangle(bounds.x, bounds.y, bounds.width, bounds.height)
                         val image = robot.createScreenCapture(screenRect)
@@ -613,6 +641,7 @@ class TestAutomationServer(
 
                     try {
                         val request = call.receive<ScreenshotRequest>()
+                        raiseWindow()
                         val bounds = window.bounds
                         val screenRect = Rectangle(bounds.x, bounds.y, bounds.width, bounds.height)
                         val image = robot.createScreenCapture(screenRect)

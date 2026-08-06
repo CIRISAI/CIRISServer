@@ -24304,10 +24304,7 @@
         "required": [
           "status",
           "version",
-          "uptime_seconds",
-          "services",
-          "initialization_complete",
-          "timestamp"
+          "services"
         ],
         "title": "SystemHealthResponse",
         "description": "Overall system health status."

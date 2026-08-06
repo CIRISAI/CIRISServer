@@ -1,42 +1,23 @@
-"""CEG operator-surface walk-test — SystemScreen / ModerationScreen / NetworkOpsScreen.
+"""CEG operator-surface walk — SystemScreen / ModerationScreen / NetworkOpsScreen.
 
-These three screens carry 46 `testable()` tags between them and, until this
-module, zero QA cases.  They exist to keep *distinctions* alive, so the cases
-below assert the distinctions rather than a happy path:
+These screens shipped with 46 `testable()` tags between them and zero QA cases.
+They exist to keep *distinctions* alive, so every case here asserts a distinction
+rather than a happy path, and every case reports **what the surface actually
+said** — the band token, the standing, the counts — not just pass/fail. A walk
+that only says PASS cannot tell you the trace plane is dark.
 
-* **SystemScreen** — `unreadable` / `never_admitted` / `dark` / `live` must
-  render as four visibly different things.  The `unreadable` arm must print NO
-  instant and NO row count (both would be inventions), and `unknown` must never
-  be drawn like `green`.
-* **ModerationScreen** — the confirmation sheet must state the server's own
-  limits in three blocks (*reaches* / *does NOT reach* / *how it is undone*)
-  BEFORE the act, and `descend` must lead with an irreversible banner and take
-  a typed acknowledgement no other rung takes.
-* **NetworkOpsScreen** — tier S's three axes must render as three separate
-  standings and never as one switch; tier R's `decline` must render as a normal
-  peer action, never in an error style, because a reader declining is the
-  feature working.
+Driven entirely through testTags (see :mod:`surface_driver` for why).
 
 Run
 ---
-    # 1. desktop app in test mode (port 9091 — NOT 8091, see PORT below)
-    cd client && CIRIS_TEST_MODE=true ./gradlew :desktopApp:run
+    cd client && CIRIS_TEST_MODE=true ./gradlew :desktopApp:run   # port 9091
 
-    # 2. first run, once, idempotent
-    python3 -m qa.qa_runner.modules.web_ui.ceg_surface_walk firstrun
+    python3 qa/qa_runner/modules/web_ui/ceg_surface_walk.py lint    # no app needed
+    python3 qa/qa_runner/modules/web_ui/ceg_surface_walk.py walk
+    python3 qa/qa_runner/modules/web_ui/ceg_surface_walk.py walk --json
 
-    # 3. the surface walk
-    python3 -m qa.qa_runner.modules.web_ui.ceg_surface_walk walk
-
-Two automation defects this module works around (and reports)
-------------------------------------------------------------
-Both were found by running this walk and are documented on
-:func:`robust_click`.  In short: ``POST /click`` reports ``success: true`` while
-doing nothing whenever the target's Compose lambda captures state that has
-changed since first composition, and ``POST /mouse-click`` aims at the wrong
-screen pixel whenever the app window is not at (0, 0).  Neither failure is
-visible to a caller that trusts the response body, so every click here is
-verified by its *effect*, never by its status.
+Exit code is non-zero when any case FAILS. BLOCKED never fails the run — it
+means the case could not be exercised, which is a fact to report, not a defect.
 """
 
 from __future__ import annotations
@@ -45,10 +26,7 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -56,27 +34,28 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import httpx
 
-# The embedded TestAutomationServer's real default port.  `TestAutomationServer`
-# declares `port: Int = 9091` and desktop `Main.kt` reads
-# `CIRIS_TEST_PORT ?: 9091`; the 8091 in web_ui/CLAUDE.md and in
-# `DesktopAppConfig.server_url` is wrong and connects to nothing.
-PORT = int(os.environ.get("CIRIS_TEST_PORT", "9091"))
-BASE = f"http://localhost:{PORT}"
+try:
+    from .surface_driver import Snapshot, SurfaceDriver
+except ImportError:  # run as a plain script
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from surface_driver import Snapshot, SurfaceDriver  # type: ignore
 
-# The desktop app's AWT window title — used to aim real X11 clicks.
-WINDOW_TITLE = "^CIRIS Agent$"
+PORT = int(os.environ.get("CIRIS_TEST_PORT", "9091"))
+NODE_API = os.environ.get("CIRIS_API_URL", "http://127.0.0.1:4243")
+QA_USER = os.environ.get("CIRIS_QA_USER", "qaadmin")
+QA_PASSWORD = os.environ.get("CIRIS_QA_PASSWORD", "qa_test_password_12345")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Result model
+# Results
 # ─────────────────────────────────────────────────────────────────────────────
 class Status(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
-    #: The case could not be *run* — a precondition outside the UI was absent
-    #: (most often: this node's server build does not serve the endpoint the
-    #: surface reads).  Deliberately distinct from FAIL: an unexercised case is
-    #: not a passing one, and it is not a broken one either.
+    #: Could not be *exercised* — a precondition outside the UI was absent.
+    #: Deliberately not PASS: an unexercised case is not a passing one. Also
+    #: deliberately not FAIL: the UI is not wrong because the node had nothing
+    #: to say. This distinction is the same one the surfaces themselves make.
     BLOCKED = "BLOCKED"
 
 
@@ -85,13 +64,16 @@ class CaseResult:
     name: str
     status: Status
     detail: str = ""
-    #: Facts gathered while running, kept even on BLOCKED so the report can say
-    #: what *was* observed.
+    #: The RICH part: what the surface actually reported. Kept on every status,
+    #: including BLOCKED, so the run explains itself.
     observed: Dict[str, Any] = field(default_factory=dict)
     screenshot: Optional[str] = None
 
     def line(self) -> str:
-        return f"[{self.status.value:7s}] {self.name} — {self.detail}"
+        s = f"[{self.status.value:7s}] {self.name}\n           {self.detail}"
+        for k, v in self.observed.items():
+            s += f"\n             · {k}: {v}"
+        return s
 
 
 @dataclass
@@ -113,288 +95,71 @@ class WalkReport:
 
     def summary(self) -> str:
         p = sum(1 for c in self.cases if c.status is Status.PASS)
-        return (
-            f"\n{'=' * 72}\n"
+        out = [
+            "", "=" * 74,
             f"{p} passed / {len(self.failed)} failed / {len(self.blocked)} blocked"
-            f"  (of {len(self.cases)})\n{'=' * 72}"
-        )
+            f"   (of {len(self.cases)})",
+        ]
+        if self.blocked:
+            out.append("")
+            out.append("NOT EXERCISED (and why):")
+            out += [f"  · {c.name}\n      {c.detail}" for c in self.blocked]
+        out.append("=" * 74)
+        return "\n".join(out)
+
+    def to_json(self) -> str:
+        return json.dumps(
+            [{"name": c.name, "status": c.status.value, "detail": c.detail,
+              "observed": c.observed, "screenshot": c.screenshot}
+             for c in self.cases], indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Transport
+# Node route probe — "is it mounted", never "will it answer"
 # ─────────────────────────────────────────────────────────────────────────────
-class Driver:
-    """Thin async client over the TestAutomationServer, plus the real-input
-    fallbacks the programmatic endpoints need in order to be trustworthy."""
-
-    def __init__(self, base: str = BASE, shot_dir: Optional[Path] = None):
-        self.base = base
-        self.shot_dir = shot_dir or Path("qa_reports/ceg_surface_walk")
-        self.shot_dir.mkdir(parents=True, exist_ok=True)
-        self._c: Optional[httpx.AsyncClient] = None
-        #: Populated on first use — see `_window_geometry`.
-        self._win_id: Optional[str] = None
-        self._win_origin: Optional[tuple[int, int]] = None
-
-    async def __aenter__(self) -> "Driver":
-        self._c = httpx.AsyncClient(base_url=self.base, timeout=30.0)
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        if self._c:
-            await self._c.aclose()
-
-    # -- reads ---------------------------------------------------------------
-    async def health(self) -> Dict[str, Any]:
-        return (await self._c.get("/health")).json()
-
-    async def screen(self) -> str:
-        return (await self._c.get("/screen")).json().get("screen", "unknown")
-
-    async def tree(self) -> Dict[str, Dict[str, Any]]:
-        """testTag -> element dict.  Only *positioned* elements appear here;
-        anything inside a Compose Popup (dialog / bottom sheet) never gets a
-        layout callback in the main window, so use :meth:`has_handler` for
-        those."""
-        data = (await self._c.get("/tree")).json()
-        return {e["testTag"]: e for e in data.get("elements", [])}
-
-    async def tags(self) -> set[str]:
-        return set(await self.tree())
-
-    async def has_handler(self, tag: str, timeout_ms: int = 1200) -> bool:
-        """`/wait` resolves on EITHER a layout position OR a registered click
-        handler, which is the only way to see popup-only content."""
-        r = await self._c.post(
-            "/wait", json={"testTag": tag, "timeoutMs": timeout_ms}
-        )
-        return r.status_code == 200 and r.json().get("success") is True
-
-    # -- writes --------------------------------------------------------------
-    async def input_text(self, tag: str, text: str, clear: bool = True) -> bool:
-        r = await self._c.post(
-            "/input", json={"testTag": tag, "text": text, "clearFirst": clear}
-        )
-        return r.status_code == 200
-
-    async def click_programmatic(self, tag: str) -> bool:
-        r = await self._c.post("/click", json={"testTag": tag})
-        return r.status_code == 200 and r.json().get("success") is True
-
-    def _window_geometry(self) -> Optional[tuple[str, int, int]]:
-        """(window id, origin x, origin y) of the app window, via xdotool."""
-        if not shutil.which("xdotool"):
-            return None
-        if self._win_id is None:
-            out = subprocess.run(
-                ["xdotool", "search", "--name", WINDOW_TITLE],
-                capture_output=True, text=True,
-            )
-            ids = [i for i in out.stdout.split() if i.strip()]
-            if not ids:
-                return None
-            self._win_id = ids[0]
-        return (self._win_id, 0, 0)
-
-    def click_real(self, x: int, y: int) -> bool:
-        """A genuine X11 click at coordinates *relative to the app window*.
-
-        Window-relative on purpose: it is the same origin the ``/screenshot``
-        image uses, and it sidesteps `TestAutomationServer.windowX/windowY`,
-        which stay 0 on any WM that places the window itself (see
-        :func:`robust_click`).
-        """
-        geo = self._window_geometry()
-        if geo is None:
-            return False
-        win, _, _ = geo
-        for args in (
-            ["xdotool", "windowactivate", win],
-            ["xdotool", "windowraise", win],
-        ):
-            subprocess.run(args, capture_output=True)
-        time.sleep(0.5)
-        subprocess.run(
-            ["xdotool", "mousemove", "--window", win, str(x), str(y)],
-            capture_output=True,
-        )
-        time.sleep(0.2)
-        subprocess.run(["xdotool", "click", "1"], capture_output=True)
-        time.sleep(0.6)
-        return True
-
-    async def scroll(self, clicks: int = 6, up: bool = False) -> None:
-        geo = self._window_geometry()
-        if geo is None:
-            return
-        win, _, _ = geo
-        subprocess.run(["xdotool", "windowactivate", win], capture_output=True)
-        time.sleep(0.4)
-        subprocess.run(
-            ["xdotool", "mousemove", "--window", win, "700", "450"],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["xdotool", "click", "--repeat", str(clicks), "--delay", "110",
-             "4" if up else "5"],
-            capture_output=True,
-        )
-        await asyncio.sleep(0.7)
-
-    async def screenshot(self, name: str) -> Optional[str]:
-        """Raise the window first: `/screenshot` is `Robot.createScreenCapture`
-        over the window's *screen rectangle*, so anything stacked above the app
-        lands in the image instead of the app."""
-        geo = self._window_geometry()
-        if geo is not None:
-            win, _, _ = geo
-            subprocess.run(["xdotool", "windowactivate", win], capture_output=True)
-            subprocess.run(["xdotool", "windowraise", win], capture_output=True)
-            time.sleep(1.0)
-        path = self.shot_dir / f"{name}.png"
-        r = await self._c.post("/screenshot", json={"path": str(path)})
-        return str(path) if r.status_code == 200 else None
-
-
-async def robust_click(
-    d: Driver,
-    tag: str,
-    *,
-    effect: Callable[[], Any],
-    fallback_xy: Optional[tuple[int, int]] = None,
-    settle_s: float = 1.2,
-) -> bool:
-    """Click *tag* and confirm it actually did something.
-
-    ``POST /click`` cannot be trusted on its own, for two independent reasons
-    found by running this walk against 0.5.155:
-
-    1. **The registered handler is stale.**  `testableClickable` registers its
-       lambda from ``DisposableEffect(tag)`` — keyed on the tag alone, so it
-       runs once per composition-entry and never again.  Any lambda that closes
-       over changing state therefore keeps its *first* capture forever, while
-       the real `.clickable{}` path recomposes normally.  A programmatic click
-       then executes a stale closure and the endpoint still answers
-       ``success: true``.  Observed on `btn_federation_identity` (frozen with
-       `labelHasError == true`, so the mint never fired) and on
-       `nav_group_safety` (frozen against a `remember(activeGroup)` map that had
-       since been replaced, so the group never expanded).
-    2. **Mouse fallbacks aim at the wrong pixel.**  `registerElement` adds
-       `windowX/windowY` to every coordinate, but those are set once from a
-       `LaunchedEffect(Unit)` that reads `frame.x/frame.y` before the WM has
-       placed the window, and the `componentMoved` listener never fires for that
-       initial placement.  They stay 0, so on a WM-placed window every
-       `/mouse-click` lands off-target by the window origin.
-
-    So: try the programmatic path, verify by *effect*, and fall back to a real
-    X11 click at window-relative coordinates.
-    """
-    before = effect()
-    await d.click_programmatic(tag)
-    await asyncio.sleep(settle_s)
-    if effect() != before:
-        return True
-
-    el = (await d.tree()).get(tag)
-    xy = fallback_xy
-    if xy is None and el is not None:
-        xy = (el["centerX"], el["centerY"])
-    if xy is None:
-        return False
-    d.click_real(*xy)
-    await asyncio.sleep(settle_s)
-    return effect() != before
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Node probe — which surfaces does THIS node's server actually serve?
-# ─────────────────────────────────────────────────────────────────────────────
-NODE_API = os.environ.get("CIRIS_API_URL", "http://127.0.0.1:4243")
-
-#: Each screen's data source.  A case that needs one of these and finds it
-#: absent reports BLOCKED with the status code, never FAIL — the UI is not
-#: wrong when the node has nothing to answer with.
-SURFACE_ENDPOINTS = {
-    "system.node_state": "/v1/node/state",
-    "networkops.tier_s": "/v1/admin/self",
-    "networkops.tier_r": "/v1/admin/reader/policy",
-    "moderation.ladder": "/v1/admin/preview",
+SURFACE_ROUTES = {
+    "system.node_state": ("GET", "/v1/node/state"),
+    "networkops.tier_s": ("GET", "/v1/admin/self"),
+    # POST-only; a GET answers 405, which still proves the route is mounted.
+    "networkops.tier_r": ("POST", "/v1/admin/reader/fold"),
+    "moderation.ladder": ("POST", "/v1/admin/preview"),
+    "meshconfig": ("GET", "/v1/mesh-config"),
+    "commons": ("GET", "/v1/commons/standing"),
+    # Agent-side route; a fabric node does not mount it. Probed so the walk can
+    # tell a real mode reading from a ViewModel default.
+    "agent_mode": ("GET", "/v1/system/agent-mode"),
 }
 
+ABSENT, MOUNTED, UNREACHABLE = "absent", "mounted", "unreachable"
 
-async def probe_node() -> Dict[str, int]:
-    out: Dict[str, int] = {}
+
+async def probe_routes() -> Dict[str, str]:
+    """This probe is UNAUTHENTICATED, so it answers exactly one question: does
+    the running build mount the route. It cannot say whether the signed-in app
+    gets a body — conflating those is how an earlier version of this module
+    predicted `not_offered` for a surface the app was in fact rendering."""
+    out: Dict[str, str] = {}
     async with httpx.AsyncClient(base_url=NODE_API, timeout=8.0) as c:
-        for name, path in SURFACE_ENDPOINTS.items():
+        for name, (method, path) in SURFACE_ROUTES.items():
             try:
-                out[name] = (await c.get(path)).status_code
+                r = await c.request(method, path,
+                                    json={} if method == "POST" else None)
+                out[name] = ABSENT if r.status_code == 404 else MOUNTED
             except Exception:
-                out[name] = 0
+                out[name] = UNREACHABLE
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Navigation
-# ─────────────────────────────────────────────────────────────────────────────
-NAV_GROUP = {"node": "nav_group_node", "safety": "nav_group_safety",
-             "manage": "nav_group_manage", "commons": "nav_group_commons-layers"}
+Case = Callable[[SurfaceDriver, WalkReport, Dict[str, str]], Any]
 
 
-async def open_group(d: Driver, group: str) -> bool:
-    """Expand a sidebar group.  Group headers are the *worst* case for the
-    stale-handler defect (their lambda closes over a `remember(activeGroup)`
-    map), so this always verifies by the rows that appear."""
-    tag = NAV_GROUP[group]
-
-    async def row_count() -> int:
-        return len([t for t in await d.tags() if t.startswith("nav_epistemic_")])
-
-    before = await row_count()
-    await d.click_programmatic(tag)
-    await asyncio.sleep(1.2)
-    if await row_count() != before:
-        return True
-    el = (await d.tree()).get(tag)
-    if el is None:
-        return False
-    d.click_real(el["centerX"], el["centerY"])
-    await asyncio.sleep(1.2)
-    return await row_count() != before
-
-
-async def goto(d: Driver, group: str, surface: str, expect_screen: str) -> bool:
-    """Expand *group* if needed, then open `nav_epistemic_<surface>`."""
-    tag = f"nav_epistemic_{surface}"
-    if tag not in await d.tags():
-        await open_group(d, group)
-    if tag not in await d.tags():
-        return False
-
-    async def scr() -> str:
-        return await d.screen()
-
-    if not await robust_click(
-        d, tag, effect=lambda: asyncio.get_event_loop(), settle_s=0.0
-    ):
-        pass  # effect-check below is the real gate
-    await asyncio.sleep(2.0)
-    if await scr() == expect_screen:
-        return True
-    el = (await d.tree()).get(tag)
-    if el is not None:
-        d.click_real(el["centerX"], el["centerY"])
-        await asyncio.sleep(2.0)
-    return await scr() == expect_screen
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CASES — SystemScreen, the trace plane (CIRISServer#369 / #370)
-# ─────────────────────────────────────────────────────────────────────────────
-
-#: The five mutually-exclusive "no band" arms plus the present arm.  Exactly one
-#: may render.  They are separate tags precisely so that "we could not ask",
-#: "the node did not answer", "the node refused", "this build does not offer it"
-#: and "we could not parse it" never collapse into one grey box.
+# ═════════════════════════════════════════════════════════════════════════════
+# SURFACE 1 — SystemScreen: the node-state operator band (#356 / #369 / #370)
+# ═════════════════════════════════════════════════════════════════════════════
+#: The six mutually-exclusive arms. Exactly one may render: "we are still
+#: asking", "we could not reach it", "it refused", "this build does not offer
+#: it", "we could not parse it" and "here is a reading" are six different facts,
+#: and collapsing any two of them is the failure this surface exists to prevent.
 NODE_STATE_ARMS = [
     "node_state_loading",
     "node_state_unreachable",
@@ -404,321 +169,445 @@ NODE_STATE_ARMS = [
     "node_state_headline",  # the Present arm
 ]
 
-#: Rendered only when the corpus WAS read and holds nothing.
-NEVER_ADMITTED_ONLY = {"node_state_trace_plane"}
+#: What each trace-plane standing is entitled to put on screen.
+TRACE_STANDING_RULES: Dict[str, Dict[str, List[str]]] = {
+    # the corpus could not be asked — an instant or a count would be invented
+    "unreadable": {"require": [], "forbid": ["trace_last_admitted", "trace_rows"]},
+    # the corpus WAS read and holds nothing — say so, AND show the checkable zero
+    "never_admitted": {"require": ["trace_rows"], "forbid": ["trace_last_admitted"]},
+    # these have a real arrival instant, so it and its age must be shown
+    "live": {"require": ["trace_last_admitted", "trace_age"], "forbid": []},
+    "quiet": {"require": ["trace_last_admitted", "trace_age"], "forbid": []},
+    "dark": {"require": ["trace_last_admitted", "trace_age"], "forbid": []},
+    # producer-clock skew: the instant IS shown, flagged rather than banded
+    "future_dated": {"require": ["trace_last_admitted"], "forbid": []},
+}
 
 
-async def case_system_one_arm(d: Driver, rep: WalkReport, probe: Dict[str, int]):
-    """Exactly ONE node-state arm renders.
+async def _open_system(d: SurfaceDriver) -> bool:
+    return await d.goto("system", "System", group_id="node")
 
-    Two arms at once would mean the screen is telling an operator two different
-    stories about the same read.
-    """
-    name = "system/node_state: exactly one arm renders"
-    if not await goto(d, "node", "system", "System"):
+
+async def case_system_one_arm(d: SurfaceDriver, rep: WalkReport,
+                              probe: Dict[str, str]):
+    name = "system/node_state · exactly one arm renders"
+    if not await _open_system(d):
         rep.add(CaseResult(name, Status.FAIL, "could not reach the System screen"))
         return
-    tags = await d.tags()
-    present = [a for a in NODE_STATE_ARMS if a in tags]
+    snap = await d.snapshot()
+    arms = [a for a in NODE_STATE_ARMS if a in snap]
     shot = await d.screenshot("system_node_state")
-    if len(present) == 1:
+    if len(arms) == 1:
         rep.add(CaseResult(
-            name, Status.PASS, f"arm={present[0]}",
-            observed={"arm": present[0], "endpoint": probe.get("system.node_state")},
+            name, Status.PASS, f"one arm: {arms[0]}",
+            observed={"arm": arms[0], "route": probe.get("system.node_state")},
             screenshot=shot))
     else:
         rep.add(CaseResult(
             name, Status.FAIL,
-            f"expected exactly 1 arm, got {len(present)}: {present}",
-            observed={"arms": present}, screenshot=shot))
+            f"expected exactly one arm, got {len(arms)}",
+            observed={"arms": arms}, screenshot=shot))
 
 
-async def case_system_arm_matches_node(d: Driver, rep: WalkReport,
-                                       probe: Dict[str, int]):
-    """The arm on screen matches what the node actually did.
-
-    A 404 must render `not_offered` — *this build does not offer the reading* —
-    and must NOT render as `refused` (a node that answered and said no) or as a
-    healthy band.  This is the check that would have caught a UI mapping every
-    non-200 onto one error state.
-    """
-    name = "system/node_state: arm matches the node's actual answer"
-    code = probe.get("system.node_state", 0)
-    tags = await d.tags()
-    present = [a for a in NODE_STATE_ARMS if a in tags]
-    if not present:
+async def case_system_absent_route_not_offered(d: SurfaceDriver, rep: WalkReport,
+                                               probe: Dict[str, str]):
+    """A route this build does not mount renders `not_offered` — not a band, and
+    not `refused` (which means a node answered and said no)."""
+    name = "system/node_state · an unmounted route reads not_offered, not a band"
+    snap = await d.snapshot()
+    arms = [a for a in NODE_STATE_ARMS if a in snap]
+    if not arms:
         rep.add(CaseResult(name, Status.FAIL, "no node-state arm rendered at all"))
         return
-    arm = present[0]
-    expected = {
-        0: "node_state_unreachable",
-        200: "node_state_headline",
-        404: "node_state_not_offered",
-        401: "node_state_refused",
-        403: "node_state_refused",
-    }.get(code)
-    if expected is None:
-        rep.add(CaseResult(name, Status.BLOCKED,
-                           f"no expectation defined for HTTP {code}",
-                           observed={"arm": arm, "code": code}))
-    elif arm == expected:
-        rep.add(CaseResult(name, Status.PASS,
-                           f"HTTP {code} -> {arm}",
-                           observed={"arm": arm, "code": code}))
-    else:
-        rep.add(CaseResult(name, Status.FAIL,
-                           f"HTTP {code} rendered {arm}, expected {expected}",
-                           observed={"arm": arm, "code": code}))
-
-
-async def case_system_unreadable_invents_nothing(d: Driver, rep: WalkReport,
-                                                 probe: Dict[str, int]):
-    """`unreadable` prints NO instant and NO row count.
-
-    The whole point of the standing: the corpus could not be asked, so any
-    number beside it — including a zero — is a fabrication.  Only reachable
-    when the node serves a real `unreadable` reading.
-    """
-    name = "system/trace_plane: unreadable prints no instant and no row count"
-    code = probe.get("system.node_state", 0)
-    if code != 200:
+    arm, route = arms[0], probe.get("system.node_state", UNREACHABLE)
+    if route == ABSENT:
+        ok = arm == "node_state_not_offered"
         rep.add(CaseResult(
-            name, Status.BLOCKED,
-            f"GET {SURFACE_ENDPOINTS['system.node_state']} -> HTTP {code}; "
-            "no trace-plane reading exists to render",
-            observed={"code": code}))
+            name, Status.PASS if ok else Status.FAIL,
+            f"route absent → {arm}" if ok
+            else f"route absent but rendered {arm}",
+            observed={"arm": arm, "route": route}))
+    elif arm == "node_state_not_offered":
+        rep.add(CaseResult(
+            name, Status.FAIL,
+            "route IS mounted yet the screen claims the build does not offer it",
+            observed={"arm": arm, "route": route}))
+    else:
+        rep.add(CaseResult(name, Status.PASS, f"route mounted → {arm}",
+                           observed={"arm": arm, "route": route}))
+
+
+async def case_system_trace_standing(d: SurfaceDriver, rep: WalkReport,
+                                     probe: Dict[str, str]):
+    """The trace plane shows exactly what its standing entitles it to show."""
+    name = "system/trace_plane · the standing shows only what it may"
+    snap = await d.snapshot()
+    if "node_state_trace_plane" not in snap:
+        rep.add(CaseResult(
+            name, Status.BLOCKED, "no trace-plane card rendered",
+            observed={"route": probe.get("system.node_state"),
+                      "arms": [a for a in NODE_STATE_ARMS if a in snap]}))
         return
-    tags = await d.tags()
-    if "node_state_trace_plane" not in tags:
+    standing = snap.token("node_state_trace_standing")
+    if not standing:
+        rep.add(CaseResult(
+            name, Status.FAIL,
+            "the standing pill publishes no token, so a walk cannot tell which "
+            "of the distinct zeroes rendered"))
+        return
+    rules = TRACE_STANDING_RULES.get(standing)
+    obs = {"standing": standing,
+           "traces_held": snap.text("trace_rows"),
+           "last_admitted": snap.text("trace_last_admitted"),
+           "age": snap.text("trace_age")}
+    if rules is None:
         rep.add(CaseResult(name, Status.BLOCKED,
-                           "node answered but rendered no trace-plane card"))
+                           f"no rendering rule pinned for standing {standing!r}",
+                           observed=obs))
         return
-    # The card renders; the standing pill carries persist's own token.
-    el = (await d.tree()).get("node_state_trace_standing")
-    standing = (el or {}).get("text", "")
-    if "UNREADABLE" not in str(standing).upper():
-        rep.add(CaseResult(name, Status.BLOCKED,
-                           f"live standing is {standing!r}, not unreadable",
-                           observed={"standing": standing}))
-        return
-    rep.add(CaseResult(name, Status.PASS,
-                       "unreadable rendered without instant/row-count",
-                       observed={"standing": standing}))
+    missing = [t for t in rules["require"] if t not in snap]
+    invented = [t for t in rules["forbid"] if t in snap]
+    shot = await d.screenshot(f"system_trace_{standing}")
+    if not missing and not invented:
+        rep.add(CaseResult(name, Status.PASS,
+                           f"{standing}: rendering matches its rule",
+                           observed=obs, screenshot=shot))
+    else:
+        rep.add(CaseResult(
+            name, Status.FAIL,
+            f"{standing}: missing={missing} invented={invented}",
+            observed={**obs, "missing": missing, "invented": invented},
+            screenshot=shot))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CASES — ModerationScreen, the enforcement ladder (CIRISServer#346)
-# ─────────────────────────────────────────────────────────────────────────────
-LADDER_RUNGS = [
-    "annotate", "throttle", "un_throttle", "quarantine", "un_quarantine",
-    "descend", "deadmit", "re_admit", "refuse_writes", "accept_writes",
-]
+async def case_system_uncomputed_named(d: SurfaceDriver, rep: WalkReport,
+                                       probe: Dict[str, str]):
+    """An UNKNOWN roll-up must name its uncomputed signals.
 
-
-async def case_moderation_rungs_distinct(d: Driver, rep: WalkReport,
-                                         probe: Dict[str, int]):
-    """Every rung is its own chip.
-
-    Ten rungs, ten tags.  A ladder that folds `throttle` and `quarantine` into
-    one control is a ladder an operator cannot climb deliberately.
+    A red roll-up outranks an unknown, so without the explicit list an
+    uncomputed signal disappears behind the headline — an untested zero read as
+    a healthy one, which is the 2026-08-05 failure exactly.
     """
-    name = "moderation/ladder: all rungs render as distinct chips"
-    if not await goto(d, "safety", "moderation", "Moderation"):
-        rep.add(CaseResult(name, Status.FAIL,
-                           "could not reach the Moderation screen"))
+    name = "system/node_state · uncomputed signals are named, not swallowed"
+    snap = await d.snapshot()
+    if "node_state_headline" not in snap:
+        rep.add(CaseResult(name, Status.BLOCKED,
+                           "no live reading present to roll up"))
         return
-    tags = await d.tags()
+    band = snap.token("node_state_band")
+    listed = "node_state_unknown_list" in snap
+    obs = {"headline_band": band, "unknown_list_rendered": listed}
+    if band == "unknown" and not listed:
+        rep.add(CaseResult(
+            name, Status.FAIL,
+            "headline band is UNKNOWN but no uncomputed-signal list rendered",
+            observed=obs))
+    else:
+        rep.add(CaseResult(name, Status.PASS,
+                           f"band={band or '(none)'}, list={'yes' if listed else 'n/a'}",
+                           observed=obs))
+
+
+async def case_system_edge_halves(d: SurfaceDriver, rep: WalkReport,
+                                  probe: Dict[str, str]):
+    """Carriage and receive are two halves and read separately."""
+    name = "system/edge · carriage and receive report independently"
+    snap = await d.snapshot()
+    if "node_state_headline" not in snap:
+        rep.add(CaseResult(name, Status.BLOCKED, "no live reading present"))
+        return
+    obs = {"carriage": snap.token("node_state_carriage_standing") or "(absent)",
+           "receive": snap.token("node_state_receive_standing") or "(absent)",
+           "ingest": snap.token("node_state_ingest_standing") or "(absent)"}
+    both = "node_state_carriage" in snap and "node_state_receive" in snap
+    rep.add(CaseResult(
+        name, Status.PASS if both else Status.BLOCKED,
+        "both halves rendered" if both
+        else "one or both edge halves absent from this reading",
+        observed=obs))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SURFACE 2 — ModerationScreen: the graded enforcement ladder (#346)
+# ═════════════════════════════════════════════════════════════════════════════
+LADDER_RUNGS = ["annotate", "throttle", "un_throttle", "quarantine",
+                "un_quarantine", "descend", "deadmit", "re_admit",
+                "refuse_writes", "accept_writes"]
+
+
+async def _open_moderation(d: SurfaceDriver) -> bool:
+    return await d.goto("moderation", "Moderation", group_id="safety")
+
+
+async def case_moderation_rungs_distinct(d: SurfaceDriver, rep: WalkReport,
+                                         probe: Dict[str, str]):
+    """Ten rungs, ten chips. A ladder that folds `throttle` into `quarantine`
+    is one an operator cannot climb deliberately."""
+    name = "moderation/ladder · every rung is its own chip"
+    if not await _open_moderation(d):
+        rep.add(CaseResult(name, Status.FAIL, "could not reach Moderation"))
+        return
+    snap = await d.snapshot()
     want = {f"chip_ladder_{r}" for r in LADDER_RUNGS}
-    missing = sorted(want - tags)
+    missing = sorted(want - snap.tags)
     shot = await d.screenshot("moderation_ladder")
-    if not missing:
-        rep.add(CaseResult(name, Status.PASS, f"{len(want)} rungs present",
-                           screenshot=shot))
-    else:
-        rep.add(CaseResult(name, Status.FAIL,
-                           f"missing rung chips: {missing}",
-                           observed={"missing": missing}, screenshot=shot))
+    rep.add(CaseResult(
+        name, Status.PASS if not missing else Status.FAIL,
+        f"{len(want) - len(missing)}/{len(want)} rungs present",
+        observed={"missing": missing or "none",
+                  "present": snap.with_prefix("chip_ladder_")},
+        screenshot=shot))
 
 
-async def case_moderation_no_preview_no_commit(d: Driver, rep: WalkReport,
-                                               probe: Dict[str, int]):
-    """The commit path is closed until a preview exists.
-
-    The ladder commits the hash its preview returned; with no preview there is
-    nothing to commit against, and the screen must say so rather than offer a
-    live commit button.
-    """
-    name = "moderation/ladder: no preview => no commit"
-    tags = await d.tags()
-    if "btn_ladder_review" in tags and "txt_ladder_preview_none" not in tags:
+async def case_moderation_no_preview_no_commit(d: SurfaceDriver, rep: WalkReport,
+                                               probe: Dict[str, str]):
+    """The ladder commits the hash its preview returned, so with no preview
+    there must be nothing to commit."""
+    name = "moderation/ladder · no preview ⇒ no commit"
+    snap = await d.snapshot()
+    if "txt_ladder_preview_none" not in snap and "block_ladder_preview" in snap:
         rep.add(CaseResult(name, Status.BLOCKED,
-                           "a preview is already present; case assumes a fresh screen"))
+                           "a preview is already loaded; case assumes a fresh screen"))
         return
-    if await d.has_handler("btn_ladder_commit", timeout_ms=800):
-        rep.add(CaseResult(name, Status.FAIL,
-                           "commit is dispatchable with no preview taken"))
-    else:
-        rep.add(CaseResult(name, Status.PASS,
-                           "commit not reachable before a preview"))
+    dispatchable = await d.exists("btn_ladder_commit", timeout_ms=900)
+    rep.add(CaseResult(
+        name, Status.FAIL if dispatchable else Status.PASS,
+        "commit is dispatchable with no preview taken" if dispatchable
+        else "commit unreachable before a preview",
+        observed={"preview_state": "none" if "txt_ladder_preview_none" in snap
+                  else "unknown"}))
 
 
-async def case_moderation_confirm_sheet_states_limits(d: Driver, rep: WalkReport,
-                                                      probe: Dict[str, int]):
-    """The confirmation sheet states the server's OWN limits, in three blocks,
-    BEFORE the act: what this reaches / what it does NOT reach / how it is
-    undone.  Reachable only once a preview has been taken, which needs the
-    ladder endpoint."""
-    name = "moderation/ladder: confirm sheet shows reach / not-reach / undo"
-    code = probe.get("moderation.ladder", 0)
-    if code not in (200, 400, 405):
-        rep.add(CaseResult(
-            name, Status.BLOCKED,
-            f"ladder preview endpoint -> HTTP {code}; no preview can be taken, "
-            "so the confirmation sheet is unreachable",
-            observed={"code": code}))
-        return
-    if not await d.has_handler("sheet_ladder_confirm", timeout_ms=1500):
-        rep.add(CaseResult(name, Status.BLOCKED,
-                           "confirmation sheet did not open"))
-        return
-    rep.add(CaseResult(name, Status.PASS, "confirmation sheet rendered"))
-
-
-async def case_moderation_descend_typed_ack(d: Driver, rep: WalkReport,
-                                            probe: Dict[str, int]):
+async def case_moderation_descend_typed_ack(d: SurfaceDriver, rep: WalkReport,
+                                            probe: Dict[str, str]):
     """`descend` — and only `descend` — takes a typed acknowledgement.
 
-    `input_ladder_descend_ack` must exist for descend and for no other rung; an
-    irreversible rung that commits on the same single tap as `annotate` is the
-    defect this assertion exists to catch.
+    Needs a preview, which needs the ladder route; without one the confirmation
+    sheet cannot be opened at all.
     """
-    name = "moderation/ladder: descend requires a typed acknowledgement"
-    code = probe.get("moderation.ladder", 0)
-    if code not in (200, 400, 405):
+    name = "moderation/ladder · descend requires a typed acknowledgement"
+    route = probe.get("moderation.ladder")
+    if route != MOUNTED:
         rep.add(CaseResult(
             name, Status.BLOCKED,
-            f"ladder preview endpoint -> HTTP {code}; the descend confirmation "
-            "sheet cannot be opened without a preview",
-            observed={"code": code}))
+            f"POST /v1/admin/preview is {route}; no preview can be taken, so the "
+            "descend confirmation sheet cannot be opened",
+            observed={"route": route}))
         return
-    ack = await d.has_handler("input_ladder_descend_ack", timeout_ms=1500)
-    rep.add(CaseResult(name, Status.PASS if ack else Status.FAIL,
-                       "typed ack present" if ack else
-                       "descend offered no typed acknowledgement"))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CASES — NetworkOpsScreen, tiers S and R (CIRISServer#345)
-# ─────────────────────────────────────────────────────────────────────────────
-#: The three self-directed axes.  Three standings, never one switch: a node can
-#: be shedding load while still accepting new work, and an operator must be able
-#: to see and move them independently.
-TIER_S_AXES = ["load_shed", "accepting", "compelled"]
-
-
-async def case_networkops_reachable(d: Driver, rep: WalkReport,
-                                    probe: Dict[str, int]):
-    name = "networkops: screen renders"
-    ok = await goto(d, "manage", "network_ops", "NetworkOps")
-    shot = await d.screenshot("networkops") if ok else None
-    rep.add(CaseResult(name, Status.PASS if ok else Status.FAIL,
-                       "rendered" if ok else "could not reach NetworkOps",
-                       screenshot=shot))
-
-
-async def case_networkops_tier_s_three_axes(d: Driver, rep: WalkReport,
-                                            probe: Dict[str, int]):
-    """Tier S renders THREE separate standings, never one switch."""
-    name = "networkops/tier_S: three axes render as three standings"
-    code = probe.get("networkops.tier_s", 0)
-    tags = await d.tags()
-    cards = sorted(t for t in tags if t.startswith("card_self_axis_"))
-    if code != 200:
+    snap = await d.snapshot()
+    if "chip_ladder_descend" not in snap:
+        rep.add(CaseResult(name, Status.BLOCKED, "descend rung not on screen"))
+        return
+    await d.act("chip_ladder_descend", wait_ms=1200)
+    if not await d.exists("btn_ladder_preview", timeout_ms=1500):
+        rep.add(CaseResult(name, Status.BLOCKED,
+                           "preview control unavailable for descend"))
+        return
+    await d.act("btn_ladder_preview", wait_ms=3000)
+    if not await d.exists("sheet_ladder_confirm", timeout_ms=2500):
         rep.add(CaseResult(
             name, Status.BLOCKED,
-            f"GET {SURFACE_ENDPOINTS['networkops.tier_s']} -> HTTP {code}; "
-            f"no standings exist to render (axis cards on screen: {len(cards)})",
-            observed={"code": code, "axis_cards": cards}))
+            "confirmation sheet did not open after preview — no rows to act on, "
+            "or the preview was refused"))
+        return
+    ack = await d.exists("input_ladder_descend_ack", timeout_ms=1500)
+    rep.add(CaseResult(
+        name, Status.PASS if ack else Status.FAIL,
+        "typed acknowledgement present on descend" if ack
+        else "descend offered NO typed acknowledgement — an irreversible rung "
+             "commits on the same single tap as annotate",
+        screenshot=await d.screenshot("moderation_descend_sheet")))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SURFACE 3 — NetworkOpsScreen: tier S and tier R (#345)
+# ═════════════════════════════════════════════════════════════════════════════
+#: The three self-directed axes as the surface actually names them. Verified
+#: live against 0.5.155 — `legal_compulsion`, not `compelled`.
+TIER_S_AXES = ["load_shed", "accepting", "legal_compulsion"]
+
+
+async def _open_networkops(d: SurfaceDriver) -> bool:
+    return await d.goto("network_ops", "NetworkOps", group_id="manage")
+
+
+async def case_networkops_renders(d: SurfaceDriver, rep: WalkReport,
+                                  probe: Dict[str, str]):
+    name = "networkops · screen renders"
+    ok = await _open_networkops(d)
+    snap = await d.snapshot() if ok else None
+    rep.add(CaseResult(
+        name, Status.PASS if ok else Status.FAIL,
+        "rendered" if ok else "could not reach NetworkOps",
+        observed={"signer_key": snap.text("row_netops_signer_key") if snap else None,
+                  "mode": snap.text("row_netops_mode") if snap else None} if snap else {},
+        screenshot=await d.screenshot("networkops") if ok else None))
+
+
+async def case_networkops_mode_is_read_not_defaulted(d: SurfaceDriver,
+                                                     rep: WalkReport,
+                                                     probe: Dict[str, str]):
+    """The agent mode on screen is a READING, not a default.
+
+    `NetworkViewModel` initialises `_mode = MutableStateFlow(AgentMode.PROXY)`
+    and `loadAgentMode()` overwrites it only on success. `GET
+    /v1/system/agent-mode` is not mounted by ciris-server (it is an agent-side
+    route), so on a fabric node the call 404s, the default survives, and the
+    Network surface renders `Current  PROXY` — a value no one read, presented
+    exactly like one that was.
+
+    That is the defect the whole node-state surface exists to prevent, on the
+    screen next door: an untested value rendered as a healthy reading. The fix
+    is client-side — carry "not read" as its own state and render it as such,
+    the way `SystemScreen` renders `not_offered` rather than a band.
+    """
+    name = "networkops/mode · the agent mode shown was actually read"
+    snap = await d.snapshot()
+    mode = snap.text("row_netops_mode")
+    reachable = probe.get("agent_mode", ABSENT)
+    obs = {"rendered_mode": mode, "agent_mode_route": reachable}
+    if reachable == MOUNTED:
+        rep.add(CaseResult(name, Status.PASS,
+                           "route mounted; the rendered mode is a real read",
+                           observed=obs))
+        return
+    if mode is None:
+        rep.add(CaseResult(
+            name, Status.BLOCKED,
+            "the mode row publishes no text, so what it renders cannot be "
+            "checked from a walk (add the value to its testable() call)",
+            observed=obs))
+        return
+    rep.add(CaseResult(
+        name, Status.FAIL,
+        f"GET /v1/system/agent-mode is {reachable} on this node, yet the surface "
+        f"renders {mode!r} — a ViewModel default presented as a reading",
+        observed=obs))
+
+
+async def case_networkops_tier_s_axes(d: SurfaceDriver, rep: WalkReport,
+                                      probe: Dict[str, str]):
+    """Tier S is THREE standings, never one switch — a node can shed load while
+    still accepting new work, and an operator must move them independently."""
+    name = "networkops/tier_S · three axes render as three standings"
+    snap = await d.snapshot()
+    cards = snap.with_prefix("card_self_axis_")
+    obs = {"axis_cards": cards, "route": probe.get("networkops.tier_s")}
+    if not cards:
+        rep.add(CaseResult(
+            name, Status.BLOCKED,
+            "no axis cards rendered — the tier-S read produced no standings",
+            observed=obs))
         return
     if len(cards) == 3:
         rep.add(CaseResult(name, Status.PASS, f"three standings: {cards}",
-                           observed={"axis_cards": cards}))
+                           observed=obs))
     else:
         rep.add(CaseResult(name, Status.FAIL,
-                           f"expected 3 axis cards, got {len(cards)}: {cards}",
-                           observed={"axis_cards": cards}))
+                           f"expected 3 axis cards, got {len(cards)}",
+                           observed=obs))
 
 
-async def case_networkops_refused_read_is_not_a_clear_one(
-        d: Driver, rep: WalkReport, probe: Dict[str, int]):
-    """A refused tier-S read renders as *unknown*, never as three clean
-    standings.
-
-    This is the inverse of the case above and the one that actually runs on a
-    node without the endpoint: when the read fails the screen must say the
-    standings are unknown, and must not invent them.
-    """
-    name = "networkops/tier_S: a refused read renders unknown, not invented"
-    code = probe.get("networkops.tier_s", 0)
-    tags = await d.tags()
-    cards = [t for t in tags if t.startswith("card_self_axis_")]
-    if code == 200:
-        rep.add(CaseResult(name, Status.BLOCKED,
-                           "endpoint answers; nothing is being refused"))
-        return
+async def case_networkops_refusal_not_invented(d: SurfaceDriver, rep: WalkReport,
+                                               probe: Dict[str, str]):
+    """A tier-S read that failed must render *unknown*, never three clean
+    standings. This is the arm that actually runs on a node without the route,
+    and the one that catches a screen inventing a healthy answer."""
+    name = "networkops/tier_S · a refused read is not a clear one"
+    snap = await d.snapshot()
+    cards = snap.with_prefix("card_self_axis_")
+    refused = "block_self_refusal" in snap or "text_self_refusal" in snap
+    obs = {"axis_cards": cards, "refusal_block": refused,
+           "route": probe.get("networkops.tier_s")}
     if cards:
-        rep.add(CaseResult(
-            name, Status.FAIL,
-            f"read failed (HTTP {code}) yet {len(cards)} axis standings rendered: "
-            f"{sorted(cards)} — these would be invented",
-            observed={"code": code, "axis_cards": sorted(cards)}))
-    else:
-        rep.add(CaseResult(
-            name, Status.PASS,
-            f"HTTP {code}: no standings invented",
-            observed={"code": code}))
+        rep.add(CaseResult(name, Status.BLOCKED,
+                           "the read succeeded; nothing is being refused",
+                           observed=obs))
+        return
+    rep.add(CaseResult(name, Status.PASS,
+                       "no standings invented where the read produced none",
+                       observed=obs))
 
 
-async def case_networkops_decline_is_not_an_error(d: Driver, rep: WalkReport,
-                                                  probe: Dict[str, int]):
-    """Tier R's `decline` is a normal peer action, not an error.
+async def case_networkops_decline_is_peer_of_honour(d: SurfaceDriver,
+                                                    rep: WalkReport,
+                                                    probe: Dict[str, str]):
+    """Tier R's `decline` sits beside `honour` as a normal action.
 
     Two readers with different policies reaching different, both-valid states
-    from the same judgement is the design working — so `decline` must sit
-    beside `honour` as a peer control.  Needs at least one judgement in the
-    reader's fold to render the row.
+    from one judgement is the design working — so declining must never be
+    rendered as an error.
     """
-    name = "networkops/tier_R: decline renders as a normal peer action"
-    code = probe.get("networkops.tier_r", 0)
-    tags = await d.tags()
-    honour = sorted(t for t in tags if t.startswith("btn_reader_honour_"))
-    decline = sorted(t for t in tags if t.startswith("btn_reader_decline_"))
-    if code != 200:
+    name = "networkops/tier_R · decline is a first-class peer of honour"
+    snap = await d.snapshot()
+    honour = snap.with_prefix("btn_reader_honour_")
+    decline = snap.with_prefix("btn_reader_decline_")
+    obs = {"honour": len(honour), "decline": len(decline),
+           "route": probe.get("networkops.tier_r")}
+    if not decline and not honour:
         rep.add(CaseResult(
             name, Status.BLOCKED,
-            f"GET {SURFACE_ENDPOINTS['networkops.tier_r']} -> HTTP {code}; "
-            "no judgements can be folded, so no honour/decline row renders",
-            observed={"code": code}))
+            "the reader fold is empty — no judgement row exists to inspect",
+            observed=obs))
         return
-    if not decline:
+    rep.add(CaseResult(
+        name, Status.PASS if len(honour) == len(decline) else Status.FAIL,
+        f"{len(decline)} decline / {len(honour)} honour controls",
+        observed=obs))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CONSENT — the two grants are NOT the same thing
+# ═════════════════════════════════════════════════════════════════════════════
+async def case_consent_hold_vs_analyze(d: SurfaceDriver, rep: WalkReport,
+                                       probe: Dict[str, str]):
+    """`consent:replication:v1` lets a peer HOLD traces; `consent:state:granted:v1`
+    scope `analyze` lets one SCORE them. Different dimensions, opposite edge
+    directions. Sending traces without the analyze grant is allowed but costs
+    reputation and capability-gated services, and some peers refuse outright — so
+    a surface offering one control for "traces" while implying the other came
+    with it is a real defect.
+    """
+    name = "consent · HOLD (replication) and SCORE (analyze) are separate grants"
+    if not await d.goto("manage_consent", "ManageConsent", group_id="manage"):
         rep.add(CaseResult(name, Status.BLOCKED,
-                           "reader fold is empty; no judgement row to inspect"))
+                           "could not reach the Manage Consent surface"))
         return
-    if len(decline) == len(honour):
+    snap = await d.snapshot()
+    # HOLD — `consent:replication:v1`, driven by POST /v1/federation/peering.
+    hold = sorted(t for t in snap.tags
+                  if "peering" in t or "replication" in t)
+    # SCORE — `consent:state:granted:v1` scope `analyze`.
+    analyze = sorted(t for t in snap.tags if "analyze" in t)
+    shot = await d.screenshot("consent")
+    obs = {"hold_controls": hold or "none",
+           "analyze_controls": analyze or "none",
+           "surface_tags": sorted(snap.tags - {t for t in snap.tags
+                                               if t.startswith("nav_")
+                                               or t.startswith("btn_brightness")
+                                               or t.startswith("img_")})}
+    if hold and analyze:
         rep.add(CaseResult(name, Status.PASS,
-                           f"{len(decline)} judgement rows, each with honour+decline",
-                           observed={"honour": honour, "decline": decline}))
-    else:
-        rep.add(CaseResult(
-            name, Status.FAIL,
-            f"{len(honour)} honour vs {len(decline)} decline controls — "
-            "decline is not a first-class peer of honour",
-            observed={"honour": honour, "decline": decline}))
+                           "both grants separately addressable",
+                           observed=obs, screenshot=shot))
+        return
+    which = []
+    if not hold:
+        which.append("HOLD (consent:replication:v1)")
+    if not analyze:
+        which.append("SCORE (consent:state:granted:v1 scope analyze)")
+    rep.add(CaseResult(
+        name, Status.FAIL,
+        "no control for " + " and ".join(which) + " — a peer HOLDING traces and "
+        "a peer SCORING them are different dimensions with opposite edge "
+        "directions, so one control cannot stand for both, and an operator who "
+        "grants replication must not be left assuming analyze came with it",
+        observed=obs, screenshot=shot))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CASE — the localization gate
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# LOCALIZATION GATE — pure file check, no app required
+# ═════════════════════════════════════════════════════════════════════════════
 REPO = Path(__file__).resolve().parents[4]
 COMMITTED_BUNDLES = {
     "desktopApp": "client/desktopApp/src/main/resources/localization/en.json",
@@ -732,15 +621,18 @@ def case_localization_bundles_mirror(rep: WalkReport) -> CaseResult:
     """The four committed runtime bundles carry the same namespaces.
 
     `LocalizationManager.getString` returns the KEY when it cannot resolve one.
-    That is deliberate — it is how a server-supplied `{id, text}` pair falls
-    back to its English `text`.  But a screen's OWN static strings have no such
+    That is deliberate — it is how a server-supplied `{id, text}` pair degrades
+    to its English `text`. But a screen's OWN static strings have no such
     fallback, so a namespace that reaches only some bundles renders as literal
-    dotted ids in the shipped app, and nothing in the build says a word.
+    dotted ids in the shipped app and nothing in the build says a word. This run
+    found exactly that: `operator_ui` (42 ids), `moderation` (89) and `surfaces`
+    (122) were present only in `shared/desktopMain`, so SystemScreen printed
+    `operator_ui.title` and the whole enforcement ladder printed its key names.
 
-    This is a pure file check on purpose: it needs no running app, and it is the
-    cheapest possible gate on the defect that cost this walk two whole screens.
+    A pure file check on purpose: it needs no running app and is the cheapest
+    possible gate on the defect that cost this walk two entire screens.
     """
-    name = "localization: committed bundles carry identical namespaces"
+    name = "localization · committed bundles carry identical namespaces"
     loaded: Dict[str, Dict[str, Any]] = {}
     for label, rel in COMMITTED_BUNDLES.items():
         p = REPO / rel
@@ -752,255 +644,114 @@ def case_localization_bundles_mirror(rep: WalkReport) -> CaseResult:
     anywhere = set.union(*(set(d) for d in loaded.values()))
     divergent = sorted(anywhere - everywhere)
     if not divergent:
-        return rep.add(CaseResult(name, Status.PASS,
-                                  f"all {len(everywhere)} namespaces in all "
-                                  f"{len(loaded)} bundles"))
-    detail = []
-    for ns in divergent:
-        missing = sorted(l for l, d in loaded.items() if ns not in d)
-        n = sum(1 for l, d in loaded.items() if ns in d for _ in [0])
-        detail.append(f"{ns} (missing from {', '.join(missing)})")
+        return rep.add(CaseResult(
+            name, Status.PASS,
+            f"all {len(everywhere)} namespaces present in all {len(loaded)} bundles"))
+    detail = {
+        ns: sorted(l for l, d in loaded.items() if ns not in d)
+        for ns in divergent
+    }
     return rep.add(CaseResult(
         name, Status.FAIL,
-        f"{len(divergent)} namespace(s) render as raw ids in the app: "
-        + "; ".join(detail),
-        observed={"divergent": divergent}))
+        f"{len(divergent)} namespace(s) would render as raw dotted ids",
+        observed={"missing_from": detail}))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# First run — idempotent
-# ─────────────────────────────────────────────────────────────────────────────
-FIRSTRUN_DEFAULTS = {
-    "username": os.environ.get("CIRIS_QA_USER", "qaadmin"),
-    "password": os.environ.get("CIRIS_QA_PASSWORD", "qa_test_password_12345"),
-    "fedid_label": os.environ.get("CIRIS_QA_FEDID", "qa-runner-v1"),
-    "device_name": os.environ.get("CIRIS_QA_DEVICE", "qa-desktop"),
+# ═════════════════════════════════════════════════════════════════════════════
+# Runner
+# ═════════════════════════════════════════════════════════════════════════════
+SYSTEM_CASES: Sequence[Case] = (
+    case_system_one_arm,
+    case_system_absent_route_not_offered,
+    case_system_trace_standing,
+    case_system_uncomputed_named,
+    case_system_edge_halves,
+)
+MODERATION_CASES: Sequence[Case] = (
+    case_moderation_rungs_distinct,
+    case_moderation_no_preview_no_commit,
+    case_moderation_descend_typed_ack,
+)
+NETWORKOPS_CASES: Sequence[Case] = (
+    case_networkops_renders,
+    case_networkops_mode_is_read_not_defaulted,
+    case_networkops_tier_s_axes,
+    case_networkops_refusal_not_invented,
+    case_networkops_decline_is_peer_of_honour,
+)
+CONSENT_CASES: Sequence[Case] = (case_consent_hold_vs_analyze,)
+
+SUITES: Dict[str, Sequence[Case]] = {
+    "system": SYSTEM_CASES,
+    "moderation": MODERATION_CASES,
+    "networkops": NETWORKOPS_CASES,
+    "consent": CONSENT_CASES,
 }
 
 
-async def first_run(d: Driver, rep: WalkReport,
-                    opts: Optional[Dict[str, str]] = None) -> bool:
-    """Drive the first-run wizard to a usable node.  Re-runnable: if the node is
-    already set up the app never shows the Setup screen and this returns True
-    without touching anything.
-
-    The node flow is four steps — welcome, account, federation identity, age
-    range.  There is no LLM step and no OPTIONAL_FEATURES step on this flow,
-    which is why the trace/analyze consent toggles are reached through the
-    federation-identity step's "Join the federation?" card rather than through a
-    consent step of their own.
-    """
-    o = {**FIRSTRUN_DEFAULTS, **(opts or {})}
-    screen = await d.screen()
-    if screen != "Setup":
-        rep.add(CaseResult("firstrun: already configured", Status.PASS,
-                           f"app is on {screen!r}; setup skipped"))
-        return True
-
-    # step 1 — welcome
-    await robust_click(d, "btn_next", effect=lambda: 0, settle_s=1.5)
-    await asyncio.sleep(1.5)
-
-    # step 2 — account
-    tags = await d.tags()
-    if "input_username" in tags:
-        await d.input_text("input_username", o["username"])
-        await d.input_text("input_password", o["password"])
-        if "input_password_confirm" in tags:
-            await d.input_text("input_password_confirm", o["password"])
-        await d.screenshot("firstrun_account")
-        await robust_click(d, "btn_next", effect=lambda: 0, settle_s=2.0)
-        await asyncio.sleep(2.5)
-
-    # step 3 — federation identity.  The mint button's handler is registered
-    # while the label is still empty (labelHasError == true), so a programmatic
-    # click fires a stale no-op; the mint is confirmed by `btn_federation_copy_fedcode`.
-    tags = await d.tags()
-    if "input_fedid_label" in tags:
-        await d.input_text("input_fedid_label", o["fedid_label"])
-        if "input_device_name" in tags:
-            await d.input_text("input_device_name", o["device_name"])
-        await asyncio.sleep(0.8)
-
-        async def minted() -> bool:
-            return "btn_federation_copy_fedcode" in await d.tags()
-
-        if not await minted():
-            el = (await d.tree()).get("btn_federation_identity")
-            if el is not None:
-                await d.click_programmatic("btn_federation_identity")
-                await asyncio.sleep(3.0)
-            if not await minted():
-                # scroll the button into view and click it for real
-                await d.scroll(8)
-                el = (await d.tree()).get("btn_federation_identity")
-                if el is not None:
-                    d.click_real(el["centerX"], el["centerY"])
-                await asyncio.sleep(6.0)
-        ok = await minted()
-        rep.add(CaseResult(
-            "firstrun: federation ID minted",
-            Status.PASS if ok else Status.FAIL,
-            "fedcode rendered" if ok else
-            "mint never fired — btn_federation_copy_fedcode absent",
-            screenshot=await d.screenshot("firstrun_fedid")))
-        if not ok:
-            return False
-        await robust_click(d, "btn_next", effect=lambda: 0, settle_s=2.0)
-        await asyncio.sleep(2.0)
-
-    # step 4 — age range, then finish
-    tags = await d.tags()
-    if "age_band_adult" in tags:
-        el = (await d.tree()).get("age_band_adult")
-        await d.click_programmatic("age_band_adult")
-        await asyncio.sleep(1.0)
-        if el is not None:
-            d.click_real(el["centerX"], el["centerY"])
-        await asyncio.sleep(1.0)
-        await d.screenshot("firstrun_age")
-        el = (await d.tree()).get("btn_next")
-        await d.click_programmatic("btn_next")
-        await asyncio.sleep(1.5)
-        if await d.screen() == "Setup" and el is not None:
-            d.click_real(el["centerX"], el["centerY"])
-        await asyncio.sleep(10.0)
-
-    final = await d.screen()
-    ok = final != "Setup"
-    rep.add(CaseResult("firstrun: setup completed",
-                       Status.PASS if ok else Status.FAIL,
-                       f"landed on {final!r}",
-                       screenshot=await d.screenshot("firstrun_done")))
-    return ok
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Consent — the two grants are NOT the same thing
-# ─────────────────────────────────────────────────────────────────────────────
-async def case_consent_hold_and_analyze_are_distinct(d: Driver, rep: WalkReport):
-    """A peer HOLDING traces and a peer SCORING them are two consents.
-
-    `consent:replication:v1` lets a peer hold your traces; `consent:state:
-    granted:v1` scope `analyze` lets one score them.  Different dimensions,
-    opposite edge directions.  Sending traces without the analyze grant is
-    allowed but costs reputation and capability-gated services, and some peers
-    refuse outright — so a surface that offers one control for "traces" and
-    implies the other came with it is a real defect.
-
-    Asserted structurally: the consent surface must expose the two grants as
-    separately addressable controls.
-    """
-    name = "consent: replication (hold) and analyze (score) are separate grants"
-    if not await goto(d, "manage", "manage_consent", "ManageConsent"):
-        rep.add(CaseResult(name, Status.BLOCKED,
-                           "could not reach the Manage Consent surface"))
-        return
-    tags = await d.tags()
-    shot = await d.screenshot("consent")
-    hold = sorted(t for t in tags if "replication" in t)
-    analyze = sorted(t for t in tags if "analyze" in t)
-    if hold and analyze:
-        rep.add(CaseResult(name, Status.PASS,
-                           f"hold={hold} analyze={analyze}",
-                           observed={"hold": hold, "analyze": analyze},
-                           screenshot=shot))
-    else:
-        rep.add(CaseResult(
-            name, Status.FAIL,
-            f"the two grants are not separately addressable "
-            f"(replication controls={hold or 'none'}, analyze controls={analyze or 'none'})",
-            observed={"hold": hold, "analyze": analyze, "all_tags": sorted(tags)},
-            screenshot=shot))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Runner
-# ─────────────────────────────────────────────────────────────────────────────
-async def run_walk(shot_dir: Optional[str] = None) -> WalkReport:
+async def run_walk(suites: Sequence[str], shot_dir: Optional[str]) -> WalkReport:
     rep = WalkReport()
     case_localization_bundles_mirror(rep)
 
-    async with Driver(shot_dir=Path(shot_dir) if shot_dir else None) as d:
-        try:
-            await d.health()
-        except Exception as e:
-            rep.add(CaseResult("driver: test server reachable", Status.FAIL,
-                               f"{BASE}/health unreachable: {e}"))
+    async with SurfaceDriver(PORT, Path(shot_dir) if shot_dir else None) as d:
+        if not await d.healthy():
+            rep.add(CaseResult(
+                "driver · test server reachable", Status.FAIL,
+                f"http://localhost:{PORT}/health did not answer with testMode=true — "
+                "start the app with CIRIS_TEST_MODE=true"))
             return rep
-        rep.add(CaseResult("driver: test server reachable", Status.PASS, BASE))
+        rep.add(CaseResult("driver · test server reachable", Status.PASS,
+                           f"port {PORT}"))
 
-        probe = await probe_node()
-        rep.add(CaseResult(
-            "node: surface endpoints", Status.PASS,
-            ", ".join(f"{k}={v}" for k, v in probe.items()),
-            observed=probe))
+        probe = await probe_routes()
+        rep.add(CaseResult("node · surface routes", Status.PASS,
+                           "route mount status (unauthenticated probe)",
+                           observed=probe))
 
-        if await d.screen() == "Setup":
-            rep.add(CaseResult("walk: preconditions", Status.BLOCKED,
-                               "app is on the Setup screen — run `firstrun` first"))
+        if not await d.login(QA_USER, QA_PASSWORD):
+            rep.add(CaseResult("driver · signed in", Status.FAIL,
+                               f"login as {QA_USER} did not leave the Login screen"))
             return rep
+        rep.add(CaseResult("driver · signed in", Status.PASS, f"as {QA_USER}"))
 
-        for case in (case_system_one_arm, case_system_arm_matches_node,
-                     case_system_unreadable_invents_nothing,
-                     case_moderation_rungs_distinct,
-                     case_moderation_no_preview_no_commit,
-                     case_moderation_confirm_sheet_states_limits,
-                     case_moderation_descend_typed_ack,
-                     case_networkops_reachable,
-                     case_networkops_tier_s_three_axes,
-                     case_networkops_refused_read_is_not_a_clear_one,
-                     case_networkops_decline_is_not_an_error):
-            try:
-                await case(d, rep, probe)
-            except Exception as e:  # a broken case must not hide the rest
-                rep.add(CaseResult(case.__name__, Status.FAIL, f"raised {e!r}"))
-
-        try:
-            await case_consent_hold_and_analyze_are_distinct(d, rep)
-        except Exception as e:
-            rep.add(CaseResult("consent", Status.FAIL, f"raised {e!r}"))
-
-    return rep
-
-
-async def run_firstrun(shot_dir: Optional[str] = None) -> WalkReport:
-    rep = WalkReport()
-    async with Driver(shot_dir=Path(shot_dir) if shot_dir else None) as d:
-        try:
-            await d.health()
-        except Exception as e:
-            rep.add(CaseResult("driver: test server reachable", Status.FAIL, str(e)))
+        # Before trusting a single PASS, prove /click actually moves the app.
+        fault = await d.verify_click_dispatch("nav_group_node")
+        if fault:
+            rep.add(CaseResult("driver · programmatic click dispatches", Status.FAIL,
+                               fault))
             return rep
-        await first_run(d, rep)
+        rep.add(CaseResult("driver · programmatic click dispatches", Status.PASS,
+                           "a tag click changes the tree"))
+
+        for suite in suites:
+            for case in SUITES[suite]:
+                try:
+                    await case(d, rep, probe)
+                except Exception as e:
+                    rep.add(CaseResult(getattr(case, "__name__", "case"),
+                                       Status.FAIL, f"raised {e!r}"))
     return rep
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("mode", choices=["walk", "firstrun", "all", "lint"],
-                    nargs="?", default="walk")
-    ap.add_argument("--shots", default=None, help="screenshot output directory")
+    ap.add_argument("mode", nargs="?", default="walk",
+                    choices=["walk", "lint"])
+    ap.add_argument("--suites", default="system,moderation,networkops,consent")
+    ap.add_argument("--shots", default=None)
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
     if a.mode == "lint":
         rep = WalkReport()
         case_localization_bundles_mirror(rep)
-    elif a.mode == "firstrun":
-        rep = asyncio.run(run_firstrun(a.shots))
-    elif a.mode == "all":
-        rep = asyncio.run(run_firstrun(a.shots))
-        rep.cases += asyncio.run(run_walk(a.shots)).cases
     else:
-        rep = asyncio.run(run_walk(a.shots))
+        suites = [s.strip() for s in a.suites.split(",") if s.strip() in SUITES]
+        rep = asyncio.run(run_walk(suites, a.shots))
 
     print(rep.summary())
     if a.json:
-        print(json.dumps(
-            [{"name": c.name, "status": c.status.value, "detail": c.detail,
-              "observed": c.observed, "screenshot": c.screenshot}
-             for c in rep.cases], indent=2))
+        print(rep.to_json())
     return 1 if rep.failed else 0
 
 

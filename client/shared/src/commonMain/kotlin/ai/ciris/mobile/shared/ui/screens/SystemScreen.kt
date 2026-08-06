@@ -913,7 +913,16 @@ private fun bandColor(band: OperatorBand?): Color {
     }
 }
 
-/** The wire token as a chip: persist's own vocabulary, never paraphrased. */
+/**
+ * The wire token as a chip: persist's own vocabulary, never paraphrased.
+ *
+ * The token is also published to the test-automation tree as the element's
+ * `text`, because the distinctions this surface exists to keep (`never_admitted`
+ * vs `unreadable` vs `dark`; `not_exercised` vs `idle`) are exactly what a QA
+ * walk has to be able to read back. Without it a walk can only see THAT a pill
+ * rendered, not WHICH standing it carries — and "a pill rendered" is true for
+ * every one of the states that must not be confused with each other.
+ */
 @Composable
 private fun BandPill(band: OperatorBand?, token: String, testTagName: String) {
     val color = bandColor(band)
@@ -922,7 +931,7 @@ private fun BandPill(band: OperatorBand?, token: String, testTagName: String) {
         shape = RoundedCornerShape(6.dp),
         modifier = Modifier
             .border(1.dp, color.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-            .testable(testTagName)
+            .testable(testTagName, token)
     ) {
         Text(
             text = token.replace('_', ' ').uppercase(),
@@ -963,11 +972,25 @@ private fun ageLabel(seconds: Long): String {
     }
 }
 
-/** A label/value line. The value is a fact, never a placeholder dash. */
+/**
+ * A label/value line. The value is a fact, never a placeholder dash.
+ *
+ * [testTagName] is optional but load-bearing for the rows whose PRESENCE is the
+ * assertion: an `unreadable` trace plane must show neither an arrival instant
+ * nor a row count, while `never_admitted` must show the row count and cannot
+ * show an instant. A walk can only check that if the rows are addressable, so
+ * the trace-plane rows pass a tag and carry their value as the element text.
+ */
 @Composable
-private fun OperatorFactRow(label: String, value: String, valueColor: Color? = null) {
+private fun OperatorFactRow(
+    label: String,
+    value: String,
+    valueColor: Color? = null,
+    testTagName: String? = null
+) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = (testTagName?.let { Modifier.testable(it, value) } ?: Modifier)
+            .fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
@@ -1306,7 +1329,8 @@ private fun TracePlaneCard(reading: TracePlaneReading?) {
                     )
                     OperatorFactRow(
                         label = localizedString("operator_ui.traces_held"),
-                        value = (reading.rows ?: 0L).toString()
+                        value = (reading.rows ?: 0L).toString(),
+                        testTagName = "trace_rows"
                     )
                 }
                 else -> {
@@ -1315,13 +1339,15 @@ private fun TracePlaneCard(reading: TracePlaneReading?) {
                     if (reading.lastAdmittedAt != null) {
                         OperatorFactRow(
                             label = localizedString("operator_ui.last_admitted"),
-                            value = reading.lastAdmittedAt!!
+                            value = reading.lastAdmittedAt!!,
+                            testTagName = "trace_last_admitted"
                         )
                         reading.ageSeconds?.let { secs ->
                             OperatorFactRow(
                                 label = localizedString("operator_ui.age"),
                                 value = ageLabel(secs),
-                                valueColor = color
+                                valueColor = color,
+                                testTagName = "trace_age"
                             )
                         }
                     } else {
@@ -1336,7 +1362,8 @@ private fun TracePlaneCard(reading: TracePlaneReading?) {
                     reading.rows?.let {
                         OperatorFactRow(
                             label = localizedString("operator_ui.traces_held"),
-                            value = it.toString()
+                            value = it.toString(),
+                            testTagName = "trace_rows"
                         )
                     }
                 }
