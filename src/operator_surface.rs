@@ -224,12 +224,26 @@ impl WithholdClass {
             WithholdReason::RecipientNotInSendSet
             | WithholdReason::ServeCapabilityMissing
             | WithholdReason::ServeCapabilityNotRooted
-            | WithholdReason::RecipientCapabilityRestriction => Self::Policy,
+            | WithholdReason::RecipientCapabilityRestriction
+            // edge v15.19.0 (CIRISEdge#440). Both are decisions somebody MADE,
+            // not failures: a subscribed trust root paused the plane via
+            // mesh_config, or an operator quarantined the author here. They
+            // belong beside the other deliberate withholds — Yellow, "change the
+            // configuration, not the code" — and NOT with the fail-closed reads
+            // below, because reading them as a fault would send an operator
+            // hunting for a defect in a mesh doing exactly what it was told.
+            | WithholdReason::ConfigPaused
+            | WithholdReason::QuarantinedAuthor => Self::Policy,
             // Fail-closed on a failed read, or a missing local wiring input.
             WithholdReason::LocalIdentityMissing
             | WithholdReason::SendSetUnresolved
             | WithholdReason::ServeCapabilityReadError
-            | WithholdReason::TrustRootWalkError => Self::Fault,
+            | WithholdReason::TrustRootWalkError
+            // A quarantine read that FAILED is not a quarantine that said no —
+            // could-not-ask versus a verdict, the distinction this surface exists
+            // to keep. Fail-closed, and Red: the node withheld without knowing
+            // whether it had to.
+            | WithholdReason::QuarantineReadError => Self::Fault,
             // Local state that cannot be put on the wire at all.
             WithholdReason::EnvelopeUnfetchable
             | WithholdReason::RowNotSerializable

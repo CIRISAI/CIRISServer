@@ -771,7 +771,7 @@ async fn drive_coordinator_round(mdu: Option<usize>, tag: &str) -> (bool, Vec<us
         Arc::new(
             DirectoryStateAdapter::new(agent_bridge.clone()).with_peer(canonical.key_id.clone()),
         ),
-        Arc::new(Mutex::new(MutableDirectoryStateAdapter::new(agent_bridge))),
+        Arc::new(MutableDirectoryStateAdapter::new(agent_bridge)),
     );
     let canon_coord = ReplicationCoordinator::new(
         Arc::new(Loopback {
@@ -783,7 +783,7 @@ async fn drive_coordinator_round(mdu: Option<usize>, tag: &str) -> (bool, Vec<us
         EnvelopeKind::Attestation,
         SessionRole::Responder,
         Arc::new(DirectoryStateAdapter::new(canon_bridge.clone()).with_peer(agent.key_id.clone())),
-        Arc::new(Mutex::new(MutableDirectoryStateAdapter::new(canon_bridge))),
+        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge)),
     );
 
     // Drive: initiator starts, then pump both directions until terminal.
