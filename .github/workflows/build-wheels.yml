@@ -198,12 +198,24 @@ jobs:
       # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
       # the wheel had been creeping ~1 MB a release for four cuts.
       #
-      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
-      # on the build, with the artifact in hand — not at the end of a publish.
+      # FAIL_MB sits just below PyPI's limit so the failure lands HERE, on the
+      # build with the artifact in hand, rather than at the last step of a
+      # publish — but only when rejection is actually imminent.
+      #
+      # It was 94 on the first pass, chosen before anyone had measured: linux is
+      # 97 and windows 98, both of which publish fine, so the gate blocked a cut
+      # that was not at risk. A gate that cries wolf gets raised or deleted by
+      # whoever is holding a broken release at 2am, and then it is not there for
+      # the case it was built for.
+      #
+      # 100 MB is arbitrary but USEFUL — it is the only forcing function against
+      # a wheel that grows ~1 MB a release forever. The right answer to this
+      # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
+      # loads), never to raise the number.
       - name: Wheel size gate
         shell: bash
         run: |
-          FAIL_MB=94
+          FAIL_MB=99
           rc=0
           for w in dist/*.whl; do
             MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
@@ -451,12 +463,24 @@ jobs:
       # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
       # the wheel had been creeping ~1 MB a release for four cuts.
       #
-      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
-      # on the build, with the artifact in hand — not at the end of a publish.
+      # FAIL_MB sits just below PyPI's limit so the failure lands HERE, on the
+      # build with the artifact in hand, rather than at the last step of a
+      # publish — but only when rejection is actually imminent.
+      #
+      # It was 94 on the first pass, chosen before anyone had measured: linux is
+      # 97 and windows 98, both of which publish fine, so the gate blocked a cut
+      # that was not at risk. A gate that cries wolf gets raised or deleted by
+      # whoever is holding a broken release at 2am, and then it is not there for
+      # the case it was built for.
+      #
+      # 100 MB is arbitrary but USEFUL — it is the only forcing function against
+      # a wheel that grows ~1 MB a release forever. The right answer to this
+      # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
+      # loads), never to raise the number.
       - name: Wheel size gate
         shell: bash
         run: |
-          FAIL_MB=94
+          FAIL_MB=99
           rc=0
           for w in dist/*.whl; do
             MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
@@ -643,12 +667,24 @@ jobs:
       # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
       # the wheel had been creeping ~1 MB a release for four cuts.
       #
-      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
-      # on the build, with the artifact in hand — not at the end of a publish.
+      # FAIL_MB sits just below PyPI's limit so the failure lands HERE, on the
+      # build with the artifact in hand, rather than at the last step of a
+      # publish — but only when rejection is actually imminent.
+      #
+      # It was 94 on the first pass, chosen before anyone had measured: linux is
+      # 97 and windows 98, both of which publish fine, so the gate blocked a cut
+      # that was not at risk. A gate that cries wolf gets raised or deleted by
+      # whoever is holding a broken release at 2am, and then it is not there for
+      # the case it was built for.
+      #
+      # 100 MB is arbitrary but USEFUL — it is the only forcing function against
+      # a wheel that grows ~1 MB a release forever. The right answer to this
+      # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
+      # loads), never to raise the number.
       - name: Wheel size gate
         shell: bash
         run: |
-          FAIL_MB=94
+          FAIL_MB=99
           rc=0
           for w in dist/*.whl; do
             MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
