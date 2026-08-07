@@ -38,9 +38,6 @@ permissions:
   packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
 
 env:
-  CARGO_TERM_COLOR: always
-
-env:
   # CIRISServer#129 — crates.io HTTP/2 multiplexing flake hardening. The CDN
   # drops HTTP/2 streams mid-download and cargo surfaces it as a build error it
   # is not:
@@ -53,6 +50,7 @@ env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_MULTIPLEXING: "false"   # force HTTP/1.1 — no stream multiplexing
   CARGO_NET_TIMEOUT: "60"
+  CARGO_TERM_COLOR: always
 
 jobs:
   fmt:

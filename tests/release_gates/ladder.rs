@@ -1209,3 +1209,101 @@ fn gate0_no_anchored_proof_is_an_empty_instrument() {
         dead.join("\n"),
     );
 }
+
+/// Every workflow file is one GitHub Actions will actually accept.
+///
+/// This gate exists because of the way it was found. `0.5.158` added a
+/// workflow-level `env:` block to `ci.yml` and `release.yml` for the crates.io
+/// HTTP/2 hardening — and both files already HAD one. The result was a duplicate
+/// top-level key. It was validated before the push, with `yaml.safe_load`, which
+/// accepts duplicate keys silently and keeps the last: the check passed, and
+/// Actions rejected both files outright on the tag push. Two workflows went from
+/// green to `startup_failure` in under a second.
+///
+/// So the validator and the consumer disagreed, and the validator was the lenient
+/// one. **A check is only worth what it shares with the thing it stands in for**;
+/// `safe_load` answered "is this YAML" when the question was "will Actions run
+/// this". That is the same shape as the rest of this cut's defects — an
+/// instrument reporting on a plane adjacent to the one that matters — and it is
+/// the most dangerous instance of it available in this repo, because a workflow
+/// that fails to parse does not run ONE gate. It runs none of them, and a ladder
+/// of thirty rungs reports nothing at all while `main` is red for a reason no
+/// rung can see.
+///
+/// Failing here means: whatever else is true of this tree, CI cannot speak for it.
+#[test]
+fn gate0_every_workflow_is_one_actions_will_accept() {
+    let dir = repo().join(".github/workflows");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "yml" || x == "yaml"))
+        .collect();
+    files.sort();
+
+    // A zero denominator is itself the error — see the rest of this suite.
+    assert!(
+        !files.is_empty(),
+        "\n🚫 RELEASE LADDER — no workflow files found under {}.\n\
+         Either CI was deleted or this gate is looking in the wrong place; both are\n\
+         release-blocking, and neither may read as a pass.\n",
+        dir.display(),
+    );
+
+    let mut bad = Vec::new();
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(path).unwrap_or_default();
+
+        // Top-level keys only: column 0, not a comment, not a list item. Block
+        // scalars (`run: |`) are always indented under a job, so their bodies
+        // cannot produce a column-0 match.
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for (i, line) in src.lines().enumerate() {
+            if line.starts_with([' ', '\t', '#', '-']) || line.trim().is_empty() {
+                continue;
+            }
+            let Some((k, _)) = line.split_once(':') else { continue };
+            let key = k.trim().trim_matches(['"', '\'']).to_string();
+            if key.is_empty() || !k.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            if let Some((_, first)) = seen.iter().find(|(s, _)| *s == key) {
+                bad.push(format!(
+                    "  {name}: DUPLICATE top-level key `{key}` — line {} and line {}.\n    \
+                     YAML parsers keep the last and drop the first silently; Actions refuses\n    \
+                     the file. Merge the two blocks; never append a second one.",
+                    first + 1,
+                    i + 1,
+                ));
+            } else {
+                seen.push((key, i));
+            }
+        }
+
+        // The two keys Actions requires to schedule anything at all.
+        for required in ["on", "jobs"] {
+            if !seen.iter().any(|(k, _)| k == required) {
+                bad.push(format!(
+                    "  {name}: no top-level `{required}:` — Actions cannot schedule this file."
+                ));
+            }
+        }
+    }
+
+    assert!(
+        bad.is_empty(),
+        "\n\
+         🚫 RELEASE LADDER — a workflow file will not parse, so CI cannot speak for this tree.\n\
+         \n\
+         {}\n\
+         \n\
+         Examined {} workflow file(s) under .github/workflows.\n\
+         \n\
+         Note for whoever fixes this: `yaml.safe_load` will NOT reproduce a duplicate-key\n\
+         failure — it accepts them and keeps the last. That leniency is what let this ship.\n",
+        bad.join("\n"),
+        files.len(),
+    );
+}
