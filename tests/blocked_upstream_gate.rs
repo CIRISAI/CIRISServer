@@ -215,8 +215,24 @@ fn checkout(repo: &str) -> Result<Option<PathBuf>, String> {
         "CIRISVerify" => "cirisverify-",
         other => return Err(format!("unknown substrate repo {other:?} in {MANIFEST}")),
     };
-    let home = std::env::var("HOME").map_err(|_| "HOME unset".to_string())?;
-    let checkouts = PathBuf::from(home).join(".cargo/git/checkouts");
+    // CARGO_HOME first, because it is the variable that actually decides where
+    // these checkouts live — deriving the path from HOME ignores anyone who has
+    // relocated their cargo home and silently reads the wrong tree, or none.
+    // CI sets it explicitly (`CARGO_HOME: /home/runner/.cargo`).
+    //
+    // The HOME/USERPROFILE fallbacks exist because HOME alone is a POSIX
+    // assumption: it is unset on Windows runners, where this gate panicked with
+    // "HOME unset" and took all of CI red with it — which in turn blocked the
+    // iOS release asset, since that job harvests only from a GREEN ci.yml run.
+    // A gate for upstream blockers has no business having an opinion about the
+    // host OS.
+    let checkouts = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".cargo")))
+        .ok_or_else(|| "none of CARGO_HOME, HOME or USERPROFILE is set".to_string())?
+        .join("git")
+        .join("checkouts");
     let Ok(entries) = std::fs::read_dir(&checkouts) else {
         return Ok(None);
     };

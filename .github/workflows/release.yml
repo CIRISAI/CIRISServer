@@ -345,28 +345,64 @@ jobs:
           set -euo pipefail
           # ci.yml triggers on push:main + pull_request (NOT on tags), so the
           # artifact belongs to the CI run of this same SHA on main. If that run
-          # is still in flight (tag pushed right behind the branch push), wait
-          # for it — up to 30 minutes, which covers the macOS iOS legs.
+          # is still in flight (tag pushed right behind the branch push), wait.
+          #
+          # WAIT ON THE JOBS THAT BUILD THE ASSET, NOT ON THE RUN'S CONCLUSION.
+          #
+          # This gate used to select `.conclusion == "success"` over the whole
+          # ci.yml run. A run's conclusion is the AND of every job in it, so any
+          # unrelated red — a rustfmt nit, a clippy lint in a test file — vetoed
+          # a 58 MiB iOS asset that had built perfectly. On v0.5.158 exactly that
+          # happened: `ios PyO3 abi3` (both slices) and `package ios artifacts`
+          # all went green and uploaded `ciris-server-ios`, while rustfmt and two
+          # clippy legs failed, and this job reported "No successful ci.yml run".
+          #
+          # It is the defect class this repo keeps finding: ONE NAME, TWO AXES.
+          # "CI is green" was standing in for "the iOS artifact was built", and
+          # those are different questions over different jobs. Every release from
+          # v0.5.146 to v0.5.158 carries zero iOS assets — the harvest has never
+          # once succeeded, and the run-level gate is why.
+          #
+          # So: poll until the iOS jobs specifically are COMPLETE, then require
+          # THOSE to be green. An unrelated red is reported loudly and does not
+          # veto. A red iOS job still blocks, because then the asset is suspect.
+          IOS_JOBS='^(ios PyO3 abi3|package ios artifacts)'
           RUN_ID=""
-          for attempt in $(seq 1 30); do
-            RUN_JSON=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
-                        --repo "$GITHUB_REPOSITORY" --limit 20 \
-                        --json databaseId,status,conclusion 2>/dev/null || echo '[]')
-            RUN_ID=$(echo "$RUN_JSON" | jq -r '[.[] | select(.conclusion == "success")][0].databaseId // empty')
+          for attempt in $(seq 1 45); do
+            RUN_ID=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
+                      --repo "$GITHUB_REPOSITORY" --limit 20 \
+                      --json databaseId,createdAt 2>/dev/null \
+                      | jq -r 'sort_by(.createdAt) | reverse | .[0].databaseId // empty')
             if [ -n "$RUN_ID" ]; then
-              echo "✓ CI run ${RUN_ID} for ${GITHUB_SHA} is green"
-              break
+              JOBS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+                      --paginate --jq '.jobs[] | {name, status, conclusion}' 2>/dev/null \
+                      | jq -s '.' || echo '[]')
+              TOTAL=$(echo "$JOBS"   | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re))] | length')
+              PENDING=$(echo "$JOBS" | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re)) | select(.status != "completed")] | length')
+              if [ "$TOTAL" != "0" ] && [ "$PENDING" = "0" ]; then
+                FAILED=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
+                          '[.[] | select(.name|test($re)) | select(.conclusion != "success") | .name] | join(", ")')
+                if [ -n "$FAILED" ]; then
+                  echo "::error::The iOS build itself failed in ci.yml run ${RUN_ID}: ${FAILED}. The asset is not publishable. Fix the iOS leg; do not re-tag."
+                  exit 1
+                fi
+                echo "✓ all ${TOTAL} iOS job(s) green in ci.yml run ${RUN_ID}"
+                # Report unrelated reds — they do not block the asset, but they
+                # must never be invisible from here.
+                OTHER=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
+                         '[.[] | select(.name|test($re)|not) | select(.conclusion == "failure") | .name] | join(", ")')
+                if [ -n "$OTHER" ]; then
+                  echo "::warning::ci.yml run ${RUN_ID} is RED for reasons unrelated to iOS: ${OTHER}. Publishing the iOS asset anyway — those jobs do not build it — but that CI failure still needs fixing."
+                fi
+                break
+              fi
             fi
-            PENDING=$(echo "$RUN_JSON" | jq -r '[.[] | select(.status != "completed")] | length')
-            if [ "$PENDING" = "0" ]; then
-              echo "::error::No successful ci.yml run for ${GITHUB_SHA}. The iOS release asset is BUILT BY CI (ci.yml: ios-build → ios-package) and published from here. Fix: run the CI workflow on this commit (Actions → CI → Run workflow, or push the commit to main), wait for it to go green, then re-run this job. Do not re-tag."
-              exit 1
-            fi
-            echo "CI run for ${GITHUB_SHA} still in progress (${attempt}/30) — waiting 60s"
+            echo "iOS jobs for ${GITHUB_SHA} not finished yet (${attempt}/45) — waiting 60s"
+            RUN_ID=""
             sleep 60
           done
           if [ -z "$RUN_ID" ]; then
-            echo "::error::Timed out after 30 minutes waiting for the ci.yml run on ${GITHUB_SHA} to finish. Re-run this job once CI is green."
+            echo "::error::Timed out after 45 minutes waiting for the iOS jobs of the ci.yml run on ${GITHUB_SHA}. The iOS release asset is BUILT BY CI (ci.yml: ios-build → ios-package) and published from here. Re-run this job once those jobs have finished. Do not re-tag."
             exit 1
           fi
           mkdir -p ios

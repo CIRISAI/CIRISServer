@@ -734,7 +734,6 @@ impl ciris_edge::transport::Transport for Loopback {
 /// Returns `(converged, frame_sizes)`.
 async fn drive_coordinator_round(mdu: Option<usize>, tag: &str) -> (bool, Vec<usize>) {
     use ciris_edge::replication::{DriveStep, ReplicationCoordinator};
-    use tokio::sync::Mutex;
 
     arm_test_trust_root(&genesis_holders());
     let agent = node(&format!("agent-{tag}"), 0xE1, 0xE2).await;

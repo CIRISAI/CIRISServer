@@ -1264,7 +1264,9 @@ fn gate0_every_workflow_is_one_actions_will_accept() {
             if line.starts_with([' ', '\t', '#', '-']) || line.trim().is_empty() {
                 continue;
             }
-            let Some((k, _)) = line.split_once(':') else { continue };
+            let Some((k, _)) = line.split_once(':') else {
+                continue;
+            };
             let key = k.trim().trim_matches(['"', '\'']).to_string();
             if key.is_empty() || !k.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                 continue;
@@ -1305,5 +1307,88 @@ fn gate0_every_workflow_is_one_actions_will_accept() {
          failure — it accepts them and keeps the last. That leniency is what let this ship.\n",
         bad.join("\n"),
         files.len(),
+    );
+}
+
+/// `scripts/preflight.sh` runs what `ci.yml` runs.
+///
+/// The preflight script duplicates CI's cargo invocations so they can be run
+/// before a push. A duplicate that can drift is worth less than no duplicate:
+/// it would keep reporting green about a CI that had moved on, and the person
+/// trusting it would be worse off than the person who ran nothing. So the
+/// duplication is checked rather than hoped about.
+///
+/// The allow-list is jobs whose commands genuinely cannot run on a contributor's
+/// machine — the iOS legs need macOS and installed Apple targets. Naming them
+/// here is the point: a skip that is written down is a decision, and a skip that
+/// is silent is a gap nobody knows they have.
+#[test]
+fn gate0_preflight_runs_what_ci_runs() {
+    const PLATFORM_ONLY: &[&str] = &["ios-build", "ios-package"];
+
+    let ci = std::fs::read_to_string(repo().join(".github/workflows/ci.yml"))
+        .expect("ci.yml unreadable");
+    let pre = std::fs::read_to_string(repo().join("scripts/preflight.sh"))
+        .expect("scripts/preflight.sh unreadable — CI's checks have no local runner");
+
+    // Walk ci.yml tracking which job we are inside, collecting cargo commands.
+    let mut job = String::new();
+    let mut want: Vec<(String, String)> = Vec::new();
+    for line in ci.lines() {
+        // job ids sit at exactly two spaces of indent under `jobs:`
+        if let Some(rest) = line.strip_prefix("  ") {
+            if !rest.starts_with(' ') && rest.ends_with(':') && !rest.contains(' ') {
+                job = rest.trim_end_matches(':').to_string();
+            }
+        }
+        // CI writes these two ways, and only one of them starts with `cargo`:
+        //   - run: cargo fmt --all --check      (inline)
+        //     run: |                            (block, one command per line)
+        //       cargo test
+        let t = line
+            .trim()
+            .trim_start_matches("- ")
+            .trim_start_matches("run:")
+            .trim();
+        if t.starts_with("cargo ") && !t.contains("--version") && !t.contains("--help") {
+            if PLATFORM_ONLY.contains(&job.as_str()) {
+                continue;
+            }
+            // matrix/env expansions cannot be compared literally
+            if t.contains("${{") || t.contains('$') {
+                continue;
+            }
+            want.push((job.clone(), t.to_string()));
+        }
+    }
+
+    assert!(
+        !want.is_empty(),
+        "\n🚫 RELEASE LADDER — parsed ZERO cargo commands out of ci.yml.\n\
+         The parser has drifted from the file's shape, so this gate is measuring\n\
+         nothing and would pass no matter what preflight.sh contained. A zero\n\
+         denominator is the error, not a pass.\n",
+    );
+
+    let missing: Vec<_> = want
+        .iter()
+        .filter(|(_, cmd)| !pre.contains(cmd.as_str()))
+        .map(|(job, cmd)| format!("  [{job}]  {cmd}"))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "\n\
+         🚫 RELEASE LADDER — scripts/preflight.sh does not run everything ci.yml runs.\n\
+         \n\
+         Missing:\n{}\n\
+         \n\
+         Checked {} cargo command(s) from ci.yml against scripts/preflight.sh.\n\
+         \n\
+         Add them to preflight.sh, or — if the command genuinely cannot run off-CI —\n\
+         add its job to PLATFORM_ONLY in this gate, which is a decision on the record\n\
+         rather than a hole nobody knows about.\n",
+        missing.join("\n"),
+        want.len(),
     );
 }

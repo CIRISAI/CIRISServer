@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Run what CI runs, before pushing — in parallel.
+#
+# WHY THIS EXISTS
+#
+# v0.5.158 went to main with three reds, and all three were the same mistake:
+# something NEAR the CI command was run instead of the CI command.
+#
+#   tests/release_gates/ladder.rs:1264  rustfmt   — never ran `cargo fmt --check`
+#   tests/trace_round_e2e.rs:737        clippy    — ran clippy WITHOUT --features
+#                                                   test-anchor; the unused import
+#                                                   is invisible without it
+#   tests/blocked_upstream_gate.rs:218  windows   — HOME is unset there
+#
+# None was a hard bug. All three were free to find. The cost was not the fixes —
+# it was that a red ci.yml run blocked the iOS release asset, because the harvest
+# job waits on CI. A formatting nit deleted a 58 MiB artifact from the release.
+#
+# WHY IT IS PARALLEL, AND WHY THAT IS NOT JUST SPEED
+#
+# A preflight nobody runs is worth nothing, and the thing that stops people
+# running one is the wall clock. Serially these checks are dominated by CARGO
+# FEATURE THRASH: default, `python` and `test-anchor` produce different build
+# fingerprints, so a shared target dir rebuilds the world every time the lane
+# changes — the same crates, three times, in sequence.
+#
+# So each feature set gets its OWN target dir. That removes the thrash AND the
+# build lock that would otherwise serialize the lanes no matter how they were
+# launched (cargo holds an exclusive lock on a target dir for a whole command —
+# backgrounding alone buys nothing). Costs disk, returns wall clock.
+#
+#   lane 1  default features    target/pf-default
+#   lane 2  --features python   target/pf-python
+#   lane 3  --features anchor   target/pf-anchor
+#   lane 4  no build at all     — fmt, evidence, localization, version
+#
+# DRIFT
+#
+# These commands are duplicated from .github/workflows/ci.yml, and a duplicate
+# that can drift is worth less than no duplicate: it would keep reporting green
+# about a CI that had moved on. `gate0_preflight_runs_what_ci_runs` in
+# tests/release_gates/ladder.rs asserts every cargo command in ci.yml's fmt and
+# clippy-test jobs appears here. Platform-only legs (ios, macOS) are named in
+# that gate's allow-list — a skip written down is a decision; a silent one is a
+# gap nobody knows they have.
+#
+#   ./scripts/preflight.sh            # everything
+#   ./scripts/preflight.sh --fast     # skip the slow test-anchor round-trip
+#   PF_SEQUENTIAL=1 ./scripts/preflight.sh    # one lane at a time (low disk)
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+FAST=0
+[ "${1:-}" = "--fast" ] && FAST=1
+SEQUENTIAL="${PF_SEQUENTIAL:-0}"
+
+LOG=$(mktemp -d)
+trap 'rm -rf "$LOG"' EXIT
+START=$SECONDS
+
+# One check: name, then the command. Output is captured per check so parallel
+# lanes do not interleave into an unreadable stream.
+declare -a NAMES=() STATUS=()
+check() {
+  local name="$1"; shift
+  local slug=${name//[^a-zA-Z0-9]/_}
+  if "$@" >"$LOG/$slug.out" 2>&1; then echo "0" >"$LOG/$slug.rc"; else echo "1" >"$LOG/$slug.rc"; fi
+}
+
+# A lane is a sequence of checks sharing one target dir. Lanes run concurrently;
+# checks inside a lane run in order, because they contend for that dir's lock.
+lane() {
+  local tgt="$1"; shift
+  # An EMPTY CARGO_TARGET_DIR is not "unset" — cargo rejects it outright, and
+  # `cargo fmt` reports that by printing its full usage text with the actual
+  # reason on the line above, which reads as a malformed command rather than a
+  # bad environment. Lane 4 builds nothing and wants no target dir at all.
+  if [ -n "$tgt" ]; then export CARGO_TARGET_DIR="$tgt"; else unset CARGO_TARGET_DIR; fi
+  while [ $# -gt 0 ]; do
+    local name="$1" cmd="$2"; shift 2
+    check "$name" bash -c "$cmd"
+  done
+}
+
+echo "preflight: 4 lanes, $( [ "$SEQUENTIAL" = 1 ] && echo sequential || echo parallel )"
+
+L1=( "clippy"              "cargo clippy --all-targets -- -D warnings"
+     "tests"               "cargo test"
+     "tests-lens-core"     "cargo test -p ciris-lens-core --lib"
+     "noise-floor"         "cargo test --test noise_floor -- --nocapture" )
+
+L2=( "clippy-python"       "cargo clippy --lib --features python -- -D warnings" )
+
+L3=( "clippy-test-anchor"  "cargo clippy --all-targets --features test-anchor -- -D warnings" )
+if [ "$FAST" = "0" ]; then
+  L3+=( "trace-round+trust-root" \
+        "cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa" )
+fi
+
+# Lane 4 builds nothing, so it needs no target dir and always runs alongside.
+L4=( "rustfmt"             "cargo fmt --all --check"
+     "evidence"            "python3 tools/check_evidence.py"
+     "localization"        "python3 client/tools/check_localization_sync.py --strict"
+     "client-version"      "./scripts/sync-client-version.sh --check"
+     "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )
+
+if [ "$SEQUENTIAL" = "1" ]; then
+  lane target/pf-default "${L1[@]}"
+  lane target/pf-python  "${L2[@]}"
+  lane target/pf-anchor  "${L3[@]}"
+  lane ""                "${L4[@]}"
+else
+  lane target/pf-default "${L1[@]}" &
+  lane target/pf-python  "${L2[@]}" &
+  lane target/pf-anchor  "${L3[@]}" &
+  lane ""                "${L4[@]}" &
+  wait
+fi
+
+# ── report ────────────────────────────────────────────────────────────────
+FAILED=(); RAN=0
+for f in "$LOG"/*.rc; do
+  [ -e "$f" ] || continue
+  RAN=$((RAN+1))
+  name=$(basename "$f" .rc)
+  if [ "$(cat "$f")" != "0" ]; then FAILED+=("$name"); fi
+done
+
+for n in "${FAILED[@]}"; do
+  printf '\n\033[31m── FAILED: %s\033[0m\n' "$n"
+  tail -30 "$LOG/$n.out" | sed 's/^/    /'
+done
+
+printf '\n\033[1m%d check(s) run in %ds, %d failed\033[0m\n' "$RAN" "$((SECONDS-START))" "${#FAILED[@]}"
+
+# A zero denominator is the error, not a pass — the same rule the release ladder
+# applies to itself. If nothing ran, something is wrong with this script.
+if [ "$RAN" -eq 0 ]; then
+  printf '\033[31mpreflight ran ZERO checks — that is a failure, not a pass\033[0m\n'
+  exit 1
+fi
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  printf '\033[31m  %s\033[0m\n' "${FAILED[@]}"
+  exit 1
+fi
+printf '\033[32mpreflight clean — safe to push\033[0m\n'
