@@ -36,6 +36,20 @@ permissions:
   contents: read
   packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
 
+env:
+  # CIRISServer#129 — crates.io HTTP/2 multiplexing flake hardening. The CDN
+  # drops HTTP/2 streams mid-download and cargo surfaces it as a build error it
+  # is not:
+  #   error: download of <crate> failed: curl failed … OpenSSL SSL_read:
+  #          unexpected eof … Failed receiving HTTP2 data
+  # persist and edge already carry this (CIRISVerify#148/#158); server did not,
+  # so every lane here was exposed to a retryable network fault presenting as a
+  # compile failure — the kind of red that teaches people to re-run rather than
+  # to read.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"   # force HTTP/1.1 — no stream multiplexing
+  CARGO_NET_TIMEOUT: "60"
+
 jobs:
   # ── Build abi3 wheels per platform ─────────────────────────────────────────
   # Linux: build on the native runners with apt deps + patchelf (NOT a manylinux
@@ -174,6 +188,32 @@ jobs:
       # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
       # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
       #
+      # ── Wheel size gate (CIRISServer#378) ────────────────────────────────
+      # PyPI enforces a per-project file limit (100 MB for `ciris-server`) at
+      # UPLOAD — the last step of a tag run, after every wheel has built and the
+      # conformance gate has passed. v0.5.157 died there: macosx_10_12_x86_64 at
+      # 100.4 MB, rejected, with the Linux/Android wheels already published.
+      #
+      # Nothing measured the wheel until PyPI did. The belief going in was that
+      # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
+      # the wheel had been creeping ~1 MB a release for four cuts.
+      #
+      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
+      # on the build, with the artifact in hand — not at the end of a publish.
+      - name: Wheel size gate
+        shell: bash
+        run: |
+          FAIL_MB=94
+          rc=0
+          for w in dist/*.whl; do
+            MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
+            printf '  %4d MB  %s\n' "$MB" "$(basename "$w")"
+            if [ "$MB" -ge "$FAIL_MB" ]; then
+              echo "::error::$(basename "$w") is ${MB} MB, at or over the ${FAIL_MB} MB gate (PyPI's limit for ciris-server is 100 MB). Find the growth before tagging — see CIRISServer#378 for how the macOS Skiko duplication was found."
+              rc=1
+            fi
+          done
+          exit $rc
       # Two modes, because one leg cross-compiles:
       #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
       #                agent uses. The faithful check.
@@ -295,6 +335,51 @@ jobs:
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           mkdir -p ../python/ciris_server/desktop_app
           cp desktopApp/build/compose/jars/CIRIS-*.jar ../python/ciris_server/desktop_app/
+          # ── Drop the Skiko native this wheel will never load (CIRISServer#378) ──
+          #
+          # Compose's macOS uber-jar bundles BOTH Skiko renderers — 19.8 MB of
+          # arm64 plus 20.6 MB of x64 — and a wheel loads exactly one. Linux and
+          # Windows ship a single native and are already correct; this is a
+          # macOS-only surgery, so the loop is a no-op elsewhere by construction
+          # rather than by an `if`.
+          #
+          # v0.5.157's macosx_10_12_x86_64 wheel was REJECTED by PyPI at 100.4 MB
+          # against a 100 MB project limit. Dropping the unused dylib takes it to
+          # 91.4 MB — measured on the rejected artifact itself, not projected.
+          #
+          # This also retires the KNOWN LIMITATION documented on the macos job:
+          # the x86_64 wheel is built on an Apple-Silicon runner so its JAR is
+          # named `-arm64`, and the note warned an Intel user might hit a Skiko
+          # load error. They would not have — the JAR carried both natives — but
+          # after this step the payload is genuinely single-arch and matches the
+          # wheel tag, so the name is the only arm64 thing left about it.
+          python3 - "${{ matrix.target }}" <<'SKIKO'
+          import os, sys, zipfile, glob, shutil
+          want = "arm64" if sys.argv[1] in ("aarch64", "arm64") else "x64"
+          drop = "arm64" if want == "x64" else "x64"
+          for jar in glob.glob("../python/ciris_server/desktop_app/CIRIS-macos-*.jar"):
+              victims = {f"libskiko-macos-{drop}.dylib", f"libskiko-macos-{drop}.dylib.sha256"}
+              src = zipfile.ZipFile(jar)
+              names = {i.filename for i in src.infolist()}
+              if not (victims & names):
+                  print(f"  {os.path.basename(jar)}: no {drop} native present — nothing to drop")
+                  src.close(); continue
+              # Fail loudly if the native we intend to KEEP is missing: shipping a
+              # JAR with neither renderer is worse than shipping one with both.
+              keep = f"libskiko-macos-{want}.dylib"
+              assert keep in names, f"{jar}: would drop {drop} but {keep} is ABSENT — refusing"
+              tmp = jar + ".tmp"
+              before = sum(i.file_size for i in src.infolist())
+              with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+                  for i in src.infolist():
+                      if i.filename in victims:
+                          continue
+                      out.writestr(i, src.read(i.filename))
+              src.close(); shutil.move(tmp, jar)
+              after = sum(i.file_size for i in zipfile.ZipFile(jar).infolist())
+              print(f"  {os.path.basename(jar)}: kept {want}, dropped {drop} — "
+                    f"{before/1048576:.1f} MB -> {after/1048576:.1f} MB")
+          SKIKO
           ls -l ../python/ciris_server/desktop_app/
       # CIRISCache (CIRISServer#99) — 4-layer centipede, layered over
       # maturin-action's sccache below. Restore verify→persist→edge→server;
@@ -356,6 +441,32 @@ jobs:
       # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
       # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
       #
+      # ── Wheel size gate (CIRISServer#378) ────────────────────────────────
+      # PyPI enforces a per-project file limit (100 MB for `ciris-server`) at
+      # UPLOAD — the last step of a tag run, after every wheel has built and the
+      # conformance gate has passed. v0.5.157 died there: macosx_10_12_x86_64 at
+      # 100.4 MB, rejected, with the Linux/Android wheels already published.
+      #
+      # Nothing measured the wheel until PyPI did. The belief going in was that
+      # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
+      # the wheel had been creeping ~1 MB a release for four cuts.
+      #
+      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
+      # on the build, with the artifact in hand — not at the end of a publish.
+      - name: Wheel size gate
+        shell: bash
+        run: |
+          FAIL_MB=94
+          rc=0
+          for w in dist/*.whl; do
+            MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
+            printf '  %4d MB  %s\n' "$MB" "$(basename "$w")"
+            if [ "$MB" -ge "$FAIL_MB" ]; then
+              echo "::error::$(basename "$w") is ${MB} MB, at or over the ${FAIL_MB} MB gate (PyPI's limit for ciris-server is 100 MB). Find the growth before tagging — see CIRISServer#378 for how the macOS Skiko duplication was found."
+              rc=1
+            fi
+          done
+          exit $rc
       # Two modes, because one leg cross-compiles:
       #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
       #                agent uses. The faithful check.
@@ -522,6 +633,32 @@ jobs:
       # --gc-sections would happily dead-strip all ~84 ciris_verify_* symbols —
       # PER-PLATFORM-SILENTLY. Assert the surface actually survived into the wheel.
       #
+      # ── Wheel size gate (CIRISServer#378) ────────────────────────────────
+      # PyPI enforces a per-project file limit (100 MB for `ciris-server`) at
+      # UPLOAD — the last step of a tag run, after every wheel has built and the
+      # conformance gate has passed. v0.5.157 died there: macosx_10_12_x86_64 at
+      # 100.4 MB, rejected, with the Linux/Android wheels already published.
+      #
+      # Nothing measured the wheel until PyPI did. The belief going in was that
+      # we had ~20 MB of headroom; the real figure at v0.5.155 was 2.2 MB, and
+      # the wheel had been creeping ~1 MB a release for four cuts.
+      #
+      # FAIL_MB is deliberately below the PyPI limit so the failure lands here,
+      # on the build, with the artifact in hand — not at the end of a publish.
+      - name: Wheel size gate
+        shell: bash
+        run: |
+          FAIL_MB=94
+          rc=0
+          for w in dist/*.whl; do
+            MB=$(( $(stat -c%s "$w" 2>/dev/null || stat -f%z "$w") / 1048576 ))
+            printf '  %4d MB  %s\n' "$MB" "$(basename "$w")"
+            if [ "$MB" -ge "$FAIL_MB" ]; then
+              echo "::error::$(basename "$w") is ${MB} MB, at or over the ${FAIL_MB} MB gate (PyPI's limit for ciris-server is 100 MB). Find the growth before tagging — see CIRISServer#378 for how the macOS Skiko duplication was found."
+              rc=1
+            fi
+          done
+          exit $rc
       # Two modes, because one leg cross-compiles:
       #   native leg → pip-install the wheel and ctypes-load it: EXACTLY the path the
       #                agent uses. The faithful check.

@@ -36,6 +36,20 @@ permissions:
 # of the conformance fabric; it must attest its own builds.
 # ============================================================================
 
+env:
+  # CIRISServer#129 — crates.io HTTP/2 multiplexing flake hardening. The CDN
+  # drops HTTP/2 streams mid-download and cargo surfaces it as a build error it
+  # is not:
+  #   error: download of <crate> failed: curl failed … OpenSSL SSL_read:
+  #          unexpected eof … Failed receiving HTTP2 data
+  # persist and edge already carry this (CIRISVerify#148/#158); server did not,
+  # so every lane here was exposed to a retryable network fault presenting as a
+  # compile failure — the kind of red that teaches people to re-run rather than
+  # to read.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"   # force HTTP/1.1 — no stream multiplexing
+  CARGO_NET_TIMEOUT: "60"
+
 jobs:
   build-native:
     name: Build (${{ matrix.target }})
