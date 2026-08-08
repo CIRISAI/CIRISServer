@@ -1392,3 +1392,109 @@ fn gate0_preflight_runs_what_ci_runs() {
         want.len(),
     );
 }
+
+/// Nothing in this workspace signs through persist's SYNC `local_sign` /
+/// `local_pqc_sign` verbs.
+///
+/// The node's classical federation key lives in the sealed keystore
+/// (CIRISServer#380 — one hardware-custodied identity). That makes its signer
+/// **async**, and persist's sync `local_sign` refuses with a `sign_ed25519`
+/// error. Every call site that still used it died silently: `capture_event`
+/// sealed nothing (`sealed_and_persisted=0`), audit entries stopped being
+/// written, and the adapter went on loading and reporting healthy — it simply
+/// could not sign.
+///
+/// That failure was already fixed once. `ffi/pyo3.rs`'s assemble path moved to
+/// `local_sign_hybrid` for CIRISServer#283, and its comment said it had removed
+/// "the last surviving copy of the binding rule in this repo". **It had not.**
+/// Two more copies existed — the `capture_event` seal and the audit chain — and
+/// nobody re-grepped after fixing the one they were looking at. The claim was
+/// load-bearing and unverified, which is the only kind of claim this gate exists
+/// to replace.
+///
+/// `local_sign_hybrid` is the one verb: it dispatches the classical half through
+/// the sealed HardwareSigner and composes `bound = message ‖ classical_sig`
+/// itself, so the binding rule has exactly ONE implementation and it is
+/// upstream's. Ed25519-only wire formats (the audit chain) take
+/// `["classical_sig"]` — identical bytes, no migration.
+#[test]
+fn gate0_nothing_signs_through_the_sync_verb() {
+    const BANNED: &[&str] = &["local_sign\"", "local_pqc_sign\""];
+
+    let mut hits = Vec::new();
+    let mut scanned = 0usize;
+    for dir in ["src", "crates"] {
+        let mut stack = vec![repo().join(dir)];
+        while let Some(p) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&p) else {
+                continue;
+            };
+            for e in rd.filter_map(Result::ok) {
+                let path = e.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let Ok(src) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    scanned += 1;
+                    for (i, line) in src.lines().enumerate() {
+                        let t = line.trim_start();
+                        // Only real call sites — doc comments describing the old
+                        // contract are history, not behaviour.
+                        if t.starts_with("//") {
+                            continue;
+                        }
+                        if !line.contains("call_method") {
+                            continue;
+                        }
+                        for b in BANNED {
+                            if line.contains(b) {
+                                hits.push(format!(
+                                    "  {}:{}  {}",
+                                    path.strip_prefix(repo()).unwrap_or(&path).display(),
+                                    i + 1,
+                                    t.trim()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "\n🚫 RELEASE LADDER — scanned ZERO .rs files looking for sync-signing call \
+         sites. The walker is broken, so this gate proves nothing. A zero denominator \
+         is the error, not a pass.\n"
+    );
+
+    assert!(
+        hits.is_empty(),
+        "\n\
+         🚫 RELEASE LADDER — a call site still signs through persist's SYNC verb.\n\
+         \n\
+         {}\n\
+         \n\
+         The node's classical key is in the sealed keystore (CIRISServer#380), so its\n\
+         signer is ASYNC and `local_sign` refuses. This does not fail loudly: the caller\n\
+         loads, reports healthy, and silently seals nothing — `sealed_and_persisted=0`\n\
+         while the replication plane keeps moving envelopes, which is exactly the reading\n\
+         that got mistaken for traces shipping.\n\
+         \n\
+         Use `engine.local_sign_hybrid(msg)`:\n\
+           • hybrid seals  → take both `classical_sig` and `pqc_sig`\n\
+           • Ed25519-only wire (the audit chain) → take `classical_sig` alone; identical\n\
+             bytes over an identical preimage, so no chain migration\n\
+         \n\
+         It also composes `bound = message ‖ classical_sig` upstream, so the binding rule\n\
+         stays at ONE implementation. Scanned {} .rs files.\n",
+        hits.join("\n"),
+        scanned,
+    );
+}

@@ -942,36 +942,65 @@ impl PyLensClient {
                         // verifies against the derived id).
                         let key_id = engine_federation_key_id(engine)?;
 
-                        // 3c. HYBRID-sign via Python — the federation-admissible
-                        // seal persist v10's VerifyMode::Full hard cut requires
-                        // (CIRISServer#121; an Ed25519-only seal is rejected with
-                        // verify_hybrid_required). Ed25519 signs `canonical`;
-                        // ML-DSA-65 signs the bound `canonical ‖ ed25519_sig`
-                        // (prevents classical-half stripping) — mirrors persist's
-                        // own LocalSigner::sign_hybrid / verify_trace_hybrid.
+                        // 3c. ONE hybrid-sign call (CIRISServer#380 follow-up).
+                        //
+                        // This site used to fetch the two halves separately —
+                        // `local_sign(canonical)` then `local_pqc_sign(canonical ‖
+                        // ed_sig)` — hand-composing the binding preimage itself. It
+                        // was the SECOND copy of that rule, and the comment on the
+                        // other one (assemble path, ~line 360) claimed it had removed
+                        // "the last surviving copy". That claim was wrong: this copy
+                        // seals every trace, and nobody re-grepped after fixing the
+                        // one they were looking at.
+                        //
+                        // It broke for a reason worth recording, because the
+                        // duplication is what made it breakable. Once the classical
+                        // key moved into the SEALED KEYSTORE (CIRISServer#380 — one
+                        // hardware-custodied federation identity), its signer became
+                        // ASYNC, and persist's sync `local_sign` verb refuses:
+                        // `sign_ed25519` errors, every `capture_event` fails, nothing
+                        // seals. The adapter loads fine and reports healthy — it
+                        // simply cannot sign. `sealed_and_persisted=0` with the
+                        // replication plane still moving envelopes, which is exactly
+                        // the reading that got misread as traces shipping.
+                        //
+                        // `local_sign_hybrid` dispatches the classical half THROUGH
+                        // the sealed HardwareSigner (persist signing/mod.rs:450-453,
+                        // custody preserved, never unsealed) and composes
+                        // `bound = message ‖ classical_sig` itself — byte-identical to
+                        // what this site was hand-rolling. So the binding rule now has
+                        // exactly one implementation, upstream's, pinned there by
+                        // `local_sign_hybrid_matches_rlib_sign_hybrid`.
+                        //
+                        // A correct second copy is still a second copy. This one was
+                        // correct for two years and then a custody change made it
+                        // wrong, silently, in the half nobody re-checked.
                         let canonical_pybytes = PyBytes::new(py, &canonical);
-                        let ed_sig: Vec<u8> = engine
-                            .call_method1("local_sign", (canonical_pybytes,))
+                        let sig_dict = engine
+                            .call_method1("local_sign_hybrid", (canonical_pybytes,))
                             .map_err(|e| {
-                                PyRuntimeError::new_err(format!("engine.local_sign: {e}"))
+                                PyRuntimeError::new_err(format!("engine.local_sign_hybrid: {e}"))
+                            })?;
+                        let ed_sig: Vec<u8> = sig_dict
+                            .get_item("classical_sig")
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!(
+                                    "local_sign_hybrid classical_sig: {e}"
+                                ))
                             })?
                             .cast::<PyBytes>()?
                             .as_bytes()
                             .to_vec();
                         if ed_sig.len() != 64 {
                             return Err(PyRuntimeError::new_err(format!(
-                                "engine.local_sign returned {} bytes, expected 64",
+                                "local_sign_hybrid classical_sig is {} bytes, expected 64",
                                 ed_sig.len()
                             )));
                         }
-                        // ML-DSA-65 over `canonical ‖ ed25519_sig`.
-                        let mut bound = canonical.clone();
-                        bound.extend_from_slice(&ed_sig);
-                        let bound_pybytes = PyBytes::new(py, &bound);
-                        let pqc_sig: Vec<u8> = engine
-                            .call_method1("local_pqc_sign", (bound_pybytes,))
+                        let pqc_sig: Vec<u8> = sig_dict
+                            .get_item("pqc_sig")
                             .map_err(|e| {
-                                PyRuntimeError::new_err(format!("engine.local_pqc_sign: {e}"))
+                                PyRuntimeError::new_err(format!("local_sign_hybrid pqc_sig: {e}"))
                             })?
                             .cast::<PyBytes>()?
                             .as_bytes()

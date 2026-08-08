@@ -462,14 +462,41 @@ impl PyLensAudit {
                 let sign_canon_bytes: Vec<u8> =
                     sign_canon_bytes_obj.cast::<PyBytes>()?.as_bytes().to_vec();
 
+                // The audit chain is Ed25519-only ON THE WIRE — `stamp_signature`
+                // writes one 64-byte signature and every verifier reads exactly that.
+                // So we take the classical half of the hybrid verb and drop the PQC
+                // half: same bytes, same wire shape, no chain migration.
+                //
+                // Why not `local_sign`: once the classical key moved into the sealed
+                // keystore (CIRISServer#380 — one hardware-custodied federation
+                // identity), its signer became ASYNC and persist's SYNC `local_sign`
+                // refuses with a `sign_ed25519` error. That silently kills every audit
+                // entry the same way it killed every trace seal.
+                //
+                // `local_sign_hybrid`'s classical half dispatches through the sealed
+                // HardwareSigner (persist signing/mod.rs:450-453 — custody preserved,
+                // never unsealed) and returns the identical 64-byte Ed25519 signature
+                // over the identical preimage. The PQC half is computed and discarded
+                // here; that is a few ms on an audit write, and it is the price of
+                // having ONE signing verb in this repo instead of two that diverge
+                // under a custody change.
                 let sign_py_bytes = PyBytes::new(py, &sign_canon_bytes);
-                let sig_obj = engine
-                    .call_method1("local_sign", (sign_py_bytes,))
-                    .map_err(|e| PyRuntimeError::new_err(format!("engine.local_sign: {e}")))?;
-                let sig_bytes: Vec<u8> = sig_obj.cast::<PyBytes>()?.as_bytes().to_vec();
+                let sig_dict = engine
+                    .call_method1("local_sign_hybrid", (sign_py_bytes,))
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("engine.local_sign_hybrid: {e}"))
+                    })?;
+                let sig_bytes: Vec<u8> = sig_dict
+                    .get_item("classical_sig")
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("local_sign_hybrid classical_sig: {e}"))
+                    })?
+                    .cast::<PyBytes>()?
+                    .as_bytes()
+                    .to_vec();
                 if sig_bytes.len() != 64 {
                     return Err(PyRuntimeError::new_err(format!(
-                        "engine.local_sign returned {} bytes, expected 64",
+                        "local_sign_hybrid classical_sig is {} bytes, expected 64",
                         sig_bytes.len()
                     )));
                 }
