@@ -58,6 +58,26 @@ LOG=$(mktemp -d)
 trap 'rm -rf "$LOG"' EXIT
 START=$SECONDS
 
+# ── Stale-lane prune ──────────────────────────────────────────────────────
+# Each lane keeps its own target dir, which is what buys the parallelism. The
+# cost nobody sees: a SUBSTRATE REPIN invalidates all of them at once, and the
+# old artifacts are not reclaimed — cargo keeps them keyed by the previous
+# fingerprint. Four repins in one session grew target/pf-default to 58 GB and
+# took the disk to 88%, at which point preflight started dying with no output,
+# which reads as a harness bug rather than a full disk.
+#
+# So: if the substrate pins have moved since these dirs were built, drop them.
+# The rebuild costs ~4 minutes; not noticing costs a debugging session.
+PIN_STAMP=$(grep -ohE 'tag = "v[0-9.]+"' Cargo.toml crates/*/Cargo.toml 2>/dev/null \
+              | sort | md5sum | cut -c1-12)
+STAMP_FILE="target/.preflight-pins"
+if [ -d target ] && [ "$(cat "$STAMP_FILE" 2>/dev/null)" != "$PIN_STAMP" ]; then
+  stale=$(du -sh target/pf-* 2>/dev/null | awk '{s=$1} END {print s}')
+  rm -rf target/pf-default target/pf-python target/pf-anchor 2>/dev/null
+  [ -n "$stale" ] && echo "preflight: substrate pins moved — dropped stale lane dirs"
+fi
+mkdir -p target && printf '%s' "$PIN_STAMP" > "$STAMP_FILE"
+
 # One check: name, then the command. Output is captured per check so parallel
 # lanes do not interleave into an unreadable stream.
 declare -a NAMES=() STATUS=()
