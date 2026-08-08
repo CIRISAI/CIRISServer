@@ -219,6 +219,9 @@ pub mod http_log;
 /// CLI subcommand, the `POST /v1/self/identity` endpoint, and the integration
 /// test can drive it.
 pub mod identity;
+/// One federation identity per node, hybrid on both halves — the boot gate
+/// that refuses a forked identity instead of stalling silently (CIRISServer#380).
+mod identity_gate;
 /// A single cosmetic-id helper (`new_id`) shared by the attestation builders —
 /// replaces the per-module hand-rolled `new_uuid_v4` copies.
 pub mod ids;
@@ -977,6 +980,58 @@ pub fn log_dir_from_args(args: &[String]) -> std::path::PathBuf {
 /// [--reason <text>]` — write a node-signed `config:*` object from the console.
 /// JSON-first value parse (`'["a:1"]'`→List, `true`→Bool, `7`→I64), bare-string
 /// fallback. Used by the headless/no-session path.
+/// `ciris-server identity-paths [--home <dir>] [--key-id <label>]` — print the
+/// node's ONE federation identity as JSON and exit.
+///
+/// This exists so an embedding host (CIRISAgent) can ASK for the seed paths
+/// instead of hardcoding a guess. Hardcoding is what produced CIRISAgent#1009
+/// (71 hours) and CIRISServer#380: both were a second identity minted locally
+/// alongside the one the fabric verifies against, and in both the host had no
+/// authoritative way to learn where the real one lived.
+///
+/// The output is exactly the two values to pass to `Engine(...)`:
+///
+/// ```json
+/// {
+///   "key_id_alias": "ciris-agent-bootstrap",
+///   "local_key_path": "/var/lib/ciris/identity/ed25519.seed",
+///   "local_pqc_key_path": "/var/lib/ciris/identity/ml_dsa_65.seed",
+///   "identity_dir": "/var/lib/ciris/identity"
+/// }
+/// ```
+///
+/// Both halves are REQUIRED — signing is hybrid end to end or it is not
+/// federation signing. Do not mint a second pair under the data dir.
+pub fn identity_paths_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut home: Option<String> = None;
+    let mut key_id: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--home" => home = args.next(),
+            "--key-id" => key_id = args.next(),
+            o if o.starts_with("--home=") => home = Some(o["--home=".len()..].to_string()),
+            o if o.starts_with("--key-id=") => key_id = Some(o["--key-id=".len()..].to_string()),
+            o => anyhow::bail!("unknown identity-paths arg: {o}"),
+        }
+    }
+    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
+    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
+    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "key_id_alias": cfg.keystore_alias,
+            "local_key_path": cfg.seed_path(),
+            "local_pqc_key_path": cfg.identity_dir.join("ml_dsa_65.seed"),
+            "identity_dir": cfg.identity_dir,
+            "note": "ONE federation identity per node. Pass BOTH paths to Engine(...); \
+                     signing is hybrid end to end. Do NOT mint a second pair under the \
+                     data dir — see CIRISServer#380.",
+        }))?
+    );
+    Ok(())
+}
+
 pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;

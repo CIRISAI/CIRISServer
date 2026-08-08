@@ -27,6 +27,10 @@ async fn main() -> Result<()> {
         // federation scoreboard (CIRISServer#12/#13) as JSON and exit. With
         // `--criterion-dir` the substrate tier is promoted to MEASURED from real
         // criterion bench output; without it the board stays all-modeled/gated.
+        // `ciris-server identity-paths` — print the node's ONE federation identity
+        // (both seed paths) as JSON, so an embedding host can ASK instead of guess.
+        // Guessing is what produced CIRISAgent#1009 and CIRISServer#380.
+        Some("identity-paths") => ciris_server::identity_paths_cli(args),
         Some("scoreboard") => {
             let mut criterion_dir: Option<String> = None;
             while let Some(arg) = args.next() {

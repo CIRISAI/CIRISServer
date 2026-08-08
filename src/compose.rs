@@ -183,6 +183,58 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
 
+    // ── ONE IDENTITY, HYBRID, OR WE DO NOT BOOT (CIRISServer#380) ─────────────
+    // See `crate::identity_gate` for why this is a boot error rather than a
+    // warning, and why the comparison is on public-key bytes rather than key_ids.
+    crate::compose_status::phase("identity_gate");
+    {
+        let engine_ed = engine.signer().public_key().await.context(
+            "read the Engine signer's Ed25519 public key (CIRISServer#380 identity gate)",
+        )?;
+        let compose_ed = signer
+            .public_key()
+            .await
+            .context("read the compose federation signer's Ed25519 public key (CIRISServer#380)")?;
+        // Probe the real verb, not an accessor: what is asserted is then what
+        // downstream actually calls, and `sign_hybrid` hands back the PQC public
+        // key it signed under — exactly the value to compare.
+        let probed = engine
+            .sign_hybrid(b"ciris-server: hybrid identity boot probe")
+            .await
+            .with_context(|| {
+                format!(
+                    "the Engine cannot sign hybrid at all (CIRISServer#380). Every \
+                     federation-tier surface this node authors needs a hybrid signature; \
+                     hybrid-mandatory admission refuses the rest. Build the Engine with \
+                     BOTH halves of the one federation identity: {} and {}",
+                    cfg.seed_path().display(),
+                    cfg.identity_dir.join("ml_dsa_65.seed").display(),
+                )
+            })?;
+        let engine_pqc = (!probed.pqc.signature.is_empty()).then_some(&probed.pqc.public_key[..]);
+        let compose_pqc = pqc
+            .public_key()
+            .await
+            .context("read the compose federation PQC public key (CIRISServer#380)")?;
+        crate::identity_gate::check(&crate::identity_gate::IdentityFacts {
+            engine_ed: &engine_ed,
+            compose_ed: &compose_ed,
+            engine_pqc,
+            compose_pqc: &compose_pqc,
+            key_id: &cfg.key_id,
+            seed_path: &cfg.seed_path(),
+            pqc_seed_path: &cfg.identity_dir.join("ml_dsa_65.seed"),
+        })?;
+        tracing::info!(
+            key_id = %cfg.key_id,
+            classical_seed = %cfg.seed_path().display(),
+            pqc_seed = %cfg.identity_dir.join("ml_dsa_65.seed").display(),
+            "identity gate: ONE federation identity, hybrid on both halves — these are \
+             the two seeds any embedding host must build its Engine against \
+             (CIRISServer#380)"
+        );
+    }
+
     // ── The ADAPTER SEAM's shared-core handle (mirror of the agent adapter's
     //    `runtime`). Built ONCE the Engine exists; captured by clone into both
     //    the read-API router closure (adapter.routers) and the lifecycle task. ─
