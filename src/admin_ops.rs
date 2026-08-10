@@ -4173,18 +4173,6 @@ pub fn router(engine: Arc<Engine>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    /// **A set of keys is ONE act** (CIRISPersist#627, persist v30.9.0).
-    ///
-    /// Clearing the 61 exposed keys of CIRISServer#383 used to be 61
-    /// preview→commit pairs. Asserted on the FILTER, because the whole point is
-
-    /// A set IS a predicate.
-    ///
-    /// Treating an act with 61 named subjects as "unpredicated" would refuse the
-    /// exact operation #627 unblocks — and the refusal reads
-    /// `selection_unpredicated`, which is nonsense to an operator who just
-    /// pasted 61 keys. The blank-only case must still refuse: a set that
-
     /// The singular and plural coexist — persist OR-combines them, so naming one
     /// key and a set in the same act selects the union, not the intersection.
     #[test]
