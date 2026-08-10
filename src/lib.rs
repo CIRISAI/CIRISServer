@@ -282,6 +282,9 @@ pub mod node_control;
 /// byte-identically with the agent so a code shared from one app decodes on the
 /// other. Public so the node-code endpoint + the founder's client can use it.
 pub mod nodecode;
+/// The graded-act ladder, enumerated — so adding an operation is adding a row,
+/// not a development cycle across four places.
+pub mod operations_catalogue;
 /// CIRISServer#356 — **the operator surface**: one owner-gated read composing
 /// persist's node-state signals with edge's carriage counters, where every zero
 /// names its own cause. `GET /v1/node/state` + `ciris_server.node_state()`.
@@ -363,6 +366,9 @@ mod test_bless;
 /// writes the verdict to the node log — edge-triggered, so it cannot become the
 /// log volume nobody read.
 pub mod trace_plane_watch;
+/// The wire vocabularies, served to the operator UI so no picker ever
+/// hardcodes a member (CIRISPersist#625).
+pub mod vocabulary_surface;
 // TEST-ANCHOR-ONLY QA — mint a portable trust root (accord + canonical) in
 // substrate test mode and USE it: the acceptance gate for the next persist
 // repin (CIRISPersist#486/#488). It lives in `tests/trust_root_qa.rs`, NOT here,

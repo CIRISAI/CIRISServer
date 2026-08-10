@@ -809,6 +809,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // /v1/system/health). Mandatory base; the agent enriches the
                     // /v1/system/health endpoint with optional cognitive health.
                     .merge(crate::health::router())
+                    // The wire vocabularies, so no picker hardcodes a member
+                    // (CIRISPersist#625). Ungated: public value sets, not node state.
+                    .merge(crate::vocabulary_surface::router())
+                    // The graded-act ladder, so the UI renders tiers, scopes and
+                    // reversals from one table instead of re-deriving them.
+                    .merge(crate::operations_catalogue::router())
                     // GET /v1/system/verify-status — read-only CIRISVerify status
                     // (loaded + the node's derived key_id + custody class) for the
                     // client's Trust & Security display. The verify family is in the
