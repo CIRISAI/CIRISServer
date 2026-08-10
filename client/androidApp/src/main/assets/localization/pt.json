@@ -3710,7 +3710,10 @@
       "descent_performed": "A descida da carga útil foi executada.",
       "descent_refused": "A descida da carga útil não foi executada: {token}",
       "withdrew_row": "Retirou {id}",
-      "unparsable_response": "O nó respondeu com um corpo que este aplicativo não conseguiu ler."
+      "unparsable_response": "O nó respondeu com um corpo que este aplicativo não conseguiu ler.",
+      "attesting_keys_count": "{count} chaves selecionadas — este é UM único ato, com um hash e um motivo abrangendo todas elas.",
+      "attesting_keys_hint": "Cole uma chave por linha (vírgulas ou espaços também funcionam)",
+      "attesting_keys_label": "Ou várias chaves de uma vez"
     }
   },
   "surfaces": {

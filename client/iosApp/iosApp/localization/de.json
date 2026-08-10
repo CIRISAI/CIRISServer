@@ -3710,7 +3710,10 @@
       "descent_performed": "Der Abstieg der Nutzdaten wurde durchgeführt.",
       "descent_refused": "Der Abstieg der Nutzdaten ist nicht gelaufen: {token}",
       "withdrew_row": "{id} zurückgezogen",
-      "unparsable_response": "Der Knoten hat mit einem Text geantwortet, den diese App nicht lesen konnte."
+      "unparsable_response": "Der Knoten hat mit einem Text geantwortet, den diese App nicht lesen konnte.",
+      "attesting_keys_count": "{count} Schlüssel ausgewählt – dies ist EINE Handlung, mit einem Hash und einem Grund für alle.",
+      "attesting_keys_hint": "Fügen Sie einen Schlüssel pro Zeile ein (Kommas oder Leerzeichen funktionieren ebenfalls)",
+      "attesting_keys_label": "Oder mehrere Schlüssel auf einmal"
     }
   },
   "surfaces": {

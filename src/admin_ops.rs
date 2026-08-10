@@ -4176,6 +4176,33 @@ mod tests {
     /// **A set of keys is ONE act** (CIRISPersist#627, persist v30.9.0).
     ///
     /// Clearing the 61 exposed keys of CIRISServer#383 used to be 61
+    /// preview→commit pairs. Asserted on the FILTER, because the whole point is
+
+    /// A set IS a predicate.
+    ///
+    /// Treating an act with 61 named subjects as "unpredicated" would refuse the
+    /// exact operation #627 unblocks — and the refusal reads
+    /// `selection_unpredicated`, which is nonsense to an operator who just
+    /// pasted 61 keys. The blank-only case must still refuse: a set that
+
+    /// The singular and plural coexist — persist OR-combines them, so naming one
+    /// key and a set in the same act selects the union, not the intersection.
+    #[test]
+    fn singular_and_plural_key_predicates_coexist() {
+        let sel = Selection {
+            attested_key_id: Some("solo".into()),
+            attested_key_ids: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        let f = sel.to_filter();
+        assert_eq!(f.attested_key_id.as_deref(), Some("solo"));
+        assert_eq!(f.attested_key_ids, vec!["a".to_string(), "b".to_string()]);
+        assert!(!sel.is_unpredicated());
+    }
+
+    /// **A set of keys is ONE act** (CIRISPersist#627, persist v30.9.0).
+    ///
+    /// Clearing the 61 exposed keys of CIRISServer#383 used to be 61
     /// preview→commit pairs. The set now reaches the QUERY — asserted on the
     /// filter, because the whole point is that no loop appears on this side.
     #[test]

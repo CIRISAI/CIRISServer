@@ -3710,7 +3710,10 @@
       "descent_performed": "Ushushaji wa mzigo ulitekelezwa.",
       "descent_refused": "Ushushaji wa mzigo haukuendeshwa: {token}",
       "withdrew_row": "Iliondoa {id}",
-      "unparsable_response": "Nodi ilijibu kwa mwili ambao programu hii haikuweza kuusoma."
+      "unparsable_response": "Nodi ilijibu kwa mwili ambao programu hii haikuweza kuusoma.",
+      "attesting_keys_count": "Funguo {count} zimechaguliwa — hiki ni kitendo KIMOJA, chenye hashi moja na sababu moja inayozifunika zote.",
+      "attesting_keys_hint": "Bandika ufunguo mmoja kwa kila mstari (mikato au nafasi pia hufanya kazi)",
+      "attesting_keys_label": "Au funguo nyingi kwa mara moja"
     }
   },
   "surfaces": {

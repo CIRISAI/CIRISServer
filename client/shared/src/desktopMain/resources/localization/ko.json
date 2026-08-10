@@ -3710,7 +3710,10 @@
       "descent_performed": "페이로드 강하가 수행되었습니다.",
       "descent_refused": "페이로드 강하가 실행되지 않았습니다: {token}",
       "withdrew_row": "{id} 철회됨",
-      "unparsable_response": "노드가 이 앱이 읽을 수 없는 본문으로 답했습니다."
+      "unparsable_response": "노드가 이 앱이 읽을 수 없는 본문으로 답했습니다.",
+      "attesting_keys_count": "{count}개의 키가 선택되었습니다 — 이는 하나의 행위이며, 모두에 대해 하나의 해시와 하나의 사유가 적용됩니다.",
+      "attesting_keys_hint": "한 줄에 키 하나씩 붙여넣으세요(쉼표나 공백으로 구분해도 됩니다)",
+      "attesting_keys_label": "또는 여러 키를 한 번에"
     }
   },
   "surfaces": {

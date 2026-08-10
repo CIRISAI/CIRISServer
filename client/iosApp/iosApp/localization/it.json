@@ -3710,7 +3710,10 @@
       "descent_performed": "La discesa del payload è stata eseguita.",
       "descent_refused": "La discesa del payload non è stata eseguita: {token}",
       "withdrew_row": "Ritirata {id}",
-      "unparsable_response": "Il nodo ha risposto con un corpo che questa app non è riuscita a leggere."
+      "unparsable_response": "Il nodo ha risposto con un corpo che questa app non è riuscita a leggere.",
+      "attesting_keys_count": "{count} chiavi selezionate — questo è UN unico atto, con un solo hash e una sola motivazione che li copre tutti.",
+      "attesting_keys_hint": "Incolla una chiave per riga (vanno bene anche virgole o spazi)",
+      "attesting_keys_label": "Oppure molte chiavi in una volta"
     }
   },
   "surfaces": {

@@ -3710,7 +3710,10 @@
       "descent_performed": "The payload descent was performed.",
       "descent_refused": "The payload descent did not run: {token}",
       "withdrew_row": "Withdrew {id}",
-      "unparsable_response": "The node answered with a body this app could not read."
+      "unparsable_response": "The node answered with a body this app could not read.",
+      "attesting_keys_label": "Or many keys at once",
+      "attesting_keys_hint": "Paste one key per line (commas or spaces work too)",
+      "attesting_keys_count": "{count} keys selected — this is ONE act, with one hash and one reason covering all of them."
     }
   },
   "surfaces": {

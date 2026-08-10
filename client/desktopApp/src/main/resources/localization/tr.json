@@ -3710,7 +3710,10 @@
       "descent_performed": "Yük indirgemesi gerçekleştirildi.",
       "descent_refused": "Yük indirgemesi çalışmadı: {token}",
       "withdrew_row": "{id} geri çekildi",
-      "unparsable_response": "Düğüm, bu uygulamanın okuyamadığı bir gövdeyle yanıt verdi."
+      "unparsable_response": "Düğüm, bu uygulamanın okuyamadığı bir gövdeyle yanıt verdi.",
+      "attesting_keys_count": "{count} anahtar seçildi — bu, hepsini kapsayan tek bir karma ve tek bir gerekçeyle TEK bir işlemdir.",
+      "attesting_keys_hint": "Her satıra bir anahtar yapıştırın (virgül veya boşluk da olur)",
+      "attesting_keys_label": "Veya aynı anda birçok anahtar"
     }
   },
   "surfaces": {

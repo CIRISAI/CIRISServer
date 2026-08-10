@@ -3710,7 +3710,10 @@
       "descent_performed": "A ṣe ìsọ̀kalẹ̀ ẹrù-ìsọfúnni náà.",
       "descent_refused": "Ìsọ̀kalẹ̀ ẹrù-ìsọfúnni náà kò ṣiṣẹ́: {token}",
       "withdrew_row": "A fa {id} sẹ́yìn",
-      "unparsable_response": "Nódù náà dáhùn pẹ̀lú ara-ìhìn tí app yìí kò lè kà."
+      "unparsable_response": "Nódù náà dáhùn pẹ̀lú ara-ìhìn tí app yìí kò lè kà.",
+      "attesting_keys_count": "{count} kọ́kọ́rọ́ ni a yàn — ìṣe KAN ni èyí, pẹ̀lú hash kan àti ìdí kan tí ó bo gbogbo wọn.",
+      "attesting_keys_hint": "Lẹ̀ kọ́kọ́rọ́ kan sí ìlà kọ̀ọ̀kan (àmì ààlà tàbí àlàfo náà ń ṣiṣẹ́)",
+      "attesting_keys_label": "Tàbí ọ̀pọ̀ kọ́kọ́rọ́ lẹ́ẹ̀kan náà"
     }
   },
   "surfaces": {

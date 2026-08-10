@@ -3710,7 +3710,10 @@
       "descent_performed": "El descenso del payload se llevó a cabo.",
       "descent_refused": "El descenso del payload no se ejecutó: {token}",
       "withdrew_row": "Retirada {id}",
-      "unparsable_response": "El nodo respondió con un cuerpo que esta app no pudo leer."
+      "unparsable_response": "El nodo respondió con un cuerpo que esta app no pudo leer.",
+      "attesting_keys_count": "{count} claves seleccionadas: esto es UN solo acto, con un único hash y un único motivo que las abarca todas.",
+      "attesting_keys_hint": "Pega una clave por línea (también funcionan comas o espacios)",
+      "attesting_keys_label": "O varias claves a la vez"
     }
   },
   "surfaces": {

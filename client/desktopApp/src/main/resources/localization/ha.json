@@ -3710,7 +3710,10 @@
       "descent_performed": "An aiwatar da gangarowar payload.",
       "descent_refused": "Gangarowar payload ba ta gudana ba: {token}",
       "withdrew_row": "An janye {id}",
-      "unparsable_response": "Kumburin ya amsa da jiki da wannan manhaja ba ta iya karantawa ba."
+      "unparsable_response": "Kumburin ya amsa da jiki da wannan manhaja ba ta iya karantawa ba.",
+      "attesting_keys_count": "An zaɓi maɓallai {count} — wannan aiki ƊAYA ne, mai hash ɗaya da dalili ɗaya da ya ƙunshi dukkansu.",
+      "attesting_keys_hint": "Liƙa maɓalli ɗaya a kowane layi (waƙafi ko sarari suma suna aiki)",
+      "attesting_keys_label": "Ko maɓallai da yawa lokaci ɗaya"
     }
   },
   "surfaces": {

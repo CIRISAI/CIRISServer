@@ -3710,7 +3710,10 @@
       "descent_performed": "La descente de la charge utile a été effectuée.",
       "descent_refused": "La descente de la charge utile n'a pas été exécutée : {token}",
       "withdrew_row": "Retrait de {id}",
-      "unparsable_response": "Le nœud a répondu avec un corps que cette application n'a pas pu lire."
+      "unparsable_response": "Le nœud a répondu avec un corps que cette application n'a pas pu lire.",
+      "attesting_keys_count": "{count} clés sélectionnées — il s'agit d'UN SEUL acte, avec une seule empreinte et un seul motif qui les couvrent toutes.",
+      "attesting_keys_hint": "Collez une clé par ligne (les virgules ou les espaces fonctionnent aussi)",
+      "attesting_keys_label": "Ou plusieurs clés à la fois"
     }
   },
   "surfaces": {

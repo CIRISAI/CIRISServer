@@ -3710,7 +3710,10 @@
       "descent_performed": "载荷下沉已执行。",
       "descent_refused": "载荷下沉未运行：{token}",
       "withdrew_row": "已撤回 {id}",
-      "unparsable_response": "该节点作出了应答，但其正文本应用无法读取。"
+      "unparsable_response": "该节点作出了应答，但其正文本应用无法读取。",
+      "attesting_keys_count": "已选择 {count} 个密钥 —— 这是一次操作，用同一个哈希和同一个理由涵盖全部密钥。",
+      "attesting_keys_hint": "每行粘贴一个密钥（也可用逗号或空格分隔）",
+      "attesting_keys_label": "或一次输入多个密钥"
     }
   },
   "surfaces": {

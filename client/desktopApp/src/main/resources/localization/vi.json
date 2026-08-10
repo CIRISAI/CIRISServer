@@ -3710,7 +3710,10 @@
       "descent_performed": "Đã thực hiện việc hạ giáng tải.",
       "descent_refused": "Việc hạ giáng tải đã không chạy: {token}",
       "withdrew_row": "Đã rút lại {id}",
-      "unparsable_response": "Nút trả lời bằng một phần thân mà ứng dụng này không đọc được."
+      "unparsable_response": "Nút trả lời bằng một phần thân mà ứng dụng này không đọc được.",
+      "attesting_keys_count": "Đã chọn {count} khóa — đây là MỘT hành động duy nhất, với một mã băm và một lý do bao trùm tất cả.",
+      "attesting_keys_hint": "Dán mỗi dòng một khóa (dùng dấu phẩy hoặc khoảng trắng cũng được)",
+      "attesting_keys_label": "Hoặc nhiều khóa cùng lúc"
     }
   },
   "surfaces": {

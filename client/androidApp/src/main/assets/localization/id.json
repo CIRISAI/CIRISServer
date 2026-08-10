@@ -3710,7 +3710,10 @@
       "descent_performed": "Penurunan muatan telah dilakukan.",
       "descent_refused": "Penurunan muatan tidak berjalan: {token}",
       "withdrew_row": "Menarik {id}",
-      "unparsable_response": "Node menjawab dengan isi yang tidak dapat dibaca aplikasi ini."
+      "unparsable_response": "Node menjawab dengan isi yang tidak dapat dibaca aplikasi ini.",
+      "attesting_keys_count": "{count} kunci dipilih — ini adalah SATU tindakan, dengan satu hash dan satu alasan yang mencakup semuanya.",
+      "attesting_keys_hint": "Tempel satu kunci per baris (koma atau spasi juga bisa)",
+      "attesting_keys_label": "Atau banyak kunci sekaligus"
     }
   },
   "surfaces": {

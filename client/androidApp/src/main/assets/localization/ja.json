@@ -3710,7 +3710,10 @@
       "descent_performed": "ペイロードの降下を実行しました。",
       "descent_refused": "ペイロードの降下は実行されませんでした：{token}",
       "withdrew_row": "{id} を撤回しました",
-      "unparsable_response": "ノードは応答しましたが、このアプリが読み取れない本文でした。"
+      "unparsable_response": "ノードは応答しましたが、このアプリが読み取れない本文でした。",
+      "attesting_keys_count": "{count} 件の鍵を選択中 — これは1つの行為であり、1つのハッシュと1つの理由がそのすべてに適用されます。",
+      "attesting_keys_hint": "1行に1つの鍵を貼り付けてください（カンマやスペース区切りも使えます）",
+      "attesting_keys_label": "または複数の鍵をまとめて"
     }
   },
   "surfaces": {
