@@ -1281,17 +1281,18 @@ fun CIRISApp(
                 // During FIRST RUN, go to setup wizard
                 // Desktop: auto-trigger since no OAuth; iOS: show login first for auth
                 LaunchedEffect(googleSignInCallback, isFirstRun) {
-                    if (isFirstRun == true && googleSignInCallback == null) {
-                        // Desktop: no OAuth, go directly to setup
-                        platformLog(TAG, "[INFO][Screen.Login] Desktop first-run detected (no OAuth) - going to setup")
-                        setupViewModel.setGoogleAuthState(
-                            isAuth = false,
-                            idToken = null,
-                            email = null,
-                            userId = null
-                        )
-                        currentScreen = Screen.Setup
-                    } else if (isFirstRun == true && googleSignInCallback != null) {
+                    if (isFirstRun == true) {
+                        // EVERY platform shows the login screen first, so the human
+                        // picks how they sign in — Google or a local account.
+                        //
+                        // Desktop used to auto-skip straight to the wizard on the
+                        // premise "no OAuth on desktop". That premise died when the
+                        // node started serving the browser flow: skipping the screen
+                        // meant desktop silently offered ONE option, and the account
+                        // step asked for a username and password as though nothing
+                        // else existed.
+                        platformLog(TAG, "[INFO][Screen.Login] First-run — showing the login screen so the user picks a sign-in method")
+                    } else if (false) {
                         // iOS/Android: first run with OAuth - show login so user can sign in,
                         // then auth flow will detect first user and redirect to setup
                         platformLog(TAG, "[INFO][Screen.Login] Mobile first-run - showing login for OAuth sign-in")
@@ -1556,7 +1557,7 @@ fun CIRISApp(
                                 // ~3 minutes: long enough for a real sign-in with a
                                 // password manager and 2FA, short enough that an
                                 // abandoned attempt does not spin forever.
-                                var token: String? = null
+                                var token: ai.ciris.mobile.shared.models.OAuthHandoff? = null
                                 repeat(90) {
                                     if (token != null) return@repeat
                                     kotlinx.coroutines.delay(2000)
@@ -1574,12 +1575,27 @@ fun CIRISApp(
                                     platformLog(TAG, "[WARN][onGoogleSignIn] desktop browser sign-in not collected within the window")
                                 } else {
                                     platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser sign-in collected a session")
-                                    currentAccessToken = collected
-                                    apiClient.setAccessToken(collected)
-                                    secureStorage.saveAccessToken(collected)
-                                    onTokenUpdated?.invoke(collected)
-                                    interactViewModel.startPolling()
-                                    currentScreen = HOME_SCREEN
+                                    currentAccessToken = collected.accessToken
+                                    apiClient.setAccessToken(collected.accessToken)
+                                    secureStorage.saveAccessToken(collected.accessToken)
+                                    onTokenUpdated?.invoke(collected.accessToken)
+                                    if (isFirstRun == true) {
+                                        // Hand the identity to the wizard: it derives the
+                                        // federation-ID name from <provider>-<subject>, so
+                                        // arriving with only a bearer would put the user
+                                        // back to inventing a unique name by hand.
+                                        setupViewModel.setGoogleAuthState(
+                                            isAuth = true,
+                                            idToken = null,
+                                            email = collected.email,
+                                            userId = collected.externalId,
+                                            provider = collected.provider,
+                                        )
+                                        currentScreen = Screen.Setup
+                                    } else {
+                                        interactViewModel.startPolling()
+                                        currentScreen = HOME_SCREEN
+                                    }
                                 }
                             }
                         }

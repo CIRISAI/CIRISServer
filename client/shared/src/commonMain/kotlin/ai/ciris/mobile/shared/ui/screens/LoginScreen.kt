@@ -210,8 +210,15 @@ fun LoginScreen(
                             modifier = Modifier.padding(top = 16.dp)
                         )
                     }
-                } else if (isDesktopMode || showLoginForm) {
-                    // Desktop mode or Local Login form - show username/password fields
+                } else if (showLoginForm) {
+                    // The local-account form. Reached by CHOOSING "Local Login"
+                    // below, on every platform.
+                    //
+                    // `isDesktopMode ||` used to force this branch, so desktop
+                    // never saw the chooser and the only way in was a username and
+                    // password — correct while desktop had no OAuth, wrong once the
+                    // node started serving the browser flow. Desktop now gets the
+                    // same first screen as mobile: pick Google or a local account.
                     LocalLoginForm(
                         username = username,
                         onUsernameChange = { username = it },
@@ -222,7 +229,11 @@ fun LoginScreen(
                                 onLocalLoginSubmit(username, password)
                             }
                         },
-                        onBack = if (!isDesktopMode) {{ showLoginForm = false }} else null,
+                        // Back is available everywhere now: the form is a CHOICE
+                        // on every platform, so it must be reversible on every
+                        // platform. Desktop got no back arrow because it could not
+                        // have arrived here from anywhere.
+                        onBack = { showLoginForm = false },
                         errorMessage = errorMessage,
                         focusManager = focusManager
                     )

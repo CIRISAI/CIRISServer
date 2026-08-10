@@ -141,21 +141,39 @@ impl CsrfStore {
 /// proves the app is the one that opened the browser.
 #[derive(Default)]
 struct HandoffStore {
-    ready: HashMap<String, (String, Instant)>,
+    ready: HashMap<String, (HandoffPayload, Instant)>,
+}
+
+/// What a desktop app collects: the session AND who it belongs to.
+///
+/// The identity is not decoration. On first run the wizard derives the
+/// federation-ID name from `<provider>-<subject>`, so an app that collected only
+/// a bearer would have a session and no idea whose it was.
+#[derive(Debug, Clone, Serialize)]
+struct HandoffPayload {
+    access_token: String,
+    token_type: &'static str,
+    expires_in: u64,
+    user_id: String,
+    role: String,
+    provider: String,
+    external_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
 }
 
 impl HandoffStore {
-    fn park(&mut self, nonce: String, token: String) {
+    fn park(&mut self, nonce: String, payload: HandoffPayload) {
         self.prune();
         self.ready
-            .insert(nonce, (token, Instant::now() + Duration::from_secs(300)));
+            .insert(nonce, (payload, Instant::now() + Duration::from_secs(300)));
     }
     /// Collect ONCE. A second read gets nothing, so a leaked nonce cannot be
     /// replayed after the app has taken its session.
-    fn collect(&mut self, nonce: &str) -> Option<String> {
+    fn collect(&mut self, nonce: &str) -> Option<HandoffPayload> {
         self.prune();
-        let (tok, deadline) = self.ready.remove(nonce)?;
-        (deadline > Instant::now()).then_some(tok)
+        let (payload, deadline) = self.ready.remove(nonce)?;
+        (deadline > Instant::now()).then_some(payload)
     }
     fn prune(&mut self) {
         let now = Instant::now();
@@ -1388,7 +1406,19 @@ async fn finish_oauth_login(
             // way to learn the result.
             if let Some(nonce) = app_nonce {
                 if let Ok(mut h) = st.handoff.lock() {
-                    h.park(nonce, access_token.clone());
+                    h.park(
+                        nonce,
+                        HandoffPayload {
+                            access_token: access_token.clone(),
+                            token_type: "Bearer",
+                            expires_in: 86_400,
+                            user_id: user_id.clone(),
+                            role: role.as_str().to_string(),
+                            provider: ident.provider.clone(),
+                            external_id: ident.external_id.clone(),
+                            email: ident.email.clone(),
+                        },
+                    );
                 }
                 return (
                     StatusCode::OK,
@@ -1631,8 +1661,23 @@ mod tests {
     #[test]
     fn a_parked_session_is_collected_exactly_once() {
         let mut h = HandoffStore::default();
-        h.park("n1".into(), "sess:wa-x:abc".into());
-        assert_eq!(h.collect("n1").as_deref(), Some("sess:wa-x:abc"));
+        h.park(
+            "n1".into(),
+            HandoffPayload {
+                access_token: "sess:wa-x:abc".into(),
+                token_type: "Bearer",
+                expires_in: 1,
+                user_id: "wa-x".into(),
+                role: "SYSTEM_ADMIN".into(),
+                provider: "google".into(),
+                external_id: "sub-1".into(),
+                email: None,
+            },
+        );
+        assert_eq!(
+            h.collect("n1").map(|p| p.access_token).as_deref(),
+            Some("sess:wa-x:abc")
+        );
         assert!(h.collect("n1").is_none(), "second collection must be empty");
         assert!(h.collect("never-parked").is_none());
     }

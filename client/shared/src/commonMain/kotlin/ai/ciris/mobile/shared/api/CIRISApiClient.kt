@@ -1573,14 +1573,13 @@ class CIRISApiClient(
     suspend fun collectOAuthHandoff(
         appNonce: String,
         localNodeUrl: String = LOCAL_NODE_URL,
-    ): String? {
+    ): OAuthHandoff? {
         val client = federationHttpClient()
         return try {
             val response = client.get("$localNodeUrl/v1/auth/oauth/handoff?app_nonce=$appNonce")
             if (response.status.value == 204) return null
             if (!response.status.isSuccess()) return null
-            Json.parseToJsonElement(response.bodyAsText())
-                .jsonObject["access_token"]?.jsonPrimitive?.content
+            jsonConfig.decodeFromString(OAuthHandoff.serializer(), response.bodyAsText())
         } catch (_: Exception) {
             null
         } finally {
