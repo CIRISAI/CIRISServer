@@ -127,9 +127,19 @@ async fn create_api_key(
         wa_id: wa_id.clone(),
         name: req.description.clone(),
         role: WaRole::Observer,
-        // An API key has no signing pubkey/jwt of its own; mirror the agent's
-        // api-key cert shape (api_key_hash carries the secret hash).
-        pubkey: String::new(),
+        // An API key has no signing keypair of its own — `api_key_hash` carries
+        // the secret. But `pubkey` is NOT NULL-able in the substrate
+        // (`wa_cert/sqlite.rs:136` refuses an empty one), and this wrote `""`,
+        // so **creating an API key has never once succeeded** — the same defect
+        // as the OAuth path, found by enumerating all six `WaCert` construction
+        // sites rather than by hitting it (CIRISServer#386).
+        //
+        // The column holds an identity REFERENCE, not key material: the
+        // claim-minted ROOT stores a federation `key_id`, and the system cert
+        // stores the synthetic `system-of:{root_wa_id}`. So a synthetic
+        // reference is the established convention, and it says WHAT this
+        // identity is rather than pretending to be a key.
+        pubkey: format!("apikey:{wa_id}"),
         jwt_kid: format!("ak-kid-{}", &hash[..16]),
         password_hash: None,
         api_key_hash: Some(hash),

@@ -5,12 +5,17 @@
 //! `(oauth_provider, oauth_external_id)` via the partial `wa_cert_oauth` index
 //! (`WaCertService::get_by_oauth`).
 //!
-//! This header used to claim "the agent's `create_oauth_user` was exactly an
-//! upsert into this table". **It was not**, and a live desktop sign-in is what
-//! proved it — see [`resolve_oauth_user`]. The agent keeps OAuth users in an
-//! in-memory dict with no key material; `wa_cert` is keyed on a public key. The
-//! port fused the two and wrote an empty `pubkey`, which persist refuses, so the
-//! write had never once succeeded on any node.
+//! OAuth users are FIRST-CLASS here: sign-in resolves an existing cert, or
+//! creates one. That is the Python behaviour being converted, not an addition.
+//!
+//! It had never worked, though — the port wrote `pubkey: ""` and persist refuses
+//! an empty one (`wa_cert/sqlite.rs:136`), so no OAuth user was ever created ON
+//! A NODE (the Python surface, which is where the last year's OAuth users live,
+//! was unaffected). `pubkey` holds an identity REFERENCE, not key material — the
+//! ROOT cert stores a federation `key_id`, the system cert stores the synthetic
+//! `system-of:{root_wa_id}` — so this stores `oauth:{provider}:{subject}`.
+//! Enumerating all six `WaCert` construction sites found the same empty-pubkey
+//! defect independently in `api_keys.rs`.
 //!
 //! Routes (port of `routes/auth.py`):
 //! - `GET  /v1/auth/oauth/providers`            — list configured providers.
@@ -799,10 +804,8 @@ impl HttpProviderClient {
 
 // ─── create_oauth_user — the substrate write (PORTED) ───────────────────────
 
-/// **Resolve** a `wa_cert` for an authenticated OAuth identity, keyed by
-/// `(oauth_provider, oauth_external_id)`. Returns the `wa_id`, or
-/// [`OAuthResolveError::NoLocalIdentity`] when this node holds no certificate
-/// bound to that account.
+/// Resolve-or-create the `wa_cert` for an authenticated OAuth identity, keyed by
+/// `(oauth_provider, oauth_external_id)`. Returns the `wa_id`.
 ///
 /// # This RESOLVES; it does not mint (CIRISServer#386)
 ///
@@ -825,17 +828,17 @@ impl HttpProviderClient {
 /// zero rejections. Unit coverage missed it because the owner path returns
 /// early from the lookup below and never reaches the write.
 ///
-/// Rather than satisfy the constraint with a fabricated key — putting a non-key
-/// in a key column is the exact defect class this repo has spent months
-/// removing — an unbound account is REFUSED, with a reason a UI can render. A
-/// node's identities are federation keys plus whatever the owner has bound; a
-/// stranger with a Google account is not silently granted a keyless row that no
-/// act could ever be attributed to. Whether a node should represent keyless
-/// OAuth users at all is a design question, filed rather than answered here,
-/// because the agent's adoption does depend on the answer.
+/// The column is an identity REFERENCE, so the fix is the convention already in
+/// use rather than a refusal: `system-of:{root_wa_id}` on the system cert, a
+/// federation `key_id` on ROOT, and `oauth:{provider}:{subject}` here. It names
+/// what the identity IS instead of impersonating key material.
+///
+/// [`OAuthResolveError`] remains for genuine failures, so a refusal reaches the
+/// UI as a typed, localizable reason rather than a store-internal string.
 pub async fn resolve_oauth_user(
     engine: &Engine,
     ident: &OAuthIdentity,
+    role: UserRole,
 ) -> Result<String, OAuthResolveError> {
     if let Some(existing) = store::get_by_oauth(engine, &ident.provider, &ident.external_id).await?
     {
@@ -857,9 +860,18 @@ pub async fn resolve_oauth_user(
         subject = %redact_subject(&ident.external_id),
         "oauth sign-in REFUSED — no local identity is bound to this account on this node"
     );
-    Err(OAuthResolveError::NoLocalIdentity {
-        provider: ident.provider.clone(),
-    })
+    // No cert carries this identity yet — CREATE one. OAuth users are
+    // first-class in the surface being converted; refusing here would drop a
+    // capability the Python has had for a year.
+    let wa_id = create_oauth_user_inner(engine, ident, role).await?;
+    tracing::info!(
+        provider = %ident.provider,
+        subject = %redact_subject(&ident.external_id),
+        wa_id = %wa_id,
+        ?role,
+        "oauth sign-in CREATED a local identity"
+    );
+    Ok(wa_id)
 }
 
 /// Last 4 of a provider subject — enough to correlate two log lines, not enough
@@ -920,10 +932,14 @@ impl OAuthResolveError {
     }
 }
 
-/// Retained for the MINT path, which currently has no caller — see
-/// [`resolve_oauth_user`] for why a keyless `wa_cert` cannot be written.
-#[allow(dead_code)]
-async fn mint_oauth_user_unsupported(
+/// Create-or-update the `wa_cert` for an authenticated OAuth identity — the
+/// Rust half of the auth surface being converted from Python.
+///
+/// Resolves `get_by_oauth` first (that early return is the #384 owner path: a
+/// ROOT cert carrying the pair is found, so the owner lands on their own
+/// SYSTEM_ADMIN session). Otherwise the user is CREATED, because OAuth users are
+/// first-class here exactly as they are in the Python this replaces.
+async fn create_oauth_user_inner(
     engine: &Engine,
     ident: &OAuthIdentity,
     role: UserRole,
@@ -941,10 +957,19 @@ async fn mint_oauth_user_unsupported(
         _ => WaRole::Observer,
     };
     let now = chrono::Utc::now();
-    let mut links = serde_json::Map::new();
-    if let Some(email) = &ident.email {
-        links.insert("email".into(), serde_json::Value::String(email.clone()));
-    }
+    // Upstream shape (`schemas/services/authority_core.py:39` OAuthIdentityLink):
+    // a LIST of {provider, external_id, account_name, linked_at, metadata,
+    // is_primary}. We were writing an OBJECT keyed "email" — a different shape
+    // in the same column, which no reader on either side could interpret.
+    let links = serde_json::json!([{
+        "provider": ident.provider,
+        "external_id": ident.external_id,
+        "account_name": ident.name,
+        "linked_at": now.to_rfc3339(),
+        "metadata": ident.email.as_ref().map(|e| serde_json::json!({"email": e}))
+            .unwrap_or_else(|| serde_json::json!({})),
+        "is_primary": true,
+    }]);
     let cert = WaCert {
         wa_id: wa_id.clone(),
         name: ident
@@ -952,13 +977,17 @@ async fn mint_oauth_user_unsupported(
             .clone()
             .unwrap_or_else(|| ident.external_id.clone()),
         role: wa_role,
-        pubkey: String::new(),
+        // NOT key material — an identity REFERENCE, the convention the system
+        // cert already uses (`system-of:{root_wa_id}`) and the ROOT cert follows
+        // with a federation `key_id`. This wrote `""`, which persist refuses
+        // (`wa_cert/sqlite.rs:136`), so this write had never once succeeded.
+        pubkey: format!("oauth:{}:{}", ident.provider, ident.external_id),
         jwt_kid: format!("oauth-kid-{}-{}", ident.provider, ident.external_id),
         password_hash: None,
         api_key_hash: None,
         oauth_provider: Some(ident.provider.clone()),
         oauth_external_id: Some(ident.external_id.clone()),
-        oauth_links: Some(serde_json::Value::Object(links)),
+        oauth_links: Some(links),
         veilid_id: None,
         auto_minted: true,
         parent_wa_id: None,
@@ -1232,7 +1261,7 @@ async fn native_apple(State(st): State<OAuthState>, body: axum::body::Bytes) -> 
 /// Shared tail: determine role, RESOLVE the local identity, return it.
 async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
     let role = determine_role(&st.engine, ident.email.as_deref()).await;
-    match resolve_oauth_user(&st.engine, &ident).await {
+    match resolve_oauth_user(&st.engine, &ident, role).await {
         Ok(user_id) => {
             // Auto-mint ROOT for a SYSTEM_ADMIN OAuth user (CIRISServer#19, port of
             // `_auto_mint_system_admin_if_needed`): the first OAuth user (setup

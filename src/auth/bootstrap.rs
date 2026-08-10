@@ -350,6 +350,28 @@ pub async fn auto_mint_root_if_needed(
     if !is_admin {
         return Ok(false);
     }
+    // THE IDENTITY MAY ALREADY BE ROOT ITSELF — check that FIRST.
+    //
+    // The OAuth path hands us a cert whose role was determined SystemAdmin, and
+    // `resolve_oauth_user` writes it with `WaRole::Root` BEFORE this runs. The
+    // guard below asks only whether the DERIVED `wa-root-…` id exists, which is
+    // a different question, so it minted a SECOND ROOT on the same node —
+    // carrying `oauth_provider: None`, the exact shape CIRISServer#384 was
+    // about, and tripping `setup/root`'s "root already claimed; first-run setup
+    // is closed" so the node could never be owner-bound afterwards.
+    //
+    // One name, two axes: "is there a root FOR this identity" is not "does this
+    // derived id exist". Found by a live first OAuth sign-in leaving two ROOT
+    // rows behind.
+    if let Some(self_cert) = store::get(engine, identity_key_id).await? {
+        if self_cert.role == WaRole::Root && self_cert.active {
+            tracing::debug!(
+                identity = %identity_key_id,
+                "auto-mint ROOT: identity is ALREADY an active ROOT — no-op"
+            );
+            return Ok(false);
+        }
+    }
     let wa_id = root_wa_id_for_identity(identity_key_id);
     // Already minted (active ROOT bound to this identity) ⇒ no-op.
     if let Some(existing) = store::get(engine, &wa_id).await? {

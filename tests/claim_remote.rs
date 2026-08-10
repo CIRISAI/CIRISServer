@@ -412,12 +412,13 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
     );
 
     // THE PROPERTY: the owner signs in with Google and gets the OWNER cert.
-    // Resolve-only: if this ever mints again (the pre-#386 behaviour) it returns
-    // an `oauth-google-…` row instead, and the owner still cannot record an age
-    // band or announce.
-    let wa_id = resolve_oauth_user(&t, &ident)
+    // Handed the LOWEST role on purpose: if this CREATED a row instead of
+    // resolving the ROOT cert (the #384 behaviour) it returns an
+    // `oauth-google-…` observer, and the owner still cannot record an age band
+    // or announce. Resolution must win over creation.
+    let wa_id = resolve_oauth_user(&t, &ident, UserRole::Observer)
         .await
-        .expect("oauth sign-in resolves to a local identity");
+        .expect("oauth sign-in resolves to the owner's identity");
     assert_eq!(
         wa_id, root.wa_id,
         "OAuth sign-in must resolve to the OWNER ROOT cert, not mint a new user"
