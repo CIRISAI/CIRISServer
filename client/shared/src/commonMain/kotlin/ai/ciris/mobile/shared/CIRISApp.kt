@@ -1874,8 +1874,20 @@ fun CIRISApp(
                                     // Clear pending tokens
                                     pendingIdToken = null
                                     pendingUserId = null
+                                } else if (currentAccessToken != null) {
+                                    // DESKTOP browser sign-in: we already hold a NODE
+                                    // session, collected from the hand-off. There is no
+                                    // Google id_token to exchange — the node did the
+                                    // code exchange — so the branch above cannot apply,
+                                    // and falling through to "local auth" tried to log
+                                    // in with an admin password that a Google owner
+                                    // never set. That is what bounced a SUCCESSFUL
+                                    // sign-in back to the local-login form.
+                                    PlatformLogger.i(TAG, " Using the node session from the browser sign-in (no id_token to exchange)")
+                                    apiClient.setAccessToken(currentAccessToken!!)
+                                    apiClient.logTokenState()
                                 } else {
-                                    PlatformLogger.i(TAG, " No pending OAuth token, using local auth")
+                                    PlatformLogger.i(TAG, " No pending OAuth token and no session, using local auth")
                                     // For local login, authenticate with the admin credentials from setup
                                     val setupState = setupViewModel.state.value
                                     val username = setupState.username.ifEmpty { "admin" }

@@ -1220,11 +1220,40 @@ pub fn router(
     let loopback_reads = Router::new()
         .route("/v1/setup/status", axum::routing::get(setup_status))
         .route("/v1/setup/owned-nodes", axum::routing::get(owned_nodes))
+        // The wizard's consent step renders the SUBSTRATE's own words rather
+        // than a paragraph the client wrote — that is the whole point of the
+        // export. The route was missing here, so a live desktop first-run got
+        // `404 Not Found` on `/v1/setup/consent-disclosure` and the step fell
+        // back to whatever the client could say for itself, which is exactly
+        // the drift the disclosure exists to prevent.
+        .route(
+            "/v1/setup/consent-disclosure",
+            axum::routing::get(setup_consent_disclosure),
+        )
         .with_state(state)
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ));
     claim.merge(loopback_reads)
+}
+
+/// `GET /v1/setup/consent-disclosure` — what joining actually grants, in the
+/// substrate's own words.
+///
+/// Serves [`crate::peer::consent_disclosure_json`] verbatim: the ids are
+/// wire-stable and every string is already translated against them, so the
+/// wizard renders the operator's locale and falls back to this English only
+/// when its catalogue lacks the id.
+async fn setup_consent_disclosure() -> Response {
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        crate::peer::consent_disclosure_json(),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
