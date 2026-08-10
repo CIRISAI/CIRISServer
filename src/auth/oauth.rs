@@ -1137,7 +1137,22 @@ async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
 
 /// The default OAuth callback base URL when `auth.oauth_callback_base_url` is
 /// unset (an empty config:* value). Was the `OAUTH_CALLBACK_BASE_URL` env fallback.
-pub const DEFAULT_OAUTH_CALLBACK_BASE_URL: &str = "http://localhost:8080";
+/// **The NODE's own loopback read-API base — the port this router is mounted on.**
+///
+/// This used to default to `http://localhost:8080`, the Python brain's port. But
+/// `oauth::router` is merged into the node read API (`:4243`, beside
+/// `auth::session` and `auth::api_keys`), so the default named a service that
+/// does not serve this callback — and on a NODE build (`HAS_AGENT == false`)
+/// there is no `:8080` at all. Google would redirect the browser to a dead port
+/// after a correct sign-in, and the failure surfaces as a browser error page
+/// rather than as anything this node ever logs.
+///
+/// One name, two axes again: "where the app lives" and "where THIS router
+/// answers" are not the same question, and only the second one is a callback
+/// base. Deployments that DO front OAuth from the brain or a public host still
+/// set `auth.oauth_callback_base_url` explicitly; this is only the fallback, and
+/// the fallback should name the port that actually answers.
+pub const DEFAULT_OAUTH_CALLBACK_BASE_URL: &str = "http://127.0.0.1:4243";
 
 /// The OAuth front-door router.
 ///
@@ -1355,5 +1370,25 @@ mod tests {
                 "{provider} must REFUSE an empty audience list, not skip the aud check"
             );
         }
+    }
+
+    /// The default callback base names the port this router actually answers on.
+    ///
+    /// It defaulted to the Python brain's `:8080` while being mounted on the
+    /// node read API `:4243`. On a node build there is no `:8080`, so Google
+    /// returned the browser to a dead port after a correct sign-in — a failure
+    /// that appears in the BROWSER and never in this node's logs.
+    #[test]
+    fn the_default_callback_base_is_the_port_this_router_serves() {
+        assert!(
+            DEFAULT_OAUTH_CALLBACK_BASE_URL.contains("4243"),
+            "oauth::router is mounted on the node read API (:4243); a default \
+             naming any other port sends the browser somewhere nothing answers"
+        );
+        assert_eq!(
+            oauth_callback_url(DEFAULT_OAUTH_CALLBACK_BASE_URL, "google"),
+            "http://127.0.0.1:4243/v1/auth/oauth/google/callback",
+            "and this is the loopback URL a Google DESKTOP client may redirect to"
+        );
     }
 }
