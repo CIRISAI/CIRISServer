@@ -1383,21 +1383,33 @@ struct HandoffQuery {
 /// first while giving up on neither silently: a 404 here would make "still
 /// typing your password" indistinguishable from "this flow is dead".
 async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuery>) -> Response {
-    let token = st
-        .handoff
-        .lock()
-        .ok()
-        .and_then(|mut h| h.collect(&q.app_nonce));
-    match token {
-        Some(access_token) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": 86_400,
-            })),
-        )
-            .into_response(),
+    let payload = st.handoff.lock().ok().and_then(|mut h| {
+        h.collect(&q.app_nonce).or_else(|| {
+            // Only when the caller asks. The bound path is the default, so a
+            // client that has not waited for its own flow never takes someone
+            // else's.
+            if !q.allow_unbound {
+                return None;
+            }
+            let p = h.collect_recent();
+            if p.is_some() {
+                tracing::info!(
+                    "hand-off claimed from the RECENT slot — the sign-in that completed \
+                     carried no app_nonce (a stray browser tab). Loopback-only and \
+                     one-time, but the app that polled is NOT proven to be the app that \
+                     opened the browser."
+                );
+            }
+            p
+        })
+    });
+    match payload {
+        // Serialize the payload ITSELF. This previously wrapped the whole
+        // struct as `{"access_token": {…}}` — the client's decode then failed,
+        // returned null, and the app polled forever against a hand-off that had
+        // been parked correctly all along. A shape defect on the one hop where
+        // "nothing yet" and "malformed" look identical to the caller.
+        Some(p) => (StatusCode::OK, Json(p)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -1727,6 +1739,73 @@ mod tests {
     /// stray tab opened at the plain `/login` URL and carried no nonce. The
     /// binding is still preferred; this is the fallback that makes the feature
     /// work for a human with real browser tabs.
+
+    /// **The hand-off response shape**, asserted on the SERIALIZED bytes.
+    ///
+    /// This shipped as `{"access_token": {…the whole payload…}}` because the
+    /// handler wrapped the struct instead of returning it. Everything
+    /// type-checked; the client's decode failed, returned null, and the app
+    /// polled forever against a session that had been parked correctly the whole
+    /// time. On a poll endpoint "nothing yet" (204) and "malformed" are
+    /// indistinguishable to the caller — both read as *keep waiting* — so the
+    /// shape has to be pinned here rather than inferred from a green compile.
+    #[test]
+    fn the_handoff_payload_serializes_flat() {
+        let p = HandoffPayload {
+            access_token: "sess:wa-x:abc".into(),
+            token_type: "Bearer",
+            expires_in: 86_400,
+            user_id: "oauth-google-123".into(),
+            role: "SYSTEM_ADMIN".into(),
+            provider: "google".into(),
+            external_id: "123".into(),
+            email: Some("a@b.c".into()),
+        };
+        let v = serde_json::to_value(&p).expect("serializes");
+        assert_eq!(
+            v.get("access_token").and_then(|x| x.as_str()),
+            Some("sess:wa-x:abc"),
+            "access_token must be the TOKEN, not an object containing the payload"
+        );
+        for k in ["user_id", "role", "provider", "external_id"] {
+            assert!(
+                v.get(k).is_some_and(|x| x.is_string()),
+                "{k} must be a top-level string"
+            );
+        }
+        assert_eq!(v.get("token_type").and_then(|x| x.as_str()), Some("Bearer"));
+        assert!(v.get("expires_in").is_some_and(|x| x.is_number()));
+
+        // AND the handler must RETURN that payload, not re-wrap it. The struct
+        // serializing flat is not the property that broke — the handler wrapping
+        // it was, so asserting only the struct leaves the actual defect site
+        // uncovered (verified: mutating the handler did not fail this test until
+        // the check below existed).
+        let src = include_str!("oauth.rs");
+        // CODE only. The handler's own comment explains the bug using the very
+        // literal being searched for, so a raw `contains` over the slice fails on
+        // correct source — the fourth time a self-referential source assertion
+        // has bitten in this file.
+        let body: String = src
+            .split("async fn oauth_handoff(")
+            .nth(1)
+            .expect("handler present")
+            .split("\nasync fn ")
+            .next()
+            .expect("handler ends")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("Json(p)"),
+            "oauth_handoff must return the payload itself"
+        );
+        assert!(
+            !body.contains(r#""access_token":"#),
+            "oauth_handoff must NOT re-wrap the payload under an access_token key"
+        );
+    }
     #[test]
     fn a_nonceless_signin_is_claimable_once_from_the_recent_slot() {
         let payload = |t: &str| HandoffPayload {
