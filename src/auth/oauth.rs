@@ -1495,12 +1495,12 @@ async fn finish_oauth_login(
                         },
                     );
                 }
-                return (
+                (
                     StatusCode::OK,
                     [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     HANDOFF_PAGE,
                 )
-                    .into_response();
+                    .into_response()
             }
         }
         // A TYPED refusal, carrying the localization id AND an English fallback.
@@ -1729,17 +1729,6 @@ mod tests {
         assert!(s.consume(&state).is_none(), "state is still one-use");
     }
 
-    /// Collect ONCE: a nonce that has handed over its bearer hands over nothing
-    /// afterwards, so a leaked one cannot be replayed behind the app's back.
-
-    /// A sign-in completed WITHOUT a nonce is still claimable by a local app.
-    ///
-    /// Twice in live testing a Google sign-in succeeded at the node while the
-    /// desktop app waited forever, because the flow that completed came from a
-    /// stray tab opened at the plain `/login` URL and carried no nonce. The
-    /// binding is still preferred; this is the fallback that makes the feature
-    /// work for a human with real browser tabs.
-
     /// **The hand-off response shape**, asserted on the SERIALIZED bytes.
     ///
     /// This shipped as `{"access_token": {…the whole payload…}}` because the
@@ -1806,6 +1795,13 @@ mod tests {
             "oauth_handoff must NOT re-wrap the payload under an access_token key"
         );
     }
+    /// A sign-in completed WITHOUT a nonce is still claimable by a local app.
+    ///
+    /// Twice in live testing a Google sign-in succeeded at the node while the
+    /// desktop app waited forever, because the flow that completed came from a
+    /// stray tab opened at the plain `/login` URL and carried no nonce. The
+    /// binding is still preferred; this is the fallback that makes the feature
+    /// work for a human with real browser tabs.
     #[test]
     fn a_nonceless_signin_is_claimable_once_from_the_recent_slot() {
         let payload = |t: &str| HandoffPayload {
@@ -1839,6 +1835,8 @@ mod tests {
             "a session claimed by nonce must not remain claimable as 'recent'"
         );
     }
+    /// Collect ONCE: a nonce that has handed over its bearer hands over nothing
+    /// afterwards, so a leaked one cannot be replayed behind the app's back.
     #[test]
     fn a_parked_session_is_collected_exactly_once() {
         let mut h = HandoffStore::default();
@@ -1921,13 +1919,6 @@ mod tests {
         }
     }
 
-    /// The default callback base names the port this router actually answers on.
-    ///
-    /// It defaulted to the Python brain's `:8080` while being mounted on the
-    /// node read API `:4243`. On a node build there is no `:8080`, so Google
-    /// returned the browser to a dead port after a correct sign-in — a failure
-    /// that appears in the BROWSER and never in this node's logs.
-
     /// The hand-off route is loopback-GATED in the router, not merely described
     /// as such in a doc comment.
     ///
@@ -1959,6 +1950,12 @@ mod tests {
              it hands out a bearer and this node listens on 0.0.0.0"
         );
     }
+    /// The default callback base names the port this router actually answers on.
+    ///
+    /// It defaulted to the Python brain's `:8080` while being mounted on the
+    /// node read API `:4243`. On a node build there is no `:8080`, so Google
+    /// returned the browser to a dead port after a correct sign-in — a failure
+    /// that appears in the BROWSER and never in this node's logs.
     #[test]
     fn the_default_callback_base_is_the_port_this_router_serves() {
         assert!(
