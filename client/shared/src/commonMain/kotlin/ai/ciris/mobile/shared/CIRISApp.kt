@@ -1816,7 +1816,10 @@ fun CIRISApp(
                     // from the LOCAL node's console banner so the setup flow can
                     // self-claim ownership of this node on COMPLETE. Console-only:
                     // PythonRuntime scrapes it from the node stdout it launched.
-                    claimPinProvider = { pythonRuntimeProtocol.localClaimPin.value },
+                    // Ask the runtime, which reads the node's durable file. A
+                    // snapshot of `localClaimPin` returned null in the shipped
+                    // wheel, where nothing ever populates that flow.
+                    claimPinProvider = { pythonRuntimeProtocol.claimPin() },
                     nodeCodeProvider = { pythonRuntimeProtocol.localNodeCode.value },
                     onSetupComplete = {
                         platformLog(TAG, "[INFO] onSetupComplete called - exchanging tokens...")

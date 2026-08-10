@@ -119,6 +119,27 @@ interface PythonRuntimeProtocol {
         get() = EMPTY_CLAIM_PIN
 
     /**
+     * **The one way to obtain this node's one-time claim PIN.**
+     *
+     * Reads the node's DURABLE `<home>/claim_pin` (0600) as the primary source,
+     * because that is the only path that does not depend on process ancestry.
+     * [localClaimPin] captures the boot banner, which requires the app to own
+     * the node's stdout — true when the app launches the node, and FALSE in the
+     * shipped desktop wheel, where the Python launcher starts the node and then
+     * spawns the UI. Treating the file as a "fallback" meant the reliable source
+     * was consulted only on the path that did not need it, so first-run claim
+     * failed with "claim PIN not captured" while the PIN sat readable on disk.
+     *
+     * Suspends and retries briefly: at first run the node writes the file during
+     * boot, so "absent" a moment after launch means *not yet*, not *never*.
+     *
+     * Still never over HTTP. This is a same-machine read of a 0600 file in the
+     * node's own home — first-run operator-level access — and `setup/root` still
+     * verifies the PIN, so nothing is weakened by reading it here.
+     */
+    suspend fun claimPin(): String? = localClaimPin.value
+
+    /**
      * THIS node's own NodeCode, if the node printed it alongside the unclaimed
      * banner. May be `null` even when [localClaimPin] is set — in that case the
      * NodeCode is fetched at claim time via `GET /v1/federation/node-code`.

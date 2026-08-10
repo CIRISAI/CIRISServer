@@ -129,11 +129,44 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     }
 
     /**
-     * Fallback CLAIM-PIN capture: read the local node's durable `<home>/claim_pin`
-     * file when the stdout banner capture missed it (e.g. the node was already
-     * running, so we never owned its stdout). Console-only-over-HTTP is preserved —
-     * this is a same-machine file read (first-run op-level access). No-op if the PIN
-     * is already captured or the file is absent/empty.
+     * **The claim PIN, from the node's durable file — the PRIMARY path.**
+     *
+     * Not a fallback. The stdout banner only reaches us when this process
+     * launched the node, which is FALSE in the shipped wheel: the Python
+     * launcher starts the node and then spawns this UI, so the banner capture
+     * never runs and first-run claim failed with "claim PIN not captured" while
+     * the PIN sat readable at `<home>/claim_pin`.
+     *
+     * Retries for a bounded window because at first run the node writes the file
+     * during boot — absent a moment after launch means NOT YET, not never. Each
+     * attempt re-reads, so a PIN that appears late is still found.
+     *
+     * Prefers whatever the banner already captured (identical value, no I/O),
+     * then the file. Still never over HTTP: a 0600 read inside the node's own
+     * home is first-run operator-level access, and `setup/root` verifies the PIN
+     * regardless.
+     */
+    override suspend fun claimPin(): String? {
+        _localClaimPin.value?.let { return it }
+        repeat(20) { attempt ->
+            readClaimPinFromFileIfMissing()
+            _localClaimPin.value?.let {
+                println("[PythonRuntime.desktop] claim PIN resolved (attempt ${attempt + 1})")
+                return it
+            }
+            kotlinx.coroutines.delay(500)
+        }
+        println(
+            "[PythonRuntime.desktop] claim PIN NOT resolvable: no boot banner and no readable " +
+                "${java.io.File(nodeHomeDir(), "claim_pin").path} after 10s — the node may be " +
+                "claimed already (the PIN is consumed on claim) or running under a different home."
+        )
+        return null
+    }
+
+    /**
+     * Read the node's durable `<home>/claim_pin` (0600) into the flow. No-op if
+     * already captured or the file is absent/empty. Called by [claimPin].
      */
     private fun readClaimPinFromFileIfMissing() {
         if (_localClaimPin.value != null) return
