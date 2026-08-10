@@ -34,34 +34,81 @@ use serde::{Deserialize, Serialize};
 use super::roles::UserRole;
 use super::store;
 
-/// In-memory CSRF state store (issue #847 — one-use token, 600s TTL).
+/// One pending authorization: its expiry and its PKCE verifier.
+struct Pending {
+    deadline: Instant,
+    /// RFC 7636 `code_verifier` — held server-side, never sent to the browser,
+    /// and presented only at token exchange.
+    code_verifier: String,
+}
+
+/// In-memory CSRF + PKCE state store (issue #847 — one-use token, 600s TTL).
+///
+/// # Why the verifier lives here (CIRISServer#384 follow-up)
+///
+/// The desktop build ships a Google **installed-app** client, whose secret is not
+/// confidential — Google documents it as shipped in the binary, and RFC 8252
+/// treats native apps as public clients. That is fine, but ONLY because PKCE, not
+/// the secret, is what binds the authorization code to the client that requested
+/// it.
+///
+/// Without PKCE, a loopback redirect is interceptable by any local process that
+/// races the callback: it captures the `code` and exchanges it using the secret we
+/// shipped. The secret being public is the premise, not the flaw — the flaw would
+/// be relying on it. So the verifier is generated per authorization, bound to the
+/// same one-use CSRF token, kept server-side, and required at exchange.
 #[derive(Default)]
 struct CsrfStore {
-    pending: HashMap<String, Instant>,
+    pending: HashMap<String, Pending>,
 }
 
 impl CsrfStore {
-    fn issue(&mut self) -> String {
+    /// Issue a one-use state token and its PKCE verifier.
+    /// Returns `(state, code_challenge)` — the challenge goes in the authorize
+    /// URL; the verifier stays here.
+    fn issue(&mut self) -> (String, String) {
         use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        const B64: base64::engine::general_purpose::GeneralPurpose =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
         let mut raw = [0u8; 32];
         ciris_crypto::random::fill(&mut raw).expect("CSPRNG for OAuth CSRF token");
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        let token = B64.encode(raw);
+
+        // RFC 7636 §4.1 — 43..128 chars of unreserved ASCII. 32 random bytes
+        // base64url-encodes to 43, the minimum, and is the recommended shape.
+        let mut vraw = [0u8; 32];
+        ciris_crypto::random::fill(&mut vraw).expect("CSPRNG for PKCE verifier");
+        let code_verifier = B64.encode(vraw);
+        // S256 only. `plain` is permitted by RFC 7636 but offers nothing here —
+        // it would put the verifier in the authorize URL, which is the exact
+        // exposure PKCE exists to remove.
+        let code_challenge = B64.encode(Sha256::digest(code_verifier.as_bytes()));
+
         self.prune();
-        self.pending
-            .insert(token.clone(), Instant::now() + Duration::from_secs(600));
-        token
+        self.pending.insert(
+            token.clone(),
+            Pending {
+                deadline: Instant::now() + Duration::from_secs(600),
+                code_verifier,
+            },
+        );
+        (token, code_challenge)
     }
-    /// One-use consume: returns true iff the token was issued and unexpired.
-    fn consume(&mut self, token: &str) -> bool {
+
+    /// One-use consume: returns the PKCE verifier iff the token was issued and
+    /// unexpired. `None` means the exchange must be refused — a missing verifier
+    /// and a wrong one are the same answer here, deliberately.
+    fn consume(&mut self, token: &str) -> Option<String> {
         self.prune();
-        match self.pending.remove(token) {
-            Some(deadline) => deadline > Instant::now(),
-            None => false,
-        }
+        let p = self.pending.remove(token)?;
+        (p.deadline > Instant::now()).then_some(p.code_verifier)
     }
+
     fn prune(&mut self) {
         let now = Instant::now();
-        self.pending.retain(|_, d| *d > now);
+        self.pending.retain(|_, p| p.deadline > now);
     }
 }
 
@@ -132,6 +179,7 @@ pub trait ProviderClient: Send + Sync {
         client_id: &str,
         state: &str,
         redirect_uri: &str,
+        code_challenge: &str,
     ) -> String;
     /// Exchange an auth `code` for the authenticated human's claims.
     async fn exchange_code(
@@ -141,6 +189,7 @@ pub trait ProviderClient: Send + Sync {
         cfg_client_secret: &str,
         code: &str,
         redirect_uri: &str,
+        code_verifier: &str,
     ) -> Result<OAuthIdentity, String>;
     /// Verify a native SDK id_token (Google tokeninfo / Apple JWKS RS256).
     async fn verify_native(
@@ -180,32 +229,56 @@ impl ProviderClient for HttpProviderClient {
         client_id: &str,
         state: &str,
         redirect_uri: &str,
+        code_challenge: &str,
     ) -> String {
         let enc = |s: &str| urlencoding::encode(s).into_owned();
+        // RFC 7636 — every provider below advertises S256. The challenge is public
+        // by design; the verifier it commits to never leaves this process.
+        let pkce = format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            enc(code_challenge)
+        );
         match provider {
             "google" => format!(
                 "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}\
-                 &response_type=code&scope={}&state={}&access_type=offline&prompt=consent",
+                 &response_type=code&scope={}&state={}&access_type=offline&prompt=consent{}",
                 enc(client_id),
                 enc(redirect_uri),
                 enc("openid email profile"),
                 enc(state),
+                pkce,
+            ),
+            // Apple: `response_mode=form_post` is REQUIRED whenever a scope is
+            // requested — Apple POSTs the callback rather than redirecting, and
+            // omitting it makes Apple drop the scope silently rather than error.
+            // Note the exchange for Apple needs an ES256 client-secret JWT, not a
+            // static string: see `exchange_code`.
+            "apple" => format!(
+                "https://appleid.apple.com/auth/authorize?client_id={}&redirect_uri={}\
+                 &response_type=code&scope={}&response_mode=form_post&state={}{}",
+                enc(client_id),
+                enc(redirect_uri),
+                enc("name email"),
+                enc(state),
+                pkce,
             ),
             "github" => format!(
                 "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}\
-                 &scope={}&state={}",
+                 &scope={}&state={}{}",
                 enc(client_id),
                 enc(redirect_uri),
                 enc("read:user user:email"),
                 enc(state),
+                pkce,
             ),
             "discord" => format!(
                 "https://discord.com/api/oauth2/authorize?client_id={}&redirect_uri={}\
-                 &response_type=code&scope={}&state={}",
+                 &response_type=code&scope={}&state={}{}",
                 enc(client_id),
                 enc(redirect_uri),
                 enc("identify email"),
                 enc(state),
+                pkce,
             ),
             _ => format!("https://example.invalid/authorize?state={}", enc(state)),
         }
@@ -218,18 +291,19 @@ impl ProviderClient for HttpProviderClient {
         client_secret: &str,
         code: &str,
         redirect_uri: &str,
+        code_verifier: &str,
     ) -> Result<OAuthIdentity, String> {
         match provider {
             "google" => {
-                self.exchange_google(client_id, client_secret, code, redirect_uri)
+                self.exchange_google(client_id, client_secret, code, redirect_uri, code_verifier)
                     .await
             }
             "github" => {
-                self.exchange_github(client_id, client_secret, code, redirect_uri)
+                self.exchange_github(client_id, client_secret, code, redirect_uri, code_verifier)
                     .await
             }
             "discord" => {
-                self.exchange_discord(client_id, client_secret, code, redirect_uri)
+                self.exchange_discord(client_id, client_secret, code, redirect_uri, code_verifier)
                     .await
             }
             other => Err(format!("unsupported OAuth provider: {other}")),
@@ -262,6 +336,7 @@ impl HttpProviderClient {
         client_secret: &str,
         code: &str,
         redirect_uri: &str,
+        code_verifier: &str,
     ) -> Result<OAuthIdentity, String> {
         // POST https://oauth2.googleapis.com/token (form), then GET userinfo.
         let token: serde_json::Value = self
@@ -273,6 +348,8 @@ impl HttpProviderClient {
                 ("client_secret", client_secret),
                 ("redirect_uri", redirect_uri),
                 ("grant_type", "authorization_code"),
+                // RFC 7636 §4.5 — proves this client requested the code.
+                ("code_verifier", code_verifier),
             ])
             .send()
             .await
@@ -326,6 +403,7 @@ impl HttpProviderClient {
         client_secret: &str,
         code: &str,
         redirect_uri: &str,
+        code_verifier: &str,
     ) -> Result<OAuthIdentity, String> {
         let token: serde_json::Value = self
             .http
@@ -336,6 +414,10 @@ impl HttpProviderClient {
                 ("client_id", client_id),
                 ("client_secret", client_secret),
                 ("redirect_uri", redirect_uri),
+                // GitHub omits `grant_type`, so this body did not match the
+                // shared anchor the other providers did — it needs the verifier
+                // stated explicitly or PKCE is silently absent on this leg.
+                ("code_verifier", code_verifier),
             ])
             .send()
             .await
@@ -417,6 +499,7 @@ impl HttpProviderClient {
         client_secret: &str,
         code: &str,
         redirect_uri: &str,
+        code_verifier: &str,
     ) -> Result<OAuthIdentity, String> {
         let token: serde_json::Value = self
             .http
@@ -427,6 +510,8 @@ impl HttpProviderClient {
                 ("client_secret", client_secret),
                 ("redirect_uri", redirect_uri),
                 ("grant_type", "authorization_code"),
+                // RFC 7636 §4.5 — proves this client requested the code.
+                ("code_verifier", code_verifier),
             ])
             .send()
             .await
@@ -782,7 +867,8 @@ async fn oauth_login(
     if !is_safe_redirect(&redirect_uri) {
         return err(StatusCode::BAD_REQUEST, "unsafe redirect_uri");
     }
-    let state = {
+    // The verifier stays in the store; only its S256 challenge goes to the browser.
+    let (state, code_challenge) = {
         let mut csrf = st.csrf.lock().unwrap();
         csrf.issue()
     };
@@ -794,7 +880,7 @@ async fn oauth_login(
     let callback = oauth_callback_url(&st.callback_base, &provider);
     let url = st
         .client
-        .authorize_url(&provider, &client_id, &state, &callback);
+        .authorize_url(&provider, &client_id, &state, &callback, &code_challenge);
     axum::response::Redirect::temporary(&url).into_response()
 }
 
@@ -835,12 +921,16 @@ async fn oauth_callback(
     Query(q): Query<CallbackQuery>,
 ) -> Response {
     // CSRF: fail-closed on missing/expired/replayed state (issue #847).
-    {
+    // One-use: consuming the state YIELDS the PKCE verifier. A replayed or
+    // expired state and a missing verifier are the same refusal — there is no
+    // path that exchanges a code without the secret that committed to it.
+    let code_verifier = {
         let mut csrf = st.csrf.lock().unwrap();
-        if !csrf.consume(&q.state) {
-            return err(StatusCode::BAD_REQUEST, "invalid or expired oauth state");
+        match csrf.consume(&q.state) {
+            Some(v) => v,
+            None => return err(StatusCode::BAD_REQUEST, "invalid or expired oauth state"),
         }
-    }
+    };
     let (client_id, client_secret) = {
         let store = st.providers.lock().unwrap();
         match store.by_provider.get(&provider) {
@@ -857,6 +947,7 @@ async fn oauth_callback(
             &client_secret,
             &q.code,
             &redirect_uri,
+            &code_verifier,
         )
         .await
     {
@@ -1006,10 +1097,71 @@ mod tests {
     #[test]
     fn csrf_is_one_use_and_expiring() {
         let mut s = CsrfStore::default();
-        let t = s.issue();
-        assert!(s.consume(&t), "issued token must verify once");
-        assert!(!s.consume(&t), "token must not be reusable");
-        assert!(!s.consume("never-issued"));
+        let (t, _challenge) = s.issue();
+        assert!(s.consume(&t).is_some(), "issued token must verify once");
+        assert!(s.consume(&t).is_none(), "token must not be reusable");
+        assert!(s.consume("never-issued").is_none());
+    }
+
+    /// The challenge published to the browser is the S256 hash of a verifier that
+    /// never leaves this process, and consuming the state yields THAT verifier.
+    ///
+    /// Both halves matter. If the challenge were not the hash, the provider would
+    /// reject every exchange; if consume returned a different verifier, PKCE would
+    /// be theatre — present in the URL, unenforced at the token endpoint.
+    #[test]
+    fn pkce_challenge_is_s256_of_the_retained_verifier() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        let mut s = CsrfStore::default();
+        let (state, challenge) = s.issue();
+        let verifier = s.consume(&state).expect("verifier on first consume");
+
+        // RFC 7636 §4.1 — 43..128 unreserved chars.
+        assert!(
+            (43..=128).contains(&verifier.len()),
+            "verifier length {} is outside RFC 7636 bounds",
+            verifier.len()
+        );
+        let expect = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        assert_eq!(challenge, expect, "challenge must be S256(verifier)");
+        assert_ne!(
+            challenge, verifier,
+            "challenge must not BE the verifier (plain)"
+        );
+    }
+
+    /// Every provider that exchanges an authorization code sends `code_verifier`.
+    ///
+    /// This exists because of how it was nearly missed. The verifier was added to
+    /// the token bodies with one replace anchored on `grant_type` — which GitHub
+    /// does not send. The build stayed green, the URL still advertised S256, and
+    /// PKCE was silently absent on exactly one provider. A per-leg property is
+    /// exactly the kind that a shared-shape edit skips.
+    #[test]
+    fn every_code_exchange_sends_the_verifier() {
+        let src = include_str!("oauth.rs");
+        let mut missing = Vec::new();
+        let mut checked = 0usize;
+        for prov in ["google", "github", "discord"] {
+            let Some(start) = src.find(&format!("async fn exchange_{prov}")) else {
+                missing.push(format!("{prov} (no exchange fn)"));
+                continue;
+            };
+            let body = &src[start..];
+            let end = body.find("\n    async fn ").unwrap_or(body.len());
+            checked += 1;
+            if !body[..end].contains("(\"code_verifier\", code_verifier)") {
+                missing.push(prov.to_string());
+            }
+        }
+        assert_eq!(checked, 3, "all three code-exchange legs must be examined");
+        assert!(
+            missing.is_empty(),
+            "provider exchange(s) {missing:?} do not send code_verifier — PKCE would be \
+             advertised in the authorize URL and unenforced at the token endpoint"
+        );
     }
 
     #[test]
@@ -1020,8 +1172,12 @@ mod tests {
             "cid",
             "st8",
             "https://app.ciris.ai/v1/auth/oauth/google/callback",
+            "chal",
         );
         assert!(u.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        // PKCE must reach the provider, or the exchange's verifier proves nothing.
+        assert!(u.contains("code_challenge=chal"));
+        assert!(u.contains("code_challenge_method=S256"));
         assert!(u.contains("client_id=cid"));
         assert!(u.contains("response_type=code"));
         assert!(u.contains("scope=openid%20email%20profile"));
@@ -1030,7 +1186,7 @@ mod tests {
         assert!(u.contains("prompt=consent"));
         assert!(u.contains("redirect_uri=https%3A%2F%2Fapp.ciris.ai"));
         // github uses its own scope set.
-        let g = c.authorize_url("github", "cid", "st8", "https://x/cb");
+        let g = c.authorize_url("github", "cid", "st8", "https://x/cb", "chal");
         assert!(g.starts_with("https://github.com/login/oauth/authorize?"));
         assert!(g.contains("scope=read%3Auser%20user%3Aemail"));
     }
