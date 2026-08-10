@@ -181,30 +181,30 @@ pub const OPERATIONS: &[Operation] = &[
     },
 ];
 
-/// How a client runs an op over many subjects — **and the limit that makes it
-/// painful today**.
+/// How a client runs an op over many subjects — **a set, as of persist v30.9.0**.
 ///
-/// `Selection.attesting_key_id` is `Option<String>`: ONE key. Acting on 61
-/// exposed keys is currently 61 preview→commit pairs.
+/// `Selection` now carries `attesting_key_ids` / `attested_key_ids`
+/// (`Vec<String>`) beside the singular fields, OR-combined and pushed into the
+/// query as `IN (…)` by persist's `merge_key_predicate`. One act names a
+/// population.
 ///
-/// **That is a limitation, not a design.** The safety property the ladder
-/// actually needs is *what was previewed is what executes* — one HASH, not one
-/// SUBJECT. A preview over a 61-key selection yields one hash over that row set
-/// and is equally TOCTOU-closed, with one authority walk and one ledger entry
-/// saying "these 61, for this reason". Per-subject iteration buys no safety and
-/// costs an operator 61 decisions where they made one.
+/// **What this changed, and what it did not.** The safety property the ladder
+/// needs is *what was previewed is what executes* — one HASH, not one SUBJECT.
+/// A preview over 61 keys always yielded one hash over that row set and was
+/// always equally TOCTOU-closed; the cardinality limit bought no safety and cost
+/// an operator 61 decisions where they made one. So this is the removal of a
+/// limitation, not a relaxation of a guarantee, and the audit trail gets BETTER:
+/// one decision, one reason, one ledger entry naming the set, instead of 61 rows
+/// a reader has to infer were a single act.
 ///
-/// It also does not survive the mesh this is built for. At millions of nodes a
-/// moderation act must address a SET — by list or by predicate — or it cannot be
-/// performed at all. `Selection` is already a predicate query in every other
-/// dimension; only the key fields are singular, and `dimension_prefixes` in the
-/// same struct is already an OR-combined `Vec<String>`.
+/// It is also what makes the mesh's own scale expressible. At millions of nodes
+/// an act that can only name one subject cannot be performed at all, and the
+/// operator's alternative — a script hammering a tier-4 door in a loop — is
+/// worse than the thing the tiering exists to prevent.
 ///
-/// Tracked as CIRISPersist#627 (set-valued key predicates in `AttestationFilter`,
-/// pushed into the query as `IN (…)`, never an application-side loop — the #343
-/// rule). Until it lands, a client batches and reports per subject; after it
-/// lands, this constant changes and the client stops looping.
-pub const SELECTION_CARDINALITY: &str = "one_subject_per_act_pending_persist_627";
+/// Landed as CIRISPersist#627; still no application-side loop anywhere in
+/// `admin_ops` (the #343 rule). A client reading this value stops batching.
+pub const SELECTION_CARDINALITY: &str = "set_valued_key_predicates";
 
 async fn get_operations() -> impl IntoResponse {
     Json(json!({

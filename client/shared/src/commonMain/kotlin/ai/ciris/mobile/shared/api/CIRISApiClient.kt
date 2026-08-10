@@ -1573,10 +1573,19 @@ class CIRISApiClient(
     suspend fun collectOAuthHandoff(
         appNonce: String,
         localNodeUrl: String = LOCAL_NODE_URL,
+        /**
+         * Accept a sign-in that completed without OUR nonce — a stray browser
+         * tab opened at the plain `/login` URL. Off while we still expect our
+         * own flow to land; the caller turns it on only after waiting, so the
+         * bound path always wins when it exists.
+         */
+        allowUnbound: Boolean = false,
     ): OAuthHandoff? {
         val client = federationHttpClient()
         return try {
-            val response = client.get("$localNodeUrl/v1/auth/oauth/handoff?app_nonce=$appNonce")
+            val response = client.get(
+                "$localNodeUrl/v1/auth/oauth/handoff?app_nonce=$appNonce&allow_unbound=$allowUnbound"
+            )
             if (response.status.value == 204) return null
             if (!response.status.isSuccess()) return null
             jsonConfig.decodeFromString(OAuthHandoff.serializer(), response.bodyAsText())

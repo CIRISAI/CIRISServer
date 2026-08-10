@@ -142,6 +142,22 @@ impl CsrfStore {
 #[derive(Default)]
 struct HandoffStore {
     ready: HashMap<String, (HandoffPayload, Instant)>,
+    /// **The most recent completed sign-in, whatever tab finished it.**
+    ///
+    /// The nonce binds a session to the app that opened the browser, which is
+    /// the right default. But a desktop user has real browsers with real tabs:
+    /// every attempt opens a new one, stale CIRIS sign-in tabs accumulate, and
+    /// whichever tab the human actually finishes in decides whether a nonce
+    /// exists at all. Twice in testing a sign-in succeeded at the node while the
+    /// app waited forever, because the completed flow came from a tab opened at
+    /// the plain `/login` URL.
+    ///
+    /// So a completed sign-in is ALSO parked here and a local app may claim it
+    /// when its own nonce does not resolve. This is a deliberate weakening of
+    /// the binding, and it is bounded: loopback-only (enforced by a layer on the
+    /// route, not by a comment), one-time, and expiring in minutes. On a desktop
+    /// the only process that can reach it is the app the human is looking at.
+    recent: Option<(HandoffPayload, Instant)>,
 }
 
 /// What a desktop app collects: the session AND who it belongs to.
@@ -163,21 +179,42 @@ struct HandoffPayload {
 }
 
 impl HandoffStore {
-    fn park(&mut self, nonce: String, payload: HandoffPayload) {
+    fn park(&mut self, nonce: Option<String>, payload: HandoffPayload) {
         self.prune();
-        self.ready
-            .insert(nonce, (payload, Instant::now() + Duration::from_secs(300)));
+        let deadline = Instant::now() + Duration::from_secs(300);
+        if let Some(n) = nonce {
+            self.ready.insert(n, (payload.clone(), deadline));
+        }
+        // Always claimable by a local app, even when no nonce came back.
+        self.recent = Some((payload, deadline));
     }
     /// Collect ONCE. A second read gets nothing, so a leaked nonce cannot be
     /// replayed after the app has taken its session.
     fn collect(&mut self, nonce: &str) -> Option<HandoffPayload> {
         self.prune();
-        let (payload, deadline) = self.ready.remove(nonce)?;
+        if let Some((payload, deadline)) = self.ready.remove(nonce) {
+            if deadline > Instant::now() {
+                self.recent = None; // claimed; do not hand it out twice
+                return Some(payload);
+            }
+        }
+        None
+    }
+
+    /// Claim the most recent completed sign-in regardless of nonce. One-time.
+    fn collect_recent(&mut self) -> Option<HandoffPayload> {
+        self.prune();
+        let (payload, deadline) = self.recent.take()?;
         (deadline > Instant::now()).then_some(payload)
     }
     fn prune(&mut self) {
         let now = Instant::now();
         self.ready.retain(|_, (_, d)| *d > now);
+        if let Some((_, d)) = &self.recent {
+            if *d <= now {
+                self.recent = None;
+            }
+        }
     }
 }
 
@@ -911,13 +948,14 @@ pub async fn resolve_oauth_user(
         );
         return Ok(existing.wa_id);
     }
-    // Name WHO was refused and WHY. The callback previously logged nothing at
-    // all about the identity, so a failure here was undiagnosable from the
-    // node's own logs — the operator saw a 500 and the node said nothing.
-    tracing::warn!(
+    // No cert carries this identity yet. NOT a refusal — we create below — and
+    // saying "REFUSED" here put a warning in the log for the ordinary first
+    // sign-in, immediately followed by "CREATED". A log that cries wolf on the
+    // happy path is worse than no log.
+    tracing::debug!(
         provider = %ident.provider,
         subject = %redact_subject(&ident.external_id),
-        "oauth sign-in REFUSED — no local identity is bound to this account on this node"
+        "oauth sign-in: no local identity bound yet — creating one"
     );
     // No cert carries this identity yet — CREATE one. OAuth users are
     // first-class in the surface being converted; refusing here would drop a
@@ -1206,21 +1244,6 @@ struct CallbackQuery {
     state: String,
 }
 
-#[derive(Debug, Serialize)]
-struct CallbackResponse {
-    user_id: String,
-    role: String,
-    /// The node session this sign-in issued.
-    ///
-    /// The callback used to return an identity and NO bearer, so a completed
-    /// OAuth sign-in left the caller with nothing to authenticate with — the
-    /// password path minted one and this did not. Same opaque `sess:` token,
-    /// same `resolve_bearer`.
-    access_token: String,
-    token_type: &'static str,
-    expires_in: u64,
-}
-
 async fn oauth_callback(
     State(st): State<OAuthState>,
     Path(provider): Path<String>,
@@ -1336,10 +1359,24 @@ const HANDOFF_PAGE: &str = "<!doctype html><meta charset=utf-8>\
 #[derive(Debug, Deserialize)]
 struct HandoffQuery {
     app_nonce: String,
+    /// Accept a sign-in that completed WITHOUT this nonce — a stray tab. Opt-in
+    /// so the bound path stays the default and the fallback is a decision the
+    /// client makes explicitly, after its own nonce has failed to resolve.
+    #[serde(default)]
+    allow_unbound: bool,
 }
 
 /// `GET /v1/auth/oauth/handoff?app_nonce=…` — the desktop app collects the
 /// session its browser sign-in produced.
+///
+/// **LOOPBACK-ONLY, enforced.** This route hands out a session BEARER, and the
+/// node binds `0.0.0.0:4243`. An earlier comment here claimed the route was
+/// "loopback-only, the same trust boundary the setup routes use" — it was not:
+/// `require_loopback` wrapped `portable_occurrence::router` only, and this
+/// router was merged beside it, so the claim was a comment rather than a
+/// control. The layer is now applied to this route specifically (see
+/// [`router`]), NOT to the whole OAuth router — the provider callback has to
+/// stay reachable by whatever browser the human used.
 ///
 /// `204 No Content` means *not yet* — the human has not finished in the browser.
 /// That is a DIFFERENT answer from "no such nonce", and the app polls on the
@@ -1404,10 +1441,36 @@ async fn finish_oauth_login(
             // collect once, and give the human a page that says so. Without this
             // the app is a different process watching a browser succeed with no
             // way to learn the result.
-            if let Some(nonce) = app_nonce {
+            // WHETHER a hand-off was parked is the single most useful line in
+            // this flow. Without it, "the app never noticed" is indistinguishable
+            // from "the browser never finished" — and a sign-in completed through
+            // a stray tab (a login URL opened earlier, carrying no nonce) looks
+            // exactly like success from the node's side.
+            // Say which way this completed. A nonce-bound hand-off and a
+            // nonce-less one are both collectable now, but only the first proves
+            // the app that polls is the app that opened the browser — and that
+            // distinction is exactly what a reader of this log needs.
+            tracing::info!(
+                nonce_bound = app_nonce.is_some(),
+                user_id = %user_id,
+                "oauth callback completed — session parked ({})",
+                if app_nonce.is_some() {
+                    "bound to the app_nonce that started this flow"
+                } else {
+                    "NO app_nonce: this sign-in was started from a plain /login URL \
+                     (a stray tab), so it is claimable only via the loopback-gated \
+                     recent slot"
+                }
+            );
+            // ALWAYS park, and ALWAYS answer the browser with a page. The
+            // callback is only ever reached by a provider redirecting a HUMAN's
+            // browser, so JSON here was never something a client could consume —
+            // and rendering the bearer into a page would put a live session in
+            // browser history.
+            {
                 if let Ok(mut h) = st.handoff.lock() {
                     h.park(
-                        nonce,
+                        app_nonce.clone(),
                         HandoffPayload {
                             access_token: access_token.clone(),
                             token_type: "Bearer",
@@ -1427,17 +1490,6 @@ async fn finish_oauth_login(
                 )
                     .into_response();
             }
-            (
-                StatusCode::OK,
-                Json(CallbackResponse {
-                    user_id,
-                    role: role.as_str().to_string(),
-                    access_token,
-                    token_type: "Bearer",
-                    expires_in: 86_400,
-                }),
-            )
-                .into_response()
         }
         // A TYPED refusal, carrying the localization id AND an English fallback.
         // The live failure was `store: wa_cert: invalid argument: pubkey required`
@@ -1510,15 +1562,24 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
             "/v1/auth/oauth/{provider}/login",
             axum::routing::get(oauth_login),
         )
-        // The desktop hand-off: a browser signs in, the APP collects the session.
-        .route("/v1/auth/oauth/handoff", axum::routing::get(oauth_handoff))
         .route(
             "/v1/auth/oauth/{provider}/callback",
             axum::routing::get(oauth_callback),
         )
         .route("/v1/auth/native/google", axum::routing::post(native_google))
         .route("/v1/auth/native/apple", axum::routing::post(native_apple))
-        .with_state(st)
+        .with_state(st.clone())
+        // The desktop hand-off, LOOPBACK-GATED on its own sub-router. It returns
+        // a session BEARER and this node binds 0.0.0.0:4243, so the gate has to
+        // be a layer, not a sentence in a doc comment (which is what it was).
+        // Scoped here rather than to the whole router because the provider
+        // callback must stay reachable by whatever browser the human used.
+        .merge(
+            Router::new()
+                .route("/v1/auth/oauth/handoff", axum::routing::get(oauth_handoff))
+                .layer(axum::middleware::from_fn(super::loopback::require_loopback))
+                .with_state(st),
+        )
 }
 
 #[cfg(test)]
@@ -1658,11 +1719,52 @@ mod tests {
 
     /// Collect ONCE: a nonce that has handed over its bearer hands over nothing
     /// afterwards, so a leaked one cannot be replayed behind the app's back.
+
+    /// A sign-in completed WITHOUT a nonce is still claimable by a local app.
+    ///
+    /// Twice in live testing a Google sign-in succeeded at the node while the
+    /// desktop app waited forever, because the flow that completed came from a
+    /// stray tab opened at the plain `/login` URL and carried no nonce. The
+    /// binding is still preferred; this is the fallback that makes the feature
+    /// work for a human with real browser tabs.
+    #[test]
+    fn a_nonceless_signin_is_claimable_once_from_the_recent_slot() {
+        let payload = |t: &str| HandoffPayload {
+            access_token: t.into(),
+            token_type: "Bearer",
+            expires_in: 1,
+            user_id: "wa-x".into(),
+            role: "SYSTEM_ADMIN".into(),
+            provider: "google".into(),
+            external_id: "sub-1".into(),
+            email: None,
+        };
+        let mut h = HandoffStore::default();
+        h.park(None, payload("sess:no-nonce"));
+        assert_eq!(
+            h.collect_recent().map(|p| p.access_token).as_deref(),
+            Some("sess:no-nonce")
+        );
+        assert!(
+            h.collect_recent().is_none(),
+            "one-time, like the nonce slot"
+        );
+
+        // Claiming BY NONCE must also consume the recent slot, or the same
+        // session could be handed out twice.
+        let mut h2 = HandoffStore::default();
+        h2.park(Some("n".into()), payload("sess:bound"));
+        assert!(h2.collect("n").is_some());
+        assert!(
+            h2.collect_recent().is_none(),
+            "a session claimed by nonce must not remain claimable as 'recent'"
+        );
+    }
     #[test]
     fn a_parked_session_is_collected_exactly_once() {
         let mut h = HandoffStore::default();
         h.park(
-            "n1".into(),
+            Some("n1".to_string()),
             HandoffPayload {
                 access_token: "sess:wa-x:abc".into(),
                 token_type: "Bearer",
@@ -1746,6 +1848,38 @@ mod tests {
     /// node read API `:4243`. On a node build there is no `:8080`, so Google
     /// returned the browser to a dead port after a correct sign-in — a failure
     /// that appears in the BROWSER and never in this node's logs.
+
+    /// The hand-off route is loopback-GATED in the router, not merely described
+    /// as such in a doc comment.
+    ///
+    /// It returns a session bearer and the node binds 0.0.0.0:4243, so a comment
+    /// asserting "loopback-only" while the layer sat on a sibling router was a
+    /// protection that did not exist. This asserts the wiring.
+    #[test]
+    fn the_handoff_route_is_loopback_gated_in_the_router() {
+        let src = include_str!("oauth.rs");
+        // Read ONLY the router function — everything up to the test module.
+        // Splitting to EOF swallowed this very test, whose assertion message
+        // contains "require_loopback", so the check passed on its own text while
+        // the layer was gone. Third time that self-reference has bitten in this
+        // file; bound the slice, do not trust `contains` over a whole file.
+        let body = src
+            .split("pub fn router(")
+            .nth(1)
+            .expect("router fn present")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("router fn ends before the tests");
+        let sub = body
+            .split("Router::new()")
+            .find(|chunk| chunk.contains("/v1/auth/oauth/handoff"))
+            .expect("handoff registered on some sub-router");
+        assert!(
+            sub.contains("require_loopback"),
+            "the handoff route must carry require_loopback ON ITS OWN sub-router — \
+             it hands out a bearer and this node listens on 0.0.0.0"
+        );
+    }
     #[test]
     fn the_default_callback_base_is_the_port_this_router_serves() {
         assert!(

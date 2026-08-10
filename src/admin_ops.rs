@@ -488,11 +488,38 @@ async fn gate(st: &AdminOpsState, headers: &HeaderMap) -> Result<String, Respons
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct Selection {
     /// Rows authored BY this key (the key being judged, in almost every op).
+    ///
+    /// Singular; kept because most acts name one subject and because every
+    /// stored selection predates the plural. Prefer [`Self::attesting_key_ids`]
+    /// for a set — the two are OR-combined, not exclusive.
     #[serde(default)]
     pub attesting_key_id: Option<String>,
     /// Rows authored ABOUT this key.
     #[serde(default)]
     pub attested_key_id: Option<String>,
+    /// **Rows authored BY ANY of these keys** (CIRISPersist#627, persist v30.9.0).
+    ///
+    /// One act, a whole population. Until persist made its own filter
+    /// set-valued, a moderation act could name exactly one subject, so clearing
+    /// the 61 exposed keys of CIRISServer#383 meant 61 preview→commit pairs —
+    /// 61 hashes, 61 reasons, 61 authority walks against a tier-4 door. At the
+    /// scale this mesh is for, that is not slow, it is unusable.
+    ///
+    /// The guarantee was never harmed by this: preview-hash commit is a property
+    /// of the HASH, not of the cardinality. A preview over 61 keys yields one
+    /// hash over that row set, is exactly as TOCTOU-closed, and audits BETTER —
+    /// one decision, one reason, one ledger entry naming the set, rather than 61
+    /// rows a reader has to infer were a single act.
+    ///
+    /// OR-combined with the singular field and pushed into the query as
+    /// `IN (…)`. Still no application-side loop: that is the #343 rule, and
+    /// moving the loop from the query into the operator would have broken it
+    /// just as thoroughly as moving it into this module.
+    #[serde(default)]
+    pub attesting_key_ids: Vec<String>,
+    /// **Rows authored ABOUT ANY of these keys** — see [`Self::attesting_key_ids`].
+    #[serde(default)]
+    pub attested_key_ids: Vec<String>,
     /// `scores` / `delegates_to` / `withdraws` / …
     #[serde(default)]
     pub attestation_type: Option<String>,
@@ -525,6 +552,18 @@ impl Selection {
     /// Trim / drop-empty / sort / dedupe, so two spellings of one selection
     /// hash identically.
     fn normalized(&self) -> Self {
+        /// Trim, drop blanks, dedupe — a set with an empty string in it would
+        /// otherwise widen the predicate to a key that cannot exist.
+        fn v(xs: &[String]) -> Vec<String> {
+            let mut out: Vec<String> = xs
+                .iter()
+                .map(|x| x.trim().to_owned())
+                .filter(|x| !x.is_empty())
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        }
         fn s(v: &Option<String>) -> Option<String> {
             v.as_deref()
                 .map(str::trim)
@@ -542,6 +581,8 @@ impl Selection {
         Self {
             attesting_key_id: s(&self.attesting_key_id),
             attested_key_id: s(&self.attested_key_id),
+            attesting_key_ids: v(&self.attesting_key_ids),
+            attested_key_ids: v(&self.attested_key_ids),
             attestation_type: s(&self.attestation_type),
             dimension_prefixes: prefixes,
             dimension_exact: s(&self.dimension_exact),
@@ -564,6 +605,8 @@ impl Selection {
         let n = self.normalized();
         n.attesting_key_id.is_none()
             && n.attested_key_id.is_none()
+            && n.attesting_key_ids.is_empty()
+            && n.attested_key_ids.is_empty()
             && n.attestation_type.is_none()
             && n.dimension_prefixes.is_empty()
             && n.dimension_exact.is_none()
@@ -585,6 +628,10 @@ impl Selection {
         let mut f = AttestationFilter::default();
         f.attesting_key_id = n.attesting_key_id;
         f.attested_key_id = n.attested_key_id;
+        // OR-combined with the singular by persist's `merge_key_predicate`,
+        // emitted as IN(…) / = ANY(…). Set here, never iterated here.
+        f.attesting_key_ids = n.attesting_key_ids;
+        f.attested_key_ids = n.attested_key_ids;
         f.attestation_type = n.attestation_type;
         f.dimension_prefixes = n.dimension_prefixes;
         f.dimension_exact = n.dimension_exact;
@@ -4126,6 +4173,58 @@ pub fn router(engine: Arc<Engine>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    /// **A set of keys is ONE act** (CIRISPersist#627, persist v30.9.0).
+    ///
+    /// Clearing the 61 exposed keys of CIRISServer#383 used to be 61
+    /// preview→commit pairs. The set now reaches the QUERY — asserted on the
+    /// filter, because the whole point is that no loop appears on this side.
+    #[test]
+    fn a_key_set_reaches_the_filter_as_a_set() {
+        let sel = Selection {
+            attested_key_ids: vec![
+                "  leaked-a  ".into(),
+                "leaked-b".into(),
+                "leaked-a".into(), // duplicate
+                "   ".into(),      // blank
+            ],
+            ..Default::default()
+        };
+        let f = sel.to_filter();
+        assert_eq!(
+            f.attested_key_ids,
+            vec!["leaked-a".to_string(), "leaked-b".to_string()],
+            "trimmed, de-duplicated, blanks dropped — a blank would widen the \
+             predicate to a key that cannot exist"
+        );
+        assert!(
+            f.attested_key_id.is_none(),
+            "the singular stays empty; persist OR-combines the two"
+        );
+    }
+
+    /// A set IS a predicate. Treating an act with 61 named subjects as
+    /// "unpredicated" would refuse the exact operation this unblocks — and the
+    /// refusal names selection_unpredicated, which would read as nonsense to an
+    /// operator who just pasted 61 keys.
+    #[test]
+    fn a_key_set_alone_is_a_predicate() {
+        let sel = Selection {
+            attested_key_ids: vec!["k1".into()],
+            ..Default::default()
+        };
+        assert!(!sel.is_unpredicated());
+
+        let blanks = Selection {
+            attested_key_ids: vec!["   ".into()],
+            ..Default::default()
+        };
+        assert!(
+            blanks.is_unpredicated(),
+            "a set of blanks predicates NOTHING and must not pass the gate"
+        );
+        assert!(Selection::default().is_unpredicated());
+    }
+
     use super::*;
 
     const NODE: &str = "node-under-test";

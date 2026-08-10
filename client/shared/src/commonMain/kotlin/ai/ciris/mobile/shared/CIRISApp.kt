@@ -1552,16 +1552,38 @@ fun CIRISApp(
                                 val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
                                 repeat(32) { append(alphabet[kotlin.random.Random.nextInt(alphabet.length)]) }
                             }
-                            openUrlInBrowser(apiClient.oauthBrowserLoginUrl("google", nonce, nodeBaseUrl))
+                            val signInUrl = apiClient.oauthBrowserLoginUrl("google", nonce, nodeBaseUrl)
+                            // Log the URL we hand the browser. A sign-in completed in
+                            // some OTHER tab — one opened earlier at the plain
+                            // /login URL — carries no app_nonce, parks nothing, and
+                            // leaves this poll waiting forever while the node reports
+                            // a perfectly successful sign-in. Without this line the
+                            // two are indistinguishable from the client side.
+                            platformLog(TAG, "[INFO][onGoogleSignIn] opening browser: $signInUrl")
+                            openUrlInBrowser(signInUrl)
                             coroutineScope.launch {
                                 // ~3 minutes: long enough for a real sign-in with a
                                 // password manager and 2FA, short enough that an
                                 // abandoned attempt does not spin forever.
                                 var token: ai.ciris.mobile.shared.models.OAuthHandoff? = null
-                                repeat(90) {
-                                    if (token != null) return@repeat
+                                var attempts = 0
+                                while (token == null && attempts < 90) {
                                     kotlinx.coroutines.delay(2000)
-                                    token = apiClient.collectOAuthHandoff(nonce, nodeBaseUrl)
+                                    attempts++
+                                    // After ~20s our own tab has had its chance;
+                                    // accept a sign-in that completed in a stray
+                                    // tab rather than spin while the node holds a
+                                    // perfectly good session.
+                                    token = apiClient.collectOAuthHandoff(
+                                        nonce,
+                                        nodeBaseUrl,
+                                        allowUnbound = attempts > 10,
+                                    )
+                                    // Heartbeat every ~20s: "still waiting" must be
+                                    // visible, or a stalled flow looks like a crashed one.
+                                    if (token == null && attempts % 10 == 0) {
+                                        platformLog(TAG, "[INFO][onGoogleSignIn] still waiting for the browser (${attempts * 2}s)")
+                                    }
                                 }
                                 isLoginLoading = false
                                 loginStatusMessage = null
@@ -1572,7 +1594,7 @@ fun CIRISApp(
                                     // broken", and only one of those is the user's to fix.
                                     loginErrorMessage =
                                         LocalizationHelper.getString("auth.browser_signin.timed_out")
-                                    platformLog(TAG, "[WARN][onGoogleSignIn] desktop browser sign-in not collected within the window")
+                                    platformLog(TAG, "[WARN][onGoogleSignIn] no hand-off after ${attempts * 2}s. If you signed in successfully, the browser tab was probably an OLD one opened without ?app_nonce= — close stray CIRIS sign-in tabs and use the button again.")
                                 } else {
                                     platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser sign-in collected a session")
                                     currentAccessToken = collected.accessToken
