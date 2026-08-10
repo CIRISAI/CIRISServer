@@ -3858,6 +3858,10 @@
       "node_unowned": "Bu düğümün henüz bir sahibi yok, bu nedenle hesabın bağlanabileceği bir kimlik de yok. Önce düğümün sahipliğini alın.",
       "store_unavailable": "Kimlik deposu kullanılamadığı için düğüm bağlantıyı yazamadı. Hiçbir şey değiştirilmedi."
     },
-    "session_expired": "Oturumunuz artık geçerli değil. Devam etmek için tekrar oturum açın."
+    "session_expired": "Oturumunuz artık geçerli değil. Devam etmek için tekrar oturum açın.",
+    "browser_signin": {
+      "timed_out": "Oturum açma işlemi tarayıcıda tamamlanmadı, bu nedenle hiçbir şey değiştirilmedi. Tekrar deneyin veya bunun yerine yerel bir hesap kullanın.",
+      "waiting": "Tarayıcınızda Google ile oturum açma işlemini tamamlayın, ardından buraya geri dönün."
+    }
   }
 }

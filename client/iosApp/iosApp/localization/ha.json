@@ -3858,6 +3858,10 @@
       "node_unowned": "Wannan node ba shi da mai mallaka tukuna, don haka babu shaidar da za a haɗa asusu da ita. Ka fara mallakar node ɗin.",
       "store_unavailable": "Node ɗin bai iya rubuta haɗin ba saboda ma'ajiyar shaidarsa ba ta samuwa. Ba a canza komai ba."
     },
-    "session_expired": "Zamanka ya ƙare. Ka sake shiga don ci gaba."
+    "session_expired": "Zamanka ya ƙare. Ka sake shiga don ci gaba.",
+    "browser_signin": {
+      "timed_out": "Ba a kammala shiga ba a cikin burauza, don haka ba a canza komai ba. Sake gwadawa, ko a yi amfani da asusun cikin gida maimakon haka.",
+      "waiting": "Kammala shiga da Google a cikin burauzarka, sannan ka dawo nan."
+    }
   }
 }

@@ -3858,6 +3858,10 @@
       "node_unowned": "Nút này chưa có chủ sở hữu, nên chưa có danh tính nào để liên kết tài khoản vào. Hãy nhận quyền sở hữu nút trước.",
       "store_unavailable": "Nút không thể ghi liên kết vì kho danh tính của nó không khả dụng. Không có gì bị thay đổi."
     },
-    "session_expired": "Phiên làm việc của bạn không còn hiệu lực. Hãy đăng nhập lại để tiếp tục."
+    "session_expired": "Phiên làm việc của bạn không còn hiệu lực. Hãy đăng nhập lại để tiếp tục.",
+    "browser_signin": {
+      "timed_out": "Quá trình đăng nhập trong trình duyệt chưa hoàn tất nên không có gì thay đổi. Hãy thử lại, hoặc dùng tài khoản cục bộ.",
+      "waiting": "Hãy hoàn tất đăng nhập bằng Google trong trình duyệt của bạn, rồi quay lại đây."
+    }
   }
 }

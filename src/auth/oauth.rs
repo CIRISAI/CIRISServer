@@ -51,6 +51,13 @@ struct Pending {
     /// RFC 7636 `code_verifier` — held server-side, never sent to the browser,
     /// and presented only at token exchange.
     code_verifier: String,
+    /// A DESKTOP app's own nonce, when it started this flow.
+    ///
+    /// The browser completes the sign-in but the APP needs the session, and the
+    /// two are different processes. The app generates a nonce, opens the browser
+    /// with it, and afterwards exchanges it — once — for the bearer. Bound to
+    /// the same one-use CSRF entry so a nonce cannot outlive its authorization.
+    app_nonce: Option<String>,
 }
 
 /// In-memory CSRF + PKCE state store (issue #847 — one-use token, 600s TTL).
@@ -77,7 +84,7 @@ impl CsrfStore {
     /// Issue a one-use state token and its PKCE verifier.
     /// Returns `(state, code_challenge)` — the challenge goes in the authorize
     /// URL; the verifier stays here.
-    fn issue(&mut self) -> (String, String) {
+    fn issue(&mut self, app_nonce: Option<String>) -> (String, String) {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
         const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -103,6 +110,7 @@ impl CsrfStore {
             Pending {
                 deadline: Instant::now() + Duration::from_secs(600),
                 code_verifier,
+                app_nonce,
             },
         );
         (token, code_challenge)
@@ -111,10 +119,10 @@ impl CsrfStore {
     /// One-use consume: returns the PKCE verifier iff the token was issued and
     /// unexpired. `None` means the exchange must be refused — a missing verifier
     /// and a wrong one are the same answer here, deliberately.
-    fn consume(&mut self, token: &str) -> Option<String> {
+    fn consume(&mut self, token: &str) -> Option<(String, Option<String>)> {
         self.prune();
         let p = self.pending.remove(token)?;
-        (p.deadline > Instant::now()).then_some(p.code_verifier)
+        (p.deadline > Instant::now()).then_some((p.code_verifier, p.app_nonce))
     }
 
     fn prune(&mut self) {
@@ -123,11 +131,44 @@ impl CsrfStore {
     }
 }
 
+/// **Desktop hand-off** — a completed browser sign-in, waiting to be collected
+/// by the app that started it.
+///
+/// One-time and short-lived: a bearer parked here is removed by the first
+/// successful read, and expires on its own if nobody collects it. The route that
+/// reads it is loopback-only, the same trust boundary the setup routes use — the
+/// browser and the app are the same human on the same machine, and the nonce
+/// proves the app is the one that opened the browser.
+#[derive(Default)]
+struct HandoffStore {
+    ready: HashMap<String, (String, Instant)>,
+}
+
+impl HandoffStore {
+    fn park(&mut self, nonce: String, token: String) {
+        self.prune();
+        self.ready
+            .insert(nonce, (token, Instant::now() + Duration::from_secs(300)));
+    }
+    /// Collect ONCE. A second read gets nothing, so a leaked nonce cannot be
+    /// replayed after the app has taken its session.
+    fn collect(&mut self, nonce: &str) -> Option<String> {
+        self.prune();
+        let (tok, deadline) = self.ready.remove(nonce)?;
+        (deadline > Instant::now()).then_some(tok)
+    }
+    fn prune(&mut self) {
+        let now = Instant::now();
+        self.ready.retain(|_, (_, d)| *d > now);
+    }
+}
+
 #[derive(Clone)]
 struct OAuthState {
     engine: Arc<Engine>,
     csrf: Arc<Mutex<CsrfStore>>,
     providers: Arc<Mutex<ProviderConfigStore>>,
+    handoff: Arc<Mutex<HandoffStore>>,
     client: Arc<dyn ProviderClient>,
     /// Base URL the OAuth callback is registered under (e.g.
     /// `https://app.ciris.ai`); the per-provider callback path is appended. The
@@ -1083,6 +1124,10 @@ async fn configure_provider(State(st): State<OAuthState>, body: axum::body::Byte
 struct LoginQuery {
     #[serde(default)]
     redirect_uri: Option<String>,
+    /// A desktop app's nonce — see [`Pending::app_nonce`]. Present ⇒ the session
+    /// is parked for collection instead of only being rendered to the browser.
+    #[serde(default)]
+    app_nonce: Option<String>,
 }
 
 async fn oauth_login(
@@ -1105,13 +1150,12 @@ async fn oauth_login(
     // The verifier stays in the store; only its S256 challenge goes to the browser.
     let (state, code_challenge) = {
         let mut csrf = st.csrf.lock().unwrap();
-        csrf.issue()
+        csrf.issue(q.app_nonce.clone())
     };
     // The provider redirect_uri is ALWAYS our registered callback (not the
     // app-supplied post-login `redirect_uri`, which is validated above and would
     // be carried separately in real deployments). This matches the agent, which
     // always sends `get_oauth_callback_url(provider)` to the provider.
-    let _ = redirect_uri;
     let callback = oauth_callback_url(&st.callback_base, &provider);
     let url = st
         .client
@@ -1148,6 +1192,15 @@ struct CallbackQuery {
 struct CallbackResponse {
     user_id: String,
     role: String,
+    /// The node session this sign-in issued.
+    ///
+    /// The callback used to return an identity and NO bearer, so a completed
+    /// OAuth sign-in left the caller with nothing to authenticate with — the
+    /// password path minted one and this did not. Same opaque `sess:` token,
+    /// same `resolve_bearer`.
+    access_token: String,
+    token_type: &'static str,
+    expires_in: u64,
 }
 
 async fn oauth_callback(
@@ -1159,7 +1212,7 @@ async fn oauth_callback(
     // One-use: consuming the state YIELDS the PKCE verifier. A replayed or
     // expired state and a missing verifier are the same refusal — there is no
     // path that exchanges a code without the secret that committed to it.
-    let code_verifier = {
+    let (code_verifier, app_nonce) = {
         let mut csrf = st.csrf.lock().unwrap();
         match csrf.consume(&q.state) {
             Some(v) => v,
@@ -1189,7 +1242,7 @@ async fn oauth_callback(
         Ok(i) => i,
         Err(e) => return err(StatusCode::BAD_GATEWAY, e),
     };
-    finish_oauth_login(&st, ident).await
+    finish_oauth_login(&st, ident, app_nonce).await
 }
 
 // ─── POST /v1/auth/native/{google,apple} ────────────────────────────────────
@@ -1248,7 +1301,50 @@ async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response 
         Ok(i) => i,
         Err(e) => return err(StatusCode::UNAUTHORIZED, e),
     };
-    finish_oauth_login(st, ident).await
+    finish_oauth_login(st, ident, None).await
+}
+
+/// What the human sees in the browser once a desktop sign-in completes.
+///
+/// Deliberately not the JSON the API returns: the bearer belongs to the APP that
+/// opened this window, not to the page. Showing it here would put a live session
+/// in a browser history and in whatever the user pastes next.
+const HANDOFF_PAGE: &str = "<!doctype html><meta charset=utf-8>\
+<title>Signed in</title>\
+<body style=\"font-family:system-ui;margin:4rem auto;max-width:32rem;text-align:center\">\
+<h2>You're signed in</h2>\
+<p>You can close this window and return to CIRIS.</p>";
+
+#[derive(Debug, Deserialize)]
+struct HandoffQuery {
+    app_nonce: String,
+}
+
+/// `GET /v1/auth/oauth/handoff?app_nonce=…` — the desktop app collects the
+/// session its browser sign-in produced.
+///
+/// `204 No Content` means *not yet* — the human has not finished in the browser.
+/// That is a DIFFERENT answer from "no such nonce", and the app polls on the
+/// first while giving up on neither silently: a 404 here would make "still
+/// typing your password" indistinguishable from "this flow is dead".
+async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuery>) -> Response {
+    let token = st
+        .handoff
+        .lock()
+        .ok()
+        .and_then(|mut h| h.collect(&q.app_nonce));
+    match token {
+        Some(access_token) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 86_400,
+            })),
+        )
+            .into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 
 async fn native_google(State(st): State<OAuthState>, body: axum::body::Bytes) -> Response {
@@ -1259,7 +1355,11 @@ async fn native_apple(State(st): State<OAuthState>, body: axum::body::Bytes) -> 
 }
 
 /// Shared tail: determine role, RESOLVE the local identity, return it.
-async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
+async fn finish_oauth_login(
+    st: &OAuthState,
+    ident: OAuthIdentity,
+    app_nonce: Option<String>,
+) -> Response {
     let role = determine_role(&st.engine, ident.email.as_deref()).await;
     match resolve_oauth_user(&st.engine, &ident, role).await {
         Ok(user_id) => {
@@ -1277,11 +1377,34 @@ async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
                     tracing::warn!(error = %e, user_id = %user_id, "auto-mint ROOT on OAuth login failed (founder can claim manually)");
                 }
             }
+            // Mint the session THIS sign-in earns — the same opaque token the
+            // password path issues, so everything downstream resolves it the
+            // same way.
+            let access_token = super::session::issue_session_token(&user_id);
+
+            // A desktop app started this in a browser: park the bearer for it to
+            // collect once, and give the human a page that says so. Without this
+            // the app is a different process watching a browser succeed with no
+            // way to learn the result.
+            if let Some(nonce) = app_nonce {
+                if let Ok(mut h) = st.handoff.lock() {
+                    h.park(nonce, access_token.clone());
+                }
+                return (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    HANDOFF_PAGE,
+                )
+                    .into_response();
+            }
             (
                 StatusCode::OK,
                 Json(CallbackResponse {
                     user_id,
                     role: role.as_str().to_string(),
+                    access_token,
+                    token_type: "Bearer",
+                    expires_in: 86_400,
                 }),
             )
                 .into_response()
@@ -1344,6 +1467,7 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
         engine,
         csrf: Arc::new(Mutex::new(CsrfStore::default())),
         providers: Arc::new(Mutex::new(ProviderConfigStore::default())),
+        handoff: Arc::new(Mutex::new(HandoffStore::default())),
         client: Arc::new(HttpProviderClient::default()),
         callback_base,
     };
@@ -1356,6 +1480,8 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
             "/v1/auth/oauth/{provider}/login",
             axum::routing::get(oauth_login),
         )
+        // The desktop hand-off: a browser signs in, the APP collects the session.
+        .route("/v1/auth/oauth/handoff", axum::routing::get(oauth_handoff))
         .route(
             "/v1/auth/oauth/{provider}/callback",
             axum::routing::get(oauth_callback),
@@ -1372,7 +1498,7 @@ mod tests {
     #[test]
     fn csrf_is_one_use_and_expiring() {
         let mut s = CsrfStore::default();
-        let (t, _challenge) = s.issue();
+        let (t, _challenge) = s.issue(None);
         assert!(s.consume(&t).is_some(), "issued token must verify once");
         assert!(s.consume(&t).is_none(), "token must not be reusable");
         assert!(s.consume("never-issued").is_none());
@@ -1389,8 +1515,8 @@ mod tests {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
         let mut s = CsrfStore::default();
-        let (state, challenge) = s.issue();
-        let verifier = s.consume(&state).expect("verifier on first consume");
+        let (state, challenge) = s.issue(None);
+        let (verifier, _nonce) = s.consume(&state).expect("verifier on first consume");
 
         // RFC 7636 §4.1 — 43..128 unreserved chars.
         assert!(
@@ -1489,6 +1615,28 @@ mod tests {
     /// `/v1/auth/oauth/google/login` with no client and sign-in was impossible
     /// until someone POSTed credentials to `/v1/auth/oauth/providers`. Sign-in is
     /// a FIRST-RUN step, so "configure it before first run" was unreachable.
+    /// A desktop app's nonce survives the round trip, bound to the SAME one-use
+    /// CSRF entry — so it cannot outlive the authorization that produced it.
+    #[test]
+    fn the_app_nonce_is_bound_to_the_one_use_state() {
+        let mut s = CsrfStore::default();
+        let (state, _c) = s.issue(Some("app-nonce-123".into()));
+        let (_v, nonce) = s.consume(&state).expect("first consume");
+        assert_eq!(nonce.as_deref(), Some("app-nonce-123"));
+        assert!(s.consume(&state).is_none(), "state is still one-use");
+    }
+
+    /// Collect ONCE: a nonce that has handed over its bearer hands over nothing
+    /// afterwards, so a leaked one cannot be replayed behind the app's back.
+    #[test]
+    fn a_parked_session_is_collected_exactly_once() {
+        let mut h = HandoffStore::default();
+        h.park("n1".into(), "sess:wa-x:abc".into());
+        assert_eq!(h.collect("n1").as_deref(), Some("sess:wa-x:abc"));
+        assert!(h.collect("n1").is_none(), "second collection must be empty");
+        assert!(h.collect("never-parked").is_none());
+    }
+
     #[test]
     fn google_is_configured_out_of_the_box() {
         let store = ProviderConfigStore::default();

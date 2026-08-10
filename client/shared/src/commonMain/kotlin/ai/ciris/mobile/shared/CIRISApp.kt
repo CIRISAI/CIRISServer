@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared
 import ai.ciris.mobile.shared.platform.PlatformBackHandler
 import ai.ciris.mobile.shared.platform.PlatformLogger
+import ai.ciris.mobile.shared.platform.openUrlInBrowser
 import ai.ciris.mobile.shared.platform.TestAutomation
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
@@ -1532,9 +1533,55 @@ fun CIRISApp(
                                 }
                             }
                         } else {
-                            // No callback provided - show error
-                            platformLog(TAG, "[ERROR][onGoogleSignIn] googleSignInCallback is NULL - cannot invoke native sign-in!")
-                            loginErrorMessage = "${getOAuthProviderName()} Sign-In not available"
+                            // DESKTOP: no native Google SDK, so sign in through the
+                            // BROWSER against this node's OAuth front door. Until the
+                            // node minted a session on callback there was nothing for
+                            // this process to hold, so desktop offered local login
+                            // only and this branch just said "not available".
+                            //
+                            // Two processes, one sign-in: we generate a nonce, open the
+                            // browser with it, and poll until the node hands the bearer
+                            // over. 204 means NOT YET, which is why the loop keeps
+                            // going instead of treating a quiet answer as failure.
+                            platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser flow (no native SDK)")
+                            isLoginLoading = true
+                            loginErrorMessage = null
+                            loginStatusMessage = LocalizationHelper.getString("auth.browser_signin.waiting")
+                            val nonce = buildString {
+                                val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+                                repeat(32) { append(alphabet[kotlin.random.Random.nextInt(alphabet.length)]) }
+                            }
+                            openUrlInBrowser(apiClient.oauthBrowserLoginUrl("google", nonce, nodeBaseUrl))
+                            coroutineScope.launch {
+                                // ~3 minutes: long enough for a real sign-in with a
+                                // password manager and 2FA, short enough that an
+                                // abandoned attempt does not spin forever.
+                                var token: String? = null
+                                repeat(90) {
+                                    if (token != null) return@repeat
+                                    kotlinx.coroutines.delay(2000)
+                                    token = apiClient.collectOAuthHandoff(nonce, nodeBaseUrl)
+                                }
+                                isLoginLoading = false
+                                loginStatusMessage = null
+                                val collected = token
+                                if (collected == null) {
+                                    // Say WHICH failure this is. "Sign-in failed" would
+                                    // cover both "you closed the tab" and "the node is
+                                    // broken", and only one of those is the user's to fix.
+                                    loginErrorMessage =
+                                        LocalizationHelper.getString("auth.browser_signin.timed_out")
+                                    platformLog(TAG, "[WARN][onGoogleSignIn] desktop browser sign-in not collected within the window")
+                                } else {
+                                    platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser sign-in collected a session")
+                                    currentAccessToken = collected
+                                    apiClient.setAccessToken(collected)
+                                    secureStorage.saveAccessToken(collected)
+                                    onTokenUpdated?.invoke(collected)
+                                    interactViewModel.startPolling()
+                                    currentScreen = HOME_SCREEN
+                                }
+                            }
                         }
                     },
                     onLocalLogin = {

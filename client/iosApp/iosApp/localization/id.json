@@ -3858,6 +3858,10 @@
       "node_unowned": "Node ini belum memiliki pemilik, jadi tidak ada identitas untuk ditautkan dengan sebuah akun. Klaim node terlebih dahulu.",
       "store_unavailable": "Node tidak dapat menulis tautan tersebut karena penyimpanan identitasnya tidak tersedia. Tidak ada yang diubah."
     },
-    "session_expired": "Sesi Anda sudah tidak berlaku. Masuk lagi untuk melanjutkan."
+    "session_expired": "Sesi Anda sudah tidak berlaku. Masuk lagi untuk melanjutkan.",
+    "browser_signin": {
+      "timed_out": "Proses masuk tidak diselesaikan di peramban, jadi tidak ada yang diubah. Coba lagi, atau gunakan akun lokal.",
+      "waiting": "Selesaikan proses masuk dengan Google di peramban Anda, lalu kembali ke sini."
+    }
   }
 }

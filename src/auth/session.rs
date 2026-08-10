@@ -129,7 +129,11 @@ struct LoginResponse {
 }
 
 /// Issue an opaque session token bound to `wa_id`.
-fn issue_session_token(wa_id: &str) -> String {
+///
+/// `pub(crate)` so the OAuth front door mints the SAME kind of session the
+/// password path does — before this, a completed OAuth sign-in returned an
+/// identity and no bearer, so there was nothing for a client to hold.
+pub(crate) fn issue_session_token(wa_id: &str) -> String {
     use base64::Engine as _;
     let mut raw = [0u8; 24];
     ciris_crypto::random::fill(&mut raw).expect("CSPRNG for session token");

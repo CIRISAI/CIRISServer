@@ -3858,6 +3858,10 @@
       "incomplete_pair": "Both the provider and the account id are required. Half of a pair links an account that nothing can find again.",
       "bad_request": "The node could not read that request. Check the fields and try again.",
       "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed."
+    },
+    "browser_signin": {
+      "waiting": "Finish signing in with Google in your browser, then come back here.",
+      "timed_out": "Sign-in wasn't completed in the browser, so nothing was changed. Try again, or use a local account instead."
     }
   }
 }

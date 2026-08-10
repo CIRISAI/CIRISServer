@@ -3858,6 +3858,10 @@
       "node_unowned": "Questo nodo non ha ancora un proprietario, quindi non esiste alcuna identità a cui collegare un account. Rivendica prima il nodo.",
       "store_unavailable": "Il nodo non è riuscito a scrivere il collegamento perché il suo archivio delle identità non è disponibile. Non è stata apportata alcuna modifica."
     },
-    "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare."
+    "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare.",
+    "browser_signin": {
+      "timed_out": "L'accesso non è stato completato nel browser, quindi non è stato modificato nulla. Riprova oppure usa un account locale.",
+      "waiting": "Completa l'accesso con Google nel browser, poi torna qui."
+    }
   }
 }

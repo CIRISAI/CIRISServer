@@ -3858,6 +3858,10 @@
       "node_unowned": "Dieser Knoten hat noch keinen Eigentümer, daher gibt es keine Identität, mit der ein Konto verknüpft werden könnte. Beanspruchen Sie zuerst den Knoten.",
       "store_unavailable": "Der Knoten konnte die Verknüpfung nicht schreiben, da sein Identitätsspeicher nicht verfügbar ist. Es wurde nichts geändert."
     },
-    "session_expired": "Ihre Sitzung ist nicht mehr gültig. Melden Sie sich erneut an, um fortzufahren."
+    "session_expired": "Ihre Sitzung ist nicht mehr gültig. Melden Sie sich erneut an, um fortzufahren.",
+    "browser_signin": {
+      "timed_out": "Die Anmeldung wurde im Browser nicht abgeschlossen, daher wurde nichts geändert. Versuche es erneut oder verwende stattdessen ein lokales Konto.",
+      "waiting": "Schließe die Anmeldung mit Google in deinem Browser ab und kehre dann hierher zurück."
+    }
   }
 }

@@ -3858,6 +3858,10 @@
       "node_unowned": "Ce nœud n'a pas encore de propriétaire, il n'y a donc aucune identité à laquelle associer un compte. Revendiquez d'abord le nœud.",
       "store_unavailable": "Le nœud n'a pas pu écrire l'association car son magasin d'identités est indisponible. Rien n'a été modifié."
     },
-    "session_expired": "Votre session n'est plus valide. Reconnectez-vous pour continuer."
+    "session_expired": "Votre session n'est plus valide. Reconnectez-vous pour continuer.",
+    "browser_signin": {
+      "timed_out": "La connexion n'a pas été terminée dans le navigateur, aucune modification n'a donc été effectuée. Réessayez ou utilisez plutôt un compte local.",
+      "waiting": "Terminez la connexion avec Google dans votre navigateur, puis revenez ici."
+    }
   }
 }

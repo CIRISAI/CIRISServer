@@ -3858,6 +3858,10 @@
       "node_unowned": "Nodi hii bado haina mmiliki, hivyo hakuna utambulisho wa kuunganisha akaunti nao. Dai nodi kwanza.",
       "store_unavailable": "Nodi haikuweza kuandika kiungo kwa sababu hifadhi yake ya utambulisho haipatikani. Hakuna kilichobadilishwa."
     },
-    "session_expired": "Kipindi chako hakitumiki tena. Ingia tena ili kuendelea."
+    "session_expired": "Kipindi chako hakitumiki tena. Ingia tena ili kuendelea.",
+    "browser_signin": {
+      "timed_out": "Kuingia hakukukamilika katika kivinjari, kwa hivyo hakuna kilichobadilishwa. Jaribu tena, au tumia akaunti ya karibu badala yake.",
+      "waiting": "Maliza kuingia kwa kutumia Google katika kivinjari chako, kisha urudi hapa."
+    }
   }
 }

@@ -3858,6 +3858,10 @@
       "node_unowned": "Este nodo aún no tiene propietario, así que no hay ninguna identidad a la que vincular una cuenta. Reclama el nodo primero.",
       "store_unavailable": "El nodo no pudo escribir el vínculo porque su almacén de identidades no está disponible. No se cambió nada."
     },
-    "session_expired": "Tu sesión ya no es válida. Inicia sesión de nuevo para continuar."
+    "session_expired": "Tu sesión ya no es válida. Inicia sesión de nuevo para continuar.",
+    "browser_signin": {
+      "timed_out": "No se completó el inicio de sesión en el navegador, así que no se cambió nada. Vuelve a intentarlo o usa una cuenta local.",
+      "waiting": "Termina de iniciar sesión con Google en tu navegador y vuelve aquí."
+    }
   }
 }

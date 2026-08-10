@@ -3858,6 +3858,10 @@
       "node_unowned": "Node yìí kò tí ì ní olóhun, nítorí náà kò sí ìdánimọ̀ tí a lè so àkàǹtì mọ́. Gba node náà ní àkọ́kọ́.",
       "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà."
     },
-    "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú."
+    "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú.",
+    "browser_signin": {
+      "timed_out": "A kò parí ìwọlé nínú aṣàwákiri, nítorí náà kò sí ohun tí a yípadà. Gbìyànjú lẹ́ẹ̀kan sí i, tàbí lo àkàntì agbègbè dípò rẹ̀.",
+      "waiting": "Parí ìwọlé pẹ̀lú Google nínú aṣàwákiri rẹ, lẹ́yìn náà padà wá síbí."
+    }
   }
 }
