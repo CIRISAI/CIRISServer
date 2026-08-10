@@ -62,6 +62,31 @@ data class ClaimRemoteRequest(
      */
     @SerialName("owner_username")
     val ownerUsername: String? = null,
+    /**
+     * The claiming owner's OAuth provider (`google` / `apple`), when they signed
+     * in rather than setting a password.
+     *
+     * **This is an OAuth owner's only session path (CIRISServer#384.)** The claim
+     * installs the ROOT cert and rotates the setup bearer, so every later call
+     * 401s by design and the only route back is `/v1/auth/login`. A password
+     * owner has [ownerPassword]; an OAuth owner has none, so without this the
+     * claim succeeded and then the owner could authenticate to nothing — the age
+     * band and the federation announce were silently skipped while the wizard
+     * still reported success.
+     *
+     * The node stamps the pair on the ROOT cert, and OAuth sign-in resolves an
+     * existing cert by `(provider, subject)` before minting anything — so the
+     * owner signs in with Google and lands on the SYSTEM_ADMIN session.
+     */
+    @SerialName("owner_oauth_provider")
+    val ownerOauthProvider: String? = null,
+    /**
+     * The provider's stable subject (`sub`) paired with [ownerOauthProvider].
+     * Send BOTH or NEITHER — the node keys its lookup on the pair, so a half
+     * pair writes a ROOT cert the sign-in can never find.
+     */
+    @SerialName("owner_oauth_external_id")
+    val ownerOauthExternalId: String? = null,
 )
 
 /**

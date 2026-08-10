@@ -689,9 +689,16 @@ private fun YouStep(
             modifier = Modifier.padding(bottom = 20.dp)
         )
 
-        FederationIdentitySection(viewModel = viewModel, state = state)
-        Spacer(modifier = Modifier.height(24.dp))
+        // ACCOUNT FIRST, then the federation identity. The order is load-bearing,
+        // not cosmetic: the OAuth identity is who OWNS the federation key, so
+        // signing in has to happen before the key is named. Sign-in then
+        // pre-populates the fed-ID name with `<provider>-<subject>` (see
+        // `SetupViewModel.setGoogleAuthState`) — with the old order the user was
+        // asked to invent a unique name first, and the identity that would have
+        // supplied one arrived a section too late to help.
         AccountSection(viewModel = viewModel, state = state)
+        Spacer(modifier = Modifier.height(24.dp))
+        FederationIdentitySection(viewModel = viewModel, state = state)
         Spacer(modifier = Modifier.height(24.dp))
         AgeRangeSection(viewModel = viewModel, state = state)
     }

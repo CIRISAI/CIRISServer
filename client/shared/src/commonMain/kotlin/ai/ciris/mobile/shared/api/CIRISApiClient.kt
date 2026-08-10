@@ -1756,17 +1756,34 @@ class CIRISApiClient(
         token: String? = accessToken,
         ownerPassword: String? = null,
         ownerUsername: String? = null,
+        ownerOauthProvider: String? = null,
+        ownerOauthExternalId: String? = null,
     ): ClaimRemoteResponse {
         val method = "claimRemote"
-        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope ownerPw=${ownerPassword != null}")
+        // Log WHETHER an owner session path is being installed, and which kind.
+        // #384 was invisible for exactly this reason: the claim reported success
+        // and nothing said the owner had no way back in.
+        val sessionPath = when {
+            ownerPassword != null -> "password"
+            ownerOauthProvider != null && ownerOauthExternalId != null -> "oauth:$ownerOauthProvider"
+            else -> "NONE (owner will have no session path)"
+        }
+        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope owner_session=$sessionPath")
         val client = federationHttpClient()
         return try {
+            // Both halves or neither — a half pair is a ROOT cert the OAuth
+            // sign-in lookup cannot key on, which silently reproduces #384.
+            val oauthPair = ownerOauthProvider
+                ?.takeIf { it.isNotBlank() }
+                ?.let { p -> ownerOauthExternalId?.takeIf { it.isNotBlank() }?.let { p to it } }
             val request = ClaimRemoteRequest(
                 nodeCode = nodeCode,
                 claimPin = claimPin,
                 cohortScope = cohortScope,
                 ownerPassword = ownerPassword,
                 ownerUsername = ownerUsername,
+                ownerOauthProvider = oauthPair?.first,
+                ownerOauthExternalId = oauthPair?.second,
             )
             val bodyText = jsonConfig.encodeToString(ClaimRemoteRequest.serializer(), request)
             val response = client.post("$localNodeUrl/v1/setup/claim-remote") {

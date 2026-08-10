@@ -139,6 +139,14 @@ struct RemoteSetupRootRequest {
     /// self-claim only), so the owner can log in with it.
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_username: Option<String>,
+    /// OPTIONAL OAuth provider of the claiming owner (CIRISServer#384) — stamped
+    /// on the target's ROOT cert so a Google/Apple owner, who has no password,
+    /// still has a session path back after the claim rotates the setup bearer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_oauth_provider: Option<String>,
+    /// The provider subject (`sub`) paired with [`Self::owner_oauth_provider`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_oauth_external_id: Option<String>,
 }
 
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
@@ -188,6 +196,10 @@ pub async fn claim_remote(
     self_fallback_url: Option<&str>,
     owner_password: Option<&str>,
     owner_username: Option<&str>,
+    // ONE parameter, not two: the target keys its OAuth lookup on the PAIR, so a
+    // caller that can supply half of it is a caller that can write a ROOT cert
+    // nothing will ever find (CIRISServer#384).
+    owner_oauth: Option<(&str, &str)>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
     let (nc, owner_binding) = build_claim_for_target(user_signer, target_node_code).await?;
@@ -215,6 +227,8 @@ pub async fn claim_remote(
         owner_binding,
         owner_password: owner_password.map(str::to_owned),
         owner_username: owner_username.map(str::to_owned),
+        owner_oauth_provider: owner_oauth.map(|(p, _)| p.to_owned()),
+        owner_oauth_external_id: owner_oauth.map(|(_, e)| e.to_owned()),
     };
 
     let resp = http
@@ -327,6 +341,14 @@ struct ClaimRemoteRequest {
     /// the owner can log in with it instead of the derived wa_id.
     #[serde(default)]
     owner_username: Option<String>,
+    /// OPTIONAL OAuth provider of the claiming owner — forwarded to the target so
+    /// an owner who signed in with Google/Apple (and therefore has no password)
+    /// can still obtain the SYSTEM_ADMIN session (CIRISServer#384).
+    #[serde(default)]
+    owner_oauth_provider: Option<String>,
+    /// The provider subject (`sub`) paired with [`Self::owner_oauth_provider`].
+    #[serde(default)]
+    owner_oauth_external_id: Option<String>,
 }
 
 async fn claim_remote_handler(
@@ -415,6 +437,18 @@ async fn claim_remote_handler(
         Some(fallback),
         req.owner_password.as_deref(),
         req.owner_username.as_deref(),
+        // Zip: only a COMPLETE pair is forwarded, so a client sending one half
+        // never writes a ROOT cert the OAuth lookup cannot key on.
+        req.owner_oauth_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .zip(
+                req.owner_oauth_external_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+            ),
     )
     .await
     {

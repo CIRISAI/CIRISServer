@@ -257,6 +257,7 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
         None, // no self-fallback: this test drives a real transport_hint target
         None, // no owner password (this test doesn't exercise the login path)
         None, // no owner username
+        None, // no OAuth identity (password/OAuth session paths are exercised below)
     )
     .await
     .expect("L claims T over HTTP");
@@ -352,4 +353,91 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
         .unwrap()
         .is_empty());
     assert!(is_steward_bound(&t, T_NODE_KEY_ID).await.is_none());
+}
+
+/// **CIRISServer#384 — an OAuth owner can obtain the owner session.**
+///
+/// The claim installs the ROOT cert and ROTATES the setup bearer, so every later
+/// `:4243` call 401s by design and the only route back is `/v1/auth/login`. A
+/// password owner has `owner_password`; an OAuth owner has no password, so the
+/// claim succeeded and then the owner could authenticate to NOTHING — age band
+/// and announce were silently skipped while the wizard still reported success.
+///
+/// The fix is not a new route: `create_oauth_user` (the sign-in write) resolves
+/// `get_by_oauth` BEFORE minting, so a ROOT cert carrying `(provider, sub)` is
+/// found and returned. This asserts the property that matters to the user —
+/// signing in with Google lands on the OWNER cert, at ROOT/SYSTEM_ADMIN — and
+/// asserts the pre-fix behaviour is genuinely different, so the test would fail
+/// against a ROOT minted with `oauth_provider: None`.
+#[tokio::test]
+async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
+    use ciris_server::auth::oauth::{create_oauth_user, OAuthIdentity};
+    use ciris_server::auth::roles::UserRole;
+
+    let t = target_node(T_NODE_KEY_ID).await;
+    register_target(&t, T_NODE_KEY_ID).await;
+    let (base, _h) = serve_target(Arc::clone(&t)).await;
+    let user = local_user_signer(L_USER_KEY_ID);
+
+    let ident = OAuthIdentity {
+        provider: "google".to_string(),
+        external_id: "108423319902184623111".to_string(),
+        email: Some("eric@ciris.ai".to_string()),
+        name: Some("Eric".to_string()),
+    };
+
+    let result = claim_remote::claim_remote(
+        &reqwest::Client::new(),
+        &user,
+        &target_node_code(&base),
+        TEST_CLAIM_PIN,
+        "self",
+        None,
+        None, // the whole point: an OAuth owner has NO password
+        None,
+        Some((ident.provider.as_str(), ident.external_id.as_str())),
+    )
+    .await
+    .expect("L claims T over HTTP");
+    assert_eq!(result["role"], "SYSTEM_ADMIN");
+
+    // The claim-minted ROOT carries the OAuth identity.
+    let roots = store::list_by_role(&t, WaRole::Root, 10).await.unwrap();
+    assert_eq!(roots.len(), 1, "exactly one ROOT after the claim");
+    let root = &roots[0];
+    assert_eq!(root.oauth_provider.as_deref(), Some("google"));
+    assert_eq!(
+        root.oauth_external_id.as_deref(),
+        Some(ident.external_id.as_str())
+    );
+
+    // THE PROPERTY: the owner signs in with Google and gets the OWNER cert.
+    // `create_oauth_user` is handed the LOWEST role on purpose — if it minted a
+    // fresh row (the #384 behaviour) this returns an `oauth-google-…` observer,
+    // and the owner still cannot record an age band or announce.
+    let wa_id = create_oauth_user(&t, &ident, UserRole::Observer)
+        .await
+        .expect("oauth sign-in resolves");
+    assert_eq!(
+        wa_id, root.wa_id,
+        "OAuth sign-in must resolve to the OWNER ROOT cert, not mint a new user"
+    );
+    let resolved = store::get_by_oauth(&t, &ident.provider, &ident.external_id)
+        .await
+        .unwrap()
+        .expect("cert found by (provider, external_id)");
+    assert_eq!(resolved.role, WaRole::Root, "the session is the OWNER's");
+    assert_eq!(
+        UserRole::from_wa_role(resolved.role),
+        UserRole::SystemAdmin,
+        "ROOT maps to SYSTEM_ADMIN — the role age/announce require"
+    );
+    // Still exactly one ROOT: the sign-in reused, it did not mint a second.
+    assert_eq!(
+        store::list_by_role(&t, WaRole::Root, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

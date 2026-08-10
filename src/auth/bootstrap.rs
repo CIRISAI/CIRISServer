@@ -603,6 +603,36 @@ struct SetupRootRequest {
     /// instead of the derived `wa_id`. Loopback self-claim only.
     #[serde(default)]
     owner_username: Option<String>,
+    /// OPTIONAL OAuth identity of the claiming owner — the `(provider, subject)`
+    /// pair from the Google/Apple sign-in the wizard already completed.
+    ///
+    /// **This is the OAuth owner's ONLY session path (CIRISServer#384).** The
+    /// claim installs the ROOT cert and ROTATES the setup bearer, so every later
+    /// `:4243` call 401s by design and the sole way back is `/v1/auth/login`.
+    /// A password owner supplies [`Self::owner_password`]; an OAuth owner has no
+    /// password, so before this the claim succeeded and the owner could then
+    /// authenticate to nothing — age band and announce were silently skipped
+    /// while `completeSetup` still reported success.
+    ///
+    /// Binding the pair HERE (rather than adding an OAuth login route) is what
+    /// closes it: [`super::oauth`] already resolves a login through
+    /// `store::get_by_oauth` BEFORE minting anything, so a ROOT cert carrying the
+    /// pair is found and returned, and `WaRole::Root` maps to `SystemAdmin`. The
+    /// owner signs in with Google and lands on the owner session — no new route,
+    /// no new secret, no token echoed out of the claim.
+    ///
+    /// SAFETY: no more privileged than `owner_password`. Reaching here already
+    /// required the console-only claim PIN plus a user-signed owner-binding, and
+    /// an identifier is not a credential — binding a subject the claimant cannot
+    /// authenticate as locks THEM out (they must still prove it to the provider),
+    /// it does not grant them anything. Both fields must be present or neither is
+    /// stored; a half-pair would write a row the partial unique index cannot key.
+    #[serde(default)]
+    owner_oauth_provider: Option<String>,
+    /// The provider's stable subject id (`sub`) for the claiming owner. Paired
+    /// with [`Self::owner_oauth_provider`] — see that field for why this exists.
+    #[serde(default)]
+    owner_oauth_external_id: Option<String>,
 }
 
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
@@ -916,6 +946,32 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     let identity_key_id = applied.responsible_user_key_id;
     let wa_id = root_wa_id_for_identity(&identity_key_id);
     let now = chrono::Utc::now();
+    // Both halves or neither (see `SetupRootRequest::owner_oauth_provider`). A
+    // trimmed-empty half is treated as absent so a client sending "" does not
+    // write an unfindable row.
+    let oauth_identity: Option<(String, String)> = match (
+        req.owner_oauth_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        req.owner_oauth_external_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(p), Some(e)) => Some((p.to_ascii_lowercase(), e.to_owned())),
+        (Some(_), None) | (None, Some(_)) => {
+            // Name it. A silent drop here reads downstream as "the owner has no
+            // OAuth identity", which is exactly #384's failure mode again.
+            tracing::warn!(
+                "setup/root: owner OAuth identity ignored — only one half supplied \
+                 (provider and external_id must BOTH be present); the owner will \
+                 have no OAuth session path"
+            );
+            None
+        }
+        (None, None) => None,
+    };
     let cert = WaCert {
         wa_id: wa_id.clone(),
         // Friendly owner username (the wizard's account name) when supplied — so
@@ -939,8 +995,14 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             .filter(|p| !p.is_empty())
             .map(super::session::hash_password),
         api_key_hash: None,
-        oauth_provider: None,
-        oauth_external_id: None,
+        // The claiming owner's OAuth identity (CIRISServer#384). `auth::oauth`
+        // resolves a login via `store::get_by_oauth` BEFORE minting a fresh cert,
+        // so stamping the pair here is what lets a Google/Apple owner reach THIS
+        // SYSTEM_ADMIN cert instead of a new unprivileged one. BOTH halves or
+        // neither — the lookup is keyed on the pair, so a half-pair is a row that
+        // can never be found and silently reproduces the bug it fixes.
+        oauth_provider: oauth_identity.as_ref().map(|(p, _)| p.clone()),
+        oauth_external_id: oauth_identity.as_ref().map(|(_, e)| e.clone()),
         oauth_links: None,
         veilid_id: None,
         auto_minted: false,

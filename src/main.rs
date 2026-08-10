@@ -544,6 +544,12 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
         Some(target_url.as_str()),
         owner_password.as_deref(),
         owner_username.as_deref(),
+        // No OAuth identity from the CLI: this surface claims with an explicit
+        // `--owner-password`, and an operator at a terminal has no provider
+        // sign-in to bind. The OAuth pair is the WIZARD's path (CIRISServer#384),
+        // where the owner has just completed a Google/Apple sign-in and has no
+        // password to fall back on.
+        None,
     )
     .await?;
     println!("✅ claim accepted by {target_url}");

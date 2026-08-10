@@ -128,8 +128,54 @@ class SetupViewModel(
             // with WELCOME merged into screen 1 there is nothing to skip, and
             // the fork was what made the trace-consent checkbox unreachable on
             // the non-OAuth path while showing a disabled one on the OAuth path.
-            currentStep = _state.value.currentStep
+            currentStep = _state.value.currentStep,
+            // Pre-populate the federation-ID name from the OAuth identity that
+            // just signed in. The account step now comes BEFORE the fed-ID step
+            // precisely so this value exists by the time the field is rendered:
+            // the OAuth identity is who OWNS the federation key, so deriving the
+            // name from it is the honest default rather than asking the user to
+            // invent one.
+            //
+            // `<provider>-<sub>` is unique BY CONSTRUCTION — a provider subject
+            // is globally unique — which is exactly what `isLabelValid` is
+            // guarding: its doc warns that a generic alias "caused TWO machines
+            // to mint DIFFERENT identities under the SAME alias". A typed name
+            // can collide; this cannot.
+            //
+            // Only fills a BLANK or generic field. A user who typed their own
+            // name, or who is re-entering the wizard with a real label already
+            // set, keeps it — signing in must never silently rewrite an identity
+            // name the user chose.
+            federationIdentity = _state.value.federationIdentity.let { fed ->
+                val derived = deriveFederationLabel(provider, userId)
+                if (isAuth && derived != null && !fed.isLabelValid()) {
+                    fed.copy(label = derived)
+                } else {
+                    fed
+                }
+            },
         )
+    }
+
+    /**
+     * `<provider>-<subject>` reduced to the character set a fed-ID label may use.
+     *
+     * The label becomes the local node's `label-fingerprint` key_id, so anything
+     * outside `[a-z0-9-]` is normalised here rather than being rejected by the
+     * node after the user has already moved on. Runs of separators collapse and
+     * the edges are trimmed, so a provider that ever returns an email-shaped or
+     * punctuated subject still yields a clean label. Returns null when there is
+     * no usable subject — the caller then leaves the field for the user, which
+     * is the honest outcome rather than a label like `google-`.
+     */
+    private fun deriveFederationLabel(provider: String, userId: String?): String? {
+        val sub = userId?.trim().orEmpty()
+        if (sub.isEmpty()) return null
+        val raw = "${provider.trim()}-$sub".lowercase()
+        val cleaned = buildString {
+            for (c in raw) append(if (c.isLetterOrDigit()) c else '-')
+        }.trim('-').replace(Regex("-+"), "-")
+        return cleaned.ifEmpty { null }
     }
 
     // ========== Setup Mode ==========
@@ -1111,6 +1157,17 @@ class SetupViewModel(
                     // prerequisite for approving a device-auth grant.
                     ownerPassword = _state.value.userPassword.ifBlank { null },
                     ownerUsername = _state.value.username.ifBlank { null },
+                    // OAuth owners have NO password, so the two lines above give
+                    // them nothing and the claim would leave them unable to
+                    // authenticate to the node they just claimed — age band and
+                    // announce silently skipped (CIRISServer#384). The node
+                    // stamps this pair on the ROOT cert and OAuth sign-in
+                    // resolves it, so signing in with Google IS the owner
+                    // session. Sent only when the user actually signed in.
+                    ownerOauthProvider = _state.value.oauthProvider
+                        .takeIf { _state.value.isGoogleAuth },
+                    ownerOauthExternalId = _state.value.googleUserId
+                        ?.takeIf { _state.value.isGoogleAuth },
                 )
                 // [ORDER] E5→E9 GATE (FSD/FIRST_RUN_STATECHART.md): on a successful
                 // claim, inProgress stays TRUE through the whole post-claim block
