@@ -283,19 +283,19 @@ struct ProviderConfig {
 /// registering each port, which is what lets this reach the local node on
 /// `http://127.0.0.1:4243/v1/auth/oauth/google/callback` (see
 /// [`oauth_callback_url`]).
-const BUILTIN_GOOGLE_DESKTOP_CLIENT_ID: &str =
-    option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+const BUILTIN_GOOGLE_DESKTOP_CLIENT_ID: Option<&str> =
+    option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID");
 /// See [`BUILTIN_GOOGLE_DESKTOP_CLIENT_ID`] — public by design for a native app.
-const BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET: &str = option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET").unwrap_or("");
+const BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET: Option<&str> =
+    option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET");
 /// The Android client (same project). Present so `native_audiences` accepts a
 /// phone's id_token — client IDs are public identifiers, never credentials.
-const BUILTIN_GOOGLE_ANDROID_CLIENT_ID: &str =
-    option_env!("CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+const BUILTIN_GOOGLE_ANDROID_CLIENT_ID: Option<&str> =
+    option_env!("CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID");
 /// The Web client ID — the AUDIENCE Android's `requestIdToken` stamps. Its
 /// SECRET is confidential and lives only on the lens/billing hosts; only the
 /// public identifier appears here.
-const BUILTIN_GOOGLE_WEB_CLIENT_ID: &str =
-    option_env!("CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+const BUILTIN_GOOGLE_WEB_CLIENT_ID: Option<&str> = option_env!("CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID");
 
 struct ProviderConfigStore {
     by_provider: HashMap<String, ProviderConfig>,
@@ -316,19 +316,34 @@ impl Default for ProviderConfigStore {
     /// DEFAULT, not a lock.
     fn default() -> Self {
         let mut by_provider = HashMap::new();
-        by_provider.insert(
-            "google".to_string(),
-            ProviderConfig {
-                client_id: BUILTIN_GOOGLE_DESKTOP_CLIENT_ID.to_string(),
-                client_secret: BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET.to_string(),
-                metadata: serde_json::json!({
-                    "builtin": true,
-                    "client_type": "desktop",
-                    "android_client_id": BUILTIN_GOOGLE_ANDROID_CLIENT_ID,
-                    "web_client_id": BUILTIN_GOOGLE_WEB_CLIENT_ID,
-                }),
-            },
-        );
+        // BOTH halves or nothing. A client_id with no secret cannot complete the
+        // code exchange, so a half-injected build would offer a Google button
+        // that fails at the last step — worse than a build that plainly has no
+        // Google and says so through `auth.oauth.no_local_identity`.
+        if let (Some(id), Some(secret)) = (
+            BUILTIN_GOOGLE_DESKTOP_CLIENT_ID,
+            BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET,
+        ) {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("builtin".into(), serde_json::Value::Bool(true));
+            metadata.insert("client_type".into(), serde_json::json!("desktop"));
+            // The mobile audiences are public identifiers, injected the same way
+            // so nothing about the client lives in committed source.
+            if let Some(a) = BUILTIN_GOOGLE_ANDROID_CLIENT_ID {
+                metadata.insert("android_client_id".into(), serde_json::json!(a));
+            }
+            if let Some(w) = BUILTIN_GOOGLE_WEB_CLIENT_ID {
+                metadata.insert("web_client_id".into(), serde_json::json!(w));
+            }
+            by_provider.insert(
+                "google".to_string(),
+                ProviderConfig {
+                    client_id: id.to_string(),
+                    client_secret: secret.to_string(),
+                    metadata: serde_json::Value::Object(metadata),
+                },
+            );
+        }
         Self { by_provider }
     }
 }
@@ -1861,19 +1876,32 @@ mod tests {
         assert!(h.collect("never-parked").is_none());
     }
 
+    /// Google is configured out of the box IFF the build injected the client.
+    ///
+    /// The credentials are compile-time inputs now
+    /// (`CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_*`), so a developer build without
+    /// them legitimately has no built-in provider. What must hold either way is
+    /// that the store is never HALF configured: a client_id with no secret
+    /// cannot complete the code exchange, so it would render a Google button
+    /// that fails at the last step.
     #[test]
-    fn google_is_configured_out_of_the_box() {
+    fn google_is_configured_iff_the_build_injected_it() {
         let store = ProviderConfigStore::default();
-        let cfg = store
-            .by_provider
-            .get("google")
-            .expect("google configured at boot");
-        assert!(cfg.client_id.ends_with(".apps.googleusercontent.com"));
-        assert!(!cfg.client_secret.is_empty(), "desktop exchange needs it");
-        // The DESKTOP client, never the web one — the web secret is confidential
-        // and must never reach a distributed wheel.
-        assert_eq!(cfg.metadata.get("client_type").unwrap(), "desktop");
-        assert_ne!(cfg.client_id, BUILTIN_GOOGLE_WEB_CLIENT_ID);
+        match store.by_provider.get("google") {
+            Some(cfg) => {
+                assert!(cfg.client_id.ends_with(".apps.googleusercontent.com"));
+                assert!(!cfg.client_secret.is_empty(), "desktop exchange needs it");
+                // The DESKTOP client, never the web one — the web secret is
+                // confidential and must never reach a distributed wheel.
+                assert_eq!(cfg.metadata.get("client_type").unwrap(), "desktop");
+                assert_ne!(Some(cfg.client_id.as_str()), BUILTIN_GOOGLE_WEB_CLIENT_ID);
+            }
+            None => assert!(
+                BUILTIN_GOOGLE_DESKTOP_CLIENT_ID.is_none()
+                    || BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET.is_none(),
+                "google is absent from the store while BOTH halves were injected"
+            ),
+        }
     }
 
     /// All THREE surfaces authenticate: desktop, Android, and the web audience
@@ -1881,12 +1909,24 @@ mod tests {
     #[test]
     fn native_audiences_cover_every_google_surface() {
         let auds = native_audiences(&ProviderConfigStore::default(), "google");
+        if BUILTIN_GOOGLE_DESKTOP_CLIENT_ID.is_none() {
+            // Nothing injected: there is no provider, so no audiences. Asserting
+            // over an empty set would be a zero-denominator pass.
+            assert!(auds.is_empty());
+            return;
+        }
         for expected in [
             BUILTIN_GOOGLE_DESKTOP_CLIENT_ID,
             BUILTIN_GOOGLE_ANDROID_CLIENT_ID,
             BUILTIN_GOOGLE_WEB_CLIENT_ID,
-        ] {
-            assert!(auds.iter().any(|a| a == expected), "missing {expected}");
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                auds.iter().any(|a| a == expected),
+                "missing audience {expected}"
+            );
         }
     }
 

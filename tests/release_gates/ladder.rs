@@ -1498,3 +1498,97 @@ fn gate0_nothing_signs_through_the_sync_verb() {
         scanned,
     );
 }
+
+/// **No OAuth credential may live in committed source.**
+///
+/// The Google desktop client is a COMPILE-TIME input
+/// (`CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_*`), injected by CI from repo secrets.
+/// It was briefly a pair of constants, and GitHub push protection refused the
+/// push — rightly: scanning cannot tell a desktop client's non-confidential
+/// secret from a web client's real one, and an embedded credential should be a
+/// deliberate build input rather than a constant someone finds later.
+///
+/// Greps for the value SHAPES, not for the specific values, so a different
+/// client pasted in tomorrow is caught just as well.
+#[test]
+fn gate0_no_oauth_credential_is_committed_to_source() {
+    let mut offenders = Vec::new();
+    for dir in ["src", "crates", "python"] {
+        let walk = walk_files(std::path::Path::new(dir));
+        for path in walk {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let has_secret = line.contains("GOCSPX-");
+                // A full client ID, not the bare suffix: `ends_with(".apps.…")`
+                // is a legitimate VALIDATION and must not trip this gate. A real
+                // id carries the project number and a token before the suffix,
+                // so require a quoted literal longer than the suffix itself.
+                const SUFFIX: &str = ".apps.googleusercontent.com";
+                let has_id = line
+                    .split('"')
+                    .any(|tok| tok.ends_with(SUFFIX) && tok.len() > SUFFIX.len() + 8);
+                if has_secret || has_id {
+                    offenders.push(format!("{}:{}", path.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "OAuth credential literal(s) in committed source at {offenders:?} — inject them at \
+         build time via option_env!(\"CIRIS_*_GOOGLE_OAUTH_CLIENT_*\") instead. Committing one \
+         blocks every future push (push protection flags each commit that carries it) and \
+         publishes a credential as a side effect of a code change."
+    );
+}
+
+/// Every wheel-producing build leg injects the OAuth credentials.
+///
+/// One leg missing them ships a wheel with no built-in Google while every other
+/// platform has one — a per-platform difference nobody would think to look for.
+#[test]
+fn gate0_every_wheel_build_injects_the_oauth_client() {
+    for wf in [
+        ".github/workflows/build-wheels.yml",
+        ".github/workflows/conformance.yml",
+    ] {
+        let text = std::fs::read_to_string(wf).unwrap_or_default();
+        let builds = text.matches("maturin build --release").count();
+        let injected = text
+            .matches("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.")
+            .count();
+        assert_eq!(
+            builds, injected,
+            "{wf}: {builds} maturin build step(s) but {injected} credential injection(s) — a \
+             leg without them produces a wheel whose Google sign-in is silently absent"
+        );
+    }
+}
+
+/// Recursively list files under `dir` (test helper).
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().is_some_and(|n| n == "target" || n == ".git") {
+                continue;
+            }
+            out.extend(walk_files(&p));
+        } else if p
+            .extension()
+            .is_some_and(|x| x == "rs" || x == "py" || x == "kt")
+        {
+            out.push(p);
+        }
+    }
+    out
+}

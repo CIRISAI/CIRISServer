@@ -177,6 +177,18 @@ jobs:
           # Route rustc through sccache (mirrors PR #215's client-artifacts wiring).
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
+          # The Google DESKTOP OAuth client, injected at COMPILE time.
+          # Never in committed source: GitHub push protection blocks it (rightly
+          # — it cannot tell a desktop client's non-confidential secret from a
+          # web client's real one), and an embedded credential should be a
+          # deliberate build input rather than a constant someone finds later.
+          # Absent ⇒ the wheel simply has no built-in Google and says so through
+          # the typed refusal, instead of shipping a button that fails at the
+          # code exchange.
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID }}
         run: |
           python -m pip install --upgrade pip
           pip install "maturin>=1.7,<2"
@@ -862,6 +874,14 @@ jobs:
           # previously relied on Swatinem for its compiler cache.
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
+          # Same compile-time OAuth injection as the x86_64 leg — these ANDROID
+          # wheels ship to users too, and a leg that silently misses the
+          # credentials produces a wheel with no built-in Google while every
+          # other platform has one.
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID }}
         run: |
           # cc-rs guesses the wrong NDK clang name (arm-linux-androideabi-clang);
           # point CC/CXX/AR + the cargo linker at the real r26b tools (what
