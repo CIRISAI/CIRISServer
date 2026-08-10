@@ -2302,7 +2302,9 @@
     "announce_decision_toggle_label": "Hacer que mi nodo sea visible en la federación",
     "announce_decision_trace_desc": "Comparte puntuaciones de calidad de razonamiento y patrones de decisión (sin el contenido de los mensajes) con el grupo de servidores canónicos de confianza.",
     "announce_decision_trace_locked": "Activa el anuncio de arriba para poder enviar trazas de razonamiento y unirte a comunidades.",
-    "announce_decision_trace_title": "Enviar trazas de razonamiento"
+    "announce_decision_trace_title": "Enviar trazas de razonamiento",
+    "status_reconfiguring": "Reiniciando tu nodo...",
+    "status_reconfiguring_timeout": "Tu nodo está tardando más de lo esperado en reiniciarse. Por favor, reinicia la aplicación."
   },
   "prompts": {
     "dma": {

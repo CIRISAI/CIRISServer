@@ -2302,7 +2302,9 @@
     "announce_decision_toggle_label": "Meinen Knoten in der Föderation sichtbar machen",
     "announce_decision_trace_desc": "Teilen Sie Bewertungen der Reasoning-Qualität und Entscheidungsmuster (keine Nachrichteninhalte) mit der vertrauenswürdigen kanonischen Servergruppe.",
     "announce_decision_trace_locked": "Aktivieren Sie oben das Ankündigen, um das Senden von Reasoning-Traces und den Beitritt zu Communitys zu ermöglichen.",
-    "announce_decision_trace_title": "Reasoning-Traces senden"
+    "announce_decision_trace_title": "Reasoning-Traces senden",
+    "status_reconfiguring": "Ihr Node wird neu gestartet...",
+    "status_reconfiguring_timeout": "Ihr Node braucht länger als erwartet zum Neustart. Bitte starten Sie die App neu."
   },
   "prompts": {
     "dma": {

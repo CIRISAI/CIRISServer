@@ -2394,7 +2394,9 @@
     "announce_decision_toggle_label": "Sanya kumburina ya bayyana ga tarayya",
     "announce_decision_trace_desc": "Raba makin ingancin tunani da tsarin yanke shawara (ba tare da abin da ke cikin saƙonni ba) tare da amintaccen rukunin sabar canonical.",
     "announce_decision_trace_locked": "Kunna sanarwa a sama don ba da damar aika trace na tunani da shiga al'ummomi.",
-    "announce_decision_trace_title": "Aika trace na tunani"
+    "announce_decision_trace_title": "Aika trace na tunani",
+    "status_reconfiguring": "Ana sake fara node ɗinka...",
+    "status_reconfiguring_timeout": "Node ɗinka yana ɗaukar lokaci fiye da yadda ake tsammani don sake farawa. Da fatan za a sake fara app."
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",

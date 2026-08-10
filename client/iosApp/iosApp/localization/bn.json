@@ -2395,7 +2395,9 @@
     "announce_decision_toggle_label": "আমার নোডকে ফেডারেশনে দৃশ্যমান করুন",
     "announce_decision_trace_desc": "বিশ্বস্ত ক্যানোনিকাল সার্ভার গ্রুপের সঙ্গে রিজনিং-মানের স্কোর ও সিদ্ধান্তের প্যাটার্ন শেয়ার করুন (কোনো বার্তার বিষয়বস্তু নয়)।",
     "announce_decision_trace_locked": "রিজনিং ট্রেস পাঠানো ও কমিউনিটিতে যোগ দেওয়া সক্রিয় করতে উপরে অ্যানাউন্সিং চালু করুন।",
-    "announce_decision_trace_title": "রিজনিং ট্রেস পাঠান"
+    "announce_decision_trace_title": "রিজনিং ট্রেস পাঠান",
+    "status_reconfiguring": "আপনার নোড পুনরায় চালু করা হচ্ছে...",
+    "status_reconfiguring_timeout": "আপনার নোড পুনরায় চালু হতে প্রত্যাশার চেয়ে বেশি সময় নিচ্ছে। অনুগ্রহ করে অ্যাপটি পুনরায় চালু করুন।"
   },
   "conscience": {
     "ponder_attempted": "আমি {action} করার চেষ্টা করেছিলাম",

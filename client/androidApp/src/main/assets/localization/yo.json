@@ -2394,7 +2394,9 @@
     "announce_decision_toggle_label": "Jẹ́ kí ojú-ìsopọ̀ mi hàn sí àjọṣepọ̀",
     "announce_decision_trace_desc": "Pín àwọn àmì-ìdíwọ̀n dídára ìrònú àti àwòṣe ìpinnu (kò sí àkóónú iṣẹ́-ránṣẹ́) pẹ̀lú àwùjọ olùpín kánọ́níkà tí a gbẹ́kẹ̀lé.",
     "announce_decision_trace_locked": "Tan ìkéde lókè láti jẹ́ kí fífi àwọn ìtọpa ìrònú ránṣẹ́ àti dídara pọ̀ mọ́ àwọn àwùjọ ṣeé ṣe.",
-    "announce_decision_trace_title": "Fi àwọn ìtọpa ìrònú ránṣẹ́"
+    "announce_decision_trace_title": "Fi àwọn ìtọpa ìrònú ránṣẹ́",
+    "status_reconfiguring": "Ń tún node rẹ bẹ̀rẹ̀...",
+    "status_reconfiguring_timeout": "Node rẹ ń gba àkókò gùn ju bí a ṣe retí lọ láti tún bẹ̀rẹ̀. Jọ̀wọ́ tún áàpù náà bẹ̀rẹ̀."
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",

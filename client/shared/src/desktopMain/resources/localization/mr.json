@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "fiat cashout साठी दुसऱ्या Base पत्त्यावर हस्तांतरण करा",
     "wallet_transfer_success": "Transfer यशful! TX: {tx}",
     "wallet_trust_degraded": "हार्डवेअर विश्वास खालावला",
-    "wallet_warning": "इशारा"
+    "wallet_warning": "इशारा",
+    "status_reconfiguring": "तुमचा नोड पुन्हा सुरू होत आहे...",
+    "status_reconfiguring_timeout": "तुमच्या नोडला पुन्हा सुरू होण्यास अपेक्षेपेक्षा जास्त वेळ लागत आहे. कृपया अ‍ॅप पुन्हा सुरू करा."
   },
   "nav": {
     "group": {

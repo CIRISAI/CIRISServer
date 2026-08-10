@@ -2302,7 +2302,9 @@
     "announce_decision_toggle_label": "मेरे नोड को फ़ेडरेशन-दृश्य बनाएँ",
     "announce_decision_trace_desc": "विश्वसनीय कैनोनिकल सर्वर समूह के साथ रीज़निंग-गुणवत्ता स्कोर और निर्णय पैटर्न साझा करें (कोई संदेश सामग्री नहीं)।",
     "announce_decision_trace_locked": "रीज़निंग ट्रेस भेजने और समुदायों में शामिल होने की सुविधा चालू करने के लिए ऊपर अनाउंसिंग ऑन करें।",
-    "announce_decision_trace_title": "रीज़निंग ट्रेस भेजें"
+    "announce_decision_trace_title": "रीज़निंग ट्रेस भेजें",
+    "status_reconfiguring": "आपका नोड पुनः शुरू हो रहा है...",
+    "status_reconfiguring_timeout": "आपके नोड को पुनः शुरू होने में अपेक्षा से अधिक समय लग रहा है। कृपया ऐप को पुनः प्रारंभ करें।"
   },
   "prompts": {
     "dma": {

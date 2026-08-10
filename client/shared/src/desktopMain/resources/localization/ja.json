@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "フィアット出金のために別のBaseアドレスに送金",
     "wallet_transfer_success": "送金成功！TX: {tx}",
     "wallet_trust_degraded": "ハードウェア信頼が低下しました",
-    "wallet_warning": "警告"
+    "wallet_warning": "警告",
+    "status_reconfiguring": "ノードを再起動しています...",
+    "status_reconfiguring_timeout": "ノードの再起動に予想以上の時間がかかっています。アプリを再起動してください。"
   },
   "nav": {
     "group": {

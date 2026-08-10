@@ -2302,7 +2302,9 @@
     "announce_decision_toggle_label": "Rendre mon nœud visible sur la fédération",
     "announce_decision_trace_desc": "Partagez les scores de qualité de raisonnement et les schémas de décision (aucun contenu de message) avec le groupe de serveurs canoniques de confiance.",
     "announce_decision_trace_locked": "Activez l'annonce ci-dessus pour pouvoir envoyer des traces de raisonnement et rejoindre des communautés.",
-    "announce_decision_trace_title": "Envoyer des traces de raisonnement"
+    "announce_decision_trace_title": "Envoyer des traces de raisonnement",
+    "status_reconfiguring": "Redémarrage de votre nœud...",
+    "status_reconfiguring_timeout": "Le redémarrage de votre nœud prend plus de temps que prévu. Veuillez redémarrer l'application."
   },
   "prompts": {
     "dma": {

@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "ਫਿਆਟ ਨਕਦੀ ਲਈ ਕਿਸੇ ਹੋਰ Base ਪਤੇ 'ਤੇ ਟ੍ਰਾਂਸਫਰ ਕਰੋ",
     "wallet_transfer_success": "ਟ੍ਰਾਂਸਫਰ ਸਫਲ! TX: {tx}",
     "wallet_trust_degraded": "ਹਾਰਡਵੇਅਰ ਭਰੋਸਾ ਘਟਿਆ",
-    "wallet_warning": "ਚੇਤਾਵਨੀ"
+    "wallet_warning": "ਚੇਤਾਵਨੀ",
+    "status_reconfiguring": "ਤੁਹਾਡਾ ਨੋਡ ਮੁੜ ਸ਼ੁਰੂ ਹੋ ਰਿਹਾ ਹੈ...",
+    "status_reconfiguring_timeout": "ਤੁਹਾਡੇ ਨੋਡ ਨੂੰ ਮੁੜ ਸ਼ੁਰੂ ਹੋਣ ਵਿੱਚ ਉਮੀਦ ਤੋਂ ਵੱਧ ਸਮਾਂ ਲੱਗ ਰਿਹਾ ਹੈ। ਕਿਰਪਾ ਕਰਕੇ ਐਪ ਮੁੜ ਸ਼ੁਰੂ ਕਰੋ।"
   },
   "moderation": {
     "ladder": {

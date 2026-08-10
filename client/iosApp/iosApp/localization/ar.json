@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "التحويل إلى عنوان Base آخر للسحب النقدي",
     "wallet_transfer_success": "نجح التحويل! TX: {tx}",
     "wallet_trust_degraded": "تدهورت ثقة الأجهزة",
-    "wallet_warning": "تحذير"
+    "wallet_warning": "تحذير",
+    "status_reconfiguring": "جارٍ إعادة تشغيل العقدة الخاصة بك...",
+    "status_reconfiguring_timeout": "تستغرق العقدة الخاصة بك وقتًا أطول من المتوقع لإعادة التشغيل. يرجى إعادة تشغيل التطبيق."
   },
   "nav": {
     "group": {

@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "fiat ငွေထုတ်ယူရန် Base လိပ်စာတစ်ခုသို့ လွှဲပြောင်းပါ",
     "wallet_transfer_success": "Transfer အောင်မြင်ful! TX: {tx}",
     "wallet_trust_degraded": "Hardware ယုံကြည်မှု အားနည်းသွားပြီ",
-    "wallet_warning": "သတိပေး"
+    "wallet_warning": "သတိပေး",
+    "status_reconfiguring": "သင်၏ node ကို ပြန်လည်စတင်နေသည်...",
+    "status_reconfiguring_timeout": "သင်၏ node သည် ပြန်လည်စတင်ရန် မျှော်လင့်ထားသည်ထက် အချိန်ပိုကြာနေသည်။ ကျေးဇူးပြု၍ အပ်ပ်ကို ပြန်လည်စတင်ပါ။"
   },
   "nav": {
     "group": {

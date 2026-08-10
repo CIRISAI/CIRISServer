@@ -2302,7 +2302,9 @@
     "announce_decision_toggle_label": "Fanya nodi yangu ionekane kwenye shirikisho",
     "announce_decision_trace_desc": "Shiriki alama za ubora wa ufikiri na mifumo ya maamuzi (bila maudhui ya ujumbe) na kundi la seva kuu zinazoaminika.",
     "announce_decision_trace_locked": "Washa utangazaji hapo juu ili kuwezesha kutuma nyayo za ufikiri na kujiunga na jamii.",
-    "announce_decision_trace_title": "Tuma nyayo za ufikiri"
+    "announce_decision_trace_title": "Tuma nyayo za ufikiri",
+    "status_reconfiguring": "Inaanzisha upya nodi yako...",
+    "status_reconfiguring_timeout": "Nodi yako inachukua muda mrefu kuliko inavyotarajiwa kuanzisha upya. Tafadhali anzisha upya programu."
   },
   "prompts": {
     "dma": {

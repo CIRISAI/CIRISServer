@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "Transfer ke alamat Base lain untuk pencairan fiat",
     "wallet_transfer_success": "Transfer berhasil! TX: {tx}",
     "wallet_trust_degraded": "Kepercayaan Perangkat Keras Menurun",
-    "wallet_warning": "Peringatan"
+    "wallet_warning": "Peringatan",
+    "status_reconfiguring": "Memulai ulang node Anda...",
+    "status_reconfiguring_timeout": "Node Anda membutuhkan waktu lebih lama dari yang diharapkan untuk dimulai ulang. Silakan mulai ulang aplikasi."
   },
   "nav": {
     "group": {

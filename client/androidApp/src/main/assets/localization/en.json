@@ -2376,7 +2376,9 @@
     "accord_ceremony_done_title": "Genesis assembled",
     "accord_ceremony_save_genesis": "Save this genesis — it is the bake artifact for cold-start recognition.",
     "accord_ceremony_genesis_label": "Genesis (bake artifact)",
-    "accord_ceremony_save_note": "Copy the JSON above and store it safely off-device. It is the cold-start recognition root for this mesh."
+    "accord_ceremony_save_note": "Copy the JSON above and store it safely off-device. It is the cold-start recognition root for this mesh.",
+    "status_reconfiguring": "Restarting your node...",
+    "status_reconfiguring_timeout": "Your node is taking longer than expected to restart. Please restart the app."
   },
   "nav": {
     "group": {

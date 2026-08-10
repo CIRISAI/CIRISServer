@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "Ghi chú Chuyển khoản",
     "wallet_transfer_success": "Chuyển khoản thành công! TX: {tx}",
     "wallet_trust_degraded": "Tin tưởng Suy giảm",
-    "wallet_warning": "Cảnh báo"
+    "wallet_warning": "Cảnh báo",
+    "status_reconfiguring": "Đang khởi động lại nút của bạn...",
+    "status_reconfiguring_timeout": "Nút của bạn đang mất nhiều thời gian khởi động lại hơn dự kiến. Vui lòng khởi động lại ứng dụng."
   },
   "nav": {
     "group": {

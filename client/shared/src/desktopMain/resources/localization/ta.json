@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "Transfer to another Base தீர்க்கவும் for fiat cashout",
     "wallet_transfer_success": "பரிமாற்றம் வெற்றிகரம்! TX: {tx}",
     "wallet_trust_degraded": "Hardware நம்பகத்தன்மை Degraded",
-    "wallet_warning": "எச்சரிக்கை"
+    "wallet_warning": "எச்சரிக்கை",
+    "status_reconfiguring": "உங்கள் கணுவை மீண்டும் தொடங்குகிறது...",
+    "status_reconfiguring_timeout": "உங்கள் கணு மீண்டும் தொடங்க எதிர்பார்த்ததை விட அதிக நேரம் எடுக்கிறது. தயவுசெய்து ஆப்பை மீண்டும் தொடங்கவும்."
   },
   "nav": {
     "group": {

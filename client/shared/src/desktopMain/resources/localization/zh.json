@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "转账到另一个 Base 地址以进行法定货币提现",
     "wallet_transfer_success": "转账成功！TX: {tx}",
     "wallet_trust_degraded": "硬件信任降级",
-    "wallet_warning": "警告"
+    "wallet_warning": "警告",
+    "status_reconfiguring": "正在重启您的节点...",
+    "status_reconfiguring_timeout": "您的节点重启时间超出预期。请重启应用。"
   },
   "nav": {
     "group": {

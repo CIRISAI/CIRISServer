@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.api
 
 import ai.ciris.mobile.shared.models.*
+import ai.ciris.mobile.shared.models.federation.FederationConsentScopes
 import ai.ciris.mobile.shared.models.safety.AgeBand
 import ai.ciris.mobile.shared.models.safety.AgeStatusResponse
 import ai.ciris.mobile.shared.models.safety.AssuranceLevel
@@ -1463,15 +1464,16 @@ class CIRISApiClient(
      */
     suspend fun selfLogin(
         request: SelfLoginRequest,
+        nodeUrl: String = LOCAL_NODE_URL,
     ): SelfLoginResponse {
         val method = "selfLogin"
-        logInfo(method, "POST $baseUrl/v1/self/login identityKey=${request.identityKeyId.take(16)}… occurrences=${request.occurrences.map { it.kind }}")
+        logInfo(method, "POST $nodeUrl/v1/self/login identityKey=${request.identityKeyId.take(16)}… occurrences=${request.occurrences.map { it.kind }}")
         val client = federationHttpClient()
         return try {
             // Plain unsigned POST to the LOCAL node. Any federation signing the
             // ceremony needs is performed by the node's substrate, not the app.
             val bodyText = jsonConfig.encodeToString(SelfLoginRequest.serializer(), request)
-            val response = client.post("$baseUrl/v1/self/login") {
+            val response = client.post("$nodeUrl/v1/self/login") {
                 contentType(ContentType.Application.Json)
                 setBody(bodyText)
             }
@@ -1482,7 +1484,7 @@ class CIRISApiClient(
             parsed.accessToken?.let { setAccessToken(it) }
             parsed
         } catch (e: Exception) {
-            logException(method, e, "url=$baseUrl")
+            logException(method, e, "url=$nodeUrl")
             throw e
         } finally {
             client.close()
@@ -1503,9 +1505,13 @@ class CIRISApiClient(
      * Fetch a node's own [SignedKeyRecord].
      *
      * Hits ``GET {nodeUrl}/v1/federation/self-key-record``.
+     *
+     * `/v1/federation` is a SUBSTRATE prefix — served natively by the NODE and
+     * never proxied from the brain — so [nodeUrl] defaults to [LOCAL_NODE_URL],
+     * not to this client's [baseUrl] (which addresses the Python brain).
      */
     suspend fun getSelfKeyRecord(
-        nodeUrl: String = baseUrl,
+        nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
     ): SignedKeyRecord {
         val method = "getSelfKeyRecord"
@@ -4279,6 +4285,145 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * Owner login against the LOCAL NODE — `POST {localNodeUrl}/v1/auth/login`.
+     *
+     * The post-claim owner session MUST come from the node: the self-claim writes
+     * the owner ROOT cert into the node's substrate and ROTATES the setup session
+     * (FSD/FIRST_RUN_STATECHART.md, axis S), while the brain (:8080) is still in
+     * setup mode with no auth routes mounted — `login()` (SDK, brain-bound) can
+     * never succeed at that point (its 404 body fails LoginResponse parsing,
+     * which is exactly the E6x failure the first conformance runs captured).
+     * Accepts the friendly username OR the wa_id. Response shape verified live
+     * on ciris-server 0.5.122:
+     * {"access_token","token_type","expires_in","role","user_id"}.
+     *
+     * Returns the bearer token; does NOT mutate [accessToken] — callers decide.
+     */
+    suspend fun loginToNode(
+        username: String,
+        password: String,
+        localNodeUrl: String = LOCAL_NODE_URL,
+    ): String {
+        val method = "loginToNode"
+        logInfo(method, "POST $localNodeUrl/v1/auth/login user=$username")
+        val client = federationHttpClient()
+        return try {
+            val response = client.post("$localNodeUrl/v1/auth/login") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("username", username)
+                        put("password", password)
+                    }.toString()
+                )
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logException(method, RuntimeException("status=${response.status} body=${raw.take(300)}"), "localNodeUrl=$localNodeUrl")
+                throw RuntimeException("node login failed: ${response.status}: ${raw.take(200)}")
+            }
+            val obj = Json.parseToJsonElement(raw).jsonObject
+            val tokenValue = obj["access_token"]?.jsonPrimitive?.content
+            if (tokenValue.isNullOrBlank()) {
+                throw RuntimeException("node login: no access_token in response: ${raw.take(200)}")
+            }
+            logInfo(
+                method,
+                "node owner session established (role=${obj["role"]?.jsonPrimitive?.content} " +
+                    "user_id=${obj["user_id"]?.jsonPrimitive?.content})",
+            )
+            tokenValue
+        } catch (e: Exception) {
+            logException(method, e, "localNodeUrl=$localNodeUrl user=$username")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Author the explicit trace-sharing consent** —
+     * `POST {localNodeUrl}/v1/federation/consent` (owner-gated; ciris-server
+     * >= the explicit-consent cut). Consent is NO LONGER auto-authored at node
+     * boot: when the user opts into "Send traces to CIRIS L3C", the wizard (or
+     * the Manage Consent card) must author `consent:replication` explicitly,
+     * once, AFTER the owner claim (pre-claim the route 403s). Idempotent —
+     * re-POST is a no-op.
+     *
+     * When [peerKeyId] is null, the method resolves the canonical the node is
+     * rooted to via `GET {localNodeUrl}/v1/accord/canonical/servers` (first
+     * entry). [attestationPrefixes] is the explicit scope the user consented
+     * to (empty ⇒ the node 400s — pass what was actually consented).
+     *
+     * [analyze] is CC#46's be-scored dimension and is the OWNER'S ANSWER —
+     * pass what they chose. The substrate marks it `required: false` with named
+     * costs, so a caller that always sends true grants a dimension the user was
+     * never asked about. The default exists only for callers acting on a
+     * standing opt-in with no fresh answer to hand.
+     *
+     * @return the raw response body (carries `grant_attestation_id`).
+     */
+    suspend fun authorFederationConsent(
+        peerKeyId: String? = null,
+        attestationPrefixes: List<String> = FederationConsentScopes.TO_CANONICAL,
+        analyze: Boolean = true,
+        localNodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): String {
+        val method = "authorFederationConsent"
+        val client = federationHttpClient()
+        return try {
+            val peer = peerKeyId ?: run {
+                // `canonical/servers`, NOT `canonical-servers`. The route is
+                // `/v1/accord/canonical/servers` (accord_provision.rs:3458); the
+                // hyphenated spelling 404s and there is no redirect. Verified live:
+                //   :4243 /v1/accord/canonical-servers  -> 404
+                //   :4243 /v1/accord/canonical/servers  -> 200 {"servers":[...]}
+                //
+                // The cost of the typo was the whole trace plane. Consent WAS
+                // requested and the owner session WAS valid; this lookup threw, the
+                // catch is non-fatal by design, and setup completed reporting
+                // success while `consent:replication` was never authored — so
+                // sealed traces strand at (self, local) forever. A first-run wizard
+                // that says it consented and did not is exactly the failure the
+                // [ORDER] saga logging exists to make visible.
+                val resp = client.get("$localNodeUrl/v1/accord/canonical/servers") {
+                    token?.let { header("Authorization", "Bearer $it") }
+                }
+                val raw = resp.bodyAsText()
+                if (!resp.status.isSuccess()) {
+                    throw RuntimeException("canonical/servers failed: ${resp.status}: ${raw.take(200)}")
+                }
+                // Envelope-tolerant first-key extraction: [{"key_id": ...}] or {"data":[...]}
+                Regex("\"key_id\"\\s*:\\s*\"([^\"]+)\"").find(raw)?.groupValues?.get(1)
+                    ?: throw RuntimeException("no canonical server in: ${raw.take(200)}")
+            }
+            val prefixesJson = attestationPrefixes.joinToString(",") { "\"$it\"" }
+            logInfo(method, "POST $localNodeUrl/v1/federation/consent peer=$peer scope=$attestationPrefixes")
+            val response = client.post("$localNodeUrl/v1/federation/consent") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                // `analyze`: CC#46 (persist v22) — the subject's consent to BE SCORED
+                // (consent:state:granted:v1, scope analyze, naming the recipient's
+                // DERIVED key). Forward-compat: servers without the field ignore it;
+                // the CIRISServer ask extends the route to author it atomically.
+                setBody("""{"peer_key_id":"$peer","attestation_prefixes":[$prefixesJson],"analyze":$analyze}""")
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logException(method, RuntimeException("status=${response.status} body=${raw.take(300)}"), "localNodeUrl=$localNodeUrl")
+                throw RuntimeException("federation consent failed: ${response.status}: ${raw.take(200)}")
+            }
+            raw
+        } catch (e: Exception) {
+            logException(method, e, "localNodeUrl=$localNodeUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
     /** Shared body for all six tier S acts. */
     private suspend fun postSelfAct(
         method: String,
@@ -4932,10 +5077,15 @@ class CIRISApiClient(
      * the version-mismatch banner: the node `version`, its `role`
      * (`"fabric-node"` for a bare node), and the optional `cognitive_state` (present
      * only when an agent enriches the endpoint).
+     *
+     * `/v1/health` is a SUBSTRATE prefix — served natively by the NODE on :4243 and
+     * never proxied from the brain, and the Python brain on :8080 does not serve it
+     * at all. Callers must therefore pass the NODE base URL; the [baseUrl] default
+     * is kept only for clients already constructed against the node.
      */
-    suspend fun getNodeHealth(): NodeHealth {
+    suspend fun getNodeHealth(nodeUrl: String = baseUrl): NodeHealth {
         val method = "getNodeHealth"
-        logDebug(method, "Probing node health at $baseUrl/v1/health")
+        logDebug(method, "Probing node health at $nodeUrl/v1/health")
 
         val client = io.ktor.client.HttpClient {
             install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
@@ -4946,7 +5096,7 @@ class CIRISApiClient(
         }
 
         return try {
-            val response = client.get("$baseUrl/v1/health") {
+            val response = client.get("$nodeUrl/v1/health") {
                 authHeader()?.let { header("Authorization", it) }
             }
 
@@ -5048,8 +5198,9 @@ class CIRISApiClient(
         }
     }
 
-    override suspend fun getOwnerHint(): OwnerHint? {
+    override suspend fun getOwnerHint(nodeUrl: String?): OwnerHint? {
         val method = "getOwnerHint"
+        val hintUrl = nodeUrl ?: baseUrl
         // Personal-install-only endpoint shipped in 2.9.2. On a server
         // install the backend returns 404 and we render an empty hint —
         // never throw, never block the Login UI on a slow / offline
@@ -5064,7 +5215,7 @@ class CIRISApiClient(
                 }
             }
             try {
-                val response: HttpResponse = client.get("$baseUrl/v1/auth/owner-hint")
+                val response: HttpResponse = client.get("$hintUrl/v1/auth/owner-hint")
                 if (response.status.value == 404) {
                     logDebug(method, "owner-hint endpoint returned 404 (multi-tenant server or pre-2.9.2 backend)")
                     return null
@@ -5389,6 +5540,98 @@ class CIRISApiClient(
         } catch (e: Exception) {
             logException(method, e)
             throw e
+        }
+    }
+
+    /**
+     * Get the exhaustive tool disclosure for the first-run wizard.
+     * Calls GET /v1/setup/tool-disclosure (no auth required during setup).
+     *
+     * The server generates this from each tool service's own get_all_tool_info(),
+     * so it always reflects what is actually registered. Used by the
+     * OPTIONAL_FEATURES step to tell the operator what each adapter choice grants
+     * and which tools no choice controls.
+     *
+     * Not part of the generated SDK surface, so this uses a direct request in the
+     * same idiom as getAgentMode().
+     */
+    /**
+     * The substrate's OWN consent copy for the wizard's federation screen —
+     * `GET {apiBaseUrl}/v1/setup/consent-disclosure`, which serves
+     * `ciris_server.consent_disclosure()` unedited.
+     *
+     * THROWS rather than returning a default. There is no honest fallback: the
+     * screen exists to render the substrate's words, and inventing a substitute
+     * is exactly the drift the export was written to prevent.
+     */
+    suspend fun getConsentDisclosure(): ai.ciris.mobile.shared.models.ConsentDisclosure {
+        val method = "getConsentDisclosure"
+        logDebug(method, "Fetching consent disclosure from $baseUrl/v1/setup/consent-disclosure")
+        val client = io.ktor.client.HttpClient {
+            install(io.ktor.client.plugins.HttpTimeout) {
+                requestTimeoutMillis = 15000
+                connectTimeoutMillis = 5000
+            }
+        }
+        return try {
+            val response = client.get("$baseUrl/v1/setup/consent-disclosure") {
+                authHeader()?.let { header("Authorization", it) }
+            }
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("Consent disclosure fetch failed: ${response.status}")
+            }
+            val root = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val data = root["data"] ?: throw RuntimeException("Consent disclosure response has no data")
+            val disclosure = Json { ignoreUnknownKeys = true }.decodeFromJsonElement(
+                ai.ciris.mobile.shared.models.ConsentDisclosure.serializer(),
+                data,
+            )
+            logInfo(
+                method,
+                "Fetched consent disclosure: ${disclosure.grants.size} grants, " +
+                    "location max_resolution=${disclosure.location.maxResolution}, " +
+                    "locale=${disclosure.sourceLocale}",
+            )
+            disclosure
+        } catch (e: Exception) {
+            logException(method, e, "url=$baseUrl")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    suspend fun getSetupToolDisclosure(): ToolDisclosureReport {
+        val method = "getSetupToolDisclosure"
+        logDebug(method, "Fetching tool disclosure from $baseUrl/v1/setup/tool-disclosure")
+        val client = io.ktor.client.HttpClient {
+            install(io.ktor.client.plugins.HttpTimeout) {
+                requestTimeoutMillis = 30000
+                connectTimeoutMillis = 5000
+            }
+        }
+        return try {
+            val response = client.get("$baseUrl/v1/setup/tool-disclosure") {
+                authHeader()?.let { header("Authorization", it) }
+            }
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("Tool disclosure fetch failed: ${response.status}")
+            }
+            val root = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val data = root["data"] ?: throw RuntimeException("Tool disclosure response has no data")
+            val decoder = Json { ignoreUnknownKeys = true }
+            val report = decoder.decodeFromJsonElement(
+                ToolDisclosureReport.serializer(),
+                data
+            )
+            logInfo(method, "Fetched disclosure: ${report.total_tools} tools across " +
+                "${report.adapters.size} adapters + ${report.always_on.size} always-on groups")
+            report
+        } catch (e: Exception) {
+            logException(method, e, "url=$baseUrl")
+            throw e
+        } finally {
+            client.close()
         }
     }
 

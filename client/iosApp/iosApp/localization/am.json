@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "ለ fiat cashout ወደ ሌላ Base አድራሻ ማስተላለፍ",
     "wallet_transfer_success": "ማስተላለፍ ተሳክቷል! TX: {tx}",
     "wallet_trust_degraded": "ስልክ ሥቅ ተዳክሞ ነበር",
-    "wallet_warning": "ማስጠንቀቂያ"
+    "wallet_warning": "ማስጠንቀቂያ",
+    "status_reconfiguring": "የእርስዎን node ዳግም በማስጀመር ላይ...",
+    "status_reconfiguring_timeout": "የእርስዎ node ከተጠበቀው በላይ ዳግም ለመጀመር እየወሰደ ነው። እባክዎ መተግበሪያውን ዳግም ያስጀምሩ።"
   },
   "nav": {
     "group": {

@@ -2376,7 +2376,9 @@
     "announce_decision_toggle_label": "میرے نوڈ کو فیڈریشن میں قابلِ رؤیت بنائیں",
     "announce_decision_trace_desc": "قابلِ اعتماد کینونیکل سرور گروپ کے ساتھ استدلال کے معیار کے اسکور اور فیصلہ سازی کے نمونے (پیغام کا متن نہیں) شیئر کریں۔",
     "announce_decision_trace_locked": "استدلالی ٹریس بھیجنے اور کمیونٹیز میں شامل ہونے کے لیے اوپر اعلان کرنا آن کریں۔",
-    "announce_decision_trace_title": "استدلالی ٹریس بھیجیں"
+    "announce_decision_trace_title": "استدلالی ٹریس بھیجیں",
+    "status_reconfiguring": "آپ کا نوڈ دوبارہ شروع ہو رہا ہے...",
+    "status_reconfiguring_timeout": "آپ کے نوڈ کو دوبارہ شروع ہونے میں توقع سے زیادہ وقت لگ رہا ہے۔ براہ کرم ایپ کو دوبارہ شروع کریں۔"
   },
   "nav": {
     "group": {

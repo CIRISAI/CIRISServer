@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "โอนไปยังที่อยู่ Base อื่นเพื่อถอนเป็นเงินสด",
     "wallet_transfer_success": "Transfer สำเร็จful! TX: {tx}",
     "wallet_trust_degraded": "ความน่าเชื่อถือของฮาร์ดแวร์ลดลง",
-    "wallet_warning": "คำเตือน"
+    "wallet_warning": "คำเตือน",
+    "status_reconfiguring": "กำลังรีสตาร์ทโหนดของคุณ...",
+    "status_reconfiguring_timeout": "โหนดของคุณใช้เวลารีสตาร์ทนานกว่าที่คาดไว้ กรุณารีสตาร์ทแอป"
   },
   "nav": {
     "group": {

@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "Trasferisci a un altro indirizzo Base per prelievo fiat",
     "wallet_transfer_success": "Trasferimento riuscito! TX: {tx}",
     "wallet_trust_degraded": "Fiducia Hardware Degradata",
-    "wallet_warning": "Avviso"
+    "wallet_warning": "Avviso",
+    "status_reconfiguring": "Riavvio del tuo nodo in corso...",
+    "status_reconfiguring_timeout": "Il riavvio del tuo nodo sta richiedendo più tempo del previsto. Riavvia l'app."
   },
   "nav": {
     "group": {

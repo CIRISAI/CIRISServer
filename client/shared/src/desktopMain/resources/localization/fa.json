@@ -2382,7 +2382,9 @@
     "wallet_transfer_note": "التحويل إلى عنوان Base آخر للسحب النقدي",
     "wallet_transfer_success": "نجح التحويل! TX: {tx}",
     "wallet_trust_degraded": "تدهورت ثقة الأجهزة",
-    "wallet_warning": "هشدار"
+    "wallet_warning": "هشدار",
+    "status_reconfiguring": "در حال راه‌اندازی مجدد گره شما...",
+    "status_reconfiguring_timeout": "راه‌اندازی مجدد گره شما بیشتر از حد انتظار طول می‌کشد. لطفاً برنامه را دوباره راه‌اندازی کنید."
   },
   "nav": {
     "group": {

@@ -2376,7 +2376,9 @@
     "wallet_transfer_note": "Transferir para outro endereço Base para saque em fiat",
     "wallet_transfer_success": "Transferência bem-sucedida! TX: {tx}",
     "wallet_trust_degraded": "Confiança de Hardware Degradada",
-    "wallet_warning": "Aviso"
+    "wallet_warning": "Aviso",
+    "status_reconfiguring": "Reiniciando seu nó...",
+    "status_reconfiguring_timeout": "Seu nó está demorando mais do que o esperado para reiniciar. Por favor, reinicie o aplicativo."
   },
   "nav": {
     "group": {

@@ -1,5 +1,7 @@
 package ai.ciris.mobile.shared.viewmodels
 
+import ai.ciris.mobile.shared.models.federation.FederationConsentScopes
+
 import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.config.CIRISConfig
 import ai.ciris.mobile.shared.models.*
@@ -53,7 +55,18 @@ class SetupViewModel(
     private var locationSearchJob: Job? = null
 
     // Available LLM providers for BYOK mode
+    /**
+     * LLM providers, **keyless first**.
+     *
+     * The two that need no API key used to sit at positions 12 and 13 of a
+     * 15-item dropdown, under a default (`OpenAI`) that disables Next with "API
+     * key is required" and signposts nothing. A user with no key had three
+     * working paths and no way to find them. Ordering is the whole fix — the
+     * list is otherwise unchanged.
+     */
     val availableProviders = listOf(
+        "local_inference" to "Local Inference Server",
+        "local" to "Local (Ollama)",
         "openai" to "OpenAI",
         "anthropic" to "Anthropic",
         "google" to "Google AI",
@@ -63,10 +76,9 @@ class SetupViewModel(
         "mistral" to "Mistral",
         "cohere" to "Cohere",
         "deepseek" to "DeepSeek",
+        "deepinfra" to "DeepInfra",
         "xai" to "xAI (Grok)",
         "azure" to "Azure OpenAI",
-        "local_inference" to "Local Inference Server",
-        "local" to "Local (Ollama)",
         "openai_compatible" to "OpenAI Compatible",
         "other" to "Other"
     )
@@ -99,18 +111,24 @@ class SetupViewModel(
             googleEmail = email,
             googleUserId = userId,
             oauthProvider = provider,
-            // Setup mode: CIRIS_PROXY for Google/Apple OAuth, BYOK otherwise
+            // Setup mode: CIRIS_PROXY for Google/Apple OAuth, BYOK otherwise.
+            // Preserve only an EXPLICIT LLM-mode choice (BYOK / CIRIS_PROXY). The
+            // default is LOCAL_ON_DEVICE (non-null), so a bare `!= null` guard
+            // would ALWAYS win and a ciris-eligible OAuth would never get
+            // CIRIS_PROXY — the "forced BYOK despite Google login" bug. Treat the
+            // LOCAL_ON_DEVICE default as "unchosen" so OAuth eligibility applies.
             setupMode = when {
-                _state.value.setupMode != null -> _state.value.setupMode
+                _state.value.setupMode == SetupMode.BYOK ||
+                    _state.value.setupMode == SetupMode.CIRIS_PROXY -> _state.value.setupMode
                 isCirisEligible -> SetupMode.CIRIS_PROXY
                 else -> SetupMode.BYOK
             },
-            // Skip Welcome step for authenticated users - go directly to Quick Setup
-            currentStep = if (isAuth && _state.value.currentStep == SetupStep.WELCOME) {
-                SetupStep.QUICK_SETUP
-            } else {
-                _state.value.currentStep
-            }
+            // OAuth no longer forks the flow. QUICK_SETUP existed to let an
+            // authenticated user skip a welcome screen that collected nothing;
+            // with WELCOME merged into screen 1 there is nothing to skip, and
+            // the fork was what made the trace-consent checkbox unreachable on
+            // the non-OAuth path while showing a disabled one on the OAuth path.
+            currentStep = _state.value.currentStep
         )
     }
 
@@ -271,6 +289,9 @@ class SetupViewModel(
         val isLocalOllama = provider in LOCAL_OLLAMA_PROVIDER_IDS
         _state.value = current.copy(
             llmProvider = provider,
+            // Picking a provider IS the answer to "what powers it" — the two
+            // choices are mutually exclusive, so selecting one clears the other.
+            runWithoutAi = false,
             llmBaseUrl = if (isLocalOllama && current.llmBaseUrl.isEmpty()) {
                 LOCAL_OLLAMA_BASE_URL
             } else {
@@ -512,122 +533,26 @@ class SetupViewModel(
      */
     fun nextStep(): Boolean {
         val currentState = _state.value
-
         if (!currentState.canProceedFromCurrentStep()) {
             return false
         }
-
-        // NODE CLIENT first-run flow (drives a local ciris-server, NOT the agent).
-        // USER CREATION LEADS: a fresh run creates the founder's local account
-        // FIRST (ACCOUNT_AND_CONFIRMATION — the robust, existing creation step),
-        // THEN mints the founder's hardware-rooted federation ID (now associated to
-        // that just-created user), THEN states the protective age-range gate, then
-        // completes (and on COMPLETE the local node is self-claimed for that user).
-        // The agent setup steps (NODE_AUTH / PREFERENCES / LLM_CONFIGURATION /
-        // OPTIONAL_FEATURES / QUICK_SETUP) are dropped from the node-client path.
-        // BOTH the advanced (isNodeFlow) and the unified branch funnel through the
-        // same account-first sequence:
-        //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP →
-        //   AGE_RANGE → COMPLETE
-        //
-        // AGENT BUILD (CIRISBuild.HAS_AGENT): the brain needs an LLM, so the
-        // LLM_CONFIGURATION step (CIRIS proxy vs BYOK provider/key) is inserted
-        // after the fed-ID:
-        //   WELCOME → ACCOUNT_AND_CONFIRMATION → FEDERATION_IDENTITY_SETUP →
-        //   LLM_CONFIGURATION → AGE_RANGE → COMPLETE
-        // Gated with the flag (not a forked when) so this file stays mergeable
-        // with the upstream node client.
-        val nextStep = if (currentState.isNodeFlow) {
-            when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.ACCOUNT_AND_CONFIRMATION
-                // Account created — now MINT YOUR FEDERATION ID (associated to the
-                // just-created user).
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.FEDERATION_IDENTITY_SETUP
-                // You have an ID — agent builds configure the brain's LLM next;
-                // the node client goes straight to the protective age gate.
-                SetupStep.FEDERATION_IDENTITY_SETUP ->
-                    if (CIRISBuild.HAS_AGENT) SetupStep.LLM_CONFIGURATION else SetupStep.AGE_RANGE
-                // Now STATE YOUR AGE RANGE (the foundational protective gate),
-                // THEN you're on the fabric.
-                SetupStep.LLM_CONFIGURATION -> SetupStep.AGE_RANGE
-                SetupStep.AGE_RANGE -> SetupStep.COMPLETE
-                else -> SetupStep.COMPLETE
-            }
-        } else {
-            // Unified branch — same account-first node-client flow.
-            when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.ACCOUNT_AND_CONFIRMATION
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.FEDERATION_IDENTITY_SETUP
-                SetupStep.FEDERATION_IDENTITY_SETUP ->
-                    if (CIRISBuild.HAS_AGENT) SetupStep.LLM_CONFIGURATION else SetupStep.AGE_RANGE
-                SetupStep.LLM_CONFIGURATION -> SetupStep.AGE_RANGE
-                SetupStep.AGE_RANGE -> SetupStep.COMPLETE
-                else -> SetupStep.COMPLETE
-            }
-        }
-
-        _state.value = currentState.copy(currentStep = nextStep)
+        _state.value = currentState.copy(
+            currentStep = nextSetupStep(currentState.currentStep, CIRISBuild.HAS_AGENT),
+        )
         return true
     }
 
     /**
      * Move to the previous setup step.
-     *
-     * IMPORTANT: When going back from NODE_AUTH to WELCOME, we must reset isNodeFlow
-     * so that the user can choose to NOT register this time.
      */
     fun previousStep() {
         val currentState = _state.value
-
-        // Node-client back-button mirrors the account-first forward path:
-        //   COMPLETE → AGE_RANGE → FEDERATION_IDENTITY_SETUP →
-        //   ACCOUNT_AND_CONFIRMATION → WELCOME
-        // Agent build (CIRISBuild.HAS_AGENT) inserts LLM_CONFIGURATION between
-        // AGE_RANGE and FEDERATION_IDENTITY_SETUP, mirroring nextStep().
-        val prevStep = if (currentState.isNodeFlow) {
-            when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.WELCOME
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.WELCOME
-                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.ACCOUNT_AND_CONFIRMATION
-                SetupStep.LLM_CONFIGURATION -> SetupStep.FEDERATION_IDENTITY_SETUP
-                SetupStep.AGE_RANGE ->
-                    if (CIRISBuild.HAS_AGENT) SetupStep.LLM_CONFIGURATION else SetupStep.FEDERATION_IDENTITY_SETUP
-                SetupStep.COMPLETE -> SetupStep.AGE_RANGE
-                else -> SetupStep.WELCOME
-            }
-        } else {
-            when (currentState.currentStep) {
-                SetupStep.WELCOME -> SetupStep.WELCOME
-                SetupStep.ACCOUNT_AND_CONFIRMATION -> SetupStep.WELCOME
-                SetupStep.FEDERATION_IDENTITY_SETUP -> SetupStep.ACCOUNT_AND_CONFIRMATION
-                SetupStep.LLM_CONFIGURATION -> SetupStep.FEDERATION_IDENTITY_SETUP
-                SetupStep.AGE_RANGE ->
-                    if (CIRISBuild.HAS_AGENT) SetupStep.LLM_CONFIGURATION else SetupStep.FEDERATION_IDENTITY_SETUP
-                SetupStep.COMPLETE -> SetupStep.AGE_RANGE
-                else -> SetupStep.WELCOME
-            }
-        }
-
-        // When going back from NODE_AUTH to WELCOME, reset isNodeFlow so user can
-        // choose NOT to register this time (fixes bug where back->continue still went to NODE_AUTH)
-        val shouldResetNodeFlow = currentState.isNodeFlow &&
-            currentState.currentStep == SetupStep.NODE_AUTH &&
-            prevStep == SetupStep.WELCOME
-
         _state.value = currentState.copy(
-            currentStep = prevStep,
-            isNodeFlow = if (shouldResetNodeFlow) false else currentState.isNodeFlow
+            currentStep = previousSetupStep(currentState.currentStep, CIRISBuild.HAS_AGENT),
         )
-
-        // Also reset device auth state when backing out of NODE_AUTH to clear any
-        // stale/error/timeout state. This ensures a clean slate for retry.
-        if (shouldResetNodeFlow) {
-            PlatformLogger.i(TAG, "previousStep: Backing out of NODE_AUTH, resetting device auth state")
-            resetDeviceAuth()
-        }
     }
 
-    // ========== Federation Identity (FEDERATION_IDENTITY_SETUP) ==========
+    // ========== Federation Identity (the mint card on screen 1) ==========
 
     /**
      * Probe the LOCAL node for the owner's federation identity.
@@ -1040,22 +965,27 @@ class SetupViewModel(
      * POSTs the signed artifact to its own `/v1/setup/root`. The substrate does
      * all crypto; the app only supplies {node_code, claim_pin}.
      *
-     * The one-time [claimPin] is CONSOLE-ONLY — it is read off the node's stdout
-     * by PythonRuntime (the "OWNERSHIP UNCLAIMED" banner) and passed in here. If
-     * it was never captured we surface an honest error and do NOT block the flow
-     * (the node simply stays unclaimed until the user claims it from the network
-     * surface).
+     * The one-time claim PIN is captured ASYNCHRONOUSLY from the node's boot
+     * banner (console stream + boot-log FILE fallback) by PythonRuntime. Because
+     * the banner can land slightly after this COMPLETE step fires, we take a
+     * SUSPEND provider ([claimPinProvider]) rather than a one-shot snapshot and
+     * AWAIT the PIN (bounded timeout) inside the coroutine below. Only after the
+     * wait times out do we treat the PIN as "not captured" — and even then we do
+     * NOT block the flow (the node simply stays unclaimed until the user claims
+     * it from the network surface).
      *
-     * @param claimPin the one-time claim PIN captured from the node's console
-     *        (PythonRuntime.localClaimPin), or null/blank if it was not seen.
-     * @param capturedNodeCode the node's own NodeCode if it was also captured from
-     *        the banner; when null we fetch it via `GET /v1/federation/node-code`.
+     * @param claimPinProvider suspends until the one-time claim PIN is available
+     *        (PythonRuntime.localClaimPin, awaited with a bounded timeout by the
+     *        provider), or returns null/blank if it was never seen.
+     * @param nodeCodeProvider resolves the node's own NodeCode if it was captured
+     *        from the banner; when null/blank we fetch it via
+     *        `GET /v1/federation/node-code`.
      * @param cohortScope the cohort scope to claim under (`self` by default — a
      *        first-run desktop install is the founder's own node).
      */
     fun claimLocalNodeOwnership(
-        claimPin: String?,
-        capturedNodeCode: String? = null,
+        claimPinProvider: suspend () -> String?,
+        nodeCodeProvider: suspend () -> String? = { null },
         cohortScope: String = "self",
     ) {
         // FAIL-SECURE under-18 gate (CC 0.5.1 §2580): a minor MUST NOT self-claim
@@ -1064,6 +994,7 @@ class SetupViewModel(
         // NOT touch the local node's owner-binding here; surface the pending state.
         if (_state.value.isMinorBand()) {
             PlatformLogger.i(TAG, "claimLocalNodeOwnership: minor band — skipping self-claim (fail-secure, awaiting adult steward)")
+            PlatformLogger.i(TAG, "[ORDER] claim_settled claimed=false (skipped: minor band, fail-secure)")
             _state.value = _state.value.copy(
                 ownershipClaim = _state.value.ownershipClaim.copy(
                     inProgress = false,
@@ -1082,23 +1013,43 @@ class SetupViewModel(
             )
             return
         }
-        if (claimPin.isNullOrBlank()) {
-            // Console-only PIN was never captured — be honest, don't pretend.
-            _state.value = _state.value.copy(
-                ownershipClaim = _state.value.ownershipClaim.copy(
-                    inProgress = false,
-                    claimed = false,
-                    error = "claim PIN not captured — this node's one-time ownership " +
-                        "PIN was not seen on its console. You can claim ownership later " +
-                        "from the Network surface using the PIN printed on the node.",
-                )
-            )
-            return
-        }
+        // Show progress immediately: awaiting the one-time PIN below can take a
+        // few seconds (the banner may land just after this COMPLETE step fires),
+        // and the COMPLETE screen renders this in-progress state during the wait.
         _state.value = _state.value.copy(
             ownershipClaim = _state.value.ownershipClaim.copy(inProgress = true, error = null)
         )
         viewModelScope.launch {
+            // WAIT for the one-time PIN. The provider suspends until PythonRuntime
+            // latches it from the node's boot banner (console stream OR boot-log
+            // FILE fallback), with a bounded timeout. A still-null/blank result
+            // after the wait means it was genuinely never captured — only THEN do
+            // we surface the honest "not captured" error (no one-shot snapshot).
+            val claimPin = claimPinProvider()
+            if (claimPin.isNullOrBlank()) {
+                PlatformLogger.w(TAG, "claimLocalNodeOwnership: claim PIN not captured after wait — leaving node unclaimed")
+                PlatformLogger.w(TAG, "[ORDER] claim_settled claimed=false (PIN not captured)")
+                _state.value = _state.value.copy(
+                    ownershipClaim = _state.value.ownershipClaim.copy(
+                        inProgress = false,
+                        claimed = false,
+                        error = "claim PIN not captured — this node's one-time ownership " +
+                            "PIN was not seen on its console. You can claim ownership later " +
+                            "from the Network surface using the PIN printed on the node.",
+                    )
+                )
+                return@launch
+            }
+            // Resolve the captured NodeCode (may be null — fetched via HTTP below).
+            val capturedNodeCode = nodeCodeProvider()
+            // [ORDER] session-state tracking for the provisioning saga
+            // (FSD/FIRST_RUN_STATECHART.md): every :4243 call below logs which
+            // bearer it rides so a 401 is diagnosable from the preceding line.
+            // The wizard starts on the SETUP session; a successful post-claim
+            // owner login swaps it for the OWNER session. BOTH die at the
+            // completeSetup runtime restart — hence the settle gate (E9 ≺ E10).
+            var sessionKind = "setup"
+            var ownerLoginOk = false
             try {
                 // MINT-IF-ABSENT: the self-claim REQUIRES a responsible-user fed-ID
                 // (the node 503s "no responsible-user identity yet" otherwise). The
@@ -1113,6 +1064,7 @@ class SetupViewModel(
                 if (!fed0.minted && !fed0.admitted) {
                     val mintBackend = fed0.backend
                         ?: if (_state.value.secureWith2FA) "pkcs11" else null
+                    PlatformLogger.i(TAG, "[ORDER] fedid_mint begin (session=$sessionKind url=${CIRISApiClient.LOCAL_NODE_URL})")
                     val minted = client.mintUserIdentity(
                         label = fed0.label.trim().ifBlank { null },
                         backend = mintBackend,
@@ -1130,7 +1082,7 @@ class SetupViewModel(
                             error = null,
                         )
                     )
-                    PlatformLogger.i(TAG, "claimLocalNodeOwnership: minted fed-ID before claim (was absent) key_id=${minted.keyId}")
+                    PlatformLogger.i(TAG, "[ORDER] fedid_minted key_id=${minted.keyId} (was absent — minted before claim)")
                 }
 
                 // Resolve THIS node's own NodeCode (PUBLIC handle). Prefer the one
@@ -1147,6 +1099,12 @@ class SetupViewModel(
                     claimPin = claimPin.trim(),
                     cohortScope = cohortScope,
                     localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                    // claim-remote requires a live :4243 bearer session. This
+                    // runs BEFORE completeSetup (see SetupScreen — claim THEN
+                    // complete), so the app's setup-time session is still valid
+                    // here; the default token=accessToken is correct. (Doing it
+                    // AFTER completeSetup fails: the reload invalidates the
+                    // session → 401 "invalid or expired session".)
                     // SELF-claim: set the owner's login password + friendly username
                     // on the ROOT cert so the owner can obtain a SYSTEM_ADMIN session
                     // (POST /v1/auth/login with EITHER `eric` or the wa_id) — the
@@ -1154,9 +1112,17 @@ class SetupViewModel(
                     ownerPassword = _state.value.userPassword.ifBlank { null },
                     ownerUsername = _state.value.username.ifBlank { null },
                 )
+                // [ORDER] E5→E9 GATE (FSD/FIRST_RUN_STATECHART.md): on a successful
+                // claim, inProgress stays TRUE through the whole post-claim block
+                // below (owner login → setAgeSelf → announce → device name).
+                // SetupScreen's settle-await (`first { !inProgress }`) gates
+                // completeSetup — releasing it here (the old behavior) let the
+                // runtime restart race those :4243 calls → 401 "invalid or
+                // expired session" on setAgeSelf. A REJECTED claim settles now
+                // (no post-claim work follows).
                 _state.value = _state.value.copy(
                     ownershipClaim = _state.value.ownershipClaim.copy(
-                        inProgress = false,
+                        inProgress = resp.role != null,
                         claimed = resp.role != null,
                         role = resp.role,
                         waId = resp.waId,
@@ -1165,6 +1131,12 @@ class SetupViewModel(
                         } else null,
                     )
                 )
+                if (resp.role != null) {
+                    PlatformLogger.i(TAG, "[ORDER] claim_accepted role=${resp.role} waId=${resp.waId} (session=$sessionKind)")
+                } else {
+                    PlatformLogger.w(TAG, "[ORDER] claim_rejected: ${resp.error}")
+                    PlatformLogger.w(TAG, "[ORDER] claim_settled claimed=false (rejected — no post-claim work)")
+                }
 
                 // POST-CLAIM owner sequence (now that the node is owned + the owner
                 // fed-ID exists): (1) log in with the account credential to get the
@@ -1176,23 +1148,63 @@ class SetupViewModel(
                     val password = _state.value.userPassword
                     if (!waId.isNullOrBlank() && password.isNotBlank()) {
                         try {
-                            val auth = client.login(waId, password)
-                            client.setAccessToken(auth.access_token)
-                            PlatformLogger.i(TAG, "claimLocalNodeOwnership: owner session established post-claim")
+                            PlatformLogger.i(TAG, "[ORDER] owner_login begin (session=$sessionKind → owner, target=node)")
+                            // MUST target the NODE (:4243): the claim wrote the owner
+                            // ROOT cert into the node's substrate and rotated the
+                            // setup session; the brain (:8080) is still in setup mode
+                            // with no auth routes (client.login() there parse-fails
+                            // on the 404 body — the E6x signature).
+                            val nodeToken = client.loginToNode(waId, password, CIRISApiClient.LOCAL_NODE_URL)
+                            client.setAccessToken(nodeToken)
+                            sessionKind = "owner"
+                            ownerLoginOk = true
+                            PlatformLogger.i(TAG, "[ORDER] owner_login ok (session now=owner)")
                         } catch (e: Exception) {
-                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: post-claim owner login failed: ${e.message}")
+                            PlatformLogger.w(TAG, "[ORDER] owner_login FAILED (continuing on session=$sessionKind): ${e.message}")
                         }
+                    } else {
+                        // The guard states are THE diagnostic for post-claim 401s:
+                        // a successful claim ROTATES the setup session (privilege
+                        // boundary crossed), so without an owner login every
+                        // subsequent :4243 call is a guaranteed 401.
+                        PlatformLogger.w(
+                            TAG,
+                            "[ORDER] owner_login SKIPPED (waId_present=${!waId.isNullOrBlank()} " +
+                                "password_present=${password.isNotBlank()}) — no owner session",
+                        )
                     }
                     val band = _state.value.ageRange.selectedBandToken
-                    if (!band.isNullOrBlank()) {
+                    if (!ownerLoginOk) {
+                        // Statechart law (FSD/FIRST_RUN_STATECHART.md): setAgeSelf and
+                        // announce REQUIRE the owner session — the claim rotated the
+                        // setup bearer, so firing them now is a guaranteed 401.
+                        // Skip honestly with markers; surface the age gap for retry.
+                        PlatformLogger.w(TAG, "[ORDER] set_age SKIPPED (no owner session; band=$band)")
+                        if (_state.value.announceOwnership) {
+                            PlatformLogger.w(TAG, "[ORDER] announce SKIPPED (no owner session)")
+                        }
+                        if (!band.isNullOrBlank()) {
+                            _state.value = _state.value.copy(
+                                ageRange = _state.value.ageRange.copy(
+                                    recorded = false,
+                                    error = "Your age range couldn't be recorded during setup — " +
+                                        "you can set it after signing in.",
+                                )
+                            )
+                        }
+                    } else if (!band.isNullOrBlank()) {
                         try {
+                            PlatformLogger.i(
+                                TAG,
+                                "[ORDER] set_age begin (session=$sessionKind band=$band url=${CIRISApiClient.LOCAL_NODE_URL})",
+                            )
                             val r = client.setAgeSelf(band = band, localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
                             _state.value = _state.value.copy(
                                 ageRange = _state.value.ageRange.copy(recorded = true, error = null)
                             )
-                            PlatformLogger.i(TAG, "claimLocalNodeOwnership: age band '$band' recorded post-claim ($r)")
+                            PlatformLogger.i(TAG, "[ORDER] age_recorded band=$band (session=$sessionKind): $r")
                         } catch (e: Exception) {
-                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: post-claim age record failed: ${e.message}")
+                            PlatformLogger.w(TAG, "[ORDER] age_record FAILED (session=$sessionKind): ${e.message}")
                             _state.value = _state.value.copy(
                                 ageRange = _state.value.ageRange.copy(
                                     recorded = false,
@@ -1208,20 +1220,21 @@ class SetupViewModel(
                     // claim already succeeded, so this is NON-FATAL — on failure we
                     // surface a soft notice and let the user retry later; it never
                     // blocks COMPLETE. Takes effect on the node's next boot.
-                    if (_state.value.announceOwnership) {
+                    if (ownerLoginOk && _state.value.announceOwnership) {
                         try {
+                            PlatformLogger.i(TAG, "[ORDER] announce begin (session=$sessionKind)")
                             val ann = client.announceOwnership(localNodeUrl = CIRISApiClient.LOCAL_NODE_URL)
                             PlatformLogger.i(
                                 TAG,
-                                "claimLocalNodeOwnership: announced to federation " +
-                                    "(owner=${ann.owner} cohort=${ann.cohortScope}); " +
+                                "[ORDER] announced to federation " +
+                                    "(owner=${ann.owner} cohort=${ann.cohortScope} session=$sessionKind); " +
                                     "takes effect ${ann.announceTakesEffect ?: "next boot"}",
                             )
                             _state.value = _state.value.copy(
                                 ownershipClaim = _state.value.ownershipClaim.copy(announceNotice = null)
                             )
                         } catch (e: Exception) {
-                            PlatformLogger.w(TAG, "claimLocalNodeOwnership: federation announce failed (non-fatal): ${e.message}")
+                            PlatformLogger.w(TAG, "[ORDER] announce FAILED (non-fatal, session=$sessionKind): ${e.message}")
                             _state.value = _state.value.copy(
                                 ownershipClaim = _state.value.ownershipClaim.copy(
                                     announceNotice = "You're set up, but announcing to the " +
@@ -1230,6 +1243,63 @@ class SetupViewModel(
                                 )
                             )
                         }
+                    }
+
+                    // EXPLICIT trace-sharing consent (ciris-server explicit-consent
+                    // cut): consent:replication is NO LONGER auto-authored at node
+                    // boot — when the user opted into "Send traces to CIRIS L3C",
+                    // the wizard must POST /v1/federation/consent once, after the
+                    // owner claim (the route is owner-gated). Without this call the
+                    // node reports nothing to the canonical — sealed traces never
+                    // replicate (runbook §1/§3). NON-FATAL like announce: a failure
+                    // never blocks COMPLETE; the Manage Consent card can retry.
+                    if (ownerLoginOk && _state.value.accordMetricsConsent) {
+                        try {
+                            PlatformLogger.i(TAG, "[ORDER] federation_consent begin (session=$sessionKind)")
+                            // `analyze` is the owner's OWN answer from the
+                            // consent screen, not a constant. The substrate
+                            // marks the be-scored dimension required:false with
+                            // named costs; sending true regardless granted a
+                            // dimension the user was never asked about.
+                            val consentRaw = client.authorFederationConsent(
+                                analyze = _state.value.traceAnalyze,
+                                localNodeUrl = CIRISApiClient.LOCAL_NODE_URL,
+                            )
+                            PlatformLogger.i(
+                                TAG,
+                                "[ORDER] federation_consent authored (scope=" +
+                                    "${FederationConsentScopes.describe(FederationConsentScopes.TO_CANONICAL)} " +
+                                    "analyze=${_state.value.traceAnalyze} " +
+                                    "session=$sessionKind): ${consentRaw.take(200)}",
+                            )
+                        } catch (e: Exception) {
+                            PlatformLogger.w(
+                                TAG,
+                                "[ORDER] federation_consent FAILED (non-fatal, session=$sessionKind): " +
+                                    "${e.message} — traces will NOT replicate until consent is " +
+                                    "authored (retry via Manage Consent)",
+                            )
+                        }
+                    } else {
+                        // A SILENT skip here is indistinguishable from success and
+                        // costs a whole debugging cycle: the node seals traces, keeps
+                        // them at (cohort_scope=self, tier=local) forever because no
+                        // grant covers `trace:`, converges to its consent peer, and
+                        // reports healthy. A live run skipped this step and the saga
+                        // still verified CONFORMANT, because the step was not in the
+                        // edge list — so nothing anywhere said the word "skipped".
+                        //
+                        // Name which conjunct failed. Emitted under the same [ORDER]
+                        // key as the success path so the saga sees the step either way.
+                        PlatformLogger.w(
+                            TAG,
+                            "[ORDER] federation_consent SKIPPED (session=$sessionKind): " +
+                                "owner_login=$ownerLoginOk trace_opt_in=${_state.value.accordMetricsConsent} " +
+                                "announce_on=${_state.value.announceOwnership} — " +
+                                "traces will seal locally and NEVER replicate to the canonical " +
+                                "(no grant covers trace:; rows strand at self/local). " +
+                                "Fix: enable Data & Privacy → Send traces, which authors the grant.",
+                        )
                     }
 
                     // Persist the OPTIONAL friendly device name (e.g. "Mac mini")
@@ -1246,9 +1316,25 @@ class SetupViewModel(
                             PlatformLogger.w(TAG, "claimLocalNodeOwnership: failed to persist device name: ${e.message}")
                         }
                     }
+
+                    // [ORDER] E9 claim_settled: every :4243 session-consuming saga
+                    // step above is now terminal. ONLY here may SetupScreen's
+                    // settle-await release and completeSetup restart the runtime
+                    // (E9 ≺ E10, FSD/FIRST_RUN_STATECHART.md § 3).
+                    _state.value = _state.value.copy(
+                        ownershipClaim = _state.value.ownershipClaim.copy(inProgress = false)
+                    )
+                    PlatformLogger.i(
+                        TAG,
+                        "[ORDER] claim_settled claimed=true login=$ownerLoginOk " +
+                            "age_recorded=${_state.value.ageRange.recorded} " +
+                            "announce_on=${_state.value.announceOwnership} " +
+                            "session=$sessionKind — safe to complete",
+                    )
                 }
             } catch (e: Exception) {
                 PlatformLogger.w(TAG, "claimLocalNodeOwnership: self-claim via local node failed: ${e.message}")
+                PlatformLogger.w(TAG, "[ORDER] claim_settled claimed=false (exception, session=$sessionKind): ${e.message}")
                 val msg = e.message.orEmpty()
                 val isPinRejection = msg.contains("claim_pin", ignoreCase = true) ||
                     msg.contains("claim pin", ignoreCase = true) ||
@@ -1280,6 +1366,25 @@ class SetupViewModel(
      */
     fun setAccordMetricsConsent(consent: Boolean) {
         _state.value = _state.value.copy(accordMetricsConsent = consent)
+    }
+
+    /**
+     * Set the CC#46 "be scored" grant — whether shipped traces may be ANALYZED.
+     *
+     * A SEPARATE consent from sending them, on the opposite edge. The substrate
+     * marks it `required: false` and publishes what declining costs, so this is
+     * the owner's answer arriving; it used to be a hardcoded `true`.
+     */
+    fun setTraceAnalyze(analyze: Boolean) {
+        _state.value = _state.value.copy(traceAnalyze = analyze)
+    }
+
+    /**
+     * Choose to run with NO LLM. Selecting a provider clears the choice, so the
+     * two cannot both be true.
+     */
+    fun setRunWithoutAi(runWithout: Boolean) {
+        _state.value = _state.value.copy(runWithoutAi = runWithout)
     }
 
     // ========== Public API Services (Navigation & Weather) ==========
@@ -1381,6 +1486,70 @@ class SetupViewModel(
             _state.value = _state.value.copy(adaptersLoading = false)
         }
     }
+
+    // ========== Tool Disclosure (#941) ==========
+    //
+    // Wide tool access is intended. None of this restricts, gates, or defaults
+    // anything off -- it exists so the operator accepting the enabled-by-default
+    // optional features is told what those choices actually grant, including the
+    // always-on tools that no choice controls.
+
+    /**
+     * Load the generated tool disclosure from the setup API.
+     * Call this when entering the OPTIONAL_FEATURES step.
+     *
+     * A failure leaves [SetupFormState.toolDisclosure] null, which the UI renders
+     * as "could not be listed" -- never as "grants nothing".
+     */
+    suspend fun loadToolDisclosure(
+        fetchFunc: suspend () -> ai.ciris.mobile.shared.models.ToolDisclosureReport
+    ) {
+        _state.value = _state.value.copy(toolDisclosureLoading = true)
+        try {
+            val disclosure = fetchFunc()
+            _state.value = _state.value.copy(
+                toolDisclosure = disclosure,
+                toolDisclosureLoading = false
+            )
+        } catch (e: Exception) {
+            _state.value = _state.value.copy(
+                toolDisclosure = null,
+                toolDisclosureLoading = false
+            )
+        }
+    }
+
+    /**
+     * Expand or collapse one group's tool list. Purely presentational -- expanding
+     * a disclosure never changes which adapters are enabled.
+     */
+    fun toggleToolDisclosureExpanded(groupId: String) {
+        val current = _state.value.expandedToolDisclosureIds
+        _state.value = _state.value.copy(
+            expandedToolDisclosureIds =
+                if (groupId in current) current - groupId else current + groupId
+        )
+    }
+
+    /** Whether [groupId]'s tool list is currently expanded. */
+    fun isToolDisclosureExpanded(groupId: String): Boolean =
+        groupId in _state.value.expandedToolDisclosureIds
+
+    /**
+     * Disclosure for [adapterId], or null when the server listed none.
+     *
+     * Null means "not disclosed", not "grants nothing" -- callers must render
+     * that difference.
+     */
+    fun toolDisclosureFor(adapterId: String): ai.ciris.mobile.shared.models.AdapterToolDisclosure? =
+        _state.value.toolDisclosure?.adapters?.firstOrNull { it.adapter_id == adapterId }
+
+    /**
+     * Tool groups that are registered regardless of every wizard choice and
+     * therefore cannot be declined.
+     */
+    fun alwaysOnToolDisclosures(): List<ai.ciris.mobile.shared.models.AdapterToolDisclosure> =
+        _state.value.toolDisclosure?.always_on ?: emptyList()
 
     /**
      * Toggle an adapter's enabled state.
@@ -1838,10 +2007,10 @@ class SetupViewModel(
     }
 
     /**
-     * Reset to welcome step.
+     * Reset to the first step.
      */
     fun resetToWelcome() {
-        _state.value = _state.value.copy(currentStep = SetupStep.WELCOME)
+        _state.value = _state.value.copy(currentStep = SetupStep.YOU)
     }
 
     // ========== Connect to Node (Device Auth Flow) ==========
@@ -1852,17 +2021,6 @@ class SetupViewModel(
     fun updateNodeUrl(url: String) {
         _state.value = _state.value.copy(
             deviceAuth = _state.value.deviceAuth.copy(nodeUrl = url)
-        )
-    }
-
-    /**
-     * Enter the node flow from the WELCOME step.
-     * Sets isNodeFlow=true and transitions to NODE_AUTH step.
-     */
-    fun enterNodeFlow() {
-        _state.value = _state.value.copy(
-            isNodeFlow = true,
-            currentStep = SetupStep.NODE_AUTH
         )
     }
 
@@ -2113,9 +2271,6 @@ class SetupViewModel(
         val currentState = _state.value
         val useCirisProxy = currentState.useCirisProxy()
 
-        // Debug logging for node flow
-        PlatformLogger.i(TAG, "buildSetupRequest: isNodeFlow=${currentState.isNodeFlow}, deviceAuth.status=${currentState.deviceAuth.status}")
-        PlatformLogger.i(TAG, "buildSetupRequest: deviceAuth.keyId=${currentState.deviceAuth.keyId}, signingKeyB64=${currentState.deviceAuth.signingKeyB64?.take(20)}...")
 
         // Auto-generate admin password (32 chars)
         // Source: SetupViewModel.kt:141-146
@@ -2141,6 +2296,18 @@ class SetupViewModel(
             }
         }
 
+        // [ORDER] trace_consent written into the completeSetup request. Including
+        // ciris_accord_metrics in enabled_adapters is what makes the backend
+        // emit the happy CEG grant (consent:community_trust:v1) at completeSetup
+        // (_emit_accord_metrics_consent). This marker is check (a) of the
+        // client-side trace-consent trail — grep [ORDER] in logcat_app.txt.
+        PlatformLogger.i(
+            TAG,
+            "[ORDER] trace_consent ${if (currentState.accordMetricsConsent) "REQUESTED" else "declined"} " +
+                "(accord_adapter=${enabledAdapters.contains("ciris_accord_metrics")}) — " +
+                "backend emits the consent:community_trust:v1 grant at completeSetup when requested",
+        )
+
         // Build adapter config with consent settings and adapter-specific config
         val adapterConfig = buildMap {
             // Accord metrics settings
@@ -2159,10 +2326,13 @@ class SetupViewModel(
             }
         }
 
-        // Node flow fields (if provisioned via Portal)
-        val nodeFlowData = if (currentState.isNodeFlow && currentState.deviceAuth.status == DeviceAuthStatus.COMPLETE) {
+        // Portal-provisioned node-flow fields. The wizard no longer has a route
+        // into device auth (the NODE_AUTH step's only entry point had no
+        // callers), so these are populated only when a device-auth session
+        // completed out-of-band. Nothing in first-run sets them today.
+        val nodeFlowData = if (currentState.deviceAuth.status == DeviceAuthStatus.COMPLETE) {
             val da = currentState.deviceAuth
-            PlatformLogger.i(TAG, "Node flow COMPLETE - extracting NodeFlowData: keyId=${da.keyId}, signingKeyB64=${da.signingKeyB64?.take(20)}...")
+            PlatformLogger.i(TAG, "Device auth COMPLETE - extracting NodeFlowData: keyId=${da.keyId}")
             NodeFlowData(
                 nodeUrl = da.nodeUrl.takeIf { it.isNotEmpty() },
                 identityTemplate = da.provisionedTemplate,
@@ -2174,7 +2344,6 @@ class SetupViewModel(
                 keyId = da.keyId
             )
         } else {
-            PlatformLogger.w(TAG, "Node flow NOT complete or not in node flow - nodeFlowData will be null (isNodeFlow=${currentState.isNodeFlow}, status=${currentState.deviceAuth.status})")
             null
         }
 
@@ -2216,6 +2385,8 @@ class SetupViewModel(
                 location_longitude = currentState.selectedLocation?.longitude,
                 timezone = currentState.selectedLocation?.timezone,
                 share_location_in_traces = currentState.shareLocationInTraces,
+                trace_analyze = currentState.traceAnalyze,
+                run_without_ai = currentState.runWithoutAi,
 
                 // Node flow fields
                 node_url = nodeFlowData?.nodeUrl,
@@ -2296,6 +2467,8 @@ class SetupViewModel(
                 location_longitude = currentState.selectedLocation?.longitude,
                 timezone = currentState.selectedLocation?.timezone,
                 share_location_in_traces = currentState.shareLocationInTraces,
+                trace_analyze = currentState.traceAnalyze,
+                run_without_ai = currentState.runWithoutAi,
 
                 // Node flow fields
                 node_url = nodeFlowData?.nodeUrl,

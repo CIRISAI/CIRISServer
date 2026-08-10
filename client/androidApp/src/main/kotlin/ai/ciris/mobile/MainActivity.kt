@@ -175,7 +175,7 @@ class MainActivity : ComponentActivity() {
                 // Show the full KMP app with native StartupScreen (22 lights)
                 CIRISApp(
                     accessToken = "pending", // Will be set after auth
-                    baseUrl = "http://localhost:8080",
+                    apiBaseUrl = "http://localhost:8080",
                     googleSignInCallback = googleSignInCallback,
                     purchaseLauncher = purchaseLauncher,
                     deviceAttestationCallback = deviceAttestationCallback,

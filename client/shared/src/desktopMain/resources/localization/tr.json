@@ -2376,7 +2376,9 @@
     "announce_decision_toggle_label": "Düğümüm federasyonda görünür olsun",
     "announce_decision_trace_desc": "Akıl yürütme kalitesi puanlarını ve karar örüntülerini (mesaj içeriği olmadan) güvenilen kanonik sunucu grubuyla paylaşın.",
     "announce_decision_trace_locked": "Akıl yürütme izleri göndermeyi ve topluluklara katılmayı etkinleştirmek için yukarıdaki duyurmayı açın.",
-    "announce_decision_trace_title": "Akıl yürütme izleri gönder"
+    "announce_decision_trace_title": "Akıl yürütme izleri gönder",
+    "status_reconfiguring": "Düğümünüz yeniden başlatılıyor...",
+    "status_reconfiguring_timeout": "Düğümünüzün yeniden başlatılması beklenenden uzun sürüyor. Lütfen uygulamayı yeniden başlatın."
   },
   "nav": {
     "group": {

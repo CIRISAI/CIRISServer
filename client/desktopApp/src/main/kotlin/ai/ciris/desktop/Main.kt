@@ -172,8 +172,18 @@ fun main() {
             ) {
                 CIRISApp(
                     accessToken = accessToken,
-                    // Local ciris-server node read API (node base :4242 → API :4243).
-                    baseUrl = System.getenv("CIRIS_API_URL") ?: "http://127.0.0.1:4243",
+                    // TWO parameters upstream, ONE service here. The agent build
+                    // has a Python brain on :8080 and a node read API on :4243;
+                    // this is the NODE client (CIRISBuild.HAS_AGENT == false), so
+                    // there is no brain to address — ciris-server serves the whole
+                    // surface on :4243. Pointing apiBaseUrl at the upstream :8080
+                    // default would aim every shared-client call at a dead port.
+                    // CIRIS_NODE_URL is the upstream name; CIRIS_API_URL is kept
+                    // because this build has always used it to mean the node.
+                    apiBaseUrl = System.getenv("CIRIS_NODE_URL")
+                        ?: System.getenv("CIRIS_API_URL") ?: "http://127.0.0.1:4243",
+                    nodeBaseUrl = System.getenv("CIRIS_NODE_URL")
+                        ?: System.getenv("CIRIS_API_URL") ?: "http://127.0.0.1:4243",
                     pythonRuntime = pythonRuntime,
                     secureStorage = createSecureStorage(),
                     envFileUpdater = createEnvFileUpdater(),
