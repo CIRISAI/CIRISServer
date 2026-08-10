@@ -171,6 +171,13 @@ def launch_desktop_app(server_url: str = DEFAULT_SERVER_URL) -> int:
 
     env = os.environ.copy()
     env["CIRIS_API_URL"] = server_url
+    # Tell the UI where the node's home IS, rather than leaving it to infer.
+    # The JVM's `user.home` comes from the passwd entry and ignores $HOME, so a
+    # node started under an overridden HOME wrote its claim PIN somewhere the UI
+    # would never look. We know the answer here; state it.
+    from ciris_server.cli import _default_user_home
+
+    env.setdefault("CIRIS_HOME", _default_user_home())
 
     try:
         result = subprocess.run([java, "-jar", str(jar_path)], env=env)

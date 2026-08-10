@@ -341,9 +341,24 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
         val dir = when {
             managed -> java.io.File("/app")
             else -> {
-                val env = System.getenv("CIRIS_HOME")
-                if (!env.isNullOrBlank()) java.io.File(env)
-                else java.io.File(System.getProperty("user.home", "."), "ciris")
+                // Resolve the node's home the way the NODE resolves it, in order:
+                //   CIRIS_HOME  — set explicitly by the launcher that started it
+                //   HOME        — what the node process itself used
+                //   user.home   — last resort
+                //
+                // `user.home` alone was wrong: the JVM reads it from the passwd
+                // entry, NOT from $HOME, so any process started with an
+                // overridden HOME (a container, a systemd unit, sudo, a sandboxed
+                // run) had the app looking in /home/<user>/ciris while the node
+                // wrote to $HOME/ciris. The claim PIN was then "not captured"
+                // with the file sitting readable a directory away.
+                val explicit = System.getenv("CIRIS_HOME")
+                val home = System.getenv("HOME")
+                when {
+                    !explicit.isNullOrBlank() -> java.io.File(explicit)
+                    !home.isNullOrBlank() -> java.io.File(home, "ciris")
+                    else -> java.io.File(System.getProperty("user.home", "."), "ciris")
+                }
             }
         }
         if (!dir.exists()) dir.mkdirs()
