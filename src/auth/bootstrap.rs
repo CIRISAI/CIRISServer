@@ -1245,19 +1245,57 @@ pub fn router(
 /// wizard renders the operator's locale and falls back to this English only
 /// when its catalogue lacks the id.
 async fn setup_consent_disclosure() -> Response {
+    // WRAPPED in `{"data": …}`, because that is the envelope the client speaks.
+    //
+    // The vendored KMP client is the agent's, and the agent's API returns
+    // `SuccessResponse { data, metadata }` — `CIRISApiClient.getConsentDisclosure`
+    // reads `root["data"]` and throws "response has no data" without it. Serving
+    // the disclosure bare produced a 200 that the client could not read, which
+    // is strictly worse than the 404 it replaced: a 404 says the route is
+    // missing, while a 200 with the wrong shape says the node is fine and the
+    // consent step is empty for no stated reason.
     (
         StatusCode::OK,
         [(
             axum::http::header::CONTENT_TYPE,
             "application/json; charset=utf-8",
         )],
-        crate::peer::consent_disclosure_json(),
+        format!(r#"{{"data":{}}}"#, crate::peer::consent_disclosure_json()),
     )
         .into_response()
 }
 
 #[cfg(test)]
 mod tests {
+    /// The consent disclosure is served in the envelope the CLIENT reads.
+    ///
+    /// The vendored KMP client is the agent's, and its API returns
+    /// `SuccessResponse { data, metadata }`; `getConsentDisclosure` reads
+    /// `root["data"]`. Serving the payload bare gave a 200 the client could not
+    /// read — worse than the 404 it replaced, because a 404 names a missing
+    /// route while a wrong-shaped 200 says the node is healthy and leaves the
+    /// consent step silently empty.
+    #[tokio::test]
+    async fn the_consent_disclosure_is_wrapped_for_the_client() {
+        let resp = super::setup_consent_disclosure().await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        let data = v.get("data").expect("the client reads root[\"data\"]");
+        // And the payload underneath is the substrate's own disclosure, not a
+        // paraphrase: spot-check the keys the wizard binds.
+        for k in [
+            "primary_action",
+            "announce_requirement",
+            "independent",
+            "grants",
+            "location",
+        ] {
+            assert!(data.get(k).is_some(), "disclosure is missing {k}");
+        }
+    }
+
     use super::*;
 
     #[test]
