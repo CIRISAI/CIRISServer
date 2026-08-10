@@ -3842,5 +3842,22 @@
       "admitted": "Ammessa",
       "refused": "Rifiutata"
     }
+  },
+  "auth": {
+    "not_signed_in": "Non hai effettuato l'accesso. Accedi come proprietario di questo nodo, quindi riprova.",
+    "not_the_owner": "Hai effettuato l'accesso, ma non come proprietario di questo nodo. Questa azione richiede l'account del proprietario (accesso completo).",
+    "oauth": {
+      "no_local_identity": "L'accesso con quell'account è riuscito, ma questo nodo non ha alcuna identità collegata ad esso. Rivendica questo nodo con questo account oppure chiedi al proprietario del nodo di collegarlo.",
+      "store_unavailable": "Il nodo non è riuscito a leggere il proprio archivio delle identità, quindi l'accesso non è stato completato. Si tratta di un problema del nodo, non del tuo account."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Quell'account è già collegato a un'altra identità su questo nodo. Scollegalo prima da lì — un account provider appartiene a una sola identità.",
+      "bad_request": "Il nodo non è riuscito a leggere la richiesta. Controlla i campi e riprova.",
+      "incomplete_pair": "Sono richiesti sia il provider sia l'ID dell'account. Metà di una coppia collega un account che poi nulla potrà più ritrovare.",
+      "no_such_identity": "Su questo nodo non esiste un'identità a cui collegare l'account.",
+      "node_unowned": "Questo nodo non ha ancora un proprietario, quindi non esiste alcuna identità a cui collegare un account. Rivendica prima il nodo.",
+      "store_unavailable": "Il nodo non è riuscito a scrivere il collegamento perché il suo archivio delle identità non è disponibile. Non è stata apportata alcuna modifica."
+    },
+    "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare."
   }
 }

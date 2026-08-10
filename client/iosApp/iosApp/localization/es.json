@@ -3842,5 +3842,22 @@
       "admitted": "Admitida",
       "refused": "Rechazada"
     }
+  },
+  "auth": {
+    "not_signed_in": "No has iniciado sesión. Inicia sesión como propietario de este nodo e inténtalo de nuevo.",
+    "not_the_owner": "Has iniciado sesión, pero no como propietario de este nodo. Esta acción requiere la cuenta del propietario (acceso completo).",
+    "oauth": {
+      "no_local_identity": "Esa cuenta inició sesión correctamente, pero este nodo no tiene ninguna identidad vinculada a ella. Reclama este nodo con esta cuenta o pide al propietario del nodo que la vincule.",
+      "store_unavailable": "El nodo no pudo leer su almacén de identidades, por lo que no se pudo completar el inicio de sesión. Es un problema del nodo, no de tu cuenta."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Esa cuenta ya está vinculada a otra identidad en este nodo. Desvincúlala allí primero: una cuenta de proveedor pertenece a una sola identidad.",
+      "bad_request": "El nodo no pudo leer esa solicitud. Revisa los campos e inténtalo de nuevo.",
+      "incomplete_pair": "Se requieren tanto el proveedor como el id de la cuenta. La mitad de un par vincula una cuenta que nada podrá volver a encontrar.",
+      "no_such_identity": "No existe esa identidad en este nodo para vincularle la cuenta.",
+      "node_unowned": "Este nodo aún no tiene propietario, así que no hay ninguna identidad a la que vincular una cuenta. Reclama el nodo primero.",
+      "store_unavailable": "El nodo no pudo escribir el vínculo porque su almacén de identidades no está disponible. No se cambió nada."
+    },
+    "session_expired": "Tu sesión ya no es válida. Inicia sesión de nuevo para continuar."
   }
 }

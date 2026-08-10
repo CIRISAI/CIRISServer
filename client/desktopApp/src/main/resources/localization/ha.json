@@ -3842,5 +3842,22 @@
       "admitted": "An karɓa",
       "refused": "An ƙi"
     }
+  },
+  "auth": {
+    "not_signed_in": "Ba ka shiga ba. Ka shiga a matsayin mai mallakar wannan node, sannan ka sake gwadawa.",
+    "not_the_owner": "Ka shiga, amma ba a matsayin mai mallakar wannan node ba. Wannan aikin yana buƙatar asusun mai mallaka (cikakken damar shiga).",
+    "oauth": {
+      "no_local_identity": "An yi nasarar shiga da wannan asusun, amma wannan node ba shi da wata shaida da aka haɗa da shi. Ka mallaki wannan node da wannan asusun, ko ka nemi mai mallakar node ya haɗa shi.",
+      "store_unavailable": "Node ɗin bai iya karanta ma'ajiyar shaidarsa ba, don haka ba a iya kammala shiga ba. Wannan matsala ce ta node, ba ta asusunka ba."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "An riga an haɗa wannan asusun da wata shaida daban a wannan node. Ka fara cire haɗin a wurin — asusun mai bayarwa guda yana na shaida guda ɗaya.",
+      "bad_request": "Node ɗin bai iya karanta wannan buƙatar ba. Ka duba filayen sannan ka sake gwadawa.",
+      "incomplete_pair": "Ana buƙatar mai bayarwa da kuma id ɗin asusu duka biyu. Rabin biyun kawai yana haɗa asusun da ba abin da zai sake same shi.",
+      "no_such_identity": "Babu irin wannan shaida a wannan node da za a haɗa asusun da ita.",
+      "node_unowned": "Wannan node ba shi da mai mallaka tukuna, don haka babu shaidar da za a haɗa asusu da ita. Ka fara mallakar node ɗin.",
+      "store_unavailable": "Node ɗin bai iya rubuta haɗin ba saboda ma'ajiyar shaidarsa ba ta samuwa. Ba a canza komai ba."
+    },
+    "session_expired": "Zamanka ya ƙare. Ka sake shiga don ci gaba."
   }
 }

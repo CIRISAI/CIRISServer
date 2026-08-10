@@ -3842,5 +3842,22 @@
       "admitted": "Admitted",
       "refused": "Refused"
     }
+  },
+  "auth": {
+    "not_signed_in": "You are not signed in. Sign in as this node's owner, then try again.",
+    "not_the_owner": "You are signed in, but not as this node's owner. This act needs the owner account (full access).",
+    "session_expired": "Your session is no longer valid. Sign in again to continue.",
+    "oauth": {
+      "no_local_identity": "That account signed in successfully, but this node has no identity linked to it. Claim this node with this account, or ask the node's owner to link it.",
+      "store_unavailable": "The node could not read its identity store, so sign-in could not be completed. This is a problem with the node, not with your account."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "That account is already linked to a different identity on this node. Unlink it there first — one provider account belongs to one identity.",
+      "no_such_identity": "There is no such identity on this node to link the account to.",
+      "node_unowned": "This node has no owner yet, so there is no identity to link an account to. Claim the node first.",
+      "incomplete_pair": "Both the provider and the account id are required. Half of a pair links an account that nothing can find again.",
+      "bad_request": "The node could not read that request. Check the fields and try again.",
+      "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed."
+    }
   }
 }

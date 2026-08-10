@@ -3842,5 +3842,22 @@
       "admitted": "Đã kết nạp",
       "refused": "Bị từ chối"
     }
+  },
+  "auth": {
+    "not_signed_in": "Bạn chưa đăng nhập. Hãy đăng nhập với tư cách chủ sở hữu của nút này rồi thử lại.",
+    "not_the_owner": "Bạn đã đăng nhập, nhưng không phải với tư cách chủ sở hữu của nút này. Hành động này cần tài khoản chủ sở hữu (toàn quyền truy cập).",
+    "oauth": {
+      "no_local_identity": "Tài khoản đó đã đăng nhập thành công, nhưng nút này không có danh tính nào được liên kết với nó. Hãy nhận quyền sở hữu nút này bằng tài khoản đó, hoặc yêu cầu chủ sở hữu của nút liên kết nó.",
+      "store_unavailable": "Nút không thể đọc kho danh tính của mình, nên không thể hoàn tất việc đăng nhập. Đây là sự cố của nút, không phải của tài khoản bạn."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Tài khoản đó đã được liên kết với một danh tính khác trên nút này. Hãy hủy liên kết ở đó trước — một tài khoản nhà cung cấp chỉ thuộc về một danh tính.",
+      "bad_request": "Nút không thể đọc được yêu cầu đó. Hãy kiểm tra các trường thông tin và thử lại.",
+      "incomplete_pair": "Cần có cả nhà cung cấp lẫn mã tài khoản. Một nửa của cặp này sẽ liên kết một tài khoản mà sau đó không gì tìm lại được.",
+      "no_such_identity": "Không có danh tính nào như vậy trên nút này để liên kết tài khoản vào.",
+      "node_unowned": "Nút này chưa có chủ sở hữu, nên chưa có danh tính nào để liên kết tài khoản vào. Hãy nhận quyền sở hữu nút trước.",
+      "store_unavailable": "Nút không thể ghi liên kết vì kho danh tính của nó không khả dụng. Không có gì bị thay đổi."
+    },
+    "session_expired": "Phiên làm việc của bạn không còn hiệu lực. Hãy đăng nhập lại để tiếp tục."
   }
 }

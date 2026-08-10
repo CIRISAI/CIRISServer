@@ -952,6 +952,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         initial_config.oauth_callback_base_url.clone(),
                     ))
+                    // Link an OAuth identity onto an EXISTING certificate — the
+                    // port of the agent's `link_oauth_identity`. Sign-in could
+                    // resolve a pair but nothing could establish one except the
+                    // claim, so an owner who set the node up with a portable
+                    // fed-ID and then signed in with Google became a second
+                    // identity on their own node. This is "join your existing
+                    // self".
+                    .merge(crate::auth::oauth_link::router(Arc::clone(&engine)))
                     // API keys + service-token revocation
                     .merge(crate::auth::api_keys::router(Arc::clone(&engine)))
                     // device-authorization grant (RFC 8628 shape): authorize an

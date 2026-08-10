@@ -3842,5 +3842,22 @@
       "admitted": "Diterima",
       "refused": "Ditolak"
     }
+  },
+  "auth": {
+    "not_signed_in": "Anda belum masuk. Masuklah sebagai pemilik node ini, lalu coba lagi.",
+    "not_the_owner": "Anda sudah masuk, tetapi bukan sebagai pemilik node ini. Tindakan ini memerlukan akun pemilik (akses penuh).",
+    "oauth": {
+      "no_local_identity": "Akun tersebut berhasil masuk, tetapi node ini tidak memiliki identitas yang tertaut dengannya. Klaim node ini dengan akun tersebut, atau minta pemilik node untuk menautkannya.",
+      "store_unavailable": "Node tidak dapat membaca penyimpanan identitasnya, sehingga proses masuk tidak dapat diselesaikan. Ini adalah masalah pada node, bukan pada akun Anda."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Akun tersebut sudah tertaut ke identitas lain pada node ini. Batalkan tautannya di sana terlebih dahulu — satu akun penyedia hanya untuk satu identitas.",
+      "bad_request": "Node tidak dapat membaca permintaan tersebut. Periksa kolom isian dan coba lagi.",
+      "incomplete_pair": "Penyedia dan id akun keduanya wajib diisi. Setengah pasangan akan menautkan akun yang tidak dapat ditemukan lagi.",
+      "no_such_identity": "Tidak ada identitas seperti itu pada node ini untuk ditautkan dengan akun tersebut.",
+      "node_unowned": "Node ini belum memiliki pemilik, jadi tidak ada identitas untuk ditautkan dengan sebuah akun. Klaim node terlebih dahulu.",
+      "store_unavailable": "Node tidak dapat menulis tautan tersebut karena penyimpanan identitasnya tidak tersedia. Tidak ada yang diubah."
+    },
+    "session_expired": "Sesi Anda sudah tidak berlaku. Masuk lagi untuk melanjutkan."
   }
 }

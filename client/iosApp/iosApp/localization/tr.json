@@ -3842,5 +3842,22 @@
       "admitted": "Kabul edildi",
       "refused": "Reddedildi"
     }
+  },
+  "auth": {
+    "not_signed_in": "Oturum açmadınız. Bu düğümün sahibi olarak oturum açın ve tekrar deneyin.",
+    "not_the_owner": "Oturum açtınız, ancak bu düğümün sahibi olarak değil. Bu işlem sahip hesabını (tam erişim) gerektirir.",
+    "oauth": {
+      "no_local_identity": "Bu hesapla oturum açma başarılı oldu, ancak bu düğümde bu hesaba bağlı bir kimlik yok. Bu hesapla düğümün sahipliğini alın veya düğümün sahibinden bağlamasını isteyin.",
+      "store_unavailable": "Düğüm kimlik deposunu okuyamadı, bu nedenle oturum açma tamamlanamadı. Bu, hesabınızla değil düğümle ilgili bir sorundur."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Bu hesap bu düğümdeki başka bir kimliğe zaten bağlı. Önce oradaki bağlantıyı kaldırın — bir sağlayıcı hesabı tek bir kimliğe aittir.",
+      "bad_request": "Düğüm bu isteği okuyamadı. Alanları kontrol edip tekrar deneyin.",
+      "incomplete_pair": "Hem sağlayıcı hem de hesap kimliği gereklidir. Çiftin yarısı, bir daha hiçbir şeyin bulamayacağı bir hesabı bağlar.",
+      "no_such_identity": "Bu düğümde hesabın bağlanabileceği böyle bir kimlik yok.",
+      "node_unowned": "Bu düğümün henüz bir sahibi yok, bu nedenle hesabın bağlanabileceği bir kimlik de yok. Önce düğümün sahipliğini alın.",
+      "store_unavailable": "Kimlik deposu kullanılamadığı için düğüm bağlantıyı yazamadı. Hiçbir şey değiştirilmedi."
+    },
+    "session_expired": "Oturumunuz artık geçerli değil. Devam etmek için tekrar oturum açın."
   }
 }

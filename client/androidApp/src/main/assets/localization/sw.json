@@ -3842,5 +3842,22 @@
       "admitted": "Imekubaliwa",
       "refused": "Imekataliwa"
     }
+  },
+  "auth": {
+    "not_signed_in": "Hujaingia. Ingia kama mmiliki wa nodi hii, kisha ujaribu tena.",
+    "not_the_owner": "Umeingia, lakini si kama mmiliki wa nodi hii. Kitendo hiki kinahitaji akaunti ya mmiliki (ufikiaji kamili).",
+    "oauth": {
+      "no_local_identity": "Akaunti hiyo imeingia kwa mafanikio, lakini nodi hii haina utambulisho uliounganishwa nayo. Dai nodi hii kwa akaunti hii, au mwombe mmiliki wa nodi aiunganishe.",
+      "store_unavailable": "Nodi haikuweza kusoma hifadhi yake ya utambulisho, hivyo kuingia hakukukamilika. Hili ni tatizo la nodi, si la akaunti yako."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Akaunti hiyo tayari imeunganishwa na utambulisho mwingine kwenye nodi hii. Itenganishe huko kwanza — akaunti moja ya mtoa huduma ni ya utambulisho mmoja.",
+      "bad_request": "Nodi haikuweza kusoma ombi hilo. Angalia sehemu na ujaribu tena.",
+      "incomplete_pair": "Mtoa huduma na kitambulisho cha akaunti vyote vinahitajika. Nusu ya jozi huunganisha akaunti ambayo hakuna kitu kitakachoipata tena.",
+      "no_such_identity": "Hakuna utambulisho kama huo kwenye nodi hii wa kuunganisha akaunti nao.",
+      "node_unowned": "Nodi hii bado haina mmiliki, hivyo hakuna utambulisho wa kuunganisha akaunti nao. Dai nodi kwanza.",
+      "store_unavailable": "Nodi haikuweza kuandika kiungo kwa sababu hifadhi yake ya utambulisho haipatikani. Hakuna kilichobadilishwa."
+    },
+    "session_expired": "Kipindi chako hakitumiki tena. Ingia tena ili kuendelea."
   }
 }

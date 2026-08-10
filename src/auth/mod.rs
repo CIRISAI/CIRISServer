@@ -47,6 +47,7 @@ pub mod erasure;
 pub mod gate;
 pub mod loopback;
 pub mod oauth;
+pub mod oauth_link;
 /// Self-occurrence **enrollment** (CIRISServer#76): add a second device (e.g. a
 /// phone) as an occurrence of your self so a hardware-sealed fed-ID survives the
 /// loss of its first device, and revoke a lost/stolen device. The clean,

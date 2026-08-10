@@ -3842,5 +3842,22 @@
       "admitted": "Admitida",
       "refused": "Recusada"
     }
+  },
+  "auth": {
+    "not_signed_in": "Não tem sessão iniciada. Inicie sessão como proprietário deste nó e tente novamente.",
+    "not_the_owner": "Iniciou sessão, mas não como proprietário deste nó. Esta ação requer a conta do proprietário (acesso total).",
+    "oauth": {
+      "no_local_identity": "Essa conta iniciou sessão com êxito, mas este nó não tem nenhuma identidade associada a ela. Reivindique este nó com esta conta ou peça ao proprietário do nó que a associe.",
+      "store_unavailable": "O nó não conseguiu ler o seu repositório de identidades, pelo que não foi possível concluir o início de sessão. O problema é do nó, não da sua conta."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "Essa conta já está associada a outra identidade neste nó. Desassocie-a aí primeiro — uma conta de fornecedor pertence a uma só identidade.",
+      "bad_request": "O nó não conseguiu ler esse pedido. Verifique os campos e tente novamente.",
+      "incomplete_pair": "São necessários tanto o fornecedor como o id da conta. Metade de um par associa uma conta que nada volta a encontrar.",
+      "no_such_identity": "Não existe essa identidade neste nó à qual associar a conta.",
+      "node_unowned": "Este nó ainda não tem proprietário, pelo que não há nenhuma identidade à qual associar uma conta. Reivindique primeiro o nó.",
+      "store_unavailable": "O nó não conseguiu escrever a associação porque o seu repositório de identidades está indisponível. Nada foi alterado."
+    },
+    "session_expired": "A sua sessão já não é válida. Inicie sessão novamente para continuar."
   }
 }

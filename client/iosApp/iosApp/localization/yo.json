@@ -3842,5 +3842,22 @@
       "admitted": "A gbà wọlé",
       "refused": "A kọ̀"
     }
+  },
+  "auth": {
+    "not_signed_in": "O kò tí ì wọlé. Wọlé gẹ́gẹ́ bí ẹni tí ó ni node yìí, lẹ́yìn náà gbìyànjú lẹ́ẹ̀kan sí i.",
+    "not_the_owner": "O ti wọlé, ṣùgbọ́n kì í ṣe gẹ́gẹ́ bí ẹni tí ó ni node yìí. Ìṣe yìí nílò àkàǹtì olóhun (ìwọlé kíkún).",
+    "oauth": {
+      "no_local_identity": "Àkàǹtì yẹn wọlé ní àṣeyọrí, ṣùgbọ́n node yìí kò ní ìdánimọ̀ kankan tí a so mọ́ ọn. Gba node yìí pẹ̀lú àkàǹtì yìí, tàbí bèèrè lọ́wọ́ ẹni tí ó ni node náà kí ó so ó mọ́ ọn.",
+      "store_unavailable": "Node náà kò lè ka ilé-ìtọ́jú ìdánimọ̀ rẹ̀, nítorí náà a kò lè parí ìwọlé. Ìṣòro node náà ni èyí, kì í ṣe ti àkàǹtì rẹ."
+    },
+    "oauth_link": {
+      "already_linked_elsewhere": "A ti so àkàǹtì yẹn mọ́ ìdánimọ̀ mìíràn lórí node yìí. Tú u sílẹ̀ níbẹ̀ ní àkọ́kọ́ — àkàǹtì olùpèsè kan jẹ́ ti ìdánimọ̀ kan ṣoṣo.",
+      "bad_request": "Node náà kò lè ka ìbéèrè yẹn. Ṣàyẹ̀wò àwọn àyè náà kí o sì tún gbìyànjú.",
+      "incomplete_pair": "A nílò olùpèsè àti id àkàǹtì méjèèjì. Ìdajì tọ́kọtaya kan yóò so àkàǹtì tí kò sí ohun tí ó lè rí i mọ́.",
+      "no_such_identity": "Kò sí ìdánimọ̀ bẹ́ẹ̀ lórí node yìí láti so àkàǹtì náà mọ́.",
+      "node_unowned": "Node yìí kò tí ì ní olóhun, nítorí náà kò sí ìdánimọ̀ tí a lè so àkàǹtì mọ́. Gba node náà ní àkọ́kọ́.",
+      "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà."
+    },
+    "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú."
   }
 }
