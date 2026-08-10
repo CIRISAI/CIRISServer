@@ -150,9 +150,80 @@ struct ProviderConfig {
     metadata: serde_json::Value,
 }
 
-#[derive(Default)]
+/// **The CIRIS Google DESKTOP-app OAuth client, shipped in the wheel.**
+///
+/// # Why a secret is in committed source, and why this one only
+///
+/// RFC 8252 §8.5: a natively-installed app is a PUBLIC client — it cannot keep a
+/// secret, because the secret ships wherever the binary ships. Google issues one
+/// for the *Desktop app* client type anyway and documents it as not confidential
+/// ("in this context, the client secret is obviously not treated as a secret"),
+/// because it authenticates nothing on its own. What actually binds an
+/// authorization code to THIS client is PKCE (RFC 7636): the verifier is
+/// generated per-flow, never leaves the node, and the exchange fails without it.
+/// Every authorize URL this module builds carries `code_challenge` +
+/// `code_challenge_method=S256`, and every exchange sends `code_verifier`.
+///
+/// **The distinction that matters:** the CIRIS *Web application* client
+/// (`…-l421…`, rendered into the lens/billing hosts by ansible) has a genuinely
+/// confidential secret and MUST NOT be embedded — a web client's secret is a
+/// bearer credential for the client itself. This is the DESKTOP client, minted
+/// separately for exactly this purpose. If you ever find yourself reaching for
+/// the web pair to make a build work, that is the bug this comment exists to
+/// prevent.
+///
+/// Redirect: Google allows loopback redirects for desktop clients without
+/// registering each port, which is what lets this reach the local node on
+/// `http://127.0.0.1:4243/v1/auth/oauth/google/callback` (see
+/// [`oauth_callback_url`]).
+const BUILTIN_GOOGLE_DESKTOP_CLIENT_ID: &str =
+    option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+/// See [`BUILTIN_GOOGLE_DESKTOP_CLIENT_ID`] — public by design for a native app.
+const BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET: &str = option_env!("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET").unwrap_or("");
+/// The Android client (same project). Present so `native_audiences` accepts a
+/// phone's id_token — client IDs are public identifiers, never credentials.
+const BUILTIN_GOOGLE_ANDROID_CLIENT_ID: &str =
+    option_env!("CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+/// The Web client ID — the AUDIENCE Android's `requestIdToken` stamps. Its
+/// SECRET is confidential and lives only on the lens/billing hosts; only the
+/// public identifier appears here.
+const BUILTIN_GOOGLE_WEB_CLIENT_ID: &str =
+    option_env!("CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID").unwrap_or("");
+
 struct ProviderConfigStore {
     by_provider: HashMap<String, ProviderConfig>,
+}
+
+impl Default for ProviderConfigStore {
+    /// Google is configured OUT OF THE BOX.
+    ///
+    /// The store used to start empty, so a freshly-installed desktop node served
+    /// `/v1/auth/oauth/google/login` with no client and the only way to sign in
+    /// was for the operator to POST their own credentials to
+    /// `/v1/auth/oauth/providers` first — which nothing told them to do. Sign-in
+    /// is a first-run step, so requiring configuration BEFORE first run made the
+    /// documented path unreachable.
+    ///
+    /// `configure_provider` still overwrites this: an operator with their own
+    /// Google client (or a fork) POSTs it and their value wins. This is a
+    /// DEFAULT, not a lock.
+    fn default() -> Self {
+        let mut by_provider = HashMap::new();
+        by_provider.insert(
+            "google".to_string(),
+            ProviderConfig {
+                client_id: BUILTIN_GOOGLE_DESKTOP_CLIENT_ID.to_string(),
+                client_secret: BUILTIN_GOOGLE_DESKTOP_CLIENT_SECRET.to_string(),
+                metadata: serde_json::json!({
+                    "builtin": true,
+                    "client_type": "desktop",
+                    "android_client_id": BUILTIN_GOOGLE_ANDROID_CLIENT_ID,
+                    "web_client_id": BUILTIN_GOOGLE_WEB_CLIENT_ID,
+                }),
+            },
+        );
+        Self { by_provider }
+    }
 }
 
 // ─── The outbound-HTTP seam (scaffolded) ────────────────────────────────────
@@ -580,14 +651,23 @@ impl HttpProviderClient {
             .await
             .map_err(|e| format!("google tokeninfo decode: {e}"))?;
 
-        // aud — skipped when no audiences configured (the agent's on-device mode).
-        if !allowed_audiences.is_empty() {
-            let aud = info.get("aud").and_then(|v| v.as_str()).unwrap_or("");
-            if !allowed_audiences.iter().any(|a| a == aud) {
-                return Err(
-                    "Token was not issued for this application (audience mismatch).".into(),
-                );
-            }
+        // aud — FAIL CLOSED. "No audiences configured" is not "any audience is
+        // acceptable": skipping the check accepts an id_token minted for SOMEONE
+        // ELSE'S Google client, which is the confused-deputy this claim exists to
+        // stop. The owner signs into an unrelated site, that site receives a token
+        // carrying the owner's `sub`, and replaying it here used to authenticate
+        // as the owner — now that a claim binds ROOT to `(google, sub)`
+        // (CIRISServer#384) that is the SYSTEM_ADMIN session.
+        //
+        // The two providers disagreed about what an empty list MEANT — Apple
+        // below refuses, Google skipped — which is the distinct-zeroes bug:
+        // "nothing configured" read as "nothing to enforce". They now agree.
+        if allowed_audiences.is_empty() {
+            return Err("Google native auth is not configured for this application.".into());
+        }
+        let aud = info.get("aud").and_then(|v| v.as_str()).unwrap_or("");
+        if !allowed_audiences.iter().any(|a| a == aud) {
+            return Err("Token was not issued for this application (audience mismatch).".into());
         }
         // iss
         let iss = info.get("iss").and_then(|v| v.as_str()).unwrap_or("");
@@ -977,7 +1057,12 @@ fn native_audiences(store: &ProviderConfigStore, provider: &str) -> Vec<String> 
         auds.push(cfg.client_id.clone());
     }
     let fields: &[&str] = match provider {
-        "google" => &["android_client_id"],
+        // `web_client_id` is NOT redundant with the desktop `client_id`: Android's
+        // GoogleSignIn `requestIdToken(WEB_CLIENT_ID)` mints a token whose `aud`
+        // is the WEB client, not the Android one — so a node that accepted only
+        // its own client_id would reject every phone. Three surfaces, three
+        // audiences, one identity.
+        "google" => &["android_client_id", "web_client_id"],
         "apple" => &["ios_client_id", "native_client_id", "bundle_id"],
         _ => &[],
     };
@@ -1206,5 +1291,69 @@ mod tests {
         assert!(is_safe_redirect("http://127.0.0.1:3000/cb"));
         assert!(!is_safe_redirect("http://evil.example.com"));
         assert!(!is_safe_redirect("javascript:alert(1)"));
+    }
+
+    /// Google is usable the moment the node boots — no operator step first.
+    ///
+    /// The store shipped EMPTY, so a fresh desktop install served
+    /// `/v1/auth/oauth/google/login` with no client and sign-in was impossible
+    /// until someone POSTed credentials to `/v1/auth/oauth/providers`. Sign-in is
+    /// a FIRST-RUN step, so "configure it before first run" was unreachable.
+    #[test]
+    fn google_is_configured_out_of_the_box() {
+        let store = ProviderConfigStore::default();
+        let cfg = store
+            .by_provider
+            .get("google")
+            .expect("google configured at boot");
+        assert!(cfg.client_id.ends_with(".apps.googleusercontent.com"));
+        assert!(!cfg.client_secret.is_empty(), "desktop exchange needs it");
+        // The DESKTOP client, never the web one — the web secret is confidential
+        // and must never reach a distributed wheel.
+        assert_eq!(cfg.metadata.get("client_type").unwrap(), "desktop");
+        assert_ne!(cfg.client_id, BUILTIN_GOOGLE_WEB_CLIENT_ID);
+    }
+
+    /// All THREE surfaces authenticate: desktop, Android, and the web audience
+    /// Android's `requestIdToken` actually stamps.
+    #[test]
+    fn native_audiences_cover_every_google_surface() {
+        let auds = native_audiences(&ProviderConfigStore::default(), "google");
+        for expected in [
+            BUILTIN_GOOGLE_DESKTOP_CLIENT_ID,
+            BUILTIN_GOOGLE_ANDROID_CLIENT_ID,
+            BUILTIN_GOOGLE_WEB_CLIENT_ID,
+        ] {
+            assert!(auds.iter().any(|a| a == expected), "missing {expected}");
+        }
+    }
+
+    /// An UNCONFIGURED provider yields NO audiences — and the verifier must read
+    /// that as "refuse", never as "skip the check".
+    ///
+    /// Google's native path used to skip `aud` when the list was empty while
+    /// Apple refused: the same zero meaning opposite things. Skipping accepts an
+    /// id_token minted for someone else's Google client, and since a claim binds
+    /// ROOT to `(google, sub)` (CIRISServer#384) that is the owner's SYSTEM_ADMIN
+    /// session. This pins the EMPTY case, which is the one that regressed.
+    #[test]
+    fn an_unconfigured_provider_has_no_audiences_to_accept() {
+        let empty = ProviderConfigStore {
+            by_provider: std::collections::HashMap::new(),
+        };
+        assert!(native_audiences(&empty, "google").is_empty());
+        assert!(native_audiences(&empty, "apple").is_empty());
+        // And BOTH providers refuse rather than skip. Counted per-provider: a
+        // single shared substring would also match this assertion's own literal
+        // and pass on its own text.
+        let src = include_str!("oauth.rs");
+        for provider in ["Google", "Apple"] {
+            assert!(
+                src.contains(&format!(
+                    "{provider} native auth is not configured for this application."
+                )),
+                "{provider} must REFUSE an empty audience list, not skip the aud check"
+            );
+        }
     }
 }
