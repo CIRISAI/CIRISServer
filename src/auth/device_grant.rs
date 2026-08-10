@@ -159,6 +159,38 @@ fn with_constraints(
     envelope
 }
 
+/// Stamp the **re-delegation budget** onto a `delegates_to` envelope.
+///
+/// persist v30.8.0 reads these two keys directly off the envelope
+/// (`delegation_sub_delegation_depth`, `enforce_attenuation_and_sub_delegation`),
+/// so they are ENVELOPE fields, not scope tokens. Worth stating because
+/// `sub_delegation` is ALSO a legacy agency SCOPE token in
+/// [`super::ownership::LEGACY_AGENCY_KINDS`], where it is rejected — one word,
+/// two axes. This is the field; that is the token; they are unrelated.
+///
+/// Absent `sub_delegation` writes NOTHING rather than an explicit depth, so
+/// existing envelopes stay byte-identical and the substrate's own default is
+/// what decides — a node reading an older row must not see a field the author
+/// never expressed an opinion about.
+///
+/// `sub_delegation` ITSELF is persist's own third parameter on
+/// `delegates_to_envelope`, so it is not stamped here; only the depth is, since
+/// the helper predates v30.8.0. The flag is still taken as an argument so the
+/// depth cannot be written without it.
+fn with_sub_delegation_depth(
+    mut envelope: serde_json::Value,
+    sub_delegation: bool,
+    depth: Option<u32>,
+) -> serde_json::Value {
+    if !sub_delegation {
+        return envelope;
+    }
+    if let (Some(obj), Some(d)) = (envelope.as_object_mut(), depth) {
+        obj.insert("sub_delegation_depth".to_string(), serde_json::json!(d));
+    }
+    envelope
+}
+
 /// Resolve the LOCAL owner's federation signer (re-opening its hardware/software
 /// custody from the conventional seed path). For a hardware-backed identity the
 /// caller's subsequent `sign_hybrid` BLOCKS until the key is inserted + touched.
@@ -361,6 +393,28 @@ struct DelegateRequest {
     /// grant); the server never-list applies regardless. See `DelegationConstraints`.
     #[serde(default)]
     constraints: Option<DelegationConstraints>,
+    /// **May the delegate pass this scope on?** Default `false` — a grant confers
+    /// the duty, not the right to hand it out, and that has to be the default
+    /// because the permissive reading of an absent field is unrecoverable once
+    /// signed.
+    ///
+    /// Delegating moderation is the case this exists for (CIRISServer#383): a
+    /// holder given `slash` to clear the exposed keys may in turn need to deputise,
+    /// and before persist v30.8.0 there was no way to say so — the choice was
+    /// grant-everything or grant-nothing.
+    #[serde(default)]
+    sub_delegation: bool,
+    /// **How far the chain may run below the delegate**, when [`Self::sub_delegation`]
+    /// is set. `None` = one hop (they may deputise; those deputies may not).
+    ///
+    /// persist v30.8.0 reads this off the envelope
+    /// (`delegation_sub_delegation_depth`) and `enforce_attenuation_and_sub_delegation`
+    /// walks it, capped by `MAX_MODERATION_DELEGATION_DEPTH`. Meaningless without
+    /// `sub_delegation` — and rather than silently ignoring it, the handler refuses,
+    /// because a depth the operator typed and the graph never received is a budget
+    /// they will believe they granted.
+    #[serde(default)]
+    sub_delegation_depth: Option<u32>,
 }
 
 /// Register a freshly-MINTED agent key into `federation_keys` so the device flow's
@@ -566,6 +620,20 @@ async fn delegate(
     // Owner-initiated: the owner declares the constraints up front (carried onto
     // the grant AND into the durable signed edge below).
     let constraints = req.constraints.clone().unwrap_or_default();
+    // The re-delegation budget (persist v30.8.0). REFUSE a depth without the
+    // flag rather than dropping it: the operator typed a budget, and silently
+    // ignoring it leaves them believing they granted something they did not —
+    // which is the whole failure shape this cut has been chasing.
+    let sub_delegation = req.sub_delegation;
+    let sub_delegation_depth = req.sub_delegation_depth;
+    if sub_delegation_depth.is_some() && !sub_delegation {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "sub_delegation_depth was supplied without sub_delegation=true — a depth budget \
+             means nothing unless the delegate may pass the scope on. Set sub_delegation, or \
+             omit the depth.",
+        );
+    }
     {
         let grant = DeviceGrant {
             user_code: user_code.clone(),
@@ -593,13 +661,20 @@ async fn delegate(
         Ok(s) => s,
         Err(resp) => return resp,
     };
-    let envelope = with_constraints(
-        ciris_persist::federation::delegates_to_envelope(
-            &client_id,
-            std::slice::from_ref(&scope),
-            false,
+    // The re-delegation budget: `sub_delegation` is persist's OWN third
+    // parameter, so it is passed there rather than stamped on afterwards; only
+    // the depth needs adding, because the helper predates it (v30.8.0).
+    let envelope = with_sub_delegation_depth(
+        with_constraints(
+            ciris_persist::federation::delegates_to_envelope(
+                &client_id,
+                std::slice::from_ref(&scope),
+                sub_delegation,
+            ),
+            &constraints,
         ),
-        &constraints,
+        sub_delegation,
+        sub_delegation_depth,
     );
     let attestation_id = match crate::auth::ownership::emit_signed_attestation(
         &st.engine,

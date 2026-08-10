@@ -363,15 +363,15 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
 /// claim succeeded and then the owner could authenticate to NOTHING — age band
 /// and announce were silently skipped while the wizard still reported success.
 ///
-/// The fix is not a new route: `create_oauth_user` (the sign-in write) resolves
-/// `get_by_oauth` BEFORE minting, so a ROOT cert carrying `(provider, sub)` is
-/// found and returned. This asserts the property that matters to the user —
+/// The fix is not a new route: `resolve_oauth_user` (the sign-in path) looks up
+/// `get_by_oauth`, so a ROOT cert carrying `(provider, sub)` is found and
+/// returned. This asserts the property that matters to the user —
 /// signing in with Google lands on the OWNER cert, at ROOT/SYSTEM_ADMIN — and
 /// asserts the pre-fix behaviour is genuinely different, so the test would fail
 /// against a ROOT minted with `oauth_provider: None`.
 #[tokio::test]
 async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
-    use ciris_server::auth::oauth::{create_oauth_user, OAuthIdentity};
+    use ciris_server::auth::oauth::{resolve_oauth_user, OAuthIdentity};
     use ciris_server::auth::roles::UserRole;
 
     let t = target_node(T_NODE_KEY_ID).await;
@@ -412,12 +412,12 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
     );
 
     // THE PROPERTY: the owner signs in with Google and gets the OWNER cert.
-    // `create_oauth_user` is handed the LOWEST role on purpose — if it minted a
-    // fresh row (the #384 behaviour) this returns an `oauth-google-…` observer,
-    // and the owner still cannot record an age band or announce.
-    let wa_id = create_oauth_user(&t, &ident, UserRole::Observer)
+    // Resolve-only: if this ever mints again (the pre-#386 behaviour) it returns
+    // an `oauth-google-…` row instead, and the owner still cannot record an age
+    // band or announce.
+    let wa_id = resolve_oauth_user(&t, &ident)
         .await
-        .expect("oauth sign-in resolves");
+        .expect("oauth sign-in resolves to a local identity");
     assert_eq!(
         wa_id, root.wa_id,
         "OAuth sign-in must resolve to the OWNER ROOT cert, not mint a new user"

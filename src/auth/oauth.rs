@@ -1,16 +1,22 @@
 //! OAuth front-door (CIRISServer#9) — the human-login entry point.
 //!
-//! OAuth authenticates the **human**; the result resolves to a self identity +
-//! session. The flow rides the SAME substrate OAuth-user storage the agent used:
-//! `wa_cert` rows keyed by `(oauth_provider, oauth_external_id)` via the partial
-//! `wa_cert_oauth` index (`WaCertService::get_by_oauth` / `upsert_wa_cert`). The
-//! agent's `create_oauth_user` was exactly an upsert into this table.
+//! OAuth authenticates the **human**; the result RESOLVES to a local identity +
+//! session. Resolution reads `wa_cert` rows keyed by
+//! `(oauth_provider, oauth_external_id)` via the partial `wa_cert_oauth` index
+//! (`WaCertService::get_by_oauth`).
+//!
+//! This header used to claim "the agent's `create_oauth_user` was exactly an
+//! upsert into this table". **It was not**, and a live desktop sign-in is what
+//! proved it — see [`resolve_oauth_user`]. The agent keeps OAuth users in an
+//! in-memory dict with no key material; `wa_cert` is keyed on a public key. The
+//! port fused the two and wrote an empty `pubkey`, which persist refuses, so the
+//! write had never once succeeded on any node.
 //!
 //! Routes (port of `routes/auth.py`):
 //! - `GET  /v1/auth/oauth/providers`            — list configured providers.
 //! - `POST /v1/auth/oauth/providers`            — configure a provider.
 //! - `GET  /v1/auth/oauth/{provider}/login`     — start the flow (CSRF state).
-//! - `GET  /v1/auth/oauth/{provider}/callback`  — exchange + create_oauth_user + session.
+//! - `GET  /v1/auth/oauth/{provider}/callback`  — exchange + resolve + session.
 //! - `POST /v1/auth/native/google`              — native Google id_token login.
 //! - `POST /v1/auth/native/apple`               — native Apple id_token login.
 //!
@@ -793,11 +799,131 @@ impl HttpProviderClient {
 
 // ─── create_oauth_user — the substrate write (PORTED) ───────────────────────
 
-/// Port of the agent's `auth_service.create_oauth_user`: upsert a `wa_cert` row
-/// keyed by `(oauth_provider, oauth_external_id)` (TokenType::Oauth). Returns the
-/// `wa_id`. Idempotent — re-login updates `last_login` / claims, preserves
-/// `created` (substrate upsert semantics).
-pub async fn create_oauth_user(
+/// **Resolve** a `wa_cert` for an authenticated OAuth identity, keyed by
+/// `(oauth_provider, oauth_external_id)`. Returns the `wa_id`, or
+/// [`OAuthResolveError::NoLocalIdentity`] when this node holds no certificate
+/// bound to that account.
+///
+/// # This RESOLVES; it does not mint (CIRISServer#386)
+///
+/// The doc here used to say this was "the agent's `create_oauth_user` — exactly
+/// an upsert into this table". **That premise was wrong**, and a live desktop
+/// sign-in is what proved it: the agent's `create_oauth_user`
+/// (`api/services/auth_service.py:476`) writes an `OAuthUser` into an IN-MEMORY
+/// dict with no key material anywhere. Nothing about it is a `wa_cert`.
+///
+/// Mapping it onto `wa_cert` fused two axes. `wa_cert` answers *"what key is
+/// this identity"* — the claim-minted ROOT carries the owner's federation
+/// `identity_key_id` in `pubkey` — while an OAuth sign-in answers *"which human
+/// authenticated"*, and that human may hold no federation key at all. So the
+/// port wrote `pubkey: String::new()`, and persist refuses it in BOTH backends
+/// (`wa_cert/sqlite.rs:136`, `wa_cert/postgres.rs:58`:
+/// `InvalidArgument("pubkey required")`).
+///
+/// **That path had therefore never once succeeded.** Zero OAuth users were ever
+/// created on any node, and nothing said so — the tell being zero arrivals AND
+/// zero rejections. Unit coverage missed it because the owner path returns
+/// early from the lookup below and never reaches the write.
+///
+/// Rather than satisfy the constraint with a fabricated key — putting a non-key
+/// in a key column is the exact defect class this repo has spent months
+/// removing — an unbound account is REFUSED, with a reason a UI can render. A
+/// node's identities are federation keys plus whatever the owner has bound; a
+/// stranger with a Google account is not silently granted a keyless row that no
+/// act could ever be attributed to. Whether a node should represent keyless
+/// OAuth users at all is a design question, filed rather than answered here,
+/// because the agent's adoption does depend on the answer.
+pub async fn resolve_oauth_user(
+    engine: &Engine,
+    ident: &OAuthIdentity,
+) -> Result<String, OAuthResolveError> {
+    if let Some(existing) = store::get_by_oauth(engine, &ident.provider, &ident.external_id).await?
+    {
+        let _ = store::touch_login(engine, &existing.wa_id).await;
+        tracing::info!(
+            provider = %ident.provider,
+            subject = %redact_subject(&ident.external_id),
+            wa_id = %existing.wa_id,
+            role = ?existing.role,
+            "oauth sign-in resolved to a local identity"
+        );
+        return Ok(existing.wa_id);
+    }
+    // Name WHO was refused and WHY. The callback previously logged nothing at
+    // all about the identity, so a failure here was undiagnosable from the
+    // node's own logs — the operator saw a 500 and the node said nothing.
+    tracing::warn!(
+        provider = %ident.provider,
+        subject = %redact_subject(&ident.external_id),
+        "oauth sign-in REFUSED — no local identity is bound to this account on this node"
+    );
+    Err(OAuthResolveError::NoLocalIdentity {
+        provider: ident.provider.clone(),
+    })
+}
+
+/// Last 4 of a provider subject — enough to correlate two log lines, not enough
+/// to be an identifier lying around in a log file.
+fn redact_subject(sub: &str) -> String {
+    let tail: String = sub
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
+}
+
+/// Why an authenticated OAuth identity did not become a session.
+///
+/// Typed rather than a string so the UI can render an exhaustive, localized
+/// reason instead of echoing a store-internal message. The live failure read
+/// `store: wa_cert: invalid argument: pubkey required`, which tells an operator
+/// nothing they can act on.
+#[derive(Debug)]
+pub enum OAuthResolveError {
+    /// Authentication SUCCEEDED at the provider; this node simply has no
+    /// certificate bound to that account. Actionable: claim the node with this
+    /// account, or have the owner bind/grant it.
+    NoLocalIdentity { provider: String },
+    /// The substrate refused the read.
+    Store(store::StoreError),
+}
+
+impl From<store::StoreError> for OAuthResolveError {
+    fn from(e: store::StoreError) -> Self {
+        Self::Store(e)
+    }
+}
+
+impl OAuthResolveError {
+    /// Stable machine-readable id — the localization key the client binds, so
+    /// the operator reads their own language rather than English from a server.
+    pub fn reason_id(&self) -> &'static str {
+        match self {
+            Self::NoLocalIdentity { .. } => "auth.oauth.no_local_identity",
+            Self::Store(_) => "auth.oauth.store_unavailable",
+        }
+    }
+
+    /// English fallback, used only when the client's bundle lacks the id.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoLocalIdentity { provider } => format!(
+                "Signed in with {provider}, but this node has no identity linked to that account. \
+                 Claim this node with this account, or ask the node's owner to grant it access."
+            ),
+            Self::Store(e) => format!("The node could not read its identity store: {e}"),
+        }
+    }
+}
+
+/// Retained for the MINT path, which currently has no caller — see
+/// [`resolve_oauth_user`] for why a keyless `wa_cert` cannot be written.
+#[allow(dead_code)]
+async fn mint_oauth_user_unsupported(
     engine: &Engine,
     ident: &OAuthIdentity,
     role: UserRole,
@@ -1103,10 +1229,10 @@ async fn native_apple(State(st): State<OAuthState>, body: axum::body::Bytes) -> 
     native_login(&st, "apple", &body).await
 }
 
-/// Shared tail: determine role, create_oauth_user (substrate), return identity.
+/// Shared tail: determine role, RESOLVE the local identity, return it.
 async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
     let role = determine_role(&st.engine, ident.email.as_deref()).await;
-    match create_oauth_user(&st.engine, &ident, role).await {
+    match resolve_oauth_user(&st.engine, &ident).await {
         Ok(user_id) => {
             // Auto-mint ROOT for a SYSTEM_ADMIN OAuth user (CIRISServer#19, port of
             // `_auto_mint_system_admin_if_needed`): the first OAuth user (setup
@@ -1131,7 +1257,27 @@ async fn finish_oauth_login(st: &OAuthState, ident: OAuthIdentity) -> Response {
             )
                 .into_response()
         }
-        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+        // A TYPED refusal, carrying the localization id AND an English fallback.
+        // The live failure was `store: wa_cert: invalid argument: pubkey required`
+        // — a store-internal message an operator can do nothing with, at a 5xx
+        // that blamed the node for a request that was actually well-formed.
+        Err(e) => {
+            let status = match e {
+                // The provider authenticated them; WE have no binding. That is a
+                // 403 about authorization, not a 5xx about the node being broken.
+                OAuthResolveError::NoLocalIdentity { .. } => StatusCode::FORBIDDEN,
+                OAuthResolveError::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            (
+                status,
+                Json(serde_json::json!({
+                    "error": e.message(),
+                    "reason_id": e.reason_id(),
+                    "provider": ident.provider,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
