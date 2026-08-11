@@ -167,13 +167,21 @@ fn the_claim_response_carries_an_owner_session() {
 fn a_duplicate_holder_of_the_owners_provider_pair_is_retired() {
     let src = include_str!("../src/auth/bootstrap.rs");
     assert!(
-        src.contains("store::get_by_oauth(&st.engine, prov, ext)"),
-        "the claim must look up ANY cert holding the owner's provider pair — keying on the adopt \
-         path alone stopped firing the moment OAuth stopped minting ROOTs"
+        src.contains("store::live_oauth_holders(&st.engine, prov, ext)"),
+        "the claim must SCAN for holders of the owner's provider pair. Two earlier shapes were \
+         wrong: keying on the adopt path stopped firing the moment OAuth stopped minting ROOTs, \
+         and routing through `get_by_oauth` made the cleanup take the Err arm on the exact \
+         two-live-holders state it exists to resolve (Codex review) — retiring nothing and \
+         leaving sign-in ambiguous forever."
     );
     assert!(
-        src.contains("other.wa_id != wa_id"),
-        "…and retire it only when it is NOT the owner itself"
+        !src.contains("store::get_by_oauth(&st.engine, prov, ext)"),
+        "the cleanup must NOT use the fail-closed reader — a repair path cannot depend on a \
+         reader that refuses the state the repair is for"
+    );
+    assert!(
+        src.contains("c.wa_id != wa_id"),
+        "…and retire only the holders that are NOT the owner"
     );
     assert!(
         src.contains("set_active(&st.engine, &other.wa_id, false)"),

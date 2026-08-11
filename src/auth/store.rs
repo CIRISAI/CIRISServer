@@ -89,6 +89,44 @@ pub fn revocation_backend(
 
 /// Look up a WA cert by its OAuth `(provider, external_id)` — the OAuth login
 /// path (hits the partial `wa_cert_oauth` index). `None` if no linked cert.
+/// Every LIVE cert claiming `(provider, external_id)`.
+///
+/// Separate from [`get_by_oauth`] because two callers want DIFFERENT things from
+/// the same scan, and conflating them broke the claim (found in review by Codex
+/// on the 0.5.168 PR):
+///
+/// - **Sign-in** wants one answer and must REFUSE when there are several —
+///   picking one is how a human gets signed in with the wrong rights.
+/// - **The claim's cleanup** wants exactly the multi-holder case, because
+///   PRODUCING it is what it exists to resolve: the claim has just stamped the
+///   owner's pair onto the owner, so the pre-claim OAuth cert and the owner BOTH
+///   hold it. Routing that cleanup through the fail-closed resolver made it take
+///   the `Err` arm and retire nothing — leaving sign-in permanently ambiguous,
+///   which is worse than the duplicate it was meant to remove.
+///
+/// A fail-closed READER and a REPAIR path cannot share an entry point: the
+/// repair exists precisely for the state the reader refuses.
+pub async fn live_oauth_holders(
+    engine: &Engine,
+    provider: &str,
+    external_id: &str,
+) -> Result<Vec<WaCert>, StoreError> {
+    let mut live: Vec<WaCert> = Vec::new();
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        live.extend(
+            list_by_role(engine, role, 128)
+                .await?
+                .into_iter()
+                .filter(|c| {
+                    c.active
+                        && c.oauth_provider.as_deref() == Some(provider)
+                        && c.oauth_external_id.as_deref() == Some(external_id)
+                }),
+        );
+    }
+    Ok(live)
+}
+
 /// Resolve a provider pair to its WA cert. **RETIRED CERTS DO NOT ANSWER**
 /// (CIRISServer#395).
 ///
@@ -138,19 +176,7 @@ pub async fn get_by_oauth(
     // "Two certs claim this identity" is not a question with a best answer; it
     // is a broken invariant. Refusing says so at the door, as one line in a log,
     // instead of a 403 three screens later.
-    let mut live: Vec<WaCert> = Vec::new();
-    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
-        live.extend(
-            list_by_role(engine, role, 128)
-                .await?
-                .into_iter()
-                .filter(|c| {
-                    c.active
-                        && c.oauth_provider.as_deref() == Some(provider)
-                        && c.oauth_external_id.as_deref() == Some(external_id)
-                }),
-        );
-    }
+    let mut live = live_oauth_holders(engine, provider, external_id).await?;
     match live.len() {
         0 => {
             // Nothing live in the scanned roles — let the index answer, still

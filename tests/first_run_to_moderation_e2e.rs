@@ -249,3 +249,64 @@ async fn two_live_certs_claiming_one_identity_refuse_rather_than_choose() {
          silently signed in as an observer on their own node."
     );
 }
+
+/// **The claim's cleanup must survive its own fail-closed reader** (#397/#398).
+///
+/// This is the regression Codex caught, and the reason it escaped the test above
+/// is worth recording: that test MODELS the claim (upsert the owner, deactivate
+/// the duplicate) rather than calling `setup_root`. It asserted the state I
+/// intended the claim to leave, so it could not see that the claim had stopped
+/// being able to leave it.
+///
+/// A test that reproduces the post-state of the code under test proves the
+/// post-state is coherent. It proves nothing about whether the code still
+/// reaches it. Here the cleanup routed through `get_by_oauth`, which by then
+/// REFUSED the exact two-live-holders state the cleanup exists to resolve — so
+/// it retired nothing, and sign-in stayed ambiguous forever.
+///
+/// So this pins the PRIMITIVE the cleanup depends on: the scan must SEE both
+/// holders at the moment the resolver refuses them.
+#[tokio::test]
+async fn the_scan_sees_what_the_resolver_refuses() {
+    let hs = holders();
+    arm(&hs);
+    let node_id = Identity::new("e2e-repair-node");
+    let e = engine(&node_id).await;
+
+    let signed_in =
+        oauth::test_support_resolve_oauth_user(&e, "google", GOOGLE_SUBJECT, Some("eric@ciris.ai"))
+            .await
+            .expect("first sign-in creates");
+
+    // The claim stamps the pair onto the owner — now BOTH are live.
+    let owner_wa = format!("wa-root-{OWNER_FEDID}");
+    let mut owner = store::get(&e, &signed_in).await.unwrap().unwrap();
+    owner.wa_id = owner_wa.clone();
+    owner.jwt_kid = format!("kid-{owner_wa}");
+    owner.role = WaRole::Root;
+    store::upsert(&e, owner).await.expect("bind the owner");
+
+    // The READER refuses this state — correctly.
+    assert!(
+        store::get_by_oauth(&e, "google", GOOGLE_SUBJECT)
+            .await
+            .is_err(),
+        "two live holders must make the sign-in resolver refuse"
+    );
+
+    // …and the REPAIR path must still be able to see and fix it. Sharing one
+    // entry point is what silently disabled the cleanup.
+    let holders_seen = store::live_oauth_holders(&e, "google", GOOGLE_SUBJECT)
+        .await
+        .expect("the scan must not refuse — it exists FOR this state");
+    assert_eq!(
+        holders_seen.len(),
+        2,
+        "the scan must see BOTH holders at the moment the resolver refuses them, or the claim \
+         cannot retire the duplicate and sign-in stays ambiguous forever"
+    );
+    assert!(
+        holders_seen.iter().any(|c| c.wa_id == owner_wa),
+        "…including the owner, so the cleanup knows which one to keep"
+    );
+}

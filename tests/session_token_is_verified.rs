@@ -177,3 +177,43 @@ async fn a_pre_fix_token_shape_is_not_grandfathered() {
          from a forgery, because that IS the forgery"
     );
 }
+
+/// **Every door, not one door** (CIRISServer#398).
+///
+/// #394 put the MAC check inside `resolve_bearer`. Two other handlers parsed a
+/// `wa_id` out of an unverified token and acted on it:
+///
+/// - `/v1/auth/refresh` minted a REAL, MAC'd session for that `wa_id` — forge
+///   once, call refresh, receive a genuine owner token. The forgery was closed
+///   at one door and left open one hop away.
+/// - `/v1/auth/logout` DEACTIVATED that `wa_id`'s cert — unauthenticated account
+///   lockout for anyone who could read `owner-hint`.
+///
+/// Fixing three call sites would invite a fourth, so the unsafe operation was
+/// removed: `wa_id_from_token` returns `None` unless the MAC verifies. A caller
+/// cannot forget a check it cannot skip.
+///
+/// Found in review by Codex; the logout half came from asking what else shared
+/// the shape.
+#[test]
+fn a_forged_token_yields_no_wa_id_at_all() {
+    let wa = "wa-root-eric-moore-v2-portable-f34de31d8c21-6e2b4kpvxk";
+    assert_eq!(
+        session::wa_id_from_token(&format!("sess:{wa}:FORGEDXXXXXX")),
+        None,
+        "a forged token must not yield a wa_id — every handler that parses one would otherwise \
+         act on it (refresh mints a real session; logout deactivates the account)"
+    );
+    assert_eq!(
+        session::wa_id_from_token(&format!("sess:{wa}:nonce.badmac")),
+        None,
+        "…including a well-formed shape with a wrong MAC"
+    );
+    // …and a real one still parses.
+    let real = session::test_support_issue_session_token(wa);
+    assert_eq!(
+        session::wa_id_from_token(&real),
+        Some(wa),
+        "a token this process minted must still parse"
+    );
+}

@@ -1172,25 +1172,36 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             // to prevent remained. Deactivate, never delete: the row is audit
             // history of a real sign-in.
             if let Some((prov, ext)) = &oauth_identity {
-                match store::get_by_oauth(&st.engine, prov, ext).await {
-                    Ok(Some(other)) if other.wa_id != wa_id => {
-                        match store::set_active(&st.engine, &other.wa_id, false).await {
-                            Ok(_) => tracing::info!(
-                                retired_wa_id = %other.wa_id, owner_wa_id = %wa_id, provider = %prov,
-                                "retired a duplicate cert holding the owner's sign-in pair — the \
-                                 provider identity now resolves to the owner alone"
-                            ),
-                            Err(e) => tracing::warn!(
-                                error = %e, duplicate_wa_id = %other.wa_id,
-                                "could not retire the duplicate provider cert — TWO certs carry \
-                                 this pair and a sign-in may resolve to either"
-                            ),
+                // THE SCAN, not the fail-closed resolver (Codex review, #397).
+                //
+                // At this exact moment BOTH the owner (just stamped with the
+                // pair) and the pre-claim OAuth cert hold it, which is the state
+                // `get_by_oauth` now REFUSES. Routing the cleanup through it made
+                // this take the Err arm and retire nothing — leaving sign-in
+                // permanently ambiguous, i.e. worse than the duplicate it exists
+                // to remove. A repair path cannot use a reader that refuses the
+                // state the repair is for.
+                match store::live_oauth_holders(&st.engine, prov, ext).await {
+                    Ok(holders) => {
+                        for other in holders.iter().filter(|c| c.wa_id != wa_id) {
+                            match store::set_active(&st.engine, &other.wa_id, false).await {
+                                Ok(_) => tracing::info!(
+                                    retired_wa_id = %other.wa_id, owner_wa_id = %wa_id,
+                                    provider = %prov,
+                                    "retired a duplicate cert holding the owner's sign-in pair — \
+                                     the provider identity now resolves to the owner alone"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    error = %e, duplicate_wa_id = %other.wa_id,
+                                    "could not retire a duplicate provider cert — sign-in will \
+                                     refuse this identity as AMBIGUOUS until it is resolved"
+                                ),
+                            }
                         }
                     }
-                    Ok(_) => {}
                     Err(e) => tracing::warn!(
                         error = %e,
-                        "could not check for a duplicate provider cert after the claim"
+                        "could not scan for duplicate provider certs after the claim"
                     ),
                 }
             }

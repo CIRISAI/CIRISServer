@@ -268,8 +268,40 @@ fn session_token_is_authentic(token: &str) -> bool {
     expected.as_bytes().ct_eq(mac.as_bytes()).into()
 }
 
-/// Parse the `wa_id` out of an opaque session token (`sess:<wa_id>:<rand>`).
+/// The `wa_id` an **authentic** session token names (`sess:<wa_id>:<nonce>.<mac>`).
+///
+/// # The parse IS the verification (CIRISServer#398)
+///
+/// This used to be a pure string split, and #394 put the MAC check inside
+/// [`resolve_bearer`] alone. That left the other two callers reading a `wa_id`
+/// out of an unverified string and acting on it:
+///
+/// - `POST /v1/auth/refresh` — minted a REAL, MAC'd session for that `wa_id`.
+///   Forge `sess:<owner>:junk`, call refresh, receive a genuine owner token. The
+///   forgery was closed at one door and left open one hop away.
+/// - `POST /v1/auth/logout` — DEACTIVATED that `wa_id`'s cert. Unauthenticated
+///   account lockout: anyone who could read `owner-hint` could disable the
+///   owner.
+///
+/// Fixing three call sites would invite a fourth, so the unsafe operation is
+/// gone instead: there is no way to obtain a `wa_id` from a token without the
+/// MAC having verified. A caller cannot forget a check it cannot skip.
+///
+/// Found in review by Codex on the 0.5.168 PR — the refresh half. The logout
+/// half came from asking what ELSE shared the shape.
 pub fn wa_id_from_token(token: &str) -> Option<&str> {
+    if !session_token_is_authentic(token) {
+        return None;
+    }
+    wa_id_from_token_unverified(token)
+}
+
+/// The `wa_id` a token CLAIMS, with no authenticity check.
+///
+/// For logging and diagnostics only — never for a decision. Deliberately
+/// separate and deliberately named, so that using it where the verified form
+/// belongs is a visible choice rather than an accident.
+fn wa_id_from_token_unverified(token: &str) -> Option<&str> {
     token
         .strip_prefix("sess:")?
         .rsplit_once(':')
