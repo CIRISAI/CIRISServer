@@ -288,6 +288,52 @@ jobs:
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
+      # ── FFI symbol INVENTORY, not a spot-check (CIRISServer#378) ────────────
+      #
+      # The step above names ten symbols. That was sufficient against
+      # --gc-sections, which is all-or-nothing on a section. It is NOT sufficient
+      # against LTO (`lto = "thin"` since 0.5.166), whose unit of work is the
+      # call graph: the realistic failure is PARTIAL — a dozen symbols dropped,
+      # the ten famous ones kept, and the gate green.
+      #
+      # So this asserts the COUNT and every module entry point. Counting is the
+      # whole point: it is the only form a partial strip cannot slip past.
+      #
+      # Runs on EVERY target, cross-built included, because which platform
+      # inlines hardest is exactly what you cannot predict — and a symbol that
+      # survives on linux tells you nothing about windows.
+      - name: FFI symbol inventory (LTO must not drop what only ctypes calls)
+        shell: bash
+        env:
+          MIN_VERIFY_SYMBOLS: 88
+          NEED_PYINIT: >-
+            PyInit__native PyInit_ciris_edge PyInit_ciris_lens_core
+            PyInit_ciris_persist PyInit_pyo3_async_runtimes
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          SYMFILE=$(mktemp)
+          # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
+          # above, which false-FAILED a PRESENT symbol on v0.5.108.
+          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
+            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
+          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            exit 1
+          fi
+          MISSING=""
+          for s in $NEED_PYINIT; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
+          if [ -n "$MISSING" ]; then
+            echo "::error::module entry point(s) missing from $(basename "$WHL"):$MISSING — CPython resolves these by name at import, and all must live in THIS cdylib for the one-wheel type identity (CIRISServer#4)."
+            exit 1
+          fi
+          echo "  OK - inventory intact: $N verify symbols + all $(echo $NEED_PYINIT | wc -w) module entry points"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.plat.name }}
@@ -553,6 +599,52 @@ jobs:
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
+      # ── FFI symbol INVENTORY, not a spot-check (CIRISServer#378) ────────────
+      #
+      # The step above names ten symbols. That was sufficient against
+      # --gc-sections, which is all-or-nothing on a section. It is NOT sufficient
+      # against LTO (`lto = "thin"` since 0.5.166), whose unit of work is the
+      # call graph: the realistic failure is PARTIAL — a dozen symbols dropped,
+      # the ten famous ones kept, and the gate green.
+      #
+      # So this asserts the COUNT and every module entry point. Counting is the
+      # whole point: it is the only form a partial strip cannot slip past.
+      #
+      # Runs on EVERY target, cross-built included, because which platform
+      # inlines hardest is exactly what you cannot predict — and a symbol that
+      # survives on linux tells you nothing about windows.
+      - name: FFI symbol inventory (LTO must not drop what only ctypes calls)
+        shell: bash
+        env:
+          MIN_VERIFY_SYMBOLS: 88
+          NEED_PYINIT: >-
+            PyInit__native PyInit_ciris_edge PyInit_ciris_lens_core
+            PyInit_ciris_persist PyInit_pyo3_async_runtimes
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          SYMFILE=$(mktemp)
+          # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
+          # above, which false-FAILED a PRESENT symbol on v0.5.108.
+          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
+            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
+          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            exit 1
+          fi
+          MISSING=""
+          for s in $NEED_PYINIT; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
+          if [ -n "$MISSING" ]; then
+            echo "::error::module entry point(s) missing from $(basename "$WHL"):$MISSING — CPython resolves these by name at import, and all must live in THIS cdylib for the one-wheel type identity (CIRISServer#4)."
+            exit 1
+          fi
+          echo "  OK - inventory intact: $N verify symbols + all $(echo $NEED_PYINIT | wc -w) module entry points"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -757,6 +849,52 @@ jobs:
             if [ -n "$MISSING" ]; then echo "verify FFI symbols MISSING from _native (--gc-sections stripped the fold):$MISSING"; exit 1; fi
             echo "OK (nm) - verify FFI folded: all symbols present in the cross-built wheel"
           fi
+      # ── FFI symbol INVENTORY, not a spot-check (CIRISServer#378) ────────────
+      #
+      # The step above names ten symbols. That was sufficient against
+      # --gc-sections, which is all-or-nothing on a section. It is NOT sufficient
+      # against LTO (`lto = "thin"` since 0.5.166), whose unit of work is the
+      # call graph: the realistic failure is PARTIAL — a dozen symbols dropped,
+      # the ten famous ones kept, and the gate green.
+      #
+      # So this asserts the COUNT and every module entry point. Counting is the
+      # whole point: it is the only form a partial strip cannot slip past.
+      #
+      # Runs on EVERY target, cross-built included, because which platform
+      # inlines hardest is exactly what you cannot predict — and a symbol that
+      # survives on linux tells you nothing about windows.
+      - name: FFI symbol inventory (LTO must not drop what only ctypes calls)
+        shell: bash
+        env:
+          MIN_VERIFY_SYMBOLS: 88
+          NEED_PYINIT: >-
+            PyInit__native PyInit_ciris_edge PyInit_ciris_lens_core
+            PyInit_ciris_persist PyInit_pyo3_async_runtimes
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          SYMFILE=$(mktemp)
+          # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
+          # above, which false-FAILED a PRESENT symbol on v0.5.108.
+          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
+            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
+          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            exit 1
+          fi
+          MISSING=""
+          for s in $NEED_PYINIT; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
+          if [ -n "$MISSING" ]; then
+            echo "::error::module entry point(s) missing from $(basename "$WHL"):$MISSING — CPython resolves these by name at import, and all must live in THIS cdylib for the one-wheel type identity (CIRISServer#4)."
+            exit 1
+          fi
+          echo "  OK - inventory intact: $N verify symbols + all $(echo $NEED_PYINIT | wc -w) module entry points"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64

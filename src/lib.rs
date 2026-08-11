@@ -479,6 +479,31 @@ pub use compose::{run_config_get, run_config_set};
 /// `ciris-persist` directly or guessing its path).
 pub use ciris_persist::prelude::Engine;
 
+/// **The whole persist crate, at the version THIS server was built against.**
+///
+/// The `Engine` re-export above had the right idea and stopped one type short.
+/// An adapter needs far more than `Engine` — the federation types it emits, the
+/// envelope paths, `CallerScope`, the canonicalizer — and for every one of those
+/// it had to declare its own `ciris-persist` git pin. That is a SECOND source of
+/// truth for one substrate, and the failure mode is not a compile error: cargo
+/// happily resolves two `ciris-persist` instances, and then `Engine` from one is
+/// a different TYPE from `Engine` in the other. Same name, same fields, same
+/// version even — different crate instance, so it does not unify. That is the
+/// cross-wheel type-identity bug (CIRISPersist#109) the one-wheel re-export was
+/// built to make impossible, arriving by the source-tree door instead.
+///
+/// Keeping the pins equal by hand is not a fix, it is a chore that is correct
+/// until someone bumps one of them. With this, a consumer declares
+/// `ciris-server` ALONE and reaches persist as `ciris_server::ciris_persist::…`
+/// — it cannot get a different persist than the server has, because there is
+/// only the one.
+///
+/// Feature note: features are additive and unified across the graph, so a
+/// consumer inherits this crate's persist features (`sqlite` among them) rather
+/// than requesting its own. A consumer that needs a feature the server does not
+/// enable should add it HERE, so every consumer agrees.
+pub use ciris_persist;
+
 use anyhow::Result;
 
 /// Run the fabric node from the **conventions + CLI** (Server 0.5 zero-env):

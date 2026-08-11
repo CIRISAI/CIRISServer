@@ -87,3 +87,6 @@ mod surfaces;
 
 #[path = "release_gates/boundary.rs"]
 mod boundary;
+
+#[path = "release_gates/ffi_symbols.rs"]
+mod ffi_symbols;

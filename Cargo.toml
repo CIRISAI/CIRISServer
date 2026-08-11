@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.165" # 0.5.165 = THE OAUTH CUT — adopting persist v30.9.0 + edge v15.21.7, and making a Google owner able to actually use their node. CIRISServer#384 said an OAuth owner claims successfully and can then authenticate to NOTHING, so the age band (a SAFETY input) and the federation announce were silently skipped while completeSetup reported success. The claim now carries the owner OAuth identity onto the ROOT cert and sign-in resolves it — but proving that end-to-end took eleven defects, and the shape of them is the story. FOUR were one keyless row: create_oauth_user wrote pubkey:"" which persist refuses, so an OAuth user had NEVER ONCE been created on a node; api_keys.rs had the identical empty pubkey (found by ENUMERATING all six WaCert construction sites rather than by hitting it, so API-key creation had never succeeded either); oauth_links was written as an object where upstream is a list; and the first sign-in left TWO ROOT certs because auto_mint asked "does the derived wa-root id exist" instead of "is this identity already ROOT". FOUR more hid the desktop button: first-run auto-skipped the login screen, isDesktopMode forced the password form, the null-callback branch said "not available", and getOAuthProviderName answered "Desktop" — a PLATFORM where a PROVIDER belongs, which also made getOAuthProviderId return "desktop", a value no route serves. Each was correct when a local account was the only desktop identity and wrong the moment the browser flow produced real sessions. THREE were envelope drift between the vendored agent client and this node: the hand-off returned the payload wrapped inside its own access_token field, the consent disclosure was served bare where the client reads root["data"], and both produced a 200 the client could not read — strictly worse than the 404 one replaced, because on a poll "nothing yet" and "malformed" are the same answer to the caller. Desktop gained Google-alongside-local at all only because the callback now MINTS a session: it returned {user_id, role} and no bearer, so a desktop app had nothing to hold, which is why desktop was local-login-only. The browser and the app are two processes for one sign-in, so a nonce-bound hand-off parks the session for the app to collect once, loopback-GATED — a gate an earlier comment claimed and the code did not have, on a route handing out bearers while the node binds 0.0.0.0. Also FAIL-CLOSED: native Google skipped the aud check when unconfigured while Apple refused, and the store shipped empty, so every node accepted an id_token minted for ANY Google client. persist v30.9.0 lands CIRISPersist#627: Selection is set-valued, SELECTION_CARDINALITY reports set_valued_key_predicates, and the moderation card takes a pasted key list, so #383 is one act with one hash over 61 keys rather than 61 preview→commit pairs — the guarantee was always the HASH, never the cardinality. Verified by DRIVING THE REAL UI under an overridden HOME: claim_settled claimed=true login=true age_recorded=true announce_on=true. AND THE LAST GATE WAS AUTHORITY, NOT CODE: tier_4_deadmit began refusing because v30.8.0 closed the absent-⇒-admit bypass, so the old GREEN was wrong — the test had been reading absence of evidence as evidence of authority. De-admitting a directory KEY is neither content nor community moderation, and had no duty-holder resolver at all; filed as CIRISPersist#632 and closed the same night by duty_holders_for_federation, which resolves the LIVE humanity-accord roster and REFUSES an unresolvable one rather than returning an empty set (the same shape, inverted). So #383 now waits on a GRANT, not on code: the 61 keys are de-admissible the moment an accord holder delegates slash for federation duties. Substrate: persist v30.10.0 / edge v15.21.8 / verify v13.0.0.
+version = "0.5.166" # 0.5.166 = the re-export cut. ciris-server now does `pub use ciris_persist`, so a consumer declares THIS crate alone and reaches persist as `ciris_server::ciris_persist::…`. The Engine re-export (0.5.x) had the right idea and stopped one type short: an adapter needs the federation types, the envelope paths, CallerScope and the canonicalizer too, so every consumer carried its OWN ciris-persist git pin beside the server one. That is a SECOND source of truth for one substrate, and the failure mode is not a compile error — cargo resolves BOTH instances happily, and then `Engine` from one is a different TYPE from `Engine` in the other. Same name, same fields, same version even; different crate instance, so it does not unify. That is exactly the cross-wheel type-identity bug (CIRISPersist#109) the one-wheel PyO3 re-export was built to make impossible, arriving by the source-tree door instead. Keeping two pins equal by hand is not a fix, it is a chore that stays correct until someone bumps one of them. CIRISStatus 0.3.37 is the first consumer to drop its pin: 18/18 green, and `cargo tree -i ciris-persist` now shows ONE instance reached only through ciris-server. Features stay additive and unified, so a consumer inherits this crate's persist features rather than requesting its own. Substrate unchanged: persist v30.10.0 / edge v15.21.8 / verify v13.0.0.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -402,6 +402,44 @@ path = "examples/mesh_propagation/main.rs"
 # pinned here, not on the build-std crate list — see release.yml win7 lane).
 panic = "unwind"
 strip = false   # release workflow strips per-target after build
+
+# ── CIRISServer#378 — thin LTO + one codegen unit ────────────────────────────
+# This cdylib statically links the ENTIRE substrate (persist + edge + verify),
+# so the default 16 codegen units duplicate and under-inline across a very large
+# graph. Thin LTO plus `codegen-units = 1` is the standard fix.
+#
+# It was tried once in 0.5.158 and reverted, for a reason worth keeping: the
+# measurement compared a CI `extension-module` build against a plain
+# `cargo build --lib`. Different feature sets, not comparable, so the reported
+# win was meaningless. This time both sides are the SAME `maturin build
+# --release --strip` wheel, same features, same box, same command:
+#
+#   before  97.32 MiB      after  90.13 MiB      -7.19 MiB (-7.4%)
+#
+# Against the 99 MB CI gate that binds hardest on Windows (98 MB at 0.5.165 —
+# one megabyte of room), that buys back roughly seven releases of the ~1 MB-per-
+# cut drift the gate exists to catch. It does NOT retire #379: 45.95 MiB of
+# identical .class still ships in all nine wheels.
+#
+# THE REAL HAZARD IS NOT SIZE, IT IS SILENCE. Everything reachable only through
+# FFI — the ~88 `ciris_verify_*` C symbols and the five `PyInit_*` entry points
+# — is, to the linker, correctly unreachable: nothing in Rust calls them. An
+# optimizer given more freedom can conclude exactly that. The failure then ships
+# GREEN: the wheel builds, it is smaller, it imports fine, and the missing symbol
+# surfaces at a call site on whichever platform inlined hardest.
+#
+# So the gate is symbol SURVIVAL, not the size number:
+# `tests/release_gates/ffi_symbols.rs` asserts the full exported inventory, and
+# build-wheels.yml re-asserts it against the built artifact on every target.
+# `#[no_mangle] pub extern "C"` already implies `used`, and cdylib exports are
+# GC roots — this is belt-and-braces against a future flag (`--gc-sections`,
+# `-Zbuild-std`) that changes what the linker considers a root.
+#
+# "thin" rather than "fat" deliberately: near-identical results on a graph this
+# size, without fat LTO's single-threaded whole-program link, which on this
+# 31 GiB box is a memory risk (see the [profile.dev] guardrail below).
+lto = "thin"
+codegen-units = 1
 
 # ── Build-memory guardrail (do NOT remove without reading this) ───────────────
 # `cargo test` does not build one binary — it links the ~32 integration-test
