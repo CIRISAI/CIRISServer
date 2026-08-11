@@ -56,7 +56,10 @@ jobs:
   ladder:
     name: ${{ github.event.inputs.scenario || 'traceflow' }} ladder
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 0.5.166 raised this from 45: this ladder builds a test-anchor wheel, and
+    # `lto = "thin"` + `codegen-units = 1` (CIRISServer#378) roughly doubles the
+    # final link. See the note in client-artifacts.yml.
+    timeout-minutes: 75
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache

@@ -38,7 +38,12 @@ jobs:
   android-apk:
     name: Android debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # 0.5.166 raised this from 40. `lto = "thin"` + `codegen-units = 1`
+    # (CIRISServer#378) roughly doubles the final ciris-server link, and this
+    # job timed out mid-link at exactly 40:00 on the first LTO run. A timeout
+    # reports as `cancelled`, not `failure`, which reads like someone stopped
+    # it — so it is worth saying plainly here that LTO is what costs the time.
+    timeout-minutes: 75
     steps:
       - name: Checkout CIRISServer
         uses: actions/checkout@v4
@@ -103,7 +108,12 @@ jobs:
   windows-installer:
     name: Windows desktop installer
     runs-on: windows-latest
-    timeout-minutes: 40
+    # 0.5.166 raised this from 40. `lto = "thin"` + `codegen-units = 1`
+    # (CIRISServer#378) roughly doubles the final ciris-server link, and this
+    # job timed out mid-link at exactly 40:00 on the first LTO run. A timeout
+    # reports as `cancelled`, not `failure`, which reads like someone stopped
+    # it — so it is worth saying plainly here that LTO is what costs the time.
+    timeout-minutes: 75
     # NON-GATING (same rationale as publish-pypi.yml's windows wheel job): the
     # installer must first build the ciris-server abi3 wheel on Windows, which
     # fails today because the substrate (persist/edge) pulls openssl-src + has
