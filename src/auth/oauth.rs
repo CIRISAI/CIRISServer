@@ -1773,7 +1773,7 @@ mod tests {
         // no entry at all...
         let empty = ProviderConfigStore::default();
         assert!(
-            empty.by_provider.get("google").is_none(),
+            !empty.by_provider.contains_key("google"),
             "a build with no injected credential must not offer a google entry"
         );
 
