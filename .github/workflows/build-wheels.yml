@@ -255,7 +255,22 @@ jobs:
           # Match the SHAPE, never the value: a Google desktop client id ends in
           # .apps.googleusercontent.com. Grepping for the literal id would put a
           # credential in a public workflow file and in every log line.
-          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+          # NO PIPE INTO `grep -q`. This is the EPIPE trap the #232 step above
+          # documents, and it bit here on the very first tag: `grep -q` exits
+          # the moment it matches, closing the pipe while `strings` is still
+          # writing; `strings` dies with EPIPE; and under `set -o pipefail` the
+          # PIPELINE reports failure — so a wheel that DOES carry the credential
+          # is reported as missing it. macOS's strings is strict about the
+          # flush, GNU's is not, so it false-failed macOS only while linux
+          # passed: a per-platform lie from a gate written to catch a
+          # per-platform lie. Dump to a file, then grep the file.
+          SFILE=$(mktemp)
+          strings "$LIB" > "$SFILE" 2>/dev/null || true
+          if [ ! -s "$SFILE" ]; then
+            echo "::error::strings produced no output for $LIB — INSTRUMENT failure, not evidence about the wheel."
+            exit 1
+          fi
+          if grep -q 'apps\.googleusercontent\.com' "$SFILE"; then
             echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
           else
             echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
@@ -661,7 +676,22 @@ jobs:
           # Match the SHAPE, never the value: a Google desktop client id ends in
           # .apps.googleusercontent.com. Grepping for the literal id would put a
           # credential in a public workflow file and in every log line.
-          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+          # NO PIPE INTO `grep -q`. This is the EPIPE trap the #232 step above
+          # documents, and it bit here on the very first tag: `grep -q` exits
+          # the moment it matches, closing the pipe while `strings` is still
+          # writing; `strings` dies with EPIPE; and under `set -o pipefail` the
+          # PIPELINE reports failure — so a wheel that DOES carry the credential
+          # is reported as missing it. macOS's strings is strict about the
+          # flush, GNU's is not, so it false-failed macOS only while linux
+          # passed: a per-platform lie from a gate written to catch a
+          # per-platform lie. Dump to a file, then grep the file.
+          SFILE=$(mktemp)
+          strings "$LIB" > "$SFILE" 2>/dev/null || true
+          if [ ! -s "$SFILE" ]; then
+            echo "::error::strings produced no output for $LIB — INSTRUMENT failure, not evidence about the wheel."
+            exit 1
+          fi
+          if grep -q 'apps\.googleusercontent\.com' "$SFILE"; then
             echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
           else
             echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
@@ -1006,7 +1036,22 @@ jobs:
           # Match the SHAPE, never the value: a Google desktop client id ends in
           # .apps.googleusercontent.com. Grepping for the literal id would put a
           # credential in a public workflow file and in every log line.
-          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+          # NO PIPE INTO `grep -q`. This is the EPIPE trap the #232 step above
+          # documents, and it bit here on the very first tag: `grep -q` exits
+          # the moment it matches, closing the pipe while `strings` is still
+          # writing; `strings` dies with EPIPE; and under `set -o pipefail` the
+          # PIPELINE reports failure — so a wheel that DOES carry the credential
+          # is reported as missing it. macOS's strings is strict about the
+          # flush, GNU's is not, so it false-failed macOS only while linux
+          # passed: a per-platform lie from a gate written to catch a
+          # per-platform lie. Dump to a file, then grep the file.
+          SFILE=$(mktemp)
+          strings "$LIB" > "$SFILE" 2>/dev/null || true
+          if [ ! -s "$SFILE" ]; then
+            echo "::error::strings produced no output for $LIB — INSTRUMENT failure, not evidence about the wheel."
+            exit 1
+          fi
+          if grep -q 'apps\.googleusercontent\.com' "$SFILE"; then
             echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
           else
             echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
