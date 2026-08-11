@@ -224,6 +224,43 @@ jobs:
       # a wheel that grows ~1 MB a release forever. The right answer to this
       # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
       # loads), never to raise the number.
+      # ── The credential is IN THE ARTIFACT, not merely in the YAML (#387) ───
+      #
+      # 0.5.165 and 0.5.166 both shipped nine wheels with no built-in Google.
+      # The injection was present in this file the whole time; publish-pypi.yml
+      # called this workflow WITHOUT `secrets: inherit`, so every
+      # `${{ secrets.* }}` here resolved to the empty string — no warning, no
+      # failure, just a blank. option_env! then baked nothing, and
+      # ProviderConfigStore's both-halves-or-nothing rule left the store empty.
+      #
+      # The gate that was supposed to prevent this asserted the YAML instead:
+      # it read a HARDCODED list of the two files already known to be fixed and
+      # confirmed they were still fixed. It could not discover a caller that
+      # dropped the secrets, because it never asked about callers at all.
+      #
+      # So this asks the only question that cannot be answered by intent: is the
+      # client id actually inside the binary we are about to publish. On tags
+      # only, because that is the path where the secrets MUST be present — on a
+      # fork PR they legitimately are not, and failing there would be noise.
+      - name: Built-in OAuth credential is present in the wheel (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          # Match the SHAPE, never the value: a Google desktop client id ends in
+          # .apps.googleusercontent.com. Grepping for the literal id would put a
+          # credential in a public workflow file and in every log line.
+          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+            echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
+          else
+            echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
+            exit 1
+          fi
       - name: Wheel size gate
         shell: bash
         run: |
@@ -577,6 +614,43 @@ jobs:
       # a wheel that grows ~1 MB a release forever. The right answer to this
       # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
       # loads), never to raise the number.
+      # ── The credential is IN THE ARTIFACT, not merely in the YAML (#387) ───
+      #
+      # 0.5.165 and 0.5.166 both shipped nine wheels with no built-in Google.
+      # The injection was present in this file the whole time; publish-pypi.yml
+      # called this workflow WITHOUT `secrets: inherit`, so every
+      # `${{ secrets.* }}` here resolved to the empty string — no warning, no
+      # failure, just a blank. option_env! then baked nothing, and
+      # ProviderConfigStore's both-halves-or-nothing rule left the store empty.
+      #
+      # The gate that was supposed to prevent this asserted the YAML instead:
+      # it read a HARDCODED list of the two files already known to be fixed and
+      # confirmed they were still fixed. It could not discover a caller that
+      # dropped the secrets, because it never asked about callers at all.
+      #
+      # So this asks the only question that cannot be answered by intent: is the
+      # client id actually inside the binary we are about to publish. On tags
+      # only, because that is the path where the secrets MUST be present — on a
+      # fork PR they legitimately are not, and failing there would be noise.
+      - name: Built-in OAuth credential is present in the wheel (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          # Match the SHAPE, never the value: a Google desktop client id ends in
+          # .apps.googleusercontent.com. Grepping for the literal id would put a
+          # credential in a public workflow file and in every log line.
+          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+            echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
+          else
+            echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
+            exit 1
+          fi
       - name: Wheel size gate
         shell: bash
         run: |
@@ -869,6 +943,43 @@ jobs:
       # a wheel that grows ~1 MB a release forever. The right answer to this
       # gate firing is to find the growth (v0.5.157: 19.8 MB of Skiko nobody
       # loads), never to raise the number.
+      # ── The credential is IN THE ARTIFACT, not merely in the YAML (#387) ───
+      #
+      # 0.5.165 and 0.5.166 both shipped nine wheels with no built-in Google.
+      # The injection was present in this file the whole time; publish-pypi.yml
+      # called this workflow WITHOUT `secrets: inherit`, so every
+      # `${{ secrets.* }}` here resolved to the empty string — no warning, no
+      # failure, just a blank. option_env! then baked nothing, and
+      # ProviderConfigStore's both-halves-or-nothing rule left the store empty.
+      #
+      # The gate that was supposed to prevent this asserted the YAML instead:
+      # it read a HARDCODED list of the two files already known to be fixed and
+      # confirmed they were still fixed. It could not discover a caller that
+      # dropped the secrets, because it never asked about callers at all.
+      #
+      # So this asks the only question that cannot be answered by intent: is the
+      # client id actually inside the binary we are about to publish. On tags
+      # only, because that is the path where the secrets MUST be present — on a
+      # fork PR they legitimately are not, and failing there would be noise.
+      - name: Built-in OAuth credential is present in the wheel (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          # Match the SHAPE, never the value: a Google desktop client id ends in
+          # .apps.googleusercontent.com. Grepping for the literal id would put a
+          # credential in a public workflow file and in every log line.
+          if strings "$LIB" | grep -q 'apps\.googleusercontent\.com'; then
+            echo "  OK - a built-in Google client id is compiled into $(basename "$WHL")"
+          else
+            echo "::error::$(basename "$WHL") has NO built-in Google client id. The secrets did not reach the build — check that every caller of build-wheels.yml passes 'secrets: inherit' (CIRISServer#387). This wheel would offer a Google button that cannot work."
+            exit 1
+          fi
       - name: Wheel size gate
         shell: bash
         run: |

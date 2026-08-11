@@ -83,3 +83,9 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/build-wheels.yml
+    # Inherit for the same reason publish-pypi.yml does (CIRISServer#387), and
+    # for one more: this job WARMS THE BUILD CACHE. A cache layer compiled with
+    # an empty credential is a poisoned artifact that a later release build can
+    # restore and reuse, which would reintroduce the blank wheel through a door
+    # nobody is watching.
+    secrets: inherit

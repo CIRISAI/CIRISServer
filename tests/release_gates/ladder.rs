@@ -1547,27 +1547,111 @@ fn gate0_no_oauth_credential_is_committed_to_source() {
     );
 }
 
-/// Every wheel-producing build leg injects the OAuth credentials.
+/// Every wheel-producing build leg injects the OAuth credentials, AND every
+/// caller of a reusable wheel workflow passes its secrets down.
 ///
-/// One leg missing them ships a wheel with no built-in Google while every other
-/// platform has one — a per-platform difference nobody would think to look for.
+/// # The version of this gate that shipped two blank releases
+///
+/// It read a HARDCODED list of two workflow files — the two that were already
+/// fixed — and asserted they were still fixed. So it could only ever confirm
+/// work already done. `publish-pypi.yml` was never in the list, and the wheels
+/// users actually install are built through it.
+///
+/// The real defect it could not see: `publish-pypi.yml` calls
+/// `build-wheels.yml` as a REUSABLE workflow, and a called workflow receives no
+/// secrets unless the caller inherits or maps them. Every `${{ secrets.* }}` in
+/// the callee then resolves to the EMPTY STRING — no warning, no failure. The
+/// injection was present and correct in the file the whole time; it was handed
+/// nothing to inject. 0.5.165 and 0.5.166 shipped nine wheels each with no
+/// built-in Google (CIRISServer#387).
+///
+/// Two lessons, both encoded below. DISCOVER the denominator instead of listing
+/// it — a check whose scope is "the files I already edited" has a denominator
+/// equal to its numerator and is green by construction. And check the SEAM, not
+/// just the endpoints: both files were individually correct, and the defect
+/// lived in the call between them.
+///
+/// The authoritative check is still in CI, against the built artifact
+/// (`build-wheels.yml`: "Built-in OAuth credential is present in the wheel").
+/// Only that one can catch a secret that exists but arrives empty. This gate
+/// catches the same class earlier and without a build.
 #[test]
 fn gate0_every_wheel_build_injects_the_oauth_client() {
-    for wf in [
-        ".github/workflows/build-wheels.yml",
-        ".github/workflows/conformance.yml",
-    ] {
+    let dir = std::path::Path::new(".github/workflows");
+    let mut checked = 0usize;
+    let mut problems: Vec<String> = Vec::new();
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        panic!("{} is unreadable — this gate cannot run", dir.display());
+    };
+    let files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "yml" || x == "yaml"))
+        .collect();
+
+    for wf in &files {
         let text = std::fs::read_to_string(wf).unwrap_or_default();
+        let name = wf
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // (a) A workflow that BUILDS a wheel must inject on every build step.
         let builds = text.matches("maturin build --release").count();
-        let injected = text
-            .matches("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.")
-            .count();
-        assert_eq!(
-            builds, injected,
-            "{wf}: {builds} maturin build step(s) but {injected} credential injection(s) — a \
-             leg without them produces a wheel whose Google sign-in is silently absent"
-        );
+        if builds > 0 {
+            checked += 1;
+            let injected = text
+                .matches("CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.")
+                .count();
+            if injected != builds {
+                problems.push(format!(
+                    "{name}: {builds} `maturin build --release` step(s) but {injected} \
+                     credential injection(s) — a leg without them ships a wheel whose Google \
+                     sign-in is silently absent on that platform alone"
+                ));
+            }
+        }
+
+        // (b) A workflow that CALLS the reusable wheel builder must pass secrets
+        //     down, or the callee's injections resolve to empty strings.
+        for (i, _) in text.match_indices("uses: ./.github/workflows/build-wheels.yml") {
+            checked += 1;
+            // Look at the call block: from this `uses:` to the next line that is
+            // not more-indented (i.e. the rest of this job's mapping entries).
+            // COMMENTS ARE STRIPPED FIRST. The block below is documented with a
+            // note explaining why `secrets: inherit` matters — and the first
+            // version of this check read that note as the config, so deleting
+            // the real line still passed. A check that its own documentation
+            // satisfies is worse than no check: it is green by construction and
+            // reads as coverage. (Same shape as an `include_str!` assertion
+            // matching its own assertion text.)
+            let rest = &text[i..];
+            let block: String = rest
+                .lines()
+                .take(20)
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !block.contains("secrets: inherit") && !block.contains("secrets:\n") {
+                problems.push(format!(
+                    "{name}: calls build-wheels.yml WITHOUT `secrets: inherit` — the callee's \
+                     `${{{{ secrets.* }}}}` will resolve to EMPTY STRINGS, silently, and the \
+                     wheels it produces will have no built-in Google (CIRISServer#387)"
+                ));
+            }
+        }
     }
+
+    assert!(
+        checked > 0,
+        "this gate examined ZERO wheel-producing steps and ZERO reusable-workflow calls. That \
+         is not a pass — it means the discovery is broken (wrong path, renamed step, or the \
+         workflows moved). A zero denominator must never read as green; that is the whole \
+         reason this gate was rewritten."
+    );
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// Recursively list files under `dir` (test helper).

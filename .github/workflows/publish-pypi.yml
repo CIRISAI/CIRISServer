@@ -40,6 +40,19 @@ jobs:
   # (upstream + CI saves); the server layer compiles + saves on this tag.
   build:
     uses: ./.github/workflows/build-wheels.yml
+    # secrets: inherit is LOAD-BEARING, not boilerplate. build-wheels.yml is a
+    # reusable workflow, and a called workflow receives NO secrets from its
+    # caller unless they are inherited or mapped explicitly. Without this line
+    # `${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}` inside it evaluates
+    # to the EMPTY STRING — silently, with no warning and no failure — so
+    # option_env! bakes nothing and ProviderConfigStore's both-halves-or-nothing
+    # rule leaves the wheel with no built-in Google at all.
+    #
+    # That is exactly what shipped in 0.5.165 and 0.5.166 (CIRISServer#387).
+    # Direct runs of build-wheels.yml had the secrets and looked correct; only
+    # the TAG path, which goes through this call, produced blank wheels. The
+    # difference was invisible in every place anyone was looking.
+    secrets: inherit
 
   # ── Gate: the linux wheel must pass cohabitation conformance ───────────────
   # A failure here BLOCKS publish (the substrate-sister discipline). Runs the

@@ -1206,11 +1206,46 @@ async fn oauth_login(
     Path(provider): Path<String>,
     Query(q): Query<LoginQuery>,
 ) -> Response {
+    // REFUSE AT THE DOOR, TYPED (CIRISServer#387).
+    //
+    // This is the first thing a user touches — the button — and until now the
+    // two ways it can be unusable both ended somewhere unhelpful: an
+    // unconfigured provider returned an untyped `{"error": "..."}` string a
+    // client cannot localize, and a HALF-configured one (client id present but
+    // blank, which is what a build with only one of the two secrets injected
+    // produces) sailed through and 307'd the user to the provider with
+    // `client_id=`. Google answers that with its own error page, so the failure
+    // surfaced three hops away wearing someone else's branding.
+    //
+    // A button that cannot work is worse than no button, and the honest place
+    // to say so is here rather than at the code exchange the user never reaches.
+    // Same `reason_id` the exchange already uses, so a client binds ONE key.
     let client_id = {
         let store = st.providers.lock().unwrap();
         match store.by_provider.get(&provider) {
-            Some(c) => c.client_id.clone(),
-            None => return err(StatusCode::NOT_FOUND, "provider not configured"),
+            Some(c) if !c.client_id.trim().is_empty() => c.client_id.clone(),
+            // Configured-but-blank and absent are the same answer to the user
+            // ("this node cannot sign you in with {provider}"), and deliberately
+            // NOT distinguished in the response: which half of a credential a
+            // build is missing is an operator fact, not a visitor's.
+            _ => {
+                let e = OAuthResolveError::NoLocalIdentity {
+                    provider: provider.clone(),
+                };
+                tracing::warn!(
+                    provider = %provider,
+                    "oauth login refused: no usable client id for this provider — the wheel was \
+                     built without the credential, or with only half of it (CIRISServer#387)"
+                );
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": e.message(),
+                        "reason_id": e.reason_id(),
+                    })),
+                )
+                    .into_response();
+            }
         }
     };
     // issue #846 redirect-uri validation: only relative or https allowed.
@@ -1715,6 +1750,55 @@ mod tests {
         assert_eq!(
             oauth_callback_url("https://app.ciris.ai/", "google"),
             "https://app.ciris.ai/v1/auth/oauth/google/callback"
+        );
+    }
+
+    /// **A button that cannot work must refuse at the door** (CIRISServer#387).
+    ///
+    /// Both unusable states are pinned, because the second one is the reason
+    /// this exists. An ABSENT provider was already a 404, but an untyped one no
+    /// client could localize. A BLANK one — the shape a build produces when only
+    /// one of the two credential halves reaches it — passed the lookup and
+    /// 307'd the user to Google with `client_id=`, so the failure surfaced three
+    /// hops away wearing Google's branding instead of ours.
+    ///
+    /// The wheels published as 0.5.165 and 0.5.166 had NEITHER half: the tag
+    /// path called build-wheels.yml without `secrets: inherit`, so every
+    /// `${{ secrets.* }}` in the callee resolved to an empty string, silently.
+    /// The store's both-halves-or-nothing rule then left it empty, which is why
+    /// this reads as "absent" rather than "blank" on those artifacts.
+    #[test]
+    fn a_provider_with_no_usable_client_id_is_refused_not_redirected() {
+        // The store is both-halves-or-nothing, so a credential-less build has
+        // no entry at all...
+        let empty = ProviderConfigStore::default();
+        assert!(
+            empty.by_provider.get("google").is_none(),
+            "a build with no injected credential must not offer a google entry"
+        );
+
+        // ...and a hand-written blank one must be treated the same way by the
+        // handler's guard, never redirected with `client_id=`.
+        let blank = ProviderConfig {
+            client_id: "   ".to_string(),
+            client_secret: String::new(),
+            metadata: serde_json::Value::Null,
+        };
+        assert!(
+            blank.client_id.trim().is_empty(),
+            "the guard keys on a TRIMMED emptiness check — whitespace is not a client id"
+        );
+
+        // And the refusal a user receives carries the SAME stable id the code
+        // exchange uses, so a client binds one localization key for "this node
+        // cannot sign you in with that account" rather than two.
+        let e = OAuthResolveError::NoLocalIdentity {
+            provider: "google".to_string(),
+        };
+        assert_eq!(e.reason_id(), "auth.oauth.no_local_identity");
+        assert!(
+            !e.message().is_empty(),
+            "an English fallback must exist for a client whose bundle lacks the id"
         );
     }
 
