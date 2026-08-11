@@ -1591,7 +1591,18 @@ fn gate0_every_wheel_build_injects_the_oauth_client() {
         .collect();
 
     for wf in &files {
-        let text = std::fs::read_to_string(wf).unwrap_or_default();
+        let raw = std::fs::read_to_string(wf).unwrap_or_default();
+        // COMMENTS STRIPPED BEFORE ANY COUNTING. This is the third time in one
+        // change that a check was satisfied by its own documentation: the notes
+        // explaining the fix quote the very strings this gate greps for
+        // (`maturin build --release`, `secrets: inherit`), so an un-stripped
+        // scan counts prose as configuration. A gate its own comment can
+        // satisfy is green by construction — the exact failure it replaced.
+        let text: String = raw
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
         let name = wf
             .file_name()
             .unwrap_or_default()
@@ -1599,7 +1610,31 @@ fn gate0_every_wheel_build_injects_the_oauth_client() {
             .to_string();
 
         // (a) A workflow that BUILDS a wheel must inject on every build step.
-        let builds = text.matches("maturin build --release").count();
+        //
+        // BOTH SPELLINGS COUNT. There are two ways this repo builds a wheel — a
+        // `maturin build --release` run step (linux, android) and a
+        // `PyO3/maturin-action` step (macos, windows) — and counting only the
+        // first is how macOS and Windows shipped with no built-in Google while
+        // linux and android were fine. The fix keyed on one spelling, and so did
+        // the gate written to enforce the fix, so the gate agreed with the fix
+        // and both were half-blind. A per-platform difference nobody would think
+        // to look for (CIRISServer#387).
+        //
+        // The sdist step also uses maturin-action but compiles no cdylib, so it
+        // is excluded by name rather than by counting it and expecting an
+        // injection that would do nothing.
+        let run_builds = text.matches("maturin build --release").count();
+        let action_builds = text
+            .match_indices("uses: PyO3/maturin-action@v1")
+            .filter(|(i, _)| {
+                // Look back at the step's `- name:` line; the sdist step is the
+                // one that does not produce a cdylib.
+                let head = &text[..*i];
+                let last_name = head.rfind("- name:").map(|n| &head[n..]).unwrap_or("");
+                !last_name.contains("sdist")
+            })
+            .count();
+        let builds = run_builds + action_builds;
         if builds > 0 {
             checked += 1;
             let injected = text

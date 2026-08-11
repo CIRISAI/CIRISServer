@@ -576,6 +576,22 @@ jobs:
             ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
+        # THE SAME INJECTION THE run:-STYLE LEGS HAVE (CIRISServer#387). These legs
+        # build their wheel through the ACTION rather than a `maturin build` run
+        # step, and that difference alone is why they never received the
+        # credential: the original fix, and the gate written to enforce it, both
+        # keyed on the literal string `maturin build --release`. Two spellings of
+        # "build a wheel", one of them invisible to every check — so macOS and
+        # Windows shipped with no built-in Google even on direct runs, while linux
+        # and android were fine. A per-platform difference nobody would look for.
+        #
+        # option_env! reads the COMPILE-TIME environment, so these belong on the
+        # step that compiles — not the job, not a later step.
+        env:
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET }}
         with:
           target: ${{ matrix.target }}
           rust-toolchain: "1.97.0"
@@ -906,6 +922,22 @@ jobs:
             ${{ steps.cachekey.outputs.key-any }}*
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1
+        # THE SAME INJECTION THE run:-STYLE LEGS HAVE (CIRISServer#387). These legs
+        # build their wheel through the ACTION rather than a `maturin build` run
+        # step, and that difference alone is why they never received the
+        # credential: the original fix, and the gate written to enforce it, both
+        # keyed on the literal string `maturin build --release`. Two spellings of
+        # "build a wheel", one of them invisible to every check — so macOS and
+        # Windows shipped with no built-in Google even on direct runs, while linux
+        # and android were fine. A per-platform difference nobody would look for.
+        #
+        # option_env! reads the COMPILE-TIME environment, so these belong on the
+        # step that compiles — not the job, not a later step.
+        env:
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET }}
         with:
           target: x64
           rust-toolchain: "1.97.0"

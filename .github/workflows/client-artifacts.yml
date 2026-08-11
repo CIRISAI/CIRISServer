@@ -229,6 +229,18 @@ jobs:
       # output dir (does not affect the sccache compile keys).
       - name: Build the ciris-server wheel (maturin-action, shared sccache)
         uses: PyO3/maturin-action@v1
+        # The desktop installer IS the Google desktop client, so of all the
+        # wheels this repo builds, this is the one that most needs the built-in
+        # credential — and it had none (CIRISServer#387). Missed for the same
+        # reason macOS and Windows were: the injection and the gate enforcing it
+        # both keyed on `maturin build --release`, and this is a maturin-ACTION
+        # step. option_env! reads the compile-time environment, so it goes here,
+        # on the step that compiles.
+        env:
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET }}
         with:
           target: x64
           rust-toolchain: "1.97.0"
