@@ -3301,6 +3301,16 @@
       "already_refused": "Kunci ini sudah dicabut penerimaannya di sini, sehingga tidak ada yang ditulis dan statusnya tidak berubah.",
       "not_reached": "Ini tidak membatalkan penulisan apa pun. Baris-baris yang sudah ditulis kunci-kunci ini di sini tidak tersentuh dan tetap dilayani — karantinalah operasi yang menghentikan pelayanannya. Baris yang sudah tereplikasi ke para peer tidak ditarik kembali dan memang tidak bisa. Kunci-kunci itu tidak dihapus, tanda tangannya tetap terverifikasi, dan mereka terus menulis ke setiap node lain, termasuk para peer node ini, sehingga baris-baris itu dapat tiba di sini lagi melalui replikasi. Satu pengecualian sengaja dipertahankan agar sebuah node selalu dapat menarik penolakannya sendiri, dan pengecualian itu tidak menanyakan siapa yang menulis: kunci yang telah dicabut penerimaannya tetap boleh menulis baris pencabutan penerimaan di sini (CIRISPersist#608).",
       "reversal": "Dapat dibalik, dan pembalikannya benar-benar mencapai substrat alih-alih sekadar mencatat perubahan pikiran: POST /v1/admin/accept-writes menarik pencabutan penerimaan itu dan penulisan dari kunci tersebut kembali diterima di sini. Dua pembalikan pada anak tangga ini mencapai substrat — melepaskan karantina, yang memulihkan apa yang DILAYANI node ini, dan yang satu ini, yang memulihkan apa yang DITERIMANYA. Kedua barisnya tetap ada dan tetap dapat dibaca: 'ditolak lalu diterima kembali' bukanlah fakta yang sama dengan 'tidak pernah ditolak'."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Node ini tidak dapat menyusun pencabutan. Tidak ada yang diubah, dan ini bukan penolakan otoritas — tindakan tersebut tidak pernah diajukan ke substrat. Tahap yang gagal ada di `error`.",
+        "substrate": "Pencabutan tidak dapat ditulis. Ini bukan penolakan otoritas — substrat tidak menyelesaikan tindakan tersebut. Detail teknisnya ada di `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Node ini tidak berwenang untuk mencabut penerimaan kunci milik pihak lain. Mencabut kunci yang bukan milik Anda sendiri adalah tindakan moderasi, dan hal itu memerlukan kewajiban `slash` yang diberikan kepada node ini oleh trust root yang diterimanya. Tidak ada yang diubah. Mintalah pemegang accord untuk mendelegasikan `slash` bagi kewajiban federasi ke node ini, lalu jalankan pilihan yang sama sekali lagi — hash pratinjau masih berlaku.",
+        "node_identity_unset": "Node ini belum memiliki identitas federasi, sehingga tidak dapat menandatangani pencabutan atau menentukan apakah node ini memiliki wewenang untuk menerbitkannya. Selesaikan penyiapan node terlebih dahulu."
+      }
     }
   },
   "consent": {

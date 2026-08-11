@@ -3301,6 +3301,16 @@
       "already_refused": "Khóa này vốn đã bị hủy kết nạp ở đây, nên không có gì được ghi ra và tình trạng không thay đổi.",
       "not_reached": "Nó không hủy ghi bất cứ thứ gì. Những hàng mà các khóa này đã ghi ra ở đây thì không bị đụng tới và vẫn được phục vụ — cách ly mới là thao tác ngừng phục vụ chúng. Những hàng đã sao chép sang các nút ngang hàng thì không được thu hồi và không thể thu hồi. Các khóa không bị gỡ bỏ, chữ ký của chúng vẫn xác minh được, và chúng vẫn tiếp tục ghi vào mọi nút khác, kể cả các nút ngang hàng của nút này, và từ đó những hàng ấy có thể lại đến đây qua đường sao chép. Một ngoại lệ duy nhất được cố ý giữ lại để một nút luôn có thể tự gỡ bỏ lệnh từ chối của chính mình, và nó không hỏi ai đang ghi: một khóa đã bị hủy kết nạp vẫn có thể ghi các hàng hủy kết nạp ở đây (CIRISPersist#608).",
       "reversal": "Có thể đảo ngược, và việc đảo ngược chạm tới nền tảng chứ không chỉ ghi lại một sự đổi ý: POST /v1/admin/accept-writes rút lại lệnh hủy kết nạp và các lượt ghi của khóa lại được kết nạp ở đây. Hai trong số các thao tác đảo ngược của nấc thang này chạm tới nền tảng — việc giải phóng một lệnh cách ly, vốn khôi phục những gì nút này PHỤC VỤ, và thao tác này, vốn khôi phục những gì nó CHẤP NHẬN. Cả hai hàng đều tồn tại tiếp và vẫn đọc được: “đã bị từ chối rồi được kết nạp lại” không phải là cùng một sự việc với “chưa bao giờ bị từ chối”."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Nút này không thể tạo lệnh thu hồi. Không có gì bị thay đổi, và đây không phải là sự từ chối vì thẩm quyền — hành vi này chưa bao giờ được đưa xuống nền tảng. Giai đoạn bị lỗi nằm trong `error`.",
+        "substrate": "Không thể ghi lệnh thu hồi. Đây không phải là sự từ chối vì thẩm quyền — nền tảng đã không hoàn tất hành vi này. Chi tiết kỹ thuật nằm trong `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Nút này không được phép loại bỏ khóa của người khác. Việc thu hồi một khóa không thuộc về bạn là một hành vi kiểm duyệt, và nó cần nhiệm vụ `slash` do một gốc tin cậy mà nút chấp nhận cấp cho nút này. Không có gì bị thay đổi. Hãy đề nghị một bên nắm giữ thỏa ước ủy quyền `slash` cho các nhiệm vụ liên kết tới nút này, rồi chạy lại đúng lựa chọn đó — mã băm xem trước vẫn còn hiệu lực.",
+        "node_identity_unset": "Nút này chưa có danh tính liên kết, nên nó không thể ký lệnh thu hồi hoặc xác định liệu nó có thẩm quyền ban hành lệnh đó hay không. Hãy hoàn tất thiết lập nút trước."
+      }
     }
   },
   "consent": {

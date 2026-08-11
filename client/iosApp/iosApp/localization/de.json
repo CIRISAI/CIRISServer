@@ -3301,6 +3301,16 @@
       "already_refused": "Für diesen Schlüssel besteht hier bereits eine Aberkennung der Zulassung, es wurde also nichts geschrieben und der Zulassungsstand ist unverändert.",
       "not_reached": "Es macht nichts ungeschrieben. Zeilen, die diese Schlüssel hier bereits geschrieben haben, bleiben unangetastet und werden weiterhin ausgeliefert — die Quarantäne ist der Vorgang, der das Ausliefern beendet. Zeilen, die bereits zu Peers repliziert sind, werden nicht zurückgerufen und können es auch nicht. Die Schlüssel werden nicht entfernt, ihre Signaturen verifizieren weiterhin, und sie schreiben auf jedem anderen Knoten weiter, auch auf den Peers dieses Knotens, von denen jene Zeilen durch Replikation erneut hier eintreffen können. Eine einzige Ausnahme besteht mit Absicht fort, damit ein Knoten seine eigene Verweigerung stets aufheben kann, und sie fragt nicht danach, wer schreibt: Ein nicht mehr zugelassener Schlüssel darf hier weiterhin Zeilen zur Aberkennung der Zulassung schreiben (CIRISPersist#608).",
       "reversal": "Umkehrbar — und die Umkehrung erreicht das Substrat, statt bloß einen Sinneswandel zu protokollieren: POST /v1/admin/accept-writes nimmt die Aberkennung der Zulassung zurück, und die Schreibvorgänge des Schlüssels sind hier wieder zugelassen. Zwei Umkehrungen dieser Stufenleiter erreichen das Substrat — das Aufheben einer Quarantäne, das wiederherstellt, was dieser Knoten AUSLIEFERT, und diese hier, die wiederherstellt, was er ANNIMMT. Beide Zeilen bleiben bestehen und bleiben lesbar: „abgewiesen und danach wieder zugelassen“ ist nicht derselbe Sachverhalt wie „nie abgewiesen“."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Dieser Knoten konnte den Widerruf nicht erstellen. Es wurde nichts geändert, und dies ist keine Verweigerung durch eine Autorität – der Akt wurde dem Substrat nie vorgelegt. Die fehlgeschlagene Phase steht in `error`.",
+        "substrate": "Der Widerruf konnte nicht geschrieben werden. Dies ist keine Verweigerung durch eine Autorität – das Substrat hat den Akt nicht abgeschlossen. Das technische Detail steht in `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Dieser Knoten ist nicht berechtigt, die Zulassung eines fremden Schlüssels zu entziehen. Das Widerrufen eines Schlüssels, der nicht Ihr eigener ist, ist ein Moderationsakt und erfordert die Pflicht `slash`, die diesem Knoten von einer von ihm akzeptierten Vertrauenswurzel erteilt werden muss. Es wurde nichts geändert. Bitten Sie einen Accord-Inhaber, `slash` für Föderationspflichten an diesen Knoten zu delegieren, und führen Sie dann dieselbe Auswahl erneut aus – der Vorschau-Hash gilt weiterhin.",
+        "node_identity_unset": "Dieser Knoten hat noch keine Föderationsidentität und kann daher weder einen Widerruf signieren noch feststellen, ob er die Befugnis besitzt, einen solchen auszustellen. Schließen Sie zuerst die Knoten-Einrichtung ab."
+      }
     }
   },
   "consent": {

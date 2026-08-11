@@ -1974,8 +1974,23 @@ async fn deadmit(
                     "event_id": event_id.ok(),
                 }));
             }
-            Err(e) => results.push(serde_json::json!({
-                "target_key_id": target, "outcome": "error", "error": e,
+            // `refused` and `error` are DIFFERENT outcomes: the first is the
+            // substrate answering "no" about authority, the second is it not
+            // answering. A UI that renders them alike sends an operator to
+            // debug a healthy node.
+            Err(f) => results.push(serde_json::json!({
+                "target_key_id": target,
+                "outcome": if f.refusal == "federation_delegated_scope_unauthorized" {
+                    "refused"
+                } else {
+                    "error"
+                },
+                // `reason` — the SAME field quarantine puts its substrate token
+                // in, not a parallel one. One union, one name per concept, or
+                // the client grows a second code path for the same idea.
+                "reason": f.refusal,
+                "message": f.message,
+                "error": f.detail,
             })),
         }
     }
@@ -2023,13 +2038,13 @@ async fn put_revocation_for(
     reason: &str,
     revoked_after: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<String, String> {
+) -> Result<String, DeAdmitFailure> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
     let revoking_key_id = engine
         .local_derived_key_id()
         .await
-        .map_err(|e| format!("derive acting key_id: {e}"))?;
+        .map_err(|e| DeAdmitFailure::local("derive acting key_id", e))?;
     let mut envelope = serde_json::json!({
         "revoked_key_id": revoked_key_id,
         "revoking_key_id": revoking_key_id,
@@ -2042,11 +2057,11 @@ async fn put_revocation_for(
             serde_json::json!(bound.to_rfc3339());
     }
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize revocation: {e}"))?;
+        .map_err(|e| DeAdmitFailure::local("canonicalize revocation", e))?;
     let sig = engine
         .sign_hybrid(&canonical)
         .await
-        .map_err(|e| format!("hybrid-sign revocation: {e}"))?;
+        .map_err(|e| DeAdmitFailure::local("hybrid-sign revocation", e))?;
     let revocation = Revocation {
         revocation_id: crate::ids::new_id(),
         revoked_key_id: revoked_key_id.to_owned(),
@@ -2070,8 +2085,88 @@ async fn put_revocation_for(
         .federation_directory()
         .put_revocation(SignedRevocation { revocation })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DeAdmitFailure::of(&e))?;
     Ok(id)
+}
+
+/// Why one target's de-admission did not land, in the shape the rest of this
+/// module refuses in: a **stable token** to branch on plus a localizable
+/// `{id, text}` pair — never a store-internal `Display` string.
+///
+/// This exists because of the one refusal an operator is overwhelmingly most
+/// likely to meet. persist v30.10.0 made third-party revocation require `slash`
+/// conferred by a root this node trusts (CIRISPersist#596 item 1), and
+/// CIRISServer#383's 61 leaked QA keys are blocked on exactly that grant. Until
+/// this, that arrived in the UI as `DelegatedScopeUnauthorized { signer: ...,
+/// on_behalf_of: ..., scope: "slash" }` — a Rust debug format, in one locale,
+/// naming no remedy. An operator reading it cannot tell "this node lacks
+/// authority" from "the substrate is broken", and those want opposite responses.
+///
+/// The distinction the taxonomy has to preserve: **not permitted** is a verdict
+/// about authority, and every other failure is the machinery not answering.
+/// Collapsing them is the "distinct zeroes" shape — a refusal that means "we
+/// asked and were told no" must never render like "we could not ask".
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct DeAdmitFailure {
+    /// Stable program token — the persist `kind()` where there is one.
+    pub refusal: String,
+    pub message: serde_json::Value,
+    /// The substrate's own words, kept for the log/debug pane. Additive: the
+    /// localized pair above is what a UI renders.
+    pub detail: String,
+}
+
+impl DeAdmitFailure {
+    /// A failure BEFORE the substrate is reached (key derivation, canonicalize,
+    /// sign). Not a refusal — nothing declined the act, this node could not
+    /// form it — so it gets the machinery-failed string, never the
+    /// authority one.
+    fn local(stage: &str, e: impl std::fmt::Display) -> Self {
+        Self {
+            refusal: "deadmit_local_failure".to_owned(),
+            message: m(
+                "admin.deadmit.failed.local",
+                "This node could not build the revocation. Nothing was changed, and this is not \
+                 an authority refusal — the act was never put to the substrate. The stage that \
+                 failed is in `error`.",
+            ),
+            detail: format!("{stage}: {e}"),
+        }
+    }
+
+    fn of(e: &ciris_persist::federation::Error) -> Self {
+        use ciris_persist::federation::Error as E;
+        // Each arm passes LITERAL (id, text) to `m` — the shape
+        // check_localization_sync.py scans for. A `format!` here would compile
+        // fine and silently leave the string unlocalizable in 29 languages,
+        // which is why the duty name is written out rather than interpolated:
+        // de-admission is gated on `slash` and nothing else.
+        let message = match e {
+            E::DelegatedScopeUnauthorized { .. } => m(
+                "admin.deadmit.refused.no_slash_grant",
+                "This node is not authorised to de-admit someone else's key. Revoking a key that \
+                 is not your own is a moderation act, and it needs the `slash` duty granted to \
+                 this node by a trust root it accepts. Nothing was changed. Ask an accord holder \
+                 to delegate `slash` for federation duties to this node, then run the same \
+                 selection again — the preview hash still applies.",
+            ),
+            E::NodeIdentityUnset { .. } => m(
+                "admin.deadmit.refused.node_identity_unset",
+                "This node has no federation identity yet, so it cannot sign a revocation or \
+                 resolve whether it holds the authority to issue one. Complete node setup first.",
+            ),
+            _ => m(
+                "admin.deadmit.failed.substrate",
+                "The revocation could not be written. This is not an authority refusal — the \
+                 substrate did not complete the act. The technical detail is in `error`.",
+            ),
+        };
+        Self {
+            refusal: e.kind().to_owned(),
+            message,
+            detail: e.to_string(),
+        }
+    }
 }
 
 async fn re_admit(

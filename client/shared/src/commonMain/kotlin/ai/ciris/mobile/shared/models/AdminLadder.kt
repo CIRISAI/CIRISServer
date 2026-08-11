@@ -249,7 +249,7 @@ data class AdminPayloadDescent(
  *
  * `outcome` vocabulary by route:
  *  - quarantine: `admitted` | `skipped` | `refused` | `error`
- *  - deadmit:    `revoked` | `error`
+ *  - deadmit:    `revoked` | `refused` | `error`
  *  - refuse-writes: `refused` | `already_refused` | `error`
  *  - accept-writes: `accepted` | `not_refused` | `error`
  *  - annotate / throttle / un-throttle / re-admit: absent (presence in
@@ -270,7 +270,15 @@ data class AdminOpTargetResult(
     val revocationId: String? = null,
     @SerialName("deadmission_id")
     val deadmissionId: String? = null,
-    /** Quarantine's skip reason, or the substrate's own refusal token. */
+    /**
+     * Quarantine's skip reason, or the substrate's own refusal token.
+     *
+     * Deadmit sets it to `federation_delegated_scope_unauthorized` when this
+     * node holds no accord-rooted `slash` grant — the CIRISServer#383 case. That
+     * arrives as `refused`, NOT `error`: the substrate answered a question about
+     * authority, it did not fail to answer. Render [message] for the human and
+     * keep [error] for the debug pane.
+     */
     val reason: String? = null,
     /** The folded quarantine state a skip reports. */
     val state: String? = null,

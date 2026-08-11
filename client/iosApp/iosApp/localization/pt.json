@@ -3301,6 +3301,16 @@
       "already_refused": "Esta chave já está desadmitida aqui, portanto nada foi escrito e a situação permanece inalterada.",
       "not_reached": "Não desfaz escrita alguma. As linhas que essas chaves já escreveram aqui permanecem intactas e continuam sendo servidas — a quarentena é a operação que deixa de servi-las. As linhas que já se replicaram para os pares não são recolhidas e não podem ser. As chaves não são removidas, suas assinaturas continuam a verificar, e elas seguem escrevendo em todos os outros nós, inclusive nos pares deste nó, de onde essas linhas podem chegar aqui novamente por replicação. Uma isenção sobrevive de propósito, para que um nó possa sempre levantar a própria negativa, e ela não pergunta quem está escrevendo: uma chave desadmitida ainda pode escrever linhas de desadmissão aqui (CIRISPersist#608).",
       "reversal": "Reversível, e a reversão alcança o substrato em vez de apenas registrar uma mudança de ideia: POST /v1/admin/accept-writes retira a desadmissão e as escritas da chave voltam a ser admitidas aqui. Duas das reversões desta escada alcançam o substrato — liberar uma quarentena, que restaura o que este nó SERVE, e esta, que restaura o que ele ACEITA. Ambas as linhas sobrevivem e permanecem legíveis: 'recusada e depois readmitida' não é o mesmo fato que 'nunca recusada'."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Este nó não conseguiu construir a revogação. Nada foi alterado, e isto não é uma recusa de autoridade — o ato nunca foi submetido ao substrato. A etapa que falhou está em `error`.",
+        "substrate": "Não foi possível gravar a revogação. Isto não é uma recusa de autoridade — o substrato não concluiu o ato. O detalhe técnico está em `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Este nó não está autorizado a desadmitir a chave de outra pessoa. Revogar uma chave que não é a sua é um ato de moderação e requer o dever `slash` concedido a este nó por uma raiz de confiança que ele aceite. Nada foi alterado. Peça a um detentor de acordo que delegue `slash` para deveres de federação a este nó e execute a mesma seleção novamente — o hash de pré-visualização continua válido.",
+        "node_identity_unset": "Este nó ainda não tem identidade de federação, portanto não pode assinar uma revogação nem determinar se detém a autoridade para emiti-la. Conclua primeiro a configuração do nó."
+      }
     }
   },
   "consent": {

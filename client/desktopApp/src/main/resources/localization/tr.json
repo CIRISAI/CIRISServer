@@ -3301,6 +3301,16 @@
       "already_refused": "Bu anahtarın kabulü burada zaten iptal edilmiş; dolayısıyla hiçbir şey yazılmadı ve durum değişmedi.",
       "not_reached": "Hiçbir şeyi yazılmamış hâle getirmez. Bu anahtarların buraya daha önce yazdığı satırlara dokunulmaz ve sunulmaya devam edilir — onları sunmayı durduran işlem karantinadır. Eşlere çoktan çoğaltılmış satırlar geri çağrılmaz, çağrılamaz da. Anahtarlar kaldırılmaz, imzaları hâlâ doğrulanır ve bu düğümün eşleri dahil diğer her düğüme yazmayı sürdürürler; o satırlar oradan çoğaltma yoluyla buraya yeniden ulaşabilir. Bir düğümün kendi reddini her zaman kaldırabilmesi için bir muafiyet bilerek ayakta bırakılmıştır ve bu muafiyet kimin yazdığını sormaz: kabulü iptal edilmiş bir anahtar burada yine de kabul iptali satırları yazabilir (CIRISPersist#608).",
       "reversal": "Geri çevrilebilir ve bu geri çevirme, yalnızca bir fikir değişikliğini kaydetmekle kalmaz, alt katmana ulaşır: POST /v1/admin/accept-writes kabul iptalini geri çeker ve anahtarın yazmaları burada yeniden kabul edilir. Bu basamağın geri çevirmelerinden ikisi alt katmana ulaşır — bu düğümün SUNDUĞU şeyi geri getiren karantina serbest bırakma ve KABUL ETTİĞİ şeyi geri getiren bu işlem. Her iki satır da ayakta kalır ve okunabilir olmayı sürdürür: 'reddedilip sonra yeniden kabul edilmiş', 'hiç reddedilmemiş' ile aynı olgu değildir."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Bu düğüm iptal işlemini oluşturamadı. Hiçbir şey değiştirilmedi ve bu bir yetki reddi değildir — işlem alt katmana hiç iletilmedi. Başarısız olan aşama `error` alanındadır.",
+        "substrate": "İptal işlemi yazılamadı. Bu bir yetki reddi değildir — alt katman işlemi tamamlamadı. Teknik ayrıntı `error` alanındadır."
+      },
+      "refused": {
+        "no_slash_grant": "Bu düğüm, başkasına ait bir anahtarın kabulünü geri almaya yetkili değil. Size ait olmayan bir anahtarı iptal etmek bir denetim eylemidir ve bunun için düğümün kabul ettiği bir güven kökü tarafından kendisine verilmiş `slash` yetkisi gerekir. Hiçbir şey değiştirilmedi. Bir uzlaşı sahibinden federasyon görevleri için `slash` yetkisini bu düğüme devretmesini isteyin, ardından aynı seçimi yeniden çalıştırın — önizleme özeti hâlâ geçerlidir.",
+        "node_identity_unset": "Bu düğümün henüz bir federasyon kimliği yok; bu nedenle bir iptal işlemini imzalayamaz veya böyle bir işlemi yayınlama yetkisine sahip olup olmadığını çözümleyemez. Önce düğüm kurulumunu tamamlayın."
+      }
     }
   },
   "consent": {

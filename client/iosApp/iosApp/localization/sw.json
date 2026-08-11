@@ -3301,6 +3301,16 @@
       "already_refused": "Ufunguo huu tayari umeondolewa uandikishaji hapa, hivyo hakuna kilichoandikwa na hali haijabadilika.",
       "not_reached": "Haifuti chochote kilichokwisha andikwa. Safu ambazo funguo hizi tayari ziliziandika hapa hazibadilishwi na bado zinatolewa — karantini ndiyo operesheni inayokomesha kuzitoa. Safu ambazo tayari zimejirudufu kwa wenza hazirejeshwi wala haziwezi kurejeshwa. Funguo hazijaondolewa, saini zao bado zinathibitika, na zinaendelea kuandika katika kila nodi nyingine, wakiwemo wenza wa nodi hii, ambako safu hizo zaweza kuwasili hapa tena kwa unakili. Msamaha mmoja unabaki kwa makusudi ili nodi iweze siku zote kuondoa katazo lake yenyewe, nao hauulizi ni nani anayeandika: ufunguo ulioondolewa uandikishaji bado waweza kuandika safu za uondoaji wa uandikishaji hapa (CIRISPersist#608).",
       "reversal": "Inatenguka, na utenguzi hufika kwenye msingi badala ya kurekodi tu mabadiliko ya nia: POST /v1/admin/accept-writes huondoa uondoaji wa uandikishaji na maandishi ya ufunguo huo yanakubaliwa hapa tena. Mitenguo miwili ya ngazi hii hufika kwenye msingi — kuachilia karantini, ambako hurejesha kile ambacho nodi hii HUKITOA, na huu, ambao hurejesha kile ambacho HUKIKUBALI. Safu zote mbili hubaki na kuendelea kusomeka: 'ilikataliwa kisha ikaandikishwa tena' si jambo lilelile na 'haikuwahi kukataliwa'."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Nodi hii haikuweza kuunda ubatilishaji. Hakuna kilichobadilishwa, na hili si kukataliwa kwa mamlaka — kitendo hakikuwahi kuwasilishwa kwenye substrate. Hatua iliyoshindikana iko katika `error`.",
+        "substrate": "Ubatilishaji haukuweza kuandikwa. Hili si kukataliwa kwa mamlaka — substrate haikukamilisha kitendo. Maelezo ya kiufundi yako katika `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Nodi hii haina idhini ya kuondoa ukubali wa ufunguo wa mtu mwingine. Kubatilisha ufunguo ambao si wako ni kitendo cha usimamizi, na kinahitaji jukumu la `slash` likabidhiwe nodi hii na mzizi wa uaminifu inaoukubali. Hakuna kilichobadilishwa. Mwombe mwenye makubaliano akabidhi `slash` kwa majukumu ya shirikisho kwa nodi hii, kisha rudia uteuzi uleule — heshi ya onyesho la awali bado inatumika.",
+        "node_identity_unset": "Nodi hii bado haina utambulisho wa shirikisho, kwa hivyo haiwezi kutia saini ubatilishaji wala kubaini kama ina mamlaka ya kuutoa. Kamilisha usanidi wa nodi kwanza."
+      }
     }
   },
   "consent": {

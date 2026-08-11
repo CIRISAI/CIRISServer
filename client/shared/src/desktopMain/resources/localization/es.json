@@ -3301,6 +3301,16 @@
       "already_refused": "Esta clave ya está desadmitida aquí, así que no se escribió nada y la situación no ha cambiado.",
       "not_reached": "No desescribe nada. Las filas que estas claves ya escribieron aquí quedan intactas y se siguen sirviendo — la cuarentena es la operación que deja de servirlas. Las filas que ya se replicaron a los pares no se retiran ni se pueden retirar. Las claves no se eliminan, sus firmas siguen verificando y continúan escribiendo en todos los demás nodos, incluidos los pares de este nodo, desde los cuales esas filas pueden volver a llegar aquí por replicación. Una única exención sobrevive a propósito para que un nodo siempre pueda levantar su propia denegación, y no pregunta quién escribe: una clave desadmitida todavía puede escribir aquí filas de desadmisión (CIRISPersist#608).",
       "reversal": "Reversible, y la reversión alcanza el sustrato en lugar de limitarse a registrar un cambio de opinión: POST /v1/admin/accept-writes retira la desadmisión y las escrituras de la clave vuelven a admitirse aquí. Dos de las reversiones de esta escalera alcanzan el sustrato — liberar una cuarentena, que restaura lo que este nodo SIRVE, y esta, que restaura lo que ACEPTA. Ambas filas sobreviven y siguen siendo legibles: «rechazada y luego readmitida» no es el mismo hecho que «nunca rechazada»."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Este nodo no ha podido generar la revocación. No se ha cambiado nada, y esto no es una denegación de autoridad: el acto nunca llegó a presentarse al sustrato. La etapa que ha fallado está en `error`.",
+        "substrate": "No se ha podido escribir la revocación. Esto no es una denegación de autoridad: el sustrato no ha completado el acto. El detalle técnico está en `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Este nodo no está autorizado para revocar la admisión de una clave ajena. Revocar una clave que no es la tuya es un acto de moderación y requiere que un origen de confianza que este nodo acepte le haya concedido la facultad `slash`. No se ha cambiado nada. Pide a un titular del acuerdo que delegue `slash` para las funciones de federación en este nodo y vuelve a ejecutar la misma selección: el hash de la vista previa sigue siendo válido.",
+        "node_identity_unset": "Este nodo aún no tiene identidad de federación, por lo que no puede firmar una revocación ni determinar si posee la autoridad para emitirla. Completa primero la configuración del nodo."
+      }
     }
   },
   "consent": {

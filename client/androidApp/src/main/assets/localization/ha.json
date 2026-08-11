@@ -3301,6 +3301,16 @@
       "already_refused": "An riga an soke shigarwar wannan maɓalli a nan, don haka ba a rubuta komai ba kuma matsayin bai sauya ba.",
       "not_reached": "Ba ya share wani abu daga rikodin. Layukan da waɗannan maɓallan suka riga suka rubuta a nan ba a taɓa su ba kuma ana ci gaba da bayar da su — keɓewa ita ce aikin da yake dakatar da bayar da su. Layukan da suka riga suka kwafu zuwa takwarori ba a mayar da su ba kuma ba za a iya mayar da su ba. Ba a cire maɓallan ba, sa hannunsu yana ci gaba da tabbatuwa, kuma suna ci gaba da rubutawa a kowane kumburi, har da takwarorin wannan kumburi, waɗanda daga gare su waɗannan layuka za su iya sake iso nan ta hanyar kwafi. Keɓancewa guda ɗaya ta rage da gangan domin kumburi ya kasance koyaushe yana iya ɗage ƙinsa na kansa, kuma ba ta tambayar wa ke rubutawa: maɓallin da aka soke shigarwarsa yana iya rubuta layukan soke shigarwa a nan (CIRISPersist#608).",
       "reversal": "Ana iya mayar da shi, kuma mayarwar tana kaiwa ga substrate maimakon kawai ta rubuta sauyin ra'ayi: POST /v1/admin/accept-writes yana janye soke shigarwar, kuma ana sake karɓar rubuce-rubucen maɓallin a nan. Biyu daga cikin mayarwar wannan mataki suna kaiwa ga substrate — sakin keɓewa, wanda yake mayar da abin da wannan kumburi yake BAYARWA, da kuma wannan, wanda yake mayar da abin da yake KARƁA. Layukan biyu suna nan a karantu: «an ƙi sannan aka sake karɓa» ba gaskiya ɗaya ba ce da «ba a taɓa ƙi ba»."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Wannan node bai iya gina sokewar ba. Ba a canza komai ba, kuma wannan ba ƙin amincewa ba ne daga hukuma — ba a taɓa gabatar da aikin ga substrate ba. Matakin da ya gaza yana cikin `error`.",
+        "substrate": "Ba a iya rubuta sokewar ba. Wannan ba ƙin amincewa ba ne daga hukuma — substrate bai kammala aikin ba. Cikakken bayanin fasaha yana cikin `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Wannan node ba shi da izinin cire maɓallin wani daga shiga. Soke maɓallin da ba naka ba aiki ne na sa ido, kuma yana buƙatar a ba wannan node aikin `slash` daga tushen amana da yake karɓa. Ba a canza komai ba. Ka nemi mai riƙe da yarjejeniya ya wakilta `slash` don ayyukan tarayya ga wannan node, sannan ka sake gudanar da zaɓi guda — hash ɗin samfoti yana nan yana aiki.",
+        "node_identity_unset": "Wannan node har yanzu ba shi da shaidar tarayya, don haka ba zai iya sanya hannu kan sokewa ba, ko tantance ko yana da izinin bayar da ita. Ka fara kammala saitin node."
+      }
     }
   },
   "consent": {

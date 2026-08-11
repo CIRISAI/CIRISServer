@@ -3301,6 +3301,16 @@
       "already_refused": "A ti fagilé ìgbàwọlé kọ́kọ́rọ́ yìí níbí tẹ́lẹ̀, nítorí náà kò sí ohun tí a kọ sílẹ̀, ipò rẹ̀ kò sì yípadà.",
       "not_reached": "Kò mú ohunkóhun tí a ti kọ kúrò. Àwọn ilà tí àwọn kọ́kọ́rọ́ wọ̀nyí ti kọ síbí tẹ́lẹ̀ wà bí wọ́n ti wà, a sì ń fi wọ́n fúnni síbẹ̀ — ìyàsọ́tọ̀ ni iṣẹ́ tí ó ń dáwọ́ fífúnni ní wọn dúró. Àwọn ilà tí ó ti tàn kálẹ̀ sí àwọn ẹlẹ́gbẹ́ tẹ́lẹ̀ ni a kò ké padà, a kò sì lè ké wọn padà. A kò mú àwọn kọ́kọ́rọ́ náà kúrò, àwọn ìbùwọ́lù wọn ṣì ń jẹ́rìísí, wọ́n sì ń bá kíkọ sí gbogbo nódù mìíràn lọ, títí kan àwọn ẹlẹ́gbẹ́ nódù yìí, láti ọ̀dọ̀ àwọn ẹni tí àwọn ilà wọ̀nyẹn lè tún dé síbí nípasẹ̀ àdàkọ. Àyọnda kan ṣoṣo ni ó ṣì wà ní mọ̀ọ́mọ̀ kí nódù kan lè máa gbé ìkọ̀ tí òun fúnra rẹ̀ gbé kalẹ̀ kúrò nígbà gbogbo, kò sì bi ẹni tí ń kọ léèrè: kọ́kọ́rọ́ tí a ti fagilé ìgbàwọlé rẹ̀ ṣì lè kọ àwọn ilà ìfagilé ìgbàwọlé síbí (CIRISPersist#608).",
       "reversal": "A lè yí i padà, ìyípadà náà sì dé ọ̀dọ̀ ìpìlẹ̀ náà dípò kí ó kàn ṣàkọsílẹ̀ ìyípadà ọkàn: POST /v1/admin/accept-writes ń fa ìfagilé ìgbàwọlé náà sẹ́yìn, a sì tún ń gba àwọn ìkọsílẹ̀ ti kọ́kọ́rọ́ náà wọlé níbí. Méjì nínú àwọn ìyípadà ti àkàbà yìí ni ó ń dé ọ̀dọ̀ ìpìlẹ̀ náà — títú ìyàsọ́tọ̀ sílẹ̀, tí ó ń dá ohun tí nódù yìí Ń FÚNNI padà bọ̀sípò, àti èyí, tí ó ń dá ohun tí Ó Ń GBÀ padà bọ̀sípò. Àwọn ilà méjèèjì ṣì wà, wọ́n sì ṣì ṣe é kà: “a kọ̀ ọ́ lẹ́yìn náà a tún gbà á wọlé” kì í ṣe òtítọ́ kan náà pẹ̀lú “a kò kọ̀ ọ́ rí”."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Kókó-ìsopọ̀ yìí kò lè kọ ìfagilé náà. Kò sí ohun tí a yípadà, bẹ́ẹ̀ ni kì í ṣe ìkọ̀sílẹ̀ àṣẹ — a kò gbé ìṣe náà kalẹ̀ sí ìpìlẹ̀ rárá. Ìpele tí ó kùnà wà nínú `error`.",
+        "substrate": "A kò lè kọ ìfagilé náà sílẹ̀. Kì í ṣe ìkọ̀sílẹ̀ àṣẹ — ìpìlẹ̀ náà kò parí ìṣe náà. Àlàyé ìmọ̀-ẹ̀rọ wà nínú `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Kókó-ìsopọ̀ yìí kò ní àṣẹ láti fagilé ìwọlé kọ́kọ́rọ́ ẹlòmíràn. Fífagilé kọ́kọ́rọ́ tí kì í ṣe tìrẹ jẹ́ ìṣe ìṣàkóso, ó sì nílò ojúṣe `slash` tí gbòǹgbò ìgbẹ́kẹ̀lé tí ó gbà fún kókó-ìsopọ̀ yìí. Kò sí ohun tí a yípadà. Béèrè lọ́wọ́ olùdìmú àdéhùn láti fi `slash` fún àwọn ojúṣe ìdàpọ̀ lé kókó-ìsopọ̀ yìí lọ́wọ́, lẹ́yìn náà ṣe àṣàyàn kan náà lẹ́ẹ̀kan sí i — hash àwòtẹ́lẹ̀ ṣì wúlò.",
+        "node_identity_unset": "Kókó-ìsopọ̀ yìí kò tíì ní ìdánimọ̀ ìdàpọ̀, nítorí náà kò lè fọwọ́sí ìfagilé kan tàbí pinnu bóyá ó ní àṣẹ láti ṣe ọ̀kan. Parí ètò kókó-ìsopọ̀ ní àkọ́kọ́."
+      }
     }
   },
   "consent": {

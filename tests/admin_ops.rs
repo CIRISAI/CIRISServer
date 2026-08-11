@@ -1259,7 +1259,34 @@ async fn tier_4_deadmit_writes_a_signed_revocation_with_the_history_bound() {
         "this node is deliberately NOT an accord holder — the point is that authority must be \
          granted, not assumed"
     );
-    assert_eq!(json["results"][0]["outcome"], "error", "{json}");
+    // AND THE OPERATOR HAS TO BE ABLE TO READ IT. The refusal reaches the UI as
+    // a TYPED, LOCALIZABLE verdict, not a stringified store error: `refused`
+    // (not `error` — the substrate answered, it did not fail), the stable
+    // persist token, and an `{id, text}` pair the client renders in any of the
+    // 29 languages. This is the difference between an operator who knows to go
+    // ask an accord holder for a grant and one who files a bug against a
+    // healthy node.
+    let r = &json["results"][0];
+    assert_eq!(r["outcome"], "refused", "{json}");
+    assert_eq!(
+        r["reason"], "federation_delegated_scope_unauthorized",
+        "the stable persist token must survive to the client, not be flattened \
+         into prose: {json}"
+    );
+    assert_eq!(
+        r["message"]["id"], "admin.deadmit.refused.no_slash_grant",
+        "{json}"
+    );
+    let text = r["message"]["text"].as_str().expect("localizable text");
+    assert!(
+        text.contains("slash") && text.contains("accord holder"),
+        "the refusal must name the REMEDY (who grants `slash`), not merely the \
+         denial — got: {text}"
+    );
+    assert!(
+        r["error"].as_str().is_some_and(|e| e.contains("slash")),
+        "the substrate's own words stay available for the debug pane: {json}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

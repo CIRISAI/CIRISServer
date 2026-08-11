@@ -3301,6 +3301,16 @@
       "already_refused": "Cette clé est déjà désadmise ici : rien n'a été écrit et l'état reste inchangé.",
       "not_reached": "Cela n'annule aucune écriture. Les lignes que ces clés ont déjà écrites ici demeurent intactes et continuent d'être servies — la quarantaine est l'opération qui cesse de les servir. Les lignes déjà répliquées vers des pairs ne sont pas rappelées et ne peuvent pas l'être. Les clés ne sont pas supprimées, leurs signatures se vérifient toujours, et elles continuent d'écrire sur tous les autres nœuds, y compris les pairs de ce nœud, d'où ces lignes peuvent revenir ici par réplication. Une exemption subsiste à dessein pour qu'un nœud puisse toujours lever son propre refus, et elle ne demande pas qui écrit : une clé désadmise peut encore écrire ici des lignes de désadmission (CIRISPersist#608).",
       "reversal": "Réversible, et le renversement atteint le substrat au lieu de simplement consigner un changement d'avis : POST /v1/admin/accept-writes retire la désadmission et les écritures de la clé sont de nouveau admises ici. Deux des renversements de cette échelle atteignent le substrat — la levée d'une quarantaine, qui rétablit ce que ce nœud SERT, et celui-ci, qui rétablit ce qu'il ACCEPTE. Les deux lignes subsistent et restent lisibles : « refusée puis réadmise » n'est pas le même fait que « jamais refusée »."
+    },
+    "deadmit": {
+      "failed": {
+        "local": "Ce nœud n'a pas pu construire la révocation. Rien n'a été modifié, et il ne s'agit pas d'un refus d'autorité — l'acte n'a jamais été soumis au substrat. L'étape en échec figure dans `error`.",
+        "substrate": "La révocation n'a pas pu être écrite. Il ne s'agit pas d'un refus d'autorité — le substrat n'a pas achevé l'acte. Le détail technique figure dans `error`."
+      },
+      "refused": {
+        "no_slash_grant": "Ce nœud n'est pas autorisé à retirer l'admission de la clé d'autrui. Révoquer une clé qui n'est pas la vôtre est un acte de modération, et cela requiert que le devoir `slash` soit accordé à ce nœud par une racine de confiance qu'il accepte. Rien n'a été modifié. Demandez à un détenteur d'accord de déléguer `slash` pour les devoirs de fédération à ce nœud, puis relancez la même sélection — l'empreinte de prévisualisation reste valable.",
+        "node_identity_unset": "Ce nœud n'a pas encore d'identité de fédération : il ne peut donc ni signer une révocation ni déterminer s'il détient l'autorité nécessaire pour en émettre une. Terminez d'abord la configuration du nœud."
+      }
     }
   },
   "consent": {
