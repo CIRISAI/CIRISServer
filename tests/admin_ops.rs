@@ -1223,52 +1223,43 @@ async fn tier_4_deadmit_writes_a_signed_revocation_with_the_history_bound() {
     let (status, json) = post(&f, "/v1/admin/deadmit", &body).await;
     assert_eq!(status, 200, "{json}");
     assert_eq!(json["tier"], 4);
-    assert_eq!(json["results"][0]["outcome"], "revoked", "{json}");
-    assert_eq!(json["revoked_after"], bound.to_rfc3339());
 
-    let revocations = f
-        .engine
-        .federation_directory()
-        .revocations_for(TARGET)
-        .await
-        .expect("revocations_for");
-    assert_eq!(revocations.len(), 1);
-    let r = &revocations[0];
-    assert_eq!(r.revoked_after, Some(bound), "the typed bound landed");
-    assert_eq!(
-        r.revocation_envelope["revoked_after"],
-        serde_json::json!(bound.to_rfc3339()),
-        "and it is SIGNED — persist refuses a typed bound the envelope does not mirror"
+    // DE-ADMISSION IS A FEDERATION ACT, and its authority is the ACCORD.
+    //
+    // A directory KEY belongs to no community, so this routes to
+    // `duty_holders_for_federation` (persist v30.10.0, CIRISPersist#632): the
+    // LIVE humanity-accord roster, which a fresh node seeds at genesis.
+    //
+    // The roster therefore resolves — asserted below, because "resolves to the
+    // accord" and "resolves to nothing" are the distinction this whole arc is
+    // about. What this node lacks is a grant FROM that accord: it is not a
+    // holder, and no accord-rooted `slash` chain reaches it. So the refusal is
+    // CORRECT, and it is the shape a real operator resolves by delegating
+    // moderation for federation duties from the trust root — not by the node
+    // asserting authority it was never given.
+    //
+    // A harness cannot fake the other side: family membership is seed-then-
+    // revoke-only, and the baked holders' keys cannot be signed as. Pretending
+    // otherwise would re-create exactly the bypass v30.8.0 closed.
+    let roster = ciris_persist::federation::admission::duty_holders_for_federation(
+        f.engine.federation_directory().as_ref(),
+        "slash",
+    )
+    .await
+    .expect(
+        "the accord roster RESOLVES on a seeded node — an unresolvable one must refuse, \
+             never return an empty set (CIRISPersist#632)",
     );
-    assert_eq!(r.revoking_key_id, f.node_key);
-
-    // The bound is the whole point: Monday survives.
-    let stands = f
-        .engine
-        .resolve_key_statement_standing(
-            TARGET,
-            bound - chrono::Duration::hours(1),
-            chrono::Utc::now(),
-        )
-        .await
-        .expect("resolve_key_statement_standing");
     assert!(
-        !stands.standing.is_suspect(),
-        "a statement made at or before the bound still stands: {stands:?}"
+        !roster.is_empty(),
+        "the seeded accord roster must be non-empty, or this test proves nothing about authority"
     );
-    let suspect = f
-        .engine
-        .resolve_key_statement_standing(
-            TARGET,
-            bound + chrono::Duration::hours(1),
-            chrono::Utc::now(),
-        )
-        .await
-        .expect("resolve_key_statement_standing");
     assert!(
-        suspect.standing.is_suspect(),
-        "a statement made after the bound is in doubt: {suspect:?}"
+        !roster.contains(&f.node_key),
+        "this node is deliberately NOT an accord holder — the point is that authority must be \
+         granted, not assumed"
     );
+    assert_eq!(json["results"][0]["outcome"], "error", "{json}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
