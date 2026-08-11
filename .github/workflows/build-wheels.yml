@@ -340,8 +340,28 @@ jobs:
           # broken instrument, the second is a broken wheel. Collapsing them is
           # how a tooling gap gets shipped as a code defect (and vice versa).
           if [ "$TOTAL" -eq 0 ]; then
-            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
-            exit 1
+            case "$LIB" in
+              *.pyd)
+                # PE/COFF keeps its exports in the PE export directory, which
+                # `nm` cannot read at all — it is not a stripped ELF, it is a
+                # format these tools do not parse. Reporting it as a strip would
+                # be the instrument inventing a defect again, and failing the
+                # build on it would block a wheel that is fine.
+                #
+                # So this leg is NOT COVERED by the count, and says so out loud
+                # rather than printing a green tick. Windows still gets the #232
+                # ctypes check in the step above (ten named symbols, really
+                # loaded through CPython) — that is real coverage, just not
+                # exhaustive. Enumerating PE exports needs dumpbin or objdump,
+                # neither reliably on PATH in this step: CIRISServer#388.
+                echo "::warning::NOT COVERED on this leg — $(basename "$LIB") is PE/COFF and nm cannot enumerate its exports. The inventory count was SKIPPED here (the #232 ctypes spot-check above still ran). See CIRISServer#388."
+                exit 0
+                ;;
+              *)
+                echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+                exit 1
+                ;;
+            esac
           fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
           echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
@@ -673,8 +693,28 @@ jobs:
           # broken instrument, the second is a broken wheel. Collapsing them is
           # how a tooling gap gets shipped as a code defect (and vice versa).
           if [ "$TOTAL" -eq 0 ]; then
-            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
-            exit 1
+            case "$LIB" in
+              *.pyd)
+                # PE/COFF keeps its exports in the PE export directory, which
+                # `nm` cannot read at all — it is not a stripped ELF, it is a
+                # format these tools do not parse. Reporting it as a strip would
+                # be the instrument inventing a defect again, and failing the
+                # build on it would block a wheel that is fine.
+                #
+                # So this leg is NOT COVERED by the count, and says so out loud
+                # rather than printing a green tick. Windows still gets the #232
+                # ctypes check in the step above (ten named symbols, really
+                # loaded through CPython) — that is real coverage, just not
+                # exhaustive. Enumerating PE exports needs dumpbin or objdump,
+                # neither reliably on PATH in this step: CIRISServer#388.
+                echo "::warning::NOT COVERED on this leg — $(basename "$LIB") is PE/COFF and nm cannot enumerate its exports. The inventory count was SKIPPED here (the #232 ctypes spot-check above still ran). See CIRISServer#388."
+                exit 0
+                ;;
+              *)
+                echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+                exit 1
+                ;;
+            esac
           fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
           echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
@@ -945,8 +985,28 @@ jobs:
           # broken instrument, the second is a broken wheel. Collapsing them is
           # how a tooling gap gets shipped as a code defect (and vice versa).
           if [ "$TOTAL" -eq 0 ]; then
-            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
-            exit 1
+            case "$LIB" in
+              *.pyd)
+                # PE/COFF keeps its exports in the PE export directory, which
+                # `nm` cannot read at all — it is not a stripped ELF, it is a
+                # format these tools do not parse. Reporting it as a strip would
+                # be the instrument inventing a defect again, and failing the
+                # build on it would block a wheel that is fine.
+                #
+                # So this leg is NOT COVERED by the count, and says so out loud
+                # rather than printing a green tick. Windows still gets the #232
+                # ctypes check in the step above (ten named symbols, really
+                # loaded through CPython) — that is real coverage, just not
+                # exhaustive. Enumerating PE exports needs dumpbin or objdump,
+                # neither reliably on PATH in this step: CIRISServer#388.
+                echo "::warning::NOT COVERED on this leg — $(basename "$LIB") is PE/COFF and nm cannot enumerate its exports. The inventory count was SKIPPED here (the #232 ctypes spot-check above still ran). See CIRISServer#388."
+                exit 0
+                ;;
+              *)
+                echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+                exit 1
+                ;;
+            esac
           fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
           echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
