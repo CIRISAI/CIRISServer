@@ -317,14 +317,36 @@ jobs:
           LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
           test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
           SYMFILE=$(mktemp)
+          # READ THE DYNAMIC TABLE. `nm -g` reads the STATIC symtab, which the
+          # release build strips away — on a stripped ELF it prints "no symbols"
+          # and every symbol looks missing. `.dynsym` (nm -D) is what survives a
+          # strip AND is the table the dynamic linker and ctypes actually resolve
+          # against, so it is both the durable and the CORRECT one to ask.
+          #
+          # This gate's first version asked `nm -g` and failed the linux wheel at
+          # 0 symbols on a wheel that had all 88. Same shape as the source-scan
+          # draft before it: a discrepancy invented by the instrument. Twice is a
+          # pattern worth naming — when a check reports catastrophe, suspect the
+          # check before the code.
+          #
           # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
           # above, which false-FAILED a PRESENT symbol on v0.5.108.
-          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
-            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          nm -D --defined-only "$LIB" > "$SYMFILE" 2>/dev/null || true
+          if [ ! -s "$SYMFILE" ]; then nm -g "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          if [ ! -s "$SYMFILE" ]; then llvm-nm "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          TOTAL=$(wc -l < "$SYMFILE" | tr -d ' ')
+          # "Could not read the table" and "the table is missing symbols" are
+          # DIFFERENT answers and must not share an exit path — the first is a
+          # broken instrument, the second is a broken wheel. Collapsing them is
+          # how a tooling gap gets shipped as a code defect (and vice versa).
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+            exit 1
+          fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
-          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
           if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
-            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols out of a readable $TOTAL-entry table, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
             exit 1
           fi
           MISSING=""
@@ -628,14 +650,36 @@ jobs:
           LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
           test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
           SYMFILE=$(mktemp)
+          # READ THE DYNAMIC TABLE. `nm -g` reads the STATIC symtab, which the
+          # release build strips away — on a stripped ELF it prints "no symbols"
+          # and every symbol looks missing. `.dynsym` (nm -D) is what survives a
+          # strip AND is the table the dynamic linker and ctypes actually resolve
+          # against, so it is both the durable and the CORRECT one to ask.
+          #
+          # This gate's first version asked `nm -g` and failed the linux wheel at
+          # 0 symbols on a wheel that had all 88. Same shape as the source-scan
+          # draft before it: a discrepancy invented by the instrument. Twice is a
+          # pattern worth naming — when a check reports catastrophe, suspect the
+          # check before the code.
+          #
           # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
           # above, which false-FAILED a PRESENT symbol on v0.5.108.
-          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
-            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          nm -D --defined-only "$LIB" > "$SYMFILE" 2>/dev/null || true
+          if [ ! -s "$SYMFILE" ]; then nm -g "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          if [ ! -s "$SYMFILE" ]; then llvm-nm "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          TOTAL=$(wc -l < "$SYMFILE" | tr -d ' ')
+          # "Could not read the table" and "the table is missing symbols" are
+          # DIFFERENT answers and must not share an exit path — the first is a
+          # broken instrument, the second is a broken wheel. Collapsing them is
+          # how a tooling gap gets shipped as a code defect (and vice versa).
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+            exit 1
+          fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
-          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
           if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
-            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols out of a readable $TOTAL-entry table, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
             exit 1
           fi
           MISSING=""
@@ -878,14 +922,36 @@ jobs:
           LIB=$(find "$TMP" \( -name '_native*.so' -o -name '_native*.pyd' -o -name '_native*.dylib' \) | head -1)
           test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
           SYMFILE=$(mktemp)
+          # READ THE DYNAMIC TABLE. `nm -g` reads the STATIC symtab, which the
+          # release build strips away — on a stripped ELF it prints "no symbols"
+          # and every symbol looks missing. `.dynsym` (nm -D) is what survives a
+          # strip AND is the table the dynamic linker and ctypes actually resolve
+          # against, so it is both the durable and the CORRECT one to ask.
+          #
+          # This gate's first version asked `nm -g` and failed the linux wheel at
+          # 0 symbols on a wheel that had all 88. Same shape as the source-scan
+          # draft before it: a discrepancy invented by the instrument. Twice is a
+          # pattern worth naming — when a check reports catastrophe, suspect the
+          # check before the code.
+          #
           # No pipe into `grep -q` anywhere below: see the EPIPE note on the step
           # above, which false-FAILED a PRESENT symbol on v0.5.108.
-          nm -g "$LIB" > "$SYMFILE" 2>/dev/null || llvm-nm -g "$LIB" > "$SYMFILE" 2>/dev/null || {
-            echo "::error::neither nm nor llvm-nm could read $LIB"; exit 1; }
+          nm -D --defined-only "$LIB" > "$SYMFILE" 2>/dev/null || true
+          if [ ! -s "$SYMFILE" ]; then nm -g "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          if [ ! -s "$SYMFILE" ]; then llvm-nm "$LIB" > "$SYMFILE" 2>/dev/null || true; fi
+          TOTAL=$(wc -l < "$SYMFILE" | tr -d ' ')
+          # "Could not read the table" and "the table is missing symbols" are
+          # DIFFERENT answers and must not share an exit path — the first is a
+          # broken instrument, the second is a broken wheel. Collapsing them is
+          # how a tooling gap gets shipped as a code defect (and vice versa).
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::no symbol table could be read from $LIB (tried nm -D, nm -g, llvm-nm). This is an INSTRUMENT failure, not evidence about the wheel — do not read it as a strip."
+            exit 1
+          fi
           N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
-          echo "  ciris_verify_* symbols: $N (floor $MIN_VERIFY_SYMBOLS)"
+          echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
           if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
-            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols out of a readable $TOTAL-entry table, under the $MIN_VERIFY_SYMBOLS floor. LTO dropped FFI symbols nothing in Rust calls (CIRISServer#232/#378). This wheel imports fine and fails at a ctypes call site — do NOT lower the floor to go green."
             exit 1
           fi
           MISSING=""
