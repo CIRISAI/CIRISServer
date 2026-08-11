@@ -33,14 +33,15 @@ pub mod accord;
 /// self-signed `accord_holder` record + its `portable_2fa` custody attestation
 /// (FIPS YubiKey Ed25519 + USB-wrapped ML-DSA-65; both-keys + PIN + touch).
 pub mod accord_custody;
-/// HUMANITY_ACCORD operational halt (CIRISServer#41) — the disk-latched full halt
-/// + the startup gate that makes the 2-of-3 kill-switch enforceable (CC 4.2.3).
-pub mod accord_halt;
 /// `POST /v1/accord/provision-holder` — the loopback-only server endpoint behind
 /// the guided desktop "Provision Accord Holder" flow. Drives
 /// [`accord_custody::provision_portable_holder`] from the holder's already-FIPS-
 /// approved YubiKey + the chosen ML-DSA USB path. `pkcs11`-feature-gated for the
 /// real-token path (returns NotSupported without it).
+pub mod accord_duty;
+/// HUMANITY_ACCORD operational halt (CIRISServer#41) — the disk-latched full halt
+/// + the startup gate that makes the 2-of-3 kill-switch enforceable (CC 4.2.3).
+pub mod accord_halt;
 pub mod accord_provision;
 /// HUMANITY_ACCORD reactivation (CIRISServer#41, CC 4.2.1 §69) — the offline
 /// `accord reactivate` op: a verified 2/3 `accord:lifecycle:active` clears the halt
@@ -139,6 +140,7 @@ pub mod conformance;
 /// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
+pub mod deployment;
 /// **Same-key equivocation detection** (CIRISServer#350, CC 6.1.1 N4) — the
 /// periodic pass that compares the rows this node holds and emits a
 /// `hard_case:attestation_equivocation` when ONE key has signed two different

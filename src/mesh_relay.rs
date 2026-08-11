@@ -564,7 +564,12 @@ impl MeshControlResponder {
                 .into_iter()
                 .filter(|c| c.active)
                 .min_by_key(|c| c.created)
-                .map(|c| format!("sess:{}:mesh-relay", c.wa_id)),
+                // MINT, never hand-build (CIRISServer#394). This constructed
+                // `sess:<wa_id>:mesh-relay` as a string — which worked only
+                // because the token's secret half was never verified. It is now
+                // MAC'd, so a hand-built token is a forgery and is rejected, as
+                // it should always have been.
+                .map(|c| crate::auth::session::issue_session_token(&c.wa_id)),
             Err(e) => return wire_err(503, format!("wa_cert store: {e}")),
         };
 

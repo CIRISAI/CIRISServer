@@ -2378,7 +2378,8 @@
     "announce_decision_trace_locked": "Akıl yürütme izleri göndermeyi ve topluluklara katılmayı etkinleştirmek için yukarıdaki duyurmayı açın.",
     "announce_decision_trace_title": "Akıl yürütme izleri gönder",
     "status_reconfiguring": "Düğümünüz yeniden başlatılıyor...",
-    "status_reconfiguring_timeout": "Düğümünüzün yeniden başlatılması beklenenden uzun sürüyor. Lütfen uygulamayı yeniden başlatın."
+    "status_reconfiguring_timeout": "Düğümünüzün yeniden başlatılması beklenenden uzun sürüyor. Lütfen uygulamayı yeniden başlatın.",
+    "login_setup_complete_relogin": "Kurulum tamamlandı. Düğümünüz yeniden başlatıldı; lütfen kurulumu tamamlarken kullandığınız kimlik bilgileriyle yeniden oturum açın."
   },
   "nav": {
     "group": {
@@ -3875,6 +3876,56 @@
     "browser_signin": {
       "timed_out": "Oturum açma işlemi tarayıcıda tamamlanmadı, bu nedenle hiçbir şey değiştirilmedi. Tekrar deneyin veya bunun yerine yerel bir hesap kullanın.",
       "waiting": "Tarayıcınızda Google ile oturum açma işlemini tamamlayın, ardından buraya geri dönün."
+    }
+  },
+  "duty": {
+    "adopted": "Kabul edildi — görev devredildi. Özne artık bu görevle hareket edebilir.",
+    "cosign_button": "Birlikte imzala",
+    "depth_1": "1 sıçrama daha",
+    "depth_2": "2 sıçrama daha",
+    "depth_3": "3 sıçrama daha",
+    "depth_4": "4 sıçrama daha",
+    "depth_5": "5 sıçrama daha",
+    "depth_help": "Yetkinizi devrettikten sonra ne kadar uzağa gideceği. Her sıçramayı istediğiniz zaman geri alabilirsiniz.",
+    "depth_label": "Devir derinliği",
+    "depth_leaf": "Yaprak — hareket edebilir, daha ileri devredemez",
+    "depth_unbounded": "Sınırsız (küresel üst sınır: 5)",
+    "holder_desc": "Bu devri anahtarıyla imzalayan mutabakat sahibi. Uygulama hiçbir anahtar tutmaz — yerel düğüm donanımı açar ve imzalar.",
+    "holder_label": "Sahip key_id",
+    "holder_placeholder": "A1",
+    "not_started": "Henüz bir öneri yok. Devir bilgilerini doldurun ve ilk imzayı önerin.",
+    "pending_hint": "Henüz devredilmedi — kısmi imzayı birlikte imzalaması için sonraki sahibe iletin.",
+    "propose_button": "Öner",
+    "section_conferral": "Devir",
+    "section_holder": "İmzalayan sahip",
+    "section_status": "İmzalar",
+    "signatures": "{need} imzadan {have} tanesi",
+    "subject_label": "Özne fed-ID (key_id)",
+    "subject_placeholder": "eric-moore-v2-portable-…",
+    "subtitle": "Bir moderasyon görevini başka bir benliğe devredin ve bu görevi ne kadar ileri aktarabileceğini tam olarak belirtin. Her devir, yürürlüğe girmeden önce mutabakat sahipleri tarafından birlikte imzalanır.",
+    "title": "Moderasyon görevini devret",
+    "usb_label": "ML-DSA USB klasörü",
+    "usb_placeholder": "/media/…",
+    "verb_help": "Sil içeriği kaldırır; modere et gizler ve uyarır; incele yalnızca bir insanın değerlendirmesi için işaretler.",
+    "verb_label": "Görev",
+    "verb_moderate": "Modere et",
+    "verb_review": "İncele",
+    "verb_slash": "Sil"
+  },
+  "accord": {
+    "duty": {
+      "already_signed": "Bu anlaşma sahibi bu yetki devrini zaten imzaladı. Yeter sayı FARKLI sahipleri sayar — iki kez imzalayan bir koltuk yine tek koltuktur.",
+      "bad_request": "İstek okunamadı. Hiçbir şey imzalanmadı ve hiçbir şey değiştirilmedi.",
+      "canonicalize": "Bu yetki devri kanonik biçimine indirgenemedi, bu nedenle imzalanacak güvenli bir şey yok. Hiçbir şey değiştirilmedi.",
+      "depth_over_rail": "Bu devir derinliği ağın izin verdiğinden büyük. Derinlik sınırı yalnızca daraltabilir, asla genişletemez; bu nedenle daha büyük bir sayı, altyapının karşılamayacağı bir erişim vaat ederdi.",
+      "depth_without_delegation": "Bir derinlik seçildi ancak bu yetki bir uç noktadır — işlem yapabilir, görevi başkasına devredemez. Bunun üzerindeki bir derinlik, zaten kapalı olan bir kapıya konmuş bir sınır olurdu.",
+      "holder_custody": "Anlaşma sahibinin anahtarı açılamadı. Belirtecin takılı ve kilidinin açık olduğunu, USB yolunun doğru olduğunu denetleyin. Hiçbir şey imzalanmadı.",
+      "no_subject": "Bir yetki devrinin bir öznesi olmalıdır: görevin verildiği kimlik.",
+      "partial_tampered": "Bu kısmi imza, ilk sahip imzaladıktan sonra değiştirildi. Şimdi imzalamak, iki farklı anlamın üzerine iki imza koyardı; bu nedenle reddedildi.",
+      "refused": "Altyapı bu yetki devrini reddetti. Kabul edilmedi ve hiçbir yetki verilmedi.",
+      "sign_failed": "Anlaşma sahibinin anahtarı bir imza üretmedi. Hiçbir şey değiştirilmedi.",
+      "unknown_duty": "Bu, ağın tanıdığı bir görev değil. Verilmesi burada yetki olarak görünür ve her kapıda reddedilirdi.",
+      "pkcs11_required": "Bir görev devretmek için `pkcs11` özelliği gerekir — tıpkı kanonik ortak imza (co-scrub) töreninde olduğu gibi, sahibi YubiKey'i ve USB ile sarmalanmış ML-DSA yarısını kullanarak imzalar."
     }
   }
 }

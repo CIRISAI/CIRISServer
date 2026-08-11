@@ -108,4 +108,24 @@ data class ClaimRemoteResponse(
     val role: String? = null,
     /** Error string when the claim was rejected (non-2xx bodies). */
     val error: String? = null,
+    /**
+     * The owner's session, minted BY the claim (CIRISServer#393).
+     *
+     * The claim proves ownership with a one-time PIN and a hybrid signature over
+     * the owner-binding — strictly stronger evidence than a password. Before
+     * this the wizard then had to log in again to obtain an owner session, which
+     * an OAuth owner simply cannot do: `owner_login SKIPPED
+     * (password_present=false)`, and with it `set_age`, `announce` and
+     * `federation_consent` all skipped while the app fell back to the login
+     * screen. The node was claimed correctly and the user was bounced.
+     *
+     * The node passes the target's setup/root body straight through, so this
+     * arrives on both the self-claim and the remote-claim paths.
+     */
+    @SerialName("access_token")
+    val accessToken: String? = null,
+    @SerialName("token_type")
+    val tokenType: String? = null,
+    @SerialName("expires_in")
+    val expiresIn: Long? = null,
 )

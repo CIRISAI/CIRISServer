@@ -418,6 +418,12 @@ pub async fn auto_mint_root_if_needed(
 /// The deterministic ROOT `wa_id` an identity's auto-mint / first-run claim binds
 /// to. Deterministic so the mint is idempotent across logins (re-deriving the same
 /// id) — the agent keys its mint on `oauth_user.user_id` the same way.
+/// Test seam for the derivation gate (`tests/owner_is_the_identity.rs`).
+#[doc(hidden)]
+pub fn test_support_root_wa_id(identity_key_id: &str) -> String {
+    root_wa_id_for_identity(identity_key_id)
+}
+
 fn root_wa_id_for_identity(identity_key_id: &str) -> String {
     format!("wa-root-{identity_key_id}")
 }
@@ -673,6 +679,35 @@ struct SetupRootResponse {
     /// The USER-SIGNED owner-binding `delegates_to(user → node, infra:*)`
     /// attestation id (the CC 3.2 responsible-party binding that was persisted).
     owner_binding_attestation_id: String,
+    /// **The owner's session, minted BY the claim** (CIRISServer#393).
+    ///
+    /// A claim proves ownership — with a one-time PIN and a hybrid signature over
+    /// the owner-binding, which is strictly stronger evidence than any password.
+    /// Making the caller then go and authenticate is asking them to prove again,
+    /// more weakly, what they just proved.
+    ///
+    /// It also could not be done at all by an OAuth owner. The wizard's remaining
+    /// steps — age band, federation announce, replication consent — need an owner
+    /// session, and it only knew how to obtain one by POSTing a username and
+    /// password. An OAuth owner HAS no password, so `owner_login` was SKIPPED, and
+    /// with it every step that depended on it:
+    ///
+    /// ```text
+    /// claim_accepted role=SYSTEM_ADMIN waId=wa-root-eric-moore-v2-…
+    /// owner_login SKIPPED (waId_present=true password_present=false)
+    /// set_age SKIPPED · announce SKIPPED · federation_consent SKIPPED
+    /// claim_settled claimed=true login=false
+    /// ```
+    ///
+    /// The node claimed successfully and the app fell back to the login screen —
+    /// the same "succeeded into a dead end" shape CIRISServer#384 was about, one
+    /// step later in the flow. Handing back the session closes it for EVERY owner,
+    /// password or OAuth, because the claim is the authentication.
+    /// Flattened so the wire shape is exactly what `/v1/auth/login` and the
+    /// native token exchanges return — one shape, one issuance point
+    /// ([`super::session::SessionGrant`]), no fifth copy of the token policy.
+    #[serde(flatten)]
+    session: super::session::SessionGrant,
 }
 
 // The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1) —
@@ -870,11 +905,60 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
 ///
 /// Response (`201 Created`): `{ wa_id, identity_key_id, cohort_scope, role,
 /// owner_binding_attestation_id }`.
+
+/// **Is the node's sole ROOT an OAuth placeholder this claim may ADOPT?**
+/// (CIRISServer#391)
+///
+/// # The collision this resolves
+///
+/// Signing in with Google on an unclaimed node mints a ROOT keyed to the auth
+/// pair (`oauth-<provider>-<external_id>`, `oauth.rs`). The wizard then completes
+/// setup by CLAIMING the node with the owner's federation identity — and the
+/// claim was refused, `409 root already claimed`, because a ROOT existed. Two
+/// paths both claiming the node, and the refusal could not tell "claimed by
+/// someone else" from "claimed by the very human standing here". The app fell
+/// back to local login with the fed-ID already imported and nothing bound.
+///
+/// # Why the identity wins
+///
+/// OAuth is a DOOR: it proves the human controls an email, carries no key
+/// material, and is revocable by a third party. The federation identity is WHO
+/// THEY ARE: it signs CEG rows and is the `from` of the node's
+/// `ownership:responsible_party:node:v1` edge. So the owner record must be named
+/// after the person ([`root_wa_id_for_identity`]) and merely CARRY the pair as
+/// one way in — which is exactly what this route already does, and what
+/// canonical-server-1 has in production. A ROOT named after the door is the
+/// placeholder, not the owner.
+///
+/// # The rule, deliberately narrow
+///
+/// Adoptable IFF the node's ROOT set is EXACTLY ONE cert that is not
+/// identity-derived (its `wa_id` is not `wa-root-…`) and carries an OAuth pair.
+/// Anything else — a real identity-derived owner, several ROOTs, a password
+/// account — still refuses. This can only ever REPLACE a placeholder minted by a
+/// door on THIS node during first-run; it can never displace an owner.
+///
+/// First-run authorization is unchanged: the claim PIN still proves physical
+/// possession, and the route is still loopback-gated. This decides what a
+/// SUCCESSFUL claim does about a placeholder, never who may claim.
+async fn adoptable_oauth_placeholder(engine: &Engine) -> Option<ciris_persist::wa_cert::WaCert> {
+    let roots = store::list_by_role(engine, WaRole::Root, 8).await.ok()?;
+    let [only] = roots.as_slice() else {
+        return None;
+    };
+    let identity_derived = only.wa_id.starts_with("wa-root-");
+    let has_pair = only.oauth_provider.is_some() && only.oauth_external_id.is_some();
+    (!identity_derived && has_pair).then(|| only.clone())
+}
+
 async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Response {
     // (1) Closed once a ROOT exists — checked FIRST so an unsigned probe against an
     //     already-claimed node still gets the clear 409 (no re-claim).
+    let placeholder = adoptable_oauth_placeholder(&st.engine).await;
     match store::list_by_role(&st.engine, WaRole::Root, 1).await {
-        Ok(v) if !v.is_empty() => {
+        // A ROOT exists AND it is not an adoptable door-minted placeholder ⇒ the
+        // node has a real owner. Refuse exactly as before.
+        Ok(v) if !v.is_empty() && placeholder.is_none() => {
             return err(
                 StatusCode::CONFLICT,
                 "root already claimed; first-run setup is closed",
@@ -882,6 +966,14 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
         }
         Ok(_) => {}
         Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+    }
+    if let Some(p) = &placeholder {
+        tracing::info!(
+            placeholder_wa_id = %p.wa_id,
+            provider = ?p.oauth_provider,
+            "adopting the OAuth placeholder ROOT: the claim names the owner after their \
+             FEDERATION IDENTITY and carries the sign-in pair onto it (CIRISServer#391)"
+        );
     }
 
     let req: SetupRootRequest = if body.is_empty() {
@@ -958,7 +1050,7 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
 
     // (5) Bind this responsible user as ROOT (race-narrowed: re-check + claim).
     if let Ok(v) = store::list_by_role(&st.engine, WaRole::Root, 1).await {
-        if !v.is_empty() {
+        if !v.is_empty() && placeholder.is_none() {
             return err(
                 StatusCode::CONFLICT,
                 "root already claimed; first-run setup is closed",
@@ -1059,6 +1151,49 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     }
                 }
             }
+            // ONE PROVIDER IDENTITY RESOLVES TO ONE CERT (CIRISServer#395).
+            //
+            // The claim just stamped the sign-in pair onto the OWNER. Any OTHER
+            // cert carrying that same pair now makes `get_by_oauth` ambiguous —
+            // two answers to one question — and the next sign-in resolves to
+            // whichever the store returns first.
+            //
+            // That is not hypothetical. It shipped: the OAuth sign-in creates an
+            // OBSERVER account (correct — a door does not own the house), the
+            // claim then bound the owner and carried the pair across, and the
+            // next Google sign-in resolved to the OBSERVER. The user was signed
+            // in, saw no error, and silently held observer rights on their own
+            // node — which fails at the first owner-gated act, far from the cause.
+            //
+            // Keyed on the PAIR, not on the adopt path. An earlier version of
+            // this retired only an adopted ROOT placeholder, which never fired
+            // once OAuth stopped minting ROOTs — the cleanup was coupled to a
+            // condition that had been fixed away, while the ambiguity it existed
+            // to prevent remained. Deactivate, never delete: the row is audit
+            // history of a real sign-in.
+            if let Some((prov, ext)) = &oauth_identity {
+                match store::get_by_oauth(&st.engine, prov, ext).await {
+                    Ok(Some(other)) if other.wa_id != wa_id => {
+                        match store::set_active(&st.engine, &other.wa_id, false).await {
+                            Ok(_) => tracing::info!(
+                                retired_wa_id = %other.wa_id, owner_wa_id = %wa_id, provider = %prov,
+                                "retired a duplicate cert holding the owner's sign-in pair — the \
+                                 provider identity now resolves to the owner alone"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e, duplicate_wa_id = %other.wa_id,
+                                "could not retire the duplicate provider cert — TWO certs carry \
+                                 this pair and a sign-in may resolve to either"
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not check for a duplicate provider cert after the claim"
+                    ),
+                }
+            }
             tracing::info!(
                 identity = %identity_key_id,
                 wa_id = %wa_id,
@@ -1072,6 +1207,10 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
+                    session: super::session::SessionGrant::issue(
+                        &wa_id,
+                        &super::roles::UserRole::SystemAdmin,
+                    ),
                     wa_id,
                     identity_key_id,
                     cohort_scope,

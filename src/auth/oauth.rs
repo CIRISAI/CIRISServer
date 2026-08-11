@@ -972,6 +972,39 @@ pub async fn resolve_oauth_user(
         subject = %redact_subject(&ident.external_id),
         "oauth sign-in: no local identity bound yet — creating one"
     );
+    // ── A PERSONAL NODE IS NOT A SIGN-UP SURFACE (CIRISServer#396) ──────────
+    //
+    // Auto-creating an account for any presentable Google identity belongs to a
+    // MANAGED deployment (CIRISManager / web), where an operator provisions
+    // people ahead of time and an observer account is a meaningful default. On a
+    // personal install — this desktop, this phone — it is the opposite: the node
+    // has exactly one human, and a stranger who can reach the port should get
+    // NOTHING for proving they control some unrelated email.
+    //
+    // First-run is the deliberate exception: the owner's very first sign-in is
+    // how they establish themselves, before any cert exists to recognise them.
+    // Once the node is CLAIMED, an unrecognised identity is refused, and it is
+    // refused with the SAME typed reason a known-but-unlinked identity gets, so
+    // the wire cannot be used to enumerate who is and is not enrolled here.
+    // MANAGED deployments keep creating (CIRISServer#396). CIRIS Manager
+    // provisions people ahead of time and an observer default is meaningful
+    // there; refusing would lock every web agent's users out. Detection is
+    // COPIED from the agent's `is_managed()`, majority-of-five, because a
+    // second cleverer answer to a question they have already answered in
+    // production is how two systems drift apart.
+    if !super::bootstrap::is_first_run(engine).await && !crate::deployment::is_managed() {
+        tracing::info!(
+            provider = %ident.provider,
+            subject = %redact_subject(&ident.external_id),
+            "oauth sign-in REFUSED — this node is claimed and no local identity is linked to \
+             that account. A personal node does not create accounts for whoever signs in; that \
+             is a managed-deployment behaviour."
+        );
+        return Err(OAuthResolveError::NoLocalIdentity {
+            provider: ident.provider.clone(),
+        });
+    }
+
     // No cert carries this identity yet — CREATE one. OAuth users are
     // first-class in the surface being converted; refusing here would drop a
     // capability the Python has had for a year.
@@ -1118,16 +1151,58 @@ async fn create_oauth_user_inner(
     Ok(wa_id)
 }
 
-/// First OAuth user → SYSTEM_ADMIN (setup wizard); `@ciris.ai` → ADMIN; else
-/// OBSERVER. Mirrors the agent's role-determination (routes/auth.py).
-async fn determine_role(engine: &Engine, email: Option<&str>) -> UserRole {
-    let any_root = store::list_by_role(engine, WaRole::Root, 1)
+/// Test seam: drive the resolve-or-create + role decision the callback uses
+/// (`tests/owner_is_the_identity.rs`).
+#[doc(hidden)]
+pub async fn test_support_resolve_oauth_user(
+    engine: &Engine,
+    provider: &str,
+    external_id: &str,
+    email: Option<&str>,
+) -> Result<String, String> {
+    let ident = OAuthIdentity {
+        provider: provider.to_string(),
+        external_id: external_id.to_string(),
+        email: email.map(str::to_owned),
+        name: None,
+    };
+    let role = determine_role(engine, ident.email.as_deref()).await;
+    resolve_oauth_user(engine, &ident, role)
         .await
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    if !any_root {
-        return UserRole::SystemAdmin;
-    }
+        .map_err(|e| e.reason_id().to_string())
+}
+
+/// `@ciris.ai` → ADMIN; else OBSERVER.
+///
+/// # A DOOR DOES NOT OWN THE HOUSE (CIRISServer#391)
+///
+/// This used to hand SYSTEM_ADMIN to the first OAuth user on a node with no
+/// ROOT, so signing in with Google CLAIMED the node — minting an owner named
+/// after the auth pair (`oauth-<provider>-<external_id>`). Three things then
+/// went wrong at once:
+///
+///  1. The owner was named after the DOOR, not the person. Everywhere else the
+///     owner is `wa-root-<identity_key_id>` — derived from the federation
+///     identity, which is what signs CEG rows and what the node's
+///     `ownership:responsible_party:node:v1` edge points FROM. Production
+///     (canonical-server-1) has the identity-derived shape; only this path
+///     disagreed.
+///  2. It closed first-run. The wizard's own claim step — the one that binds the
+///     owner to their fed-ID and writes the ownership edge — then failed
+///     `409 root already claimed`, and the app fell back to local login with the
+///     fed-ID imported and nothing bound.
+///  3. The resulting owner held no key. An OAuth identity carries no key
+///     material (this module touches none), so a node "owned" this way had an
+///     owner that could not sign a single federation row.
+///
+/// OAuth proves a human controls an email. It is a way IN to an account, and it
+/// is revocable by a third party. Ownership is established by the CLAIM, from
+/// the federation identity, on one path — whether the human arrives by OAuth or
+/// by password. The sign-in still stamps its pair onto that owner (see
+/// `SetupRootRequest::owner_oauth_provider`), so Google remains a way in; it
+/// simply stops being the thing that decides who the owner IS.
+async fn determine_role(engine: &Engine, email: Option<&str>) -> UserRole {
+    let _ = engine;
     if email.map(|e| e.ends_with("@ciris.ai")).unwrap_or(false) {
         return UserRole::Admin;
     }
@@ -1487,13 +1562,12 @@ async fn finish_oauth_login(
             // owner-gated POST /v1/federation/peering. The user_id (the bound
             // wa_cert) IS the identity bound; mint is idempotent. Non-admin OAuth
             // logins are a no-op; a store failure is logged, never fatal to login.
-            if role == UserRole::SystemAdmin {
-                if let Err(e) =
-                    super::bootstrap::auto_mint_root_if_needed(&st.engine, &user_id, true).await
-                {
-                    tracing::warn!(error = %e, user_id = %user_id, "auto-mint ROOT on OAuth login failed (founder can claim manually)");
-                }
-            }
+            // NO AUTO-MINT HERE (CIRISServer#391). This called
+            // `auto_mint_root_if_needed(&user_id)` — passing the OAuth wa_id as if
+            // it were a federation identity, which would mint
+            // `wa-root-oauth-google-<external_id>`: an owner named after a door,
+            // holding no key. Ownership is the CLAIM's job, from the fed-ID, on one
+            // path for OAuth and password alike. See `determine_role`.
             // Mint the session THIS sign-in earns — the same opaque token the
             // password path issues, so everything downstream resolves it the
             // same way.

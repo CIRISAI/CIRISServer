@@ -5,6 +5,22 @@
     "language_name": "English"
   },
   "access_token": "Access Token",
+  "accord": {
+    "duty": {
+      "already_signed": "That accord holder has already signed this conferral. Quorum counts DISTINCT holders — one seat signing twice is still one seat.",
+      "bad_request": "The request could not be read. Nothing was signed and nothing was changed.",
+      "canonicalize": "This conferral could not be reduced to its canonical form, so there is nothing safe to sign. Nothing was changed.",
+      "depth_over_rail": "That delegation depth is larger than the mesh allows. Depth can only ever narrow the limit, never widen it, so a bigger number would promise reach that the substrate will not honour.",
+      "depth_without_delegation": "sub_delegation_depth was given but sub_delegation is false. `false` is a LEAF grant — it may act and may not pass the duty on — so a depth on it would be a bound on a gate that is shut.",
+      "holder_custody": "The accord holder's key could not be opened. Check the token is inserted and unlocked, and that the USB path is correct. Nothing was signed.",
+      "no_subject": "a conferral needs a subject key_id — the identity the duty is granted TO",
+      "partial_tampered": "the partial's content hash does not match its envelope — it was altered after the first holder signed it. Signing it now would put two signatures over two different meanings.",
+      "pkcs11_required": "Conferring a duty needs the `pkcs11` feature — the holder signs with their YubiKey plus the USB-wrapped ML-DSA half, exactly as the canonical co-scrub ceremony does.",
+      "refused": "The substrate refused this conferral. It is not admitted, and no authority was granted.",
+      "sign_failed": "The accord holder's key did not produce a signature. Nothing was changed.",
+      "unknown_duty": "That is not a duty this mesh recognises. Granting it would show as authority here and be refused at every gate."
+    }
+  },
   "adapters": {
     "navigation": {
       "error_end_not_found": "Could not find end location: {location}",
@@ -522,6 +538,40 @@
     "field_task_id": "Task ID",
     "field_thought_id": "Thought ID",
     "field_time": "Time"
+  },
+  "duty": {
+    "adopted": "Adopted — the duty is conferred. The subject may act on it now.",
+    "cosign_button": "Cosign",
+    "depth_1": "1 further hop",
+    "depth_2": "2 further hops",
+    "depth_3": "3 further hops",
+    "depth_4": "4 further hops",
+    "depth_5": "5 further hops",
+    "depth_help": "How far your authority travels after you hand it over. Every hop can be revoked by you.",
+    "depth_label": "Delegation depth",
+    "depth_leaf": "Leaf — may act, may not delegate further",
+    "depth_unbounded": "Unbounded (global rail: 5)",
+    "holder_desc": "The accord holder whose key signs this conferral. The app holds no keys — the local node opens the hardware and signs.",
+    "holder_label": "Holder key_id",
+    "holder_placeholder": "A1",
+    "not_started": "Nothing proposed yet. Fill in the conferral and propose the first signature.",
+    "pending_hint": "Not conferred yet — hand the partial to the next holder to cosign.",
+    "propose_button": "Propose",
+    "section_conferral": "The conferral",
+    "section_holder": "Signing holder",
+    "section_status": "Signatures",
+    "signatures": "{have} of {need} signatures",
+    "subject_label": "Subject fed-ID (key_id)",
+    "subject_placeholder": "eric-moore-v2-portable-…",
+    "subtitle": "Confer a moderation duty on another self, and say exactly how far they may pass it on. Every conferral is co-signed by the accord holders before it takes effect.",
+    "title": "Delegate moderation duty",
+    "usb_label": "ML-DSA USB folder",
+    "usb_placeholder": "/media/…",
+    "verb_help": "Slash removes; moderate hides and warns; review only flags for a human.",
+    "verb_label": "Duty",
+    "verb_moderate": "Moderate",
+    "verb_review": "Review",
+    "verb_slash": "Slash"
   },
   "errors": {
     "adapter_not_available": "Adapter manager not available",
@@ -1644,6 +1694,7 @@
     "login_reset_device_cancel": "Cancel",
     "login_reset_device_confirm_body": "This will erase all local data and return to the setup wizard. This cannot be undone.",
     "login_reset_device_confirm_title": "Reset device?",
+    "login_setup_complete_relogin": "Setup is complete. Your node restarted, so please log back in with the same credentials you used to complete setup.",
     "login_signin_apple": "Sign in with Apple",
     "login_signin_google": "Sign in with Google",
     "login_signin_provider": "Sign in with {provider}",

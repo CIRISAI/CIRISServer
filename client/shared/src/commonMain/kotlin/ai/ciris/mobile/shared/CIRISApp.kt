@@ -497,6 +497,8 @@ fun CIRISApp(
     // Setup↔Startup↔Interact↔Login for minutes. Cleared once we land on
     // Login/Setup, or the rebind times out.
     var reconfiguring by remember { mutableStateOf(false) }
+    // Setup just completed and the node restarted — drives the login banner.
+    var justCompletedSetup by remember { mutableStateOf(false) }
 
     // Login state
     var isLoginLoading by remember { mutableStateOf(false) }
@@ -715,6 +717,11 @@ fun CIRISApp(
     val identityManagementViewModel: ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel(apiClient)
     }
+    // Delegate moderation duty — the co-scrubbed conferral of slash/moderate/review
+    // onto another self, with the sub-delegation depth stated up front.
+    val dutyConferralViewModel: ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel(apiClient)
+    }
     val contactsViewModel: ContactsViewModel = viewModel {
         ContactsViewModel(apiClient)
     }
@@ -895,6 +902,11 @@ fun CIRISApp(
                             // catch-up (POST /v1/self/upgrade-owner) — never by
                             // re-running the wizard.
                             platformLog(TAG, "[INFO] Node back + $ownership after reconfigure → Login")
+                            // Tell the login screen WHY it is being shown: setup
+                            // succeeded and the restart invalidated the session
+                            // (CIRISServer#393). Without this the screen is
+                            // indistinguishable from a failure.
+                            justCompletedSetup = true
                             isFirstRun = false
                             reconfiguring = false
                             startupViewModel.setKeepTimerAlive(false)
@@ -1297,7 +1309,14 @@ fun CIRISApp(
                         // then auth flow will detect first user and redirect to setup
                         platformLog(TAG, "[INFO][Screen.Login] Mobile first-run - showing login for OAuth sign-in")
                     } else if (googleSignInCallback == null && isFirstRun == false) {
-                        platformLog(TAG, "[INFO][Screen.Login] Desktop existing user - showing local login form")
+                        // Returning user on desktop. We show the OPTIONS, not the
+                        // password form — the absence of a native Google SDK is
+                        // not the absence of OAuth (CIRISServer#393).
+                        platformLog(
+                            TAG,
+                            "[INFO][Screen.Login] Returning user — offering the sign-in choice " +
+                                "(Google or local), not assuming a password account",
+                        )
                     }
                 }
 
@@ -1784,7 +1803,22 @@ fun CIRISApp(
                     errorMessage = loginErrorMessage,
                     ownerHint = ownerHint,
                     observerBlocked = observerBlocked,
-                    showLocalLoginForm = (googleSignInCallback == null && isFirstRun == false),
+                    // ALWAYS OFFER THE CHOICE (CIRISServer#393).
+                    //
+                    // This was `googleSignInCallback == null && !isFirstRun` —
+                    // i.e. "desktop has no native Google SDK, so a returning user
+                    // must want the password form". That premise died when the
+                    // node started serving the browser OAuth flow: after a
+                    // post-setup node restart, a Google owner was dropped onto a
+                    // username-and-password form for an account that has NO
+                    // password, with the Google button one un-obvious "back" away.
+                    //
+                    // The absence of a NATIVE SDK is not the absence of OAuth, and
+                    // the owner-hint on this very screen says `provider=google`.
+                    // Showing the options costs one tap and cannot guess wrong;
+                    // auto-opening the wrong door costs the whole session.
+                    showLocalLoginForm = false,
+                    justCompletedSetup = justCompletedSetup,
                     isFirstRun = isFirstRun ?: true,
                     // NOTE: no fedID sign-in option here by design — the fedID is the
                     // founder's identity, minted in the first-run wizard and accessed
@@ -1877,6 +1911,29 @@ fun CIRISApp(
                                     // Clear pending tokens
                                     pendingIdToken = null
                                     pendingUserId = null
+                                } else if (
+                                    (apiClient as? CIRISApiClient)?.currentSessionToken() != null
+                                ) {
+                                    // THE OWNER SESSION OUTRANKS THE SIGN-IN SESSION
+                                    // (CIRISServer#393).
+                                    //
+                                    // If setup already installed a session, it is the one
+                                    // the CLAIM minted for the owner — and it is strictly
+                                    // better than the token captured during the browser
+                                    // sign-in, which belongs to the OAuth placeholder the
+                                    // claim just retired. Re-applying the captured one
+                                    // replaced a live owner session with a dead one, so
+                                    // the next call 401'd and a fully-completed setup
+                                    // landed on the login form.
+                                    //
+                                    // Two tokens, one slot, and the older one was winning
+                                    // because it was the only one this branch could see.
+                                    PlatformLogger.i(
+                                        TAG,
+                                        " Keeping the OWNER session established by the claim " +
+                                            "(not re-applying the browser sign-in token)",
+                                    )
+                                    (apiClient as? CIRISApiClient)?.logTokenState()
                                 } else if (currentAccessToken != null) {
                                     // DESKTOP browser sign-in: we already hold a NODE
                                     // session, collected from the hand-off. There is no
@@ -3151,6 +3208,18 @@ fun CIRISApp(
                 )
             }
 
+            Screen.DutyConferral -> {
+                // Delegate moderation duty (reached from Safety → Moderation): confer
+                // slash / moderate / review on another self, stating in one control
+                // whether — and how far — they may pass the duty on. Co-scrubbed by
+                // the accord holders; the node signs, the app holds no keys.
+                PlatformLogger.d(TAG, "[Screen.DutyConferral] Rendering duty conferral screen")
+                DutyConferralScreen(
+                    viewModel = dutyConferralViewModel,
+                    onBack = { currentScreen = Screen.Moderation },
+                )
+            }
+
             Screen.Accord -> {
                 // Accord card (Manage group): the HUMANITY_ACCORD constitutional
                 // surface — entrenched family + quorum:2/3 holder roster + pending
@@ -3197,8 +3266,9 @@ fun CIRISApp(
                     // Tiers 0-4 of /v1/admin/* — the enforcement ladder.
                     ladderViewModel = adminLadderViewModel,
                     onBack = { currentScreen = Screen.Interact },
-                    // The delegate-moderate-duty flow lives on Family → Delegation.
-                    onOpenDelegation = { currentScreen = Screen.Delegation },
+                    // The delegate-moderate-duty flow — confer the duty on another
+                    // self with an explicit sub-delegation depth.
+                    onOpenDelegation = { currentScreen = Screen.DutyConferral },
                 )
             }
 
@@ -4615,6 +4685,10 @@ private sealed class Screen {
     // Identity Management (my self fed-ID + device roster / occurrences — add /
     // revoke a device; "log in as yourself on another device").
     object IdentityManagement : Screen()
+    // Delegate moderation duty — confer slash/moderate/review on another self with
+    // an explicit sub-delegation depth (co-scrubbed by the accord holders).
+    // Reached from Safety → Moderation's "open delegation" affordance.
+    object DutyConferral : Screen()
     // Accord (HUMANITY_ACCORD — constitutional 2/3 kill-switch + holder roster).
     object Accord : Screen()
     // Provision Accord Holder (mint a portable-2FA accord-holder identity).
@@ -4732,6 +4806,9 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.ProvisionAccordHolder -> ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder
     Screen.AccordCeremony -> ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony
     Screen.Moderation -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
+    // The duty-conferral flow is opened FROM Moderation and backs out to it, so it
+    // keeps Moderation lit in the sidebar rather than claiming a surface of its own.
+    Screen.DutyConferral -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
     Screen.ChildSafety -> ai.ciris.mobile.shared.ui.nav.NavSurface.ChildSafety
     Screen.Storage -> ai.ciris.mobile.shared.ui.nav.NavSurface.Storage
     Screen.Billing -> ai.ciris.mobile.shared.ui.nav.NavSurface.Billing

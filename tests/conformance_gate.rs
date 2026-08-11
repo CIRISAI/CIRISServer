@@ -287,7 +287,7 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
         active: true,
     };
     store::upsert(engine, cert).await.expect("mint wa_cert");
-    format!("sess:{wa_id}:testtoken")
+    ciris_server::auth::session::test_support_issue_session_token(wa_id)
 }
 
 async fn serve(engine: Arc<Engine>, skr: String) -> (String, tokio::task::JoinHandle<()>) {

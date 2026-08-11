@@ -531,6 +531,18 @@ class CIRISApiClient(
         logInfo("init", "CIRISApiClient initialized with baseUrl=$baseUrl")
     }
 
+    /**
+     * The session this client currently holds, if any (CIRISServer#393).
+     *
+     * Needed because `onSetupComplete` was re-applying the token captured during
+     * the browser sign-in AFTER the claim had already installed the OWNER
+     * session — silently replacing a live owner session with one belonging to
+     * the OAuth placeholder the claim had just deactivated. Every call after that
+     * 401'd and the app fell back to the login form, with setup fully completed.
+     * A caller cannot avoid clobbering a session it has no way to observe.
+     */
+    fun currentSessionToken(): String? = accessToken
+
     override fun setAccessToken(token: String) {
         val method = "setAccessToken"
         logInfo(method, "Setting access token: ${maskToken(token)}, length=${token.length}")
@@ -3587,6 +3599,134 @@ class CIRISApiClient(
             }
             logException(method, e, "nodeUrl=$nodeUrl$hint")
             throw RuntimeException("${e.message ?: "cosign canonical failed"}$hint", e)
+        } finally {
+            client.close()
+        }
+    }
+
+    // ─── Delegate a moderation DUTY (co-scrub) ───────────────────────────────
+    //
+    // POST /v1/accord/duty/{propose,cosign} — loopback + owner-gated. `propose`
+    // mints the 1-scrub partial; each `cosign` appends a scrub to the SAME
+    // envelope until `scrub_count == quorum_needed` and `adopted` flips true.
+    // The `partial` is OPAQUE and round-trips VERBATIM (a raw JsonElement) — the
+    // app never re-encodes a signed envelope.
+
+    /**
+     * **Propose a moderation-duty conferral (scrub #1)** —
+     * `POST {nodeUrl}/v1/accord/duty/propose`. The local accord holder confers
+     * [duty] (`slash` | `moderate` | `review`) on [subjectKeyId], stating whether the
+     * subject may pass the duty on ([subDelegation]) and how far
+     * ([subDelegationDepth]; null = bounded only by the global rail of 5).
+     *
+     * The returned `partial` does NOT yet confer the duty — hand it to the next
+     * holder's [cosignDutyConferral] unchanged. The app holds NO keys: the node
+     * opens the holder's YubiKey + USB ML-DSA and signs (a touch is the consent).
+     */
+    suspend fun proposeDutyConferral(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        subjectKeyId: String,
+        duty: String,
+        subDelegation: Boolean,
+        subDelegationDepth: Int? = null,
+        pkcs11: JsonElement? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.DutyConferralResponse {
+        val method = "proposeDutyConferral"
+        logInfo(
+            method,
+            "POST $nodeUrl/v1/accord/duty/propose holder=$holderKeyId subject=$subjectKeyId " +
+                "duty=$duty sub_delegation=$subDelegation depth=${subDelegationDepth ?: "(rail)"}",
+        )
+        logInfo(method, "needs a YubiKey touch for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.DutyProposeRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.DutyProposeRequest(
+                    holder = ai.ciris.mobile.shared.models.federation.DutyHolder(
+                        keyId = holderKeyId.trim(),
+                        mldsaUsbPath = mldsaUsbPath.trim(),
+                        pkcs11 = pkcs11,
+                    ),
+                    subjectKeyId = subjectKeyId.trim(),
+                    duty = duty.trim(),
+                    subDelegation = subDelegation,
+                    subDelegationDepth = subDelegationDepth,
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/accord/duty/propose") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("propose duty conferral failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.DutyConferralResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, subject=$subjectKeyId, duty=$duty")
+            throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * **Cosign a moderation-duty conferral** —
+     * `POST {nodeUrl}/v1/accord/duty/cosign`. THIS holder appends their scrub to
+     * [partial] over the BYTE-IDENTICAL envelope. [partial] MUST be the verbatim
+     * blob a prior propose / cosign returned — it is submitted UNCHANGED. At the
+     * family m-of-n the conferral is adopted; otherwise the advanced partial comes
+     * back for the next holder.
+     */
+    suspend fun cosignDutyConferral(
+        holderKeyId: String,
+        mldsaUsbPath: String,
+        partial: JsonElement,
+        pkcs11: JsonElement? = null,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.DutyConferralResponse {
+        val method = "cosignDutyConferral"
+        logInfo(method, "POST $nodeUrl/v1/accord/duty/cosign holder=$holderKeyId usb=$mldsaUsbPath")
+        logInfo(method, "needs a YubiKey touch for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
+        val client = federationHttpClient(ceremonyTimeoutMillis)
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.DutyCosignRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.DutyCosignRequest(
+                    holder = ai.ciris.mobile.shared.models.federation.DutyHolder(
+                        keyId = holderKeyId.trim(),
+                        mldsaUsbPath = mldsaUsbPath.trim(),
+                        pkcs11 = pkcs11,
+                    ),
+                    // Submit the partial VERBATIM — never re-encode the signed envelope.
+                    partial = partial,
+                ),
+            )
+            val response = client.post("$nodeUrl/v1/accord/duty/cosign") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                throw RuntimeException("cosign duty conferral failed: ${response.status}: ${raw.take(200)}")
+            }
+            decodeFederationEnvelope(
+                raw,
+                ai.ciris.mobile.shared.models.federation.DutyConferralResponse.serializer(),
+            )
+        } catch (e: Exception) {
+            logException(method, e, "nodeUrl=$nodeUrl, holder=$holderKeyId")
+            throw e
         } finally {
             client.close()
         }

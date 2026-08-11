@@ -1120,6 +1120,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(provision.loopback.layer(axum::middleware::from_fn(
                         crate::auth::loopback::require_loopback,
                     )))
+                    // DUTY CONFERRAL (CIRISServer#392): POST /v1/accord/duty/propose
+                    // + /cosign — the accord grants `slash` / `moderate` / `review` to
+                    // a subject, adopted at the family's own 2-of-3. This is the row
+                    // every tier-2/3/4 enforcement act walks for, and nothing could
+                    // write it before: the trust-root card confers CEREMONY-plane roles
+                    // (canonical / infra:serve), while the moderation gate reads the
+                    // DELEGATION plane (`trust:confers:v1`). Loopback-only, like every
+                    // other holder-custody act — the holder's YubiKey is on this host.
+                    .merge(crate::accord_duty::router(Arc::clone(&engine)).layer(
+                        axum::middleware::from_fn(crate::auth::loopback::require_loopback),
+                    ))
                     // Co-scrub gossip receive — the OPEN counterpart. A remote accord
                     // peer POSTs a gossiped co-scrub partial here (A1's box → B1's box),
                     // so this ONE endpoint must NOT be loopback-gated. Shares the pending

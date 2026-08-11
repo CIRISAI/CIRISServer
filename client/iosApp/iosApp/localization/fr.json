@@ -2304,7 +2304,8 @@
     "announce_decision_trace_locked": "Activez l'annonce ci-dessus pour pouvoir envoyer des traces de raisonnement et rejoindre des communautés.",
     "announce_decision_trace_title": "Envoyer des traces de raisonnement",
     "status_reconfiguring": "Redémarrage de votre nœud...",
-    "status_reconfiguring_timeout": "Le redémarrage de votre nœud prend plus de temps que prévu. Veuillez redémarrer l'application."
+    "status_reconfiguring_timeout": "Le redémarrage de votre nœud prend plus de temps que prévu. Veuillez redémarrer l'application.",
+    "login_setup_complete_relogin": "La configuration est terminée. Votre nœud a redémarré : veuillez vous reconnecter avec les mêmes identifiants que ceux utilisés pour terminer la configuration."
   },
   "prompts": {
     "dma": {
@@ -3875,6 +3876,56 @@
     "browser_signin": {
       "timed_out": "La connexion n'a pas été terminée dans le navigateur, aucune modification n'a donc été effectuée. Réessayez ou utilisez plutôt un compte local.",
       "waiting": "Terminez la connexion avec Google dans votre navigateur, puis revenez ici."
+    }
+  },
+  "duty": {
+    "adopted": "Adopté — le devoir est conféré. Le sujet peut désormais l'exercer.",
+    "cosign_button": "Cosigner",
+    "depth_1": "1 saut supplémentaire",
+    "depth_2": "2 sauts supplémentaires",
+    "depth_3": "3 sauts supplémentaires",
+    "depth_4": "4 sauts supplémentaires",
+    "depth_5": "5 sauts supplémentaires",
+    "depth_help": "Jusqu'où votre autorité se propage une fois que vous l'avez transmise. Chaque saut peut être révoqué par vous.",
+    "depth_label": "Profondeur de délégation",
+    "depth_leaf": "Feuille — peut agir, ne peut pas déléguer plus loin",
+    "depth_unbounded": "Illimitée (limite globale : 5)",
+    "holder_desc": "Le détenteur de l'accord dont la clé signe cette attribution. L'application ne détient aucune clé — le nœud local ouvre le matériel et signe.",
+    "holder_label": "key_id du détenteur",
+    "holder_placeholder": "A1",
+    "not_started": "Rien n'a encore été proposé. Renseignez l'attribution et proposez la première signature.",
+    "pending_hint": "Pas encore conféré — transmettez la signature partielle au détenteur suivant pour qu'il cosigne.",
+    "propose_button": "Proposer",
+    "section_conferral": "L'attribution",
+    "section_holder": "Détenteur signataire",
+    "section_status": "Signatures",
+    "signatures": "{have} signatures sur {need}",
+    "subject_label": "fed-ID du sujet (key_id)",
+    "subject_placeholder": "eric-moore-v2-portable-…",
+    "subtitle": "Conférez un devoir de modération à un autre soi, et indiquez exactement jusqu'où il peut le transmettre. Chaque attribution est cosignée par les détenteurs de l'accord avant de prendre effet.",
+    "title": "Déléguer un devoir de modération",
+    "usb_label": "Dossier USB ML-DSA",
+    "usb_placeholder": "/media/…",
+    "verb_help": "Supprimer retire le contenu ; modérer masque et avertit ; examiner se contente de signaler à un humain.",
+    "verb_label": "Devoir",
+    "verb_moderate": "Modérer",
+    "verb_review": "Examiner",
+    "verb_slash": "Supprimer"
+  },
+  "accord": {
+    "duty": {
+      "already_signed": "Ce détenteur d'accord a déjà signé cette attribution. Le quorum compte les détenteurs DISTINCTS — un siège qui signe deux fois reste un seul siège.",
+      "bad_request": "La requête n'a pas pu être lue. Rien n'a été signé et rien n'a été modifié.",
+      "canonicalize": "Cette attribution n'a pas pu être réduite à sa forme canonique ; il n'y a donc rien qu'il soit sûr de signer. Rien n'a été modifié.",
+      "depth_over_rail": "Cette profondeur de délégation dépasse ce que le maillage autorise. La profondeur ne peut que restreindre la limite, jamais l'élargir : un nombre plus grand promettrait une portée que le substrat n'honorera pas.",
+      "depth_without_delegation": "Une profondeur a été choisie, mais cette attribution est une feuille — elle peut agir, mais ne peut pas transmettre le devoir. Y appliquer une profondeur reviendrait à limiter une porte déjà fermée.",
+      "holder_custody": "La clé du détenteur d'accord n'a pas pu être ouverte. Vérifiez que le jeton est inséré et déverrouillé, et que le chemin USB est correct. Rien n'a été signé.",
+      "no_subject": "Une attribution nécessite un sujet : l'identité À LAQUELLE le devoir est accordé.",
+      "partial_tampered": "Cette signature partielle a été modifiée après que le premier détenteur l'a signée. La signer maintenant apposerait deux signatures sur deux sens différents ; elle est donc refusée.",
+      "refused": "Le substrat a refusé cette attribution. Elle n'est pas admise et aucune autorité n'a été accordée.",
+      "sign_failed": "La clé du détenteur d'accord n'a produit aucune signature. Rien n'a été modifié.",
+      "unknown_duty": "Ce n'est pas un devoir reconnu par ce maillage. L'accorder apparaîtrait ici comme une autorité, mais serait refusé à chaque porte.",
+      "pkcs11_required": "Conférer un devoir nécessite la fonctionnalité `pkcs11` — le titulaire signe avec sa YubiKey ainsi qu'avec la moitié ML-DSA encapsulée sur USB, exactement comme le fait la cérémonie canonique de co-scrub."
     }
   }
 }

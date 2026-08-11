@@ -2396,7 +2396,8 @@
     "announce_decision_trace_locked": "Tan ìkéde lókè láti jẹ́ kí fífi àwọn ìtọpa ìrònú ránṣẹ́ àti dídara pọ̀ mọ́ àwọn àwùjọ ṣeé ṣe.",
     "announce_decision_trace_title": "Fi àwọn ìtọpa ìrònú ránṣẹ́",
     "status_reconfiguring": "Ń tún node rẹ bẹ̀rẹ̀...",
-    "status_reconfiguring_timeout": "Node rẹ ń gba àkókò gùn ju bí a ṣe retí lọ láti tún bẹ̀rẹ̀. Jọ̀wọ́ tún áàpù náà bẹ̀rẹ̀."
+    "status_reconfiguring_timeout": "Node rẹ ń gba àkókò gùn ju bí a ṣe retí lọ láti tún bẹ̀rẹ̀. Jọ̀wọ́ tún áàpù náà bẹ̀rẹ̀.",
+    "login_setup_complete_relogin": "Ìṣètò ti parí. Node rẹ tún bẹ̀rẹ̀, nítorí náà jọ̀wọ́ wọlé padà pẹ̀lú àwọn ẹ̀rí ìdánimọ̀ kan náà tí o lò láti parí ìṣètò."
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -3875,6 +3876,56 @@
     "browser_signin": {
       "timed_out": "A kò parí ìwọlé nínú aṣàwákiri, nítorí náà kò sí ohun tí a yípadà. Gbìyànjú lẹ́ẹ̀kan sí i, tàbí lo àkàntì agbègbè dípò rẹ̀.",
       "waiting": "Parí ìwọlé pẹ̀lú Google nínú aṣàwákiri rẹ, lẹ́yìn náà padà wá síbí."
+    }
+  },
+  "duty": {
+    "adopted": "Tí a gbà — a ti fi ojúṣe náà lé e lọ́wọ́. Ẹni náà lè ṣiṣẹ́ lórí rẹ̀ báyìí.",
+    "cosign_button": "Bá fọwọ́ sí",
+    "depth_1": "Ìfò 1 síwájú",
+    "depth_2": "Ìfò 2 síwájú",
+    "depth_3": "Ìfò 3 síwájú",
+    "depth_4": "Ìfò 4 síwájú",
+    "depth_5": "Ìfò 5 síwájú",
+    "depth_help": "Bí àṣẹ rẹ ṣe ń rìn jìnnà tó lẹ́yìn tí o bá fi lé ẹlòmíràn lọ́wọ́. O lè fagi lé ìfò kọ̀ọ̀kan.",
+    "depth_label": "Ìjìnlẹ̀ ìfiṣẹ́ lélọ́wọ́",
+    "depth_leaf": "Ewé — lè ṣiṣẹ́, kò lè fi lé ẹlòmíràn lọ́wọ́ mọ́",
+    "depth_unbounded": "Aláìlópin (ààlà àgbáyé: 5)",
+    "holder_desc": "Olùdìmú àdéhùn tí kọ́kọ́rọ́ rẹ̀ fọwọ́ sí ìfilélọ́wọ́ yìí. Ohun-èlò náà kò ní kọ́kọ́rọ́ kankan — nódù agbègbè ni ó ṣí ohun-èlò-líle náà tí ó sì fọwọ́ sí i.",
+    "holder_label": "key_id olùdìmú",
+    "holder_placeholder": "A1",
+    "not_started": "Kò sí ohun tí a dábàá síbẹ̀. Kún ìfilélọ́wọ́ náà kí o sì dábàá ìfọwọ́sí àkọ́kọ́.",
+    "pending_hint": "A kò tíì fi lé e lọ́wọ́ — fi apá kan tí ó ti wà lé olùdìmú tó kàn lọ́wọ́ kí ó bá fọwọ́ sí i.",
+    "propose_button": "Dábàá",
+    "section_conferral": "Ìfilélọ́wọ́ náà",
+    "section_holder": "Olùdìmú tó ń fọwọ́sí",
+    "section_status": "Àwọn ìfọwọ́sí",
+    "signatures": "Ìfọwọ́sí {have} nínú {need}",
+    "subject_label": "fed-ID ẹni náà (key_id)",
+    "subject_placeholder": "eric-moore-v2-portable-…",
+    "subtitle": "Fi ojúṣe ìdarí-àkóónú lé ẹni mìíràn lọ́wọ́, kí o sì sọ ní pàtó bí wọ́n ṣe lè fi í lé ẹlòmíràn lọ́wọ́ tó. Àwọn olùdìmú àdéhùn ni wọ́n ń bá fọwọ́ sí ìfilélọ́wọ́ kọ̀ọ̀kan kí ó tó bẹ̀rẹ̀ sí í ṣiṣẹ́.",
+    "title": "Fi ojúṣe ìdarí-àkóónú lé ẹlòmíràn lọ́wọ́",
+    "usb_label": "Fódà USB ML-DSA",
+    "usb_placeholder": "/media/…",
+    "verb_help": "Gígé máa ń yọ kúrò; ìdarí máa ń fi pamọ́ tí ó sì ń kìlọ̀; àyẹ̀wò máa ń sàmì sí i fún ènìyàn nìkan.",
+    "verb_label": "Ojúṣe",
+    "verb_moderate": "Ìdarí",
+    "verb_review": "Àyẹ̀wò",
+    "verb_slash": "Gígé"
+  },
+  "accord": {
+    "duty": {
+      "already_signed": "Olùdìmú accord yẹn ti fọwọ́ sí ìfúnniláṣẹ yìí tẹ́lẹ̀. Quorum ń ka àwọn olùdìmú ỌTỌ̀Ọ̀TỌ̀ — ìjókòó kan tí ó bá fọwọ́ sí lẹ́ẹ̀mejì ṣì jẹ́ ìjókòó kan ṣoṣo.",
+      "bad_request": "A kò lè ka ìbéèrè náà. A kò fọwọ́ sí ohunkóhun, a kò sì yí ohunkóhun padà.",
+      "canonicalize": "A kò lè dín ìfúnniláṣẹ yìí kù sí ìrísí ìpìlẹ̀ rẹ̀, nítorí náà kò sí ohun tí ó dáàbò bo láti fọwọ́ sí. A kò yí ohunkóhun padà.",
+      "depth_over_rail": "Ìjìnlẹ̀ ìfàṣẹfúnni yẹn tóbi ju bí àwọ̀n náà ṣe gbà láàyè lọ. Ìjìnlẹ̀ lè dín ààlà náà kù nìkan, kò lè mú un fẹ̀ sí i láéláé, nítorí náà nọ́mbà tí ó tóbi jù yóò ṣèlérí ìdé tí ìpìlẹ̀ kò ní mú ṣẹ.",
+      "depth_without_delegation": "A yan ìjìnlẹ̀ kan ṣùgbọ́n ìfúnni yìí jẹ́ ewé — ó lè ṣiṣẹ́ ṣùgbọ́n kò lè fi iṣẹ́-àṣẹ náà lé ẹlòmíràn lọ́wọ́. Ìjìnlẹ̀ lórí rẹ̀ yóò jẹ́ ààlà lórí ẹnu-ọ̀nà tí ó ti tì tẹ́lẹ̀.",
+      "holder_custody": "A kò lè ṣí kọ́kọ́rọ́ olùdìmú accord náà. Rí i dájú pé a ti fi token náà sí i, pé a ti ṣí i, àti pé ọ̀nà USB tọ̀nà. A kò fọwọ́ sí ohunkóhun.",
+      "no_subject": "Ìfúnniláṣẹ nílò kókó-ẹni: ìdánimọ̀ tí À Ń FÚN ní iṣẹ́-àṣẹ náà.",
+      "partial_tampered": "A ti yí ìdìpọ̀ apá-kan yìí padà lẹ́yìn tí olùdìmú àkọ́kọ́ fọwọ́ sí i. Fífọwọ́sí i báyìí yóò fi ìbùwọ́lù méjì sórí ìtumọ̀ ọ̀tọ̀ọ̀tọ̀ méjì, nítorí náà a kọ̀ ọ́.",
+      "refused": "Ìpìlẹ̀ náà kọ ìfúnniláṣẹ yìí. A kò gbà á, a kò sì fún un ní àṣẹ kankan.",
+      "sign_failed": "Kọ́kọ́rọ́ olùdìmú accord náà kò ṣe ìbùwọ́lù kankan. A kò yí ohunkóhun padà.",
+      "unknown_duty": "Ìyẹn kì í ṣe iṣẹ́-àṣẹ tí àwọ̀n yìí mọ̀. Fífún ní i yóò farahàn bí àṣẹ níhìn-ín, a ó sì kọ̀ ọ́ ní gbogbo ẹnu-ọ̀nà.",
+      "pkcs11_required": "Fífúnni ní ojúṣe nílò ẹ̀yà `pkcs11` — ẹni tó gbà á ni yóò fọwọ́ sí i pẹ̀lú YubiKey rẹ̀ àti ìdajì ML-DSA tí a fi USB wé, gẹ́gẹ́ bí ààtò ìlànà co-scrub tí ó jẹ́ ìpìlẹ̀ ṣe ń ṣe."
     }
   }
 }

@@ -91,6 +91,9 @@ fun LoginScreen(
     observerBlocked: Boolean = false,
     showLocalLoginForm: Boolean = false,
     isFirstRun: Boolean = true,
+    /// True when setup JUST completed and the node restarted — the banner
+    /// explaining why a successful setup lands back on this screen.
+    justCompletedSetup: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var marketingOptIn by remember { mutableStateOf(false) }
@@ -184,6 +187,35 @@ fun LoginScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.width(280.dp)
                 )
+
+                // JUST FINISHED SETUP? SAY SO (CIRISServer#393).
+                //
+                // Completing setup restarts the node, and a restart invalidates
+                // the session by design — the secret that signs it is per-process.
+                // So landing back on this screen is CORRECT, but it looks exactly
+                // like a failure: the user has just spent several minutes proving
+                // who they are and is being asked again, with no explanation.
+                //
+                // A banner is the whole difference between "it worked, sign back
+                // in" and "something broke". Same credentials, not new ones —
+                // people reach for the wrong door when a screen is silent about
+                // which one they used.
+                if (justCompletedSetup) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = LoginColors.White.copy(alpha = 0.12f),
+                        modifier = Modifier.width(300.dp).testable("banner_setup_complete_relogin"),
+                    ) {
+                        Text(
+                            text = localizedString("mobile.login_setup_complete_relogin"),
+                            color = LoginColors.White,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(12.dp),
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
