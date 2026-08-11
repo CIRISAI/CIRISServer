@@ -105,6 +105,72 @@ pub async fn get_by_oauth(
 /// Returns the FIRST match in that precedence. The caller still issues the session
 /// against the resolved `cert.wa_id` (the canonical identity), so the friendly
 /// alias never leaks into the token.
+/// How [`resolve_login`] found the cert — carried so the login path can SAY
+/// which key matched instead of leaving an operator to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginMatch {
+    /// The identifier was a `wa_id`.
+    WaId,
+    /// The identifier was `"<provider>:<external_id>"`.
+    Oauth,
+    /// The identifier equalled a cert's human `name`.
+    Name,
+}
+
+impl LoginMatch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WaId => "wa_id",
+            Self::Oauth => "oauth_pair",
+            Self::Name => "name",
+        }
+    }
+}
+
+/// What the name scan actually looked at, for the miss path.
+///
+/// A bare "no cert resolved" cannot distinguish an EMPTY store (the node is
+/// reading a different database than whatever created the account) from a
+/// NAME MISMATCH (the certs are right there and none is called that). Those
+/// have opposite fixes, so the miss report carries the count and — at DEBUG
+/// only — the names themselves. Reported by CIRISAgent as CIRISServer#389:
+/// without this, a failed login is a guess between two unrelated causes.
+#[derive(Debug, Default)]
+pub struct LoginMiss {
+    /// How many certs the name scan examined across all roles.
+    pub scanned: usize,
+    /// The names it saw. DEBUG-only in the log — a human name is the user's.
+    pub names: Vec<String>,
+}
+
+/// [`resolve_login`], but reporting HOW it matched or WHAT it scanned.
+pub async fn resolve_login_detailed(
+    engine: &Engine,
+    ident: &str,
+) -> Result<Result<(WaCert, LoginMatch), LoginMiss>, StoreError> {
+    if let Some(c) = get(engine, ident).await? {
+        return Ok(Ok((c, LoginMatch::WaId)));
+    }
+    if let Some((provider, external_id)) = ident.split_once(':') {
+        if !provider.is_empty() && !external_id.is_empty() {
+            if let Some(c) = get_by_oauth(engine, provider, external_id).await? {
+                return Ok(Ok((c, LoginMatch::Oauth)));
+            }
+        }
+    }
+    let mut miss = LoginMiss::default();
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        for c in list_by_role(engine, role, 128).await? {
+            if c.name == ident {
+                return Ok(Ok((c, LoginMatch::Name)));
+            }
+            miss.scanned += 1;
+            miss.names.push(c.name.clone());
+        }
+    }
+    Ok(Err(miss))
+}
+
 pub async fn resolve_login(engine: &Engine, ident: &str) -> Result<Option<WaCert>, StoreError> {
     if let Some(c) = get(engine, ident).await? {
         return Ok(Some(c));

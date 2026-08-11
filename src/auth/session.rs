@@ -526,23 +526,82 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
     // did (multi-key): `wa_id`, OAuth `"<provider>:<external_id>"`, OR the human
     // `name` (the friendly username the wizard stamps on the owner ROOT). The
     // session is still issued against the resolved `cert.wa_id`.
-    let cert = match store::resolve_login(&st.engine, &req.username).await {
-        Ok(Some(c)) => c,
-        Ok(None) => return err(StatusCode::UNAUTHORIZED, "invalid credentials"),
-        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+    // EVERY BRANCH IS LOGGED — CIRISServer#389.
+    //
+    // The wire responses below are deliberately unchanged: two branches share
+    // "invalid credentials" so a caller cannot probe whether an account exists,
+    // and that is correct. But nothing distinguished them ANYWHERE, so a failed
+    // login was a guess between "the node has never heard of this user" and
+    // "the stored hash did not match" — two causes with opposite fixes. That
+    // cost CIRISAgent the adoption of #1028: they could not tell which.
+    //
+    // The log is node-side and never reaches the client, so it can be specific.
+    // wa_id at INFO (an internal id, and the thing an operator greps); human
+    // NAMES only at DEBUG, because a name is the user's, not the operator's.
+    let (cert, matched) = match store::resolve_login_detailed(&st.engine, &req.username).await {
+        Ok(Ok(hit)) => hit,
+        Ok(Err(miss)) => {
+            tracing::info!(
+                identifier = %req.username,
+                certs_scanned = miss.scanned,
+                "login failed: no cert resolved for identifier — tried wa_id, \
+                 \"<provider>:<external_id>\", then exact human name"
+            );
+            // The distinct zeroes, kept distinct: ZERO certs scanned means this
+            // node's wa_cert store is EMPTY (it is reading a different database
+            // than whatever created the account); a NON-zero count means the
+            // certs are present and none is named that. Saying which turns a
+            // guess into a lookup.
+            if miss.scanned == 0 {
+                tracing::info!(
+                    "login failed: the wa_cert store holds NO certs at all — this node is not \
+                     reading the database the account was created in"
+                );
+            } else {
+                tracing::debug!(
+                    names = ?miss.names,
+                    "login failed: the names this node CAN match (login uses the WHOLE name, \
+                     exactly; owner-hint shows only its first token, which is why a first name \
+                     alone is refused)"
+                );
+            }
+            return err(StatusCode::UNAUTHORIZED, "invalid credentials");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "login failed: identity store unavailable");
+            return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}"));
+        }
     };
     if !cert.active {
+        tracing::info!(wa_id = %cert.wa_id, "login failed: account is inactive");
         return err(StatusCode::FORBIDDEN, "account is inactive");
     }
     let Some(hash) = cert.password_hash.as_deref() else {
+        tracing::info!(
+            wa_id = %cert.wa_id, matched_on = matched.as_str(),
+            "login failed: cert resolved but has NO password_hash (an OAuth-only or \
+             not-yet-provisioned identity)"
+        );
         return err(StatusCode::UNAUTHORIZED, "no password set for this account");
     };
     if !verify_password(&req.password, hash) {
+        tracing::info!(
+            wa_id = %cert.wa_id, matched_on = matched.as_str(),
+            "login failed: password mismatch — the cert WAS resolved, so this is the credential, \
+             not the identifier (PBKDF2-HMAC-SHA256, 100k iters, base64(salt32||key32))"
+        );
         return err(StatusCode::UNAUTHORIZED, "invalid credentials");
     }
 
     let _ = store::touch_login(&st.engine, &cert.wa_id).await;
     let role = UserRole::from_wa_role(cert.role);
+    // The success path logs in the SAME place as the failures, so "it worked"
+    // and "it did not" are one grep. A log that only records failures cannot
+    // tell an operator whether the request arrived at all.
+    tracing::info!(
+        wa_id = %cert.wa_id, role = role.as_str(), matched_on = matched.as_str(),
+        "login ok"
+    );
     let token = issue_session_token(&cert.wa_id);
     (
         StatusCode::OK,

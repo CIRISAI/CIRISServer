@@ -121,6 +121,17 @@ impl Adapter for PyAdapter {
         }
     }
 
+    /// The brain is whichever proxy spec serves the agent surface. `/v1/agent`
+    /// by preference; otherwise the first declared upstream, since a Python
+    /// adapter that proxies anything at all is the brain by definition.
+    fn brain_upstream(&self) -> Option<String> {
+        self.proxy_specs
+            .iter()
+            .find(|(prefix, _)| prefix.starts_with("/v1/agent"))
+            .or_else(|| self.proxy_specs.first())
+            .map(|(_, upstream)| upstream.trim_end_matches('/').to_string())
+    }
+
     fn routers(&self, _ctx: &AdapterContext) -> Vec<axum::Router> {
         self.proxy_specs
             .iter()

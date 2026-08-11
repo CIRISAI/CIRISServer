@@ -808,7 +808,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the
                     // /v1/system/health endpoint with optional cognitive health.
-                    .merge(crate::health::router())
+                    .merge(crate::health::router_with_brain(adapter.brain_upstream()))
                     // The wire vocabularies, so no picker hardcodes a member
                     // (CIRISPersist#625). Ungated: public value sets, not node state.
                     .merge(crate::vocabulary_surface::router())

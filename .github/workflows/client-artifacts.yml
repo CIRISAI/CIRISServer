@@ -17,6 +17,14 @@ name: client-artifacts
 on:
   push:
     branches: [main]
+    # CIRISServer#390 — a TAG also publishes these as RELEASE ASSETS. CIRISAgent
+    # vendors our client tree (1134 files, ~206k lines; 239 of shared/ are
+    # byte-identical to theirs) purely because we ship no consumable artifact.
+    # We publish Rust tarballs and PyPI wheels and zero .jar/.apk, so "use their
+    # client" has meant "rebuild their client", which is a fork by another name.
+    # These are already BUILT here on every main push — they were simply never
+    # attached to anything anyone could depend on.
+    tags: ["v*"]
     paths:
       - "client/**"
       - ".github/workflows/client-artifacts.yml"
@@ -32,7 +40,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # `write` so a TAG run can attach the client artifacts to the release
+  # (CIRISServer#390). Branch/PR runs upload workflow artifacts only —
+  # the release step is gated on refs/tags/v below.
+  contents: write
 
 jobs:
   android-apk:
@@ -104,6 +115,78 @@ jobs:
           name: ciris-server-android-apk
           path: client/androidApp/build/outputs/apk/debug/CIRIS-Server-*.apk
           retention-days: 14
+
+      # ── The desktop uber-JAR, the artifact CIRISAgent actually needs ────────
+      # Already buildable here; it was simply never published, which is why
+      # "use their client" meant "rebuild their client".
+      - name: Build the desktop uber-JAR
+        run: |
+          cd client
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
+          ls -lh desktopApp/build/compose/jars/
+
+      # ── CLIENT_VERSION travels WITH the artifact (CIRISServer#390 ask 3) ────
+      #
+      # CLIENT_VERSION is a `const val` in commonMain kept in lockstep with
+      # Cargo.toml by a script. A consumer vendoring the tree has no way to know
+      # which node build an artifact was cut against except by reading a constant
+      # out of source and trusting it — and that hand-sync is exactly the drift
+      # that produced "node is 0.5.163, app is built for 0.5.159".
+      #
+      # So the manifest is DERIVED at build time from both sides and shipped
+      # beside the binaries. A consumer reads one file instead of trusting two
+      # constants to have been edited together.
+      - name: Emit the client artifact manifest
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          CLIENT=$(grep -oE 'const val CLIENT_VERSION = "[^"]+"' \
+            client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/models/ClientMode.kt \
+            | grep -oE '"[^"]+"' | tr -d '"')
+          # They must already agree — scripts/sync-client-version.sh enforces it in
+          # CI. Asserting again HERE is the point: the manifest must never be able
+          # to claim an agreement that does not hold at the moment of packaging.
+          if [ "$VERSION" != "$CLIENT" ]; then
+            echo "::error::CLIENT_VERSION ($CLIENT) != ciris-server ($VERSION) at packaging time"
+            exit 1
+          fi
+          mkdir -p dist-client
+          cp client/androidApp/build/outputs/apk/debug/CIRIS-Server-*.apk dist-client/ || true
+          cp client/desktopApp/build/compose/jars/CIRIS-*.jar dist-client/ || true
+          python3 - "$VERSION" "$GITHUB_SHA" > dist-client/ciris-client-manifest.json <<'PYEOF'
+          import json, sys
+          v, sha = sys.argv[1], sys.argv[2]
+          print(json.dumps({
+              "client_version": v,
+              "ciris_server_version": v,
+              "commit": sha,
+              "note": "Built from CIRISServer/client. client_version == ciris_server_version "
+                      "by construction: the packaging step refuses to emit this file if the "
+                      "vendored CLIENT_VERSION constant and Cargo.toml disagree.",
+          }, indent=2))
+          PYEOF
+          cat dist-client/ciris-client-manifest.json
+          ls -lh dist-client/
+
+      - name: Upload desktop JAR + manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-desktop-jar
+          path: |
+            dist-client/CIRIS-*.jar
+            dist-client/ciris-client-manifest.json
+          retention-days: 14
+
+      # On a TAG these become RELEASE ASSETS, so a consumer can depend on a URL
+      # the way they already depend on the wheels.
+      - name: Attach client artifacts to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist-client/CIRIS-*.jar
+            dist-client/CIRIS-Server-*.apk
+            dist-client/ciris-client-manifest.json
 
   windows-installer:
     name: Windows desktop installer

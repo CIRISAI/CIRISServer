@@ -71,7 +71,11 @@ async fn plain_health() -> Json<serde_json::Value> {
 /// when an agent enriches this endpoint (optional). `services` is the server's own
 /// (empty at this layer; the agent adds its service map).
 async fn server_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+    Json(node_health())
+}
+
+fn node_health() -> serde_json::Value {
+    serde_json::json!({
         "data": {
             "status": "ok",
             "role": "fabric-node",
@@ -80,7 +84,89 @@ async fn server_health() -> Json<serde_json::Value> {
             // CC 2.2 / CC 2.6.4 (CIRISServer#159) — see `build_conformance`.
             "conformance": build_conformance(),
         }
-    }))
+    })
+}
+
+/// The brain base URL, when one is folded. `None` ⇒ bare node.
+#[derive(Clone)]
+struct BrainState {
+    upstream: Option<String>,
+    client: reqwest::Client,
+}
+
+/// **`GET /v1/system/health` — the UNION of both meanings** (CIRISServer#390).
+///
+/// # The bug this exists to close
+///
+/// A folded deployment serves the node and the brain on ONE port. The universal
+/// client decides node-vs-agent from this endpoint: AGENT iff `cognitive_state`
+/// is present or the service map is non-empty. But health is a SUBSTRATE path —
+/// the node answers it natively and never proxies — so on the folded port a full
+/// agent reported as a bare NODE, and the client hid the 22 cognitive services
+/// of the very agent it was talking to.
+///
+/// Pointing the client at the brain's own port instead does not work either:
+/// that port 404s the node's surface. **Neither port served both meanings**, so
+/// it had to be fixed here. This is the same one-name-two-axes shape as the rest
+/// of this codebase's worst bugs: one path answering "is the NODE up?" and "is
+/// there a BRAIN, and how is it?" — correct for one axis, silently wrong on the
+/// other.
+///
+/// # Merge, never replace
+///
+/// Proxying this path wholesale would answer the second question and lose the
+/// first: a bare node's liveness would vanish behind an upstream that may not
+/// exist. So the node's own health is always the base, and the brain's
+/// `cognitive_state` / `services` are merged ON TOP. The endpoint is the union
+/// because the union is what is true.
+///
+/// # Three states, not two
+///
+/// `agent.folded` and `agent.reachable` are reported separately, because "no
+/// brain is attached" and "a brain is attached and did not answer" are DIFFERENT
+/// facts with different fixes — and both would otherwise render as a bare node,
+/// which is the failure mode this endpoint just had. A client may still key
+/// purely on `cognitive_state`; the extra field costs it nothing and tells an
+/// operator which of the two they are looking at.
+async fn folded_health(State(st): State<BrainState>) -> Json<serde_json::Value> {
+    let mut out = node_health();
+    let Some(upstream) = st.upstream.as_deref() else {
+        out["data"]["agent"] = serde_json::json!({ "folded": false, "reachable": false });
+        return Json(out);
+    };
+    // Bounded: health is a liveness probe and a client blocks on it during
+    // startup. A slow brain must not hang the node's own liveness answer.
+    let probe = st
+        .client
+        .get(format!("{upstream}/v1/system/health"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await;
+    let brain: Option<serde_json::Value> = match probe {
+        Ok(r) if r.status().is_success() => r.json().await.ok(),
+        Ok(r) => {
+            tracing::debug!(status = %r.status(), "brain health probe returned non-success");
+            None
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "brain health probe failed");
+            None
+        }
+    };
+    let Some(brain) = brain else {
+        out["data"]["agent"] = serde_json::json!({ "folded": true, "reachable": false });
+        return Json(out);
+    };
+    // The brain speaks the same `{"data":{…}}` envelope; tolerate a bare object
+    // so a future/older brain shape still contributes what it has.
+    let bd = brain.get("data").unwrap_or(&brain);
+    for key in ["cognitive_state", "services", "cognitive", "agent_id"] {
+        if let Some(v) = bd.get(key) {
+            out["data"][key] = v.clone();
+        }
+    }
+    out["data"]["agent"] = serde_json::json!({ "folded": true, "reachable": true });
+    Json(out)
 }
 
 /// The server-health routes, merged onto the read API. Stateless (liveness only).
@@ -91,13 +177,31 @@ async fn server_health() -> Json<serde_json::Value> {
 /// reproducible from the linked substrate — a mismatch PANICS the boot rather than
 /// let the node publish a fingerprint it cannot stand behind (run once per process).
 pub fn router() -> Router {
+    router_with_brain(None)
+}
+
+/// [`router`], plus the folded brain's base URL when one is attached, so
+/// `/v1/system/health` can answer BOTH meanings on one port (CIRISServer#390).
+///
+/// `/v1/health` deliberately stays node-only: it is documented as the structured
+/// SERVER health, and a caller that wants the node's own answer must keep having
+/// somewhere to get it. Enriching both would leave no path that means "the node".
+pub fn router_with_brain(brain_upstream: Option<String>) -> Router {
     static WITNESS: std::sync::Once = std::sync::Once::new();
     WITNESS.call_once(crate::conformance::assert_contract_hashes_pinned);
+    let brain = BrainState {
+        upstream: brain_upstream.map(|u| u.trim_end_matches('/').to_string()),
+        client: reqwest::Client::new(),
+    };
     Router::new()
         .route("/health", get(plain_health))
         .route("/v1/health", get(server_health))
         // The base the agent inherits + enriches (optional cognitive health on top).
-        .route("/v1/system/health", get(server_health))
+        .merge(
+            Router::new()
+                .route("/v1/system/health", get(folded_health))
+                .with_state(brain),
+        )
 }
 
 /// State for the read-only verify-status endpoint: the node Engine (to report its

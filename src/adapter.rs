@@ -82,6 +82,26 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// **The folded brain's base URL, when one is attached** (CIRISServer#390).
+    ///
+    /// A node that proxies an agent serves BOTH surfaces on one port, and the
+    /// universal client decides node-vs-agent from `/v1/system/health`
+    /// (`cognitive_state`, or a non-empty service map). But health is a
+    /// SUBSTRATE path — the node answers it natively and never proxies it — so a
+    /// folded agent reported as a bare NODE, and the client hid the very surface
+    /// it was connected to.
+    ///
+    /// Returning the upstream here lets the health handler ASK the brain and
+    /// merge its cognitive half in, so one base URL answers both meanings. The
+    /// alternative (proxying the health path wholesale) would lose the node's
+    /// own liveness on the same path — the endpoint has to be the UNION, because
+    /// it is the union that is true.
+    ///
+    /// `None` (the default) means a bare node: no brain, and health says so.
+    fn brain_upstream(&self) -> Option<String> {
+        None
+    }
+
     /// Mirror of the agent adapter's **`start()`** — one-shot setup run once
     /// before the lifecycle task is spawned. Defaults to a no-op.
     async fn start(&self, ctx: &AdapterContext) -> anyhow::Result<()> {
