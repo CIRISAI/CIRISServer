@@ -1203,7 +1203,26 @@ class SetupViewModel(
                 if (resp.role != null) {
                     val waId = resp.waId
                     val password = _state.value.userPassword
-                    if (!waId.isNullOrBlank() && password.isNotBlank()) {
+                    // THE CLAIM IS THE AUTHENTICATION (CIRISServer#393).
+                    //
+                    // The node now returns the owner's session with the claim, so we
+                    // take it and stop. Re-authenticating here asked the owner to
+                    // prove with a password what they had just proved with a one-time
+                    // PIN and a hybrid signature over the owner-binding — weaker
+                    // evidence, twice — and an OAuth owner HAS no password, so this
+                    // block was skipped entirely and every step that needed the owner
+                    // session (age band, announce, replication consent) skipped with
+                    // it. The node was claimed and the app fell back to login.
+                    val claimToken = resp.accessToken
+                    if (!claimToken.isNullOrBlank()) {
+                        client.setAccessToken(claimToken)
+                        sessionKind = "owner"
+                        ownerLoginOk = true
+                        PlatformLogger.i(
+                            TAG,
+                            "[ORDER] owner_login ok (session minted BY the claim — no re-auth)",
+                        )
+                    } else if (!waId.isNullOrBlank() && password.isNotBlank()) {
                         try {
                             PlatformLogger.i(TAG, "[ORDER] owner_login begin (session=$sessionKind → owner, target=node)")
                             // MUST target the NODE (:4243): the claim wrote the owner

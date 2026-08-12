@@ -36,6 +36,10 @@ pub enum StoreError {
     WaCert(ciris_persist::wa_cert::Error),
     /// A substrate `revoked_service_tokens` call failed.
     Revocation(ciris_persist::service_token_revocation::Error),
+    /// **More than one LIVE cert claims one provider identity** (#397). Not a
+    /// lookup failure — a broken invariant. Answering it by picking a cert is
+    /// how a human gets signed in with the wrong rights and no error.
+    AmbiguousOauthIdentity { provider: String, holders: usize },
 }
 
 impl std::fmt::Display for StoreError {
@@ -44,6 +48,11 @@ impl std::fmt::Display for StoreError {
             StoreError::NoSqliteBackend => write!(f, "engine is not SQLite-backed"),
             StoreError::WaCert(e) => write!(f, "wa_cert: {e}"),
             StoreError::Revocation(e) => write!(f, "service-token revocation: {e}"),
+            StoreError::AmbiguousOauthIdentity { provider, holders } => write!(
+                f,
+                "{holders} live certificates claim the same {provider} identity — refusing to \
+                 choose between them"
+            ),
         }
     }
 }
@@ -80,14 +89,119 @@ pub fn revocation_backend(
 
 /// Look up a WA cert by its OAuth `(provider, external_id)` — the OAuth login
 /// path (hits the partial `wa_cert_oauth` index). `None` if no linked cert.
+/// Every LIVE cert claiming `(provider, external_id)`.
+///
+/// Separate from [`get_by_oauth`] because two callers want DIFFERENT things from
+/// the same scan, and conflating them broke the claim (found in review by Codex
+/// on the 0.5.168 PR):
+///
+/// - **Sign-in** wants one answer and must REFUSE when there are several —
+///   picking one is how a human gets signed in with the wrong rights.
+/// - **The claim's cleanup** wants exactly the multi-holder case, because
+///   PRODUCING it is what it exists to resolve: the claim has just stamped the
+///   owner's pair onto the owner, so the pre-claim OAuth cert and the owner BOTH
+///   hold it. Routing that cleanup through the fail-closed resolver made it take
+///   the `Err` arm and retire nothing — leaving sign-in permanently ambiguous,
+///   which is worse than the duplicate it was meant to remove.
+///
+/// A fail-closed READER and a REPAIR path cannot share an entry point: the
+/// repair exists precisely for the state the reader refuses.
+pub async fn live_oauth_holders(
+    engine: &Engine,
+    provider: &str,
+    external_id: &str,
+) -> Result<Vec<WaCert>, StoreError> {
+    let mut live: Vec<WaCert> = Vec::new();
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        live.extend(
+            list_by_role(engine, role, 128)
+                .await?
+                .into_iter()
+                .filter(|c| {
+                    c.active
+                        && c.oauth_provider.as_deref() == Some(provider)
+                        && c.oauth_external_id.as_deref() == Some(external_id)
+                }),
+        );
+    }
+    Ok(live)
+}
+
+/// Resolve a provider pair to its WA cert. **RETIRED CERTS DO NOT ANSWER**
+/// (CIRISServer#395).
+///
+/// The substrate's lookup is a plain index read and returns a row whatever its
+/// `active` flag says. That is right for the store and wrong for a sign-in: a
+/// deactivated cert has been RETIRED, and a retired identity answering "who is
+/// this human?" is the same class of mistake as a revoked key still verifying.
+///
+/// It shipped exactly that way. The claim carries the owner's sign-in pair onto
+/// the owner cert and deactivates the duplicate — and the very next Google
+/// sign-in still resolved to the deactivated one, minting a session for a
+/// retired observer account. The retirement was correct and simply had no effect
+/// on the question anyone was asking.
+///
+/// Filtering here rather than at each call site because there is one right
+/// answer to "which cert is this provider identity" and it must not depend on
+/// which caller is asking.
 pub async fn get_by_oauth(
     engine: &Engine,
     provider: &str,
     external_id: &str,
 ) -> Result<Option<WaCert>, StoreError> {
-    Ok(wa_cert_backend(engine)?
-        .get_by_oauth(provider, external_id)
-        .await?)
+    // The backend's index answers with ONE row and does not care whether it is
+    // active. Filtering that to `None` is not enough — `create_oauth_user`
+    // derives a DETERMINISTIC `wa_id` from the pair, so a "not found" makes the
+    // next sign-in UPSERT the very row that was retired, reactivating it. The
+    // retirement then survives exactly until the next login.
+    //
+    // So: prefer the indexed row when it is live, and otherwise look for the
+    // ACTIVE cert that holds this pair — which after a claim is the OWNER, since
+    // the claim stamps the pair onto it. One provider identity, one live answer,
+    // wherever that cert happens to live.
+    // NO INDEX FAST-PATH. An early return on the indexed row skips the ambiguity
+    // check entirely — which is what the first version of this did, and it meant
+    // the refusal below could never fire while the very state it guards existed.
+    // The scan IS the answer; the index is only consulted when the scan finds
+    // nothing (a cert in a role the scan does not enumerate).
+    // AMBIGUITY FAILS CLOSED (CIRISServer#397). Collect every LIVE holder before
+    // answering, rather than returning the first match found.
+    //
+    // Picking one is what shipped, and it picked wrong: with the owner and a
+    // leftover observer both holding the pair, sign-in silently resolved to the
+    // OBSERVER. The human was authenticated, saw no error, and held the wrong
+    // rights on their own node — which only surfaces at the first owner-gated
+    // act, far from its cause.
+    //
+    // "Two certs claim this identity" is not a question with a best answer; it
+    // is a broken invariant. Refusing says so at the door, as one line in a log,
+    // instead of a 403 three screens later.
+    let mut live = live_oauth_holders(engine, provider, external_id).await?;
+    match live.len() {
+        0 => {
+            // Nothing live in the scanned roles — let the index answer, still
+            // requiring `active`, so a role we do not enumerate is not silently
+            // invisible.
+            Ok(wa_cert_backend(engine)?
+                .get_by_oauth(provider, external_id)
+                .await?
+                .filter(|c| c.active))
+        }
+        1 => Ok(live.pop()),
+        n => {
+            let ids: Vec<&str> = live.iter().map(|c| c.wa_id.as_str()).collect();
+            tracing::error!(
+                provider = %provider, holders = n, wa_ids = ?ids,
+                "AMBIGUOUS provider identity — multiple live certs claim this account. Refusing \
+                 to choose: picking one silently signs the human in with whichever rights that \
+                 cert happens to carry. Retire all but the intended holder."
+            );
+            Err(StoreError::AmbiguousOauthIdentity {
+                provider: provider.to_string(),
+                holders: n,
+            })
+        }
+    }
 }
 
 /// Resolve a login identifier to its WA cert — the fabric port of the agent's

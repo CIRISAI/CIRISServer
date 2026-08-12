@@ -431,6 +431,32 @@ async fn associate_handler(
             format!("create user seed dir {}: {e}", dest_dir.display()),
         );
     }
+    // RECOVERY ONLY — this is the one act in the system that MOVES private key
+    // material (CIRISServer#391). It copies the Ed25519 seed off the USB onto
+    // this device's disk, so the same key then exists in two places.
+    //
+    // That defeats the umbrella model the rest of this module implements. A self
+    // is a roster of `identity_occurrence` rows over one root identity, and
+    // `signer_acts_for` treats any ACTIVE occurrence as a full stand-in — so the
+    // correct way to add a device is to MINT A FRESH KEY on it
+    // (`/v1/self/occurrence/portable` does exactly this, via `random::fill`, and
+    // the existing key only ever AUTHORIZES the binding) and bind that as an
+    // occurrence. One key per device is what makes
+    // `/v1/self/occurrence/revoke` mean anything: revoking a shared key kills
+    // every device that holds it.
+    //
+    // Kept because it is the last-resort path when NO surviving occurrence exists
+    // to authorize an enrollment. Loud, because a copied key is a permanent
+    // widening of custody and the operator should be able to see it happened.
+    tracing::warn!(
+        alias = %alias,
+        source = %source_dir.display(),
+        dest = %dest_dir.display(),
+        "RECOVERY: copying portable key material onto this device — the private half will \
+         exist in TWO places. Prefer enrolling a FRESH key as an occurrence \
+         (/v1/self/occurrence/portable) so this device can be revoked on its own \
+         (CIRISServer#391)"
+    );
     match crate::identity::install_portable_software_keyset(&source_dir, &alias, &dest_dir) {
         Ok(installed) => {
             // Re-open under the alias to report the resolved occurrence key_id.

@@ -123,6 +123,14 @@ fun AccordScreen(
      * 2-of-3 human kill-switch).
      */
     onStartCeremony: () -> Unit = {},
+    /**
+     * Open the DUTY conferral card (CIRISServer#392) — the accord confers a
+     * moderation duty on a fed-ID at its own quorum. An ACCORD ceremony (two
+     * seated holders, real tokens, the same holder-custody inputs as the co-scrub
+     * flows), so it lives here rather than on the Moderation card: the duty is
+     * about moderation, but the AUTHORITY being exercised is the accord's.
+     */
+    onConferDuty: () -> Unit = {},
 ) {
     val family by viewModel.family.collectAsState()
     val holders by viewModel.holders.collectAsState()
@@ -210,6 +218,16 @@ fun AccordScreen(
                                         "mobile.accord_new_found_accord",
                                         enabled = family == null,
                                     ) { onStartCeremony() },
+                                )
+                                add(
+                                    NewAttestationAction(
+                                        "confer_duty",
+                                        "mobile.accord_new_confer_duty",
+                                        // The mirror of found_accord: you cannot
+                                        // confer on behalf of an accord that does
+                                        // not exist yet.
+                                        enabled = family != null,
+                                    ) { onConferDuty() },
                                 )
                                 add(
                                     NewAttestationAction("drill", "mobile.accord_new_drill") {

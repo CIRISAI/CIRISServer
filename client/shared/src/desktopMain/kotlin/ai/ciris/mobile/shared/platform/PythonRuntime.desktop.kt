@@ -158,29 +158,69 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
         }
         println(
             "[PythonRuntime.desktop] claim PIN NOT resolvable: no boot banner and no readable " +
-                "${java.io.File(nodeHomeDir(), "claim_pin").path} after 10s — the node may be " +
-                "claimed already (the PIN is consumed on claim) or running under a different home."
+                "PIN file after 10s (asked the node: ${declaredClaimPinFile() ?: "<no path declared>"}; " +
+                "guessed: ${java.io.File(nodeHomeDir(), "claim_pin").path}) — the node may be " +
+                "claimed already (the PIN is consumed on claim), or the file is not readable by " +
+                "this user (it is 0600 in the node's home; the wizard must run as the same user " +
+                "that started the node)."
         )
         return null
     }
 
     /**
+     * **Ask the node where it wrote the PIN file** (`GET /v1/setup/status` →
+     * `claim_pin_file`) — CIRISServer#395.
+     *
+     * The node is the only party that KNOWS its home: it was told at startup.
+     * Every client-side derivation ([nodeHomeDir]) reads the APP's environment
+     * instead, so any topology where the two differ — a launcher passing
+     * `--home`, a container, systemd, sudo — pointed the read at a path the node
+     * never wrote.
+     *
+     * Only the PATH crosses the wire; the PIN never does. The proof of operator
+     * presence is still the same-uid read of a 0600 file, which is why saying
+     * where it is costs nothing.
+     *
+     * `null` on an old server, a claimed node (PIN consumed), or any error — the
+     * caller falls back to the environment guess.
+     */
+    private suspend fun declaredClaimPinFile(): String? = runCatching {
+        val body = httpClient.get("$_serverUrl/v1/setup/status").bodyAsText()
+        // Deliberately a narrow scrape rather than a full model bind: this runs on
+        // the first-run path against a server that may be mid-boot, and a strict
+        // decode failure here must not cost us the PIN.
+        Regex("\"claim_pin_file\"\\s*:\\s*\"([^\"]+)\"")
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+    }.getOrNull()
+
+    /**
      * Read the node's durable `<home>/claim_pin` (0600) into the flow. No-op if
      * already captured or the file is absent/empty. Called by [claimPin].
      */
-    private fun readClaimPinFromFileIfMissing() {
+    private suspend fun readClaimPinFromFileIfMissing() {
         if (_localClaimPin.value != null) return
-        runCatching {
-            val pinFile = java.io.File(nodeHomeDir(), "claim_pin")
-            if (pinFile.canRead()) {
-                val pin = pinFile.readText().trim()
-                if (pin.isNotEmpty()) {
-                    _localClaimPin.value = pin
-                    println("[PythonRuntime.desktop] Captured CLAIM PIN from ${pinFile.path} (file fallback).")
+        // The node's OWN answer first, the environment guess second. The guess is
+        // kept only for a server too old to declare the path — it is the source
+        // that was wrong whenever app and node resolved home differently (#395).
+        val candidates = listOfNotNull(
+            declaredClaimPinFile()?.let { java.io.File(it) to "declared by the node" },
+            java.io.File(nodeHomeDir(), "claim_pin") to "guessed from this app's environment",
+        )
+        for ((pinFile, provenance) in candidates) {
+            runCatching {
+                if (pinFile.canRead()) {
+                    val pin = pinFile.readText().trim()
+                    if (pin.isNotEmpty()) {
+                        _localClaimPin.value = pin
+                        println("[PythonRuntime.desktop] Captured CLAIM PIN from ${pinFile.path} ($provenance).")
+                        return
+                    }
                 }
+            }.onFailure {
+                println("[PythonRuntime.desktop] claim_pin read failed at ${pinFile.path} ($provenance): ${it.message}")
             }
-        }.onFailure {
-            println("[PythonRuntime.desktop] claim_pin file fallback failed: ${it.message}")
         }
     }
 

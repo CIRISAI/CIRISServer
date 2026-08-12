@@ -1120,6 +1120,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(provision.loopback.layer(axum::middleware::from_fn(
                         crate::auth::loopback::require_loopback,
                     )))
+                    // DUTY CONFERRAL (CIRISServer#392): POST /v1/accord/duty/propose
+                    // + /cosign — the accord grants `slash` / `moderate` / `review` to
+                    // a subject, adopted at the family's own 2-of-3. This is the row
+                    // every tier-2/3/4 enforcement act walks for, and nothing could
+                    // write it before: the trust-root card confers CEREMONY-plane roles
+                    // (canonical / infra:serve), while the moderation gate reads the
+                    // DELEGATION plane (`trust:confers:v1`). Loopback-only, like every
+                    // other holder-custody act — the holder's YubiKey is on this host.
+                    .merge(crate::accord_duty::router(Arc::clone(&engine)).layer(
+                        axum::middleware::from_fn(crate::auth::loopback::require_loopback),
+                    ))
                     // Co-scrub gossip receive — the OPEN counterpart. A remote accord
                     // peer POSTs a gossiped co-scrub partial here (A1's box → B1's box),
                     // so this ONE endpoint must NOT be loopback-gated. Shares the pending
@@ -2774,7 +2785,29 @@ async fn setup_peer_replication(
     // ALIAS — reading consent by the alias returned 0 peers from a corpus whose
     // grants the signer identity authored, and the empty topology then clobbered
     // the live one (envelopes_sent=0 under a fully green transport).
-    start_replication_runtime(engine, edge, edge.signer_key_id()).await
+    let started = start_replication_runtime(engine, edge, edge.signer_key_id()).await;
+
+    // RECEIVE AXIS (CIRISEdge#462 / CIRISServer#392) — once replication is up, ask
+    // our peers for the OWNER's own testimony.
+    //
+    // Spawned, not awaited: the pull is fire-and-forget by edge's contract (the
+    // reply converges over the peer's next round), and blocking compose on a
+    // network round-trip would make boot depend on a peer being reachable.
+    //
+    // This is what makes a fed-ID's history follow it. Claim a fresh node with a
+    // portable ID that already stewards ciris-canonical-1 and, before this,
+    // `owned-nodes` showed only `self` forever — the rows existed, on the other
+    // node, with nothing to move them. Anti-entropy could not: it is
+    // advertise-based, and the `self`/`family` plane is `Projection::SelfOwn`,
+    // advertised by nobody at any setting.
+    if started.is_ok() {
+        let engine_for_pull = Arc::clone(engine);
+        let node = edge.signer_key_id().to_string();
+        tokio::spawn(async move {
+            crate::receive_axis::pull_owner_testimony(&engine_for_pull, &node).await;
+        });
+    }
+    started
 }
 
 /// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
@@ -2832,6 +2865,20 @@ pub(crate) fn build_replication_peers(
         .collect()
 }
 
+/// The ONE `ReplicationRuntime` for this process (CIRISServer#312). Hoisted to
+/// module scope so callers outside composition — notably the receive-axis pull
+/// (CIRISEdge#462) — reach the SAME runtime rather than composing a second one.
+static RUNTIME: tokio::sync::OnceCell<Arc<ciris_edge::replication::ReplicationRuntime>> =
+    tokio::sync::OnceCell::const_new();
+
+/// The composed replication runtime, or `None` when replication never started
+/// (no Reticulum transport, so there is nothing to pull over). Read-only —
+/// composition stays in [`start_replication_runtime`].
+pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::ReplicationRuntime>>
+{
+    RUNTIME.get().map(Arc::clone)
+}
+
 /// Core replication-runtime bring-up, shared by the compose boot path
 /// ([`setup_peer_replication`]) AND the agent-embedded federation-delivery
 /// controller ([`crate::federation_delivery`]) — and since CIRISServer#312 the two
@@ -2877,8 +2924,6 @@ pub(crate) async fn start_replication_runtime(
     // concurrent first calls (the loser awaits the winner instead of spawning a
     // second scheduler that leaks when its Arc drops). DRY: the atomic idiom
     // already exists; re-deriving it is how copies drift.
-    static RUNTIME: tokio::sync::OnceCell<Arc<ciris_edge::replication::ReplicationRuntime>> =
-        tokio::sync::OnceCell::const_new();
     if let Some(existing) = RUNTIME.get() {
         tracing::info!(
             "replication runtime already composed — returning the held runtime (single \

@@ -2981,6 +2981,13 @@ fn now_rfc3339() -> String {
 /// The accord family's live m-of-n `M`, read from the entrenched persist family row
 /// (persist v13.3.0 seeds it at boot on every node — CIRISPersist#386). `0` when the
 /// family/quorum isn't resolvable. (The 0.5.83 baked-genesis fallback is retired.)
+/// The accord family's `M` for a duty conferral (CIRISServer#392). Re-derived at
+/// use, never cached: a holder removed from the roster must stop counting toward
+/// the threshold immediately.
+pub(crate) async fn family_quorum_m_for_duty(engine: &Engine) -> usize {
+    family_quorum_m(engine).await
+}
+
 async fn family_quorum_m(engine: &Engine) -> usize {
     use ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID;
     use ciris_verify_core::threshold::QuorumPolicy;
