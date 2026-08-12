@@ -736,6 +736,24 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
             }
             return err(StatusCode::UNAUTHORIZED, "invalid credentials");
         }
+        // An ambiguous NAME is not a store outage and must not read as one — the
+        // store is fine, the graph is not. It is also not "invalid credentials":
+        // the credential may be perfectly correct and simply belong to the other
+        // cert, which is exactly how CIRISAgent#1029 presented — an eternal
+        // `password mismatch` against a password that worked in Python.
+        //
+        // 409 CONFLICT, and the message names both wa_ids: this is the one login
+        // failure an operator can actually FIX, and only if they are told what
+        // collided. Leaking the wa_ids here is safe — resolution already failed,
+        // so this says nothing about whether any credential is valid.
+        Err(e @ store::StoreError::AmbiguousLoginName { .. }) => {
+            tracing::error!(
+                identifier = %req.username, error = %e,
+                "login REFUSED: this name resolves to more than one active cert. Choosing one \
+                 would authenticate the caller as whichever the node ordered first."
+            );
+            return err(StatusCode::CONFLICT, e.to_string());
+        }
         Err(e) => {
             tracing::warn!(error = %e, "login failed: identity store unavailable");
             return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}"));

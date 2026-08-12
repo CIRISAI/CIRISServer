@@ -40,6 +40,25 @@ pub enum StoreError {
     /// lookup failure — a broken invariant. Answering it by picking a cert is
     /// how a human gets signed in with the wrong rights and no error.
     AmbiguousOauthIdentity { provider: String, holders: usize },
+    /// **More than one active cert answers to one human NAME** (CIRISAgent#1029).
+    ///
+    /// Same defect as [`Self::AmbiguousOauthIdentity`], on the identifier humans
+    /// actually type. The name scan used to resolve this by PICKING — "the
+    /// most-recent active match wins" — which meant a node holding two certs
+    /// named `jeff` silently decided which `jeff` you are.
+    ///
+    /// The failure it produced is worse than a refusal and reads as nothing like
+    /// one: login resolves cert A, the password belongs to cert B, and the node
+    /// reports `password mismatch` forever while the credential is perfectly
+    /// correct. CIRISAgent hit exactly this — their setup writes
+    /// `system_admin_password` onto the admin WA and `admin_password` onto the
+    /// user WA, and when both carry the same `name` the two sides resolve
+    /// different certs.
+    ///
+    /// Picking is never the right answer here. On the login path, ambiguity means
+    /// signing in as the WRONG PERSON — the same reasoning that keeps name
+    /// matching exact rather than accepting a first name.
+    AmbiguousLoginName { name: String, holders: Vec<String> },
 }
 
 impl std::fmt::Display for StoreError {
@@ -52,6 +71,15 @@ impl std::fmt::Display for StoreError {
                 f,
                 "{holders} live certificates claim the same {provider} identity — refusing to \
                  choose between them"
+            ),
+            StoreError::AmbiguousLoginName { name, holders } => write!(
+                f,
+                "{} active certificates answer to the name {name:?} ({}) — refusing to choose \
+                 between them. Sign in with the wa_id instead, or give these certs distinct \
+                 names; picking one would silently authenticate you as whichever the node \
+                 happened to order first.",
+                holders.len(),
+                holders.join(", ")
             ),
         }
     }
@@ -257,6 +285,48 @@ pub struct LoginMiss {
     pub names: Vec<String>,
 }
 
+/// **Every ACTIVE cert answering to `ident` as a human name**, across the login
+/// roles, in role order.
+///
+/// Split out because both resolvers need it and a second copy is how they would
+/// come to disagree about which cert a name means — which is the whole defect.
+/// Returns them ALL: deciding is the caller's job, and the only correct decision
+/// on more than one is to refuse.
+async fn certs_named(engine: &Engine, ident: &str) -> Result<Vec<WaCert>, StoreError> {
+    let mut out = Vec::new();
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        for c in list_by_role(engine, role, 128).await? {
+            if c.name == ident {
+                out.push(c);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Refuse rather than choose. Logs both `wa_id`s so the operator can see the
+/// collision instead of inferring it from a password that "stopped working".
+fn one_named(ident: &str, mut found: Vec<WaCert>) -> Result<Option<WaCert>, StoreError> {
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found.remove(0))),
+        _ => {
+            let holders: Vec<String> = found.iter().map(|c| c.wa_id.clone()).collect();
+            tracing::error!(
+                name = %ident, holders = ?holders,
+                "AMBIGUOUS LOGIN NAME — multiple active certs answer to this name. Refusing to \
+                 choose (CIRISAgent#1029): resolving one of them silently authenticates the \
+                 caller as whichever the node ordered first, and presents as an eternal \
+                 `password mismatch` when the password belongs to the other."
+            );
+            Err(StoreError::AmbiguousLoginName {
+                name: ident.to_string(),
+                holders,
+            })
+        }
+    }
+}
+
 /// [`resolve_login`], but reporting HOW it matched or WHAT it scanned.
 pub async fn resolve_login_detailed(
     engine: &Engine,
@@ -272,14 +342,18 @@ pub async fn resolve_login_detailed(
             }
         }
     }
+    if let Some(c) = one_named(ident, certs_named(engine, ident).await?)? {
+        return Ok(Ok((c, LoginMatch::Name)));
+    }
+    // Only NOW build the miss report — it exists to separate "this node reads a
+    // different database" (scanned=0) from "the certs are here and none is named
+    // that" (scanned>0), and neither is true until the name scan has come back
+    // empty.
     let mut miss = LoginMiss::default();
     for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
         for c in list_by_role(engine, role, 128).await? {
-            if c.name == ident {
-                return Ok(Ok((c, LoginMatch::Name)));
-            }
             miss.scanned += 1;
-            miss.names.push(c.name.clone());
+            miss.names.push(c.name);
         }
     }
     Ok(Err(miss))
@@ -296,19 +370,11 @@ pub async fn resolve_login(engine: &Engine, ident: &str) -> Result<Option<WaCert
             }
         }
     }
-    // Human-name scan across the active roles (the owner is a ROOT). Names are not
-    // guaranteed unique; the most-recent active match wins (list_by_role orders
-    // created DESC).
-    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
-        if let Some(c) = list_by_role(engine, role, 128)
-            .await?
-            .into_iter()
-            .find(|c| c.name == ident)
-        {
-            return Ok(Some(c));
-        }
-    }
-    Ok(None)
+    // Human-name scan across the active roles (the owner is a ROOT). Names are NOT
+    // unique, and this used to resolve that by picking the first match in role
+    // order — which decides which `jeff` you are, silently. It refuses now
+    // (CIRISAgent#1029); see [`one_named`].
+    one_named(ident, certs_named(engine, ident).await?)
 }
 
 /// Point lookup by `wa_id`.
