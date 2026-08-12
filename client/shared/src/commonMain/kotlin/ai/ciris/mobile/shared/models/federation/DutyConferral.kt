@@ -56,8 +56,14 @@ data class DutyProposeRequest(
     /** The self the duty is conferred ON. */
     @SerialName("subject_key_id")
     val subjectKeyId: String,
-    /** One of `slash` | `moderate` | `review`. */
-    val duty: String,
+    /**
+     * The duties this grant carries — a SET. persist admits `scope` as a bare
+     * string OR a JSON array with set-containment, so one grant can carry several
+     * duties; the earlier single `duty: String` was a narrowing invented on this
+     * side. All five the substrate defines are conferrable: `consent_revocation`,
+     * `moderate`, `takedown`, `review`, `slash`.
+     */
+    val duties: List<String>,
     /** May the subject pass the duty on at all? */
     @SerialName("sub_delegation")
     val subDelegation: Boolean,

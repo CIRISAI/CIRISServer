@@ -62,8 +62,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::admission::{
-    DELEGATION_SCOPE_MODERATE, DELEGATION_SCOPE_REVIEW, DELEGATION_SCOPE_SLASH,
-    MAX_MODERATION_DELEGATION_DEPTH,
+    DELEGATION_SCOPE_CONSENT_REVOCATION, DELEGATION_SCOPE_MODERATE, DELEGATION_SCOPE_REVIEW,
+    DELEGATION_SCOPE_SLASH, DELEGATION_SCOPE_TAKEDOWN, MAX_MODERATION_DELEGATION_DEPTH,
 };
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION;
@@ -76,13 +76,37 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The duties this surface may confer. A closed set on purpose: these are the
-/// three the §11.10 walk recognizes, and an unrecognized scope would be a grant
-/// that reads as authority in the UI and admits nothing at the gate.
+/// **Every delegated-duty scope the substrate defines** — all five, each a
+/// re-export of persist's own `pub const` rather than a literal.
+///
+/// # This list was wrong, and the way it was wrong is the point
+///
+/// It shipped with three of the five. `takedown` and `consent_revocation` were
+/// simply not here, so the card could not confer them and nobody could tell:
+/// the UI offered a tidy menu and the missing entries looked like design.
+///
+/// The cause is that persist declares five `DELEGATION_SCOPE_*` consts and NO
+/// canonical array over them. With nothing to import, this list was hand-picked,
+/// and a hand-picked mirror of someone else's vocabulary drifts the moment they
+/// add to it. That is CIRISServer#322 — single-source the vocabulary, never
+/// re-declare it — applied to the VALUES rather than the envelope keys, and it
+/// bit exactly as #322 predicts.
+///
+/// Importing the consts (as below) fixes the spelling but not the MEMBERSHIP: a
+/// sixth scope added upstream still silently goes missing. Nothing here can
+/// detect that, because "the set of consts in another crate" is not a thing this
+/// crate can enumerate. So the guard is a test that greps persist's own source
+/// (`tests/duty_scopes_match_the_substrate.rs`) and fails when the two sets
+/// diverge. Filed upstream as the real fix: CIRISPersist should export the array.
+///
+/// Ordered as persist documents them — the four EMIT authorities, then `slash`,
+/// which is the authority to take something away.
 pub const CONFERRABLE_DUTIES: &[&str] = &[
-    DELEGATION_SCOPE_SLASH,
+    DELEGATION_SCOPE_CONSENT_REVOCATION,
     DELEGATION_SCOPE_MODERATE,
+    DELEGATION_SCOPE_TAKEDOWN,
     DELEGATION_SCOPE_REVIEW,
+    DELEGATION_SCOPE_SLASH,
 ];
 
 #[derive(Clone)]
@@ -105,7 +129,17 @@ pub struct HolderRef {
 pub struct ProposeRequest {
     pub holder: HolderRef,
     pub subject_key_id: String,
-    pub duty: String,
+    /// The duties to confer — a SET. persist admits `scope` as "a bare string OR
+    /// a JSON array of strings (set-containment)", so conferring `moderate` AND
+    /// `takedown` in one grant is native to the wire; this field carrying a
+    /// single `String` was a narrowing invented here, not a substrate limit. One
+    /// grant, one co-scrub ceremony, several duties.
+    #[serde(default)]
+    pub duties: Vec<String>,
+    /// The pre-set spelling. Accepted so an older client keeps working; folded
+    /// into [`Self::duties`] on read.
+    #[serde(default)]
+    pub duty: Option<String>,
     #[serde(default)]
     pub sub_delegation: bool,
     #[serde(default)]
@@ -144,7 +178,7 @@ fn err(code: StatusCode, reason_id: &str, msg: impl Into<String>) -> Response {
 fn conferral_envelope(
     id: &str,
     subject: &str,
-    duty: &str,
+    duties: &[String],
     sub_delegation: bool,
     depth: Option<u32>,
 ) -> serde_json::Value {
@@ -156,7 +190,7 @@ fn conferral_envelope(
         // The plane. A row labelled charter or trust-edge points the other way
         // and confers nothing (CIRISPersist#551 item 2).
         (paths::DIMENSION): TRUST_CONFERS_DIMENSION,
-        "scope": [duty],
+        "scope": duties,
         "subject_key_id": subject,
     });
     // Written only when TRUE. Absent and `false` mean the same thing to persist
@@ -242,15 +276,37 @@ async fn propose(State(st): State<DutyState>, body: axum::body::Bytes) -> Respon
             )
         }
     };
-    let duty = req.duty.trim();
-    if !CONFERRABLE_DUTIES.contains(&duty) {
+    // Fold the legacy singular spelling into the set, then dedupe + sort so the
+    // canonical bytes do not depend on the order the operator ticked the boxes.
+    let mut duties: Vec<String> = req
+        .duties
+        .iter()
+        .chain(req.duty.iter())
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    duties.sort();
+    duties.dedup();
+    if duties.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "accord.duty.no_duty",
+            format!(
+                "a conferral needs at least one duty. The §11.10 walk recognizes {CONFERRABLE_DUTIES:?}."
+            ),
+        );
+    }
+    if let Some(bad) = duties
+        .iter()
+        .find(|d| !CONFERRABLE_DUTIES.contains(&d.as_str()))
+    {
         return err(
             StatusCode::BAD_REQUEST,
             "accord.duty.unknown_duty",
             format!(
-                "`{duty}` is not a conferrable duty. The §11.10 walk recognizes {:?} — anything \
-                 else would render as authority in the UI and admit nothing at the gate.",
-                CONFERRABLE_DUTIES
+                "`{bad}` is not a conferrable duty. The §11.10 walk recognizes \
+                 {CONFERRABLE_DUTIES:?} — anything else would render as authority in the UI and \
+                 admit nothing at the gate."
             ),
         );
     }
@@ -290,7 +346,7 @@ async fn propose(State(st): State<DutyState>, body: axum::body::Bytes) -> Respon
     let envelope = conferral_envelope(
         &id,
         subject,
-        duty,
+        &duties,
         req.sub_delegation,
         req.sub_delegation_depth,
     );
@@ -335,7 +391,7 @@ async fn propose(State(st): State<DutyState>, body: axum::body::Bytes) -> Respon
     let needed = quorum_needed(&st.engine).await;
     let count = distinct_scrubs(&partial);
     tracing::info!(
-        subject = %subject, duty = %duty, holder = %partial.scrub_key_id,
+        subject = %subject, duties = %duties.join("+"), holder = %partial.scrub_key_id,
         scrubs = count, needed,
         "duty conferral PROPOSED — inert until quorum; hand the partial to another holder"
     );
@@ -442,12 +498,19 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
     // verified signer set. A sub-quorum or forged set is refused here, not by us.
     let env = partial.attestation_envelope.clone();
     let subject = partial.attested_key_id.clone();
-    let duty = env
-        .get("scope")
-        .and_then(|s| s.get(0))
-        .and_then(|s| s.as_str())
-        .unwrap_or("?")
-        .to_string();
+    // EVERY scope, not `scope[0]`. This string is the operator's read-back of what
+    // they just signed; showing the first of several would under-report a grant
+    // that cannot be un-signed. `scope` admits a bare string or an array, so read
+    // both shapes rather than assuming the one we happen to write.
+    let duty = match env.get("scope") {
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" + "),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => "?".to_string(),
+    };
     if let Err(e) = st
         .engine
         .federation_directory()
@@ -511,7 +574,7 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
 #[doc(hidden)]
 pub async fn test_support_build_partial(
     subject: &str,
-    duty: &str,
+    duties: &[String],
     sub_delegation: bool,
     depth: Option<u32>,
     holders: &[&ciris_persist::federation::operational::test_support::Identity],
@@ -525,9 +588,9 @@ pub async fn test_support_build_partial(
     // it confers nothing, and a shared id would collide on insert instead.
     let holder_ids: Vec<&str> = holders.iter().map(|h| h.key_id.as_str()).collect();
     let id = hex::encode(Sha256::digest(
-        format!("{subject}/{duty}/{}", holder_ids.join("+")).as_bytes(),
+        format!("{subject}/{}/{}", duties.join("+"), holder_ids.join("+")).as_bytes(),
     ));
-    let envelope = conferral_envelope(&id[..32], subject, duty, sub_delegation, depth);
+    let envelope = conferral_envelope(&id[..32], subject, duties, sub_delegation, depth);
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize");
 
     let mut scrubs: Vec<(String, String, String)> = Vec::new();

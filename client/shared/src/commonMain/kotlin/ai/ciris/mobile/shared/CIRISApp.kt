@@ -3216,7 +3216,7 @@ fun CIRISApp(
                 PlatformLogger.d(TAG, "[Screen.DutyConferral] Rendering duty conferral screen")
                 DutyConferralScreen(
                     viewModel = dutyConferralViewModel,
-                    onBack = { currentScreen = Screen.Moderation },
+                    onBack = { currentScreen = Screen.Accord },
                 )
             }
 
@@ -3230,6 +3230,14 @@ fun CIRISApp(
                     onBack = { currentScreen = Screen.Interact },
                     // Found-a-new-accord CTA — shown only when no family exists yet.
                     onStartCeremony = { currentScreen = Screen.AccordCeremony },
+                    // Confer a DUTY from the accord (CIRISServer#392). This is an
+                    // ACCORD ceremony — two seated holders, real tokens, adopted at
+                    // the family's own quorum — so it belongs beside the other
+                    // co-scrub flows, not on the Moderation card. The duty happens
+                    // to be a moderation duty; the authority being exercised is the
+                    // accord's, and the card that opens it should be the one whose
+                    // custody UX (holder key_id + USB ML-DSA + PKCS#11) it shares.
+                    onConferDuty = { currentScreen = Screen.DutyConferral },
                 )
             }
 
@@ -3266,9 +3274,6 @@ fun CIRISApp(
                     // Tiers 0-4 of /v1/admin/* — the enforcement ladder.
                     ladderViewModel = adminLadderViewModel,
                     onBack = { currentScreen = Screen.Interact },
-                    // The delegate-moderate-duty flow — confer the duty on another
-                    // self with an explicit sub-delegation depth.
-                    onOpenDelegation = { currentScreen = Screen.DutyConferral },
                 )
             }
 
@@ -4808,7 +4813,7 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.Moderation -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
     // The duty-conferral flow is opened FROM Moderation and backs out to it, so it
     // keeps Moderation lit in the sidebar rather than claiming a surface of its own.
-    Screen.DutyConferral -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
+    Screen.DutyConferral -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ChildSafety -> ai.ciris.mobile.shared.ui.nav.NavSurface.ChildSafety
     Screen.Storage -> ai.ciris.mobile.shared.ui.nav.NavSurface.Storage
     Screen.Billing -> ai.ciris.mobile.shared.ui.nav.NavSurface.Billing

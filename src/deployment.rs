@@ -109,14 +109,40 @@ mod tests {
         );
     }
 
-    /// `/` is a mount; a path that does not exist is not. The unknown case must
-    /// fall to `false`, because `true` is the permissive answer here.
+    /// A path that does not exist is not a mount. The unknown case must fall to
+    /// `false` on EVERY platform, because `true` is the permissive answer here.
     #[test]
     fn mount_detection_fails_closed_on_the_unknown() {
-        assert!(is_mount_point("/"), "the filesystem root is a mount point");
         assert!(
             !is_mount_point("/definitely/not/a/real/path/ciris"),
             "a nonexistent path must not read as a mount — guessing 'managed' re-opens the hole"
+        );
+    }
+
+    /// The POSITIVE case is POSIX-only. `/` being its own parent's device is a
+    /// Unix fact, and the `cfg(not(unix))` arm returns `false` for everything by
+    /// design — the `/app/*` mount indicators describe a Linux container, so on
+    /// Windows they SHOULD contribute nothing rather than be emulated.
+    ///
+    /// Asserting this unconditionally is what turned CI red on windows-latest
+    /// only: the test claimed a portable fact about a deliberately
+    /// platform-specific function.
+    #[cfg(unix)]
+    #[test]
+    fn the_filesystem_root_is_a_mount_on_unix() {
+        assert!(is_mount_point("/"), "the filesystem root is a mount point");
+    }
+
+    /// …and on non-Unix the detector is inert, which must stay TRUE-by-test
+    /// rather than true-by-nobody-looking. A Windows host is personal unless the
+    /// env vars say otherwise, and that is the intended reading.
+    #[cfg(not(unix))]
+    #[test]
+    fn mount_indicators_are_inert_off_unix() {
+        assert!(
+            !is_mount_point("/") && !is_mount_point("/app/data"),
+            "the non-Unix arm must contribute NO mount indicators — the /app/* signals describe a \
+             Linux container, and emulating them would let a Windows box read as managed"
         );
     }
 }

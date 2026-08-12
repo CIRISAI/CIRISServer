@@ -37,13 +37,31 @@ class DutyConferralViewModel(
     companion object {
         private const val TAG = "DutyConferralVM"
 
-        /** The duty verbs the node accepts. */
-        const val DUTY_SLASH = "slash"
+        /**
+         * The duty verbs the node accepts — ALL FIVE the substrate defines.
+         *
+         * This list shipped with three. `takedown` and `consent_revocation` were
+         * absent, so the card could not confer them and the menu looked complete.
+         * The server holds the authoritative copy (imported from persist's own
+         * consts and gated by `duty_scopes_match_the_substrate.rs`); these are the
+         * display order, EMIT authorities first, then the one that takes away.
+         */
+        const val DUTY_CONSENT_REVOCATION = "consent_revocation"
         const val DUTY_MODERATE = "moderate"
+        const val DUTY_TAKEDOWN = "takedown"
         const val DUTY_REVIEW = "review"
+        const val DUTY_SLASH = "slash"
+
+        val ALL_DUTIES = listOf(
+            DUTY_CONSENT_REVOCATION, DUTY_MODERATE, DUTY_TAKEDOWN, DUTY_REVIEW, DUTY_SLASH,
+        )
 
         /** The global sub-delegation rail — a null depth is bounded by THIS. */
         const val GLOBAL_DEPTH_RAIL = 5
+
+        /** The node answered and there is no accord family — NOT a read failure. */
+        const val NO_ACCORD_FAMILY =
+            "this node knows no accord family yet, so there is no authority to confer from"
     }
 
     // ── The conferral being composed ─────────────────────────────────────────
@@ -52,9 +70,14 @@ class DutyConferralViewModel(
     private val _subjectKeyId = MutableStateFlow("")
     val subjectKeyId: StateFlow<String> = _subjectKeyId.asStateFlow()
 
-    /** `slash` | `moderate` | `review`. */
-    private val _duty = MutableStateFlow(DUTY_MODERATE)
-    val duty: StateFlow<String> = _duty.asStateFlow()
+    /**
+     * The duties this grant carries — a SET, because persist admits `scope` as a
+     * JSON array with set-containment. Conferring `moderate` AND `takedown`
+     * together is one grant and one ceremony; forcing one duty per grant was a
+     * narrowing this client invented, not a substrate limit.
+     */
+    private val _duties = MutableStateFlow(setOf(DUTY_MODERATE))
+    val duties: StateFlow<Set<String>> = _duties.asStateFlow()
 
     /** May the subject pass the duty on at all? */
     private val _subDelegation = MutableStateFlow(false)
@@ -104,14 +127,95 @@ class DutyConferralViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    // ── The SOURCE of the delegation, read live from the node ────────────────
+    //
+    // The conferring authority is the humanity accord — hardcoded server-side as
+    // `HUMANITY_ACCORD_FAMILY_KEY_ID` and, before this, never stated anywhere the
+    // operator could see it. The card showed a bare "have 1, need 2" with no
+    // mention of WHOSE quorum, which is the wrong shape for a constitutional act:
+    // you would be signing on behalf of an authority the card declined to name.
+    //
+    // Read from `GET /v1/accord/family` rather than written as a constant here. A
+    // label the client hardcodes is a label that can disagree with the substrate;
+    // this one cannot, because it IS the substrate's answer.
+
+    /** The conferring family's `key_id` (`humanity-accord`), or null until loaded. */
+    private val _sourceFamilyKeyId = MutableStateFlow<String?>(null)
+    val sourceFamilyKeyId: StateFlow<String?> = _sourceFamilyKeyId.asStateFlow()
+
+    /** Its display name (`HUMANITY_ACCORD`). */
+    private val _sourceFamilyName = MutableStateFlow<String?>(null)
+    val sourceFamilyName: StateFlow<String?> = _sourceFamilyName.asStateFlow()
+
+    /** Its quorum policy verbatim (`quorum:2/3`) — the accord's own words. */
+    private val _sourceConsensus = MutableStateFlow<String?>(null)
+    val sourceConsensus: StateFlow<String?> = _sourceConsensus.asStateFlow()
+
+    /** Whether that policy is entrenched (it cannot be lowered casually). */
+    private val _sourceEntrenched = MutableStateFlow(false)
+    val sourceEntrenched: StateFlow<Boolean> = _sourceEntrenched.asStateFlow()
+
+    /** The LIVE seats (admitted minus revoked) — who may scrub this grant. */
+    private val _sourceSeats = MutableStateFlow<List<String>>(emptyList())
+    val sourceSeats: StateFlow<List<String>> = _sourceSeats.asStateFlow()
+
+    /** Set when the source could not be read — the card must refuse, not guess. */
+    private val _sourceError = MutableStateFlow<String?>(null)
+    val sourceError: StateFlow<String?> = _sourceError.asStateFlow()
+
+    /**
+     * **Load the source and prefill the subject.** Called when the card opens.
+     *
+     * The subject defaults to THIS node's bound owner (its fed-ID, from
+     * `owned-nodes`) because conferring on yourself is the first thing anyone does
+     * and retyping a 50-character key_id by hand is an invitation to confer a duty
+     * on a typo. It stays editable — conferring on someone else is legitimate —
+     * but the default is the identity the node already knows.
+     */
+    fun load() {
+        viewModelScope.launch {
+            runCatching { apiClient.getAccordFamily() }
+                .onSuccess { fam ->
+                    if (fam == null) {
+                        // A 404 is a THIRD state, distinct from both success and
+                        // failure: this node reached the substrate and it says
+                        // there is no accord family yet. Nothing can be conferred,
+                        // but nothing is broken either — and conflating it with a
+                        // transport error would send the operator debugging a
+                        // network that is working fine.
+                        _sourceError.value = NO_ACCORD_FAMILY
+                    } else {
+                        _sourceFamilyKeyId.value = fam.familyKeyId
+                        _sourceFamilyName.value = fam.familyName
+                        _sourceConsensus.value = fam.consensusProtocol
+                        _sourceEntrenched.value = fam.entrenched
+                        _sourceSeats.value = fam.members.map { it.keyId }
+                        _sourceError.value = null
+                    }
+                }
+                .onFailure {
+                    // Distinct from "no seats": we could not ASK. The card renders
+                    // this instead of an empty roster, which would read as "the
+                    // accord has no holders" — a very different and false claim.
+                    _sourceError.value = it.message ?: "could not read the conferring authority"
+                }
+            // Prefill only — never clobber something the operator already typed.
+            if (_subjectKeyId.value.isBlank()) {
+                runCatching { apiClient.getOwnedNodes() }
+                    .onSuccess { owned -> owned.owner?.let { _subjectKeyId.value = it } }
+            }
+        }
+    }
+
     // ── Field setters (the card is a form; the VM owns its state) ────────────
 
     fun setSubjectKeyId(value: String) {
         _subjectKeyId.value = value
     }
 
-    fun setDuty(value: String) {
-        _duty.value = value
+    /** Tick or untick one duty. */
+    fun toggleDuty(value: String) {
+        _duties.value = _duties.value.let { if (value in it) it - value else it + value }
     }
 
     fun setHolderKeyId(value: String) {
@@ -182,7 +286,7 @@ class DutyConferralViewModel(
                     holderKeyId = holder,
                     mldsaUsbPath = usb,
                     subjectKeyId = subject,
-                    duty = _duty.value,
+                    duties = _duties.value.toList().sorted(),
                     subDelegation = _subDelegation.value,
                     subDelegationDepth = _subDelegationDepth.value,
                 )

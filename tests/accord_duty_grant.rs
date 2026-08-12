@@ -117,7 +117,7 @@ async fn the_accord_grant_is_what_unlocks_moderation_and_one_seat_is_not_enough(
     // replicate, and still confers nothing.
     let one = ciris_server::accord_duty::test_support_build_partial(
         subject,
-        DELEGATION_SCOPE_SLASH,
+        &[DELEGATION_SCOPE_SLASH.to_string()],
         true,
         Some(2),
         &[&hs[0]],
@@ -139,7 +139,7 @@ async fn the_accord_grant_is_what_unlocks_moderation_and_one_seat_is_not_enough(
     // ── (3) QUORUM: two distinct holders. ────────────────────────────────────
     let two = ciris_server::accord_duty::test_support_build_partial(
         subject,
-        DELEGATION_SCOPE_SLASH,
+        &[DELEGATION_SCOPE_SLASH.to_string()],
         true,
         Some(2),
         &[&hs[0], &hs[1]],
@@ -175,7 +175,7 @@ async fn a_leaf_grant_may_act_but_may_not_be_passed_on() {
     // sub_delegation = false ⇒ leaf.
     let leaf = ciris_server::accord_duty::test_support_build_partial(
         subject,
-        DELEGATION_SCOPE_SLASH,
+        &[DELEGATION_SCOPE_SLASH.to_string()],
         false,
         None,
         &[&hs[0], &hs[1]],

@@ -3627,7 +3627,8 @@ class CIRISApiClient(
         holderKeyId: String,
         mldsaUsbPath: String,
         subjectKeyId: String,
-        duty: String,
+        /** The duties to confer — a SET; the wire field is `duties`. */
+        duties: List<String>,
         subDelegation: Boolean,
         subDelegationDepth: Int? = null,
         pkcs11: JsonElement? = null,
@@ -3638,7 +3639,8 @@ class CIRISApiClient(
         logInfo(
             method,
             "POST $nodeUrl/v1/accord/duty/propose holder=$holderKeyId subject=$subjectKeyId " +
-                "duty=$duty sub_delegation=$subDelegation depth=${subDelegationDepth ?: "(rail)"}",
+                "duties=${duties.joinToString("+")} sub_delegation=$subDelegation " +
+                    "depth=${subDelegationDepth ?: "(rail)"}",
         )
         logInfo(method, "needs a YubiKey touch for the scrub signature; waiting up to ${ceremonyTimeoutMillis / 1000}s")
         val client = federationHttpClient(ceremonyTimeoutMillis)
@@ -3652,7 +3654,7 @@ class CIRISApiClient(
                         pkcs11 = pkcs11,
                     ),
                     subjectKeyId = subjectKeyId.trim(),
-                    duty = duty.trim(),
+                    duties = duties.map { it.trim() }.filter { it.isNotEmpty() }.sorted(),
                     subDelegation = subDelegation,
                     subDelegationDepth = subDelegationDepth,
                 ),
@@ -3671,7 +3673,11 @@ class CIRISApiClient(
                 ai.ciris.mobile.shared.models.federation.DutyConferralResponse.serializer(),
             )
         } catch (e: Exception) {
-            logException(method, e, "nodeUrl=$nodeUrl, subject=$subjectKeyId, duty=$duty")
+            logException(
+                method,
+                e,
+                "nodeUrl=$nodeUrl, subject=$subjectKeyId, duties=${duties.joinToString("+")}",
+            )
             throw e
         } finally {
             client.close()

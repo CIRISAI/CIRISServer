@@ -181,7 +181,7 @@ async fn a_google_owner_claims_a_node_and_the_accord_grants_them_moderation() {
     // One seat is not the accord.
     let one = ciris_server::accord_duty::test_support_build_partial(
         OWNER_FEDID,
-        DELEGATION_SCOPE_SLASH,
+        &[DELEGATION_SCOPE_SLASH.to_string()],
         true,
         Some(2),
         &[&hs[0]],
@@ -200,7 +200,7 @@ async fn a_google_owner_claims_a_node_and_the_accord_grants_them_moderation() {
     // Two of three IS the accord.
     let two = ciris_server::accord_duty::test_support_build_partial(
         OWNER_FEDID,
-        DELEGATION_SCOPE_SLASH,
+        &[DELEGATION_SCOPE_SLASH.to_string()],
         true,
         Some(2),
         &[&hs[0], &hs[1]],

@@ -102,8 +102,6 @@ fun ModerationScreen(
     /** Drives the owner-gated `/v1/admin` ladder (preview → commit-with-hash). */
     ladderViewModel: AdminLadderViewModel,
     onBack: () -> Unit,
-    /** Navigate to the delegation flow (Family → Delegation), if present. */
-    onOpenDelegation: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
     val ladder by ladderViewModel.state.collectAsState()
@@ -276,13 +274,6 @@ fun ModerationScreen(
                     SectionHeader(CIRISIcons.send, localizedString("mobile.moderation_delegate_section"))
                     Text(localizedString("mobile.moderation_delegate_body"),
                         fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (onOpenDelegation != null) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
-                            onClick = onOpenDelegation,
-                            modifier = Modifier.testable("btn_open_delegation"),
-                        ) { Text(localizedString("mobile.moderation_open_delegation")) }
-                    }
                 }
             }
 

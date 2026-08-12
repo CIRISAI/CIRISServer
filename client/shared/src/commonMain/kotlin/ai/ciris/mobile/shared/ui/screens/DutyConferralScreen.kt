@@ -1,6 +1,7 @@
 package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.localization.localizedString
+import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
@@ -18,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,11 +30,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,7 +72,7 @@ fun DutyConferralScreen(
     onBack: () -> Unit,
 ) {
     val subjectKeyId by viewModel.subjectKeyId.collectAsState()
-    val duty by viewModel.duty.collectAsState()
+    val duties by viewModel.duties.collectAsState()
     val subDelegation by viewModel.subDelegation.collectAsState()
     val subDelegationDepth by viewModel.subDelegationDepth.collectAsState()
     val holderKeyId by viewModel.holderKeyId.collectAsState()
@@ -81,7 +85,17 @@ fun DutyConferralScreen(
     val inProgress by viewModel.inProgress.collectAsState()
     val error by viewModel.error.collectAsState()
 
-    var dutyExpanded by remember { mutableStateOf(false) }
+    // The conferring authority, read live from the node (never a client constant).
+    val sourceFamilyKeyId by viewModel.sourceFamilyKeyId.collectAsState()
+    val sourceFamilyName by viewModel.sourceFamilyName.collectAsState()
+    val sourceConsensus by viewModel.sourceConsensus.collectAsState()
+    val sourceEntrenched by viewModel.sourceEntrenched.collectAsState()
+    val sourceSeats by viewModel.sourceSeats.collectAsState()
+    val sourceError by viewModel.sourceError.collectAsState()
+
+    LaunchedEffect(Unit) { viewModel.load() }
+
+    var showUsbPicker by remember { mutableStateOf(false) }
     var depthExpanded by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -143,6 +157,83 @@ fun DutyConferralScreen(
                 }
             }
 
+            // ── WHO IS CONFERRING — the source of the authority ────────────────
+            //
+            // First on the card, before anything the operator fills in, because it
+            // is the one fact they cannot change and the one that makes the rest
+            // mean anything. Two holders are about to sign a constitutional act;
+            // the card must say on whose behalf.
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth().testable("duty_source_card"),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                    SectionHeader(CIRISIcons.shield, localizedString("duty.section_source"))
+                    when {
+                        // Could not ASK is not the same as "no accord" — say which.
+                        sourceError != null -> Text(
+                            localizedString("duty.source_unreadable", "error", sourceError ?: ""),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.testable("duty_source_error"),
+                        )
+                        sourceFamilyKeyId == null -> Text(
+                            localizedString("duty.source_loading"),
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        else -> {
+                            Text(
+                                sourceFamilyName ?: sourceFamilyKeyId.orEmpty(),
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testable("duty_source_name"),
+                            )
+                            Text(
+                                sourceFamilyKeyId.orEmpty(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testable("duty_source_key_id"),
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            // The accord's own quorum string, verbatim.
+                            Text(
+                                localizedString(
+                                    if (sourceEntrenched) "duty.source_quorum_entrenched"
+                                    else "duty.source_quorum",
+                                    "quorum",
+                                    sourceConsensus.orEmpty(),
+                                ),
+                                fontSize = 13.sp,
+                                modifier = Modifier.testable("duty_source_quorum"),
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                localizedString(
+                                    "duty.source_seats",
+                                    mapOf(
+                                        "count" to sourceSeats.size.toString(),
+                                        "seats" to sourceSeats.joinToString(", "),
+                                    ),
+                                ),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testable("duty_source_seats"),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                localizedString("duty.source_explainer"),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
             // ── The conferral ─────────────────────────────────────────────────
             Spacer(Modifier.height(12.dp))
             Surface(
@@ -163,49 +254,92 @@ fun DutyConferralScreen(
                         modifier = Modifier.fillMaxWidth().testable("input_duty_subject"),
                     )
 
-                    // ── DUTY verb ─────────────────────────────────────────────
+                    // ── DUTIES — a SET, not a choice ──────────────────────────
+                    //
+                    // persist admits `scope` as an array with set-containment, so
+                    // one grant carries as many duties as the accord means to give.
+                    // A single-select dropdown here forced one ceremony per duty —
+                    // two humans and two YubiKey touches to say something the wire
+                    // could always have carried in one row.
                     Spacer(Modifier.height(12.dp))
-                    ExposedDropdownMenuBox(
-                        expanded = dutyExpanded,
-                        onExpandedChange = { dutyExpanded = it },
-                    ) {
-                        OutlinedTextField(
-                            value = localizedString(dutyLabelKey(duty)),
-                            onValueChange = {},
-                            readOnly = true,
-                            enabled = !inProgress,
-                            label = { Text(localizedString("duty.verb_label")) },
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = dutyExpanded) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor()
-                                .testableClickable("input_duty_verb") { dutyExpanded = !dutyExpanded },
-                        )
-                        ExposedDropdownMenu(
-                            expanded = dutyExpanded,
-                            onDismissRequest = { dutyExpanded = false },
-                        ) {
-                            DUTY_VERBS.forEach { verb ->
-                                DropdownMenuItem(
-                                    text = { Text(localizedString(dutyLabelKey(verb))) },
-                                    onClick = {
-                                        viewModel.setDuty(verb)
-                                        dutyExpanded = false
-                                    },
-                                    modifier = Modifier.testableClickable("menu_duty_$verb") {
-                                        viewModel.setDuty(verb)
-                                        dutyExpanded = false
-                                    },
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
                     Text(
-                        localizedString("duty.verb_help"),
+                        localizedString("duty.verbs_label"),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        localizedString("duty.verbs_help"),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(4.dp))
+                    DutyConferralViewModel.ALL_DUTIES.forEach { verb ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testableClickable("chk_duty_$verb") {
+                                    if (!inProgress) viewModel.toggleDuty(verb)
+                                },
+                        ) {
+                            Checkbox(
+                                checked = verb in duties,
+                                onCheckedChange = { if (!inProgress) viewModel.toggleDuty(verb) },
+                                enabled = !inProgress,
+                                modifier = Modifier.testable("chk_duty_box_$verb"),
+                            )
+                            Text(
+                                localizedString("duty.verb_$verb"),
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    if (duties.isEmpty()) {
+                        Text(
+                            localizedString("duty.verbs_none"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.testable("duty_verbs_none"),
+                        )
+                    }
+
+                    // ── What the selection actually unlocks ───────────────────
+                    //
+                    // The scope names do not say what they DO. This maps the
+                    // selection onto the enforcement ladder's own rungs, so the
+                    // operator signs knowing which doors open — the difference
+                    // between "grant slash" and "grant the authority to de-admit".
+                    val rungs = ladderRungsFor(duties)
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        localizedString("duty.ladder_label"),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    if (rungs.isEmpty()) {
+                        Text(
+                            localizedString("duty.ladder_none"),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testable("duty_ladder_none"),
+                        )
+                    } else {
+                        rungs.forEach { rungKey ->
+                            Text(
+                                "• " + localizedString(rungKey),
+                                fontSize = 12.sp,
+                                modifier = Modifier.testable("duty_ladder_$rungKey"),
+                            )
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            localizedString("duty.ladder_note"),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
 
                     // ── Delegation depth (both axes, one control) ─────────────
                     Spacer(Modifier.height(12.dp))
@@ -281,6 +415,13 @@ fun DutyConferralScreen(
                         modifier = Modifier.fillMaxWidth().testable("input_duty_holder"),
                     )
                     Spacer(Modifier.height(8.dp))
+                    // BROWSE to the PQC materials rather than typing the path.
+                    // Same control as every other trust-root ceremony
+                    // (ProvisionAccordHolderScreen, the co-scrub sheets): a
+                    // trailing Browse opening DirectoryPickerDialog. Typing a
+                    // mount path by hand is how a ceremony fails on a typo after
+                    // both humans are already in the room — and the operator is
+                    // pointing at removable media whose path they did not choose.
                     OutlinedTextField(
                         value = usbPath,
                         onValueChange = { viewModel.setUsbPath(it) },
@@ -288,7 +429,30 @@ fun DutyConferralScreen(
                         enabled = !inProgress,
                         label = { Text(localizedString("duty.usb_label")) },
                         placeholder = { Text(localizedString("duty.usb_placeholder")) },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { if (!inProgress) showUsbPicker = true },
+                                enabled = !inProgress,
+                                modifier = Modifier.testableClickable("btn_duty_usb_browse") {
+                                    if (!inProgress) showUsbPicker = true
+                                },
+                            ) { Text(localizedString("duty.usb_browse")) }
+                        },
                         modifier = Modifier.fillMaxWidth().testable("input_duty_usb"),
+                    )
+                    DirectoryPickerDialog(
+                        show = showUsbPicker,
+                        onDirectoryPicked = {
+                            viewModel.setUsbPath(it)
+                            showUsbPicker = false
+                        },
+                        onDismiss = { showUsbPicker = false },
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        localizedString("duty.usb_guidance"),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -386,15 +550,41 @@ fun DutyConferralScreen(
     }
 }
 
-/** The duty verbs, in the order the node documents them. */
-private val DUTY_VERBS = listOf(
-    DutyConferralViewModel.DUTY_SLASH,
-    DutyConferralViewModel.DUTY_MODERATE,
-    DutyConferralViewModel.DUTY_REVIEW,
-)
-
-/** Bundle id for a duty verb's label. */
-private fun dutyLabelKey(verb: String): String = "duty.verb_$verb"
+/**
+ * **Which enforcement-ladder rungs a duty set unlocks** — the node's own table,
+ * from `src/admin_ops.rs`:
+ *
+ * ```text
+ * preview        read-only    (no duty required)
+ * tier 0  annotate            scope: review
+ * tier 1  throttle            scope: moderate    (+ un_throttle)
+ * tier 2  quarantine          scope: moderate*   (+ un_quarantine)
+ * tier 3  descend             scope: slash + QUORUM
+ * tier 4  deadmit             scope: slash       (+ re_admit)
+ * tier 4  refuse-writes       scope: slash       (+ accept_writes)
+ * ```
+ *
+ * `*` tier 2 is the one documented disagreement: the FSD ladder says `moderate`,
+ * persist's admission door says `slash`. The substrate wins, so tier 2 is listed
+ * under `slash` here — showing it under `moderate` would promise a rung the gate
+ * refuses, which is worse than not showing it.
+ *
+ * `consent_revocation` and `takedown` unlock NO ladder rung: they authorize
+ * emitting (a revocation, a takedown notice), not enforcing. That is a real and
+ * useful distinction for the operator to see at signing time, so those duties
+ * contribute nothing here rather than being quietly folded in.
+ */
+private fun ladderRungsFor(duties: Set<String>): List<String> {
+    val out = mutableListOf<String>()
+    if (DutyConferralViewModel.DUTY_REVIEW in duties) out += "duty.ladder_t0"
+    if (DutyConferralViewModel.DUTY_MODERATE in duties) out += "duty.ladder_t1"
+    if (DutyConferralViewModel.DUTY_SLASH in duties) {
+        out += "duty.ladder_t2"
+        out += "duty.ladder_t3"
+        out += "duty.ladder_t4"
+    }
+    return out
+}
 
 /**
  * One delegation-depth choice — the (sub_delegation, depth) PAIR the node wants,
