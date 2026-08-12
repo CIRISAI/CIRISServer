@@ -463,19 +463,24 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
             format!("the substrate refused the conferral: {e}"),
         );
     }
-    let depth = env
+    // The three states of the sub_delegation contract, rendered for the operator
+    // log: absent/false is a LEAF, `true` with no depth is bounded by the global
+    // rail, `true` + a depth is that many further hops. Depth only ever TIGHTENS.
+    let sub_delegation = env
         .get("sub_delegation")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        .then(|| {
-            env.get("sub_delegation_depth")
-                .and_then(serde_json::Value::as_u64)
-                .map(|n| format!("{n} further hop(s)"))
-                .unwrap_or_else(|| {
-                    format!("bounded only by the rail ({MAX_MODERATION_DELEGATION_DEPTH})")
-                })
-        })
-        .unwrap_or_else(|| "leaf — may act, may not pass it on".to_string());
+        .unwrap_or(false);
+    let depth = if sub_delegation {
+        match env
+            .get("sub_delegation_depth")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(n) => format!("{n} further hop(s)"),
+            None => format!("bounded only by the rail ({MAX_MODERATION_DELEGATION_DEPTH})"),
+        }
+    } else {
+        "leaf — may act, may not pass it on".to_string()
+    };
     let conferred = format!("{duty} conferred on {subject}; sub-delegation: {depth}");
     tracing::warn!(
         subject = %subject, duty = %duty, scrubs = count, needed,

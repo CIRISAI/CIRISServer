@@ -324,6 +324,14 @@ struct ClaimRemoteRequest {
     /// The target node's `CIRIS-V1-...` NodeCode (carrying its `transport_hint`).
     node_code: String,
     /// The target node's one-time claim PIN (read off the target's console).
+    ///
+    /// REQUIRED for a remote target — it is the operator-presence proof, and only
+    /// someone at that node's console can have it. OMITTED (or empty) for a
+    /// SELF-claim: the target's console is this process, so the handler supplies
+    /// this boot's in-process PIN itself (#277). Defaulted rather than mandatory
+    /// so the wizard's automated final step does not have to invent a value for a
+    /// secret it is structurally unable to read (CIRISServer#395).
+    #[serde(default)]
     claim_pin: String,
     /// The cohort scope to claim the target under (`self` / `family` / `community`).
     cohort_scope: String,
@@ -422,6 +430,44 @@ async fn claim_remote_handler(
         }
     };
 
+    // ── SELF-claim: the PIN is ours to supply, not the client's ──────────────
+    //
+    // The claim PIN proves OPERATOR PRESENCE at the target — you read it off that
+    // node's console. That is meaningful for a REMOTE target and meaningless for
+    // this one: on a self-claim the target's console IS this process, and the PIN
+    // is documented "console-only — NEVER over HTTP", so the co-located wizard
+    // cannot obtain it by any supported route. Requiring it from the client made
+    // the automated self-claim impossible BY CONSTRUCTION — the wizard's final
+    // step posted whatever it had (empty), `setup/root` answered
+    // `401 invalid one-time claim PIN`, and first-run setup could never complete
+    // on a headless node (CIRISServer#395).
+    //
+    // So for a self-target we substitute the in-process PIN (#277) that this same
+    // process minted at boot. The presence proof is not weakened: first-run
+    // claim-remote is loopback-only, and a loopback caller on this box already has
+    // the console access the PIN stands in for. A REMOTE target keeps taking the
+    // operator-supplied PIN, unchanged — that is the case the field exists for.
+    let self_target = nodecode::decode(&req.node_code)
+        .map(|nc| nc.key_id == st.node_key_id)
+        .unwrap_or(false);
+    let claim_pin: std::borrow::Cow<'_, str> = match self_target
+        .then(crate::auth::bootstrap::first_run_claim_pin)
+        .flatten()
+    {
+        Some(local) => {
+            tracing::info!(
+                target = %st.node_key_id,
+                client_supplied = !req.claim_pin.trim().is_empty(),
+                "claim-remote: SELF-claim — using this boot's in-process claim PIN (#277); the \
+                 PIN is console-only and a co-located wizard can never have read it"
+            );
+            std::borrow::Cow::Owned(local)
+        }
+        // Remote target, or a self-target on a node that minted no PIN (already
+        // claimed — `setup/root` will answer 409, which is the honest error).
+        None => std::borrow::Cow::Borrowed(req.claim_pin.as_str()),
+    };
+
     // `target_url` overrides the NodeCode's transport_hint — needed for server
     // nodes that don't embed their external IP in the NodeCode.
     let fallback = req
@@ -432,7 +478,7 @@ async fn claim_remote_handler(
         &st.http,
         &user_signer,
         &req.node_code,
-        &req.claim_pin,
+        &claim_pin,
         &req.cohort_scope,
         Some(fallback),
         req.owner_password.as_deref(),

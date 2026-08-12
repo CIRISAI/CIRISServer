@@ -833,6 +833,51 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
     Some(err(StatusCode::UNAUTHORIZED, "invalid one-time claim PIN"))
 }
 
+/// **Is the node's sole ROOT an OAuth placeholder this claim may ADOPT?**
+/// (CIRISServer#391)
+///
+/// # The collision this resolves
+///
+/// Signing in with Google on an unclaimed node mints a ROOT keyed to the auth
+/// pair (`oauth-<provider>-<external_id>`, `oauth.rs`). The wizard then completes
+/// setup by CLAIMING the node with the owner's federation identity — and the
+/// claim was refused, `409 root already claimed`, because a ROOT existed. Two
+/// paths both claiming the node, and the refusal could not tell "claimed by
+/// someone else" from "claimed by the very human standing here". The app fell
+/// back to local login with the fed-ID already imported and nothing bound.
+///
+/// # Why the identity wins
+///
+/// OAuth is a DOOR: it proves the human controls an email, carries no key
+/// material, and is revocable by a third party. The federation identity is WHO
+/// THEY ARE: it signs CEG rows and is the `from` of the node's
+/// `ownership:responsible_party:node:v1` edge. So the owner record must be named
+/// after the person ([`root_wa_id_for_identity`]) and merely CARRY the pair as
+/// one way in — which is exactly what this route already does, and what
+/// canonical-server-1 has in production. A ROOT named after the door is the
+/// placeholder, not the owner.
+///
+/// # The rule, deliberately narrow
+///
+/// Adoptable IFF the node's ROOT set is EXACTLY ONE cert that is not
+/// identity-derived (its `wa_id` is not `wa-root-…`) and carries an OAuth pair.
+/// Anything else — a real identity-derived owner, several ROOTs, a password
+/// account — still refuses. This can only ever REPLACE a placeholder minted by a
+/// door on THIS node during first-run; it can never displace an owner.
+///
+/// First-run authorization is unchanged: the claim PIN still proves physical
+/// possession, and the route is still loopback-gated. This decides what a
+/// SUCCESSFUL claim does about a placeholder, never who may claim.
+async fn adoptable_oauth_placeholder(engine: &Engine) -> Option<ciris_persist::wa_cert::WaCert> {
+    let roots = store::list_by_role(engine, WaRole::Root, 8).await.ok()?;
+    let [only] = roots.as_slice() else {
+        return None;
+    };
+    let identity_derived = only.wa_id.starts_with("wa-root-");
+    let has_pair = only.oauth_provider.is_some() && only.oauth_external_id.is_some();
+    (!identity_derived && has_pair).then(|| only.clone())
+}
+
 /// `POST /v1/setup/root` — first-time-setup ROOT claim for a FRESH node with no
 /// baked seed. **1-phase + SUBSTRATE-NATIVE.**
 ///
@@ -905,52 +950,6 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
 ///
 /// Response (`201 Created`): `{ wa_id, identity_key_id, cohort_scope, role,
 /// owner_binding_attestation_id }`.
-
-/// **Is the node's sole ROOT an OAuth placeholder this claim may ADOPT?**
-/// (CIRISServer#391)
-///
-/// # The collision this resolves
-///
-/// Signing in with Google on an unclaimed node mints a ROOT keyed to the auth
-/// pair (`oauth-<provider>-<external_id>`, `oauth.rs`). The wizard then completes
-/// setup by CLAIMING the node with the owner's federation identity — and the
-/// claim was refused, `409 root already claimed`, because a ROOT existed. Two
-/// paths both claiming the node, and the refusal could not tell "claimed by
-/// someone else" from "claimed by the very human standing here". The app fell
-/// back to local login with the fed-ID already imported and nothing bound.
-///
-/// # Why the identity wins
-///
-/// OAuth is a DOOR: it proves the human controls an email, carries no key
-/// material, and is revocable by a third party. The federation identity is WHO
-/// THEY ARE: it signs CEG rows and is the `from` of the node's
-/// `ownership:responsible_party:node:v1` edge. So the owner record must be named
-/// after the person ([`root_wa_id_for_identity`]) and merely CARRY the pair as
-/// one way in — which is exactly what this route already does, and what
-/// canonical-server-1 has in production. A ROOT named after the door is the
-/// placeholder, not the owner.
-///
-/// # The rule, deliberately narrow
-///
-/// Adoptable IFF the node's ROOT set is EXACTLY ONE cert that is not
-/// identity-derived (its `wa_id` is not `wa-root-…`) and carries an OAuth pair.
-/// Anything else — a real identity-derived owner, several ROOTs, a password
-/// account — still refuses. This can only ever REPLACE a placeholder minted by a
-/// door on THIS node during first-run; it can never displace an owner.
-///
-/// First-run authorization is unchanged: the claim PIN still proves physical
-/// possession, and the route is still loopback-gated. This decides what a
-/// SUCCESSFUL claim does about a placeholder, never who may claim.
-async fn adoptable_oauth_placeholder(engine: &Engine) -> Option<ciris_persist::wa_cert::WaCert> {
-    let roots = store::list_by_role(engine, WaRole::Root, 8).await.ok()?;
-    let [only] = roots.as_slice() else {
-        return None;
-    };
-    let identity_derived = only.wa_id.starts_with("wa-root-");
-    let has_pair = only.oauth_provider.is_some() && only.oauth_external_id.is_some();
-    (!identity_derived && has_pair).then(|| only.clone())
-}
-
 async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Response {
     // (1) Closed once a ROOT exists — checked FIRST so an unsigned probe against an
     //     already-claimed node still gets the clear 409 (no re-claim).
