@@ -2679,7 +2679,8 @@
     "wallet_transfer_success": "Trasferimento riuscito! TX: {tx}",
     "wallet_trust_degraded": "Fiducia Hardware Degradata",
     "wallet_warning": "Avviso",
-    "login_setup_complete_relogin": "La configurazione è completata. Il tuo nodo è stato riavviato: accedi di nuovo con le stesse credenziali che hai usato per completare la configurazione."
+    "login_setup_complete_relogin": "La configurazione è completata. Il tuo nodo è stato riavviato: accedi di nuovo con le stesse credenziali che hai usato per completare la configurazione.",
+    "accord_new_confer_duty": "Conferisci un dovere a un ID di federazione"
   },
   "moderation": {
     "ladder": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Incarico",
     "verb_moderate": "Modera",
     "verb_review": "Revisiona",
-    "verb_slash": "Elimina"
+    "verb_slash": "Elimina",
+    "ladder_label": "Cosa sblocca",
+    "ladder_none": "Nulla sulla scala di applicazione: questi doveri autorizzano l'emissione, non l'applicazione.",
+    "ladder_note": "I pioli della scala stessa, dalle operazioni di amministrazione di questo nodo. Un piolo è raggiungibile solo finché una concessione attiva ne porta l'ambito.",
+    "ladder_preview": "anteprima — sola lettura: l'insieme esatto di righe, i conteggi e l'hash della selezione",
+    "ladder_t0": "livello 0 · annotare",
+    "ladder_t1": "livello 1 · limitare / rimuovere il limite",
+    "ladder_t2": "livello 2 · mettere in quarantena / togliere dalla quarantena",
+    "ladder_t3": "livello 3 · declassare (richiede anche un QUORUM)",
+    "ladder_t4": "livello 4 · revocare l'ammissione / riammettere, rifiutare le scritture / accettare le scritture",
+    "section_source": "Conferito da",
+    "source_explainer": "La concessione è fatta DALLA FAMIGLIA, non dal seggio che firma per primo. Un singolo titolare non può conferirla da solo: è questa la differenza tra l'accordo che agisce e una persona che agisce in suo nome.",
+    "source_loading": "Lettura dell'autorità conferente da questo nodo…",
+    "source_quorum": "Adottato a {quorum}: questa concessione non produce effetti finché non l'ha firmata quel numero di seggi distinti.",
+    "source_quorum_entrenched": "Adottato a {quorum}, consolidato: la soglia è fissata a livello costituzionale e non può essere abbassata per far passare questa concessione.",
+    "source_seats": "{count} seggi attivi: {seats}",
+    "source_unreadable": "Impossibile leggere l'autorità conferente: {error}. Non si può conferire nulla finché questo nodo non è in grado di indicare chi lo sta concedendo.",
+    "usb_browse": "Sfoglia",
+    "usb_guidance": "La cartella sul volume rimovibile che contiene la metà ML-DSA-65 protetta. La chiave privata non la lascia mai: questo nodo la apre sul posto e firma.",
+    "verb_consent_revocation": "consent_revocation — revocare il consenso per conto del delegante",
+    "verb_takedown": "takedown — pubblicare un avviso di rimozione per conto del delegante",
+    "verbs_help": "Seleziona tutti i doveri che questa concessione deve portare con sé. Viaggiano insieme come un unico insieme su un'unica concessione: non serve una cerimonia separata per ogni dovere.",
+    "verbs_label": "Doveri da conferire",
+    "verbs_none": "Nessun dovere selezionato. Una concessione senza ambito non conferisce nulla."
   },
   "accord": {
     "duty": {

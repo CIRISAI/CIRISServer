@@ -120,9 +120,21 @@ async fn the_owner_wa_id_is_derived_from_the_federation_identity() {
 /// three safety-relevant steps silently skipped. Asking someone to prove with a
 /// password what they just proved with a one-time PIN and a hybrid signature over
 /// the owner-binding is asking for weaker evidence, twice.
+/// The claim source, with line endings normalized.
+///
+/// `include_str!` embeds the file VERBATIM, so on a Windows checkout (CRLF) every
+/// assertion containing a `\n` silently stops matching. That turned CI red on
+/// windows-latest three separate times in this session — the mount-point test, an
+/// `ends_with`, and this file — each time because a platform-specific fact was
+/// asserted as a portable one. Normalizing once at the read point is the fix that
+/// generalizes; patching individual match strings is the one that keeps recurring.
+fn claim_src() -> String {
+    include_str!("../src/auth/bootstrap.rs").replace("\r\n", "\n")
+}
+
 #[test]
 fn the_claim_response_carries_an_owner_session() {
-    let src = include_str!("../src/auth/bootstrap.rs");
+    let src = claim_src();
     let decl = src
         .split("struct SetupRootResponse {")
         .nth(1)
@@ -165,7 +177,7 @@ fn the_claim_response_carries_an_owner_session() {
 /// remained.
 #[test]
 fn a_duplicate_holder_of_the_owners_provider_pair_is_retired() {
-    let src = include_str!("../src/auth/bootstrap.rs");
+    let src = claim_src();
     assert!(
         src.contains("store::live_oauth_holders(&st.engine, prov, ext)"),
         "the claim must SCAN for holders of the owner's provider pair. Two earlier shapes were \

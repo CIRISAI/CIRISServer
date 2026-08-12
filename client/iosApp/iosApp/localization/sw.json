@@ -2305,7 +2305,8 @@
     "announce_decision_trace_title": "Tuma nyayo za ufikiri",
     "status_reconfiguring": "Inaanzisha upya nodi yako...",
     "status_reconfiguring_timeout": "Nodi yako inachukua muda mrefu kuliko inavyotarajiwa kuanzisha upya. Tafadhali anzisha upya programu.",
-    "login_setup_complete_relogin": "Usanidi umekamilika. Nodi yako imeanzishwa upya, kwa hivyo tafadhali ingia tena ukitumia stakabadhi zilezile ulizotumia kukamilisha usanidi."
+    "login_setup_complete_relogin": "Usanidi umekamilika. Nodi yako imeanzishwa upya, kwa hivyo tafadhali ingia tena ukitumia stakabadhi zilezile ulizotumia kukamilisha usanidi.",
+    "accord_new_confer_duty": "Toa jukumu kwa kitambulisho cha shirikisho"
   },
   "prompts": {
     "dma": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Wajibu",
     "verb_moderate": "Simamia",
     "verb_review": "Kagua",
-    "verb_slash": "Kata"
+    "verb_slash": "Kata",
+    "ladder_label": "Hii inafungua nini",
+    "ladder_none": "Hakuna kitu kwenye ngazi ya utekelezaji — majukumu haya yanaidhinisha kutoa, si kutekeleza.",
+    "ladder_note": "Vipandio vya ngazi yenyewe, kutoka shughuli za usimamizi za nodi hii. Kipandio kinafikika tu wakati ruhusa hai inabeba upeo wake.",
+    "ladder_preview": "hakiki — kusoma tu: seti kamili ya safu, hesabu na hashi ya uteuzi",
+    "ladder_t0": "daraja 0 · weka maelezo",
+    "ladder_t1": "daraja 1 · punguza kasi / ondoa upunguzaji",
+    "ladder_t2": "daraja 2 · weka karantini / ondoa karantini",
+    "ladder_t3": "daraja 3 · shusha (pia inahitaji AKIDI)",
+    "ladder_t4": "daraja 4 · ondoa uandikishaji / andikisha upya, kataa maandishi / kubali maandishi",
+    "section_source": "Imetolewa na",
+    "source_explainer": "Ruhusa hutolewa NA FAMILIA, si na kiti kinachotia saini kwanza. Mwenye kiti mmoja hawezi kutoa hii peke yake — hiyo ndiyo tofauti kati ya makubaliano kutenda na mtu kutenda kwa jina lao.",
+    "source_loading": "Inasoma mamlaka inayotoa kutoka kwa nodi hii…",
+    "source_quorum": "Imepitishwa kwa {quorum} — ruhusa hii haifanyi chochote hadi idadi hiyo ya viti tofauti iwe imeitia saini.",
+    "source_quorum_entrenched": "Imepitishwa kwa {quorum}, imekitwa — kizingiti kimewekwa kikatiba na hakiwezi kushushwa ili kupitisha ruhusa hii.",
+    "source_seats": "Viti hai {count}: {seats}",
+    "source_unreadable": "Haikuweza kusoma mamlaka inayotoa: {error}. Hakuna kinachoweza kutolewa hadi nodi hii iweze kutaja ni nani anayeitoa.",
+    "usb_browse": "Vinjari",
+    "usb_guidance": "Folda iliyo kwenye kifaa kinachoondolewa inayoshikilia nusu ya ML-DSA-65 iliyofungwa. Ufunguo wa faragha hautoki humo kamwe — nodi hii huufungua palepale na kutia saini.",
+    "verb_consent_revocation": "consent_revocation — tengua ridhaa kwa niaba ya mkabidhi",
+    "verb_takedown": "takedown — chapisha notisi ya kuondoa maudhui kwa niaba ya mkabidhi",
+    "verbs_help": "Chagua kila jukumu ambalo ruhusa hii inapaswa kubeba. Yanasafiri pamoja kama seti moja kwenye ruhusa moja — huhitaji sherehe tofauti kwa kila jukumu.",
+    "verbs_label": "Majukumu ya kutoa",
+    "verbs_none": "Hakuna jukumu lililochaguliwa. Ruhusa isiyo na upeo haitoi chochote."
   },
   "accord": {
     "duty": {

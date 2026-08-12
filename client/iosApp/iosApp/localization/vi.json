@@ -2379,7 +2379,8 @@
     "wallet_warning": "Cảnh báo",
     "status_reconfiguring": "Đang khởi động lại nút của bạn...",
     "status_reconfiguring_timeout": "Nút của bạn đang mất nhiều thời gian khởi động lại hơn dự kiến. Vui lòng khởi động lại ứng dụng.",
-    "login_setup_complete_relogin": "Thiết lập đã hoàn tất. Nút của bạn đã khởi động lại, vui lòng đăng nhập lại bằng đúng thông tin đăng nhập mà bạn đã dùng để hoàn tất thiết lập."
+    "login_setup_complete_relogin": "Thiết lập đã hoàn tất. Nút của bạn đã khởi động lại, vui lòng đăng nhập lại bằng đúng thông tin đăng nhập mà bạn đã dùng để hoàn tất thiết lập.",
+    "accord_new_confer_duty": "Trao một nhiệm vụ cho một federation ID"
   },
   "nav": {
     "group": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Nhiệm vụ",
     "verb_moderate": "Kiểm duyệt",
     "verb_review": "Xem xét",
-    "verb_slash": "Xóa bỏ"
+    "verb_slash": "Xóa bỏ",
+    "ladder_label": "Điều này mở khóa những gì",
+    "ladder_none": "Không có gì trên thang cưỡng chế — các nhiệm vụ này cho phép phát hành, chứ không cưỡng chế.",
+    "ladder_note": "Chính các bậc của thang này, từ những thao tác quản trị của nút này. Một bậc chỉ chạm tới được khi có một quyền cấp đang hiệu lực mang phạm vi của nó.",
+    "ladder_preview": "xem trước — chỉ đọc: đúng tập hàng, số lượng và mã băm lựa chọn",
+    "ladder_t0": "bậc 0 · chú thích",
+    "ladder_t1": "bậc 1 · hạn chế / bỏ hạn chế",
+    "ladder_t2": "bậc 2 · cách ly / bỏ cách ly",
+    "ladder_t3": "bậc 3 · hạ cấp (cũng yêu cầu một QUORUM)",
+    "ladder_t4": "bậc 4 · thu hồi kết nạp / kết nạp lại, từ chối ghi / chấp nhận ghi",
+    "section_source": "Được trao bởi",
+    "source_explainer": "Quyền cấp được thực hiện BỞI CẢ NHÓM, không phải bởi chiếc ghế ký đầu tiên. Một người nắm giữ đơn lẻ không thể tự mình trao quyền này — đó là khác biệt giữa việc hiệp ước hành động và một cá nhân hành động nhân danh nó.",
+    "source_loading": "Đang đọc thẩm quyền trao quyền từ nút này…",
+    "source_quorum": "Được thông qua ở mức {quorum} — quyền cấp này chưa có hiệu lực cho đến khi đủ số ghế riêng biệt đó đã ký.",
+    "source_quorum_entrenched": "Được thông qua ở mức {quorum}, đã cố định — ngưỡng này được ấn định theo hiến chương và không thể hạ xuống để thông qua quyền cấp này.",
+    "source_seats": "{count} ghế đang hoạt động: {seats}",
+    "source_unreadable": "Không thể đọc thẩm quyền trao quyền: {error}. Không thể trao bất cứ điều gì cho đến khi nút này nêu được ai là bên đang cấp.",
+    "usb_browse": "Duyệt",
+    "usb_guidance": "Thư mục trên ổ đĩa rời chứa nửa khóa ML-DSA-65 đã được bọc. Khóa riêng tư không bao giờ rời khỏi đó — nút này mở khóa ngay tại chỗ và ký.",
+    "verb_consent_revocation": "consent_revocation — thu hồi sự đồng ý thay mặt bên ủy quyền",
+    "verb_takedown": "takedown — công bố thông báo gỡ bỏ thay mặt bên ủy quyền",
+    "verbs_help": "Hãy chọn mọi nhiệm vụ mà quyền cấp này cần mang theo. Chúng đi cùng nhau thành một tập trên cùng một quyền cấp — bạn không cần một nghi thức riêng cho từng nhiệm vụ.",
+    "verbs_label": "Nhiệm vụ cần trao",
+    "verbs_none": "Chưa chọn nhiệm vụ nào. Một quyền cấp không có phạm vi thì không trao gì cả."
   },
   "accord": {
     "duty": {

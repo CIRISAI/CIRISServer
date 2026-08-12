@@ -2305,7 +2305,8 @@
     "announce_decision_trace_title": "Reasoning-Traces senden",
     "status_reconfiguring": "Ihr Node wird neu gestartet...",
     "status_reconfiguring_timeout": "Ihr Node braucht länger als erwartet zum Neustart. Bitte starten Sie die App neu.",
-    "login_setup_complete_relogin": "Die Einrichtung ist abgeschlossen. Ihr Knoten wurde neu gestartet – bitte melden Sie sich erneut mit denselben Zugangsdaten an, die Sie für die Einrichtung verwendet haben."
+    "login_setup_complete_relogin": "Die Einrichtung ist abgeschlossen. Ihr Knoten wurde neu gestartet – bitte melden Sie sich erneut mit denselben Zugangsdaten an, die Sie für die Einrichtung verwendet haben.",
+    "accord_new_confer_duty": "Eine Pflicht an eine Fed ID verleihen"
   },
   "prompts": {
     "dma": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Pflicht",
     "verb_moderate": "Moderieren",
     "verb_review": "Prüfen",
-    "verb_slash": "Löschen"
+    "verb_slash": "Löschen",
+    "ladder_label": "Was dies freischaltet",
+    "ladder_none": "Nichts auf der Durchsetzungsleiter — diese Pflichten berechtigen zum Ausstellen, nicht zum Durchsetzen.",
+    "ladder_note": "Die Sprossen der Leiter selbst, aus den Admin-Operationen dieses Knotens. Eine Sprosse ist nur erreichbar, solange eine gültige Vollmacht ihren Geltungsbereich trägt.",
+    "ladder_preview": "Vorschau — schreibgeschützt: die exakte Zeilenmenge, Anzahlen und der Auswahl-Hash",
+    "ladder_t0": "Stufe 0 · annotieren",
+    "ladder_t1": "Stufe 1 · drosseln / Drosselung aufheben",
+    "ladder_t2": "Stufe 2 · isolieren / Isolierung aufheben",
+    "ladder_t3": "Stufe 3 · herabstufen (erfordert zusätzlich ein QUORUM)",
+    "ladder_t4": "Stufe 4 · Zulassung entziehen / erneut zulassen, Schreibzugriffe verweigern / zulassen",
+    "section_source": "Verliehen durch",
+    "source_explainer": "Die Vollmacht wird VON DER FAMILIE erteilt, nicht von dem Sitz, der zuerst signiert. Ein einzelner Inhaber kann dies nicht allein verleihen — das ist der Unterschied, ob der Verbund handelt oder eine Person in seinem Namen.",
+    "source_loading": "Die verleihende Instanz wird von diesem Knoten gelesen…",
+    "source_quorum": "Angenommen bei {quorum} — diese Vollmacht bewirkt nichts, bis so viele verschiedene Sitze sie signiert haben.",
+    "source_quorum_entrenched": "Angenommen bei {quorum}, verankert — die Schwelle ist verfassungsmäßig festgelegt und kann nicht gesenkt werden, um diese Vollmacht durchzubringen.",
+    "source_seats": "{count} aktive Sitze: {seats}",
+    "source_unreadable": "Die verleihende Instanz konnte nicht gelesen werden: {error}. Es kann nichts verliehen werden, solange dieser Knoten nicht benennen kann, wer es gewährt.",
+    "usb_browse": "Durchsuchen",
+    "usb_guidance": "Der Ordner auf dem Wechseldatenträger, der die eingepackte ML-DSA-65-Hälfte enthält. Der private Schlüssel verlässt ihn nie — dieser Knoten öffnet ihn an Ort und Stelle und signiert.",
+    "verb_consent_revocation": "consent_revocation — Einwilligung im Namen des Vollmachtgebers widerrufen",
+    "verb_takedown": "takedown — eine Entfernungsaufforderung im Namen des Vollmachtgebers veröffentlichen",
+    "verbs_help": "Wählen Sie jede Pflicht, die diese Vollmacht umfassen soll. Sie gelten gemeinsam als ein Satz in einer Vollmacht — Sie benötigen keine eigene Zeremonie pro Pflicht.",
+    "verbs_label": "Zu verleihende Pflichten",
+    "verbs_none": "Keine Pflicht ausgewählt. Eine Vollmacht ohne Geltungsbereich verleiht nichts."
   },
   "accord": {
     "duty": {

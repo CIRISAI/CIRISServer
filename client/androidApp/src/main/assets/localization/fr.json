@@ -2305,7 +2305,8 @@
     "announce_decision_trace_title": "Envoyer des traces de raisonnement",
     "status_reconfiguring": "Redémarrage de votre nœud...",
     "status_reconfiguring_timeout": "Le redémarrage de votre nœud prend plus de temps que prévu. Veuillez redémarrer l'application.",
-    "login_setup_complete_relogin": "La configuration est terminée. Votre nœud a redémarré : veuillez vous reconnecter avec les mêmes identifiants que ceux utilisés pour terminer la configuration."
+    "login_setup_complete_relogin": "La configuration est terminée. Votre nœud a redémarré : veuillez vous reconnecter avec les mêmes identifiants que ceux utilisés pour terminer la configuration.",
+    "accord_new_confer_duty": "Conférer un devoir à un identifiant de fédération"
   },
   "prompts": {
     "dma": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Devoir",
     "verb_moderate": "Modérer",
     "verb_review": "Examiner",
-    "verb_slash": "Supprimer"
+    "verb_slash": "Supprimer",
+    "ladder_label": "Ce que cela débloque",
+    "ladder_none": "Rien sur l'échelle d'application — ces devoirs autorisent à émettre, pas à appliquer.",
+    "ladder_note": "Les échelons de l'échelle elle-même, issus des opérations d'administration de ce nœud. Un échelon n'est accessible que tant qu'un octroi actif en porte la portée.",
+    "ladder_preview": "aperçu — lecture seule : l'ensemble exact des lignes, les décomptes et le hachage de sélection",
+    "ladder_t0": "niveau 0 · annoter",
+    "ladder_t1": "niveau 1 · limiter / lever la limitation",
+    "ladder_t2": "niveau 2 · mettre en quarantaine / lever la quarantaine",
+    "ladder_t3": "niveau 3 · rétrograder (exige aussi un QUORUM)",
+    "ladder_t4": "niveau 4 · exclure / réadmettre, refuser les écritures / accepter les écritures",
+    "section_source": "Conféré par",
+    "source_explainer": "L'octroi est fait PAR LA FAMILLE, non par le siège qui signe en premier. Un détenteur seul ne peut pas le conférer à lui seul — c'est là toute la différence entre l'accord qui agit et une personne qui agit en son nom.",
+    "source_loading": "Lecture de l'autorité conférante depuis ce nœud…",
+    "source_quorum": "Adopté à {quorum} — cet octroi reste sans effet tant qu'un tel nombre de sièges distincts ne l'a pas signé.",
+    "source_quorum_entrenched": "Adopté à {quorum}, verrouillé — le seuil est fixé constitutionnellement et ne peut pas être abaissé pour faire passer cet octroi.",
+    "source_seats": "{count} sièges actifs : {seats}",
+    "source_unreadable": "Impossible de lire l'autorité conférante : {error}. Rien ne peut être conféré tant que ce nœud ne peut pas nommer qui l'accorde.",
+    "usb_browse": "Parcourir",
+    "usb_guidance": "Le dossier, sur le volume amovible, qui contient la moitié ML-DSA-65 chiffrée. La clé privée n'en sort jamais — ce nœud l'ouvre sur place et signe.",
+    "verb_consent_revocation": "consent_revocation — révoquer le consentement au nom du délégant",
+    "verb_takedown": "takedown — publier un avis de retrait au nom du délégant",
+    "verbs_help": "Sélectionnez chaque devoir que cet octroi doit porter. Ils voyagent ensemble, en un seul ensemble sur un seul octroi — inutile de faire une cérémonie distincte par devoir.",
+    "verbs_label": "Devoirs à conférer",
+    "verbs_none": "Aucun devoir sélectionné. Un octroi sans portée ne confère rien."
   },
   "accord": {
     "duty": {

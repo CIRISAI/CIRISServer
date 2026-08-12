@@ -2379,7 +2379,8 @@
     "wallet_warning": "Aviso",
     "status_reconfiguring": "Reiniciando seu nó...",
     "status_reconfiguring_timeout": "Seu nó está demorando mais do que o esperado para reiniciar. Por favor, reinicie o aplicativo.",
-    "login_setup_complete_relogin": "A configuração foi concluída. O seu nó foi reiniciado, por isso inicie sessão novamente com as mesmas credenciais que utilizou para concluir a configuração."
+    "login_setup_complete_relogin": "A configuração foi concluída. O seu nó foi reiniciado, por isso inicie sessão novamente com as mesmas credenciais que utilizou para concluir a configuração.",
+    "accord_new_confer_duty": "Conferir um dever a um ID de federação"
   },
   "nav": {
     "group": {
@@ -3910,7 +3911,30 @@
     "verb_label": "Dever",
     "verb_moderate": "Moderar",
     "verb_review": "Revisar",
-    "verb_slash": "Penalizar"
+    "verb_slash": "Penalizar",
+    "ladder_label": "O que isto desbloqueia",
+    "ladder_none": "Nada na escada de aplicação — estes deveres autorizam emitir, não aplicar.",
+    "ladder_note": "Os próprios degraus da escada, a partir das operações de administração deste nó. Um degrau só é alcançável enquanto uma concessão ativa transportar o seu âmbito.",
+    "ladder_preview": "pré-visualização — apenas leitura: o conjunto exato de linhas, as contagens e o hash da seleção",
+    "ladder_t0": "nível 0 · anotar",
+    "ladder_t1": "nível 1 · limitar / remover limite",
+    "ladder_t2": "nível 2 · colocar em quarentena / retirar da quarentena",
+    "ladder_t3": "nível 3 · descer (também requer um QUÓRUM)",
+    "ladder_t4": "nível 4 · desadmitir / readmitir, recusar escritas / aceitar escritas",
+    "section_source": "Conferido por",
+    "source_explainer": "A concessão é feita PELA FAMÍLIA, não pelo assento que assina primeiro. Um único titular não pode conferir isto sozinho — essa é a diferença entre o acordo agir e uma pessoa agir em seu nome.",
+    "source_loading": "A ler a autoridade que confere a partir deste nó…",
+    "source_quorum": "Adotado em {quorum} — esta concessão não faz nada até que esse número de assentos distintos a tenha assinado.",
+    "source_quorum_entrenched": "Adotado em {quorum}, consolidado — o limiar está constitucionalmente fixado e não pode ser reduzido para aprovar esta concessão.",
+    "source_seats": "{count} assentos ativos: {seats}",
+    "source_unreadable": "Não foi possível ler a autoridade que confere: {error}. Nada pode ser conferido enquanto este nó não conseguir nomear quem o concede.",
+    "usb_browse": "Procurar",
+    "usb_guidance": "A pasta no volume amovível que contém a metade ML-DSA-65 encapsulada. A chave privada nunca sai de lá — este nó abre-a no local e assina.",
+    "verb_consent_revocation": "consent_revocation — revogar o consentimento em nome do delegante",
+    "verb_takedown": "takedown — publicar um aviso de remoção em nome do delegante",
+    "verbs_help": "Escolha todos os deveres que esta concessão deve transportar. Viajam juntos como um só conjunto numa única concessão — não precisa de uma cerimónia separada por dever.",
+    "verbs_label": "Deveres a conferir",
+    "verbs_none": "Nenhum dever selecionado. Uma concessão sem âmbito não confere nada."
   },
   "accord": {
     "duty": {
