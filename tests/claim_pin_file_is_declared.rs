@@ -36,8 +36,14 @@
 use std::path::Path;
 
 fn src() -> String {
+    // Normalize line endings. On Windows the checkout is CRLF, so any assertion
+    // shaped like `ends_with("...\n")` fails on a file that is byte-identical in
+    // every way that matters. That is the same defect as asserting `/` is a mount
+    // point: a platform-specific fact stated as a portable one, and it turned CI
+    // red on windows-latest only.
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/auth/bootstrap.rs"))
         .expect("read src/auth/bootstrap.rs")
+        .replace("\r\n", "\n")
 }
 
 /// Strip `//` line comments before asserting about code. A comment that names the

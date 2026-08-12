@@ -97,6 +97,29 @@ class DutyConferralViewModel(
     private val _usbPath = MutableStateFlow("")
     val usbPath: StateFlow<String> = _usbPath.asStateFlow()
 
+    /**
+     * The PIV user PIN. Without it the node cannot open the holder's slot-9c key
+     * and the ceremony fails at the token with
+     * `accord.duty.holder_custody`. Every other holder-signing flow collects it;
+     * this card omitted the field entirely, so the request always arrived with
+     * `pkcs11: null` and could not have succeeded for anyone.
+     */
+    private val _userPin = MutableStateFlow("")
+    val userPin: StateFlow<String> = _userPin.asStateFlow()
+
+    /**
+     * The BAKED accord holders, read from `GET /v1/accord-holders`.
+     *
+     * The holder was a free-text `key_id` box. Every other accord card offers the
+     * registry as a dropdown ([`HolderSignInputs`]) — typing `A1` by hand is both
+     * a typo waiting to happen and a worse answer than the node's own list, which
+     * knows exactly which holders exist and is the same source the quorum is
+     * counted from.
+     */
+    private val _holders = MutableStateFlow<List<ai.ciris.mobile.shared.models.federation.AccordHolderDto>>(emptyList())
+    val holders: StateFlow<List<ai.ciris.mobile.shared.models.federation.AccordHolderDto>> =
+        _holders.asStateFlow()
+
     // ── Co-scrub progress ────────────────────────────────────────────────────
 
     /** The opaque partial — round-tripped VERBATIM into the next [cosign]. */
@@ -164,6 +187,25 @@ class DutyConferralViewModel(
     val sourceError: StateFlow<String?> = _sourceError.asStateFlow()
 
     /**
+     * The inserted token's readiness (`GET /v1/accord/yubikey-status`). Shown as
+     * the same banner the genesis ceremony uses, so an operator learns their
+     * token is absent, not FIPS, or has an empty 9C slot BEFORE two people are in
+     * the room rather than from a failed signature.
+     */
+    private val _yubiKeyStatus =
+        MutableStateFlow<ai.ciris.mobile.shared.models.federation.YubiKeyStatus?>(null)
+    val yubiKeyStatus: StateFlow<ai.ciris.mobile.shared.models.federation.YubiKeyStatus?> =
+        _yubiKeyStatus.asStateFlow()
+
+    fun refreshYubiKeyStatus() {
+        viewModelScope.launch {
+            runCatching { apiClient.getYubiKeyStatus() }
+                .onSuccess { _yubiKeyStatus.value = it }
+                .onFailure { PlatformLogger.w(TAG, "[yubikey] ${it.message}") }
+        }
+    }
+
+    /**
      * **Load the source and prefill the subject.** Called when the card opens.
      *
      * The subject defaults to THIS node's bound owner (its fed-ID, from
@@ -199,6 +241,10 @@ class DutyConferralViewModel(
                     // accord has no holders" — a very different and false claim.
                     _sourceError.value = it.message ?: "could not read the conferring authority"
                 }
+            refreshYubiKeyStatus()
+            runCatching { apiClient.getAccordHolders() }
+                .onSuccess { _holders.value = it.holders }
+                .onFailure { PlatformLogger.w(TAG, "[load] holder registry unreadable: ${it.message}") }
             // Prefill only — never clobber something the operator already typed.
             if (_subjectKeyId.value.isBlank()) {
                 runCatching { apiClient.getOwnedNodes() }
@@ -220,6 +266,10 @@ class DutyConferralViewModel(
 
     fun setHolderKeyId(value: String) {
         _holderKeyId.value = value
+    }
+
+    fun setUserPin(value: String) {
+        _userPin.value = value
     }
 
     fun setUsbPath(value: String) {
@@ -287,6 +337,7 @@ class DutyConferralViewModel(
                     mldsaUsbPath = usb,
                     subjectKeyId = subject,
                     duties = _duties.value.toList().sorted(),
+                    userPin = _userPin.value.takeIf { it.isNotBlank() },
                     subDelegation = _subDelegation.value,
                     subDelegationDepth = _subDelegationDepth.value,
                 )
@@ -325,6 +376,7 @@ class DutyConferralViewModel(
                     holderKeyId = holder,
                     mldsaUsbPath = usb,
                     partial = pending,
+                    userPin = _userPin.value.takeIf { it.isNotBlank() },
                 )
                 applyResult(result)
             } catch (e: Exception) {
@@ -337,6 +389,15 @@ class DutyConferralViewModel(
     }
 
     /** Both routes answer the same body — one place absorbs it. */
+    /**
+     * Clear the PIN after a successful scrub. The next signature is a DIFFERENT
+     * human with a different token; leaving holder A's PIN in the box invites
+     * holder B to press submit without noticing whose credential is in it.
+     */
+    private fun clearPinBetweenHolders() {
+        _userPin.value = ""
+    }
+
     private fun applyResult(result: ai.ciris.mobile.shared.models.federation.DutyConferralResponse) {
         // Keep the last good partial when a response omits it (adopted records
         // have nothing left to hand on).

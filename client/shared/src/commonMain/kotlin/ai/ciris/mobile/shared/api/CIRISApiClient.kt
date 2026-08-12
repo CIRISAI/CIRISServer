@@ -3631,6 +3631,10 @@ class CIRISApiClient(
         duties: List<String>,
         subDelegation: Boolean,
         subDelegationDepth: Int? = null,
+        /** PIV user PIN — the holder's YubiKey cannot be opened without it. */
+        userPin: String? = null,
+        pivSlot: String? = null,
+        modulePath: String? = null,
         pkcs11: JsonElement? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
@@ -3651,7 +3655,14 @@ class CIRISApiClient(
                     holder = ai.ciris.mobile.shared.models.federation.DutyHolder(
                         keyId = holderKeyId.trim(),
                         mldsaUsbPath = mldsaUsbPath.trim(),
-                        pkcs11 = pkcs11,
+                        pkcs11 = pkcs11 ?: buildJsonObject {
+                            userPin?.takeIf { it.isNotBlank() }
+                                ?.let { put("user_pin", JsonPrimitive(it)) }
+                            pivSlot?.takeIf { it.isNotBlank() }
+                                ?.let { put("piv_slot", JsonPrimitive(it)) }
+                            modulePath?.takeIf { it.isNotBlank() }
+                                ?.let { put("module_path", JsonPrimitive(it)) }
+                        },
                     ),
                     subjectKeyId = subjectKeyId.trim(),
                     duties = duties.map { it.trim() }.filter { it.isNotEmpty() }.sorted(),
@@ -3696,6 +3707,9 @@ class CIRISApiClient(
         holderKeyId: String,
         mldsaUsbPath: String,
         partial: JsonElement,
+        userPin: String? = null,
+        pivSlot: String? = null,
+        modulePath: String? = null,
         pkcs11: JsonElement? = null,
         nodeUrl: String = LOCAL_NODE_URL,
         token: String? = accessToken,
@@ -3711,7 +3725,14 @@ class CIRISApiClient(
                     holder = ai.ciris.mobile.shared.models.federation.DutyHolder(
                         keyId = holderKeyId.trim(),
                         mldsaUsbPath = mldsaUsbPath.trim(),
-                        pkcs11 = pkcs11,
+                        pkcs11 = pkcs11 ?: buildJsonObject {
+                            userPin?.takeIf { it.isNotBlank() }
+                                ?.let { put("user_pin", JsonPrimitive(it)) }
+                            pivSlot?.takeIf { it.isNotBlank() }
+                                ?.let { put("piv_slot", JsonPrimitive(it)) }
+                            modulePath?.takeIf { it.isNotBlank() }
+                                ?.let { put("module_path", JsonPrimitive(it)) }
+                        },
                     ),
                     // Submit the partial VERBATIM — never re-encode the signed envelope.
                     partial = partial,

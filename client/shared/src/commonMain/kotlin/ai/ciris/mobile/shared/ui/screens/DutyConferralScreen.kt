@@ -5,6 +5,8 @@ import ai.ciris.mobile.shared.platform.DirectoryPickerDialog
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
+import ai.ciris.mobile.shared.ui.components.HolderSignInputs
+import ai.ciris.mobile.shared.ui.components.YubiKeyStatusBanner
 import ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -77,6 +79,9 @@ fun DutyConferralScreen(
     val subDelegationDepth by viewModel.subDelegationDepth.collectAsState()
     val holderKeyId by viewModel.holderKeyId.collectAsState()
     val usbPath by viewModel.usbPath.collectAsState()
+    val userPin by viewModel.userPin.collectAsState()
+    val holders by viewModel.holders.collectAsState()
+    val yubiKeyStatus by viewModel.yubiKeyStatus.collectAsState()
     val partial by viewModel.partial.collectAsState()
     val scrubCount by viewModel.scrubCount.collectAsState()
     val quorumNeeded by viewModel.quorumNeeded.collectAsState()
@@ -156,6 +161,11 @@ fun DutyConferralScreen(
                     }
                 }
             }
+
+            // Token readiness FIRST — the ceremony cannot start without it, and
+            // finding out from a failed signature wastes both holders' time.
+            Spacer(Modifier.height(12.dp))
+            YubiKeyStatusBanner(yubiKeyStatus) { viewModel.refreshYubiKeyStatus() }
 
             // ── WHO IS CONFERRING — the source of the authority ────────────────
             //
@@ -405,54 +415,26 @@ fun DutyConferralScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = holderKeyId,
-                        onValueChange = { viewModel.setHolderKeyId(it) },
-                        singleLine = true,
-                        enabled = !inProgress,
-                        label = { Text(localizedString("duty.holder_label")) },
-                        placeholder = { Text(localizedString("duty.holder_placeholder")) },
-                        modifier = Modifier.fillMaxWidth().testable("input_duty_holder"),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    // BROWSE to the PQC materials rather than typing the path.
-                    // Same control as every other trust-root ceremony
-                    // (ProvisionAccordHolderScreen, the co-scrub sheets): a
-                    // trailing Browse opening DirectoryPickerDialog. Typing a
-                    // mount path by hand is how a ceremony fails on a typo after
-                    // both humans are already in the room — and the operator is
-                    // pointing at removable media whose path they did not choose.
-                    OutlinedTextField(
-                        value = usbPath,
-                        onValueChange = { viewModel.setUsbPath(it) },
-                        singleLine = true,
-                        enabled = !inProgress,
-                        label = { Text(localizedString("duty.usb_label")) },
-                        placeholder = { Text(localizedString("duty.usb_placeholder")) },
-                        trailingIcon = {
-                            TextButton(
-                                onClick = { if (!inProgress) showUsbPicker = true },
-                                enabled = !inProgress,
-                                modifier = Modifier.testableClickable("btn_duty_usb_browse") {
-                                    if (!inProgress) showUsbPicker = true
-                                },
-                            ) { Text(localizedString("duty.usb_browse")) }
-                        },
-                        modifier = Modifier.fillMaxWidth().testable("input_duty_usb"),
-                    )
-                    DirectoryPickerDialog(
-                        show = showUsbPicker,
-                        onDirectoryPicked = {
-                            viewModel.setUsbPath(it)
-                            showUsbPicker = false
-                        },
-                        onDismiss = { showUsbPicker = false },
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        localizedString("duty.usb_guidance"),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // The SHARED holder inputs every accord ceremony uses:
+                    // holder picked from the node's own registry, USB browsed, PIN
+                    // masked with a reveal toggle.
+                    //
+                    // This card hand-rolled a free-text `key_id` box and a bare USB
+                    // field, and had NO PIN AT ALL — so every propose reached the
+                    // node with `pkcs11: null` and failed at the token
+                    // (`accord.duty.holder_custody`). It could not have worked for
+                    // anyone. Re-using the component is also what keeps the holder
+                    // list honest: it is the node's registry, the same source the
+                    // quorum is counted from, not a string the operator remembered.
+                    HolderSignInputs(
+                        holders = holders,
+                        holderKeyId = holderKeyId,
+                        onHolder = { viewModel.setHolderKeyId(it) },
+                        usbPath = usbPath,
+                        onUsb = { viewModel.setUsbPath(it) },
+                        pin = userPin,
+                        onPin = { viewModel.setUserPin(it) },
+                        tagPrefix = "duty",
                     )
                 }
             }
