@@ -671,12 +671,21 @@ fn step_name(s: &ciris_edge::replication::DriveStep) -> String {
     }
 }
 
+/// The wire verb, by name, for the round trace.
+///
+/// Exhaustive ON PURPOSE — no `_` arm. A new `ReplicationMessage` variant is a
+/// wire-compat event (v1 peers serde-REFUSE an unknown tag rather than ignoring
+/// it), so it must break this build and be named deliberately. `Pull` arrived
+/// with edge v15.22.0 / CIRISEdge#462 and this is exactly the compile failure
+/// that discipline is for — a wildcard here would have logged the receive axis as
+/// "other" and told nobody it existed.
 fn msg_name(m: &ReplicationMessage) -> &'static str {
     match m {
         ReplicationMessage::Summary(_) => "Summary",
         ReplicationMessage::Diff(_) => "Diff",
         ReplicationMessage::Deliver(_) => "Deliver",
         ReplicationMessage::Fetch(_) => "Fetch",
+        ReplicationMessage::Pull(_) => "Pull",
     }
 }
 
