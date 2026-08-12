@@ -61,10 +61,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::admission::{
-    DELEGATION_SCOPE_CONSENT_REVOCATION, DELEGATION_SCOPE_MODERATE, DELEGATION_SCOPE_REVIEW,
-    DELEGATION_SCOPE_SLASH, DELEGATION_SCOPE_TAKEDOWN, MAX_MODERATION_DELEGATION_DEPTH,
-};
+use ciris_persist::federation::admission::MAX_MODERATION_DELEGATION_DEPTH;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION;
 use ciris_persist::federation::types::{
@@ -76,38 +73,29 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// **Every delegated-duty scope the substrate defines** — all five, each a
-/// re-export of persist's own `pub const` rather than a literal.
+/// **Every delegated-duty scope the substrate defines** — now the substrate's own
+/// array, not a list assembled here.
 ///
-/// # This list was wrong, and the way it was wrong is the point
+/// # It was hand-picked, and it drifted
 ///
-/// It shipped with three of the five. `takedown` and `consent_revocation` were
-/// simply not here, so the card could not confer them and nobody could tell:
-/// the UI offered a tidy menu and the missing entries looked like design.
+/// This shipped with three of the five scopes: `takedown` and
+/// `consent_revocation` were absent, so the card could not confer them and the
+/// menu looked complete. Nobody scans a dropdown wondering what is *not* on it.
 ///
-/// The cause is that persist declares five `DELEGATION_SCOPE_*` consts and NO
-/// canonical array over them. With nothing to import, this list was hand-picked,
-/// and a hand-picked mirror of someone else's vocabulary drifts the moment they
-/// add to it. That is CIRISServer#322 — single-source the vocabulary, never
-/// re-declare it — applied to the VALUES rather than the envelope keys, and it
-/// bit exactly as #322 predicts.
+/// The cause was structural — persist declared five `DELEGATION_SCOPE_*` consts
+/// and no array over them, so every consumer hand-picked a subset and every
+/// hand-picked mirror drifts the moment the vocabulary grows. Filed as
+/// CIRISPersist#637; persist v30.11.0 exports
+/// [`DELEGATED_DUTY_SCOPES`](ciris_persist::federation::admission::DELEGATED_DUTY_SCOPES)
+/// and this is now a re-export of it.
 ///
-/// Importing the consts (as below) fixes the spelling but not the MEMBERSHIP: a
-/// sixth scope added upstream still silently goes missing. Nothing here can
-/// detect that, because "the set of consts in another crate" is not a thing this
-/// crate can enumerate. So the guard is a test that greps persist's own source
-/// (`tests/duty_scopes_match_the_substrate.rs`) and fails when the two sets
-/// diverge. Filed upstream as the real fix: CIRISPersist should export the array.
-///
-/// Ordered as persist documents them — the four EMIT authorities, then `slash`,
-/// which is the authority to take something away.
-pub const CONFERRABLE_DUTIES: &[&str] = &[
-    DELEGATION_SCOPE_CONSENT_REVOCATION,
-    DELEGATION_SCOPE_MODERATE,
-    DELEGATION_SCOPE_TAKEDOWN,
-    DELEGATION_SCOPE_REVIEW,
-    DELEGATION_SCOPE_SLASH,
-];
+/// That closes the membership hole a local list could not: a sixth scope added
+/// upstream appears here on the next bump with no edit, because there is nothing
+/// here to edit. `tests/duty_scopes_match_the_substrate.rs` keeps its assertions
+/// (they now compare the substrate against itself, which is cheap and still
+/// catches a future re-hand-rolling), and drops the source-grep that stood in for
+/// this import.
+pub const CONFERRABLE_DUTIES: &[&str] = ciris_persist::federation::admission::DELEGATED_DUTY_SCOPES;
 
 #[derive(Clone)]
 pub struct DutyState {

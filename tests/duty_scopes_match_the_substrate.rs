@@ -134,32 +134,36 @@ fn every_substrate_duty_scope_is_conferrable() {
     );
 }
 
-/// The list must be sourced from persist's constants, not re-spelled. Catches the
-/// regression where someone "fixes" a missing scope by adding a string literal.
+/// The list must BE the substrate's array, not a local re-spelling of it.
+///
+/// persist v30.11.0 exports `DELEGATED_DUTY_SCOPES` (CIRISPersist#637, filed from
+/// here after this list shipped with three of five). The server now re-exports it,
+/// so membership drift is structurally impossible rather than merely tested for —
+/// this asserts the re-export stayed a re-export.
 #[test]
-fn the_list_is_imported_not_respelled() {
+fn the_list_is_the_substrates_own_array() {
     let src =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/accord_duty.rs"))
-            .expect("read accord_duty.rs");
+            .expect("read accord_duty.rs")
+            .replace("\r\n", "\n");
     let start = src.find("pub const CONFERRABLE_DUTIES").expect("the list");
-    let end = start + src[start..].find("];").expect("list end");
+    let end = start + src[start..].find(';').expect("end of the item");
     let body = &src[start..end];
     assert!(
-        !body.contains('"'),
-        "CONFERRABLE_DUTIES must contain only imported constants — a string literal here is the \
-         same hand-mirroring that let the set drift in the first place (CIRISServer#322):\n{body}"
+        body.contains("DELEGATED_DUTY_SCOPES"),
+        "CONFERRABLE_DUTIES must re-export the substrate's array. Re-assembling the list here — \
+         even out of correctly-imported consts — reintroduces the membership hole that let \
+         `takedown` and `consent_revocation` go missing:\n{body}"
     );
-    for expected in [
-        "DELEGATION_SCOPE_CONSENT_REVOCATION",
-        "DELEGATION_SCOPE_MODERATE",
-        "DELEGATION_SCOPE_TAKEDOWN",
-        "DELEGATION_SCOPE_REVIEW",
-        "DELEGATION_SCOPE_SLASH",
-    ] {
-        assert!(
-            body.contains(expected),
-            "{expected} must be in CONFERRABLE_DUTIES — all five, or the card silently cannot \
-             grant what the substrate can gate on"
-        );
-    }
+    assert!(
+        !body.contains('"'),
+        "no string literals: a re-spelled scope is the hand-mirroring this exists to remove"
+    );
+    // …and the re-export must actually carry all five at runtime.
+    assert_eq!(
+        ciris_server::accord_duty::CONFERRABLE_DUTIES.len(),
+        5,
+        "the substrate defines five delegated-duty scopes; got {:?}",
+        ciris_server::accord_duty::CONFERRABLE_DUTIES
+    );
 }

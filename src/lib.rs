@@ -326,6 +326,7 @@ pub mod radio;
 /// loop converges the live `ReplicationRuntime` to them. The API never touches
 /// the runtime — it writes CEG and nudges this loop. Public so the integration
 /// test (`tests/replication_reconcile.rs`) can drive `reconcile_once` directly.
+pub mod receive_axis;
 pub mod replication_reconcile;
 /// The **retention / eviction control loop** (CIRISServer#348) — the periodic
 /// pass that enforces the node's `RetentionPolicy` against the local store.

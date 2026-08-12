@@ -1214,6 +1214,21 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                  owner-binding persisted; ROOT/SYSTEM_ADMIN bound to the responsible \
                  user; one-time claim PIN consumed (CC 3.2 / CC 1.13.5)"
             );
+            // RECEIVE AXIS (CIRISEdge#462) — the owner is bound as of THIS moment,
+            // so pull their own testimony now rather than at the next boot. The
+            // wizard's very next screen is the node list; making the operator
+            // restart to see the nodes they already steward is the difference
+            // between "it works" and "it works when you come back".
+            //
+            // Spawned and never awaited: fire-and-forget per edge's contract, and
+            // the claim response must not wait on a peer being reachable.
+            {
+                let engine_for_pull = Arc::clone(&st.engine);
+                let node = st.node_key_id.clone();
+                tokio::spawn(async move {
+                    crate::receive_axis::pull_owner_testimony(&engine_for_pull, &node).await;
+                });
+            }
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
