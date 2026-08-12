@@ -1248,6 +1248,27 @@ struct SetupStatusData {
     is_first_run: bool,
     setup_required: bool,
     config_exists: bool,
+    /// **Where this node wrote its one-time claim PIN** (`<home>/claim_pin`,
+    /// `0600`) — the PATH only, never the PIN (CIRISServer#395).
+    ///
+    /// The co-located wizard proves operator presence by READING that file: a
+    /// same-uid read of a 0600 file in the node's own home is a real check, and a
+    /// stronger one than loopback (which any local process of any user passes).
+    /// The client had to GUESS the location — `CIRIS_HOME`, else `$HOME/ciris`,
+    /// else `user.home/ciris` — and every one of those is the APP's environment,
+    /// not the node's. Whenever the two disagreed (a launcher that sets `--home`,
+    /// a container, systemd, sudo, a sandboxed run) the app read a path the node
+    /// never wrote, and first-run claim failed with `401 invalid one-time claim
+    /// PIN` while the PIN sat readable a directory away.
+    ///
+    /// The node is the only party that KNOWS its home — it was told at startup.
+    /// So it states the path and the guessing stops. The path is not the secret;
+    /// the file's mode is. Loopback-gated with the rest of the setup reads.
+    ///
+    /// `None` once claimed (the PIN is consumed on the first successful claim) or
+    /// when no PIN file was configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_pin_file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1309,6 +1330,21 @@ async fn owned_nodes(State(st): State<SetupState>) -> Response {
 /// it instead of inferring first-run from a 404 (the prior fast-degrade path).
 async fn setup_status(State(st): State<SetupState>) -> Response {
     let first_run = is_first_run(&st.engine).await;
+    // Publish the PIN FILE PATH (never the PIN) only while a PIN is actually
+    // armed, so a claimed node reports `None` rather than a path to a file it has
+    // already consumed — "look here and find nothing" is the confusing shape this
+    // field exists to remove.
+    let claim_pin_file = if st.claim_pin.lock().map(|p| p.is_some()).unwrap_or(false) {
+        st.claim_pin_file.as_ref().map(|p| p.display().to_string())
+    } else {
+        None
+    };
+    tracing::debug!(
+        first_run,
+        claim_pin_file = claim_pin_file.as_deref().unwrap_or("<none — no PIN armed>"),
+        "GET /v1/setup/status — the wizard reads claim_pin_file to locate the 0600 PIN file \
+         instead of guessing the node's home from its OWN environment (#395)"
+    );
     (
         StatusCode::OK,
         Json(SetupStatusResponse {
@@ -1316,6 +1352,7 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
                 is_first_run: first_run,
                 setup_required: first_run,
                 config_exists: !first_run,
+                claim_pin_file,
             },
         }),
     )
