@@ -1959,6 +1959,105 @@ mod python {
     /// node has a ROOT owner (no PIN minted) — or if called before compose has
     /// minted it (the host should poll). Non-consuming: safe to call repeatedly
     /// and to retry the claim; the value lives only for this process.
+    /// `ciris_server.resolve_bearer(token) -> dict | None` — **is this token
+    /// valid, and who is it?** (CIRISAgent#1029 / CIRISServer#396.)
+    ///
+    /// The one binding that retires an entire parallel auth implementation. Every
+    /// mechanism this node supports — password login, Google native `id_token`,
+    /// Apple native `id_token`, the OAuth callback, and the delegated device-grant
+    /// — funnels through a single `issue_session_token(wa_id)`, so a single
+    /// VERIFIER answers for all of them, and for whatever is added next.
+    ///
+    /// # Why this had to exist
+    ///
+    /// The brain and the node minted disjoint token families and neither verified
+    /// the other's, so proxying `/v1/auth/login` to the node succeeded and then the
+    /// very next brain call refused the token it had just been handed. The only
+    /// alternative was the brain calling `/v1/auth/me` over loopback on every
+    /// authenticated request — a round trip per call, and a second code path,
+    /// which is the thing being deleted.
+    ///
+    /// # `None` means INVALID, an exception means COULD NOT CHECK
+    ///
+    /// These are different facts and a caller must be able to tell them apart. A
+    /// verifier that cannot distinguish "forged" from "I could not look" admits
+    /// both — so a store outage raises rather than returning `None`, and a
+    /// well-formed-but-unauthentic token returns `None` rather than raising. Do
+    /// NOT collapse the exception into a falsy value at the call site: that turns
+    /// an outage into a silent, total lockout that looks exactly like everyone
+    /// suddenly presenting bad tokens.
+    ///
+    /// # The returned shape
+    ///
+    /// ```python
+    /// {"wa_id": str, "name": str, "role": str, "scopes": [str], "actor": str | None}
+    /// ```
+    ///
+    /// `actor` is the ATTRIBUTION axis and is not decoration: for a delegated
+    /// device-grant the caller wields the OWNER's authority (`wa_id`, `role` and
+    /// `scopes` are the owner's) while every action is attributable to `actor`.
+    /// Logging `wa_id` alone would record the owner as having done something a
+    /// delegate did. `None` for an ordinary session, where principal and actor are
+    /// the same party.
+    ///
+    /// Authority is re-checked on EVERY call — a delegated grant re-verifies its
+    /// `delegates_to` edge is still live, so an owner who revokes it kills the
+    /// bearer immediately rather than at TTL expiry. That is why this is a
+    /// function and not a cache.
+    #[pyfunction]
+    #[pyo3(name = "resolve_bearer", signature = (token))]
+    fn py_resolve_bearer(py: Python<'_>, token: String) -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
+        let resolved = py.detach(move || {
+            let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "resolve_bearer: no in-process persist Engine — the node is not composed in \
+                     this process, so this CANNOT be read as 'the token is invalid'",
+                )
+            })?;
+            let (rt, _c) = crate::federation_delivery::held().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "resolve_bearer: federation delivery not started — cannot verify, which is \
+                     NOT the same as a bad token",
+                )
+            })?;
+            rt.block_on(crate::auth::session::resolve_bearer(&engine, &token))
+                .map_err(|e| {
+                    // A store failure is an OUTAGE, not a verdict. Raising keeps
+                    // the caller from treating "I could not look" as "forged".
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "resolve_bearer: identity store unavailable ({e}) — the token was NOT \
+                         judged; do not treat this as a rejection"
+                    ))
+                })
+        })?;
+        let Some(caller) = resolved else {
+            return Ok(None);
+        };
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("wa_id", caller.wa_id)?;
+        d.set_item("name", caller.name)?;
+        d.set_item("role", caller.role.as_str())?;
+        // The WIRE form the agent's clients already check — `Permission` is
+        // documented as "preserved verbatim for client compatibility" and serde
+        // is what produces that spelling. Deriving a second string here is how
+        // the two surfaces would come to disagree about what `manage_config` is
+        // called.
+        let scopes: Vec<String> = caller
+            .permissions
+            .iter()
+            .map(|p| {
+                serde_json::to_value(p)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        d.set_item("scopes", scopes)?;
+        d.set_item("actor", caller.actor)?;
+        Ok(Some(d.into()))
+    }
+
     #[pyfunction]
     #[pyo3(name = "first_run_claim_pin")]
     fn py_first_run_claim_pin() -> Option<String> {
@@ -2080,6 +2179,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
+        m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_shutdown_node, m)?)?;
