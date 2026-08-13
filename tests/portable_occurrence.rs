@@ -187,47 +187,83 @@ async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the
         "after the bind the portable software key MUST act for the self"
     );
 
-    // (4) ASSOCIATE: install the portable keyset into a SECOND seed dir (a fresh
-    //     device) under a local alias, then re-open the signer and assert it
-    //     resolves to the portable occurrence key — i.e. this device now signs as
-    //     that occurrence of the SAME self.
-    let device2_seed = tmp("device2-seed");
-    // The discovered alias drives the install (mirrors the associate handler).
+    // (4) ENROL A SECOND DEVICE — and prove it does so WITHOUT holding the first
+    //     device's key (CIRISServer#391).
+    //
+    //     This step used to install the portable keyset into a second seed dir and
+    //     assert device 2's signer resolved to the SAME key_id. It passed, and what
+    //     it was pinning was the defect: one private key on two devices, which is
+    //     what makes per-device revocation meaningless.
+    //
+    //     The property now asserted is the opposite and stronger — device 2 signs
+    //     as a key ONLY IT HOLDS, and acts for the same self anyway.
     let discovered = ciris_server::identity::find_portable_alias(&usb)
         .expect("discover the portable alias in the USB dir");
     assert_eq!(discovered, portable_alias);
-    let installed =
-        ciris_server::identity::install_portable_software_keyset(&usb, &discovered, &device2_seed)
-            .expect("install (associate) the portable keyset onto device 2");
-    assert!(
-        installed.iter().any(|f| f.contains("ed25519.seed")),
-        "the ed25519 seed was installed: {installed:?}"
-    );
-    assert!(
-        device2_seed
-            .join(format!("{portable_alias}.ed25519.seed"))
-            .exists(),
-        "device 2 holds the ed25519 seed under the alias"
+
+    // The USB keyset is opened TRANSIENTLY to authorize with — possession of the
+    // identity's private key IS the authorization — and nothing is written.
+    let authorizer = ciris_server::identity::open_portable_identity_transiently(&usb, &discovered)
+        .expect("open the portable keyset transiently to authorize with");
+    assert_eq!(
+        ciris_verify_core::self_at_login::SelfSigner::key_id(&authorizer),
+        keyset.key_id,
+        "the transiently-opened authorizer IS the portable occurrence identity"
     );
 
-    // Re-open device 2's user signer the SAME way the node resolves it
-    // (`hardware_user_local_signer(Software, alias, seed_dir)`). Its key_id() must
-    // be the portable occurrence key — so device 2 IS recognized as the same self.
+    // Device 2 mints its OWN key.
+    let device2_seed = tmp("device2-seed");
+    let device2_alias = format!("{portable_alias}-device-2");
+    let device2 =
+        ciris_server::identity::mint_local_device_occurrence(&device2_seed, &device2_alias)
+            .await
+            .expect("device 2 mints its own occurrence keyset");
+    assert_ne!(
+        device2.key_id, keyset.key_id,
+        "device 2 must mint a DISTINCT key — a shared key cannot be revoked per-device"
+    );
+    assert!(
+        !device2_seed
+            .join(format!("{portable_alias}.ed25519.seed"))
+            .exists(),
+        "device 2 must NOT hold the first device's seed — that copy is the defect"
+    );
+
+    bind_occurrence_core(
+        &engine,
+        self_key,
+        &device2.key_id,
+        "laptop",
+        None,
+        device2.encryption_pubkeys.clone(),
+        Some(device2.key_record.clone()),
+    )
+    .await
+    .expect("bind device 2 as an occurrence of the self");
+
+    // Re-open device 2's user signer the SAME way the node resolves it.
     let device2_signer = ciris_server::identity::hardware_user_local_signer(
         ciris_server::identity::UserIdentityBackend::Software,
-        portable_alias,
+        &device2_alias,
         device2_seed.clone(),
     )
     .await
-    .expect("re-open device 2's associated user signer");
+    .expect("re-open device 2's own user signer");
     assert_eq!(
         device2_signer.key_id(),
-        keyset.key_id,
-        "device 2's signer resolves to the portable occurrence key"
+        device2.key_id,
+        "device 2's signer resolves to ITS OWN key"
     );
+
+    // THE point: distinct key, identical standing.
     assert!(
         signer_acts_for(&engine, device2_signer.key_id(), self_key).await,
-        "device 2's signer acts for the SAME self (it is an active occurrence)"
+        "device 2 acts for the SAME self — an occurrence is a full stand-in, so enrolling \
+         rather than copying gives up NO privilege"
+    );
+    assert!(
+        signer_acts_for(&engine, &keyset.key_id, self_key).await,
+        "and device 1 still does too — enrolling device 2 did not displace it"
     );
 
     // Cleanup.

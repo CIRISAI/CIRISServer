@@ -32,7 +32,7 @@
 //! | 4b | …and a two-key Sybil still lands it | **residual** (FSD §7: m-of-n counts keys) |
 //! | 5 | AV-77 de-admission really does stop a hostile peer's writes | **control that fires** |
 //! | 5b | …and `src/admin_ops.rs` now emits the row (`POST /v1/admin/refuse-writes`, CIRISServer#375) | **the recourse gap, CLOSED** |
-//! | 5c | a de-admitted key keeps the one dimension that de-admits others | **HOLE** |
+//! | 5c | a de-admitted key may NOT keep writing the dimension that de-admits others | **control** — the hole persist v31.0.0 closed (#608) |
 //! | 6 | `PeerWriteQuota` refuses a flood, and **nothing here counts the refusal** | **control with no reader** |
 //!
 //! Every assertion above was mutation-verified: the guarded thing was broken,
@@ -41,21 +41,17 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
+use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::replication::admission::PER_PEER_ATTESTATION_WRITES_PER_WINDOW;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    KeyRecord, SignedAttestation, SignedKeyRecord,
+    attestation_type, cohort_scope, identity_type, Attestation, SignedAttestation,
 };
 use ciris_persist::federation::{Error as FedError, FederationDirectory};
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 const NODE_ALIAS: &str = "ciris-abuse-node";
 
@@ -105,21 +101,6 @@ fn party_signer(key_id: &str) -> LocalSigner {
     )
 }
 
-async fn party_pubkeys(key_id: &str) -> (String, String) {
-    let ed = BASE64.encode(
-        SigningKey::from_bytes(&party_ed_seed(key_id))
-            .verifying_key()
-            .to_bytes(),
-    );
-    let pqc =
-        MlDsa65SoftwareSigner::from_seed_bytes(&party_pqc_seed(key_id), format!("{key_id}-pqc"))
-            .expect("party ML-DSA-65 seed");
-    (
-        ed,
-        BASE64.encode(pqc.public_key().await.expect("party ML-DSA-65 pubkey")),
-    )
-}
-
 /// **The public bootstrap door.** Register `key_id` claiming `id_type` through
 /// [`Engine::register_federation_key`] — the canonical admission gate, which
 /// proves key CUSTODY (a self-signed hybrid proof-of-possession) and whatever
@@ -134,7 +115,6 @@ async fn self_register(
     id_type: &str,
 ) -> Result<LocalSigner, ciris_server::attest::Error> {
     let signer = party_signer(key_id);
-    let (ed_pub, mldsa_pub) = party_pubkeys(key_id).await;
     // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
     // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
     // identity type nor either pubkey, and persist v31 refuses it — an envelope
@@ -143,7 +123,7 @@ async fn self_register(
     ciris_server::attest::register_key(
         engine,
         ciris_server::attest::KeySigner::Local(&signer),
-        &key_id,
+        key_id,
         id_type,
         serde_json::Value::Null,
     )
@@ -176,6 +156,16 @@ async fn register_self(engine: &Engine) -> String {
 
 /// Build a genuinely-signed federation-tier row. `attn_type` is the structural
 /// primitive (or a reserved TYPE namespace such as `hard_case:*`).
+///
+/// Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+/// row carried no signed `asserted_at` and no typed-column mirror — persist v31
+/// refuses both (CIRISPersist#598/#643), so every pin below was measuring the
+/// substrate's reaction to a shape nothing ships rather than to the abuse it
+/// names. The symbolic `id` is preserved because these fixtures read as prose.
+///
+/// The row is ABOUT `attested` with NO subject: an abuse fixture that listed its
+/// victim in `subject_key_ids` would be handing the victim revocation authority
+/// over the forgery, which is not the thing being demonstrated.
 async fn signed_row(
     signer: &LocalSigner,
     id: &str,
@@ -184,32 +174,17 @@ async fn signed_row(
     envelope: serde_json::Value,
     asserted_at: DateTime<Utc>,
 ) -> Attestation {
-    let key_id = signer.key_id().to_string();
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize row");
-    let sig = signer.sign_hybrid(&canonical).await.expect("sign row");
-    Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: attested.to_string(),
-        attestation_type: attn_type.to_string(),
-        weight: None,
+    ciris_server::attest::Emit::stamp_at(
+        signer.key_id(),
+        ciris_server::attest::Spec::new(attn_type, cohort_scope::FEDERATION, envelope)
+            .attested_to(attested),
         asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp row {id} ({attn_type}): {e}"))
+    .sign_and_assemble(ciris_server::attest::KeySigner::Local(signer))
+    .await
+    .unwrap_or_else(|e| panic!("sign row {id} ({attn_type}): {e}"))
 }
 
 fn scores_envelope(dimension: &str, subject: &str, score: f64) -> serde_json::Value {
@@ -743,42 +718,33 @@ async fn a_two_key_sybil_still_inflates_its_own_capacity() {
 
 /// Sign a row with the NODE's own key (not a party's), so the de-admission is
 /// authored by the "me" the AV-77 predicate compares against.
+///
+/// The same door as [`signed_row`], with the engine as signer — the attester is
+/// the DERIVED federation key_id, which is exactly the id `set_self_key_id`
+/// arms the predicate with.
 async fn node_signed_row(
     engine: &Engine,
     id: &str,
     attested: &str,
     envelope: serde_json::Value,
 ) -> Attestation {
-    let key_id = engine
-        .local_derived_key_id()
-        .await
-        .expect("derive node federation key_id");
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize node row");
-    let sig = engine.sign_hybrid(&canonical).await.expect("node sign");
-    let now = Utc::now();
-    Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: attested.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    ciris_server::attest::Emit::stamp(
+        &engine
+            .local_derived_key_id()
+            .await
+            .expect("derive node federation key_id"),
+        ciris_server::attest::Spec::new(
+            attestation_type::SCORES,
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .attested_to(attested),
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp node row {id}: {e}"))
+    .sign_and_assemble(ciris_server::attest::KeySigner::Engine(engine))
+    .await
+    .unwrap_or_else(|e| panic!("node sign row {id}: {e}"))
 }
 
 /// **PINS A CONTROL THAT FIRES — and, since CIRISServer#375, its caller.**
@@ -908,23 +874,32 @@ async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
     );
 }
 
-/// **PINS A HOLE.** `check_peer_deadmission` exempts the de-admission dimension
-/// itself, so that a node can always lift its own denial. The exemption is
-/// written as
+/// **PINS A CONTROL — this one used to pin a hole, and persist v31.0.0 closed
+/// it (CIRISPersist#608).**
+///
+/// `check_peer_deadmission` used to exempt the de-admission dimension itself, so
+/// that a node could always lift its own denial:
 ///
 /// ```text
 /// if row.attesting_key_id == self_key_id || envelope_dimension(..) == PEER_DEADMISSION_DIMENSION
 /// ```
 ///
-/// — a disjunction, and the second arm does not ask WHO wrote the row. So a
-/// de-admitted key keeps exactly one power: it may go on writing
-/// `revocation:peer_admission:v1` rows into this node's corpus, about anyone.
+/// — a disjunction whose second arm never asked WHO wrote the row, so a
+/// de-admitted key kept exactly one power: the one that sanctions others.
 ///
-/// They do not take effect here (the predicate reads only de-admissions THIS
-/// node authored), but they are stored, signed, and replicable — so the one
-/// dimension a sanctioned key retains is the one that sanctions others.
+/// v31.0.0 deleted that arm rather than repairing it, and the stated reason is
+/// worth keeping here because it generalises: **an exemption must mirror the
+/// consumption fold.** The fold asks `list_attestations_by(self_key_id)` — WHO
+/// AUTHORED — while the second arm asked WHAT DIMENSION, so it admitted rows the
+/// fold would never read. The "a node could not lift its own denial" worry is
+/// answered by the FIRST arm, which was always sufficient: every lift path pins
+/// the attester to this node.
+///
+/// The fixture is flipped rather than deleted, for the same reason as the
+/// `hard_case:` pin above — the demonstration of the hole is the cheapest
+/// regression guard against its return.
 #[tokio::test]
-async fn a_deadmitted_key_may_still_write_deadmission_rows_today() {
+async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
     let engine = node().await;
     let node_key = register_self(&engine).await;
     self_register(&engine, "av77-bystander", identity_type::AGENT)
@@ -970,12 +945,17 @@ async fn a_deadmitted_key_may_still_write_deadmission_rows_today() {
         Utc::now(),
     )
     .await;
-    let verdict = put(&engine, row).await;
+    let err = put(&engine, row).await.expect_err(
+        "REGRESSION: a de-admitted key landed a `revocation:peer_admission:v1` row about a \
+         bystander. persist v31.0.0 removed the dimension arm of the exemption \
+         (CIRISPersist#608); if it is back, the one power a sanctioned key retains is the one \
+         that sanctions others.",
+    );
     assert!(
-        verdict.is_ok(),
-        "PIN: the de-admission exemption is a disjunction that never asks who is writing, so a \
-         sanctioned key keeps the sanctioning dimension. If this is now refused the hole is \
-         CLOSED. Got: {verdict:?}"
+        format!("{err:?}").contains("de-admitted") && format!("{err:?}").contains("av77-abuser-2"),
+        "the refusal must be AV-77 naming the sanctioned author, not some incidental Err — \
+         otherwise this test passes while the exemption it guards has stopped being checked. \
+         Got: {err:?}"
     );
 }
 
@@ -1035,22 +1015,15 @@ async fn the_peer_write_quota_refuses_a_flood_and_nothing_here_counts_it() {
     let budget = PER_PEER_ATTESTATION_WRITES_PER_WINDOW as usize;
     let now = Utc::now();
 
-    // Sign ONCE. The scrub signature covers the canonical ENVELOPE and nothing
-    // else, so a flood of rows differing only in `attestation_id` is exactly as
-    // valid as a flood of freshly-signed ones — and it is what an abuser would
-    // actually do, because signing is the expensive half for them too. (That
-    // the top-level columns ride outside the signature is the #541 shape; here
-    // it is the attacker's economics, not a defect under test.)
-    let template = signed_row(
-        &flooder,
-        "flood-template",
-        attestation_type::SCORES,
-        "quota-victim",
-        scores_envelope("health:liveness:v1", "quota-victim", 1.0),
-        now,
-    )
-    .await;
-
+    // Sign EVERY row. This flood used to sign ONCE and re-stamp each clone's
+    // `attestation_id` and `asserted_at`, on the ground that the scrub signature
+    // covered the canonical ENVELOPE and nothing else — the #541 shape, and the
+    // abuser's real economics. **persist v31 closed that.** The envelope now
+    // carries a signed mirror of those very columns (CIRISPersist#643), so a
+    // re-stamped clone is refused as unbound, and a flood costs one hybrid
+    // signature per row. The quota below is still what refuses the flood; what
+    // changed is that the substrate now also makes it expensive to mount.
+    //
     // The burst allowance refills continuously (600 rows / 60 s = 10/s), so a
     // flood that takes T seconds may legitimately land 600 + 10·T rows before
     // the budget bites. The loop therefore runs to a ceiling well above the
@@ -1060,10 +1033,15 @@ async fn the_peer_write_quota_refuses_a_flood_and_nothing_here_counts_it() {
     let mut admitted = 0usize;
     let mut rate_limited_at: Option<usize> = None;
     for i in 0..ceiling {
-        let mut row = template.clone();
-        row.attestation_id = format!("flood-{i}");
-        row.asserted_at = now + Duration::milliseconds(i as i64);
-        row.scrub_timestamp = row.asserted_at;
+        let row = signed_row(
+            &flooder,
+            &format!("flood-{i}"),
+            attestation_type::SCORES,
+            "quota-victim",
+            scores_envelope("health:liveness:v1", "quota-victim", 1.0),
+            now + Duration::milliseconds(i as i64),
+        )
+        .await;
         match put(&engine, row).await {
             Ok(()) => admitted += 1,
             Err(FedError::RateLimited { .. }) => {

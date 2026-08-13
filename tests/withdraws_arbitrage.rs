@@ -19,19 +19,13 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::SigningKey;
 
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
-use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
-};
+use ciris_keyring::MlDsa65SoftwareSigner;
+use ciris_persist::federation::types::{attestation_type, cohort_scope, identity_type};
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
+use ciris_server::attest::{Emit, KeySigner, Spec};
 use ciris_server::withdraws_arbitrage::{
     self, ArbitragePolicy, Refusal, DEFAULT_RATIO_THRESHOLD, DEFAULT_WINDOW_DAYS,
 };
@@ -88,120 +82,86 @@ async fn register_self(engine: &Engine) {
 /// the CC 4.1.4 ledger judges.
 struct Attester {
     key_id: String,
-    ed: SigningKey,
-    mldsa: MlDsa65SoftwareSigner,
+    /// The hybrid signer, which is also how this attester goes through the emit
+    /// door: `LocalSigner::sign_hybrid` IS the bound shape persist's ingest gate
+    /// verifies (Ed25519 over canonical, ML-DSA-65 over `canonical ‖ ed_sig`).
+    signer: LocalSigner,
 }
 
 impl Attester {
     fn new(key_id: &str, seed: u8) -> Self {
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[seed ^ 0xFF; 32], format!("{key_id}-pqc"))
+                .expect("attester ML-DSA-65 seed"),
+        );
         Attester {
             key_id: key_id.to_string(),
-            ed: SigningKey::from_bytes(&[seed; 32]),
-            mldsa: MlDsa65SoftwareSigner::from_seed_bytes(
-                &[seed ^ 0xFF; 32],
-                format!("{key_id}-pqc"),
-            )
-            .expect("attester ML-DSA-65 seed"),
+            signer: LocalSigner::from_parts(
+                SigningKey::from_bytes(&[seed; 32]),
+                key_id.to_string(),
+                Some(pqc),
+                Some(format!("{key_id}-pqc")),
+            ),
         }
     }
 
-    /// Hybrid-sign `canonical` exactly as persist's federation-tier ingest gate
-    /// verifies it: Ed25519 over canonical, ML-DSA-65 over (canonical || ed_sig).
-    async fn sign(&self, canonical: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let ed_sig = self.ed.sign(canonical).to_bytes().to_vec();
-        let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
-        bound.extend_from_slice(canonical);
-        bound.extend_from_slice(&ed_sig);
-        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign");
-        (ed_sig, pqc_sig)
-    }
-
     async fn register(&self, engine: &Engine) {
-        let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": self.key_id });
-        let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");
-        let (ed_sig, pqc_sig) = self.sign(&canonical).await;
-        let record = KeyRecord {
-            key_id: self.key_id.clone(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
-            algorithm: algorithm::HYBRID.into(),
-            identity_type: identity_type::WITNESS.into(),
-            identity_ref: self.key_id.clone(),
-            valid_from: now,
-            valid_until: None,
-            registration_envelope: envelope,
-            original_content_hash: hex::encode(Sha256::digest(&canonical)),
-            scrub_signature_classical: BASE64.encode(&ed_sig),
-            scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-            scrub_key_id: self.key_id.clone(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            capability_roles: Vec::new(),
-            attestation_evidence: None,
-            consent_role: None,
-            additional_scrubs: Vec::new(),
-        };
-        engine
-            .register_federation_key(SignedKeyRecord { record })
-            .await
-            .expect("register foreign attester key");
+        // Through the ONE door (CIRISServer#402): the registration envelope now
+        // BINDS ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither
+        // the identity type nor either pubkey, and persist v31 refuses it — an
+        // envelope that does not name its subject stands for any record it is
+        // pasted onto (CIRISPersist#659).
+        ciris_server::attest::register_key(
+            engine,
+            KeySigner::Local(&self.signer),
+            &self.key_id,
+            identity_type::WITNESS,
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("register foreign attester key");
     }
 
     /// A genuinely-signed row of any `attestation_type`, `age_days` old, carrying
     /// `envelope`. Admitted through `put_attestation` — the SAME gate an inbound
-    /// replicated row goes through.
+    /// replicated row goes through. Returns the minted `attestation_id`.
     async fn put(
         &self,
         engine: &Engine,
-        id: &str,
         kind: &str,
         subject: &str,
         envelope: serde_json::Value,
         age_days: i64,
-    ) {
+    ) -> String {
         let asserted_at = chrono::Utc::now() - chrono::Duration::days(age_days);
-        let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize envelope");
-        let (ed_sig, pqc_sig) = self.sign(&canonical).await;
-        let now = chrono::Utc::now();
-        let attestation = Attestation {
-            attestation_id: id.to_string(),
-            attesting_key_id: self.key_id.clone(),
-            attested_key_id: subject.to_string(),
-            attestation_type: kind.to_string(),
-            weight: None,
+        // Through the ONE door (CIRISServer#402), stamped AT `asserted_at`: the age
+        // is what puts a row inside or outside CC 4.1.4's rolling window, and the
+        // stamp is what makes that instant the SIGNED one. Hand-rolled beside its
+        // envelope, this row carried an `asserted_at` no signature covered and no
+        // typed-column mirror, both of which persist v31 refuses
+        // (CIRISPersist#598/#643).
+        //
+        // The id is MINTED into the signed bytes now, so a retraction references the
+        // id its upstream came back with rather than one the fixture chose — which
+        // is also how a real producer builds the chain.
+        let row = Emit::stamp_at(
+            &self.key_id,
+            Spec::new(kind, cohort_scope::FEDERATION, envelope).about(subject),
             asserted_at,
-            expires_at: None,
-            attestation_envelope: envelope,
-            original_content_hash: hex::encode(Sha256::digest(&canonical)),
-            scrub_signature_classical: BASE64.encode(&ed_sig),
-            scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-            scrub_key_id: self.key_id.clone(),
-            additional_scrubs: Vec::new(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            subject_key_ids: vec![subject.to_string()],
-            withdraws_admission_rule: None,
-            cohort_scope: "federation".to_string(),
-            tier: attestation_tier::FEDERATION.to_string(),
-            promoted_at: None,
-        };
-        engine
-            .federation_directory()
-            .put_attestation(SignedAttestation { attestation })
+        )
+        .unwrap_or_else(|e| panic!("stamp {kind} row: {e}"))
+        .sign_and_assemble(KeySigner::Local(&self.signer))
+        .await
+        .unwrap_or_else(|e| panic!("sign {kind} row: {e}"));
+        ciris_server::attest::put(engine, row)
             .await
-            .unwrap_or_else(|e| panic!("substrate MUST admit {kind} row {id}: {e}"));
+            .unwrap_or_else(|e| panic!("substrate MUST admit {kind} row: {e}"))
     }
 
     /// A `scores` claim about `subject` (the row the attester will later erase).
-    async fn scores(&self, engine: &Engine, id: &str, subject: &str, age_days: i64) {
+    async fn scores(&self, engine: &Engine, subject: &str, age_days: i64) -> String {
         self.put(
             engine,
-            id,
             attestation_type::SCORES,
             subject,
             serde_json::json!({
@@ -215,15 +175,14 @@ impl Attester {
             }),
             age_days,
         )
-        .await;
+        .await
     }
 
     /// Producer self-`withdraws` against its own prior row (CC 2.4.1.1 rule 1) —
     /// "I retract this", claiming NOTHING about whether it was false. Free.
-    async fn withdraws(&self, engine: &Engine, id: &str, subject: &str, upstream: &str, age: i64) {
+    async fn withdraws(&self, engine: &Engine, subject: &str, upstream: &str, age: i64) {
         self.put(
             engine,
-            id,
             attestation_type::WITHDRAWS,
             subject,
             serde_json::json!({
@@ -238,10 +197,9 @@ impl Attester {
 
     /// Producer `recants` against its own prior row — "it was false at issuance".
     /// The costly primitive: an acknowledged-error chain consumers downweight.
-    async fn recants(&self, engine: &Engine, id: &str, subject: &str, upstream: &str, age: i64) {
+    async fn recants(&self, engine: &Engine, subject: &str, upstream: &str, age: i64) {
         self.put(
             engine,
-            id,
             attestation_type::RECANTS,
             subject,
             serde_json::json!({
@@ -277,12 +235,12 @@ async fn honest_withdraw_and_honest_recant_are_admitted() {
     let honest = Attester::new("honest-attester", 0xC0);
     honest.register(&engine).await;
 
-    honest.scores(&engine, "h-s1", &subject, 3).await;
-    honest.scores(&engine, "h-s2", &subject, 3).await;
+    let s1 = honest.scores(&engine, &subject, 3).await;
+    let s2 = honest.scores(&engine, &subject, 3).await;
     // One stale claim retracted (no falsity admitted) …
-    honest.withdraws(&engine, "h-w1", &subject, "h-s1", 2).await;
+    honest.withdraws(&engine, &subject, &s1, 2).await;
     // … and one error actually owned.
-    honest.recants(&engine, "h-r1", &subject, "h-s2", 1).await;
+    honest.recants(&engine, &subject, &s2, 1).await;
 
     let ledger =
         withdraws_arbitrage::enforce(&engine, &honest.key_id, policy(), chrono::Utc::now())
@@ -345,27 +303,21 @@ async fn spray_and_retract_arbitrage_is_refused() {
     bad.register(&engine).await;
 
     // 30 aggressive claims.
-    for i in 0..30 {
-        bad.scores(&engine, &format!("b-s{i}"), &subject, 20).await;
+    let mut sprayed = Vec::with_capacity(30);
+    for _ in 0..30 {
+        sprayed.push(bad.scores(&engine, &subject, 20).await);
     }
     // 26 of them erased with the FREE primitive — not one word about falsity.
-    for i in 0..26 {
-        bad.withdraws(
-            &engine,
-            &format!("b-w{i}"),
-            &subject,
-            &format!("b-s{i}"),
-            10,
-        )
-        .await;
+    for id in sprayed.iter().take(26) {
+        bad.withdraws(&engine, &subject, id, 10).await;
     }
     // The token toll: ONE error owned (defeats a naive "ever recanted?" check and
     // gives the ratio a non-zero denominator) …
-    bad.recants(&engine, "b-r0", &subject, "b-s29", 9).await;
+    bad.recants(&engine, &subject, &sprayed[29], 9).await;
     // … and the double-count attempt: recant a row it ALSO withdrew, hoping that
     // single admission scores in the denominator while keeping its numerator slot.
-    // Precedence says otherwise (b-s0 collapses to `recants`).
-    bad.recants(&engine, "b-r1", &subject, "b-s0", 8).await;
+    // Precedence says otherwise (the first sprayed row collapses to `recants`).
+    bad.recants(&engine, &subject, &sprayed[0], 8).await;
 
     // (1) The SUBSTRATE admitted every row — the countermeasure is NOT a wire
     //     refusal (CC 2.4.1.1 MUST-admit / CC 4.1.2 "no new wire primitives").
@@ -389,8 +341,8 @@ async fn spray_and_retract_arbitrage_is_refused() {
         Refusal::Arbitrage(l) => *l,
         other => panic!("expected an Arbitrage refusal, got {other}"),
     };
-    // The double-count attempt yielded nothing: b-s0 collapses to its `recants`
-    // winner, so 26 withdraws − 1 collapsed = 25 withdraws against 2 recants
+    // The double-count attempt yielded nothing: the doubly-retracted row collapses
+    // to its `recants` winner, so 26 withdraws − 1 collapsed = 25 withdraws against 2 recants
     // (12.5:1). Note which way the collapse cuts: it moved a row OFF the numerator,
     // i.e. it is the attacker-favourable, CEG-faithful count — and 12.5:1 is still
     // more than twice the 5:1 line. Buying the ratio down means actually admitting
@@ -425,23 +377,12 @@ async fn stale_history_ages_out_but_in_window_spray_still_trips() {
     paced.register(&engine).await;
 
     // 20 withdraws, all older than the window → forgiven.
-    for i in 0..20 {
-        paced
-            .scores(
-                &engine,
-                &format!("p-s{i}"),
-                &subject,
-                DEFAULT_WINDOW_DAYS + 40,
-            )
+    for _ in 0..20 {
+        let upstream = paced
+            .scores(&engine, &subject, DEFAULT_WINDOW_DAYS + 40)
             .await;
         paced
-            .withdraws(
-                &engine,
-                &format!("p-w{i}"),
-                &subject,
-                &format!("p-s{i}"),
-                DEFAULT_WINDOW_DAYS + 20,
-            )
+            .withdraws(&engine, &subject, &upstream, DEFAULT_WINDOW_DAYS + 20)
             .await;
     }
     let cleared =
@@ -451,11 +392,9 @@ async fn stale_history_ages_out_but_in_window_spray_still_trips() {
     assert_eq!((cleared.withdraws, cleared.recants), (0, 0));
 
     // It resumes inside the window → trips again on the fresh behavior alone.
-    for i in 100..106 {
-        paced.scores(&engine, &format!("p-s{i}"), &subject, 3).await;
-        paced
-            .withdraws(&engine, &format!("p-w{i}"), &subject, &format!("p-s{i}"), 1)
-            .await;
+    for _ in 0..6 {
+        let upstream = paced.scores(&engine, &subject, 3).await;
+        paced.withdraws(&engine, &subject, &upstream, 1).await;
     }
     let refusal =
         withdraws_arbitrage::enforce(&engine, &paced.key_id, policy(), chrono::Utc::now())
@@ -482,10 +421,9 @@ async fn a_stricter_configured_threshold_refuses_earlier() {
 
     let a = Attester::new("borderline-attester", 0xB7);
     a.register(&engine).await;
-    for i in 0..3 {
-        a.scores(&engine, &format!("m-s{i}"), &subject, 4).await;
-        a.withdraws(&engine, &format!("m-w{i}"), &subject, &format!("m-s{i}"), 2)
-            .await;
+    for _ in 0..3 {
+        let upstream = a.scores(&engine, &subject, 4).await;
+        a.withdraws(&engine, &subject, &upstream, 2).await;
     }
 
     // Default 5:1 → 3:1 is clear.

@@ -159,9 +159,31 @@ impl Holder {
     /// The holder's self-signed `accord_holder` SignedKeyRecord (the canonical
     /// admission-gate shape — hybrid bound PoP over `ceg_produce_canonicalize` +
     /// the required hardware `attestation_evidence`).
+    ///
+    /// The registration envelope BINDS ITS SUBJECT (CIRISPersist#659) through
+    /// persist's own producing half, `bind_subject_into_envelope` — the same
+    /// primitive `attest::register_key` uses. This record cannot go through that
+    /// door: the door mints `attestation_evidence: None`, and an accord holder is
+    /// precisely the identity persist refuses without hardware provenance. It is
+    /// also handed to `POST /v1/accord/holder` as a wire body by four tests, so
+    /// the RECORD is the fixture's product, not a stored row.
+    ///
+    /// Binding happens BEFORE canonicalize, because the point of #659 is that the
+    /// signature covers the subject: an envelope that does not name its subject
+    /// stands for any record it is pasted onto.
     async fn signed_key_record(&self) -> SignedKeyRecord {
         let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": self.key_id });
+        let ed_pub = BASE64.encode(self.ed.verifying_key().to_bytes());
+        let pqc_pub = BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk"));
+        let mut envelope = serde_json::json!({ "key_id": self.key_id });
+        ciris_persist::federation::admission::bind_subject_into_envelope(
+            &mut envelope,
+            &self.key_id,
+            identity_type::ACCORD_HOLDER,
+            &ed_pub,
+            Some(&pqc_pub),
+        )
+        .expect("bind the holder's subject into its registration envelope");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize holder reg");
         let ed_sig = self.ed.sign(&canonical).to_bytes();
         let mut bound = canonical.clone();
@@ -173,10 +195,8 @@ impl Holder {
             .expect("ml-dsa sign holder reg");
         let record = KeyRecord {
             key_id: self.key_id.clone(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
+            pubkey_ed25519_base64: ed_pub,
+            pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             identity_type: identity_type::ACCORD_HOLDER.into(),
             identity_ref: self.key_id.clone(),
@@ -1395,6 +1415,27 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
     // The supersede/recover op: the CURRENT 2/3 authorizes replacing one seat with a
     // vaulted spare (same N). persist's quorum gate enforces ≥M prior cosignatures +
     // anti-replay + one-seat IN THE SUBSTRATE; a sub-quorum change is refused.
+    //
+    // FAILING ON persist v31.0.0, and NOT as a fixture defect — two of its changes
+    // meet here and close the seat-replacement path outright:
+    //
+    //   #651 routes `supersede_family` through `verify_family_admission`, the
+    //        authorship gate `put_family` has run since v21.0.0 (correct: superseding
+    //        is the act that REPLACES what creation established).
+    //   #648 makes that same gate refuse `humanity-accord` unconditionally, because
+    //        boot-without-a-seed became supported and the id needed a rule rather
+    //        than the ordering accident that used to protect it.
+    //
+    // Each is right alone. Together they leave the constitutional family with no
+    // supersede door at all: the id may enter only via `put_family_local` (seeder /
+    // assemble ceremony), which the quorum path does not and should not call. So a
+    // vaulted spare cannot replace a compromised seat — the recovery op the runbook
+    // §10 is built on. The sub-quorum leg above still passes; it is the AUTHORIZED
+    // swap that is refused, which is the wrong way round.
+    //
+    // Left RED deliberately: the fix is a persist decision (an exemption for the
+    // quorum-authorized supersede, or a `supersede_family_local` twin), not a change
+    // this fixture may make without deciding it.
     let engine = node().await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
     let (base, _h) = serve(Arc::clone(&engine)).await;
@@ -1521,41 +1562,34 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
 
     // Register the canonical server as a node key so its transport_destination FK
     // is satisfied (the op binds the address of an existing directory key).
+    //
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659). Unlike a holder's record this one carries no hardware
+    // evidence and is never put on the wire, so the door fits it exactly.
     {
-        let cn = Holder::new("canonical-server-1", 0x77);
-        let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": "canonical-server-1" });
-        let canonical = ceg_produce_canonicalize(&envelope).expect("canon canonical-node");
-        let ed_sig = cn.ed.sign(&canonical).to_bytes();
-        let mut bound = canonical.clone();
-        bound.extend_from_slice(&ed_sig);
-        let pqc_sig = cn.mldsa.sign(&bound).await.expect("pqc canonical-node");
-        let record = KeyRecord {
-            key_id: "canonical-server-1".into(),
-            pubkey_ed25519_base64: BASE64.encode(cn.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(BASE64.encode(cn.mldsa.public_key().await.unwrap())),
-            algorithm: algorithm::HYBRID.into(),
-            identity_type: "node".into(),
-            identity_ref: "canonical-server-1".into(),
-            valid_from: now,
-            valid_until: None,
-            registration_envelope: envelope,
-            original_content_hash: hex::encode(Sha256::digest(&canonical)),
-            scrub_signature_classical: BASE64.encode(ed_sig),
-            scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-            scrub_key_id: "canonical-server-1".into(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            capability_roles: Vec::new(),
-            attestation_evidence: None,
-            consent_role: None,
-            additional_scrubs: Vec::new(),
-        };
-        engine
-            .register_federation_key(SignedKeyRecord { record })
-            .await
-            .expect("register canonical node key");
+        let key_id = "canonical-server-1";
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x77 ^ 0xFF; 32], format!("{key_id}-pqc"))
+                .expect("canonical ML-DSA-65 seed"),
+        );
+        let signer = LocalSigner::from_parts(
+            SigningKey::from_bytes(&[0x77; 32]),
+            key_id.to_string(),
+            Some(pqc),
+            Some(format!("{key_id}-pqc")),
+        );
+        ciris_server::attest::register_key(
+            &engine,
+            ciris_server::attest::KeySigner::Local(&signer),
+            key_id,
+            "node",
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("register canonical node key");
     }
 
     let update = serde_json::json!({

@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "ノードを再起動しています...",
     "status_reconfiguring_timeout": "ノードの再起動に予想以上の時間がかかっています。アプリを再起動してください。",
     "login_setup_complete_relogin": "セットアップが完了しました。ノードが再起動したため、セットアップで使用したものと同じ認証情報で再度ログインしてください。",
-    "accord_new_confer_duty": "フェデレーション ID に職務を付与"
+    "accord_new_confer_duty": "フェデレーション ID に職務を付与",
+    "keyset_import_cancel": "別のフォルダーを選択",
+    "keyset_import_confirm": "このデバイスを登録",
+    "keyset_inspect_checking": "このフォルダーを確認しています…",
+    "keyset_inspect_unavailable": "このフォルダーを確認できませんでした — ノードから応答がありませんでした。これは、お客様のIDがフォルダー内にあるかどうかを示すものではありません。インポートはそのままお試しいただけます。"
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "それはこのメッシュが認識している義務ではありません。付与してもここでは権限として表示されますが、すべてのゲートで拒否されます。",
       "pkcs11_required": "義務の付与には `pkcs11` 機能が必要です。保有者は、正規の共同スクラブ儀式とまったく同じように、YubiKey と USB でラップされた ML-DSA の片割れの両方で署名します。"
     }
+  },
+  "trust_root": {
+    "no_root": "どのルートですか？信頼を解除する root_key_id をパスで指定する必要があります"
   }
 }

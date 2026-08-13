@@ -2680,7 +2680,11 @@
     "wallet_trust_degraded": "Fiducia Hardware Degradata",
     "wallet_warning": "Avviso",
     "login_setup_complete_relogin": "La configurazione è completata. Il tuo nodo è stato riavviato: accedi di nuovo con le stesse credenziali che hai usato per completare la configurazione.",
-    "accord_new_confer_duty": "Conferisci un dovere a un ID di federazione"
+    "accord_new_confer_duty": "Conferisci un dovere a un ID di federazione",
+    "keyset_import_cancel": "Scegli un'altra cartella",
+    "keyset_import_confirm": "Registra questo dispositivo",
+    "keyset_inspect_checking": "Controllo di questa cartella in corso…",
+    "keyset_inspect_unavailable": "Non è stato possibile controllare questa cartella: il nodo non ha risposto. Questo non dice nulla sul fatto che la tua identità sia presente o meno; puoi comunque provare l'importazione."
   },
   "moderation": {
     "ladder": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Questo non è un dovere riconosciuto da questa mesh. Concederlo apparirebbe qui come autorità e verrebbe rifiutato a ogni porta.",
       "pkcs11_required": "Il conferimento di un dovere richiede la funzionalità `pkcs11`: il titolare firma con la propria YubiKey e con la metà ML-DSA incapsulata nella USB, esattamente come avviene nella cerimonia canonica di co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "quale root? il percorso deve specificare il root_key_id di cui revocare la fiducia"
   }
 }

@@ -15,10 +15,15 @@
 //! a revoked key passes the first half and silently reimplements the
 //! all-or-nothing behaviour the bound exists to replace.
 //!
-//! The fixtures also pin the axis: every seeded row's ROW COLUMN `asserted_at`
-//! is `Utc::now()` (persist stamps it at write) while its SIGNED envelope
-//! `asserted_at` is backdated. A check keyed on the column would find nothing
-//! here and look healthy doing it — CIRISServer#350's lesson, re-armed.
+//! The fixtures USED to pin the axis by holding the two apart: the ROW COLUMN
+//! `asserted_at` was `Utc::now()` while the SIGNED envelope's was backdated, so a
+//! check keyed on the column found nothing here and looked healthy doing it
+//! (CIRISServer#350). persist v31 retired that shape at the substrate — #598
+//! binds the column TO the signed instant at every door, and a row where they
+//! diverge is now refused rather than stored — so the two axes cannot be seeded
+//! apart any more, here or by an attacker. The gates below therefore measure
+//! enforcement (which reads consult the bound at all), and the divergence they
+//! were also guarding against is now the substrate's own invariant.
 
 use std::sync::Arc;
 
@@ -183,9 +188,9 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
     signer
 }
 
-/// Seed one federation-tier `scores` row signed by `attester`, carrying a CHOSEN
-/// signed instant in its envelope. The row column stays `Utc::now()` — the two
-/// axes, held apart on purpose.
+/// Seed one federation-tier `scores` row signed by `attester` at the CHOSEN
+/// instant `signed_at` — which is now the envelope's signed `asserted_at` and the
+/// row column alike (see this module's header).
 #[allow(clippy::too_many_arguments)]
 async fn seed_score(
     engine: &Engine,
@@ -195,6 +200,10 @@ async fn seed_score(
     score: f64,
     confidence: f64,
 ) -> String {
+    // No `asserted_at` here: the stamp writes it from `signed_at`, TRUNCATED to
+    // the substrate's microsecond floor. Writing it by hand put a nanosecond
+    // instant into the signed bytes, which persist v31 refuses outright rather
+    // than rounding (CIRISPersist#598).
     let envelope = serde_json::json!({
         (paths::DIMENSION): DIM,
         "attesting_key_id": attester.key_id(),
@@ -202,7 +211,6 @@ async fn seed_score(
         "score": score,
         "confidence": confidence,
         "witness_relation": "external",
-        "asserted_at": signed_at.to_rfc3339(),
     });
     let mut spec = ciris_server::attest::Spec::new(
         attestation_type::SCORES,
@@ -213,19 +221,20 @@ async fn seed_score(
     spec.subject_key_ids = Vec::new();
     let spec = spec.weighing(Some(score));
     let spec = spec.expiring(Some(Utc::now() + Duration::days(7)));
-    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
-    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
-    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
-    // accepts a shape this server does not produce. The id is now MINTED INTO the
-    // signed bytes rather than composed from the inputs, so callers take it back
-    // from the emit.
-    ciris_server::attest::emit(
-        engine,
-        ciris_server::attest::KeySigner::Local(&attester),
-        spec,
-    )
-    .await
-    .expect("put federation-tier score row")
+    // Through the ONE door (CIRISServer#402), stamped AT `signed_at`. Hand-rolled
+    // beside its envelope, this row carried no signed `asserted_at` and no
+    // typed-column mirror — persist v31 refuses both (CIRISPersist#598/#643), so
+    // the fixture was proving the substrate accepts a shape this server does not
+    // produce. The id is now MINTED INTO the signed bytes rather than composed
+    // from the inputs, so callers take it back from the emit.
+    let row = ciris_server::attest::Emit::stamp_at(attester.key_id(), spec, signed_at)
+        .expect("stamp federation-tier score row")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(attester))
+        .await
+        .expect("sign federation-tier score row");
+    ciris_server::attest::put(engine, row)
+        .await
+        .expect("put federation-tier score row")
 }
 
 fn hours_ago(h: i64) -> DateTime<Utc> {

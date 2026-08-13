@@ -40,10 +40,13 @@
 //!   scrub signatures — so it is structurally incapable of emitting a
 //!   classical-only row. "By construction" is exactly the kind of claim that rots
 //!   silently, hence the pin.
-//! * **NEGATIVE** — a hand-assembled `tier = federation` row with
+//! * **NEGATIVE** — a `tier = federation` row that is valid in EVERY respect except
 //!   `scrub_signature_pqc: None` is REFUSED with `federation_federation_tier_unverified`.
 //!   This proves the gate is live in THIS build rather than vacuously passing, so
-//!   the positive assertion above means something.
+//!   the positive assertion above means something. The row is built through
+//!   `attest::Emit` and then maimed in that one place on purpose: a fully
+//!   hand-rolled row is now refused EARLIER, by the v31 column/envelope bindings
+//!   (CIRISPersist#598/#643), and would never reach the gate this file names.
 //!
 //! If the negative ever passes, the hybrid-mandatory posture has been weakened
 //! somewhere in the substrate and every "hybrid by construction" claim in this repo
@@ -57,8 +60,8 @@ use ed25519_dalek::SigningKey;
 
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_keyring::PqcSigner as _;
+use ciris_persist::federation::types::SignedAttestation;
 use ciris_persist::federation::types::{algorithm, attestation_tier, identity_type};
-use ciris_persist::federation::types::{Attestation, SignedAttestation};
 use ciris_persist::federation::{FederationDirectory as _, KeyRecord, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};
 
@@ -207,47 +210,41 @@ async fn server_consent_grant_emit_admits_at_federation_tier() {
     );
 }
 
-/// NEGATIVE — a hand-assembled `tier = federation` row WITHOUT the ML-DSA-65 half is
-/// REFUSED. Proves the gate is live in this build, so the positive test above is not
-/// passing vacuously.
+/// NEGATIVE — a `tier = federation` row WITHOUT the ML-DSA-65 half is REFUSED.
+/// Proves the gate is live in this build, so the positive test above is not passing
+/// vacuously.
 #[tokio::test]
 async fn hybrid_pending_federation_tier_row_is_refused() {
     let (engine, node_key_id) = hybrid_node().await;
-    let now = chrono::Utc::now();
 
-    let envelope = serde_json::json!({
-        "dimension": "witness:hybrid_pending:v1",
-        "attesting_key_id": node_key_id,
-        "subject_key_ids": [node_key_id],
-        "score": 1.0,
-        "cohort_scope": ciris_persist::federation::types::cohort_scope::FEDERATION,
-        "asserted_at": now.to_rfc3339(),
-    });
+    // Minted through the ONE door (CIRISServer#402) and then maimed in EXACTLY one
+    // place. A row hand-rolled end to end no longer reaches the gate this file
+    // names: persist v31 refuses an unbound, nanosecond-precision `asserted_at`
+    // (CIRISPersist#598) and a missing typed-column mirror (#643) first, so the
+    // refusal below would be `federation_invalid_argument` and the hybrid posture
+    // would go untested. A door-built row is correct in every other respect, which
+    // leaves the absent PQC half as the only thing that can refuse it.
+    let mut row = ciris_server::attest::Emit::stamp(
+        &node_key_id,
+        ciris_server::attest::Spec::new(
+            ciris_persist::federation::types::attestation_type::SCORES,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            serde_json::json!({
+                "dimension": "witness:hybrid_pending:v1",
+                "score": 1.0,
+            }),
+        )
+        .about(&node_key_id)
+        .weighing(Some(1.0)),
+    )
+    .expect("stamp the witness row")
+    .sign_and_assemble(ciris_server::attest::KeySigner::Engine(&engine))
+    .await
+    .expect("sign + assemble the witness row");
 
-    let row = Attestation {
-        attestation_id: "witness-hybrid-pending-0001".to_string(),
-        attesting_key_id: node_key_id.clone(),
-        attested_key_id: node_key_id.clone(),
-        attestation_type: ciris_persist::federation::types::attestation_type::SCORES.to_string(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: "deadbeef".to_string(),
-        scrub_signature_classical: "AA==".to_string(),
-        // The defect under test: the classical half only, PQC deferred.
-        scrub_signature_pqc: None,
-        scrub_key_id: node_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: None,
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![node_key_id.clone()],
-        withdraws_admission_rule: None,
-        tier: attestation_tier::FEDERATION.to_string(),
-        cohort_scope: ciris_persist::federation::types::cohort_scope::FEDERATION.to_string(),
-        promoted_at: None,
-    };
+    // The defect under test: the classical half only, PQC deferred.
+    row.scrub_signature_pqc = None;
+    row.pqc_completed_at = None;
 
     let err = engine
         .sqlite_backend()

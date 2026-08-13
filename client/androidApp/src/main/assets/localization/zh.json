@@ -2680,7 +2680,11 @@
     "wallet_trust_degraded": "硬件信任降级",
     "wallet_warning": "警告",
     "login_setup_complete_relogin": "设置已完成。您的节点已重新启动，请使用完成设置时使用的相同凭据重新登录。",
-    "accord_new_confer_duty": "向联邦 ID 授予一项职责"
+    "accord_new_confer_duty": "向联邦 ID 授予一项职责",
+    "keyset_import_cancel": "选择其他文件夹",
+    "keyset_import_confirm": "将此设备加入",
+    "keyset_inspect_checking": "正在检查此文件夹…",
+    "keyset_inspect_unavailable": "无法检查此文件夹 — 该节点没有响应。这并不代表你的身份是否在其中；你仍然可以尝试导入。"
   },
   "moderation": {
     "ladder": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "这不是本网格所识别的职责。授予它在此处会显示为一种权限，但在每一道闸门都会被拒绝。",
       "pkcs11_required": "授予职责需要 `pkcs11` 功能 —— 持有者须使用其 YubiKey 并配合 USB 封装的 ML-DSA 密钥半份进行签名，与规范的 co-scrub 联署仪式完全一致。"
     }
+  },
+  "trust_root": {
+    "no_root": "哪个根？路径中必须指明要取消信任的 root_key_id"
   }
 }

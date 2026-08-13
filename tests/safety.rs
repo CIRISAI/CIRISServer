@@ -2257,18 +2257,27 @@ async fn put_content_class_row(
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&subject);
+    .about(subject);
     // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31
     // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
     // accepts a shape this server does not produce.
-    ciris_server::attest::emit(
-        engine,
-        ciris_server::attest::KeySigner::Local(&emitter),
-        spec,
-    )
-    .await
-    .expect("put content_class row");
+    //
+    // Stamped AT `now` rather than at wall-clock: `secs` is what orders these rows
+    // under the latest-wins fold, and the stamp writes the instant the signature
+    // covers — so a fixture that let it default would be testing an arbitrary order.
+    //
+    // The attester is `emitter_key_id`, NOT the signer's own `key_id()`: the
+    // substrate emitter is registered — and matched by `FlagAuthority` — under its
+    // DERIVED id, while its `LocalSigner` still answers with the bare alias.
+    let row = ciris_server::attest::Emit::stamp_at(emitter_key_id, spec, now)
+        .expect("stamp content_class row")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(emitter))
+        .await
+        .expect("sign content_class row");
+    ciris_server::attest::put(engine, row)
+        .await
+        .expect("put content_class row");
 }
 
 /// Flag `subject` from the node's own authorised substrate emitter.

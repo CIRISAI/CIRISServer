@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "Memulai ulang node Anda...",
     "status_reconfiguring_timeout": "Node Anda membutuhkan waktu lebih lama dari yang diharapkan untuk dimulai ulang. Silakan mulai ulang aplikasi.",
     "login_setup_complete_relogin": "Penyiapan selesai. Node Anda telah dimulai ulang, jadi silakan masuk kembali dengan kredensial yang sama seperti yang Anda gunakan saat menyelesaikan penyiapan.",
-    "accord_new_confer_duty": "Berikan sebuah tugas pada ID federasi"
+    "accord_new_confer_duty": "Berikan sebuah tugas pada ID federasi",
+    "keyset_import_cancel": "Pilih folder lain",
+    "keyset_import_confirm": "Daftarkan perangkat ini",
+    "keyset_inspect_checking": "Memeriksa folder ini…",
+    "keyset_inspect_unavailable": "Tidak dapat memeriksa folder ini — node tidak merespons. Ini tidak menunjukkan apakah identitas Anda ada di dalamnya; Anda tetap bisa mencoba mengimpor."
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Itu bukan tugas yang dikenali oleh mesh ini. Memberikannya akan tampak sebagai wewenang di sini dan akan ditolak di setiap gerbang.",
       "pkcs11_required": "Melimpahkan sebuah tugas memerlukan fitur `pkcs11` — pemegangnya menandatangani dengan YubiKey miliknya ditambah paruh ML-DSA yang dibungkus USB, persis seperti yang dilakukan upacara co-scrub kanonik."
     }
+  },
+  "trust_root": {
+    "no_root": "root yang mana? path harus menyebutkan root_key_id yang ingin dicabut kepercayaannya"
   }
 }

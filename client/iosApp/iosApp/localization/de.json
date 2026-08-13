@@ -2306,7 +2306,11 @@
     "status_reconfiguring": "Ihr Node wird neu gestartet...",
     "status_reconfiguring_timeout": "Ihr Node braucht länger als erwartet zum Neustart. Bitte starten Sie die App neu.",
     "login_setup_complete_relogin": "Die Einrichtung ist abgeschlossen. Ihr Knoten wurde neu gestartet – bitte melden Sie sich erneut mit denselben Zugangsdaten an, die Sie für die Einrichtung verwendet haben.",
-    "accord_new_confer_duty": "Eine Pflicht an eine Fed ID verleihen"
+    "accord_new_confer_duty": "Eine Pflicht an eine Fed ID verleihen",
+    "keyset_import_cancel": "Anderen Ordner wählen",
+    "keyset_import_confirm": "Dieses Gerät registrieren",
+    "keyset_inspect_checking": "Dieser Ordner wird geprüft…",
+    "keyset_inspect_unavailable": "Dieser Ordner konnte nicht geprüft werden – der Knoten hat nicht geantwortet. Das sagt nichts darüber aus, ob Ihre Identität darin enthalten ist; Sie können den Import trotzdem versuchen."
   },
   "prompts": {
     "dma": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Das ist keine Pflicht, die dieses Mesh kennt. Sie zu erteilen, würde hier als Befugnis erscheinen und an jedem Tor abgelehnt werden.",
       "pkcs11_required": "Das Übertragen einer Pflicht erfordert die Funktion `pkcs11` – der Inhaber signiert mit seinem YubiKey sowie der USB-gekapselten ML-DSA-Hälfte, genau wie bei der kanonischen Co-Scrub-Zeremonie."
     }
+  },
+  "trust_root": {
+    "no_root": "Welcher Root? Der Pfad muss die root_key_id angeben, deren Vertrauen entzogen werden soll"
   }
 }

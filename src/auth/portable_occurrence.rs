@@ -459,8 +459,34 @@ async fn associate_handler(
         Ok(id) => id,
         Err(e) => return http_err(StatusCode::BAD_REQUEST, format!("{e}")),
     };
-    let identity_key_id =
+    let supplied_key_id =
         ciris_verify_core::self_at_login::SelfSigner::key_id(&authorizer).to_string();
+
+    // WHICH identity is this device being enrolled under? (CIRISServer#401)
+    //
+    // If the supplied keyset is itself an OCCURRENCE of some parent self — which
+    // is exactly what `/v1/self/occurrence/portable` produces — then binding under
+    // the keyset's own key builds `new_device -> occurrence`, and
+    // `signer_acts_for` walks ONE level: it asks whether the signer is in
+    // `list_identity_occurrences_active(identity)`, not whether some chain reaches
+    // it. So the new device would inherit none of the parent's standing while
+    // looking enrolled.
+    //
+    // The parent cannot be discovered here. There is no reverse
+    // (occurrence -> identity) lookup in the substrate — `list_identity_occurrences_for`
+    // is forward-only — and a fresh device's directory is empty by definition. Nor
+    // may the parent be TAKEN FROM the artifact on trust: a manifest claiming
+    // `"parent": "<someone else>"` beside an attacker's own keyset would enrol a
+    // device holding that person's standing. The claim has to be PROVEN, and today
+    // the mint writes no proof (the local bind stores NULL signature columns, so
+    // there is no signed parent->occurrence row to carry).
+    //
+    // So this binds under the key it can actually verify — the one it just proved
+    // possession of — and the response says which, rather than implying an
+    // inheritance that did not happen. CIRISServer#401 carries the artifact change:
+    // the mint emits a signed parent->occurrence attestation into the keyset folder,
+    // and this path verifies it and binds under the attester.
+    let identity_key_id = supplied_key_id.clone();
 
     // (3) Admit the identity's PUBLIC key if this node has never seen it (a fresh
     //     device has not). Public only — produced by the authorizer we just proved
@@ -515,16 +541,16 @@ async fn associate_handler(
     //     it — which is what makes revoking this one device possible.
     let dest_dir = crate::user_seed_dir(&st.cfg);
     let device_alias = format!("{alias}-device-{}", short_unique());
-    let keyset =
-        match crate::identity::mint_portable_software_occurrence(&dest_dir, &device_alias).await {
-            Ok(k) => k,
-            Err(e) => {
-                return http_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("mint this device's occurrence keyset: {e}"),
-                )
-            }
-        };
+    let keyset = match crate::identity::mint_local_device_occurrence(&dest_dir, &device_alias).await
+    {
+        Ok(k) => k,
+        Err(e) => {
+            return http_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("mint this device's occurrence keyset: {e}"),
+            )
+        }
+    };
 
     // (5) BIND it as an active occurrence of the identity — the three persist
     //     effects (register + put_identity_occurrence + self-DEK cascade). After
@@ -561,15 +587,23 @@ async fn associate_handler(
         device_alias = %device_alias,
         "enrolled this device as an OCCURRENCE of {identity_key_id} — a fresh key was minted \
          here and the supplied keyset only authorized the binding. No private key material was \
-         copied (CIRISServer#391)"
+         copied (CIRISServer#391). NOTE: if that keyset is itself an occurrence of a parent \
+         self, this device does NOT inherit the parent's standing — the parent binding is not \
+         carried in the artifact and cannot be proven here (CIRISServer#401)"
     );
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "alias": device_alias,
             "identity_key_id": identity_key_id,
+            // Stated explicitly so a caller cannot read "enrolled" as "inherited
+            // everything the supplied fed-ID has". This device acts for the key
+            // named above and for nothing further up a chain — see #405.
+            "acts_for": identity_key_id,
             "associated_key_id": keyset.key_id,
-            "device_class": "portable_software",
+            // What was actually BOUND. The old value named a class persist does
+            // not accept — nothing noticed, because that path bound nothing.
+            "device_class": "laptop",
             // The wire contract keeps this key; it now names what was MINTED here
             // rather than what was copied, and copying is no longer a thing that
             // happens.

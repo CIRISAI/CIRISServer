@@ -2398,7 +2398,11 @@
     "status_reconfiguring": "Ń tún node rẹ bẹ̀rẹ̀...",
     "status_reconfiguring_timeout": "Node rẹ ń gba àkókò gùn ju bí a ṣe retí lọ láti tún bẹ̀rẹ̀. Jọ̀wọ́ tún áàpù náà bẹ̀rẹ̀.",
     "login_setup_complete_relogin": "Ìṣètò ti parí. Node rẹ tún bẹ̀rẹ̀, nítorí náà jọ̀wọ́ wọlé padà pẹ̀lú àwọn ẹ̀rí ìdánimọ̀ kan náà tí o lò láti parí ìṣètò.",
-    "accord_new_confer_duty": "Fi ojúṣe fún ID àjọṣepọ̀"
+    "accord_new_confer_duty": "Fi ojúṣe fún ID àjọṣepọ̀",
+    "keyset_import_cancel": "Yan fódà mìíràn",
+    "keyset_import_confirm": "Forúkọ ẹ̀rọ yìí sílẹ̀",
+    "keyset_inspect_checking": "Ń ṣàyẹ̀wò fódà yìí…",
+    "keyset_inspect_unavailable": "A kò lè ṣàyẹ̀wò fódà yìí — kókó náà kò dáhùn. Èyí kò sọ ohunkóhun nípa bóyá ìdánimọ̀ rẹ wà nínú rẹ̀; o ṣì lè gbìyànjú ìkó-wọlé náà."
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Ìyẹn kì í ṣe iṣẹ́-àṣẹ tí àwọ̀n yìí mọ̀. Fífún ní i yóò farahàn bí àṣẹ níhìn-ín, a ó sì kọ̀ ọ́ ní gbogbo ẹnu-ọ̀nà.",
       "pkcs11_required": "Fífúnni ní ojúṣe nílò ẹ̀yà `pkcs11` — ẹni tó gbà á ni yóò fọwọ́ sí i pẹ̀lú YubiKey rẹ̀ àti ìdajì ML-DSA tí a fi USB wé, gẹ́gẹ́ bí ààtò ìlànà co-scrub tí ó jẹ́ ìpìlẹ̀ ṣe ń ṣe."
     }
+  },
+  "trust_root": {
+    "no_root": "gbòngbò wo? ọ̀nà náà gbọ́dọ̀ dárúkọ root_key_id láti yọ ìgbẹ́kẹ̀lé kúrò"
   }
 }

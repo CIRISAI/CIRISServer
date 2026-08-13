@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "Reiniciando seu nó...",
     "status_reconfiguring_timeout": "Seu nó está demorando mais do que o esperado para reiniciar. Por favor, reinicie o aplicativo.",
     "login_setup_complete_relogin": "A configuração foi concluída. O seu nó foi reiniciado, por isso inicie sessão novamente com as mesmas credenciais que utilizou para concluir a configuração.",
-    "accord_new_confer_duty": "Conferir um dever a um ID de federação"
+    "accord_new_confer_duty": "Conferir um dever a um ID de federação",
+    "keyset_import_cancel": "Escolher outra pasta",
+    "keyset_import_confirm": "Inscrever este dispositivo",
+    "keyset_inspect_checking": "A verificar esta pasta…",
+    "keyset_inspect_unavailable": "Não foi possível verificar esta pasta — o nó não respondeu. Isto não diz nada sobre se a sua identidade está lá; pode mesmo assim tentar a importação."
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Esse não é um dever que esta malha reconhece. Concedê-lo apareceria como autoridade aqui e seria recusado em todos os portões.",
       "pkcs11_required": "Conferir um dever exige o recurso `pkcs11` — o titular assina com a sua YubiKey mais a metade ML-DSA guardada no USB, exatamente como faz a cerimônia canônica de co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "qual raiz? o caminho deve indicar o root_key_id cuja confiança será removida"
   }
 }

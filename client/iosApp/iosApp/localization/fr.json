@@ -2306,7 +2306,11 @@
     "status_reconfiguring": "Redémarrage de votre nœud...",
     "status_reconfiguring_timeout": "Le redémarrage de votre nœud prend plus de temps que prévu. Veuillez redémarrer l'application.",
     "login_setup_complete_relogin": "La configuration est terminée. Votre nœud a redémarré : veuillez vous reconnecter avec les mêmes identifiants que ceux utilisés pour terminer la configuration.",
-    "accord_new_confer_duty": "Conférer un devoir à un identifiant de fédération"
+    "accord_new_confer_duty": "Conférer un devoir à un identifiant de fédération",
+    "keyset_import_cancel": "Choisir un autre dossier",
+    "keyset_import_confirm": "Inscrire cet appareil",
+    "keyset_inspect_checking": "Vérification de ce dossier…",
+    "keyset_inspect_unavailable": "Impossible de vérifier ce dossier — le nœud n'a pas répondu. Cela ne dit rien sur la présence de votre identité dans ce dossier ; vous pouvez quand même tenter l'importation."
   },
   "prompts": {
     "dma": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Ce n'est pas un devoir reconnu par ce maillage. L'accorder apparaîtrait ici comme une autorité, mais serait refusé à chaque porte.",
       "pkcs11_required": "Conférer un devoir nécessite la fonctionnalité `pkcs11` — le titulaire signe avec sa YubiKey ainsi qu'avec la moitié ML-DSA encapsulée sur USB, exactement comme le fait la cérémonie canonique de co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "quelle racine ? le chemin doit nommer le root_key_id dont la confiance doit être révoquée"
   }
 }

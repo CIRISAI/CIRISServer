@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "የእርስዎን node ዳግም በማስጀመር ላይ...",
     "status_reconfiguring_timeout": "የእርስዎ node ከተጠበቀው በላይ ዳግም ለመጀመር እየወሰደ ነው። እባክዎ መተግበሪያውን ዳግም ያስጀምሩ።",
     "login_setup_complete_relogin": "ማዋቀሩ ተጠናቅቋል። መስቀለኛዎ እንደገና ስለተጀመረ፣ እባክዎ ማዋቀሩን ለማጠናቀቅ በተጠቀሙባቸው ተመሳሳይ የመግቢያ መረጃዎች እንደገና ይግቡ።",
-    "accord_new_confer_duty": "ለፌዴሬሽን መታወቂያ ኃላፊነት መስጠት"
+    "accord_new_confer_duty": "ለፌዴሬሽን መታወቂያ ኃላፊነት መስጠት",
+    "keyset_import_cancel": "ሌላ አቃፊ ይምረጡ",
+    "keyset_import_confirm": "ይህን መሣሪያ ያስመዝግቡ",
+    "keyset_inspect_checking": "ይህን አቃፊ በመፈተሽ ላይ…",
+    "keyset_inspect_unavailable": "ይህን አቃፊ መፈተሽ አልተቻለም — ኖዱ ምላሽ አልሰጠም። ይህ ማንነትዎ በውስጡ ስለመኖሩ ወይም ስላለመኖሩ ምንም አይናገርም፤ አሁንም ማስመጣቱን መሞከር ይችላሉ።"
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "ያ ይህ መረብ የሚያውቀው ግዴታ አይደለም። መስጠቱ እዚህ እንደ ሥልጣን ይታያል፣ በእያንዳንዱ በር ላይ ግን ይከለከላል።",
       "pkcs11_required": "ግዴታን ማስረከብ የ`pkcs11` ባህሪ ያስፈልገዋል — ባለቤቱ ልክ እንደ ቀኖናዊው የጋራ ስክረብ ሥነ ሥርዓት፣ በ YubiKey እና በ USB በተጠቀለለው የ ML-DSA ግማሽ ይፈርማል።"
     }
+  },
+  "trust_root": {
+    "no_root": "የትኛው ስር? እምነት የሚነሳበትን root_key_id መንገዱ መሰየም አለበት"
   }
 }

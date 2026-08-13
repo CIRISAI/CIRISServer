@@ -2306,7 +2306,11 @@
     "status_reconfiguring": "Reiniciando tu nodo...",
     "status_reconfiguring_timeout": "Tu nodo está tardando más de lo esperado en reiniciarse. Por favor, reinicia la aplicación.",
     "login_setup_complete_relogin": "La configuración ha finalizado. Tu nodo se reinició, así que vuelve a iniciar sesión con las mismas credenciales que usaste para completar la configuración.",
-    "accord_new_confer_duty": "Conferir un deber a un ID de federación"
+    "accord_new_confer_duty": "Conferir un deber a un ID de federación",
+    "keyset_import_cancel": "Elegir otra carpeta",
+    "keyset_import_confirm": "Inscribir este dispositivo",
+    "keyset_inspect_checking": "Comprobando esta carpeta…",
+    "keyset_inspect_unavailable": "No se pudo comprobar esta carpeta: el nodo no respondió. Esto no indica nada sobre si tu identidad está en ella; aún puedes intentar la importación."
   },
   "prompts": {
     "dma": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Ese no es un deber que esta malla reconozca. Otorgarlo aparecería como autoridad aquí y sería rechazado en todas las puertas.",
       "pkcs11_required": "Conferir un deber requiere la característica `pkcs11`: el titular firma con su YubiKey más la mitad ML-DSA envuelta en USB, exactamente como lo hace la ceremonia canónica de co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "¿qué raíz? la ruta debe indicar el root_key_id cuya confianza se va a revocar"
   }
 }

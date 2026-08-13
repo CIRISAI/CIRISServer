@@ -103,9 +103,11 @@ fn associate_enrols_an_occurrence() {
          privileges without holding the identity's key:\n{body}"
     );
     assert!(
-        body.contains("mint_portable_software_occurrence"),
+        body.contains("mint_local_device_occurrence"),
         "associate must MINT a fresh key for this device. Reusing the supplied one is the \
-         duplication this path was rewritten to stop."
+         duplication this path was rewritten to stop. (It must be the LOCAL mint, which seals \
+         the device's own post-quantum half — the portable mint leaves it as a raw file, which \
+         the local signer cannot open and which sits at rest in the clear.)"
     );
     assert!(
         body.contains("open_portable_identity_transiently"),

@@ -3955,5 +3955,8 @@
   "wa_reject": "Reject",
   "wa_resolve": "Resolve",
   "wa_service_status": "Service Status",
-  "wa_status": "Status"
+  "wa_status": "Status",
+  "trust_root": {
+    "no_root": "which root? the path must name the root_key_id to un-trust"
+  }
 }

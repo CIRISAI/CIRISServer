@@ -690,6 +690,62 @@ pub async fn mint_portable_software_occurrence(
     })
 }
 
+/// **Mint THIS device's own occurrence keyset**, ready for the local signer to
+/// re-open (CIRISServer#391).
+///
+/// [`mint_portable_software_occurrence`] writes both halves as raw seed files,
+/// which is right for the PORTABLE case — the point there is that the keyset
+/// travels. It is wrong for a key this device mints for itself:
+/// `hardware_user_local_signer` opens the Ed25519 half from a seed file but the
+/// ML-DSA-65 half from the PLATFORM-SEALED store, so a raw `<alias>.mldsa65.seed`
+/// sitting in the seed dir is a private half that is both unusable and at rest in
+/// the clear.
+///
+/// So this mints, SEALS the post-quantum half under `alias`, and removes the raw
+/// file. Afterwards the device's own private material exists once, sealed.
+///
+/// # This is not the copier coming back
+///
+/// The deleted `reseal_portable_mldsa` sealed a half COPIED from another device,
+/// which is what put one key on two machines. This seals a half THIS DEVICE JUST
+/// GENERATED and has never shared. Same mechanism, opposite direction —
+/// `tests/no_key_material_is_copied.rs` holds the line by forbidding the copy,
+/// not the seal.
+pub async fn mint_local_device_occurrence(
+    seed_dir: &std::path::Path,
+    alias: &str,
+) -> Result<PortableSoftwareKeyset> {
+    use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
+
+    let mut keyset = mint_portable_software_occurrence(seed_dir, alias).await?;
+
+    let raw_pqc = seed_dir.join(portable_mldsa_seed_name(alias));
+    let seed_bytes = std::fs::read(&raw_pqc)
+        .with_context(|| format!("read freshly-minted pqc seed {}", raw_pqc.display()))?;
+    let seed32: [u8; 32] = seed_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!("freshly-minted ML-DSA-65 seed is not 32 bytes — refusing to seal")
+    })?;
+
+    let keys_dir = ciris_verify_core::ceg_outbox::keys_dir();
+    std::fs::create_dir_all(&keys_dir)
+        .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
+    SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&seed32))
+        .map_err(|e| anyhow::anyhow!("seal this device's own ML-DSA-65 half under {alias}: {e}"))?;
+
+    // Remove the raw half ONLY after the seal round-trips — a failed seal must not
+    // leave the device with neither copy.
+    std::fs::remove_file(&raw_pqc)
+        .with_context(|| format!("remove the raw pqc seed {}", raw_pqc.display()))?;
+    keyset
+        .files_written
+        .retain(|f| f != &portable_mldsa_seed_name(alias));
+    keyset
+        .files_written
+        .push(format!("{alias} (ML-DSA-65 sealed)"));
+
+    Ok(keyset)
+}
+
 /// **Open a portable keyset TRANSIENTLY, to authorize with — never to keep.**
 ///
 /// Reads `<alias>.{ed25519,mldsa65}.seed` out of `dir` into memory and builds the
@@ -719,15 +775,19 @@ pub fn open_portable_identity_transiently(
 
     let read32 = |name: String| -> Result<[u8; 32]> {
         let path = dir.join(&name);
-        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        // `fs::read` lands the key in a heap Vec FIRST. Copying it into the array
+        // and zeroizing only the array leaves the original in freed allocator
+        // memory — so the buffer is wiped too, on every path out.
+        let mut bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let len = bytes.len();
+        let seed: Result<[u8; 32]> = bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
-                "{} is {} bytes, not the 32 a seed must be",
-                path.display(),
-                bytes.len()
+                "{} is {len} bytes, not the 32 a seed must be",
+                path.display()
             )
-        })?;
-        Ok(seed)
+        });
+        bytes.zeroize();
+        seed
     };
 
     let mut ed_seed = read32(portable_ed_seed_name(alias))?;
@@ -1388,20 +1448,27 @@ async fn inspect_handler(Json(req): Json<InspectRequest>) -> Response {
         wanted.iter().cloned().partition(|n| dir.join(n).is_file());
 
     // The Ed25519 seed is present by construction (it is what the alias was
-    // matched on), so the import proceeds. The PQC half is the one that travels
-    // or does not.
-    let importable = true;
+    // matched on). The PQC half is the one that travels or does not — and since
+    // `open_portable_identity_transiently` REQUIRES it to authorize with, its
+    // absence makes the folder genuinely un-importable, not merely incomplete.
+    //
+    // These two must not drift: `importable` is a PREDICTION of what the import
+    // will do, and a prediction the import contradicts is worse than no prediction
+    // — the UI would enable a button that then fails. When the enrol path gained
+    // the PQC requirement, this had to follow it.
     let complete = !missing.contains(&portable_mldsa_seed_name(&alias));
+    let importable = complete;
 
     let detail = if complete {
-        format!("Portable identity {alias:?} — Ed25519 + ML-DSA-65 both here. Ready to import.")
+        format!("Portable identity {alias:?} — Ed25519 + ML-DSA-65 both here. Ready to enrol.")
     } else {
         format!(
-            "Found {alias:?}, but only its classical half is in this folder — no {}. The import \
-             will still work IF this device already holds the sealed post-quantum half for \
-             {alias:?} (an already-installed identity looks exactly like this). Moving to a NEW \
-             device needs the whole source folder, or the imported identity will not be able to \
-             sign a federation row.",
+            "Found {alias:?}, but only its classical half is in this folder — no {}. Enrolling a \
+             device needs BOTH halves: the keyset authorizes the binding by signing, and a \
+             hybrid signature is not optional. Copy the whole keyset folder from the source \
+             device. (An already-INSTALLED identity looks like this too — its post-quantum half \
+             is sealed in the keystore rather than sitting beside the seed — so this folder may \
+             be a destination rather than a source.)",
             portable_mldsa_seed_name(&alias),
         )
     };

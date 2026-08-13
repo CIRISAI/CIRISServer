@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "Đang khởi động lại nút của bạn...",
     "status_reconfiguring_timeout": "Nút của bạn đang mất nhiều thời gian khởi động lại hơn dự kiến. Vui lòng khởi động lại ứng dụng.",
     "login_setup_complete_relogin": "Thiết lập đã hoàn tất. Nút của bạn đã khởi động lại, vui lòng đăng nhập lại bằng đúng thông tin đăng nhập mà bạn đã dùng để hoàn tất thiết lập.",
-    "accord_new_confer_duty": "Trao một nhiệm vụ cho một federation ID"
+    "accord_new_confer_duty": "Trao một nhiệm vụ cho một federation ID",
+    "keyset_import_cancel": "Chọn thư mục khác",
+    "keyset_import_confirm": "Đăng ký thiết bị này",
+    "keyset_inspect_checking": "Đang kiểm tra thư mục này…",
+    "keyset_inspect_unavailable": "Không thể kiểm tra thư mục này — nút mạng không phản hồi. Điều này không cho biết danh tính của bạn có nằm trong đó hay không; bạn vẫn có thể thử nhập."
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Đó không phải là nhiệm vụ mà mạng lưới này công nhận. Cấp nó sẽ hiển thị như một thẩm quyền ở đây nhưng sẽ bị từ chối tại mọi cổng.",
       "pkcs11_required": "Việc trao một nhiệm vụ cần tính năng `pkcs11` — người nắm giữ ký bằng YubiKey của mình cùng với nửa ML-DSA được bọc trong USB, đúng như nghi thức đồng ký chuẩn tắc vẫn làm."
     }
+  },
+  "trust_root": {
+    "no_root": "gốc nào? đường dẫn phải nêu rõ root_key_id cần hủy tin cậy"
   }
 }

@@ -2380,7 +2380,11 @@
     "status_reconfiguring": "Düğümünüz yeniden başlatılıyor...",
     "status_reconfiguring_timeout": "Düğümünüzün yeniden başlatılması beklenenden uzun sürüyor. Lütfen uygulamayı yeniden başlatın.",
     "login_setup_complete_relogin": "Kurulum tamamlandı. Düğümünüz yeniden başlatıldı; lütfen kurulumu tamamlarken kullandığınız kimlik bilgileriyle yeniden oturum açın.",
-    "accord_new_confer_duty": "Bir federasyon kimliğine görev ver"
+    "accord_new_confer_duty": "Bir federasyon kimliğine görev ver",
+    "keyset_inspect_checking": "Bu klasör kontrol ediliyor…",
+    "keyset_inspect_unavailable": "Bu klasör kontrol edilemedi — düğüm yanıt vermedi. Bu, kimliğinizin klasörde olup olmadığı hakkında bir şey söylemez; yine de içe aktarmayı deneyebilirsiniz.",
+    "keyset_import_confirm": "Bu cihazı kaydet",
+    "keyset_import_cancel": "Başka bir klasör seç"
   },
   "nav": {
     "group": {
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Bu, ağın tanıdığı bir görev değil. Verilmesi burada yetki olarak görünür ve her kapıda reddedilirdi.",
       "pkcs11_required": "Bir görev devretmek için `pkcs11` özelliği gerekir — tıpkı kanonik ortak imza (co-scrub) töreninde olduğu gibi, sahibi YubiKey'i ve USB ile sarmalanmış ML-DSA yarısını kullanarak imzalar."
     }
+  },
+  "trust_root": {
+    "no_root": "hangi kök? yol, güveni kaldırılacak root_key_id değerini belirtmelidir"
   }
 }

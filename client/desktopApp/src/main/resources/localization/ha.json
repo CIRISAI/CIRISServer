@@ -2398,7 +2398,11 @@
     "status_reconfiguring": "Ana sake fara node ɗinka...",
     "status_reconfiguring_timeout": "Node ɗinka yana ɗaukar lokaci fiye da yadda ake tsammani don sake farawa. Da fatan za a sake fara app.",
     "login_setup_complete_relogin": "An kammala saitin. Node ɗinka ya sake farawa, don haka ka sake shiga da bayanan shiga guda ɗaya da ka yi amfani da su wajen kammala saitin.",
-    "accord_new_confer_duty": "Bayar da aiki ga ID na tarayya"
+    "accord_new_confer_duty": "Bayar da aiki ga ID na tarayya",
+    "keyset_import_cancel": "Zaɓi wani babban fayil",
+    "keyset_import_confirm": "Yi rijistar wannan na'urar",
+    "keyset_inspect_checking": "Ana duba wannan babban fayil…",
+    "keyset_inspect_unavailable": "An kasa duba wannan babban fayil — kumburin bai amsa ba. Wannan bai nuna ko shaidarka tana ciki ba ko a'a; har yanzu kana iya gwada shigo da ita."
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",
@@ -3951,5 +3955,8 @@
       "unknown_duty": "Wannan ba aiki ba ne da wannan mesh ɗin ya sani. Bayar da shi zai bayyana a matsayin iko a nan, kuma za a ƙi shi a kowace ƙofa.",
       "pkcs11_required": "Damƙa wani aiki yana buƙatar fasalin `pkcs11` — mai riƙe shi yana sa hannu da YubiKey nasa tare da rabin ML-DSA da aka nannaɗe a USB, daidai kamar yadda bikin co-scrub na canonical yake yi."
     }
+  },
+  "trust_root": {
+    "no_root": "wane tushe ne? dole ne hanyar ta ƙayyade root_key_id ɗin da za a janye amincewa da shi"
   }
 }

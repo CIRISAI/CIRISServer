@@ -377,42 +377,30 @@ async fn register_self(engine: &Engine) -> (String, String) {
         .local_derived_key_id()
         .await
         .expect("derive node federation key_id");
-    let now = Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
+    // Through the ONE door (CIRISServer#402): the registration envelope BINDS ITS
+    // SUBJECT — key_id, identity_type and both pubkeys. The `{"key_id": …}` shape
+    // this hand-rolled vouched for none of the rest, so its signature stood for any
+    // record it was pasted onto, and persist v31 refuses it (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key via admission gate");
+
+    // Read the admitted row back out for the JSON the relay serves, so the record
+    // the peer re-verifies is byte-identical to the one this node stored.
+    let record = engine
+        .federation_directory()
+        .lookup_public_key(&key_id)
         .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    let signed = SignedKeyRecord { record };
-    let record_json =
-        serde_json::to_string(&signed).expect("serialize self-signed key record to JSON");
-    engine
-        .register_federation_key(signed)
-        .await
-        .expect("register node steward key via admission gate");
+        .expect("look up the node's own key")
+        .expect("the node's own key is present after registration");
+    let record_json = serde_json::to_string(&SignedKeyRecord { record })
+        .expect("serialize self-signed key record to JSON");
     (key_id, record_json)
 }
 

@@ -366,14 +366,26 @@ async fn try_emit_score(
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31
     // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
     // accepts a shape this server does not produce.
-    ciris_server::attest::emit(
-        engine,
-        ciris_server::attest::KeySigner::Local(&author),
-        spec,
-    )
-    .await
-    .expect("put attestation");
-    Ok(id.to_string())
+    //
+    // `stamp_at`, not `stamp`: `asserted_at` is the axis the `after:` window and
+    // the `revoked_after` bound are BOTH read on, so a fixture that let the door
+    // read the wall clock instead laid its whole corpus down at `now` and left
+    // every window test selecting all of it.
+    //
+    // The MINTED id is returned, never the caller's label. The id is now decided
+    // inside the signed bytes, so the label names no row — a caller that ratified
+    // it got `judgement_unresolved` from a node that genuinely did not hold it.
+    let row = ciris_server::attest::Emit::stamp_at(author.key_id(), spec, asserted_at)
+        .map_err(|e| format!("stamp score {id}: {e}"))?
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(author))
+        .await
+        .map_err(|e| format!("sign score {id}: {e}"))?;
+    // NOT `.expect(…)`. This function's whole reason to exist beside `emit_score`
+    // is that the AV-77 round trip needs a write that can come back REFUSED; an
+    // unwrap here panicked the test the substrate was answering correctly.
+    ciris_server::attest::put(engine, row)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// A community whose founder is `founder` — persist resolves the `slash`
@@ -445,6 +457,12 @@ struct Fixture {
     /// An `infra:serve` delegation from root A (NOT the owner) → node. Carries
     /// the right scope and the wrong issuer.
     serve_not_owner: String,
+    /// The MINTED id of the corpus's first ordinary `scores` row — a row this
+    /// node genuinely holds that is NOT a judgement. Carried on the fixture
+    /// because ids are decided inside the signed bytes now (CIRISPersist#643):
+    /// the `t-early-1` label names no row, and a test that posted it asked the
+    /// reader about something absent instead of about something ineligible.
+    ordinary_row: String,
     _handle: tokio::task::JoinHandle<()>,
 }
 
@@ -468,7 +486,7 @@ async fn fixture() -> Fixture {
 
     // The corpus. TARGET: two rows BEFORE t0 (the history a bound leaves
     // standing) and two AFTER. NOISE: one row that must never be swept in.
-    emit_score(
+    let ordinary_row = emit_score(
         &engine,
         &target,
         "t-early-1",
@@ -524,6 +542,7 @@ async fn fixture() -> Fixture {
         slash_elsewhere,
         owner_binding,
         serve_not_owner,
+        ordinary_row,
         _handle,
     }
 }
@@ -2196,12 +2215,15 @@ async fn tier_r_only_decides_about_judgements_this_node_actually_holds() {
     assert_eq!(status, 404, "{json}");
     assert_eq!(json["refusal"], "judgement_unresolved");
 
-    // A row this node holds that is not a judgement.
+    // A row this node holds that is not a judgement. The MINTED id, not the
+    // `t-early-1` label — the label resolves to nothing, and asking about an
+    // absent row tests `judgement_unresolved` a second time instead of the
+    // eligibility rule this leg is for.
     let (status, json) = post(
         &f,
         "/v1/admin/reader/honour",
         &serde_json::json!({
-            "judgement_id": "t-early-1",
+            "judgement_id": f.ordinary_row,
             "delegation_id": f.owner_binding,
             "reason": "honouring an ordinary attestation",
         }),
