@@ -158,9 +158,16 @@ async fn signed_self_occurrence(
         "app_name": app,
         "aspects": aspects,
     });
+    // `attesting_key_id` rides INSIDE the signed envelope, and it is who SIGNS —
+    // never who is claimed. The carrier field outside the bytes is compared against
+    // this one (CIRISVerify#252), so an occurrence lifted from its producer and
+    // re-presented under a substituted signer is refused as SubjectMismatch before
+    // any signature is checked. Reading it off `signer` is what makes Mallory's
+    // forgery below a genuine forgery rather than a self-inconsistent envelope.
     let envelope = serde_json::json!({
         "identity_key_id": key_id,
         "occurrence_key_id": key_id,
+        "attesting_key_id": signer.key_id(),
         "transport_destination": tb_env,
         "encryption_pubkeys": {
             "x25519_base64": enc.x25519_base64,
@@ -168,6 +175,7 @@ async fn signed_self_occurrence(
         },
         "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
+    let attesting_key_id = signer.key_id().to_string();
     let (signed_envelope, signature) = produce_signed_identity_occurrence(signer, envelope)
         .await
         .expect("produce signed occurrence");
@@ -189,7 +197,7 @@ async fn signed_self_occurrence(
             }),
             persist_row_hash: String::new(),
         },
-        attesting_key_id: key_id.to_string(),
+        attesting_key_id,
         signed_envelope,
         signature,
     }
@@ -246,7 +254,11 @@ async fn signed_occurrence_custody_replication_and_seal() {
     let mallory_signer = hybrid_identity(MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED);
     let mallory_enc = ciris_server::identity::derive_self_enc_pubkeys(&MALLORY_ED_SEED)
         .expect("mallory enc keys");
-    let mut forged = signed_self_occurrence(
+    // Mallory signs under her OWN key id (inside the envelope and out) — an
+    // honestly-signed occurrence that simply claims someone else's identity. Naming
+    // B as the attester instead would be refused as a self-inconsistent envelope
+    // and would never reach `signer_acts_for`, which is the check under test.
+    let forged = signed_self_occurrence(
         NODE_B_KEY_ID,   // claims B's identity...
         &mallory_signer, // ...but Mallory signs
         &mallory_enc,
@@ -255,7 +267,6 @@ async fn signed_occurrence_custody_replication_and_seal() {
         chrono::Utc::now(),
     )
     .await;
-    forged.attesting_key_id = MALLORY_KEY_ID.to_string();
     assert!(
         dir_a.put_identity_occurrence(forged).await.is_err(),
         "a forged occurrence (valid Mallory signature, B's identity) MUST be rejected \

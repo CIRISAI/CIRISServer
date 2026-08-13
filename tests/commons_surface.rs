@@ -361,6 +361,14 @@ async fn emit_action(
 /// the PEERS' rows — the ones that would arrive over replication — so their
 /// signatures are genuine and persist re-verifies each against this node's
 /// registered pubkeys.
+///
+/// Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+/// row carried no signed `asserted_at` and no typed-column mirror — persist v31
+/// refuses both (CIRISPersist#598/#643), so the peers' rows were a shape no peer
+/// could actually have sent.
+///
+/// The symbolic `id` is preserved: a ballot names the objection it answers BY
+/// ID, so these ids are wiring, not decoration.
 async fn peer_row(
     signer: &LocalSigner,
     envelope: serde_json::Value,
@@ -368,32 +376,21 @@ async fn peer_row(
     actor: &str,
     asserted_at: DateTime<Utc>,
 ) -> Attestation {
-    let key_id = signer.key_id().to_string();
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer row");
-    let sig = signer.sign_hybrid(&canonical).await.expect("sign peer row");
-    Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: actor.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: None,
+    ciris_server::attest::Emit::stamp_at(
+        signer.key_id(),
+        ciris_server::attest::Spec::new(
+            attestation_type::SCORES,
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .attested_to(actor),
         asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp peer row {id}: {e}"))
+    .sign_and_assemble(ciris_server::attest::KeySigner::Local(signer))
+    .await
+    .unwrap_or_else(|e| panic!("sign peer row {id}: {e}"))
 }
 
 /// A peer raises an objection through persist's own 1-of-N door.
@@ -628,6 +625,28 @@ fn dismissal_body(
 
 /// Ask the route for the canonical bytes, have `cosigners` sign exactly those,
 /// and submit. The m-of-n is over these bytes and no others.
+/// FAILING ON persist v31.0.0, and the cause is in `src/`, not here. Both tests
+/// that reach an m-of-n dismissal go red on it (`property_2_below_m_…`,
+/// `property_3_silence_escalates_…`), and they go red the same way: `counted`
+/// is 1 — the node's own scrub — because no co-signature verifies.
+///
+/// The dry run's whole contract is *"co-signers produce `additional_scrubs` over
+/// exactly the bytes the submission will carry"*. It no longer holds.
+/// `commons_surface::payload_sha256` hashes the BARE envelope persist's builder
+/// returned, while `build_row` now stamps that envelope through the emit door
+/// before signing — so the submission carries an envelope with `asserted_at`, an
+/// `attestation_id` and the seven-column mirror inside it (CIRISPersist#598/#643),
+/// and persist's `count_distinct_roster_scrubs` verifies EVERY scrub, base and
+/// additional alike, over that stamped envelope. The base scrub was made over it
+/// and counts; the co-signers signed a document that no longer exists.
+///
+/// No fixture can close this: the stamp mints the id and the instant at
+/// SUBMISSION time, so the bytes are unpredictable until the row is stamped. The
+/// fix is the co-signed shape `crate::attest` already documents — the dry run
+/// stamps and returns `stamped.envelope()` plus the hash of `stamped.canonical()`,
+/// and the submission `Emit::adopt`s those exact bytes instead of re-deriving
+/// them. Left RED rather than papered over: a dismissal that silently counts one
+/// signature short is the m-of-n failing open on the operator.
 async fn node_dismisses(
     f: &Fixture,
     community: &str,
@@ -947,7 +966,13 @@ async fn property_3_silence_escalates_and_counts_respondents_not_roster() {
     assert_eq!(status, reqwest::StatusCode::OK, "{raised}");
     let objection_id = raised["objection_id"].as_str().expect("id").to_owned();
 
-    let deadline = t0 + Duration::seconds(WINDOW_SECS + STEWARD_SECS);
+    // Off the ACTION's own instant, not off `t0`. The two differ now: the emit
+    // door truncates `asserted_at` to the substrate's microsecond resolution
+    // before signing it (CIRISPersist#598), so the row's instant is `t0` minus
+    // its nanoseconds — and the deadline the route reports is a function of the
+    // row. Recomputing it from the raw clock read asserted a deadline for a
+    // different action.
+    let deadline = action.asserted_at + Duration::seconds(WINDOW_SECS + STEWARD_SECS);
 
     // ── BEFORE the deadline. The duty-holders may still answer. This is the
     //    healthy in-progress state and must NOT read as silence.

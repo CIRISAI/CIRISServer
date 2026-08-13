@@ -397,7 +397,11 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         "subject_key_ids": [agent.key_id],
         "score": 1.0,
         "cohort_scope": cohort_scope::SELF,
-        "asserted_at": chrono::Utc::now().to_rfc3339(),
+        // NO `asserted_at` here: the emit chokepoint stamps it, TRUNCATED to the
+        // microsecond floor postgres can hold. A producer that writes the field
+        // itself is honoured rather than overwritten, so a hand-written
+        // `Utc::now()` put nanoseconds into the signed bytes — which persist v31
+        // refuses outright rather than rounding (CIRISPersist#598).
     });
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trace_envelope)
         .expect("trace envelope");

@@ -417,6 +417,14 @@ async fn register_self(engine: &Engine) -> (String, String) {
 ///       claim persists — the responder's authorization anchor AND what lets
 ///       `POST /v1/federation/announce` promote). Emitted with the owner's OWN
 ///       signer, so it is genuinely user-signed (CC 3.2);
+///   (c′) the owner's fed-ID resolvable ON THIS NODE, under the alias its seed is
+///       filed at. Announcing WIDENS the binding's audience, and `cohort_scope`
+///       lives inside the signed typed-column mirror (CIRISPersist#643), so the
+///       owner must re-state the claim at the wider audience — a node cannot
+///       re-file their old signature under a new label. This harness gives all
+///       three nodes the one `home`, so the alias is the same everywhere; the
+///       `<node>-user` id this used to pass named a seed that was never minted,
+///       which was invisible for exactly as long as announce re-signed nothing;
 ///   (d) the founding ROOT `wa_cert` (what the claim creates — the row the
 ///       responder's synthetic loopback session resolves against);
 ///   (e) the REAL v1 dispatch surface the allow-list reaches: the
@@ -428,6 +436,7 @@ async fn owned_remote(
     engine: &Arc<Engine>,
     owner_signer: &LocalSigner,
     owner: &ciris_server::identity::MintedUserIdentity,
+    owner_alias: &str,
     root_wa_id: &str,
     home: &Path,
 ) -> (String, Arc<MeshControlResponder>) {
@@ -457,7 +466,7 @@ async fn owned_remote(
     .merge(ciris_server::claim_remote::router(
         Arc::clone(engine),
         node_key.clone(),
-        format!("{node_key}-user"),
+        owner_alias.to_string(),
         home.to_path_buf(),
         "http://127.0.0.1:1".to_string(),
         ciris_persist::prelude::HybridPolicy::Strict,
@@ -515,7 +524,23 @@ impl PeerNodeB {
     /// shape `register_peer_key` requires (mirrors `tests/peer_replication.rs`).
     async fn peer_config(&self) -> PeerB {
         let now = Utc::now();
-        let envelope = serde_json::json!({ "key_id": NODE_B_KEY_LABEL });
+        let ed_pub = BASE64.encode(self.ed.verifying_key().to_bytes());
+        let pqc_pub = BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk"));
+        // B's registration envelope must BIND ITS SUBJECT — key_id, identity_type
+        // and both pubkeys — or the signature over it stands for any record it is
+        // pasted onto, and A's admission gate refuses it (CIRISPersist#659). Bound
+        // by persist's OWN binder, the one `attest::register_key` calls; the door
+        // itself is not usable here because this is the record a REMOTE peer
+        // produces and hands to A.
+        let mut envelope = serde_json::json!({ "key_id": NODE_B_KEY_LABEL });
+        ciris_persist::federation::admission::bind_subject_into_envelope(
+            &mut envelope,
+            NODE_B_KEY_LABEL,
+            identity_type::WITNESS,
+            &ed_pub,
+            Some(&pqc_pub),
+        )
+        .expect("bind the subject into B's registration envelope (#659)");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize B registration");
         let ed_sig = self.ed.sign(&canonical).to_bytes();
         let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
@@ -524,10 +549,8 @@ impl PeerNodeB {
         let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign B reg");
         let record = KeyRecord {
             key_id: NODE_B_KEY_LABEL.to_string(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
+            pubkey_ed25519_base64: ed_pub,
+            pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             identity_type: identity_type::WITNESS.into(),
             identity_ref: NODE_B_KEY_LABEL.to_string(),
@@ -694,6 +717,7 @@ async fn mesh_seed_runbook_through_relay_is_red_until_phase_d() {
         &node_a,
         &owner_signer,
         &owner_minted,
+        owner_alias,
         "wa-owner-node-a",
         &home,
     )
@@ -702,6 +726,7 @@ async fn mesh_seed_runbook_through_relay_is_red_until_phase_d() {
         &node_b,
         &owner_signer,
         &owner_minted,
+        owner_alias,
         "wa-owner-node-b",
         &home,
     )
@@ -802,13 +827,14 @@ async fn mesh_seed_runbook_through_relay_is_red_until_phase_d() {
         serde_json::json!({}),
     )
     .await;
+    // The BODY, not just the status: every relay refusal carries its own reason,
+    // and a bare `503` sends the reader to the wrong end of a five-hop path.
+    let announce_a_status = announce_a.status();
+    let announce_a_body = announce_a.text().await.unwrap_or_default();
     assert_eq!(
-        announce_a.status(),
-        200,
+        announce_a_status, 200,
         "PHASE D GATE: POST {MESH_RELAY_PATH} (announce Node A over RNS) must return 200, \
-         got {} — the RNS control relay is not implemented yet (FSD/RNS_CONTROL_RELAY.md \
-         §6 C1 + §5 C3). This is the intended RED line of the mesh-seed TDD gate.",
-        announce_a.status()
+         got {announce_a_status}: {announce_a_body} (FSD/RNS_CONTROL_RELAY.md §6 C1 + §5 C3)",
     );
 
     // ── STEP 2b: A's owner-binding survives the announce (announce is opt-in;

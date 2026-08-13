@@ -36,8 +36,7 @@ use sha2::{Digest, Sha256};
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    KeyRecord, SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::federation::KeyStatementStanding;
 use ciris_persist::prelude::{Engine, LocalSigner};

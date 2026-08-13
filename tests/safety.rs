@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    Community, CommunityMember, KeyRecord, SignedAttestation, SignedCommunity, SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, Community, CommunityMember,
+    KeyRecord, SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
@@ -1478,7 +1478,6 @@ fn authority_of(flagger: &LocalSigner) -> infohazard::FlagAuthority {
 /// from ANY key. What decides whether a reader believes it is the reader's own
 /// [`infohazard::FlagAuthority`] — see `authority_of`.
 async fn flag_subject(engine: &Engine, flagger: &LocalSigner, subject: &str, class: &str) {
-    let flagger_key = flagger.key_id().to_string();
     let dimension = format!("content_class:{class}:v1");
     let envelope = serde_json::json!({ "dimension": dimension, "content_class": class });
     let spec = ciris_server::attest::Spec::new(
@@ -1486,14 +1485,14 @@ async fn flag_subject(engine: &Engine, flagger: &LocalSigner, subject: &str, cla
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&subject);
+    .about(subject);
     // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31
     // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
     // accepts a shape this server does not produce.
     ciris_server::attest::emit(
         engine,
-        ciris_server::attest::KeySigner::Local(&flagger),
+        ciris_server::attest::KeySigner::Local(flagger),
         spec,
     )
     .await
@@ -1512,7 +1511,6 @@ async fn emit_view_consent(
     class: &str,
     secs: i64,
 ) {
-    let viewer_key = viewer.key_id().to_string();
     let now = chrono::Utc::now() + chrono::Duration::seconds(secs);
     let dimension = format!("consent:state:{state}:v1");
     let envelope = serde_json::json!({
@@ -1525,18 +1523,20 @@ async fn emit_view_consent(
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&subject);
-    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
-    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
-    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
-    // accepts a shape this server does not produce.
-    ciris_server::attest::emit(
-        engine,
-        ciris_server::attest::KeySigner::Local(&viewer),
-        spec,
-    )
-    .await
-    .expect("put view consent");
+    .about(subject);
+    // Through the ONE door (CIRISServer#402), stamped AT `now` — `secs` is what
+    // orders these acts under the latest-wins fold, and the stamp writes the
+    // instant the signature covers. Hand-rolled beside its envelope, this row
+    // carried no signed `asserted_at` and no typed-column mirror, both of which
+    // persist v31 refuses (CIRISPersist#598/#643).
+    let row = ciris_server::attest::Emit::stamp_at(viewer.key_id(), spec, now)
+        .expect("stamp view consent")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(viewer))
+        .await
+        .expect("sign view consent");
+    ciris_server::attest::put(engine, row)
+        .await
+        .expect("put view consent");
 }
 
 /// `POST /v1/safety/reveal` with a hybrid-signed request from `viewer`.
@@ -2021,7 +2021,6 @@ async fn emit_consent_scoped(
     class: Option<&str>,
     secs: i64,
 ) {
-    let viewer_key = viewer.key_id().to_string();
     let now = chrono::Utc::now() + chrono::Duration::seconds(secs);
     let mut envelope = serde_json::json!({ "dimension": format!("consent:state:{state}:v1") });
     if let Some(sc) = scope {
@@ -2035,18 +2034,18 @@ async fn emit_consent_scoped(
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&subject);
-    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
-    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
-    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
-    // accepts a shape this server does not produce.
-    ciris_server::attest::emit(
-        engine,
-        ciris_server::attest::KeySigner::Local(&viewer),
-        spec,
-    )
-    .await
-    .expect("put scoped consent");
+    .about(subject);
+    // Through the ONE door (CIRISServer#402), stamped AT `now` — see
+    // `emit_view_consent`: the offset is the fold's ordering key, so it has to be
+    // the signed instant and not a default wall-clock read.
+    let row = ciris_server::attest::Emit::stamp_at(viewer.key_id(), spec, now)
+        .expect("stamp scoped consent")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(viewer))
+        .await
+        .expect("sign scoped consent");
+    ciris_server::attest::put(engine, row)
+        .await
+        .expect("put scoped consent");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

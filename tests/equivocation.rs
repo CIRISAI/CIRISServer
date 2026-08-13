@@ -227,8 +227,17 @@ async fn hard_cases(engine: &Engine) -> Vec<ciris_persist::federation::hard_case
 const T0: &str = "2026-08-01T17:00:00Z";
 const T1: &str = "2026-08-01T18:00:00Z";
 
+/// `h` hours from an instant fixed once per process — NOT a fresh clock read
+/// per call.
+///
+/// `expires_at` rides inside the SIGNED envelope now (the emit door stamps it,
+/// CIRISPersist#643), so two calls microseconds apart minted two claims that
+/// genuinely differ in a field the detector then reports as the disagreement.
+/// Every pair here is built to differ in exactly one field, and this is what
+/// makes that true of the bytes rather than only of the intent.
 fn hour_from_now(h: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now() + chrono::Duration::hours(h)
+    static BASE: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    *BASE.get_or_init(chrono::Utc::now) + chrono::Duration::hours(h)
 }
 
 /// **The end-to-end property.** Two claims from ONE peer key about ONE subject
@@ -544,11 +553,8 @@ async fn a_duplicated_statement_records_nothing() {
     let report = equivocation::run_pass(&engine, &node_key_id, &DetectorConfig::default())
         .await
         .expect("detector pass");
-    assert_eq!(
-        report.same_statement, 1,
-        "the duplicate pair must be seen and classified, not missed (rows_scanned={})",
-        report.rows_scanned
-    );
-    assert!(report.contradictions.is_empty());
-    assert!(hard_cases(&engine).await.is_empty());
+    panic!("DIAG same_statement={} contradictions={} superseded={} pairs={} hard_cases={} differing={:?}",
+        report.same_statement, report.contradictions.len(), report.superseded,
+        report.pairs_compared, hard_cases(&engine).await.len(),
+        report.contradictions.first().map(|c| c.differing_fields.clone()));
 }

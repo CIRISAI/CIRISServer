@@ -1171,6 +1171,25 @@ async fn property_5_after_is_a_real_push_down_and_bounds_the_judgement() {
 //  Tier 4 — de-admission, with the history bound persist actually implements
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// FAILING ON persist v31.0.0, and the cause is in `src/`, not in this fixture.
+///
+/// `admin_ops::put_revocation_for` hand-writes the `revocation_envelope` beside
+/// the columns — `revoked_key_id` / `revoking_key_id` / `reason` /
+/// `delegation_id` / `effective_at` — and never calls
+/// `admission::bind_revocation_into_envelope`, the revocation plane's producing
+/// half of CIRISPersist#659. So the envelope binds neither `revocation_id` nor
+/// `revoked_at` nor `scrub_timestamp`, and `put_revocation` refuses every row
+/// tier 4 mints: `federation_revocation_envelope_unbound`.
+///
+/// That refusal arrives BEFORE `check_revocation_authority`, which is why this
+/// test reads `outcome: "error"` where it expects `"refused"` — the substrate
+/// never reaches the authority question the assertions below are about. The
+/// assertions are therefore left exactly as they are: they describe the right
+/// behaviour, and they will pass once the route binds its envelope.
+///
+/// The class is the one this whole migration is about (two authors for one
+/// fact), one plane over and in production code: `tests/support/revocation.rs`
+/// had the identical defect and is fixed by calling persist's producer.
 #[tokio::test]
 async fn tier_4_deadmit_writes_a_signed_revocation_with_the_history_bound() {
     let f = fixture().await;
