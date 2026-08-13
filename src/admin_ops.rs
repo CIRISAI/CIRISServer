@@ -3355,7 +3355,9 @@ async fn resolve_owner_authority(
              admin operation on anyone's behalf. Claim ownership first.",
         ));
     };
-    if proof.issuer_key_id != owner {
+    // An OCCURRENCE of the owner issues as the owner (CIRISServer#391): the
+    // delegation is the self's act whichever of the self's devices signed it.
+    if !crate::auth::verify::signer_acts_for(&st.engine, &proof.issuer_key_id, &owner).await {
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "authority_not_the_owner",

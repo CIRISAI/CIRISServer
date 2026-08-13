@@ -324,6 +324,22 @@ data class FederationIdentitySetupState(
     /** The honest hardware-tier label ("YubiKey" / "TPM / Secure Enclave" /
      *  "software") the local node reported. */
     val hardwareLabel: String? = null,
+    // ── Look BEFORE you import (CIRISServer#404) ──────────────────────────
+    /** A folder the operator picked and has not yet committed to importing. */
+    val inspectDir: String? = null,
+    /** `true` while the node is being asked about [inspectDir]. */
+    val inspecting: Boolean = false,
+    /**
+     * What the node found in [inspectDir] — the IMPORTER's own discovery.
+     *
+     * `null` while [inspecting], and also when the node could not be asked at
+     * all. Those two are rendered differently on purpose: "we could not look" is
+     * not "we looked and it is empty", and a UI that shows one for the other
+     * tells the operator their good USB is bad.
+     */
+    val inspection: ai.ciris.mobile.shared.models.federation.KeysetInspection? = null,
+    /** Set when the probe itself failed, as opposed to finding nothing. */
+    val inspectUnavailable: Boolean = false,
 ) {
     /**
      * Is the entered [label] a usable, UNIQUE federation-identity name?

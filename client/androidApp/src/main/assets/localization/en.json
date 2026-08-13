@@ -2753,7 +2753,11 @@
     "wallet_transfer_success": "Transfer successful! TX: {tx}",
     "wallet_trust_degraded": "Hardware Trust Degraded",
     "wallet_warning": "Warning",
-    "accord_new_confer_duty": "Confer a duty on a federation ID"
+    "accord_new_confer_duty": "Confer a duty on a federation ID",
+    "keyset_inspect_checking": "Checking this folder…",
+    "keyset_inspect_unavailable": "Couldn't check this folder — the node didn't answer. This says nothing about whether your identity is in it; you can still try the import.",
+    "keyset_import_confirm": "Enrol this device",
+    "keyset_import_cancel": "Choose another folder"
   },
   "moderation": {
     "ladder": {

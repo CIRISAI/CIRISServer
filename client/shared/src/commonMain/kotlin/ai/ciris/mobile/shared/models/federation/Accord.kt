@@ -795,3 +795,38 @@ data class YubiKeyStatus(
     @SerialName("pkcs11_ed25519_ok") val pkcs11Ed25519Ok: Boolean? = null,
     val hint: String? = null,
 )
+
+// ========== POST /v1/self/identity/inspect (CIRISServer#404) ==========
+
+/**
+ * Request: which folder to look in.
+ */
+@kotlinx.serialization.Serializable
+data class KeysetInspectRequest(val dir: String)
+
+/**
+ * What a folder holds, **as the importer itself sees it**.
+ *
+ * The node answers this, not the app. "Is there a keyset here" has exactly one
+ * correct answer — the one `install_portable_software_keyset` will act on — and a
+ * second implementation here (glob for `*.seed`, hope) would drift from it in the
+ * worst direction: a picker that says "looks fine" and an import that then
+ * refuses. So this is the importer's own discovery, run without importing.
+ */
+@kotlinx.serialization.Serializable
+data class KeysetInspection(
+    val dir: String = "",
+    /** `true` iff the import would accept this folder. */
+    val importable: Boolean = false,
+    /** The discovered alias, when exactly one keyset is present. */
+    val alias: String? = null,
+    /** Which conventional files are present, by NAME (no bytes, no sizes). */
+    val files_present: List<String> = emptyList(),
+    /** The files the importer wanted and did not find. */
+    val files_missing: List<String> = emptyList(),
+    /**
+     * A sentence for the operator — shown whether or not [importable], because
+     * "this folder is fine" is as useful to see as why it is not.
+     */
+    val detail: String = "",
+)

@@ -690,64 +690,80 @@ pub async fn mint_portable_software_occurrence(
     })
 }
 
-/// **Install a portable software keyset** read from `source_dir` as THIS device's
-/// active user fed-ID, KEYED by the SAME `alias` it was minted under (so re-opening
-/// it on this device reproduces the SAME `key_id` — the occurrence identity is
-/// preserved). Copies the `<alias>.{ed25519,mldsa65}.seed` halves + writes the
-/// `<alias>.backend` marker into `dest_dir`, and re-seals the ML-DSA-65 half under
-/// `alias` into the platform `keys_dir()`.
+/// **Open a portable keyset TRANSIENTLY, to authorize with — never to keep.**
 ///
-/// The local node resolves the user signer via
-/// `hardware_user_local_signer(Software, alias, dest_dir)` — the Ed25519 seed is
-/// read from `dest_dir` and the sealed ML-DSA-65 half from `keys_dir()`, BOTH keyed
-/// by `alias`. So after this, opening the signer under `alias` yields the portable
-/// occurrence key. Returns the destination filenames written. No private bytes are
-/// returned.
-pub fn install_portable_software_keyset(
-    source_dir: &std::path::Path,
+/// Reads `<alias>.{ed25519,mldsa65}.seed` out of `dir` into memory and builds the
+/// hybrid signing identity they represent. Nothing is written, nothing is sealed,
+/// and the seeds are zeroized before this returns.
+///
+/// # Why this exists instead of installing the keyset
+///
+/// A self is a roster of `identity_occurrence` rows over one root identity, and
+/// `signer_acts_for` treats any ACTIVE occurrence as a full stand-in. So adding a
+/// device means minting a FRESH key on it and binding that as an occurrence — the
+/// existing key only ever AUTHORIZES the binding. Copying the private half onto
+/// the new device instead makes one key exist in two places, which is what makes
+/// `/v1/self/occurrence/revoke` meaningless: revoking a shared key kills every
+/// device that holds it (CIRISServer#391).
+///
+/// Possession of the identity's private key IS the authorization to enrol a
+/// device under it — the same standard the mint path applies to the locally-held
+/// primary. This function is how that possession is proven without persisting it.
+pub fn open_portable_identity_transiently(
+    dir: &std::path::Path,
     alias: &str,
-    dest_dir: &std::path::Path,
-) -> Result<Vec<String>> {
-    std::fs::create_dir_all(dest_dir)
-        .with_context(|| format!("create dest seed dir {}", dest_dir.display()))?;
+) -> Result<ciris_verify_core::self_at_login::HybridSigningIdentity> {
+    use ciris_crypto::{ClassicalSigner as _, Ed25519Signer, MlDsa65Signer};
+    use ciris_verify_core::self_at_login::HybridSigningIdentity;
+    use zeroize::Zeroize as _;
 
-    let mut installed = Vec::new();
+    let read32 = |name: String| -> Result<[u8; 32]> {
+        let path = dir.join(&name);
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "{} is {} bytes, not the 32 a seed must be",
+                path.display(),
+                bytes.len()
+            )
+        })?;
+        Ok(seed)
+    };
 
-    // (1) Ed25519 seed → dest_dir/<alias>.ed25519.seed (what the software signer
-    //     re-opens under the alias to reproduce the key_id).
-    let src_ed = source_dir.join(portable_ed_seed_name(alias));
-    let ed_bytes = std::fs::read(&src_ed)
-        .with_context(|| format!("read portable ed25519 seed {}", src_ed.display()))?;
-    let dst_ed = dest_dir.join(portable_ed_seed_name(alias));
-    write_seed_0600(&dst_ed, &ed_bytes)?;
-    installed.push(portable_ed_seed_name(alias));
+    let mut ed_seed = read32(portable_ed_seed_name(alias))?;
+    // The PQC half is REQUIRED here, not best-effort. An authorizer that can only
+    // sign classically cannot produce the hybrid signature a federation-tier row
+    // needs, so accepting one would enrol a device under an identity that cannot
+    // actually act — the "optional half" shape this substrate has paid for
+    // repeatedly.
+    let mut ml_seed = read32(portable_mldsa_seed_name(alias)).with_context(|| {
+        format!(
+            "the post-quantum half of {alias:?} is not in this folder — an identity missing it \
+             cannot sign a federation row, so it cannot authorize enrolling a device either. \
+             Copy the WHOLE keyset folder from the source device"
+        )
+    })?;
 
-    // (2) Custody marker → software.
-    let dst_marker = dest_dir.join(portable_backend_marker_name(alias));
-    std::fs::write(&dst_marker, "software")
-        .with_context(|| format!("write {}", dst_marker.display()))?;
-    installed.push(portable_backend_marker_name(alias));
+    let build = || -> Result<HybridSigningIdentity> {
+        let ed = Ed25519Signer::from_seed(&ed_seed)
+            .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;
+        let mldsa = MlDsa65Signer::from_seed(&ml_seed)
+            .map_err(|e| anyhow::anyhow!("build ml-dsa-65 signer from seed: {e}"))?;
+        let ed_pub = ed
+            .public_key()
+            .map_err(|e| anyhow::anyhow!("read ed25519 pubkey: {e}"))?;
+        // The key_id is derived from the ALIAS + pubkey, exactly as the mint did,
+        // so this resolves the SAME identity the keyset was minted as.
+        let key_id = fedcode::derive_key_id(alias, &ed_pub);
+        Ok(HybridSigningIdentity::new(key_id, ed, mldsa))
+    };
+    let out = build();
 
-    // (3) Re-seal the portable ML-DSA-65 half under `alias` into keys_dir() so
-    //     `hardware_user_local_signer` re-opens the PQC half. Best-effort: a missing
-    //     PQC seed degrades to Ed25519-only (logged), never a hard failure.
-    let src_ml = source_dir.join(portable_mldsa_seed_name(alias));
-    match std::fs::read(&src_ml) {
-        Ok(ml_bytes) => match reseal_portable_mldsa(&ml_bytes, alias) {
-            Ok(()) => installed.push(format!("{alias} (ML-DSA-65 re-sealed)")),
-            Err(e) => tracing::warn!(
-                alias = %alias, error = %e,
-                "associate: could not re-seal the ML-DSA-65 half — the associated identity may \
-                 sign Ed25519-only until the PQC half is provisioned"
-            ),
-        },
-        Err(e) => tracing::warn!(
-            path = %src_ml.display(), error = %e,
-            "associate: no portable ML-DSA-65 seed found — associating Ed25519-only"
-        ),
-    }
-
-    Ok(installed)
+    // Zeroize on BOTH paths — an early return on a malformed seed must not leave
+    // the other half sitting in freed memory.
+    ed_seed.zeroize();
+    ml_seed.zeroize();
+    out
 }
 
 /// Discover the portable keyset's **alias** in `dir` by its `<alias>.ed25519.seed`
@@ -775,30 +791,6 @@ pub fn find_portable_alias(dir: &std::path::Path) -> Result<String> {
             dir.display()
         ),
     }
-}
-
-/// Re-seal a raw 32-byte ML-DSA-65 seed under `alias` into the platform
-/// `keys_dir()` so `get_platform_sealed_mldsa65_signer(alias, keys_dir())` re-opens
-/// it. Uses the keyring's `open_or_create(alias, keys_dir, adopt_seed)` import path
-/// — the software backend AES-GCM-SEALS the adopted seed at rest (not a plaintext
-/// file), so this is a true re-seal, not a raw copy. Idempotent: if a seed is
-/// already sealed under `alias` it is adopted verbatim and we error iff it differs
-/// (never silently clobber a distinct local PQC half).
-fn reseal_portable_mldsa(seed: &[u8], alias: &str) -> Result<()> {
-    use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
-
-    let seed32: [u8; 32] = seed
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("ML-DSA-65 seed must be 32 bytes, got {}", seed.len()))?;
-    let keys_dir = ciris_verify_core::ceg_outbox::keys_dir();
-    std::fs::create_dir_all(&keys_dir)
-        .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
-    // adopt_seed seals the supplied seed ONLY when no seed is yet stored under the
-    // alias; an existing sealed seed is adopted as-is. Building the signer proves
-    // the seal round-trips.
-    SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&seed32))
-        .map_err(|e| anyhow::anyhow!("seal portable ML-DSA-65 seed under {alias}: {e}"))?;
-    Ok(())
 }
 
 /// Compose the minted USER identity into a persist
@@ -1265,7 +1257,165 @@ pub fn router(engine: Arc<Engine>, keystore_alias: String, seed_dir: PathBuf) ->
             "/v1/self/identity",
             axum::routing::post(self_identity_handler),
         )
+        // Read-only probe; no state needed (it answers about a path, not about
+        // this node's identity).
+        .route(
+            "/v1/self/identity/inspect",
+            axum::routing::post(inspect_handler),
+        )
         .with_state(state)
+}
+
+// ─── Inspect a folder BEFORE importing from it (CIRISServer#404) ────────────
+
+/// What a folder holds, as the importer itself sees it.
+///
+/// # Why the node answers this and not the app
+///
+/// "Is there a keyset here" has exactly one correct answer: the one
+/// [`find_portable_alias`] and [`install_portable_software_keyset`] will act on.
+/// A second implementation in Kotlin — globbing for `*.seed` and hoping — is the
+/// two-authors shape this codebase keeps paying for, and it fails in the worst
+/// direction: the picker says "looks fine" and the import then refuses, or worse,
+/// says nothing and the operator cannot tell an empty USB from a full one.
+///
+/// So the probe IS the importer's own discovery, run without importing.
+///
+/// # `importable` and `complete` are TWO questions
+///
+/// They were one boolean for about an hour, and that hour produced a false alarm
+/// on a perfectly good identity. A PORTABLE SOURCE folder carries all three files
+/// side by side; an INSTALLED destination carries only the Ed25519 seed and the
+/// marker, because [`install_portable_software_keyset`] RE-SEALS the ML-DSA-65
+/// half into `keys_dir()` rather than copying it. Judge the second by the first's
+/// rule and every correctly-installed identity reads as broken — a false alarm on
+/// precisely the state the importer produces.
+///
+/// So:
+/// - [`Self::importable`] answers *"will the import proceed?"*, and it matches
+///   what the importer does — including on a half keyset, which it accepts.
+/// - [`Self::complete`] answers *"will the result be able to sign a federation
+///   row on a NEW device?"*, which is the question a source folder is really
+///   being asked.
+///
+/// A caller that wants one boolean must choose which; there isn't one that means
+/// both.
+#[derive(Debug, serde::Serialize)]
+pub struct KeysetInspection {
+    /// The folder inspected, echoed back (the app may be showing several).
+    pub dir: String,
+    /// `true` iff [`install_portable_software_keyset`] would proceed on this
+    /// folder. It does NOT imply the result can sign post-quantum — see
+    /// [`Self::complete`].
+    pub importable: bool,
+    /// `true` iff the PQC half travels WITH this folder, so importing it onto a
+    /// device that has never held this identity yields one that can author a
+    /// federation-tier row.
+    ///
+    /// `false` on a folder carrying only the classical half. That is not
+    /// necessarily a fault — an INSTALLED identity looks exactly like this, with
+    /// its PQC half sealed in `keys_dir()` — which is why this is reported beside
+    /// [`Self::importable`] rather than instead of it.
+    pub complete: bool,
+    /// The discovered alias, when exactly one keyset is present.
+    pub alias: Option<String>,
+    /// Which of the three conventional files are present, by NAME only — no
+    /// private bytes, no sizes that could narrow a key, ever leave the node.
+    pub files_present: Vec<String>,
+    /// The conventional files not found in this folder.
+    pub files_missing: Vec<String>,
+    /// A sentence for the operator. Present whether or not [`Self::importable`],
+    /// because "this folder is fine" is as useful to show as why it is not.
+    pub detail: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct InspectRequest {
+    /// Absolute path to inspect.
+    pub dir: String,
+}
+
+/// `POST /v1/self/identity/inspect` — **does this folder hold a portable keyset?**
+///
+/// Read-only and side-effect free: it discovers, it does not install. Loopback-
+/// gated like the rest of the setup surface, because it takes a local filesystem
+/// path and reports what is at it.
+async fn inspect_handler(Json(req): Json<InspectRequest>) -> Response {
+    let dir = PathBuf::from(req.dir.trim());
+    let shown = dir.display().to_string();
+
+    if !dir.is_dir() {
+        return Json(KeysetInspection {
+            dir: shown.clone(),
+            importable: false,
+            complete: false,
+            alias: None,
+            files_present: Vec::new(),
+            files_missing: Vec::new(),
+            detail: format!("{shown} is not a folder this node can read."),
+        })
+        .into_response();
+    }
+
+    // THE importer's own discovery — not a second opinion about it.
+    let alias = match find_portable_alias(&dir) {
+        Ok(a) => a,
+        Err(e) => {
+            return Json(KeysetInspection {
+                dir: shown,
+                importable: false,
+                complete: false,
+                alias: None,
+                files_present: Vec::new(),
+                files_missing: vec!["<alias>.ed25519.seed".to_string()],
+                // `find_portable_alias` already distinguishes "none here" from
+                // "several here", and those are different operator situations —
+                // one is the wrong folder, the other is a folder holding two
+                // identities. Carry its sentence rather than flattening both to
+                // "invalid".
+                detail: e.to_string(),
+            })
+            .into_response();
+        }
+    };
+
+    let wanted = [
+        portable_ed_seed_name(&alias),
+        portable_mldsa_seed_name(&alias),
+        portable_backend_marker_name(&alias),
+    ];
+    let (present, missing): (Vec<String>, Vec<String>) =
+        wanted.iter().cloned().partition(|n| dir.join(n).is_file());
+
+    // The Ed25519 seed is present by construction (it is what the alias was
+    // matched on), so the import proceeds. The PQC half is the one that travels
+    // or does not.
+    let importable = true;
+    let complete = !missing.contains(&portable_mldsa_seed_name(&alias));
+
+    let detail = if complete {
+        format!("Portable identity {alias:?} — Ed25519 + ML-DSA-65 both here. Ready to import.")
+    } else {
+        format!(
+            "Found {alias:?}, but only its classical half is in this folder — no {}. The import \
+             will still work IF this device already holds the sealed post-quantum half for \
+             {alias:?} (an already-installed identity looks exactly like this). Moving to a NEW \
+             device needs the whole source folder, or the imported identity will not be able to \
+             sign a federation row.",
+            portable_mldsa_seed_name(&alias),
+        )
+    };
+
+    Json(KeysetInspection {
+        dir: shown,
+        importable,
+        complete,
+        alias: Some(alias),
+        files_present: present,
+        files_missing: missing,
+        detail,
+    })
+    .into_response()
 }
 
 /// Sanity helper: does this fedcode decode to a USER identity with `key_id`?

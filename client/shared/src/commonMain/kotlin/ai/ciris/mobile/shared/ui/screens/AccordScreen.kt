@@ -288,6 +288,7 @@ fun AccordScreen(
             // Save flow: pick a folder, then write the partial JSON into it.
             DirectoryPickerDialog(
                 show = saveDir == "",
+                purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.SaveFile,
                 onDirectoryPicked = { dir ->
                     saveDir = null
                     val json = lastCoscrubJson
@@ -1452,6 +1453,7 @@ private fun RemintTrustRootSheet(
     // screen's co-scrub partial save).
     DirectoryPickerDialog(
         show = bundleSaveDir == "",
+        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.SaveFile,
         onDirectoryPicked = { dir ->
             bundleSaveDir = null
             val json = seed?.prettyJson

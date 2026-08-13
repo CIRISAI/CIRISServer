@@ -1293,12 +1293,16 @@ pub async fn promote_owner_binding_to_federation(
     // …and the key doing the promoting MUST be that owner's. Widening the
     // audience of an ownership claim is the claimant's act; a different signer
     // making it is a third party publishing someone else's claim.
-    if owner_signer.key_id() != owner {
+    // An OCCURRENCE of the owner is the owner (CIRISServer#391) — a device enrolled
+    // the correct way signs with its OWN fresh key, bound as an occurrence, so an
+    // id equality check here would refuse every such device from announcing.
+    if !crate::auth::verify::signer_acts_for(engine, owner_signer.key_id(), &owner).await {
         return Err(OwnershipError::Validation(format!(
             "promote refused: this node is owner-bound to {owner}, but the promotion would be \
-             signed by {}. Widening the audience of an ownership claim is the OWNER's act — \
-             CIRISPersist#643 puts `cohort_scope` inside the signed bytes precisely so a node \
-             cannot publish its owner's claim more widely than the owner stated",
+             signed by {}, which is neither that identity nor an active occurrence of it. \
+             Widening the audience of an ownership claim is the OWNER's act — CIRISPersist#643 \
+             puts `cohort_scope` inside the signed bytes precisely so a node cannot publish its \
+             owner's claim more widely than the owner stated",
             owner_signer.key_id(),
         )));
     }

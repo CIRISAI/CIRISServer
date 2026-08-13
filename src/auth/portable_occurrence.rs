@@ -175,15 +175,24 @@ async fn resolve_owner_primary(
             }
             Err(e) => return Err(http_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
         };
-    // THE proof-of-possession check: the locally-held primary signer must BE the
-    // bound owner's self. (Defense-in-depth; the alias re-open already targets the
-    // owner's keystore blob, but we never bind under an id the node can't sign for.)
-    if signer.key_id() != identity_key_id {
+    // THE proof-of-possession check: the locally-held signer must be able to ACT
+    // FOR the bound owner's self — either it IS the primary, or it is an active
+    // occurrence of it.
+    //
+    // An OCCURRENCE of the owner is the owner (CIRISServer#391). `signer_acts_for`
+    // is the predicate — `signer == identity || signer is an ACTIVE occurrence of
+    // it` — and comparing key ids directly is the identity-vs-occurrence axis
+    // fused into one name. A device enrolled the CORRECT way holds its own fresh
+    // key bound as an occurrence, so its `key_id()` is deliberately NOT the
+    // identity's; an equality check refuses exactly the devices the umbrella model
+    // exists to admit.
+    if !crate::auth::verify::signer_acts_for(&st.engine, signer.key_id(), &identity_key_id).await {
         return Err(http_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
-                "owner primary mismatch: bound owner is {identity_key_id} but the local primary \
-                 signer is {} — refusing to bind a portable occurrence",
+                "owner primary mismatch: bound owner is {identity_key_id} and the local signer \
+                 {} is neither that identity nor an active occurrence of it — refusing to bind \
+                 a portable occurrence",
                 signer.key_id()
             ),
         ));
@@ -347,24 +356,54 @@ struct AssociateRequest {
     yubikey: bool,
 }
 
+/// `POST /v1/self/associate` — **enrol THIS device as an occurrence of the
+/// identity whose keyset is in `source_dir`.**
+///
+/// # What changed, and why (CIRISServer#391)
+///
+/// This used to COPY the Ed25519 seed off the USB onto this device and re-seal the
+/// ML-DSA half into `keys_dir()`, so the identity's private half then existed in
+/// two places. It was written as a last-resort recovery path and documented as
+/// one — but nothing enforced that, and the first-run wizard's "import my existing
+/// fed-ID" button called it. So the ORDINARY new-device flow was the
+/// key-duplicating one, which is what makes `/v1/self/occurrence/revoke`
+/// meaningless: revoking a shared key kills every device holding it.
+///
+/// It now does what the umbrella model always said: **mint a fresh key HERE, and
+/// let the existing identity merely AUTHORIZE the binding.** A self is a roster of
+/// `identity_occurrence` rows, and `signer_acts_for` treats any ACTIVE occurrence
+/// as a full stand-in — so this device gets the identical privileges of the
+/// identity, and gets them under a key only it holds. One device, one key,
+/// separately revocable.
+///
+/// # The authorization
+///
+/// **Possession of the identity's private key IS the authorization** to enrol a
+/// device under it. That is the same standard the mint path applies to the
+/// locally-held primary (`resolve_owner_primary` proves possession and calls it
+/// apex authority); here the primary is on the USB rather than in the keystore.
+/// The consequence is deliberate and worth stating plainly: whoever holds the
+/// keyset can enrol a device. That is what holding a private key means, and it is
+/// why the seeds are read transiently, never written, and zeroized — see
+/// [`crate::identity::open_portable_identity_transiently`].
 async fn associate_handler(
     State(st): State<PortableState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    // Owner-gated ONCE the node is owned (replace-in-place is a self-service
-    // re-home by the current owner). During first-run (no ROOT yet) there is no
-    // owner to authenticate as, and importing the founder's fed-ID is itself how
-    // the node becomes owned — so the gate opens (the route is loopback-only).
-    // Mirrors self_identity_handler / claim_remote_handler. This is what makes
-    // "import an existing fed-ID at the first-run wizard" possible.
+    // Owner-gated ONCE the node is owned (enrolling another device is the owner's
+    // own act). During first-run (no ROOT yet) there is no owner to authenticate
+    // as, and enrolling the founder's identity is itself how the node becomes
+    // owned — so the gate opens (the route is loopback-only). Mirrors
+    // self_identity_handler / claim_remote_handler.
     if !crate::auth::bootstrap::is_first_run(&st.engine).await {
         if let Err(resp) = require_owner(&st.engine, &headers).await {
             return resp;
         }
     } else {
         tracing::info!(
-            "associate: first-run (no ROOT) — importing fed-ID without an owner session (loopback-only)"
+            "associate: first-run (no ROOT) — enrolling this device under the supplied fed-ID \
+             without an owner session (loopback-only)"
         );
     }
     let req: AssociateRequest = if body.is_empty() {
@@ -377,15 +416,10 @@ async fn associate_handler(
     };
 
     if req.yubikey {
-        // HONESTLY GATED: associating a YubiKey-backed fed-ID as THIS device's user
-        // identity needs the on-device PKCS#11 read wired through here (the accord
-        // provision path has the machinery, but adopting it as the *user fed-ID*
-        // signer — re-keying the local primary to a token — is a deeper change than
-        // this pass covers). Ship the directory path; gate the token branch clearly.
         return http_err(
             StatusCode::NOT_IMPLEMENTED,
-            "associating a YubiKey-backed fed-ID is not yet implemented — use the directory \
-             (source_dir) path to associate a portable software keyset for now",
+            "enrolling this device from a YubiKey-held fed-ID is not yet implemented — use the \
+             directory (source_dir) path for a portable software keyset for now",
         );
     }
 
@@ -411,101 +445,138 @@ async fn associate_handler(
         );
     }
 
-    // Find the portable keyset's ALIAS in source_dir (the `<alias>.ed25519.seed`
-    // stem). The alias is what the install + re-open key on, so re-opening
-    // reproduces the occurrence key_id.
+    // (1) Which identity is on the USB?
     let alias = match crate::identity::find_portable_alias(&source_dir) {
         Ok(a) => a,
         Err(e) => return http_err(StatusCode::BAD_REQUEST, format!("{e}")),
     };
 
-    // INSTALL: copy the Ed25519 seed + re-seal the ML-DSA half + write the `.backend`
-    // marker into THIS node's user_seed_dir under the SAME alias, so the local user
-    // signer re-opens as this occurrence (its key_id reproduces). (The keyset is
-    // already a registered occurrence of the self from the portable-mint step, so
-    // this device is recognized as the owner.)
-    let dest_dir = crate::user_seed_dir(&st.cfg);
-    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-        return http_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create user seed dir {}: {e}", dest_dir.display()),
-        );
-    }
-    // RECOVERY ONLY — this is the one act in the system that MOVES private key
-    // material (CIRISServer#391). It copies the Ed25519 seed off the USB onto
-    // this device's disk, so the same key then exists in two places.
-    //
-    // That defeats the umbrella model the rest of this module implements. A self
-    // is a roster of `identity_occurrence` rows over one root identity, and
-    // `signer_acts_for` treats any ACTIVE occurrence as a full stand-in — so the
-    // correct way to add a device is to MINT A FRESH KEY on it
-    // (`/v1/self/occurrence/portable` does exactly this, via `random::fill`, and
-    // the existing key only ever AUTHORIZES the binding) and bind that as an
-    // occurrence. One key per device is what makes
-    // `/v1/self/occurrence/revoke` mean anything: revoking a shared key kills
-    // every device that holds it.
-    //
-    // Kept because it is the last-resort path when NO surviving occurrence exists
-    // to authorize an enrollment. Loud, because a copied key is a permanent
-    // widening of custody and the operator should be able to see it happened.
-    tracing::warn!(
-        alias = %alias,
-        source = %source_dir.display(),
-        dest = %dest_dir.display(),
-        "RECOVERY: copying portable key material onto this device — the private half will \
-         exist in TWO places. Prefer enrolling a FRESH key as an occurrence \
-         (/v1/self/occurrence/portable) so this device can be revoked on its own \
-         (CIRISServer#391)"
-    );
-    match crate::identity::install_portable_software_keyset(&source_dir, &alias, &dest_dir) {
-        Ok(installed) => {
-            // Re-open under the alias to report the resolved occurrence key_id.
-            let resolved_key_id = match crate::identity::hardware_user_local_signer(
-                crate::identity::UserIdentityBackend::Software,
-                &alias,
-                dest_dir.clone(),
-            )
-            .await
-            {
-                Ok(s) => Some(s.key_id().to_string()),
+    // (2) PROVE possession — open the keyset transiently. The seeds are read into
+    //     memory, used to build the authorizing identity, and zeroized. Nothing is
+    //     written to this device. This is the whole authorization.
+    let authorizer = match crate::identity::open_portable_identity_transiently(&source_dir, &alias)
+    {
+        Ok(id) => id,
+        Err(e) => return http_err(StatusCode::BAD_REQUEST, format!("{e}")),
+    };
+    let identity_key_id =
+        ciris_verify_core::self_at_login::SelfSigner::key_id(&authorizer).to_string();
+
+    // (3) Admit the identity's PUBLIC key if this node has never seen it (a fresh
+    //     device has not). Public only — produced by the authorizer we just proved
+    //     possession of, through the fail-secure registration gate.
+    let known = match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&identity_key_id)
+        .await
+    {
+        Ok(k) => k.is_some(),
+        Err(e) => return http_err(StatusCode::SERVICE_UNAVAILABLE, format!("directory: {e}")),
+    };
+    if !known {
+        let now = chrono::Utc::now().to_rfc3339();
+        let v_rec = match ciris_verify_core::federation_self_record::produce_self_key_record(
+            &authorizer,
+            ciris_persist::federation::types::identity_type::USER,
+            &now,
+            &[],
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return http_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("produce the identity's self-signed record: {e}"),
+                )
+            }
+        };
+        let signed: ciris_persist::federation::SignedKeyRecord =
+            match serde_json::to_value(&v_rec).and_then(serde_json::from_value) {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(alias = %alias, error = %e,
-                        "associate: installed but could not re-open to report the key_id");
-                    None
+                    return http_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("bridge verify->persist SignedKeyRecord: {e}"),
+                    )
                 }
             };
-            // REPLACE this device's user identity with the imported one: point the
-            // active-user-alias at the imported keyset so claim-remote / upgrade-owner
-            // / set-age (all resolve the alias at request time) re-own + operate under
-            // the IMPORTED fed-ID, not the throwaway wizard `<node>-user`. One device =
-            // one person; import replaces, it does not coexist (families are the
-            // multi-person construct, not two IDs on one node).
-            if let Err(e) = crate::write_active_user_alias(&dest_dir, &alias) {
-                tracing::warn!(error = %e, alias = %alias,
-                    "associate: could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
-            }
-            tracing::info!(
-                alias = %alias,
-                resolved_key_id = ?resolved_key_id,
-                "associated (REPLACED) this device's user fed-ID with the imported keyset; \
-                 claim/upgrade-owner will re-own the node under it"
+        if let Err(e) = st.engine.register_federation_key(signed).await {
+            return http_err(
+                StatusCode::BAD_REQUEST,
+                format!("admit the identity's public key: {e}"),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "alias": alias,
-                    "associated_key_id": resolved_key_id,
-                    "device_class": "portable_software",
-                    "files_installed": installed,
-                })),
-            )
-                .into_response()
         }
-        Err(e) => http_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("install portable keyset: {e}"),
-        ),
     }
+
+    // (4) Mint a FRESH keyset for THIS device, in this node's own seed dir. This is
+    //     the key the device will sign as, and the only device that will ever hold
+    //     it — which is what makes revoking this one device possible.
+    let dest_dir = crate::user_seed_dir(&st.cfg);
+    let device_alias = format!("{alias}-device-{}", short_unique());
+    let keyset =
+        match crate::identity::mint_portable_software_occurrence(&dest_dir, &device_alias).await {
+            Ok(k) => k,
+            Err(e) => {
+                return http_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("mint this device's occurrence keyset: {e}"),
+                )
+            }
+        };
+
+    // (5) BIND it as an active occurrence of the identity — the three persist
+    //     effects (register + put_identity_occurrence + self-DEK cascade). After
+    //     this, `signer_acts_for(device_key, identity) == true`, so this device
+    //     holds the identity's full privileges.
+    if let Err(e) = crate::auth::occurrence::bind_occurrence_core(
+        &st.engine,
+        &identity_key_id,
+        &keyset.key_id,
+        "portable_software",
+        None,
+        keyset.encryption_pubkeys.clone(),
+        Some(keyset.key_record.clone()),
+    )
+    .await
+    {
+        return http_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("bind this device as an occurrence of {identity_key_id}: {e}"),
+        );
+    }
+
+    // (6) Point this device's active user alias at ITS OWN keyset, so claim-remote
+    //     / upgrade-owner / set-age (all resolve the alias at request time) operate
+    //     as this occurrence — which acts for the identity.
+    if let Err(e) = crate::write_active_user_alias(&dest_dir, &device_alias) {
+        tracing::warn!(error = %e, alias = %device_alias,
+            "associate: could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
+    }
+
+    tracing::info!(
+        identity_key_id = %identity_key_id,
+        occurrence_key_id = %keyset.key_id,
+        device_alias = %device_alias,
+        "enrolled this device as an OCCURRENCE of {identity_key_id} — a fresh key was minted \
+         here and the supplied keyset only authorized the binding. No private key material was \
+         copied (CIRISServer#391)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "alias": device_alias,
+            "identity_key_id": identity_key_id,
+            "associated_key_id": keyset.key_id,
+            "device_class": "portable_software",
+            // The wire contract keeps this key; it now names what was MINTED here
+            // rather than what was copied, and copying is no longer a thing that
+            // happens.
+            "files_installed": keyset.files_written,
+        })),
+    )
+        .into_response()
 }
 
 /// Slugify a human label into an alias-safe token (`[a-z0-9-]`), so a portable
@@ -534,11 +605,6 @@ fn short_unique() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// The portable-occurrence router — merge onto the read-API listener behind the
-/// loopback guard (see `compose.rs`). Owner-gated per-handler.
-///
-/// **It takes no key id** (CIRISServer#372 Level 2): the node whose
-/// owner-binding is read is resolved from the engine at request time.
 pub fn router(engine: Arc<Engine>, cfg: Arc<ServerConfig>) -> Router {
     let state = PortableState { engine, cfg };
     Router::new()

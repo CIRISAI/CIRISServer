@@ -2411,6 +2411,54 @@ class CIRISApiClient(
         }
     }
 
+    /**
+     * **Does this folder hold a portable keyset?** (CIRISServer#404)
+     *
+     * Read-only: it discovers, it does not install. Ask it after a folder is
+     * picked and before the operator commits, so "I have no idea if this folder
+     * has the materials" stops being the state they are left in.
+     *
+     * A transport failure is NOT reported as "no keyset" — that would turn "we
+     * could not ask" into "we asked and there is nothing there", which are
+     * different facts with different remedies. It returns `null` for the first
+     * and a verdict for the second, and the caller must render them differently.
+     */
+    suspend fun inspectKeysetFolder(
+        dir: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.KeysetInspection? {
+        val method = "inspectKeysetFolder"
+        logInfo(method, "POST $nodeUrl/v1/self/identity/inspect dir=$dir")
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.KeysetInspectRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.KeysetInspectRequest(dir = dir),
+            )
+            val response = client.post("$nodeUrl/v1/self/identity/inspect") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logWarn(method, "inspect refused: ${response.status}: ${raw.take(200)}")
+                null
+            } else {
+                jsonConfig.decodeFromString(
+                    ai.ciris.mobile.shared.models.federation.KeysetInspection.serializer(),
+                    raw,
+                )
+            }
+        } catch (e: Exception) {
+            logWarn(method, "inspect unavailable: ${e.message}")
+            null
+        } finally {
+            client.close()
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  THE MESH-CONFIG + COMMONS SURFACES (CIRISServer #346/#365 + #367)
     //  src/mesh_config_surface.rs · src/commons_surface.rs

@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 @Composable
 actual fun DirectoryPickerDialog(
     show: Boolean,
+    purpose: DirectoryPickerPurpose,
     onDirectoryPicked: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -18,14 +19,14 @@ actual fun DirectoryPickerDialog(
         if (!show) return@LaunchedEffect
         // Dispatchers.IO only to get OFF the Compose frame thread; `chooseDirectory`
         // hops to the EDT itself. Swing must never be touched from an IO thread.
-        val path = withContext(Dispatchers.IO) { chooseDirectory() }
+        val path = withContext(Dispatchers.IO) { chooseDirectory(purpose) }
         if (path != null) onDirectoryPicked(path) else onDismiss()
     }
 }
 
 /**
- * Show the USB folder picker and return the chosen absolute path, or `null` if the
- * holder cancelled — or if the picker failed for any reason.
+ * Show the folder picker for [purpose] and return the chosen absolute path, or
+ * `null` if the operator cancelled — or if the picker failed for any reason.
  *
  * ## Why this runs on the EDT, and why that is not optional
  *
@@ -59,14 +60,31 @@ actual fun DirectoryPickerDialog(
  *    terminate a node that is holding an in-progress hardware ceremony. The holder
  *    can still type the path.
  */
-private fun chooseDirectory(): String? {
-    // Start at a removable-media mount root when one exists, so the holder lands
-    // near their USB key instead of $HOME. Resolved BEFORE touching Swing.
+private fun chooseDirectory(purpose: DirectoryPickerPurpose): String? {
+    // Resolved BEFORE touching Swing — see (2) below.
+    //
+    // The title and start directory follow the PURPOSE, and used to follow neither:
+    // both were hardcoded for USB custody, so "save the genesis seed" opened a
+    // dialog headed *Select the mounted USB folder* rooted at /media. See
+    // [DirectoryPickerPurpose].
     val user = System.getProperty("user.name") ?: ""
-    val start: File? =
+    val removable: File? =
         listOf("/media/$user", "/run/media/$user", "/media", "/Volumes")
             .map(::File)
             .firstOrNull { it.isDirectory && it.canRead() }
+    val home: File? = System.getProperty("user.home")?.let(::File)?.takeIf { it.isDirectory }
+
+    val (title, start) =
+        when (purpose) {
+            // Land near the USB key rather than $HOME; fall back to home when no
+            // removable mount exists, because an empty chooser helps nobody.
+            DirectoryPickerPurpose.UsbCustody ->
+                "Select the mounted USB folder" to (removable ?: home)
+            // The answer is usually home or Documents. A USB is reachable from
+            // there like any other folder; the reverse is not true, which is why
+            // the wrong default cost an operator their seed's location.
+            DirectoryPickerPurpose.SaveFile -> "Choose where to save the file" to home
+        }
 
     val picked = arrayOfNulls<String>(1)
 
@@ -75,7 +93,7 @@ private fun chooseDirectory(): String? {
             // Directory via the constructor — see (2) above.
             val chooser =
                 JFileChooser(start).apply {
-                    dialogTitle = "Select the mounted USB folder"
+                    dialogTitle = title
                     fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
                     isMultiSelectionEnabled = false
                 }

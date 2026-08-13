@@ -752,6 +752,61 @@ class SetupViewModel(
      * self-claim (the auto-mint-on-Next + mint-if-absent backstop both no-op once
      * an identity is present).
      */
+    /**
+     * **Look before you import** (CIRISServer#404) — ask the node what is in
+     * `dir` and hold the answer, without importing anything.
+     *
+     * The wizard used to import the instant a folder was picked, so the operator
+     * found out whether the folder held their identity by watching the import
+     * either work or fail. Both outcomes are irreversible-feeling in the middle
+     * of first-run setup, and one of them replaces this device's identity.
+     */
+    fun inspectKeysetDir(dir: String) {
+        val client = apiClient as? CIRISApiClient ?: return
+        val src = dir.trim()
+        if (src.isBlank()) return
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = src,
+                inspecting = true,
+                inspection = null,
+                inspectUnavailable = false,
+                error = null,
+            )
+        )
+        viewModelScope.launch {
+            val verdict = client.inspectKeysetFolder(dir = src)
+            _state.value = _state.value.copy(
+                federationIdentity = _state.value.federationIdentity.copy(
+                    inspecting = false,
+                    inspection = verdict,
+                    // A null verdict means the NODE could not be asked — not that
+                    // the folder is empty. Kept as its own flag so the screen can
+                    // say which happened.
+                    inspectUnavailable = verdict == null,
+                )
+            )
+            PlatformLogger.i(
+                TAG,
+                "inspectKeysetDir($src): " +
+                    (verdict?.let { "importable=${it.importable} alias=${it.alias}" }
+                        ?: "node unavailable"),
+            )
+        }
+    }
+
+    /** Drop a pending inspection (the operator backed out of the folder). */
+    fun clearKeysetInspection() {
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = null,
+                inspecting = false,
+                inspection = null,
+                inspectUnavailable = false,
+            )
+        )
+    }
+
     fun importPortableFromUsb(sourceDir: String) {
         val client = apiClient as? CIRISApiClient ?: run {
             _state.value = _state.value.copy(
