@@ -528,6 +528,30 @@ async fn the_nodes_own_key_is_not_exempt() {
 /// keeps the detector from being a machine for manufacturing accusations. Two
 /// rows carrying the SAME signed statement (a replicated duplicate) are one
 /// claim recorded twice.
+///
+/// FAILING ON persist v31.0.0, and the cause is in `src/equivocation.rs`, not in
+/// this fixture. Measured on the pass this test runs:
+/// `same_statement=0 contradictions=1 hard_cases=1 differing_fields=["row"]`.
+///
+/// `classify_pair`'s first arm is `a.original_content_hash == b.original_content_hash`
+/// — "identical signed bytes are the same statement". CIRISPersist#643 stamps a
+/// seven-column `row` mirror INTO the signed envelope, and that mirror carries
+/// the row's own `attestation_id`. Two independently-minted rows therefore can
+/// never share a content hash again, so the `SameStatement` arm is unreachable,
+/// every duplicate falls through to the instant test, and a pair at one instant
+/// is classified `Contradiction`. The detector then writes a CC 6.1.1 N4
+/// `hard_case` accusing an honest producer of equivocating with itself — the
+/// exact outcome this test's own doc says it exists to prevent.
+///
+/// `a_peers_two_claims_at_one_instant_are_detected_and_recorded` is the same
+/// defect's quieter half: `differing_fields` names `row` on every pair, because
+/// the mirror differs by construction.
+///
+/// The fix is one place: compare the SEMANTIC envelope, with the bound mirror
+/// excluded — `classify_pair` and `differing_fields` both reading through a
+/// single "strip what the emit door stamped" projection, so the detector cannot
+/// come to disagree with itself about what a statement is. Left RED because a
+/// detector that manufactures accusations must not be silently accepted.
 #[tokio::test]
 async fn a_duplicated_statement_records_nothing() {
     let (engine, node_key_id) = fixture().await;
@@ -553,8 +577,11 @@ async fn a_duplicated_statement_records_nothing() {
     let report = equivocation::run_pass(&engine, &node_key_id, &DetectorConfig::default())
         .await
         .expect("detector pass");
-    panic!("DIAG same_statement={} contradictions={} superseded={} pairs={} hard_cases={} differing={:?}",
-        report.same_statement, report.contradictions.len(), report.superseded,
-        report.pairs_compared, hard_cases(&engine).await.len(),
-        report.contradictions.first().map(|c| c.differing_fields.clone()));
+    assert_eq!(
+        report.same_statement, 1,
+        "the duplicate pair must be seen and classified, not missed (rows_scanned={})",
+        report.rows_scanned
+    );
+    assert!(report.contradictions.is_empty());
+    assert!(hard_cases(&engine).await.is_empty());
 }

@@ -54,9 +54,8 @@ use ciris_persist::federation::reverse_quorum::{
     ESCALATION_RESPONDENT_FLOOR, OBJECTION_THRESHOLD,
 };
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    Community, CommunityMember, KeyRecord, ScrubSig, SignedAttestation, SignedCommunity,
-    SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, Attestation, Community,
+    CommunityMember, KeyRecord, ScrubSig, SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::Cohort;
 use ciris_persist::prelude::{Engine, LocalSigner};
@@ -346,7 +345,10 @@ async fn emit_action(
     // `attesting_key_id` and `asserted_at` off it — and `asserted_at` is now the
     // stamped, truncated instant rather than a second clock read, which is the
     // point.
-    let row = ciris_server::attest::Emit::stamp(author.key_id(), spec)
+    // `stamp_at`, not `stamp`: callers choose the action's instant and the whole
+    // escalation clock is a function of it, so letting the door read the wall
+    // clock instead would silently discard the argument.
+    let row = ciris_server::attest::Emit::stamp_at(author.key_id(), spec, asserted_at)
         .expect("stamp action")
         .sign_and_assemble(ciris_server::attest::KeySigner::Local(&author))
         .await
