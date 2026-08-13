@@ -1137,6 +1137,9 @@ class SetupViewModel(
                         error = "claim PIN not captured — this node's one-time ownership " +
                             "PIN was not seen on its console. You can claim ownership later " +
                             "from the Network surface using the PIN printed on the node.",
+                        // The message itself says "later", so the panel must not
+                        // say "not recoverable by retrying".
+                        errorRecoverable = true,
                     )
                 )
                 return@launch
@@ -1481,6 +1484,12 @@ class SetupViewModel(
                             "Couldn't claim ownership of this device's local node: " +
                                 "${e.message ?: "unknown error"}"
                         },
+                        // A REJECTED pin will be rejected again — the node has
+                        // already been claimed, or the pin is spent. Anything
+                        // else here is an exception reaching the local node: it
+                        // may not have finished starting, so retrying is exactly
+                        // the remedy.
+                        errorRecoverable = !isPinRejection,
                     )
                 )
             }

@@ -134,11 +134,25 @@ async fn list_roots(State(st): State<TrustRootState>) -> Response {
         .into_response()
 }
 
-/// The roots this node might have: the accord family, plus any charter-declared
-/// root in the baked bundle. Deliberately a small, named set rather than a scan —
-/// a trust-root list assembled by pattern-matching the graph would grow entries
-/// nobody chose.
+/// The roots this node might have: the accord family, any charter-declared root
+/// in the baked bundle, and **every root this node has actually accepted**.
+///
+/// Deliberately not a scan — a trust-root list assembled by pattern-matching the
+/// graph would grow entries nobody chose. But the first two alone were too small
+/// in the direction that matters: `POST /v1/trust-root/import` installs and
+/// ACCEPTS a root whose charter names a custom or solo identity, and such a root
+/// appeared nowhere here. The node could be entrenched under a root this endpoint
+/// did not list — so an operator could not read its id, and could not pass it to
+/// `DELETE /v1/trust-root/{id}` to un-trust it. A root you cannot name is a root
+/// you cannot revoke.
+///
+/// The third source is not a scan either: acceptance is a `delegates_to(node ->
+/// root)` this node AUTHORED (see [`crate::mesh_genesis::accept_trust_root`]), so
+/// listing the roots of this node's own outbound edges lists exactly the roots
+/// someone chose here. Nothing arrives from a peer.
 async fn candidate_roots(st: &TrustRootState) -> Vec<String> {
+    use ciris_persist::federation::types::attestation_type;
+
     let mut out =
         vec![ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_string()];
     if let Ok(Some(bundle)) = baked_bundle() {
@@ -148,7 +162,33 @@ async fn candidate_roots(st: &TrustRootState) -> Vec<String> {
             }
         }
     }
-    let _ = st;
+
+    // The accepted set. A read failure is NOT silently an empty set — that would
+    // render as "you accepted nothing", which is a different and false claim than
+    // "we could not look". The named defaults are still returned, and the caller
+    // sees the same `unreadable` treatment the per-root evaluation already uses.
+    match st
+        .engine
+        .federation_directory()
+        .list_attestations_by(&st.node_key_id)
+        .await
+    {
+        Ok(rows) => {
+            for a in rows {
+                if a.attestation_type == attestation_type::DELEGATES_TO
+                    && !a.attested_key_id.is_empty()
+                    && !out.contains(&a.attested_key_id)
+                {
+                    out.push(a.attested_key_id);
+                }
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "trust-root listing: could not read this node's acceptance edges — an IMPORTED root \
+             may be missing from the list. The named defaults are still shown"
+        ),
+    }
     out
 }
 

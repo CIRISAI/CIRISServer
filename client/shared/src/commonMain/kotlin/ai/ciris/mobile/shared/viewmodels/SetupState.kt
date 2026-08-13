@@ -449,6 +449,19 @@ data class NodeOwnershipClaimState(
     /** Human-readable failure reason (e.g. "claim PIN not captured"). */
     val error: String? = null,
     /**
+     * Is [error] worth RETRYING? Set where the failure happens, because that is
+     * the only place that knows.
+     *
+     * Every claim failure used to render as unrecoverable — including "claim PIN
+     * not captured", whose own message tells the operator to claim later, and
+     * ordinary network blips. So the panel said retrying could not work and
+     * offered a wipe-and-reinstall for a node that was fine. Classifying HERE
+     * rather than pattern-matching the message downstream keeps one author for
+     * the fact: a screen that greps an error string is a second opinion about
+     * what happened.
+     */
+    val errorRecoverable: Boolean = false,
+    /**
      * Non-fatal soft notice from the optional federation-announce opt-in. The
      * claim itself already succeeded; the announce can be retried later, so a
      * failure here is surfaced (not fatal). Null when not attempted / succeeded.

@@ -43,6 +43,21 @@ enum class FailureKind {
     /** Something did not finish in time. It may still finish. */
     Timeout,
 
+    /**
+     * Something refused for a reason that will pass — the node was not up yet,
+     * the network blipped, a precondition has not happened *yet*. **Retrying the
+     * same thing is the remedy.**
+     *
+     * This kind exists because its absence was a defect. Every claim failure was
+     * rendered [Unrecoverable], including "claim PIN not captured" — whose own
+     * message says the node can be claimed later — so the panel told operators
+     * that retrying could not work and offered them a wipe-and-reinstall. That is
+     * the same shape as an OAuth refusal that named a remedy which could not
+     * work: withholding detail is fine, naming the WRONG remedy sends someone
+     * down a path that is guaranteed to fail.
+     */
+    Recoverable,
+
     /** Something refused, and retrying the same thing will refuse again. */
     Unrecoverable,
 }
@@ -88,6 +103,8 @@ fun FailurePanel(
     context: String,
     /** Offered only for [FailureKind.Timeout]. */
     onKeepWaiting: (() -> Unit)? = null,
+    /** Offered only for [FailureKind.Recoverable] — the remedy for that kind. */
+    onRetry: (() -> Unit)? = null,
     /** Offered for either kind when the host can actually restart. */
     onRestart: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -121,6 +138,10 @@ fun FailurePanel(
                         "This is taking longer than expected. It may still finish — you can keep " +
                             "waiting, or restart the app. If it never completes, please open an " +
                             "issue so we can fix it."
+                    FailureKind.Recoverable ->
+                        "This didn't work just now, but it should work shortly — nothing is " +
+                            "broken and nothing needs reinstalling. Try again in a moment. If it " +
+                            "keeps failing, please open an issue so we can fix it."
                     FailureKind.Unrecoverable ->
                         "We're sorry — this error is not recoverable by retrying. Please open an " +
                             "issue on GitHub so we can fix it, or wipe and reinstall the app to " +
@@ -174,6 +195,12 @@ fun FailurePanel(
                     },
                 ) { Text("Open a GitHub issue") }
 
+                if (kind == FailureKind.Recoverable && onRetry != null) {
+                    OutlinedButton(
+                        onClick = onRetry,
+                        modifier = Modifier.testableClickable("btn_failure_retry") { onRetry() },
+                    ) { Text("Try again") }
+                }
                 if (kind == FailureKind.Timeout && onKeepWaiting != null) {
                     OutlinedButton(
                         onClick = onKeepWaiting,

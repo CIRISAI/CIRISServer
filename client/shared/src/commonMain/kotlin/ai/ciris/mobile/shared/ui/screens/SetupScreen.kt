@@ -364,7 +364,20 @@ fun SetupScreen(
                     SetupStep.YOU -> YouStep(viewModel, state)
                     SetupStep.JOIN_FEDERATION -> JoinFederationStep(viewModel, state, apiClient)
                     SetupStep.AI -> AiStep(viewModel, state, apiClient)
-                    SetupStep.COMPLETE -> CompleteStep(onSetupComplete, state.ownershipClaim)
+                    SetupStep.COMPLETE ->
+                        CompleteStep(
+                            onSetupComplete,
+                            state.ownershipClaim,
+                            // The SAME providers the first attempt used — a retry
+                            // that read the PIN differently would be a second way
+                            // to claim, not a retry of the first.
+                            onRetryClaim = {
+                                viewModel.claimLocalNodeOwnership(
+                                    claimPinProvider = claimPinProvider,
+                                    nodeCodeProvider = nodeCodeProvider,
+                                )
+                            },
+                        )
                 }
             }
 
@@ -2779,6 +2792,8 @@ private fun CompleteStep(
     onSetupComplete: () -> Unit,
     ownershipClaim: ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState =
         ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState(),
+    /** Retry the self-claim — offered only for a RECOVERABLE failure. */
+    onRetryClaim: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Hold here until the LOCAL-node ownership self-claim settles (success or
@@ -2862,8 +2877,16 @@ private fun CompleteStep(
                 ai.ciris.mobile.shared.ui.components.FailurePanel(
                     title = "This node could not be claimed",
                     detail = ownershipClaim.error ?: "",
-                    kind = ai.ciris.mobile.shared.ui.components.FailureKind.Unrecoverable,
+                    // The kind comes from where the failure HAPPENED, not from
+                    // grepping its message here.
+                    kind =
+                        if (ownershipClaim.errorRecoverable) {
+                            ai.ciris.mobile.shared.ui.components.FailureKind.Recoverable
+                        } else {
+                            ai.ciris.mobile.shared.ui.components.FailureKind.Unrecoverable
+                        },
                     context = "first-run claim",
+                    onRetry = if (ownershipClaim.errorRecoverable) onRetryClaim else null,
                     modifier = Modifier.testable("setup_ownership_error"),
                 )
             }
