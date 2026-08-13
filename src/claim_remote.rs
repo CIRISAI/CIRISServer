@@ -162,6 +162,12 @@ struct RemoteSetupRootRequest {
 pub async fn build_claim_for_target(
     user_signer: &LocalSigner,
     target_node_code: &str,
+    // The audience the owner is asserting under. SIGNED into the binding since
+    // persist v31 (CIRISPersist#643) — it used to be stamped, unsigned, by the
+    // node being claimed, which meant the receiver decided how widely its owner's
+    // ownership claim was published. The receiver now CHECKS it against the
+    // cohort the claim was made under and refuses a mismatch.
+    cohort_scope: &str,
 ) -> Result<(nodecode::NodeCode, SignedOwnerBinding), ClaimRemoteError> {
     let nc = nodecode::decode(target_node_code)
         .map_err(|e| ClaimRemoteError::BadNodeCode(e.to_string()))?;
@@ -169,9 +175,10 @@ pub async fn build_claim_for_target(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let binding = ownership::build_signed_owner_binding(user_signer, &nc.key_id, &infra_scopes)
-        .await
-        .map_err(ClaimRemoteError::Build)?;
+    let binding =
+        ownership::build_signed_owner_binding(user_signer, &nc.key_id, &infra_scopes, cohort_scope)
+            .await
+            .map_err(ClaimRemoteError::Build)?;
     Ok((nc, binding))
 }
 
@@ -202,7 +209,8 @@ pub async fn claim_remote(
     owner_oauth: Option<(&str, &str)>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
-    let (nc, owner_binding) = build_claim_for_target(user_signer, target_node_code).await?;
+    let (nc, owner_binding) =
+        build_claim_for_target(user_signer, target_node_code, &cohort).await?;
 
     // The target base URL is the NodeCode's `transport_hint`. A LOOPBACK node (a
     // desktop/local node with no public transport) carries NO hint — for that
@@ -695,7 +703,9 @@ async fn record_claimed_target_locally(
     // Re-derive the decoded NodeCode + a user-signed owner-binding for the target.
     // (A fresh envelope — the LOCAL record need not be byte-identical to the one the
     // target stored; it just has to be a valid user-signed delegates_to(owner→target).)
-    let (nc, owner_binding) = match build_claim_for_target(user_signer, node_code).await {
+    let (nc, owner_binding) = match build_claim_for_target(user_signer, node_code, cohort_scope)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "claim-remote: could not rebuild target binding for the local directory record (non-fatal)");
@@ -845,16 +855,22 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let binding =
-        match ownership::build_signed_owner_binding(&user_signer, &st.node_key_id, &infra).await {
-            Ok(b) => b,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("build owner-binding: {e}"),
-                )
-            }
-        };
+    let binding = match ownership::build_signed_owner_binding(
+        &user_signer,
+        &st.node_key_id,
+        &infra,
+        ciris_persist::federation::types::cohort_scope::SELF,
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("build owner-binding: {e}"),
+            )
+        }
+    };
     // CIRISServer#125: upgrade-owner re-roots an existing node on a fed-ID — bind
     // it self-scoped by default (no federation announce until the owner opts in).
     match ownership::apply_signed_owner_binding(
@@ -1002,10 +1018,11 @@ async fn set_age_self(
 ///
 ///   1. **PROMOTE** this node's owner-binding `delegates_to(owner → node)` from
 ///      `cohort_scope: self` to `federation` ([`ownership::promote_owner_binding_to_federation`])
-///      — public responsible-party accountability. Re-persists the EXISTING
-///      user-signed envelope + the owner's original signatures at the wider cohort
-///      (cohort is not in the signed envelope, so the proven signature re-verifies);
-///      no fresh signing / no user signer needed.
+///      — public responsible-party accountability. The OWNER re-signs the claim at
+///      the wider audience: since persist v31 (CIRISPersist#643) `cohort_scope`
+///      lives inside the signed typed-column mirror, so re-filing the old
+///      signature under a new label would have the owner's signature vouching for
+///      an audience they never stated. Requires the owner's signer on this node.
 ///   2. **ENABLE the Reticulum identity announce** — set the boot-structural
 ///      `net.announce_ownership` config:* key to `true` (owner-authored CEG write).
 ///      On the NEXT boot [`crate::compose`] wires the federation signer into the
@@ -1035,8 +1052,38 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
     }
 
     // (1) Promote the owner-binding self → FEDERATION.
+    //
+    // The owner's signer is REQUIRED (CIRISPersist#643): `cohort_scope` is inside
+    // the signed typed-column mirror, so widening the audience means the owner
+    // re-stating the claim at that audience — not this node re-filing their old
+    // signature under a new label. See `promote_owner_binding_to_federation`.
+    let owner_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no federation ID on this node — announcing to the federation means the OWNER \
+                 stating their ownership at a federation-wide audience, which requires their \
+                 signing key here (POST /v1/self/identity)",
+            )
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("resolve owner signer for announce: {e}"),
+            )
+        }
+    };
     let promoted = match crate::auth::ownership::promote_owner_binding_to_federation(
         &st.engine,
+        &owner_signer,
         &st.node_key_id,
     )
     .await

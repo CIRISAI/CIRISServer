@@ -64,9 +64,7 @@ use axum::{Json, Router};
 use ciris_persist::federation::admission::MAX_MODERATION_DELEGATION_DEPTH;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION;
-use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, cohort_scope, Attestation, ScrubSig,
-};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, Attestation, ScrubSig};
 use ciris_persist::federation::SignedAttestation;
 use ciris_persist::prelude::Engine;
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -164,7 +162,6 @@ fn err(code: StatusCode, reason_id: &str, msg: impl Into<String>) -> Response {
 /// the partial — every scrub must cover byte-identical canonical bytes, so the
 /// second holder signs what the first one did, not a re-derivation of it.
 fn conferral_envelope(
-    id: &str,
     subject: &str,
     duties: &[String],
     sub_delegation: bool,
@@ -173,8 +170,15 @@ fn conferral_envelope(
     // Envelope KEYS come from persist's constants, never hand-mirrored literals
     // (CIRISServer#322): a rename upstream must break the build here rather than
     // silently skew the wire.
+    //
+    // This used to carry `references_attestation_id` set to the row's OWN id —
+    // a second, independently-minted name for the row, sitting next to the
+    // column. persist ignores the field on non-composer rows (it is the TARGET
+    // of a withdraw/supersede, and a conferral retracts nothing), so it bought
+    // nothing and could disagree with the column, which is the CIRISServer#402
+    // class in miniature. The row's identity now lives in the signed mirror
+    // `crate::attest` stamps, where exactly one thing writes it.
     let mut env = serde_json::json!({
-        (paths::REFERENCES_ATTESTATION_ID): id,
         // The plane. A row labelled charter or trust-edge points the other way
         // and confers nothing (CIRISPersist#551 item 2).
         (paths::DIMENSION): TRUST_CONFERS_DIMENSION,
@@ -330,51 +334,67 @@ async fn propose(State(st): State<DutyState>, body: axum::body::Bytes) -> Respon
         }
     }
 
-    let id = uuid::Uuid::new_v4().to_string();
-    let envelope = conferral_envelope(
-        &id,
-        subject,
-        &duties,
-        req.sub_delegation,
-        req.sub_delegation_depth,
-    );
-    let canonical = match ceg_produce_canonicalize(&envelope) {
-        Ok(c) => c,
+    // ── Through the ONE door (CIRISServer#402) ────────────────────────────────
+    //
+    // A co-signed conferral is exactly the case persist's `assemble`-without-put
+    // exists for: the canonical bytes must exist for the OTHER holders to sign,
+    // and they cannot exist without a row. This route used to hand-roll that row
+    // — which is how it acquired every binding defect the claim path had, silently,
+    // because nobody had run a conferral on v31 yet. See [`crate::attest`].
+    let stamped = match crate::attest::Emit::stamp(
+        // The proposing holder is the attester; the co-signers append scrubs to
+        // the row it mints, over the same canonical bytes.
+        req.holder.key_id.trim(),
+        crate::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::FEDERATION,
+            conferral_envelope(
+                subject,
+                &duties,
+                req.sub_delegation,
+                req.sub_delegation_depth,
+            ),
+        )
+        .about(subject)
+        .weighing(Some(1.0)),
+    ) {
+        Ok(v) => v,
         Err(e) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "accord.duty.canonicalize",
-                format!("canonicalize conferral: {e}"),
+                format!("build conferral: {e}"),
             )
         }
     };
-    let (scrub_key_id, ed, pqc) = match sign_as_holder(&req.holder, &canonical).await {
+    let (scrub_key_id, ed, pqc) = match sign_as_holder(&req.holder, stamped.canonical()).await {
         Ok(t) => t,
         Err(r) => return r,
     };
-    let now = chrono::Utc::now();
-    let partial = Attestation {
-        attestation_id: id,
-        attesting_key_id: scrub_key_id.clone(),
-        attested_key_id: subject.to_string(),
-        attestation_type: attestation_type::DELEGATES_TO.to_string(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: ed,
-        scrub_signature_pqc: Some(pqc),
-        scrub_key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![subject.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
+    // The holder's custody must open as the key the mirror was stamped for. If
+    // hardware answers as a different identity, the row's `attesting_key_id` and
+    // its scrub would name two different holders — refuse rather than mint it.
+    if scrub_key_id != req.holder.key_id.trim() {
+        return err(
+            StatusCode::CONFLICT,
+            "accord.duty.holder_identity_mismatch",
+            format!(
+                "the conferral was stamped for holder {} but the custody opened as \
+                 {scrub_key_id}. The attester is inside the signed bytes (CIRISPersist#643), so \
+                 these cannot be reconciled after the fact.",
+                req.holder.key_id.trim(),
+            ),
+        );
+    }
+    let partial = match stamped.assemble_from_b64(&ed, &pqc) {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "accord.duty.assemble",
+                format!("assemble conferral: {e}"),
+            )
+        }
     };
     let needed = quorum_needed(&st.engine).await;
     let count = distinct_scrubs(&partial);
@@ -569,58 +589,48 @@ pub async fn test_support_build_partial(
 ) -> Attestation {
     assert!(!holders.is_empty(), "a conferral needs at least one scrub");
 
-    // A deterministic id keyed on the subject+duty, so a re-run re-derives the
-    // same row rather than racing a previous one.
-    // The id includes the SCRUB SET, so a 1-of-3 partial and the 2-of-3 grant are
-    // different rows. They have to be: the test stores the sub-quorum one to prove
-    // it confers nothing, and a shared id would collide on insert instead.
-    let holder_ids: Vec<&str> = holders.iter().map(|h| h.key_id.as_str()).collect();
-    let id = hex::encode(Sha256::digest(
-        format!("{subject}/{}/{}", duties.join("+"), holder_ids.join("+")).as_bytes(),
-    ));
-    let envelope = conferral_envelope(&id[..32], subject, duties, sub_delegation, depth);
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize");
+    // Through the SAME door as the route (CIRISServer#402). A test seam that
+    // hand-rolls the row proves the substrate accepts a row this server does not
+    // actually produce — which is the failure mode that let four separate binding
+    // defects reach a live claim with every gate green.
+    //
+    // The row id used to be derived here from `subject/duties/holder-set`, so a
+    // 1-of-3 partial and the 2-of-3 grant would land as different rows rather than
+    // colliding on insert. The stamp mints a fresh id per call, which gives the
+    // same property without a second minting rule.
+    let stamped = crate::attest::Emit::stamp(
+        &holders[0].key_id,
+        crate::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::FEDERATION,
+            conferral_envelope(subject, duties, sub_delegation, depth),
+        )
+        .about(subject)
+        .weighing(Some(1.0)),
+    )
+    .expect("stamp conferral");
 
     let mut scrubs: Vec<(String, String, String)> = Vec::new();
     for h in holders {
         // `sign_bytes` IS the bound-hybrid construction the route's `sign_bound`
         // performs — Ed25519 over the canonical bytes, ML-DSA-65 over
         // `canonical ‖ ed_sig`. Same signature, different custody.
-        let (ed, pqc) = h.sign_bytes(&canonical);
+        let (ed, pqc) = h.sign_bytes(stamped.canonical());
         scrubs.push((h.key_id.clone(), ed, pqc));
     }
-    let (first_id, first_ed, first_pqc) = scrubs.remove(0);
-    let now = chrono::Utc::now();
-    Attestation {
-        attestation_id: id[..32].to_string(),
-        attesting_key_id: first_id.clone(),
-        attested_key_id: subject.to_string(),
-        attestation_type: attestation_type::DELEGATES_TO.to_string(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: first_ed,
-        scrub_signature_pqc: Some(first_pqc),
-        scrub_key_id: first_id,
-        additional_scrubs: scrubs
-            .into_iter()
-            .map(|(k, ed, pqc)| ScrubSig {
-                scrub_key_id: k,
-                scrub_signature_classical: ed,
-                scrub_signature_pqc: Some(pqc),
-            })
-            .collect(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![subject.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    let (_first_id, first_ed, first_pqc) = scrubs.remove(0);
+    let mut row = stamped
+        .assemble_from_b64(&first_ed, &first_pqc)
+        .expect("assemble conferral");
+    row.additional_scrubs = scrubs
+        .into_iter()
+        .map(|(k, ed, pqc)| ScrubSig {
+            scrub_key_id: k,
+            scrub_signature_classical: ed,
+            scrub_signature_pqc: Some(pqc),
+        })
+        .collect();
+    row
 }
 
 pub fn router(engine: Arc<Engine>) -> Router {

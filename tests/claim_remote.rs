@@ -170,9 +170,14 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
     let user = local_user_signer(L_USER_KEY_ID);
 
     // L builds + substrate-signs the owner-binding (the responsible USER's key).
-    let binding = build_signed_owner_binding(&user, T_NODE_KEY_ID, &infra_scopes())
-        .await
-        .expect("L builds signed owner-binding");
+    let binding = build_signed_owner_binding(
+        &user,
+        T_NODE_KEY_ID,
+        &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
+    )
+    .await
+    .expect("L builds signed owner-binding");
     assert_eq!(binding.attesting_key_id, L_USER_KEY_ID);
 
     // T applies it: verify + register user + persist the user-signed delegates_to.
@@ -285,9 +290,14 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     let t = target_node(T_NODE_KEY_ID).await;
     register_target(&t, T_NODE_KEY_ID).await;
     let user = local_user_signer(L_USER_KEY_ID);
-    let good = build_signed_owner_binding(&user, T_NODE_KEY_ID, &infra_scopes())
-        .await
-        .expect("build");
+    let good = build_signed_owner_binding(
+        &user,
+        T_NODE_KEY_ID,
+        &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
+    )
+    .await
+    .expect("build");
 
     // (a) agency scope → rejected.
     let mut agency = good.clone();

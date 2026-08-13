@@ -283,91 +283,50 @@ async fn make_owner_bound(engine: &Engine, member: &str) -> LocalSigner {
 /// resolves through `owner_of`, which is dimension-precise — a generic
 /// `delegation:*` edge (what [`emit_delegation`] emits) is NOT an owner-binding.
 async fn emit_owner_binding(engine: &Engine, owner: &LocalSigner, member: &str) {
+    // Through the SAME door the server uses (CIRISServer#402). A fixture that
+    // hand-rolls the row proves the substrate accepts a shape nothing ships —
+    // which is how four binding defects reached a live claim with every gate green.
     let owner_key_id = owner.key_id().to_string();
-    let now = chrono::Utc::now();
-    let envelope = ciris_server::auth::ownership::build_owner_binding_envelope(
-        &owner_key_id,
-        member,
-        &["infra:hold_community_membership".to_string()],
-        &now.to_rfc3339(),
+    ciris_server::attest::emit(
+        engine,
+        owner,
+        ciris_server::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            ciris_server::auth::ownership::build_owner_binding_envelope(
+                &owner_key_id,
+                member,
+                &["infra:hold_community_membership".to_string()],
+            )
+            .expect("build owner-binding envelope"),
+        )
+        .about(member),
     )
-    .expect("build owner-binding envelope");
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner-binding");
-    let sig = owner
-        .sign_hybrid(&canonical)
-        .await
-        .expect("sign owner-binding");
-    let attestation = Attestation {
-        attestation_id: format!("ownbind-{owner_key_id}-{member}"),
-        attesting_key_id: owner_key_id.clone(),
-        attested_key_id: member.to_string(),
-        attestation_type: attestation_type::DELEGATES_TO.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: owner_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![member.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put owner-binding");
+    .await
+    .expect("put owner-binding");
 }
 
 /// Withdraw the owner-binding `owner → member` (the binding lapses → `member`
 /// becomes ineligible: not owner-bound, cannot be named or auto-promoted).
 async fn withdraw_owner_binding(engine: &Engine, owner: &LocalSigner, member: &str) {
     let owner_key_id = owner.key_id().to_string();
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({
-        "kind": "withdraws",
-        "dimension": "ownership:withdraw:v1",
-        "attesting_key_id": owner_key_id,
-        "attested_key_id": member,
-    });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize withdraw");
-    let sig = owner.sign_hybrid(&canonical).await.expect("sign withdraw");
-    let attestation = Attestation {
-        attestation_id: format!("ownwd-{owner_key_id}-{member}"),
-        attesting_key_id: owner_key_id.clone(),
-        attested_key_id: member.to_string(),
-        attestation_type: attestation_type::WITHDRAWS.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: owner_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![member.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put owner-binding withdraw");
+    ciris_server::attest::emit(
+        engine,
+        owner,
+        ciris_server::attest::Spec::new(
+            attestation_type::WITHDRAWS,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            serde_json::json!({
+                "kind": "withdraws",
+                "dimension": "ownership:withdraw:v1",
+                "attesting_key_id": owner_key_id,
+                "attested_key_id": member,
+            }),
+        )
+        .about(member),
+    )
+    .await
+    .expect("put owner-binding withdraw");
 }
 
 /// Seed `count` `moderation_track_record:{community}` reputation rows authored by

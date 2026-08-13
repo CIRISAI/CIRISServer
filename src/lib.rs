@@ -68,6 +68,13 @@ pub mod adapter;
 /// revocation is evidence a reader folds. Public so the integration test
 /// (`tests/admin_ops.rs`) can drive the router directly.
 pub mod admin_ops;
+/// **One author per row** — the single door every attestation this server
+/// produces goes through (CIRISServer#402). Stamp → sign → assemble, with every
+/// column that must agree with the signed envelope derived FROM it by persist's
+/// own producer chokepoint. Hand-rolling an `Attestation` literal elsewhere is
+/// the defect class this module retires; `tests/one_author_per_row.rs` enforces
+/// it.
+pub mod attest;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
 /// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
 /// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), the

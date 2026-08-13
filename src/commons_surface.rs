@@ -104,9 +104,7 @@ use ciris_persist::federation::reverse_quorum::{
     DIMENSION_DISMISSAL, DIMENSION_OBJECTION, DIMENSION_OVERRULED, DIMENSION_UPHELD,
     ESCALATION_RESPONDENT_FLOOR, OBJECTION_THRESHOLD,
 };
-use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, cohort_scope, Attestation, ScrubSig,
-};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, Attestation, ScrubSig};
 use ciris_persist::federation::Cohort;
 use ciris_persist::prelude::Engine;
 
@@ -905,41 +903,36 @@ async fn build_row(
     additional_scrubs: Vec<ScrubSig>,
     now: DateTime<Utc>,
 ) -> Result<Attestation, String> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-
     let key_id = engine
         .local_derived_key_id()
         .await
         .map_err(|e| format!("derive acting key_id: {e}"))?;
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize commons row: {e}"))?;
+
+    // Through the ONE door (CIRISServer#402) — see [`crate::attest`]. `now` is
+    // accepted for the caller's ordering, and the stamp truncates it to the
+    // substrate's resolution before it reaches either the signature or the column
+    // (CIRISPersist#598: nanoseconds sqlite keeps and postgres drops turn a strict
+    // order on one backend into a tie on the other).
+    let stamped = crate::attest::Emit::stamp_at(
+        &key_id,
+        crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
+            // A commons row is ABOUT the actor and names no subject: it scores
+            // conduct, and `subject_key_ids` would hand the scored party revocation
+            // authority over the score (the CIRISPersist#519 exhibit-G2 shape).
+            .attested_to(actor),
+        now,
+    )
+    .map_err(|e| format!("stamp commons row: {e}"))?;
+
     let sig = engine
-        .sign_hybrid(&canonical)
+        .sign_hybrid(stamped.canonical())
         .await
         .map_err(|e| format!("hybrid-sign commons row: {e}"))?;
-    Ok(Attestation {
-        attestation_id: crate::ids::new_id(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: actor.to_owned(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-        additional_scrubs,
-    })
+    let mut row = stamped
+        .assemble(sig)
+        .map_err(|e| format!("assemble commons row: {e}"))?;
+    row.additional_scrubs = additional_scrubs;
+    Ok(row)
 }
 
 /// **Render the substrate's outcome. Nothing is decided here.**

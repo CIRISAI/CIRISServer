@@ -2383,7 +2383,7 @@ async fn propose_genesis_impl(_st: ProvisionState, _req: ProposeGenesisRequest) 
 
 #[cfg(feature = "pkcs11")]
 async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) -> Response {
-    use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
+    use ciris_persist::federation::types::{attestation_type, SignedAttestation};
     use ciris_verify_core::self_at_login::SelfSigner;
 
     let holders = ciris_persist::federation::genesis::effective_accord_holder_records();
@@ -2528,42 +2528,40 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         envelope: serde_json::Value,
         att_type: &str,
     ) -> Result<SignedAttestation, String> {
-        use sha2::Digest as _;
-        let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-            .map_err(|e| format!("canonicalize {id}: {e}"))?;
+        // ── Through the ONE door (CIRISServer#402) ────────────────────────────
+        //
+        // This is the CEREMONY path, and it is the one place where hand-rolling
+        // the row was not merely untidy but disqualifying: persist v31 refuses
+        // any attestation carrying no signed typed-column mirror, so a bundle
+        // built the old way produces rows that "can never be installed" — a root
+        // that reads Entrenched, renders no banner, and confers nothing
+        // (CIRISPersist#648). The genesis bundle must be v31-shaped or the
+        // ceremony is theatre.
+        //
+        // The symbolic id is preserved deliberately; see `Emit::with_row_id`.
+        let mut spec = crate::attest::Spec::new(
+            att_type,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        .weighing(Some(1.0));
+        spec.attested_key_id = Some(attested_key_id.to_string());
+        // NOT `Spec::about`: a ceremony row attests the family and names NO
+        // subject. `subject_key_ids` grants revocation authority, and CIRISPersist
+        // #658's authority-injection case is precisely a key appended there — the
+        // charter that grants everything is the last row to hand that out.
+        let stamped = crate::attest::Emit::stamp(signer.key_id(), spec)
+            .and_then(|e| e.with_row_id(id))
+            .map_err(|e| format!("stamp {id}: {e}"))?;
+
         let (ed, pqc) = signer
-            .sign_bound(&canonical)
+            .sign_bound(stamped.canonical())
             .await
             .map_err(|e| format!("sign {id}: {e}"))?;
-        let now = chrono::Utc::now();
-        Ok(SignedAttestation {
-            attestation: Attestation {
-                attestation_id: id.to_string(),
-                attesting_key_id: signer.key_id().to_string(),
-                attested_key_id: attested_key_id.to_string(),
-                attestation_type: att_type.to_string(),
-                weight: Some(1.0),
-                asserted_at: now,
-                // Deliberately no expiry on the charter/grant themselves: the
-                // revocable, user-owned act is the `delegates_to(user → root)`
-                // trust edge, which the operator writes on attach and can delete.
-                expires_at: None,
-                attestation_envelope: envelope,
-                original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
-                scrub_signature_classical: ed,
-                scrub_signature_pqc: Some(pqc),
-                scrub_key_id: signer.key_id().to_string(),
-                additional_scrubs: Vec::new(),
-                scrub_timestamp: now,
-                pqc_completed_at: Some(now),
-                persist_row_hash: String::new(),
-                subject_key_ids: Vec::new(),
-                withdraws_admission_rule: None,
-                cohort_scope: "federation".to_string(),
-                tier: ciris_persist::federation::types::attestation_tier::FEDERATION.to_string(),
-                promoted_at: None,
-            },
-        })
+        let row = stamped
+            .assemble_from_b64(&ed, &pqc)
+            .map_err(|e| format!("assemble {id}: {e}"))?;
+        Ok(SignedAttestation { attestation: row })
     }
 
     let family_key_id =

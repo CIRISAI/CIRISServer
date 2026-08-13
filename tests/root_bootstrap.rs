@@ -257,10 +257,14 @@ async fn one_phase_body(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let binding =
-        ciris_server::auth::ownership::build_signed_owner_binding(user, node_key_id, &infra_scopes)
-            .await
-            .expect("build signed owner-binding");
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        user,
+        node_key_id,
+        &infra_scopes,
+        ciris_persist::federation::types::cohort_scope::SELF,
+    )
+    .await
+    .expect("build signed owner-binding");
     let mut claim = serde_json::json!({
         "node_code": node_code_string(node_key_id),
         "owner_binding": binding,
@@ -363,6 +367,7 @@ async fn first_run_setup_root_rejects_tampered_signature() {
         &user,
         node_key_id,
         &infra_scopes,
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build binding");
@@ -414,10 +419,14 @@ async fn first_run_setup_root_rejects_wrong_node_pin() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let binding =
-        ciris_server::auth::ownership::build_signed_owner_binding(&user, key_id, &infra_scopes)
-            .await
-            .expect("build binding");
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &user,
+        key_id,
+        &infra_scopes,
+        ciris_persist::federation::types::cohort_scope::SELF,
+    )
+    .await
+    .expect("build binding");
     let claim = serde_json::json!({
         "node_code": wrong_code,
         "cohort_scope": "self",

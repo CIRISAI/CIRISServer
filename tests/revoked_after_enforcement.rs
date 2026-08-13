@@ -462,43 +462,59 @@ async fn the_detector_drops_post_bound_rows_and_keeps_pre_bound_evidence() {
 
 // ─── (3) auth::ownership — owner-binding resolution ──────────────────────────
 
-/// Emit a genuinely user-signed owner-binding whose SIGNED envelope instant is
-/// `signed_at` (the row column stays `Utc::now()`).
+/// Emit a genuinely user-signed owner-binding whose signed instant is `signed_at`.
+///
+/// The row column now equals that same instant rather than a fresh `Utc::now()`:
+/// persist v31 (CIRISPersist#598) refuses the divergence, because a column no
+/// signature covers is a replay knob for whoever writes the row. This fixture
+/// builds the binding exactly as the claiming node does — through
+/// [`ciris_server::attest`] — and hands the receiving side the same three things
+/// the wire carries, so it exercises the real apply path rather than a shape only
+/// this test produces.
 async fn bind_owner(
     engine: &Engine,
     owner: &LocalSigner,
     node_key_id: &str,
     signed_at: DateTime<Utc>,
 ) {
+    use ciris_server::attest::{Emit, Spec};
     use ciris_server::auth::ownership::{
-        build_owner_binding_envelope, canonicalize_owner_binding_envelope,
-        persist_user_signed_owner_binding, OWNER_BINDING_INFRA_SCOPES,
+        build_owner_binding_envelope, persist_user_signed_owner_binding, OWNER_BINDING_INFRA_SCOPES,
     };
     let scopes: Vec<String> = OWNER_BINDING_INFRA_SCOPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    let envelope = build_owner_binding_envelope(
+    let stamped = Emit::stamp_at(
         owner.key_id(),
-        node_key_id,
-        &scopes,
-        &signed_at.to_rfc3339(),
+        Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::SELF,
+            build_owner_binding_envelope(owner.key_id(), node_key_id, &scopes)
+                .expect("build owner-binding envelope"),
+        )
+        .about(node_key_id),
+        signed_at,
     )
-    .expect("build owner-binding envelope");
-    let canonical = canonicalize_owner_binding_envelope(&envelope).expect("canonicalize binding");
+    .expect("stamp owner-binding");
     let sig = owner
-        .sign_hybrid(&canonical)
+        .sign_hybrid(stamped.canonical())
         .await
         .expect("owner hybrid-signs the binding");
+    let ed = BASE64.encode(&sig.classical.signature);
+    let pqc = BASE64.encode(&sig.pqc.signature);
+    let envelope = stamped
+        .assemble(sig)
+        .expect("assemble owner-binding")
+        .attestation_envelope;
     persist_user_signed_owner_binding(
         engine,
         envelope,
         owner.key_id(),
         node_key_id,
         cohort_scope::SELF,
-        &canonical,
-        &BASE64.encode(&sig.classical.signature),
-        &BASE64.encode(&sig.pqc.signature),
+        &ed,
+        &pqc,
     )
     .await
     .expect("persist owner-binding");

@@ -1440,10 +1440,14 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let binding =
-            ownership::build_signed_owner_binding(&signer, "target-node-key", &infra_scopes)
-                .await
-                .expect("build user-signed owner-binding with the minted identity");
+        let binding = ownership::build_signed_owner_binding(
+            &signer,
+            "target-node-key",
+            &infra_scopes,
+            ciris_persist::federation::types::cohort_scope::SELF,
+        )
+        .await
+        .expect("build user-signed owner-binding with the minted identity");
         assert_eq!(binding.attesting_key_id, minted.key_id);
 
         std::env::remove_var("CIRIS_HOME");

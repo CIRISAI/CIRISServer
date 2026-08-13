@@ -49,6 +49,46 @@ fn bundle_path() -> Option<std::path::PathBuf> {
     Some(expanded)
 }
 
+/// **Install stage 1 — or witness that the baked seed predates the ceremony.**
+///
+/// Returns `true` when the baked bundle installed, `false` when it is the pre-v31
+/// artifact this release ships with (having first asserted that persist REFUSES
+/// it, which is the whole point).
+///
+/// # Why the assertion inverts on the artifact instead of being skipped
+///
+/// persist v31 binds the seven typed columns and the two instants into the signed
+/// envelope (CIRISPersist#643/#598). The baked `canonical_seed.json` was signed
+/// before those bindings existed, so its `genesis-charter` / `genesis-grant:…` /
+/// `genesis-lifecycle` rows are refused at every `put_attestation` — correctly,
+/// and that gate must not be weakened to admit a stale artifact: a genesis-shaped
+/// carve-out would be a permanent hole in exactly the rows that grant everything.
+///
+/// So these gates ask persist's own predicate which regime the artifact is in,
+/// and assert the REFUSAL while it is pre-v31 and INSTALLATION once it is
+/// re-signed. The expectation flips on the seed, not on a hand-edited constant —
+/// which means the re-bake turns these witnesses back on by itself and nobody has
+/// to remember to. A `#[ignore]` would have gone quiet forever.
+async fn install_or_witness_pre_v31(engine: &Arc<Engine>) -> bool {
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let outcome = ciris_server::mesh_genesis::install_baked_trust_root(engine).await;
+    match ciris_persist::federation::genesis::bundle_delegation_plane_v31_shaped(baked) {
+        Ok(()) => {
+            outcome.expect("a v31-shaped baked bundle must install — stage 1 is the boot path");
+            true
+        }
+        Err(why) => {
+            let e = outcome.expect_err(&format!(
+                "the baked bundle is NOT v31-shaped ({why}), so its delegation rows must be \
+                 REFUSED. Stage 1 reporting success here would mean the binding gate had been \
+                 weakened for genesis rows — a permanent hole in the rows that grant everything."
+            ));
+            println!("  baked seed is pre-v31 ({why}); stage 1 refused as it must: {e}");
+            false
+        }
+    }
+}
+
 async fn fresh_node() -> Arc<Engine> {
     use ciris_keyring::PqcSigner as _;
     let signing_key = SigningKey::from_bytes(&[0x5A; 32]);
@@ -442,9 +482,9 @@ async fn the_delegation_plane_alone_resolves_the_serve_gate() {
 async fn the_baked_seed_makes_every_fresh_node_serve() {
     let engine = fresh_node().await;
 
-    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
-        .await
-        .expect("stage 1 installs the baked trust root");
+    if !install_or_witness_pre_v31(&engine).await {
+        return;
+    }
 
     let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
     assert!(
@@ -515,9 +555,9 @@ async fn the_baked_seed_makes_every_fresh_node_serve() {
 #[tokio::test(flavor = "multi_thread")]
 async fn baked_audit() {
     let engine = fresh_node().await;
-    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
-        .await
-        .expect("stage 1");
+    if !install_or_witness_pre_v31(&engine).await {
+        return;
+    }
     let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
     let dir = engine.federation_directory();
 
@@ -588,9 +628,9 @@ async fn baked_audit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_baked_canonical_holds_every_scope_on_both_planes() {
     let engine = fresh_node().await;
-    ciris_server::mesh_genesis::install_baked_trust_root(&engine)
-        .await
-        .expect("stage 1");
+    if !install_or_witness_pre_v31(&engine).await {
+        return;
+    }
     let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
     let node_key_id = engine.local_derived_key_id().await.expect("node identity");
     let dir = engine.federation_directory();
@@ -671,10 +711,25 @@ async fn the_baked_canonical_holds_every_scope_on_both_planes() {
 async fn stage_one_is_idempotent_across_reboots() {
     let engine = fresh_node().await;
 
+    // Idempotence is asserted in BOTH regimes: a pre-v31 seed must refuse the same
+    // way every time (a refusal that becomes a success on run 2 would mean the
+    // first run left rows behind), and a v31 seed must install the same way.
+    let mut installed = false;
     for run in 1..=3 {
-        ciris_server::mesh_genesis::install_baked_trust_root(&engine)
-            .await
-            .unwrap_or_else(|e| panic!("stage 1 run {run} failed: {e} — it must be idempotent"));
+        let ok = install_or_witness_pre_v31(&engine).await;
+        if run == 1 {
+            installed = ok;
+        } else {
+            assert_eq!(
+                ok, installed,
+                "stage 1 run {run} reached a DIFFERENT outcome than run 1. It must be idempotent \
+                 in both regimes — a refusal that turns into a success means the refused run \
+                 left rows behind."
+            );
+        }
+    }
+    if !installed {
+        return;
     }
 
     // And the trust root is still good after the repeats, not merely un-errored.

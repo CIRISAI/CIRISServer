@@ -678,13 +678,17 @@ async fn perform_trust_root_ceremony(
 /// 5.3.2.4.3.1) re-canonicalizes the envelope with `ceg_produce_canonicalize`,
 /// cross-checks `SHA-256(canonical) == original_content_hash`, and Strict
 /// `verify_hybrid`s the `scrub_signature_*` against **`attesting_key_id`**'s
-/// REGISTERED pubkeys. So we canonicalize with that SAME function and bound-hybrid
-/// sign THOSE exact bytes with the root (`sign_bound` — the identical construction
-/// `produce_scrubbed_key_record` already uses for leg A, so the seeded PQC-complete
-/// `test-accord-holder-0` row verifies it). `attesting_key_id == scrub_key_id ==
-/// root` (a self-attested root row). Mirrors the 20-field
-/// `crate::auth::ownership::persist_user_signed_owner_binding` assembly, but the
-/// signer is the root, not a user `LocalSigner`.
+/// REGISTERED pubkeys. The bytes come from [`crate::attest`], which canonicalizes
+/// through that SAME function, and the root bound-hybrid signs THOSE exact bytes
+/// (`sign_bound` — the identical construction `produce_scrubbed_key_record` uses
+/// for leg A, so the seeded PQC-complete `test-accord-holder-0` row verifies it).
+/// `attesting_key_id == scrub_key_id == root` (a self-attested root row).
+///
+/// This doc used to end "mirrors the 20-field `persist_user_signed_owner_binding`
+/// assembly" — and it did, faithfully, including every binding defect that
+/// assembly had. A ceremony fixture that hand-rolls its rows proves the substrate
+/// accepts rows this server does not produce, which is how four separate binding
+/// failures reached a live claim with the bless path green (CIRISServer#402).
 async fn put_root_signed_attestation(
     engine: &std::sync::Arc<Engine>,
     root: &ciris_verify_core::self_at_login::HybridSigningIdentity,
@@ -694,49 +698,28 @@ async fn put_root_signed_attestation(
     subject_key_ids: Vec<String>,
     cohort_scope_str: &str,
 ) -> Result<String> {
-    use ciris_persist::federation::types::{attestation_tier, Attestation, SignedAttestation};
     use ciris_verify_core::self_at_login::SelfSigner as _;
-    use sha2::{Digest, Sha256};
 
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| anyhow!("ceremony canonicalize: {e}"))?;
-    let (ed_sig_b64, pqc_sig_b64) = root
-        .sign_bound(&canonical)
-        .await
-        .map_err(|e| anyhow!("ceremony sign_bound({}): {e}", root.key_id()))?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let now = chrono::Utc::now();
     let root_key_id = root.key_id().to_string();
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: root_key_id.clone(),
-        attested_key_id: attested_key_id.to_string(),
-        attestation_type: attestation_type_str.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: ed_sig_b64,
-        scrub_signature_pqc: Some(pqc_sig_b64),
-        scrub_key_id: root_key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids,
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope_str.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
+    let mut spec = crate::attest::Spec::new(attestation_type_str, cohort_scope_str, envelope);
+    spec.attested_key_id = Some(attested_key_id.to_string());
+    // NOT `Spec::about`: a ceremony row's subjects are not always its attested
+    // key (a root charter attests the root and names no subject), so the caller's
+    // two values are carried as given.
+    spec.subject_key_ids = subject_key_ids;
+
+    let stamped = crate::attest::Emit::stamp(&root_key_id, spec)
+        .map_err(|e| anyhow!("ceremony stamp({attestation_type_str}): {e}"))?;
+    let (ed_sig_b64, pqc_sig_b64) = root
+        .sign_bound(stamped.canonical())
         .await
-        .map_err(|e| anyhow!("ceremony put_attestation({attestation_type_str}): {e}"))?;
-    Ok(attestation_id)
+        .map_err(|e| anyhow!("ceremony sign_bound({root_key_id}): {e}"))?;
+    let row = stamped
+        .assemble_from_b64(&ed_sig_b64, &pqc_sig_b64)
+        .map_err(|e| anyhow!("ceremony assemble({attestation_type_str}): {e}"))?;
+    crate::attest::put(engine, row)
+        .await
+        .map_err(|e| anyhow!("ceremony put_attestation({attestation_type_str}): {e}"))
 }
 
 /// Does `token` appear in the envelope's `scope` field (bare string OR array — the
