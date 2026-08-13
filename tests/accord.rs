@@ -51,9 +51,9 @@ async fn node() -> Arc<Engine> {
     // assemble ceremony (holders they can sign with), which the baked family would
     // UNIQUE-conflict + can't be signed for. Skipping the seed lets the ceremony run as the
     // real trust-root founding it exercises.
-    let engine = Engine::with_signer_no_genesis_seed(signer, "sqlite::memory:")
+    let engine = Engine::with_signer_pre_genesis(signer, "sqlite::memory:")
         .await
-        .expect("Engine::with_signer_no_genesis_seed (sqlite::memory:) must succeed");
+        .expect("Engine::with_signer_pre_genesis (sqlite::memory:) must succeed");
     let engine = Arc::new(engine);
     // Register the node's OWN key (under its DERIVED id) so genesis recording via
     // emit_attestation_self (attester = the node) satisfies the FK. Mirrors prod

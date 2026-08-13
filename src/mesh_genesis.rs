@@ -769,6 +769,95 @@ pub async fn accept_trust_root(
     Ok(Some(root))
 }
 
+/// **UN-TRUST** — withdraw this node's `trust:accepts` edge for `root`
+/// (CIRISServer#400).
+///
+/// The inverse of [`accept_trust_root`], and deliberately the ONLY thing it
+/// undoes. The root's records are signed history and stay: this node's opinion of
+/// them is not a reason to forget they exist. Afterwards the root is KNOWN and not
+/// TRUSTED.
+///
+/// # This is the nuclear local act, and it is supposed to be
+///
+/// `accept_trust_root`'s own doc names the cascade: delete the row →
+/// `trust_root_valid` false → the walk returns `None` → the serve gate withholds
+/// → agent capabilities gate off → manifests stop. Every one of those is
+/// emergent; none is special-cased. That is what keeps un-trust EXPRESSIBLE
+/// rather than a special power, and it is why this withdraws a row instead of
+/// setting a flag.
+///
+/// Emits a `withdraws` rather than deleting: the acceptance was a signed,
+/// federation-visible claim, so retracting it is also a signed claim. A silent
+/// row deletion would leave peers holding an acceptance this node no longer makes.
+///
+/// Returns `false` when there was nothing to withdraw (no live acceptance) —
+/// distinct from an error, because "already un-trusted" is a success.
+pub async fn withdraw_trust_acceptance(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    root: &str,
+) -> Result<bool, GenesisError> {
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+    use ciris_persist::federation::EmitAttestationInput;
+
+    // The SAME accessor accept_trust_root uses — the withdraw must name the
+    // identity the acceptance was written under, or it withdraws nothing.
+    let node_key_id = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+    let Some(accepted_id) = live_acceptance_id(engine, &node_key_id, root).await? else {
+        tracing::info!(
+            root = %root,
+            "no live trust:accepts edge for this root — nothing to withdraw (already un-trusted)"
+        );
+        return Ok(false);
+    };
+
+    let envelope = ciris_persist::federation::withdraws_attestation_envelope(
+        &accepted_id,
+        attestation_type::DELEGATES_TO,
+    );
+    let mut input = EmitAttestationInput::with_envelope(
+        attestation_type::DELEGATES_TO,
+        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
+        cohort_scope::FEDERATION,
+    );
+    input.attested_key_id = Some(root.to_string());
+    engine
+        .emit_attestation_self(input)
+        .await
+        .map_err(|e| GenesisError::Directory(format!("withdraw trust:accepts: {e}")))?;
+
+    tracing::warn!(
+        node_key_id = %node_key_id, trust_root = %root, withdrawn = %accepted_id,
+        "TRUST ROOT UN-TRUSTED — acceptance withdrawn. The capability cascade now fails closed \
+         on its own: serve gate withholds, agent capabilities gate off."
+    );
+    Ok(true)
+}
+
+/// The `attestation_id` of this node's LIVE acceptance of `root`, if any.
+async fn live_acceptance_id(
+    engine: &ciris_persist::prelude::Engine,
+    node_key_id: &str,
+    root: &str,
+) -> Result<Option<String>, GenesisError> {
+    let rows = engine
+        .federation_directory()
+        .list_attestations_by(node_key_id)
+        .await
+        .map_err(|e| GenesisError::Directory(format!("read acceptances: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .find(|a| {
+            a.attested_key_id == root
+                && a.attestation_type
+                    == ciris_persist::federation::types::attestation_type::DELEGATES_TO
+        })
+        .map(|a| a.attestation_id))
+}
+
 /// Has this node already accepted `root`? Idempotency for [`accept_trust_root`].
 async fn node_trusts_root(
     engine: &ciris_persist::prelude::Engine,
@@ -783,6 +872,40 @@ async fn node_trusts_root(
     Ok(rows
         .iter()
         .any(|a| a.attestation_type == attestation_type::DELEGATES_TO && a.attested_key_id == root))
+}
+
+/// **The operator-facing "this node has no trust root" banner** (CIRISServer#400).
+///
+/// Printed at boot when [`Engine::genesis_posture`] is not entrenched. Says the
+/// two things an operator can DO — import a portable root, or create one by
+/// running a ceremony — because "stage 1 FAILED" told them neither.
+///
+/// A node without a root is not broken. It runs, it reports, and it can host its
+/// own genesis ceremony; every root-requiring gate refuses until it is rooted.
+/// Absence of a root is not absence of a rule.
+///
+/// Raw stderr as well as tracing, for the same reason the claim-PIN banner is:
+/// on the embedded topology the file sink can be dark at compose, and this is
+/// the one message that explains why the node is serving nothing.
+pub fn announce_no_trust_root(detail: &str) {
+    tracing::warn!(
+        "\n\
+         ╔══════════════════════════════════════════════════════════════════════╗\n\
+         ║  NO TRUST ROOT CONFIGURED — import one, or create one.               ║\n\
+         ║                                                                      ║\n\
+         ║  This node runs and reports, but every root-requiring gate refuses   ║\n\
+         ║  and no trace:* row is served until it is rooted.                     ║\n\
+         ║                                                                      ║\n\
+         ║  IMPORT  a portable trust root you already hold:                     ║\n\
+         ║          POST /v1/trust-root/import                                  ║\n\
+         ║  CREATE  a new one by running the genesis ceremony:                  ║\n\
+         ║          the Accord card → Found accord (2-of-3 holders)             ║\n\
+         ║  LIST    what is installed:  GET    /v1/trust-root                   ║\n\
+         ║  DELETE  an installed root:  DELETE /v1/trust-root/{{key_id}}          ║\n\
+         ╚══════════════════════════════════════════════════════════════════════╝\n\
+         posture: {detail}"
+    );
+    eprintln!("[ciris-server] NO TRUST ROOT CONFIGURED — import or create one ({detail})");
 }
 
 /// **Stage 1** — install the BAKED trust root and accept it. Called at boot.

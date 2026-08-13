@@ -369,6 +369,7 @@ mod test_bless;
 /// writes the verdict to the node log — edge-triggered, so it cannot become the
 /// log volume nobody read.
 pub mod trace_plane_watch;
+pub mod trust_root_api;
 /// The wire vocabularies, served to the operator UI so no picker ever
 /// hardcodes a member (CIRISPersist#625).
 pub mod vocabulary_surface;

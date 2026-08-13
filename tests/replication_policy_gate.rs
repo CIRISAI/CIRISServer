@@ -22,36 +22,34 @@
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
     "351912ead0aab4847f40d2b54a7a326546c37d43507deb38ea24d6094d29d63b";
 
-/// edge v15.22.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
+/// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
 /// attestations serve ONLY to `capability:infra:serve` recipients; every other
 /// kind serves public.
 ///
-/// # Re-pinned for CIRISEdge#462 — the RECEIVE axis
+/// # Re-pinned twice, and BOTH times the serve gate was verified unmoved
 ///
-/// The manifest gained a third column, `receive`: whether a kind answers a
-/// subject-scoped pull, and under what rule. That is the axis this server filed
-/// as missing — the want-generator that let a fedID recover its own testimony
-/// after claiming a fresh node.
+/// v15.22.0 (#462) added the `receive` column — the RECEIVE axis. v16.0.0 (the
+/// persist v31 subject-binding reset) changed one value INSIDE that column: the
+/// Attestation plane's G2 carve went from naming a mechanism
+/// (`consent-gated scores … persist consent_gated_claim`) to naming a
+/// PREDICATE — `attestation_type == scores AND !is_subject_retainable(dimension)`.
 ///
-/// **What was reviewed before re-pinning**, because a hash bump is exactly the
-/// act this gate exists to make deliberate:
+/// That is a strict improvement and worth understanding rather than waving
+/// through. persist's `is_subject_retainable` is an explicit list, not a
+/// string-match over manifest prose, with a test
+/// (`manifest_self_emission_families_are_all_retainable`) that fails the build
+/// when the manifest gains a self-emission family the list does not name — "the
+/// manifest is the alarm, not the authority". And it is consulted ONLY on the
+/// data-subject axis: a score I AUTHORED stays mine to recover.
 ///
-/// - The `(advertise, serve)` match arms are BYTE-IDENTICAL across v15.21.8 and
-///   v15.22.0 (verified by hashing that block in both checkouts). The E3 gate did
-///   not move; the hash changed because a column was ADDED, not because a serve
-///   rule was relaxed. That distinction is the whole point of reading the diff
-///   rather than accepting the new value.
-/// - The new column is fail-closed in the right direction: the five replicated
-///   kinds are `subject_pull … subject-only`, and every other kind is `none` —
-///   pullable is the exception, not the default.
-/// - The Attestation plane sweeps BOTH testimonial axes
-///   (`data_subject+sender`), which is the author/subject split this server
-///   argued for, with a `consent-gated scores` carve on the `data_subject` axis
-///   for the G2 capacity self-revocation hazard — the one case this server
-///   flagged as must-not-auto-pull.
+/// **What was verified before accepting each new value:** the
+/// `(advertise, serve)` match block hashes BYTE-IDENTICAL across v15.21.8,
+/// v15.22.0 and v16.0.0 (`f43c9736…` all three). So both re-pins are column
+/// changes, not serve-rule relaxations. A hash gate exists to force that reading;
+/// taking the number on trust would make it decoration.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "049e71ef208d24266fe366b8eaed365a467cadd3aadd8856c8ed917c90bced33";
+    "6f683311627689221d886f4245ac7b9fa6715e6f1e135855f52fa7800fb7cda5";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

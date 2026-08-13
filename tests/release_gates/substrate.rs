@@ -10,9 +10,9 @@ use crate::ladder::{assert_proven, cargo_pin, cargo_toml, tag_on_line, VOCABULAR
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v13.0.0";
-pub const TARGET_PERSIST: &str = "v30.11.0";
-pub const TARGET_EDGE: &str = "v15.22.0";
+pub const TARGET_VERIFY: &str = "v13.1.0";
+pub const TARGET_PERSIST: &str = "v31.0.0";
+pub const TARGET_EDGE: &str = "v16.0.0";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -128,7 +128,7 @@ fn gate_substrate_pins_move_together() {
 #[test]
 fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     /// The vocabulary hash adopted with persist v30.0.0.
-    const ADOPTED: &str = "f1a0bc77d24915fc1e099c4715621c936ca4fb38678b71268b88a9d614c04929";
+    const ADOPTED: &str = "1213fd3cf3109df92805cb1f6b0e39ae7637812b4fba23206a7860ba381107b2";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

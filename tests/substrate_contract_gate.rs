@@ -53,7 +53,7 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// Flips when a wire kind is added/renamed/reshaped. A silent change would
 /// desync producers and readers across the triple → reviewed re-pin only.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "f1a0bc77d24915fc1e099c4715621c936ca4fb38678b71268b88a9d614c04929";
+    "1213fd3cf3109df92805cb1f6b0e39ae7637812b4fba23206a7860ba381107b2";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 
