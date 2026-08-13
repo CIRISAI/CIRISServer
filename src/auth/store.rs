@@ -8,14 +8,43 @@
 //! the single auth authority by owning those same `wa_cert` rows DIRECTLY.
 //!
 //! This module is the one place that reaches the substrate sub-services off the
-//! shared [`Engine`] — the `conn_handle()` sibling-module pattern persist
-//! documents for cohabiting backends:
+//! shared [`Engine`], and it dispatches on the backend the Engine actually has:
 //!
 //! ```text
-//! engine.sqlite_backend()? .conn_handle() -> Arc<Mutex<Connection>>
-//!     -> SqliteWaCertBackend::new(conn)                 (impls WaCertService)
-//!     -> SqliteServiceTokenRevocationBackend::new(conn) (impls ServiceTokenRevocationService)
+//! sqlite:   engine.sqlite_backend()?.conn_handle() -> SqliteWaCertBackend
+//! postgres: engine.postgres_backend()?            -> PostgresBackend
 //! ```
+//!
+//! # PostgreSQL agents could not start a node (CIRISServer#397)
+//!
+//! Both accessors used to reach for `sqlite_backend()` UNCONDITIONALLY, so the
+//! auth substrate — WA certs and service-token revocation — was SQLite-only while
+//! the rest of the Engine is backend-agnostic. On a postgres node every auth call
+//! returned `NoSqliteBackend` and the process could not compose: no federation, no
+//! `/v1/self`, no accord, no auth. PostgreSQL is a supported deployment, so that
+//! is a total outage for it, not a degraded mode.
+//!
+//! Nothing upstream was missing. persist has shipped `impl WaCertService for
+//! PostgresBackend` and `impl ServiceTokenRevocationService for PostgresBackend`
+//! all along, and `Engine::postgres_backend()` to reach them — this module simply
+//! never asked. The absorption note below describes the SQLite path because that
+//! is the backend the absorption was done against; it was never a statement that
+//! auth is SQLite-only.
+//!
+//! # Why an enum and not `dyn`
+//!
+//! `WaCertService` uses `-> impl Future`, so it is not dyn-compatible.
+//! [`AuthCertBackend`] is a two-arm enum that implements the trait by delegating,
+//! which keeps every call site unchanged and makes a THIRD backend a compile
+//! error here rather than a runtime `NoSqliteBackend` in production.
+//!
+//! # The cutover did not cause this
+//!
+//! The constraint predates the agent's auth cutover. What changed is that auth now
+//! genuinely depends on the node — before, postgres agents ran their own auth
+//! implementation that never consulted it, which is exactly the duplication
+//! CIRISAgent#1028 set out to remove. Deleting that Python exposed a real gap
+//! rather than creating one.
 //!
 //! When the agent adopts the wheel it DROPS its own `auth_service` storage and
 //! delegates to the fabric routes — no schema fork, because both sides were
@@ -24,14 +53,20 @@
 use ciris_persist::prelude::Engine;
 use ciris_persist::service_token_revocation::sqlite::SqliteServiceTokenRevocationBackend;
 use ciris_persist::wa_cert::sqlite::SqliteWaCertBackend;
-use ciris_persist::wa_cert::{WaCert, WaCertService, WaRole};
+use ciris_persist::wa_cert::{Error as WaCertBackendError, WaCert, WaCertService, WaRole};
+use std::sync::Arc;
 
 /// Why an auth-store access failed.
 #[derive(Debug)]
 pub enum StoreError {
-    /// The Engine is not SQLite-backed (no `conn_handle`); the auth store needs
-    /// the directory-bearing SQLite backend.
-    NoSqliteBackend,
+    /// The Engine has NO backend this auth store can use — neither SQLite nor
+    /// PostgreSQL (CIRISServer#397).
+    ///
+    /// Named for the limitation rather than the storage detail. The old
+    /// `NoSqliteBackend` / "engine is not SQLite-backed" told an operator on a
+    /// perfectly healthy postgres node that the wrong database was missing, which
+    /// points debugging at the storage layer instead of at auth support.
+    NoAuthBackend,
     /// A substrate `wa_cert` call failed.
     WaCert(ciris_persist::wa_cert::Error),
     /// A substrate `revoked_service_tokens` call failed.
@@ -64,7 +99,12 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreError::NoSqliteBackend => write!(f, "engine is not SQLite-backed"),
+            StoreError::NoAuthBackend => write!(
+                f,
+                "this node's engine has no auth-capable backend (expected SQLite or PostgreSQL) \
+                 — WA certs and service-token revocation cannot be read or written, so login, \
+                 /v1/self, accord and federation are all unavailable on this node"
+            ),
             StoreError::WaCert(e) => write!(f, "wa_cert: {e}"),
             StoreError::Revocation(e) => write!(f, "service-token revocation: {e}"),
             StoreError::AmbiguousOauthIdentity { provider, holders } => write!(
@@ -97,22 +137,143 @@ impl From<ciris_persist::service_token_revocation::Error> for StoreError {
     }
 }
 
-/// Open the `wa_cert` substrate backend over the Engine's shared SQLite
-/// connection. The returned backend impls [`WaCertService`].
-pub fn wa_cert_backend(engine: &Engine) -> Result<SqliteWaCertBackend, StoreError> {
-    let sqlite = engine.sqlite_backend().ok_or(StoreError::NoSqliteBackend)?;
-    Ok(SqliteWaCertBackend::new(sqlite.conn_handle()))
+/// The `wa_cert` backend for whichever store this Engine actually has.
+///
+/// Implements [`WaCertService`] by delegating, so every call site is unchanged.
+/// Adding a third backend is a COMPILE error here — which is the point: the
+/// SQLite-only version failed at runtime, in production, on a supported
+/// deployment (CIRISServer#397).
+pub enum AuthCertBackend {
+    Sqlite(SqliteWaCertBackend),
+    Postgres(Arc<ciris_persist::store::PostgresBackend>),
 }
 
-/// Open the `revoked_service_tokens` substrate backend over the Engine's shared
-/// SQLite connection. The returned backend impls [`ServiceTokenRevocationService`].
-pub fn revocation_backend(
-    engine: &Engine,
-) -> Result<SqliteServiceTokenRevocationBackend, StoreError> {
-    let sqlite = engine.sqlite_backend().ok_or(StoreError::NoSqliteBackend)?;
-    Ok(SqliteServiceTokenRevocationBackend::new(
-        sqlite.conn_handle(),
-    ))
+impl WaCertService for AuthCertBackend {
+    async fn upsert_wa_cert(&self, cert: WaCert) -> Result<(), WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.upsert_wa_cert(cert).await,
+            Self::Postgres(b) => b.upsert_wa_cert(cert).await,
+        }
+    }
+    async fn get_wa_cert(&self, wa_id: &str) -> Result<Option<WaCert>, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.get_wa_cert(wa_id).await,
+            Self::Postgres(b) => b.get_wa_cert(wa_id).await,
+        }
+    }
+    async fn get_by_kid(&self, jwt_kid: &str) -> Result<Option<WaCert>, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.get_by_kid(jwt_kid).await,
+            Self::Postgres(b) => b.get_by_kid(jwt_kid).await,
+        }
+    }
+    async fn get_by_oauth(
+        &self,
+        provider: &str,
+        external_id: &str,
+    ) -> Result<Option<WaCert>, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.get_by_oauth(provider, external_id).await,
+            Self::Postgres(b) => b.get_by_oauth(provider, external_id).await,
+        }
+    }
+    async fn list_by_role(
+        &self,
+        role: WaRole,
+        limit: i64,
+    ) -> Result<Vec<WaCert>, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.list_by_role(role, limit).await,
+            Self::Postgres(b) => b.list_by_role(role, limit).await,
+        }
+    }
+    async fn set_active(&self, wa_id: &str, active: bool) -> Result<bool, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.set_active(wa_id, active).await,
+            Self::Postgres(b) => b.set_active(wa_id, active).await,
+        }
+    }
+    async fn update_last_login(
+        &self,
+        wa_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, WaCertBackendError> {
+        match self {
+            Self::Sqlite(b) => b.update_last_login(wa_id, at).await,
+            Self::Postgres(b) => b.update_last_login(wa_id, at).await,
+        }
+    }
+}
+
+/// Open the `wa_cert` backend for this Engine — SQLite or PostgreSQL.
+///
+/// SQLite is tried first only because it is the co-located default; neither is
+/// privileged. An Engine with neither is [`StoreError::NoAuthBackend`].
+pub fn wa_cert_backend(engine: &Engine) -> Result<AuthCertBackend, StoreError> {
+    if let Some(sqlite) = engine.sqlite_backend() {
+        return Ok(AuthCertBackend::Sqlite(SqliteWaCertBackend::new(
+            sqlite.conn_handle(),
+        )));
+    }
+    if let Some(pg) = engine.postgres_backend() {
+        return Ok(AuthCertBackend::Postgres(Arc::clone(pg)));
+    }
+    Err(StoreError::NoAuthBackend)
+}
+
+/// The `revoked_service_tokens` backend for this Engine — SQLite or PostgreSQL.
+pub enum AuthRevocationBackend {
+    Sqlite(SqliteServiceTokenRevocationBackend),
+    Postgres(Arc<ciris_persist::store::PostgresBackend>),
+}
+
+impl ciris_persist::service_token_revocation::ServiceTokenRevocationService
+    for AuthRevocationBackend
+{
+    async fn record_revocation(
+        &self,
+        revocation: ciris_persist::service_token_revocation::RevokedServiceToken,
+    ) -> Result<(), ciris_persist::service_token_revocation::Error> {
+        match self {
+            Self::Sqlite(b) => b.record_revocation(revocation).await,
+            Self::Postgres(b) => b.record_revocation(revocation).await,
+        }
+    }
+    async fn list_revocations(
+        &self,
+    ) -> Result<
+        Vec<ciris_persist::service_token_revocation::RevokedServiceToken>,
+        ciris_persist::service_token_revocation::Error,
+    > {
+        match self {
+            Self::Sqlite(b) => b.list_revocations().await,
+            Self::Postgres(b) => b.list_revocations().await,
+        }
+    }
+    async fn check_revocation(
+        &self,
+        token_hash: &str,
+    ) -> Result<
+        Option<ciris_persist::service_token_revocation::RevokedServiceToken>,
+        ciris_persist::service_token_revocation::Error,
+    > {
+        match self {
+            Self::Sqlite(b) => b.check_revocation(token_hash).await,
+            Self::Postgres(b) => b.check_revocation(token_hash).await,
+        }
+    }
+}
+
+pub fn revocation_backend(engine: &Engine) -> Result<AuthRevocationBackend, StoreError> {
+    if let Some(sqlite) = engine.sqlite_backend() {
+        return Ok(AuthRevocationBackend::Sqlite(
+            SqliteServiceTokenRevocationBackend::new(sqlite.conn_handle()),
+        ));
+    }
+    if let Some(pg) = engine.postgres_backend() {
+        return Ok(AuthRevocationBackend::Postgres(Arc::clone(pg)));
+    }
+    Err(StoreError::NoAuthBackend)
 }
 
 /// Look up a WA cert by its OAuth `(provider, external_id)` — the OAuth login
