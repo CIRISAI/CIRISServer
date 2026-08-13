@@ -225,43 +225,24 @@ async fn node_a_key_id(engine: &Engine) -> String {
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     // A self-signed steward row; pubkeys from the node's own hybrid signer.
     // CEG produce-canonical (V2/JCS) so it matches verify_key_registration.
     // Under the DERIVED key_id (the consent emit attests under emit_attestation_self).
     let key_id = node_a_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node A steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node A steward key via admission gate");
 }
 
 /// The full Node-A directed-consent peering spine: register B's witness key →

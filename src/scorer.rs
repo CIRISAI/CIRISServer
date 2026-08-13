@@ -1285,6 +1285,16 @@ async fn score_and_emit(
         "feature_dim": derivation.feature_dim,
         "sample_size_gate": cfg.sample_size_gate,
         "target_n_eff": cfg.target_n_eff,
+        // This producer SETS the signed instant on purpose, and the emit stamp
+        // honours a producer-set value rather than overwriting it — which is the
+        // case that honouring exists for. `asserted_at` here is FLOORED to a
+        // coalescing bucket (see SCORE_COALESCE_BASE) so a re-measurement that
+        // has not moved produces byte-identical envelope bytes; letting the stamp
+        // write a fresh instant would restore the 0.5.151 growth defect, ~10,000
+        // simultaneously-live rows per agent per dimension all saying the same
+        // thing. Being on a bucket boundary, it is a whole number of seconds and
+        // therefore cannot carry the sub-microsecond precision CIRISPersist#598
+        // refuses — `the_scorers_floored_instant_is_storable` pins that.
         "asserted_at": asserted_at.to_rfc3339(),
         "valid_until": valid_until.to_rfc3339(),
         "cohort_scope": cohort_scope::FEDERATION,

@@ -115,36 +115,20 @@ async fn register_self(engine: &Engine) -> String {
         .local_derived_key_id()
         .await
         .expect("derive node federation key_id");
-    let now = Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::NODE.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::NODE,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node key");
     key_id
 }
 
@@ -220,43 +204,28 @@ async fn seed_score(
         "witness_relation": "external",
         "asserted_at": signed_at.to_rfc3339(),
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize score envelope");
-    let sig = attester
-        .sign_hybrid(&canonical)
-        .await
-        .expect("hybrid-sign the score");
-    let now = Utc::now();
-    let attestation_id = format!("att-{}-{}-{}", attester.key_id(), subject, score);
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: attester.key_id().to_string(),
-        attested_key_id: subject.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: Some(score),
-        // The UNSIGNED column: deliberately `now`, never the signed instant.
-        asserted_at: now,
-        expires_at: Some(now + Duration::days(7)),
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: attester.key_id().to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put federation-tier score row");
-    attestation_id
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        cohort_scope::FEDERATION,
+        envelope,
+    );
+    spec.attested_key_id = Some(subject.to_string());
+    spec.subject_key_ids = Vec::new();
+    let spec = spec.weighing(Some(score));
+    let spec = spec.expiring(Some(Utc::now() + Duration::days(7)));
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
+    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
+    // accepts a shape this server does not produce. The id is now MINTED INTO the
+    // signed bytes rather than composed from the inputs, so callers take it back
+    // from the emit.
+    ciris_server::attest::emit(
+        engine,
+        ciris_server::attest::KeySigner::Local(&attester),
+        spec,
+    )
+    .await
+    .expect("put federation-tier score row")
 }
 
 fn hours_ago(h: i64) -> DateTime<Utc> {

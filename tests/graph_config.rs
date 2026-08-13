@@ -59,40 +59,21 @@ async fn node_key_id(engine: &Engine) -> String {
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key via admission gate");
 }
 
 /// Each `ConfigValue` variant round-trips through set_config → get_config.
@@ -365,44 +346,30 @@ async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
 /// (subject_key_ids carries the row id) — the revocation shape `config_key_revoked`
 /// recognizes.
 async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
-    let now = chrono::Utc::now();
+    // Through the ONE door (CIRISServer#402). The hand-rolled version set both the
+    // signed `asserted_at` AND the column from one `Utc::now()` — which looks
+    // correct and is not: the instant carried nanoseconds postgres cannot store,
+    // so persist v31 refused the row (CIRISPersist#598). The stamp truncates.
     let nk = node_key_id(engine).await;
-    let envelope = serde_json::json!({
-        "dimension": "config:v1",
-        "attesting_key_id": nk,
-        "recants": target_attestation_id,
-        "asserted_at": now.to_rfc3339(),
-    });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize recant");
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let sig = engine.sign_hybrid(&canonical).await.expect("sign recant");
-
-    let attestation = Attestation {
-        attestation_id: format!("recant-{target_attestation_id}"),
-        attesting_key_id: nk.clone(),
-        attested_key_id: nk.clone(),
-        attestation_type: attestation_type::RECANTS.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: nk.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![target_attestation_id.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put recant attestation");
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::RECANTS,
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+        serde_json::json!({
+            "dimension": "config:v1",
+            "attesting_key_id": nk,
+            "recants": target_attestation_id,
+        }),
+    );
+    spec.attested_key_id = Some(nk.clone());
+    // A recant's SUBJECT is the ROW it kills, not a key — the shape
+    // `config_key_revoked` recognizes. So the two are set separately here rather
+    // than through `Spec::about`, which sets them to the same value.
+    spec.subject_key_ids = vec![target_attestation_id.to_string()];
+    ciris_server::attest::emit(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        spec,
+    )
+    .await
+    .expect("put recant attestation");
 }

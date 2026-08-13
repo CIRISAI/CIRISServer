@@ -197,37 +197,21 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
 }
 
 async fn register_self(engine: &Engine) {
-    let now = Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key");
 }
 
 async fn bind_owner(engine: &Engine) {
@@ -345,39 +329,32 @@ async fn emit_action(
         "attested_key_id": key_id,
         "nonce": id,
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize action envelope");
-    let sig = author.sign_hybrid(&canonical).await.expect("sign action");
-    let attestation = Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: key_id.clone(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: Some(1.0),
-        asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation {
-            attestation: attestation.clone(),
-        })
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        cohort_scope::FEDERATION,
+        envelope,
+    );
+    spec.attested_key_id = Some(key_id.to_string());
+    spec.subject_key_ids = Vec::new();
+    let spec = spec.weighing(Some(1.0));
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
+    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
+    // accepts a shape this server does not produce.
+    //
+    // The ROW is returned, not just its id: callers read `attestation_id`,
+    // `attesting_key_id` and `asserted_at` off it — and `asserted_at` is now the
+    // stamped, truncated instant rather than a second clock read, which is the
+    // point.
+    let row = ciris_server::attest::Emit::stamp(author.key_id(), spec)
+        .expect("stamp action")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(&author))
+        .await
+        .expect("sign action");
+    ciris_server::attest::put(engine, row.clone())
         .await
         .expect("put action");
-    attestation
+    row
 }
 
 /// Sign one envelope as `signer` and wrap it as a row on this plane. Used for

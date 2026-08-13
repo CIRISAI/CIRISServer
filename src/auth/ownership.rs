@@ -935,7 +935,7 @@ pub async fn emit_steward_binding(
     // `build_signed_owner_binding` / `is_steward_bound` key on end to end.
     let attestation_id = crate::attest::emit(
         engine,
-        user_signer,
+        crate::attest::KeySigner::Local(user_signer),
         crate::attest::Spec::new(
             attestation_type::DELEGATES_TO,
             cohort_scope::FEDERATION,
@@ -993,7 +993,7 @@ pub async fn emit_signed_attestation(
     // above and carried by `crate::attest::emit`.
     crate::attest::emit(
         engine,
-        signer,
+        crate::attest::KeySigner::Local(signer),
         crate::attest::Spec::new(attestation_type, cohort_scope::FEDERATION, envelope)
             .expiring(expires_at)
             // `attested_key_id` and `subject_key_ids` are set together and to the

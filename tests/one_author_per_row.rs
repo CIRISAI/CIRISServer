@@ -229,9 +229,12 @@ fn the_door_reads_one_clock_per_plane() {
     .expect("read src/attest.rs")
     .replace("\r\n", "\n");
     let code = code_only(&src);
+    // Split on the key-plane entry point itself, not on a banner comment —
+    // `code_only` strips comments, so a comment landmark would silently become
+    // "not found" and this gate would count one region twice.
     let split = code
-        .find("pub enum KeySigner")
-        .expect("the key-plane section marker moved — this gate is counting the wrong region");
+        .find("pub async fn register_key")
+        .expect("register_key moved — this gate would otherwise count the wrong region");
     for (plane, region) in [("attestation", &code[..split]), ("key", &code[split..])] {
         assert_eq!(
             region.matches("chrono::Utc::now()").count(),
@@ -249,6 +252,81 @@ fn the_door_reads_one_clock_per_plane() {
          (CIRISPersist#643) — an id minted here would be a second name for the row, sampled after \
          the bytes existed, which is #598's defect wearing #643's clothes."
     );
+}
+
+/// **No producer writes the signed instant, except the one that must.**
+///
+/// `stamp_and_canonicalize` honours a producer-set `asserted_at` instead of
+/// overwriting it — deliberately, for the staged/co-signed case. The cost of that
+/// courtesy is that a producer which sets it also owns TRUNCATING it, and a plain
+/// `Utc::now().to_rfc3339()` carries nanoseconds postgres cannot store. Three
+/// production paths did exactly that (config writes, replication consent, and the
+/// ceremony), so on v31 every write on those paths was refused.
+///
+/// One producer legitimately sets it: [`scorer`] floors the instant to a
+/// coalescing bucket so a re-measurement that has not moved produces
+/// byte-identical envelope bytes. Being on a bucket boundary it is a whole number
+/// of seconds, so it cannot carry sub-microsecond precision — which is why that
+/// exemption is safe and why it is named here rather than pattern-matched.
+#[test]
+fn no_producer_writes_the_signed_instant_unbucketed() {
+    /// (file, why) — producers allowed to set `asserted_at` in an envelope.
+    const MAY_SET: &[(&str, &str)] = &[
+        (
+            "src/scorer.rs",
+            "floors the instant to a coalescing bucket so an unchanged re-measurement \
+             produces byte-identical bytes (SCORE_COALESCE_BASE). A bucket boundary is a whole \
+             number of seconds, so it cannot carry sub-microsecond precision.",
+        ),
+        (
+            "src/compose.rs",
+            "a signed identity OCCURRENCE, not an attestation: it is produced by verify's \
+             produce_signed_identity_occurrence and never reaches put_attestation, so the \
+             instant-binding gate does not govern it. It is truncated to milliseconds anyway.",
+        ),
+    ];
+
+    let mut offenders = Vec::new();
+    for (path, body) in repo_rust_files() {
+        if path == "src/attest.rs" || MAY_SET.iter().any(|(f, _)| *f == path) {
+            continue;
+        }
+        let code = code_only(&body);
+        let (shipping, _fixtures) = split_at_cfg_test(&code);
+        for (n, line) in shipping.lines().enumerate() {
+            // A WRITE looks like `"asserted_at": <expr>` inside a json! literal.
+            // A READ looks like `.get("asserted_at")` or `row.asserted_at`, and a
+            // RENDER puts a stored value into a response body — both fine.
+            let writes = line.contains("\"asserted_at\":") && !line.contains(".asserted_at");
+            if writes {
+                offenders.push(format!("{path}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these producers write `asserted_at` into an envelope:\n  {}\n\nThe emit stamp writes \
+         it — once, truncated to the substrate's resolution — and `assemble` reads the row \
+         column back out of it. A producer-set value is HONOURED and NOT truncated, so a plain \
+         `Utc::now()` here lands with nanoseconds postgres cannot store and every put on the \
+         path is refused (CIRISPersist#598). Delete the field and let the stamp write it. If \
+         this producer genuinely needs a chosen instant — a coalescing bucket, a staged row — \
+         add it to MAY_SET with the reason AND make sure the value is truncated.",
+        offenders.join("\n  ")
+    );
+
+    for (path, why) in MAY_SET {
+        let (_, body) = repo_rust_files()
+            .into_iter()
+            .find(|(p, _)| p == path)
+            .unwrap_or_else(|| panic!("MAY_SET names {path}, which no longer exists ({why})"));
+        assert!(
+            code_only(&body).contains("\"asserted_at\":"),
+            "MAY_SET names {path}, but it no longer writes `asserted_at`. Drop the exemption — a \
+             stale one licenses the next unbucketed producer in that file.\n(exempted because: \
+             {why})"
+        );
+    }
 }
 
 // ─── Mutational: the properties are load bearing ────────────────────────────
@@ -362,7 +440,7 @@ async fn fresh_row(user: &LocalSigner) -> Attestation {
         .about(NODE),
     )
     .expect("stamp")
-    .sign_and_assemble(user)
+    .sign_and_assemble(ciris_server::attest::KeySigner::Local(user))
     .await
     .expect("sign + assemble")
 }

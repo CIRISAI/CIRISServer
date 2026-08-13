@@ -132,41 +132,22 @@ async fn self_register(
     engine: &Engine,
     key_id: &str,
     id_type: &str,
-) -> Result<LocalSigner, FedError> {
+) -> Result<LocalSigner, ciris_server::attest::Error> {
     let signer = party_signer(key_id);
     let (ed_pub, mldsa_pub) = party_pubkeys(key_id).await;
-    let now = Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id, "identity_type": id_type });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");
-    let sig = signer
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self-sign registration");
-    let record = KeyRecord {
-        key_id: key_id.to_string(),
-        pubkey_ed25519_base64: ed_pub,
-        pubkey_ml_dsa_65_base64: Some(mldsa_pub),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: id_type.to_string(),
-        identity_ref: key_id.to_string(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.to_string(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await?;
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Local(&signer),
+        &key_id,
+        id_type,
+        serde_json::Value::Null,
+    )
+    .await?;
     Ok(signer)
 }
 
@@ -176,36 +157,20 @@ async fn register_self(engine: &Engine) -> String {
         .local_derived_key_id()
         .await
         .expect("derive node federation key_id");
-    let now = Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key");
     key_id
 }
 

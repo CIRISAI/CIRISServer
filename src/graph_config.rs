@@ -207,8 +207,9 @@ pub struct ConfigEntry {
 /// Build the `config:v1` envelope for an entry — the JSON that is JCS-canonicalized
 /// into the signing basis. Mirrors [`crate::peer::emit_replication_consent`]'s
 /// envelope shape (same envelope fields: `dimension`, `attesting_key_id`,
-/// `score`, `cohort_scope`, `asserted_at`), plus the entry fields carried inline.
-fn config_envelope(node_key_id: &str, entry: &ConfigEntry, asserted_at: &str) -> serde_json::Value {
+/// `score`, `cohort_scope`), plus the entry fields carried inline. The signed
+/// instant is NOT among them — the emit stamp owns it (CIRISPersist#598).
+fn config_envelope(node_key_id: &str, entry: &ConfigEntry) -> serde_json::Value {
     serde_json::json!({
         (paths::DIMENSION): CONFIG_DIMENSION,
         "attesting_key_id": node_key_id,
@@ -219,7 +220,12 @@ fn config_envelope(node_key_id: &str, entry: &ConfigEntry, asserted_at: &str) ->
         // than repeating the literal.
         "cohort_scope": CONFIG_COHORT_SCOPE,
         "witness_relation": "self",
-        "asserted_at": asserted_at,
+        // NO `asserted_at` HERE (CIRISServer#402 / CIRISPersist#598). The stamp
+        // writes it — once, truncated to the substrate's resolution — and
+        // `assemble` reads the row column back out of it. A producer that sets it
+        // is honoured and NOT truncated, so a hand-written `Utc::now()` lands with
+        // nanoseconds postgres cannot store and the put is refused. It made every
+        // write on this path fail on v31.
         // The config entry, carried inline so a read reconstructs it verbatim.
         "key": entry.key,
         "value": entry.value,
@@ -583,9 +589,8 @@ pub async fn set_config(
         previous_version,
     };
 
-    let now = chrono::Utc::now();
     let node_key_id = self_key_id(engine).await?;
-    let envelope = config_envelope(&node_key_id, &entry, &now.to_rfc3339());
+    let envelope = config_envelope(&node_key_id, &entry);
 
     // ── Emit (CIRISPersist#253 collapse) ─────────────────────────────────────
     // node-self emit over the engine's OWN composed signer: the hand-rolled

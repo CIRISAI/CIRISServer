@@ -73,6 +73,52 @@ use ciris_persist::federation::types::{Attestation, SignedAttestation};
 use ciris_persist::federation::{attestation_emit, EmitAttestationInput};
 use ciris_persist::prelude::{Engine, LocalSigner};
 
+/// Who signs — the node's own engine identity, or a `LocalSigner` held for some
+/// other party.
+///
+/// ONE abstraction across BOTH planes (attestations and key registrations),
+/// because two would be how the binding comes to be applied on one path and not
+/// the other — which is the shape this module exists to retire.
+#[derive(Clone, Copy)]
+pub enum KeySigner<'a> {
+    /// This node's own federation identity.
+    Engine(&'a Engine),
+    /// A keypair held directly (a user's fed-ID, a test party).
+    Local(&'a LocalSigner),
+}
+
+impl KeySigner<'_> {
+    /// The attester id this signer authors under.
+    ///
+    /// For the engine it is the DERIVED federation key_id (#247) — the same one
+    /// `emit_attestation_self` stamps. For a `LocalSigner` it is `key_id()`
+    /// verbatim: the owner-binding wire contract keys on the registered id end to
+    /// end, and deriving again would produce `<id>-<fp>-<fp>` and break the
+    /// `federation_keys` foreign key.
+    pub async fn key_id(&self) -> Result<String, Error> {
+        match self {
+            Self::Engine(e) => e
+                .local_derived_key_id()
+                .await
+                .map_err(|e| Error::Sign(e.to_string())),
+            Self::Local(s) => Ok(s.key_id().to_owned()),
+        }
+    }
+
+    async fn sign_hybrid(&self, bytes: &[u8]) -> Result<ciris_crypto::HybridSignature, Error> {
+        match self {
+            Self::Engine(e) => e
+                .sign_hybrid(bytes)
+                .await
+                .map_err(|e| Error::Sign(e.to_string())),
+            Self::Local(s) => s
+                .sign_hybrid(bytes)
+                .await
+                .map_err(|e| Error::Sign(e.to_string())),
+        }
+    }
+}
+
 /// What a caller wants said, as columns. Everything a producer decides; nothing
 /// a producer may derive.
 ///
@@ -436,11 +482,8 @@ impl Emit {
 
     /// **Stage 2″ — sign here, then assemble.** For the sites that hold the
     /// signer themselves.
-    pub async fn sign_and_assemble(self, signer: &LocalSigner) -> Result<Attestation, Error> {
-        let sig = signer
-            .sign_hybrid(&self.canonical)
-            .await
-            .map_err(|e| Error::Sign(e.to_string()))?;
+    pub async fn sign_and_assemble(self, signer: KeySigner<'_>) -> Result<Attestation, Error> {
+        let sig = signer.sign_hybrid(&self.canonical).await?;
         self.assemble(sig)
     }
 }
@@ -459,47 +502,18 @@ pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
 /// **The whole recipe** — stamp, sign with `signer`, assemble, store. Returns the
 /// stored `attestation_id`.
 ///
-/// `signer.key_id()` is used verbatim as the attester. It is NOT re-derived: the
-/// owner-binding wire contract keys on the registered id end to end, and
-/// [`Engine::emit_attestation`](ciris_persist::prelude::Engine) would derive it a
-/// second time (`<id>-<fp>-<fp>`), breaking the `federation_keys` foreign key.
-pub async fn emit(engine: &Engine, signer: &LocalSigner, spec: Spec) -> Result<String, Error> {
-    let row = Emit::stamp(signer.key_id(), spec)?
+/// The attester comes from [`KeySigner::key_id`], which is derived for the engine
+/// and verbatim for a `LocalSigner` — see that method for why the difference is
+/// load bearing.
+pub async fn emit(engine: &Engine, signer: KeySigner<'_>, spec: Spec) -> Result<String, Error> {
+    let key_id = signer.key_id().await?;
+    let row = Emit::stamp(&key_id, spec)?
         .sign_and_assemble(signer)
         .await?;
     put(engine, row).await
 }
 
 // ─── The KEY plane: the registration envelope and its columns ───────────────
-
-/// Who signs a registration — the node's own engine identity, or a `LocalSigner`
-/// held for some other party.
-///
-/// ONE enum rather than two entry points, because two entry points is how the
-/// binding would come to be applied on one path and not the other — which is the
-/// shape this whole module exists to retire.
-#[derive(Clone, Copy)]
-pub enum KeySigner<'a> {
-    /// This node's own federation identity.
-    Engine(&'a Engine),
-    /// A keypair held directly (a user's fed-ID, a test party).
-    Local(&'a LocalSigner),
-}
-
-impl KeySigner<'_> {
-    async fn sign_hybrid(&self, bytes: &[u8]) -> Result<ciris_crypto::HybridSignature, Error> {
-        match self {
-            Self::Engine(e) => e
-                .sign_hybrid(bytes)
-                .await
-                .map_err(|e| Error::Sign(e.to_string())),
-            Self::Local(s) => s
-                .sign_hybrid(bytes)
-                .await
-                .map_err(|e| Error::Sign(e.to_string())),
-        }
-    }
-}
 
 /// **Register a key this node holds the signer for**, with a registration
 /// envelope that BINDS ITS SUBJECT (CIRISPersist#659).

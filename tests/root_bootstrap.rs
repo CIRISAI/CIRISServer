@@ -57,39 +57,20 @@ async fn node(key_id: &str) -> Arc<Engine> {
 /// Register this node's own steward key via the canonical admission gate — the
 /// precondition for `verify_request` to resolve the node's `key_id` (setup/root).
 async fn register_self(engine: &Engine, key_id: &str) {
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.to_string(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.to_string(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.to_string(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key via admission gate");
 }
 
 /// The node's raw Ed25519 pubkey (base64) for `key_id` — derived from the SAME

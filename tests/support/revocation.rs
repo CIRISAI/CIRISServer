@@ -169,44 +169,40 @@ async fn put_signed(
     envelope: serde_json::Value,
     id: &str,
 ) {
-    use ciris_persist::federation::types::{attestation_tier, cohort_scope, Attestation};
-    use ciris_persist::federation::SignedAttestation;
     use ciris_verify_core::self_at_login::SelfSigner;
 
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize envelope");
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, a
+    // trust-root leg carried no signed `asserted_at` and no typed-column mirror,
+    // so persist v31 refused every one of them (CIRISPersist#598/#643) — and this
+    // helper seeds the legs for most of the QA suite, so one hand-rolled row here
+    // was many red tests over there.
+    //
+    // The symbolic `id` is preserved: these legs are looked up by name, the same
+    // reason the ceremony rows keep theirs (see `Emit::with_row_id`).
+    let stamped = ciris_server::attest::Emit::stamp(
+        attester.key_id(),
+        ciris_server::attest::Spec::new(
+            ty,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        // ABOUT the attested key, with NO subject: a trust-root leg confers, and
+        // `subject_key_ids` would hand its recipient authority to revoke it.
+        .attested_to(attested_key_id)
+        .weighing(Some(1.0)),
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp trust-root leg {id} ({ty}): {e}"));
+
     let (ed_b64, pqc_b64) = attester
-        .sign_bound(&canonical)
+        .sign_bound(stamped.canonical())
         .await
         .expect("bound-hybrid sign");
-    let now = Utc::now();
-    let row = Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: attester.key_id().to_string(),
-        attested_key_id: attested_key_id.to_string(),
-        attestation_type: ty.to_string(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: ed_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: attester.key_id().to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    if let Err(e) = engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation: row })
-        .await
-    {
+    let row = stamped
+        .assemble_from_b64(&ed_b64, &pqc_b64)
+        .unwrap_or_else(|e| panic!("assemble trust-root leg {id} ({ty}): {e}"));
+
+    if let Err(e) = ciris_server::attest::put(engine, row).await {
         // A duplicate id is the idempotent re-run; anything else is a real
         // refusal and must not be swallowed into a silently-absent leg.
         let msg = e.to_string();
