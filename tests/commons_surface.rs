@@ -350,7 +350,7 @@ async fn emit_action(
     // clock instead would silently discard the argument.
     let row = ciris_server::attest::Emit::stamp_at(author.key_id(), spec, asserted_at)
         .expect("stamp action")
-        .sign_and_assemble(ciris_server::attest::KeySigner::Local(&author))
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(author))
         .await
         .expect("sign action");
     ciris_server::attest::put(engine, row.clone())

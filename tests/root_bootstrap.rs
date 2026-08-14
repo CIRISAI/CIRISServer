@@ -20,12 +20,10 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
-use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
-use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
+use ciris_persist::federation::types::identity_type;
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::WaRole;
 
 use ciris_server::auth::bootstrap::{
@@ -65,7 +63,7 @@ async fn register_self(engine: &Engine, key_id: &str) {
     ciris_server::attest::register_key(
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
-        &key_id,
+        key_id,
         identity_type::STEWARD,
         serde_json::Value::Null,
     )

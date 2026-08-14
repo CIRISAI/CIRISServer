@@ -23,8 +23,7 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_type, identity_type, KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -73,7 +72,7 @@ async fn register_node(engine: &Engine, key_id: &str) {
     ciris_server::attest::register_key(
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
-        &key_id,
+        key_id,
         "node",
         serde_json::Value::Null,
     )
@@ -301,14 +300,14 @@ async fn emit_withdraws(engine: &Engine, granter: &LocalSigner, target: &str) {
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&target);
+    .about(target);
     // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31
     // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
     // accepts a shape this server does not produce.
     ciris_server::attest::emit(
         engine,
-        ciris_server::attest::KeySigner::Local(&granter),
+        ciris_server::attest::KeySigner::Local(granter),
         spec,
     )
     .await

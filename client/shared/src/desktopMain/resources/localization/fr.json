@@ -3464,7 +3464,9 @@
       "grounds_absent": "grounds est requis. Une objection soulevée sans motif consigné est indiscernable d'une objection soulevée pour un mauvais motif — et les motifs sont consignés, jamais interprétés.",
       "node_unowned": "Ce nœud n'a aucun responsable (liaison de propriété) : il ne lit ni ne s'exprime dans le bien commun de qui que ce soit pour son compte. Revendiquez-en d'abord la propriété.",
       "not_owner": "La surface du bien commun exige le rôle de propriétaire (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id est requis : un bulletin répond à une question portant sur UNE seule objection."
+      "objection_absent": "objection_id est requis : un bulletin répond à une question portant sur UNE seule objection.",
+      "stamped_envelope_mismatch": "le `stamped_envelope` renvoyé ne décrit pas le rejet contenu dans cette requête. Relancez l'exécution à blanc pour CES champs et faites signer aux cosignataires ce qu'elle renvoie.",
+      "stamped_envelope_required": "des cosignatures ont été fournies sans le `stamped_envelope` sur lequel elles ont été apposées. Lancez l'exécution à blanc, faites signer aux cosignataires l'`envelope` qu'elle renvoie, puis renvoyez cet envelope accompagné de leurs scrubs — sinon leurs signatures couvrent des octets que cette soumission ne contient pas et le quorum en compte une en silence."
     },
     "standing": {
       "action_unknown": "Ce nœud ne détient aucune action de ce type. Une objection désigne une ligne, et il n'y a ici aucune ligne à désigner.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "Le fournisseur et l'identifiant du compte sont tous deux requis. La moitié d'une paire associe un compte que plus rien ne pourra retrouver.",
       "no_such_identity": "Aucune identité de ce type n'existe sur ce nœud à laquelle associer le compte.",
       "node_unowned": "Ce nœud n'a pas encore de propriétaire, il n'y a donc aucune identité à laquelle associer un compte. Revendiquez d'abord le nœud.",
-      "store_unavailable": "Le nœud n'a pas pu écrire l'association car son magasin d'identités est indisponible. Rien n'a été modifié."
+      "store_unavailable": "Le nœud n'a pas pu écrire l'association car son magasin d'identités est indisponible. Rien n'a été modifié.",
+      "not_delegatable": "Associer une identité de connexion est un acte propre au propriétaire. Une session déléguée ne peut pas le faire : le lien survit à la délégation, ce qui reviendrait à confier un accès permanent au titulaire d'une autorisation temporaire."
     },
     "session_expired": "Votre session n'est plus valide. Reconnectez-vous pour continuer.",
     "browser_signin": {

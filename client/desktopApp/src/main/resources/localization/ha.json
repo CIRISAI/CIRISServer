@@ -3464,7 +3464,9 @@
       "grounds_absent": "Ana buƙatar grounds. Ƙorafin da aka ɗaga ba tare da rubuta dalili ba, ba shi da bambanci da wanda aka ɗaga don mummunan dalili — kuma ana rubuta dalilai ne, ba a taɓa fassara su ba.",
       "node_unowned": "Wannan kumburi ba shi da wanda ke da alhakinsa (haɗin mallaka), don haka ba ya karantawa a filin gama-garin kowa kuma ba ya magana a cikinsa a madadinsa. Ku nemi mallaka tukuna.",
       "not_owner": "Fuskar filin gama-gari tana buƙatar matsayin mai shi (SYSTEM_ADMIN).",
-      "objection_absent": "Ana buƙatar objection_id: kuri'a tana amsa tambaya game da ƙorafi ƊAYA."
+      "objection_absent": "Ana buƙatar objection_id: kuri'a tana amsa tambaya game da ƙorafi ƊAYA.",
+      "stamped_envelope_mismatch": "`stamped_envelope` da aka maido bai bayyana korar da ke cikin wannan buƙatar ba. Sake gudanar da gwajin bushe don WAƊANNAN filayen, sannan ka sa masu haɗin-sa hannu su sa hannu kan abin da ya dawo da shi.",
+      "stamped_envelope_required": "An bayar da haɗin-sa hannu ba tare da `stamped_envelope` ɗin da aka yi su a kansa ba. Gudanar da gwajin bushe, ka sa masu haɗin-sa hannu su sa hannu kan `envelope` ɗin da ya dawo da shi, sannan ka mayar da wannan envelope tare da scrubs ɗinsu — in ba haka ba, sa hannunsu na rufe bytes waɗanda wannan gabatarwar ba ta ɗauke su ba, kuma quorum zai ƙidaya ɗaya a shiru."
     },
     "standing": {
       "action_unknown": "Wannan kumburi bai riƙe irin wannan aiki ba. Ƙorafi yana ambaton layi ne, kuma babu layin da za a ambata a nan.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "Ana buƙatar mai bayarwa da kuma id ɗin asusu duka biyu. Rabin biyun kawai yana haɗa asusun da ba abin da zai sake same shi.",
       "no_such_identity": "Babu irin wannan shaida a wannan node da za a haɗa asusun da ita.",
       "node_unowned": "Wannan node ba shi da mai mallaka tukuna, don haka babu shaidar da za a haɗa asusu da ita. Ka fara mallakar node ɗin.",
-      "store_unavailable": "Node ɗin bai iya rubuta haɗin ba saboda ma'ajiyar shaidarsa ba ta samuwa. Ba a canza komai ba."
+      "store_unavailable": "Node ɗin bai iya rubuta haɗin ba saboda ma'ajiyar shaidarsa ba ta samuwa. Ba a canza komai ba.",
+      "not_delegatable": "Haɗa shaidar shiga aiki ne na mai shi kaɗai. Zaman wakilci ba zai iya yin sa ba — haɗin yana wanzuwa fiye da wakilcin, don haka zai ba da damar shiga ta dindindin ga duk wanda ke riƙe da izini na ɗan lokaci."
     },
     "session_expired": "Zamanka ya ƙare. Ka sake shiga don ci gaba.",
     "browser_signin": {

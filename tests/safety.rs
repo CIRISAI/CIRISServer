@@ -212,14 +212,14 @@ async fn emit_delegation(
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&recipient);
+    .about(recipient);
     // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31
     // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
     // accepts a shape this server does not produce.
     ciris_server::attest::emit(
         engine,
-        ciris_server::attest::KeySigner::Local(&granter),
+        ciris_server::attest::KeySigner::Local(granter),
         spec,
     )
     .await

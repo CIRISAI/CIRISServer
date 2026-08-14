@@ -3464,7 +3464,9 @@
       "grounds_absent": "grounds ist erforderlich. Ein Einspruch, der ohne erfassten Grund erhoben wird, ist von einem aus schlechtem Grund erhobenen nicht zu unterscheiden — und Gründe werden erfasst, niemals ausgelegt.",
       "node_unowned": "Dieser Knoten hat keinen Verantwortlichen (Eigentümerbindung) und liest daher weder in irgendjemandes Gemeingut, noch spricht er dort in dessen Namen. Beanspruchen Sie zuerst die Eigentümerschaft.",
       "not_owner": "Die Gemeingut-Oberfläche erfordert die Eigentümerrolle (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id ist erforderlich: Eine Stimmabgabe beantwortet eine Frage zu EINEM Einspruch."
+      "objection_absent": "objection_id ist erforderlich: Eine Stimmabgabe beantwortet eine Frage zu EINEM Einspruch.",
+      "stamped_envelope_mismatch": "das zurückgesendete `stamped_envelope` beschreibt nicht die Ablehnung in dieser Anfrage. Führen Sie den Probelauf für DIESE Felder erneut aus und lassen Sie die Mitunterzeichner signieren, was er zurückgibt.",
+      "stamped_envelope_required": "Mitunterzeichnungen wurden ohne das `stamped_envelope` übermittelt, über das sie erstellt wurden. Führen Sie den Probelauf aus, lassen Sie die Mitunterzeichner das zurückgegebene `envelope` signieren und senden Sie dieses Envelope zusammen mit ihren Scrubs zurück – andernfalls decken ihre Signaturen Bytes ab, die diese Übermittlung nicht enthält, und das Quorum zählt stillschweigend eine mit."
     },
     "standing": {
       "action_unknown": "Dieser Knoten hält keine solche Handlung. Ein Einspruch benennt eine Zeile, und hier gibt es keine Zeile, die benannt werden könnte.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "Sowohl der Anbieter als auch die Konto-ID sind erforderlich. Eine halbe Angabe verknüpft ein Konto, das danach nicht mehr auffindbar ist.",
       "no_such_identity": "Auf diesem Knoten gibt es keine solche Identität, mit der das Konto verknüpft werden könnte.",
       "node_unowned": "Dieser Knoten hat noch keinen Eigentümer, daher gibt es keine Identität, mit der ein Konto verknüpft werden könnte. Beanspruchen Sie zuerst den Knoten.",
-      "store_unavailable": "Der Knoten konnte die Verknüpfung nicht schreiben, da sein Identitätsspeicher nicht verfügbar ist. Es wurde nichts geändert."
+      "store_unavailable": "Der Knoten konnte die Verknüpfung nicht schreiben, da sein Identitätsspeicher nicht verfügbar ist. Es wurde nichts geändert.",
+      "not_delegatable": "Das Verknüpfen einer Anmeldeidentität ist eine höchstpersönliche Handlung des Eigentümers. Eine delegierte Sitzung kann dies nicht tun – die Verknüpfung überdauert die Delegation und würde damit dauerhaften Zugriff an denjenigen übergeben, der nur eine befristete Berechtigung besitzt."
     },
     "session_expired": "Ihre Sitzung ist nicht mehr gültig. Melden Sie sich erneut an, um fortzufahren.",
     "browser_signin": {

@@ -3464,7 +3464,9 @@
       "grounds_absent": "grounds inahitajika. Pingamizi lililowekwa bila sababu iliyorekodiwa halitofautishiki na lile lililowekwa kwa sababu mbaya — na sababu hurekodiwa, kamwe hazifasiriwi.",
       "node_unowned": "Nodi hii haina mwajibikaji (kifungo cha umiliki), hivyo haisomi wala haisemi katika mali ya pamoja ya mtu yeyote kwa niaba yake. Dai umiliki kwanza.",
       "not_owner": "Uso wa mali ya pamoja unahitaji wadhifa wa mmiliki (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id inahitajika: kura hujibu swali kuhusu pingamizi MOJA."
+      "objection_absent": "objection_id inahitajika: kura hujibu swali kuhusu pingamizi MOJA.",
+      "stamped_envelope_mismatch": "`stamped_envelope` iliyorudishwa haielezi ufutaji ulio katika ombi hili. Endesha upya jaribio kavu kwa sehemu HIZI kisha uwatake wasaini-wenza wasaini kile kinachorudishwa.",
+      "stamped_envelope_required": "saini-wenza ziliwasilishwa bila `stamped_envelope` ambayo zilitolewa juu yake. Endesha jaribio kavu, uwatake wasaini-wenza wasaini `envelope` inayorudishwa, kisha urudishe bahasha hiyo pamoja na scrubs zao — la sivyo saini zao zitafunika baiti ambazo wasilisho hili halibebi na akidi itahesabu moja kimyakimya."
     },
     "standing": {
       "action_unknown": "Nodi hii haishikilii kitendo kama hicho. Pingamizi hutaja safu, na hapa hakuna safu ya kutajwa.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "Mtoa huduma na kitambulisho cha akaunti vyote vinahitajika. Nusu ya jozi huunganisha akaunti ambayo hakuna kitu kitakachoipata tena.",
       "no_such_identity": "Hakuna utambulisho kama huo kwenye nodi hii wa kuunganisha akaunti nao.",
       "node_unowned": "Nodi hii bado haina mmiliki, hivyo hakuna utambulisho wa kuunganisha akaunti nao. Dai nodi kwanza.",
-      "store_unavailable": "Nodi haikuweza kuandika kiungo kwa sababu hifadhi yake ya utambulisho haipatikani. Hakuna kilichobadilishwa."
+      "store_unavailable": "Nodi haikuweza kuandika kiungo kwa sababu hifadhi yake ya utambulisho haipatikani. Hakuna kilichobadilishwa.",
+      "not_delegatable": "Kuunganisha utambulisho wa kuingia ni kitendo cha mmiliki mwenyewe. Kipindi kilichokabidhiwa hakiwezi kufanya hivyo — kiungo hudumu zaidi ya ukabidhi, hivyo kingempa mtu yeyote mwenye ruhusa ya muda ufikiaji wa kudumu."
     },
     "session_expired": "Kipindi chako hakitumiki tena. Ingia tena ili kuendelea.",
     "browser_signin": {

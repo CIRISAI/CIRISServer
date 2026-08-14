@@ -11,18 +11,14 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use ed25519_dalek::SigningKey;
-use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
-use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
+use ciris_persist::federation::types::identity_type;
 use ciris_persist::graph::sqlite::SqliteGraphBackend;
 use ciris_persist::graph::types::{EdgeDirection, GraphScope, NodeFilter};
 use ciris_persist::graph::GraphService;
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use ciris_server::graph_config::{self, ConfigScope, ConfigValue};
 use ciris_server::memory_api;

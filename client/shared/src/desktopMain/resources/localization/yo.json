@@ -3464,7 +3464,9 @@
       "grounds_absent": "grounds jẹ́ dandan. Àtakò tí a gbé sókè láìní ìdí tí a ṣàkọsílẹ̀ kò ṣe é yà sọ́tọ̀ kúrò nínú èyí tí a gbé sókè fún ìdí burúkú — a sì ń ṣàkọsílẹ̀ ìdí, a kì í túmọ̀ rẹ̀ láé.",
       "node_unowned": "Nódù yìí kò ní ẹni tí ó ní ojúṣe fún un (ìdè-onílé), nítorí náà kò ka ohun-ìní àjọpín ẹnikẹ́ni bẹ́ẹ̀ ni kò sọ̀rọ̀ nínú rẹ̀ fún ẹnikẹ́ni. Gba ìní rẹ̀ ná.",
       "not_owner": "Ojú ohun-ìní àjọpín béèrè ipa onílé (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id jẹ́ dandan: ìbò kan ń dá ìbéèrè nípa ÀTAKÒ KAN ṣoṣo lóhùn."
+      "objection_absent": "objection_id jẹ́ dandan: ìbò kan ń dá ìbéèrè nípa ÀTAKÒ KAN ṣoṣo lóhùn.",
+      "stamped_envelope_mismatch": "`stamped_envelope` tí a dá padà kò ṣàpèjúwe ìfagilé tí ó wà nínú ìbéèrè yìí. Tún ìdánwò gbígbẹ ṣe fún ÀWỌN AYE WỌ̀NYÍ, kí o sì jẹ́ kí àwọn alábàáfọwọ́sí fọwọ́sí ohun tí ó bá dá padà.",
+      "stamped_envelope_required": "A pèsè àwọn ìfọwọ́sí-àjùmọ̀ láìsí `stamped_envelope` tí a fi ṣe wọ́n. Ṣe ìdánwò gbígbẹ náà, jẹ́ kí àwọn alábàáfọwọ́sí fọwọ́sí `envelope` tí ó dá padà, kí o sì rán envelope yẹn padà pẹ̀lú àwọn scrub wọn — bí bẹ́ẹ̀ kọ́, ìfọwọ́sí wọn yóò bo àwọn báìtì tí ìfisílẹ̀ yìí kò gbé, quorum yóò sì ka ọ̀kan ní ìdákẹ́jẹ́ẹ́."
     },
     "standing": {
       "action_unknown": "Nódù yìí kò ní irú ìṣe bẹ́ẹ̀. Àtakò máa ń dárúkọ ilà kan, kò sì sí ilà kankan níbí láti dárúkọ.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "A nílò olùpèsè àti id àkàǹtì méjèèjì. Ìdajì tọ́kọtaya kan yóò so àkàǹtì tí kò sí ohun tí ó lè rí i mọ́.",
       "no_such_identity": "Kò sí ìdánimọ̀ bẹ́ẹ̀ lórí node yìí láti so àkàǹtì náà mọ́.",
       "node_unowned": "Node yìí kò tí ì ní olóhun, nítorí náà kò sí ìdánimọ̀ tí a lè so àkàǹtì mọ́. Gba node náà ní àkọ́kọ́.",
-      "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà."
+      "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà.",
+      "not_delegatable": "Dídá ìdánimọ̀ ìwọlé pọ̀ jẹ́ iṣẹ́ olóhun fúnra rẹ̀. Ìjókòó àṣojú kò lè ṣe é — àsopọ̀ náà máa wà pẹ́ ju ìfàṣẹpàṣẹ náà lọ, nítorí náà yóò fi ààyè tí kò lópin lé ẹnikẹ́ni tí ó ní àṣẹ ìgbà díẹ̀ lọ́wọ́."
     },
     "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú.",
     "browser_signin": {

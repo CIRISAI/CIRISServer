@@ -276,7 +276,8 @@
       "incomplete_pair": "Both the provider and the account id are required. Half of a pair links an account that nothing can find again.",
       "no_such_identity": "There is no such identity on this node to link the account to.",
       "node_unowned": "This node has no owner yet, so there is no identity to link an account to. Claim the node first.",
-      "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed."
+      "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed.",
+      "not_delegatable": "Linking a sign-in identity is the owner's own act. A delegated session cannot do it — the link outlives the delegation, so it would hand permanent access to whoever holds a temporary grant."
     },
     "session_expired": "Your session is no longer valid. Sign in again to continue."
   },

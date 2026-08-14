@@ -308,7 +308,7 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
         ciris_persist::federation::types::cohort_scope::FEDERATION,
         envelope,
     )
-    .about(&subject_key_id);
+    .about(subject_key_id);
     let spec = spec.weighing(Some(0.9));
     // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
     // row carried no signed `asserted_at` and no typed-column mirror — persist v31

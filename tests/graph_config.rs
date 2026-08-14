@@ -6,18 +6,11 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use ed25519_dalek::SigningKey;
-use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
-use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
-};
+use ciris_persist::federation::types::{attestation_type, identity_type};
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use ciris_server::graph_config::{self, CONFIG_DIMENSION};
 use ciris_server::{ConfigScope, ConfigValue};

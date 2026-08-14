@@ -3464,7 +3464,9 @@
       "grounds_absent": "grounds es obligatorio. Una objeción planteada sin motivo registrado es indistinguible de una planteada por un mal motivo — y los motivos se registran, nunca se interpretan.",
       "node_unowned": "Este nodo no tiene responsable (vinculación de propietario), así que ni lee ni habla en el bien común de nadie en su nombre. Reclama primero la propiedad.",
       "not_owner": "La superficie del bien común requiere el rol de propietario (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id es obligatorio: un voto responde a una pregunta sobre UNA sola objeción."
+      "objection_absent": "objection_id es obligatorio: un voto responde a una pregunta sobre UNA sola objeción.",
+      "stamped_envelope_mismatch": "el `stamped_envelope` devuelto no describe la desestimación de esta solicitud. Vuelve a ejecutar la simulación para ESTOS campos y haz que los cofirmantes firmen lo que devuelva.",
+      "stamped_envelope_required": "se aportaron cofirmas sin el `stamped_envelope` sobre el que se realizaron. Ejecuta la simulación, haz que los cofirmantes firmen el `envelope` que devuelve y reenvía ese envelope junto con sus scrubs; de lo contrario, sus firmas cubren bytes que este envío no contiene y el cuórum contará una de forma silenciosa."
     },
     "standing": {
       "action_unknown": "Este nodo no mantiene tal acción. Una objeción nombra una fila, y aquí no hay ninguna fila que nombrar.",
@@ -3875,7 +3877,8 @@
       "incomplete_pair": "Se requieren tanto el proveedor como el id de la cuenta. La mitad de un par vincula una cuenta que nada podrá volver a encontrar.",
       "no_such_identity": "No existe esa identidad en este nodo para vincularle la cuenta.",
       "node_unowned": "Este nodo aún no tiene propietario, así que no hay ninguna identidad a la que vincular una cuenta. Reclama el nodo primero.",
-      "store_unavailable": "El nodo no pudo escribir el vínculo porque su almacén de identidades no está disponible. No se cambió nada."
+      "store_unavailable": "El nodo no pudo escribir el vínculo porque su almacén de identidades no está disponible. No se cambió nada.",
+      "not_delegatable": "Vincular una identidad de inicio de sesión es un acto propio del titular. Una sesión delegada no puede hacerlo: el vínculo sobrevive a la delegación, por lo que otorgaría acceso permanente a quien posea una concesión temporal."
     },
     "session_expired": "Tu sesión ya no es válida. Inicia sesión de nuevo para continuar.",
     "browser_signin": {
