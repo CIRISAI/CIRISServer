@@ -2384,7 +2384,9 @@
     "keyset_import_cancel": "Chọn thư mục khác",
     "keyset_import_confirm": "Đăng ký thiết bị này",
     "keyset_inspect_checking": "Đang kiểm tra thư mục này…",
-    "keyset_inspect_unavailable": "Không thể kiểm tra thư mục này — nút mạng không phản hồi. Điều này không cho biết danh tính của bạn có nằm trong đó hay không; bạn vẫn có thể thử nhập."
+    "keyset_inspect_unavailable": "Không thể kiểm tra thư mục này — nút mạng không phản hồi. Điều này không cho biết danh tính của bạn có nằm trong đó hay không; bạn vẫn có thể thử nhập.",
+    "accord_remint_invalid_desc": "Chữ ký của người giữ khác sẽ KHÔNG hoàn tất được nghi thức này — vấn đề nằm ở chính gói dữ liệu. Hãy bắt đầu một nghi thức mới sau khi đã khắc phục.",
+    "accord_remint_invalid_title": "Không thể hoàn tất hạt giống này"
   },
   "nav": {
     "group": {

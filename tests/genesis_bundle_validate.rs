@@ -154,15 +154,28 @@ async fn fresh_node() -> Arc<Engine> {
     engine
 }
 
+/// **Reports `ignored`, never `ok`, when it has no bundle to check.**
+///
+/// It used to `return` early with an eprintln when `CIRIS_GENESIS_BUNDLE` was
+/// unset, which made the run print `test result: ok` for a check that examined
+/// nothing. On 2026-08-14 that line was read as "the ceremony path is verified"
+/// and a two-holder seed ceremony was run on the strength of it; the ceremony
+/// then failed on CIRISPersist#683, which this test would have caught had it
+/// ever been given a bundle.
+///
+/// A check that could not run must not be counted as a check that passed — the
+/// same distinct-zeroes rule the rest of this suite applies to the substrate,
+/// applied to the suite itself. `#[ignore]` says "not run" in the result line,
+/// and running it explicitly with no bundle now FAILS rather than no-ops.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a minted bundle: CIRIS_GENESIS_BUNDLE=<path> cargo test --test \
+            genesis_bundle_validate -- --ignored"]
 async fn a_real_bundle_makes_a_fresh_node_serve() {
-    let Some(path) = bundle_path() else {
-        eprintln!(
-            "SKIP: set CIRIS_GENESIS_BUNDLE=<path to a minted bundle> to validate one.\n\
-             This test is the in-process form of harness arm B."
-        );
-        return;
-    };
+    let path = bundle_path().expect(
+        "CIRIS_GENESIS_BUNDLE is unset — this test validates a REAL minted bundle and \
+         has nothing to validate. It is `#[ignore]`d precisely so an absent bundle is \
+         never mistaken for a passing check; if you ran it explicitly, point it at a seed.",
+    );
 
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read bundle {}: {e}", path.display()));

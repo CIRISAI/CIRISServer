@@ -2292,7 +2292,34 @@ async fn genesis_ceremony_response(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let have = bundle.authorizations.len();
-    let complete = crate::mesh_genesis::verify_bundle(&bundle).is_ok();
+    // TWO questions, and `.is_ok()` used to collapse them into one answer:
+    //
+    //   1. "does this bundle still need signatures?"   → have < needed
+    //   2. "is this bundle valid?"                     → everything else
+    //
+    // A card holding one boolean renders both as "not done yet", so a bundle
+    // failing (2) sent an operator to fetch a holder that cannot help — measured
+    // during the 2026-08-14 ceremony, where `have=2 needed=2 complete=false` was
+    // read as a quorum shortfall when it was CIRISPersist#683. So keep the
+    // REASON: `blocked_by` is None when only more signatures are wanted, and
+    // carries the verifier's own words when the bundle is the problem.
+    let verdict = crate::mesh_genesis::verify_bundle(&bundle);
+    let complete = verdict.is_ok();
+    let blocked_by = match &verdict {
+        Ok(()) => None,
+        // A genuine shortfall is not a fault — the ceremony is simply mid-flight.
+        Err(crate::mesh_genesis::GenesisError::QuorumNotMet { .. }) => None,
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(reason) = &blocked_by {
+        tracing::error!(
+            have,
+            needed,
+            reason = %reason,
+            "Trust Root: this genesis is INVALID — another holder's signature will NOT \
+             complete it. Fix the bundle, then re-run the ceremony."
+        );
+    }
     let fingerprint = crate::mesh_genesis::fingerprint(&bundle).unwrap_or_default();
 
     // On completion the minting node adopts the root its holders just created:
@@ -2352,6 +2379,9 @@ async fn genesis_ceremony_response(
             "authorizations_have": have,
             "authorizations_needed": needed,
             "complete": complete,
+            // Absent while the ceremony is merely mid-flight; present when the
+            // bundle itself is the problem and MORE SIGNATURES WILL NOT HELP.
+            "blocked_by": blocked_by,
             "fingerprint": fingerprint,
             // The root this node now trusts (empty until the ceremony completes).
             "node_trusts_root": trusts_root,

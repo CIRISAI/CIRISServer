@@ -2384,7 +2384,9 @@
     "keyset_import_cancel": "Escolher outra pasta",
     "keyset_import_confirm": "Inscrever este dispositivo",
     "keyset_inspect_checking": "A verificar esta pasta…",
-    "keyset_inspect_unavailable": "Não foi possível verificar esta pasta — o nó não respondeu. Isto não diz nada sobre se a sua identidade está lá; pode mesmo assim tentar a importação."
+    "keyset_inspect_unavailable": "Não foi possível verificar esta pasta — o nó não respondeu. Isto não diz nada sobre se a sua identidade está lá; pode mesmo assim tentar a importação.",
+    "accord_remint_invalid_title": "Esta semente não pode ser concluída",
+    "accord_remint_invalid_desc": "A assinatura de outro titular NÃO concluirá esta cerimónia — o problema está no próprio pacote. Inicie uma nova cerimónia assim que este for corrigido."
   },
   "nav": {
     "group": {

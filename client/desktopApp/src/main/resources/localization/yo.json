@@ -2402,7 +2402,9 @@
     "keyset_import_cancel": "Yan fódà mìíràn",
     "keyset_import_confirm": "Forúkọ ẹ̀rọ yìí sílẹ̀",
     "keyset_inspect_checking": "Ń ṣàyẹ̀wò fódà yìí…",
-    "keyset_inspect_unavailable": "A kò lè ṣàyẹ̀wò fódà yìí — kókó náà kò dáhùn. Èyí kò sọ ohunkóhun nípa bóyá ìdánimọ̀ rẹ wà nínú rẹ̀; o ṣì lè gbìyànjú ìkó-wọlé náà."
+    "keyset_inspect_unavailable": "A kò lè ṣàyẹ̀wò fódà yìí — kókó náà kò dáhùn. Èyí kò sọ ohunkóhun nípa bóyá ìdánimọ̀ rẹ wà nínú rẹ̀; o ṣì lè gbìyànjú ìkó-wọlé náà.",
+    "accord_remint_invalid_desc": "Ìbùwọ́lù olùdìmú mìíràn KÒ NÍÍ parí ayẹyẹ yìí — ìdì náà fúnra rẹ̀ ni ìṣòro náà. Bẹ̀rẹ̀ ayẹyẹ tuntun lẹ́yìn tí a bá ti tún un ṣe.",
+    "accord_remint_invalid_title": "A kò lè parí irúgbìn yìí"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",

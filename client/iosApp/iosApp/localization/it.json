@@ -2687,7 +2687,9 @@
     "keyset_import_cancel": "Scegli un'altra cartella",
     "keyset_import_confirm": "Registra questo dispositivo",
     "keyset_inspect_checking": "Controllo di questa cartella in corso…",
-    "keyset_inspect_unavailable": "Non è stato possibile controllare questa cartella: il nodo non ha risposto. Questo non dice nulla sul fatto che la tua identità sia presente o meno; puoi comunque provare l'importazione."
+    "keyset_inspect_unavailable": "Non è stato possibile controllare questa cartella: il nodo non ha risposto. Questo non dice nulla sul fatto che la tua identità sia presente o meno; puoi comunque provare l'importazione.",
+    "accord_remint_invalid_desc": "La firma di un altro titolare NON completerà questa cerimonia — il problema è il bundle stesso. Avvia una nuova cerimonia una volta risolto.",
+    "accord_remint_invalid_title": "Impossibile completare questo seed"
   },
   "moderation": {
     "ladder": {

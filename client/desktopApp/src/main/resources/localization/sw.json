@@ -2310,7 +2310,9 @@
     "keyset_import_cancel": "Chagua folda nyingine",
     "keyset_import_confirm": "Sajili kifaa hiki",
     "keyset_inspect_checking": "Inakagua folda hii…",
-    "keyset_inspect_unavailable": "Imeshindwa kukagua folda hii — nodi haikujibu. Hii haisemi chochote kuhusu iwapo utambulisho wako umo ndani; bado unaweza kujaribu kuingiza."
+    "keyset_inspect_unavailable": "Imeshindwa kukagua folda hii — nodi haikujibu. Hii haisemi chochote kuhusu iwapo utambulisho wako umo ndani; bado unaweza kujaribu kuingiza.",
+    "accord_remint_invalid_desc": "Saini ya mshikaji mwingine HAITAKAMILISHA sherehe hii — kifurushi chenyewe ndicho tatizo. Anza sherehe mpya baada ya kurekebishwa.",
+    "accord_remint_invalid_title": "Mbegu hii haiwezi kukamilishwa"
   },
   "prompts": {
     "dma": {

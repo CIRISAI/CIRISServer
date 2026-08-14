@@ -2384,7 +2384,9 @@
     "keyset_import_cancel": "ሌላ አቃፊ ይምረጡ",
     "keyset_import_confirm": "ይህን መሣሪያ ያስመዝግቡ",
     "keyset_inspect_checking": "ይህን አቃፊ በመፈተሽ ላይ…",
-    "keyset_inspect_unavailable": "ይህን አቃፊ መፈተሽ አልተቻለም — ኖዱ ምላሽ አልሰጠም። ይህ ማንነትዎ በውስጡ ስለመኖሩ ወይም ስላለመኖሩ ምንም አይናገርም፤ አሁንም ማስመጣቱን መሞከር ይችላሉ።"
+    "keyset_inspect_unavailable": "ይህን አቃፊ መፈተሽ አልተቻለም — ኖዱ ምላሽ አልሰጠም። ይህ ማንነትዎ በውስጡ ስለመኖሩ ወይም ስላለመኖሩ ምንም አይናገርም፤ አሁንም ማስመጣቱን መሞከር ይችላሉ።",
+    "accord_remint_invalid_desc": "የሌላ ባለቤት ፊርማ ይህን ሥነ ሥርዓት አያጠናቅቀውም — ችግሩ ራሱ ጥቅሉ ነው። ከተስተካከለ በኋላ አዲስ ሥነ ሥርዓት ይጀምሩ።",
+    "accord_remint_invalid_title": "ይህ ዘር ሊጠናቀቅ አይችልም"
   },
   "nav": {
     "group": {

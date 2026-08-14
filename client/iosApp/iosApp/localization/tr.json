@@ -2384,7 +2384,9 @@
     "keyset_inspect_checking": "Bu klasör kontrol ediliyor…",
     "keyset_inspect_unavailable": "Bu klasör kontrol edilemedi — düğüm yanıt vermedi. Bu, kimliğinizin klasörde olup olmadığı hakkında bir şey söylemez; yine de içe aktarmayı deneyebilirsiniz.",
     "keyset_import_confirm": "Bu cihazı kaydet",
-    "keyset_import_cancel": "Başka bir klasör seç"
+    "keyset_import_cancel": "Başka bir klasör seç",
+    "accord_remint_invalid_desc": "Başka bir sahibin imzası bu töreni tamamlamayacak — sorunun kaynağı paketin kendisi. Sorun giderildikten sonra yeni bir tören başlatın.",
+    "accord_remint_invalid_title": "Bu tohum tamamlanamaz"
   },
   "nav": {
     "group": {

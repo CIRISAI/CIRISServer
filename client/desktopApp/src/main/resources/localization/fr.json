@@ -2310,7 +2310,9 @@
     "keyset_import_cancel": "Choisir un autre dossier",
     "keyset_import_confirm": "Inscrire cet appareil",
     "keyset_inspect_checking": "Vérification de ce dossier…",
-    "keyset_inspect_unavailable": "Impossible de vérifier ce dossier — le nœud n'a pas répondu. Cela ne dit rien sur la présence de votre identité dans ce dossier ; vous pouvez quand même tenter l'importation."
+    "keyset_inspect_unavailable": "Impossible de vérifier ce dossier — le nœud n'a pas répondu. Cela ne dit rien sur la présence de votre identité dans ce dossier ; vous pouvez quand même tenter l'importation.",
+    "accord_remint_invalid_desc": "La signature d'un autre détenteur ne terminera PAS cette cérémonie — le problème vient du bundle lui-même. Lancez une nouvelle cérémonie une fois qu'il aura été corrigé.",
+    "accord_remint_invalid_title": "Cette graine ne peut pas être complétée"
   },
   "prompts": {
     "dma": {

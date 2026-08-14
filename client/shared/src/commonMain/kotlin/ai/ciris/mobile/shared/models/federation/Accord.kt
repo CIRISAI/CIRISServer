@@ -679,6 +679,18 @@ data class GenesisSeedResponse(
     val authorizationsNeeded: Int = 0,
     val complete: Boolean = false,
     /**
+     * Why this bundle is not complete, when the reason is NOT "it wants more
+     * signatures". Null while the ceremony is merely mid-flight.
+     *
+     * `complete` alone cannot carry this: a bundle that is INVALID and a bundle
+     * that is one holder short both read as `false`, and the card rendered both
+     * as "keep signing". During the 2026-08-14 ceremony that sent the operator
+     * to fetch a third YubiKey for a bundle no signature could ever repair
+     * (CIRISPersist#683). When this is present, MORE HOLDERS WILL NOT HELP.
+     */
+    @SerialName("blocked_by")
+    val blockedBy: String? = null,
+    /**
      * The chosen canonical carried no `infra:serve` (it predated the conferral),
      * so THIS ceremony blessed it as a trace server as part of minting the seed —
      * the same two holders, the same two taps. Surface it so the operator knows a
@@ -713,6 +725,12 @@ data class GenesisSeedState(
     val authorizedKeyIds: List<String> = emptyList(),
     /** Sticky once true across the ceremony: the canonical was blessed inline. */
     val serveNodeReblessed: Boolean = false,
+    /**
+     * Carried through from [GenesisSeedResponse.blockedBy]: why this bundle is
+     * not complete when the reason is NOT "it wants more signatures". Null while
+     * the ceremony is merely mid-flight. When set, MORE HOLDERS WILL NOT HELP.
+     */
+    val blockedBy: String? = null,
 )
 
 /**
