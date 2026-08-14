@@ -1196,6 +1196,108 @@ fn preflight_digest_is_signable() -> Result<(), String> {
     Ok(())
 }
 
+/// How many PIN attempts the inserted PIV token has left, read WITHOUT a PIN.
+///
+/// `ykman piv info` prints `PIN tries remaining:      2/3` and needs no
+/// authentication to say so. Returns None when there is no token, no `ykman`,
+/// or the line is not where we expect it — this informs messages, it never
+/// gates on its own.
+fn piv_pin_tries_remaining() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("ykman")
+        .args(["piv", "info"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let raw = text
+        .lines()
+        .find(|l| l.to_ascii_lowercase().contains("pin tries remaining"))?
+        .rsplit(':')
+        .next()?
+        .trim()
+        .to_string();
+    let (a, b) = raw.split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// The Ed25519 public key sitting in the token's PIV slot, base64 of the raw 32
+/// bytes — the same encoding a `KeyRecord` carries. Readable with NO PIN.
+///
+/// Ed25519 SubjectPublicKeyInfo is a fixed 12-byte header followed by the key,
+/// so the raw key is the trailing 32 bytes of the DER.
+fn piv_slot_pubkey_b64(slot: &str) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let out = std::process::Command::new("ykman")
+        .args(["piv", "keys", "export", slot, "-"])
+        .output()
+        .ok()?;
+    let pem = String::from_utf8_lossy(&out.stdout);
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .concat();
+    let der = B64.decode(body.trim()).ok()?;
+    if der.len() < 32 {
+        return None;
+    }
+    Some(B64.encode(&der[der.len() - 32..]))
+}
+
+/// **Do not spend a PIN attempt discovering the wrong key is inserted.**
+///
+/// A PIV PIN locks after three wrong tries and then needs the PUK. On
+/// 2026-08-14 an operator had B1's YubiKey in the slot with the card set to A1,
+/// typed A1's PIN, and burned one of B1's three attempts to find out — the only
+/// signal being a `C_Login` failure the card never displayed.
+///
+/// Both facts needed to prevent that are readable with NO PIN: the slot's public
+/// key, and the tries remaining.
+///
+/// **This refuses only on POSITIVE identification** — the inserted key parsed
+/// cleanly AND matches a DIFFERENT holder in the roster. Anything else (no
+/// `ykman`, no token, an unreadable slot, a key matching nobody) returns Ok and
+/// lets the normal path run. A guard on the ceremony's critical path must fail
+/// open: refusing a legitimate holder because a subprocess printed something
+/// unexpected would be worse than the hazard it prevents.
+fn piv_preflight_matches_holder(expected_key_id: &str, piv_slot: &str) -> Result<(), String> {
+    let roster = ciris_persist::federation::genesis::effective_accord_holder_records();
+    // Only meaningful when the caller names a seated holder; otherwise there is
+    // no roster to be wrong about.
+    let expected = match roster.iter().find(|h| h.record.key_id == expected_key_id) {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let inserted = match piv_slot_pubkey_b64(piv_slot) {
+        Some(k) => k,
+        None => return Ok(()), // could not look — not the same as "wrong key"
+    };
+    if inserted == expected.record.pubkey_ed25519_base64 {
+        return Ok(());
+    }
+    // It is not the expected holder. Refuse ONLY if we can say who it IS.
+    let actual = roster
+        .iter()
+        .find(|h| h.record.pubkey_ed25519_base64 == inserted);
+    match actual {
+        Some(other) => {
+            let tries = piv_pin_tries_remaining()
+                .map(|(n, m)| format!(" This token has {n} of {m} PIN attempts left."))
+                .unwrap_or_default();
+            Err(format!(
+                "the YubiKey in the reader is {}, but this step is signing as {}. \
+                 No PIN attempt has been spent. Insert {}'s YubiKey (and its USB), \
+                 or switch this step to {}.{tries}",
+                other.record.key_id, expected_key_id, expected_key_id, other.record.key_id,
+            ))
+        }
+        // Parsed a key that belongs to no seated holder. Could equally be a
+        // format we do not understand, so let the normal path decide.
+        None => Ok(()),
+    }
+}
+
 pub(crate) async fn open_holder_identity(
     key_id: &str,
     usb_path: &str,
@@ -1236,16 +1338,37 @@ pub(crate) async fn open_holder_identity(
         provision: false,
         ..Pkcs11Options::default()
     };
+    // BEFORE the PIN is spent: is this even the right token? See
+    // `piv_preflight_matches_holder` — refuses only on positive identification.
+    if let Err(msg) = piv_preflight_matches_holder(key_id, &piv_slot) {
+        return Err((StatusCode::BAD_REQUEST, msg));
+    }
+
     let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
         Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
         Err(e) => {
+            // A wrong PIN costs one of three attempts and the operator cannot
+            // see the counter. Say what it is now, while there is still a
+            // decision to make — "2 left" and "1 left before lockout" call for
+            // very different next moves.
+            let tries = match piv_pin_tries_remaining() {
+                Some((0, _)) => " This token's PIN is now LOCKED — unlock it with the PUK \
+                                  (`ykman piv access unblock-pin`) before retrying."
+                    .to_string(),
+                Some((1, m)) => format!(
+                    " WARNING: 1 of {m} PIN attempts left — one more wrong PIN LOCKS this \
+                     token and it will need the PUK."
+                ),
+                Some((n, m)) => format!(" {n} of {m} PIN attempts remain."),
+                None => String::new(),
+            };
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
                     "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
-                     inserted and the PIN correct?"
+                     inserted and the PIN correct?{tries}"
                 ),
-            ))
+            ));
         }
     };
     let mldsa =
