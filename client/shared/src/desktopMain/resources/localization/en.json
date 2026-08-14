@@ -365,7 +365,7 @@
     "dismissal": {
       "admitted": "The objection is lifted for the count. The threshold is re-derived from this node's own roster on every later read, so a dismissal that stops clearing a grown roster stops suppressing — and the protection it removed comes back."
     },
-    "dry_run": "Nothing was signed and nothing was submitted. These are the exact canonical bytes each co-signer must sign for their scrub to count on the real submission — the m-of-n is over these bytes and no others.",
+    "dry_run": "Nothing was signed and nothing was submitted. These are the exact canonical bytes each co-signer must sign for their scrub to count on the real submission — the m-of-n is over these bytes and no others. Send this `envelope` back verbatim as `stamped_envelope` with the submission: a second stamp would mint a different row id and instant, and every co-signature would then verify against nothing.",
     "escalation": {
       "awaiting": "The appointed moderators may still answer, or they have already ruled in time. Escalation has not opened.",
       "not_adopted": "This community declared no steward tier, so there is no moderator deadline and no escalation. Silence changes nothing here.",
@@ -410,7 +410,9 @@
       "steward_tier_not_adopted": "This community declared no steward tier, so there is no deadline to be silent past and no escalated pool. A ballot here would be stored and never read.",
       "store_unavailable": "The substrate could not be reached.",
       "target_action_unknown": "The objected-to action is not a row this node holds, so the objection would be uncountable and its window unresolvable.",
-      "unverifiable_signature": "The row's signature did not verify against the signer's keys as registered on this node."
+      "unverifiable_signature": "The row's signature did not verify against the signer's keys as registered on this node.",
+      "stamped_envelope_mismatch": "the echoed `stamped_envelope` does not describe the dismissal in this request. Re-run the dry run for THESE fields and have the co-signers sign what it returns.",
+      "stamped_envelope_required": "co-signatures were supplied without the `stamped_envelope` they were made over. Run the dry run, have the co-signers sign the `envelope` it returns, and send that envelope back with their scrubs — otherwise their signatures cover bytes this submission does not carry and the quorum silently counts one."
     },
     "standing": {
       "action_unknown": "This node holds no such action. An objection names a row, and there is no row here to name.",

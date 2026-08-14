@@ -1493,14 +1493,44 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         .send()
         .await
         .expect("2-of-3 supersede");
+    // v31 REFUSES this, and the refusal is the property now worth pinning.
+    //
+    // CIRISPersist#648 reserves `humanity-accord` at every ordinary door, and #651
+    // closed the last one — `supersede_family` used to run no admission gate at
+    // all, so the table had a second write path that re-baselined a roster on
+    // FK-existence alone. The id now enters a directory through the genesis
+    // seeder and the assemble ceremony and through nothing else, which is what
+    // stops a registered peer declaring itself the sole seat of the
+    // constitutional root and chartering the mesh with one signature.
+    //
+    // These endpoints are hardcoded to that family, so seat rotation through them
+    // is impossible BY DESIGN. The test asserts the refusal AND that it names the
+    // remedy — on a mesh with no support channel, a refusal that does not say
+    // what to do next is the whole interface failing.
+    let two_status = two.status();
     assert_eq!(
-        two.status(),
-        200,
-        "2-of-3 authorizes the swap: {}",
-        two.text().await.unwrap_or_default()
+        two_status, 409,
+        "superseding the constitutional family must be REFUSED — it is established by the \
+         ceremony and by nothing else (CIRISPersist#648/#651)",
+    );
+    let two_body = two.text().await.unwrap_or_default();
+
+    // The refusal must be ACTIONABLE, not merely correct. An operator whose seat
+    // key is compromised needs to learn that the remedy is a re-ceremony; being
+    // told only that the id is reserved leaves them stuck on a mesh with nobody
+    // to ask.
+    let body = two_body;
+    assert!(
+        body.contains("ceremony"),
+        "the refusal must name the remedy (run the ceremony again), not just the rule: {body}"
+    );
+    assert!(
+        body.contains("/v1/accord/provision"),
+        "the refusal must name the ENDPOINT that performs the remedy: {body}"
     );
 
-    // The kill-switch roster now reflects {b,c,d} — A is gone, D is a seat.
+    // And the live roster is UNTOUCHED — a refused supersede must leave the
+    // family exactly as it was, or a rejected attempt becomes a partial one.
     let roster: serde_json::Value = client
         .get(format!("{base}/v1/accord-holders"))
         .send()
@@ -1517,12 +1547,12 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         .map(|h| h["key_id"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        seats.contains(&"accord-holder-d".to_string()),
-        "spare D is now a seat: {seats:?}"
+        seats.contains(&"accord-holder-a".to_string()),
+        "A is STILL a seat — the refused supersede changed nothing: {seats:?}"
     );
     assert!(
-        !seats.contains(&"accord-holder-a".to_string()),
-        "A was replaced: {seats:?}"
+        !seats.contains(&"accord-holder-d".to_string()),
+        "spare D was NOT seated by a refused supersede: {seats:?}"
     );
 }
 

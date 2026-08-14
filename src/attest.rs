@@ -513,6 +513,51 @@ pub async fn emit(engine: &Engine, signer: KeySigner<'_>, spec: Spec) -> Result<
     put(engine, row).await
 }
 
+/// The envelope keys that are **per-row bookkeeping, not part of the claim**.
+///
+/// persist v31 binds the row's own identity and instants INTO the signed
+/// envelope (CIRISPersist#643/#598) so a relay cannot rewrite them. That is
+/// right, and it broke this module in two directions at once, because both of
+/// its comparisons treated "the envelope" and "the claim" as the same thing:
+///
+/// - `row.attestation_id` is unique per row, so EVERY pair of envelopes differs
+///   on `row` — the evidence started naming `row` as a field two claims
+///   "disagree on", which is noise that appears in every proof.
+/// - `original_content_hash` covers those bytes, so two IDENTICAL claims can
+///   never hash equal any more. Duplicate detection — the arm that keeps an
+///   honest restatement or a replicated copy from being called a contradiction —
+///   stopped firing at all.
+///
+/// Read from persist's own path constants rather than re-spelled: a rename
+/// upstream must break this build, not silently shrink what counts as the claim.
+///
+/// TWO consumers now, which is why it lives here rather than in either of them:
+/// [`crate::equivocation`] asks "do these two claims differ", and
+/// [`crate::commons_surface`] asks "is this echoed envelope a stamp of the one I
+/// would have built". Two spellings of "what is the claim" would be two answers.
+pub const ROW_BOOKKEEPING: [&str; 3] = [
+    ciris_persist::federation::envelope::paths::ROW,
+    ciris_persist::federation::envelope::paths::ASSERTED_AT,
+    ciris_persist::federation::envelope::paths::EXPIRES_AT,
+];
+
+/// The envelope with [`ROW_BOOKKEEPING`] removed — **what the attester actually
+/// claimed**, as opposed to which row carried it.
+///
+/// `asserted_at` is excluded from the CONTENT comparison and is still the
+/// coordinate the pair is keyed on (see the module note): two claims at the same
+/// signed instant is the precondition, and what they say at it is this.
+pub fn claim_view(envelope: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = envelope.as_object() else {
+        return envelope.clone();
+    };
+    let mut out = obj.clone();
+    for k in ROW_BOOKKEEPING {
+        out.remove(k);
+    }
+    serde_json::Value::Object(out)
+}
+
 // ─── The KEY plane: the registration envelope and its columns ───────────────
 
 /// **Register a key this node holds the signer for**, with a registration

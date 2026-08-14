@@ -613,8 +613,9 @@ fn dismissal_body(
     objection_id: &str,
     scrubs: Vec<ScrubSig>,
     dry_run: bool,
+    stamped_envelope: Option<serde_json::Value>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "cohort": "community",
         "cohort_key_id": community,
         "action_id": action_id,
@@ -622,33 +623,27 @@ fn dismissal_body(
         "grounds": "the cohort holds that this objection does not stand",
         "additional_scrubs": scrubs,
         "dry_run": dry_run,
-    })
+    });
+    // Echo the dry run's envelope back. The stamp mints the row id and the
+    // instant, so a second stamp is a different document and every co-signature
+    // over the first verifies against nothing (CIRISPersist#598/#643).
+    if let Some(e) = stamped_envelope {
+        body["stamped_envelope"] = e;
+    }
+    body
 }
 
 /// Ask the route for the canonical bytes, have `cosigners` sign exactly those,
-/// and submit. The m-of-n is over these bytes and no others.
-/// FAILING ON persist v31.0.0, and the cause is in `src/`, not here. Both tests
-/// that reach an m-of-n dismissal go red on it (`property_2_below_m_…`,
-/// `property_3_silence_escalates_…`), and they go red the same way: `counted`
-/// is 1 — the node's own scrub — because no co-signature verifies.
+/// and submit — echoing the dry run's envelope back so the submission carries the
+/// document they signed.
 ///
-/// The dry run's whole contract is *"co-signers produce `additional_scrubs` over
-/// exactly the bytes the submission will carry"*. It no longer holds.
-/// `commons_surface::payload_sha256` hashes the BARE envelope persist's builder
-/// returned, while `build_row` now stamps that envelope through the emit door
-/// before signing — so the submission carries an envelope with `asserted_at`, an
-/// `attestation_id` and the seven-column mirror inside it (CIRISPersist#598/#643),
-/// and persist's `count_distinct_roster_scrubs` verifies EVERY scrub, base and
-/// additional alike, over that stamped envelope. The base scrub was made over it
-/// and counts; the co-signers signed a document that no longer exists.
-///
-/// No fixture can close this: the stamp mints the id and the instant at
-/// SUBMISSION time, so the bytes are unpredictable until the row is stamped. The
-/// fix is the co-signed shape `crate::attest` already documents — the dry run
-/// stamps and returns `stamped.envelope()` plus the hash of `stamped.canonical()`,
-/// and the submission `Emit::adopt`s those exact bytes instead of re-deriving
-/// them. Left RED rather than papered over: a dismissal that silently counts one
-/// signature short is the m-of-n failing open on the operator.
+/// The echo is the contract, not a convenience. The emit stamp mints the row id
+/// and the instant AT STAMP TIME (CIRISPersist#598/#643), and persist re-verifies
+/// base and additional scrubs alike over the STORED envelope. So a submission
+/// that re-stamps carries bytes no co-signer ever saw: the node's own scrub
+/// counts and every other verifies against nothing, and the m-of-n silently
+/// counts one — the quorum failing OPEN on the operator, which is the direction
+/// that matters for a moderation gate.
 async fn node_dismisses(
     f: &Fixture,
     community: &str,
@@ -659,7 +654,7 @@ async fn node_dismisses(
     let (status, dry) = post(
         f,
         ROUTE_DISMISS,
-        &dismissal_body(community, action_id, objection_id, Vec::new(), true),
+        &dismissal_body(community, action_id, objection_id, Vec::new(), true, None),
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "dry-run: {dry}");
@@ -683,7 +678,14 @@ async fn node_dismisses(
     post(
         f,
         ROUTE_DISMISS,
-        &dismissal_body(community, action_id, objection_id, scrubs, false),
+        &dismissal_body(
+            community,
+            action_id,
+            objection_id,
+            scrubs,
+            false,
+            Some(envelope),
+        ),
     )
     .await
 }

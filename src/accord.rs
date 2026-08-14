@@ -2272,6 +2272,34 @@ async fn family_supersede(
         Ok(f) => f,
         Err(resp) => return resp,
     };
+    // ── THE CONSTITUTIONAL FAMILY CANNOT BE SUPERSEDED (CIRISPersist#648) ────
+    //
+    // v31 reserves `humanity-accord` at every ordinary door — including the
+    // QUORUM door, because `supersede_family` now runs `verify_family_admission`
+    // too (#651: supersede previously "ran NOTHING", so the table had a second
+    // write path that re-baselined a roster on FK-existence alone). The id enters
+    // a directory through the genesis seeder and the assemble ceremony
+    // (`put_family_local`) and through nothing else. That single-door property is
+    // what stops a registered peer declaring itself the sole seat of the
+    // constitutional root and chartering the mesh with one signature.
+    //
+    // These endpoints are hardcoded to that family, so seat rotation here is now
+    // impossible BY DESIGN. Refusing at this layer rather than passing persist's
+    // message through is not cosmetic: persist correctly says the id "is
+    // established by the genesis ceremony, never by a peer declaration", which
+    // tells an operator what is forbidden and not what to DO. On a mesh with no
+    // support channel the refusal is the whole interface, so it names the remedy.
+    if new.family.family_key_id == HUMANITY_ACCORD_FAMILY_KEY_ID {
+        return err(
+            StatusCode::CONFLICT,
+            "the constitutional accord family cannot be superseded — it is established by the \
+             genesis ceremony and by nothing else (CIRISPersist#648), and that single door is \
+             what stops one signature chartering the root of the mesh. To change a seat, run the \
+             ceremony again with the roster you want and adopt the bundle it produces: \
+             POST /v1/accord/provision, then POST /v1/trust-root/import on each node.",
+        );
+    }
+
     let new_count = new.family.members.len();
     let new_protocol = new.family.consensus_protocol.clone();
     match st

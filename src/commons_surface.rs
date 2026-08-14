@@ -792,12 +792,27 @@ struct DismissalRequest {
     /// counted by the substrate**; this module counts nothing.
     #[serde(default)]
     additional_scrubs: Vec<ScrubSig>,
-    /// Return the canonical envelope and its `payload_sha256` WITHOUT signing
-    /// or submitting, so co-signers can produce `additional_scrubs` over
+    /// Return the STAMPED canonical envelope and its `payload_sha256` WITHOUT
+    /// signing or submitting, so co-signers can produce `additional_scrubs` over
     /// exactly the bytes the submission will carry. The m-of-n is unreachable
     /// without it.
     #[serde(default)]
     dry_run: bool,
+    /// The `envelope` a [`Self::dry_run`] returned, echoed back verbatim.
+    ///
+    /// REQUIRED for a co-signed submission, and the reason is arithmetic: the
+    /// emit stamp mints the row id and the instant AT STAMP TIME, so a second
+    /// stamp produces different bytes and every co-signature made over the first
+    /// verifies against nothing. persist re-verifies base and additional scrubs
+    /// alike over the stored envelope, so the node's own scrub would count and
+    /// the co-signers' would not — an m-of-n silently counting one, which is the
+    /// quorum failing OPEN on the operator.
+    ///
+    /// Echoing it back is the only way the two calls can agree on one document.
+    /// It is not trusted: the submission rebuilds what it WOULD have stamped and
+    /// refuses anything whose claim differs (see the handler).
+    #[serde(default)]
+    stamped_envelope: Option<Value>,
 }
 
 /// Refuse a blank required string.
@@ -896,24 +911,27 @@ fn payload_sha256(envelope: &Value) -> Result<String, String> {
 /// cannot disagree about where a reference lives. `attested_key_id` is the
 /// ACTOR, which is what makes the row findable by the fold's
 /// `list_attestations_for(actor)` read.
-async fn build_row(
+/// Stamp a commons envelope — mint its id, instant and column mirror — WITHOUT
+/// signing it.
+///
+/// Split out of [`build_row`] because the co-signed path needs the stamped bytes
+/// BEFORE anyone signs: the dry run advertises them, the co-signers sign them,
+/// and the submission assembles over the same ones. A second stamp would mint a
+/// different id and instant (CIRISPersist#598/#643), and persist re-verifies base
+/// AND additional scrubs over the stored envelope — so co-signatures made over a
+/// bare envelope verify against nothing while the node's own still counts. That
+/// is an m-of-n silently counting one, which is the quorum failing OPEN.
+async fn stamp_for(
     engine: &Arc<Engine>,
     envelope: Value,
     actor: &str,
-    additional_scrubs: Vec<ScrubSig>,
     now: DateTime<Utc>,
-) -> Result<Attestation, String> {
+) -> Result<crate::attest::Emit, String> {
     let key_id = engine
         .local_derived_key_id()
         .await
         .map_err(|e| format!("derive acting key_id: {e}"))?;
-
-    // Through the ONE door (CIRISServer#402) — see [`crate::attest`]. `now` is
-    // accepted for the caller's ordering, and the stamp truncates it to the
-    // substrate's resolution before it reaches either the signature or the column
-    // (CIRISPersist#598: nanoseconds sqlite keeps and postgres drops turn a strict
-    // order on one backend into a tie on the other).
-    let stamped = crate::attest::Emit::stamp_at(
+    crate::attest::Emit::stamp_at(
         &key_id,
         crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
             // A commons row is ABOUT the actor and names no subject: it scores
@@ -922,7 +940,30 @@ async fn build_row(
             .attested_to(actor),
         now,
     )
-    .map_err(|e| format!("stamp commons row: {e}"))?;
+    .map_err(|e| format!("stamp commons row: {e}"))
+}
+
+/// Sign and assemble a commons row from `envelope`.
+///
+/// When the envelope is ALREADY stamped — the co-signed path echoing back what
+/// the dry run returned — it is ADOPTED rather than re-stamped, so the bytes the
+/// co-signers signed are the bytes the row carries. An unstamped envelope is
+/// stamped here, which is right for the uncontested single-signer path.
+async fn build_row_from(
+    engine: &Arc<Engine>,
+    envelope: Value,
+    actor: &str,
+    additional_scrubs: Vec<ScrubSig>,
+    now: DateTime<Utc>,
+) -> Result<Attestation, String> {
+    let already_stamped = envelope
+        .get(ciris_persist::federation::envelope::paths::ROW)
+        .is_some();
+    let stamped = if already_stamped {
+        crate::attest::Emit::adopt(&envelope).map_err(|e| format!("adopt commons row: {e}"))?
+    } else {
+        stamp_for(engine, envelope, actor, now).await?
+    };
 
     let sig = engine
         .sign_hybrid(stamped.canonical())
@@ -1012,7 +1053,7 @@ async fn post_objection(
         req.base.grounds.trim(),
     );
     let now = Utc::now();
-    let row = match build_row(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
+    let row = match build_row_from(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
         Ok(r) => r,
         Err(e) => return sign_failed(e),
     };
@@ -1071,7 +1112,7 @@ async fn post_ballot(
         req.base.grounds.trim(),
     );
     let now = Utc::now();
-    let row = match build_row(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
+    let row = match build_row_from(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
         Ok(r) => r,
         Err(e) => return sign_failed(e),
     };
@@ -1128,37 +1169,96 @@ async fn post_dismissal(
         req.objection_id.trim(),
         req.base.grounds.trim(),
     );
-    let sha = match payload_sha256(&envelope) {
-        Ok(s) => s,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "canonicalize_failed",
-                "commons_surface.refusal.canonicalize_failed",
-                e,
-            )
-        }
-    };
     if req.dry_run {
+        // STAMP, then advertise. The bytes a co-signer must sign are the bytes
+        // the row will carry, and since CIRISPersist#598/#643 those include the
+        // row's own id, its instant and the seven-column mirror — all minted by
+        // the stamp. Advertising the BARE envelope here is what made every
+        // co-signature verify against a document that never existed.
+        let stamped = match stamp_for(&st.engine, envelope, &ctx.actor, Utc::now()).await {
+            Ok(v) => v,
+            Err(e) => return sign_failed(e),
+        };
+        let stamped_envelope = stamped.envelope();
+        let sha = match payload_sha256(&stamped_envelope) {
+            Ok(s) => s,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "canonicalize_failed",
+                    "commons_surface.refusal.canonicalize_failed",
+                    e,
+                )
+            }
+        };
         return (
             StatusCode::OK,
             Json(json!({
                 "source_locale": SOURCE_LOCALE,
                 "dry_run": true,
-                "envelope": envelope,
+                "envelope": stamped_envelope,
                 "payload_sha256": sha,
                 "message": m(
                     "commons_surface.dry_run",
                     "Nothing was signed and nothing was submitted. These are the exact canonical \
                      bytes each co-signer must sign for their scrub to count on the real \
-                     submission — the m-of-n is over these bytes and no others.",
+                     submission — the m-of-n is over these bytes and no others. Send this \
+                     `envelope` back verbatim as `stamped_envelope` with the submission: a second \
+                     stamp would mint a different row id and instant, and every co-signature \
+                     would then verify against nothing.",
                 ),
             })),
         )
             .into_response();
     }
+
+    // A CO-SIGNED submission must carry the stamped envelope the co-signers
+    // actually signed. Rebuild what we WOULD have stamped and refuse anything
+    // whose claim differs — the echo is a transport for the stamp, never a way to
+    // choose what the row says.
+    let echoed =
+        match req.stamped_envelope.as_ref() {
+            Some(e) if !req.additional_scrubs.is_empty() => {
+                if crate::attest::claim_view(e) != crate::attest::claim_view(&envelope) {
+                    return err(
+                        StatusCode::CONFLICT,
+                        "stamped_envelope_mismatch",
+                        "commons_surface.refusal.stamped_envelope_mismatch",
+                        "the echoed `stamped_envelope` does not describe the dismissal in this \
+                     request. Re-run the dry run for THESE fields and have the co-signers sign \
+                     what it returns."
+                            .to_string(),
+                    );
+                }
+                Some(e.clone())
+            }
+            // No co-signers: nothing was signed elsewhere, so there is nothing to
+            // agree with and a fresh stamp is correct. An echoed envelope with no
+            // scrubs is harmless but pointless — ignored rather than refused.
+            Some(_) => None,
+            None if req.additional_scrubs.is_empty() => None,
+            None => return err(
+                StatusCode::BAD_REQUEST,
+                "stamped_envelope_required",
+                "commons_surface.refusal.stamped_envelope_required",
+                "co-signatures were supplied without the `stamped_envelope` they were made over. \
+                 Run the dry run, have the co-signers sign the `envelope` it returns, and send \
+                 that envelope back with their scrubs — otherwise their signatures cover bytes \
+                 this submission does not carry and the quorum silently counts one."
+                    .to_string(),
+            ),
+        };
+
     let now = Utc::now();
-    let row = match build_row(&st.engine, envelope, &ctx.actor, req.additional_scrubs, now).await {
+    let row = match build_row_from(
+        &st.engine,
+        echoed.unwrap_or(envelope),
+        &ctx.actor,
+        req.additional_scrubs,
+        now,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return sign_failed(e),
     };
@@ -1171,7 +1271,13 @@ async fn post_dismissal(
     body.insert("source_locale".into(), json!(SOURCE_LOCALE));
     body.insert("dismissal_id".into(), json!(row.attestation_id));
     body.insert("objection_id".into(), json!(req.objection_id.trim()));
-    body.insert("payload_sha256".into(), json!(sha));
+    // The hash of the envelope the ROW carries — which since the stamp is the
+    // same document the co-signers signed. Hashing a separately-built envelope
+    // here is how the advertised preimage and the stored one came apart.
+    body.insert(
+        "payload_sha256".into(),
+        json!(payload_sha256(&row.attestation_envelope).unwrap_or_default()),
+    );
     // The m-of-n evidence, on BOTH arms — a refusal names its shortfall and an
     // admission names what it cleared. persist's numbers, verbatim.
     body.insert(

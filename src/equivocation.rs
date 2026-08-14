@@ -341,46 +341,6 @@ impl Contradiction {
     }
 }
 
-/// The envelope keys that are **per-row bookkeeping, not part of the claim**.
-///
-/// persist v31 binds the row's own identity and instants INTO the signed
-/// envelope (CIRISPersist#643/#598) so a relay cannot rewrite them. That is
-/// right, and it broke this module in two directions at once, because both of
-/// its comparisons treated "the envelope" and "the claim" as the same thing:
-///
-/// - `row.attestation_id` is unique per row, so EVERY pair of envelopes differs
-///   on `row` — the evidence started naming `row` as a field two claims
-///   "disagree on", which is noise that appears in every proof.
-/// - `original_content_hash` covers those bytes, so two IDENTICAL claims can
-///   never hash equal any more. Duplicate detection — the arm that keeps an
-///   honest restatement or a replicated copy from being called a contradiction —
-///   stopped firing at all.
-///
-/// Read from persist's own path constants rather than re-spelled: a rename
-/// upstream must break this build, not silently shrink what counts as the claim.
-const ROW_BOOKKEEPING: [&str; 3] = [
-    ciris_persist::federation::envelope::paths::ROW,
-    ciris_persist::federation::envelope::paths::ASSERTED_AT,
-    ciris_persist::federation::envelope::paths::EXPIRES_AT,
-];
-
-/// The envelope with [`ROW_BOOKKEEPING`] removed — **what the attester actually
-/// claimed**, as opposed to which row carried it.
-///
-/// `asserted_at` is excluded from the CONTENT comparison and is still the
-/// coordinate the pair is keyed on (see the module note): two claims at the same
-/// signed instant is the precondition, and what they say at it is this.
-fn claim_view(envelope: &serde_json::Value) -> serde_json::Value {
-    let Some(obj) = envelope.as_object() else {
-        return envelope.clone();
-    };
-    let mut out = obj.clone();
-    for k in ROW_BOOKKEEPING {
-        out.remove(k);
-    }
-    serde_json::Value::Object(out)
-}
-
 /// A stable digest of [`claim_view`] — the replacement for comparing
 /// `original_content_hash`, which now covers the row's identity and so differs
 /// on every pair by construction.
@@ -390,15 +350,17 @@ fn claim_view(envelope: &serde_json::Value) -> serde_json::Value {
 /// `to_string()` would make the answer depend on serde's map ordering.
 fn claim_digest(envelope: &serde_json::Value) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let canonical =
-        ciris_persist::verify::canonical::ceg_produce_canonicalize(&claim_view(envelope)).ok()?;
+    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(
+        &crate::attest::claim_view(envelope),
+    )
+    .ok()?;
     Some(hex::encode(Sha256::digest(&canonical)))
 }
 
 /// Top-level CLAIM keys whose values differ (including keys present in only
 /// one). Sorted, so the evidence reads the same on every node.
 fn differing_fields(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
-    let (a, b) = (claim_view(a), claim_view(b));
+    let (a, b) = (crate::attest::claim_view(a), crate::attest::claim_view(b));
     let (Some(oa), Some(ob)) = (a.as_object(), b.as_object()) else {
         return Vec::new();
     };
