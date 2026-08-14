@@ -668,10 +668,6 @@ async fn preview_pushes_the_filter_down_and_hashes_the_exact_row_set() {
     assert_ne!(hash, other_hash, "the filter is inside the hash preimage");
 }
 
-/// The #343 gate. `list_attestations_by(self)` was a whole-corpus scan that
-/// made `config_resolution` a 152-second boot phase; the preview must never
-/// reintroduce it. **Comments are stripped before the scan** — this is about
-/// what the code DOES, and the module deliberately discusses the anti-pattern
 /// in prose.
 #[test]
 fn the_preview_never_scans_the_whole_self_authored_corpus() {
