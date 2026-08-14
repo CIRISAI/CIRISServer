@@ -324,17 +324,24 @@ fn open_software_ed25519_signer(
     std::fs::create_dir_all(seed_dir)
         .with_context(|| format!("create user seed dir {}", seed_dir.display()))?;
     let seed_path = seed_dir.join(format!("{key_id}.ed25519.seed"));
-    let seed: [u8; 32] = if seed_path.exists() {
-        let bytes = std::fs::read(&seed_path)
-            .with_context(|| format!("read user ed25519 seed {}", seed_path.display()))?;
-        bytes.as_slice().try_into().map_err(|_| {
+    // ZEROIZING, not a later `.zeroize()` call. `fs::read` lands the key in a heap
+    // Vec first, and a manual wipe is skipped by every early return between here
+    // and it — which is how the enrol path came to wipe its array while leaving
+    // the buffer behind. `Zeroizing` wipes on DROP, so the ? operators below and
+    // any panic are covered without anyone remembering.
+    let seed: zeroize::Zeroizing<[u8; 32]> = if seed_path.exists() {
+        let bytes = zeroize::Zeroizing::new(
+            std::fs::read(&seed_path)
+                .with_context(|| format!("read user ed25519 seed {}", seed_path.display()))?,
+        );
+        zeroize::Zeroizing::new(bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!("{} must be a 32-byte ed25519 seed", seed_path.display())
-        })?
+        })?)
     } else {
-        let mut s = [0u8; 32];
-        ciris_crypto::random::fill(&mut s)
+        let mut s = zeroize::Zeroizing::new([0u8; 32]);
+        ciris_crypto::random::fill(&mut *s)
             .map_err(|e| anyhow::anyhow!("mint user ed25519 seed: {e}"))?;
-        std::fs::write(&seed_path, s).with_context(|| format!("write {}", seed_path.display()))?;
+        std::fs::write(&seed_path, *s).with_context(|| format!("write {}", seed_path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -342,7 +349,7 @@ fn open_software_ed25519_signer(
         }
         s
     };
-    let signer = Ed25519SoftwareSigner::from_bytes(&seed, key_id)
+    let signer = Ed25519SoftwareSigner::from_bytes(&*seed, key_id)
         .map_err(|e| anyhow::anyhow!("load user ed25519 software signer: {e}"))?;
     Ok(Box::new(signer))
 }
@@ -599,17 +606,18 @@ pub async fn mint_portable_software_occurrence(
     std::fs::create_dir_all(target_dir)
         .with_context(|| format!("create portable target dir {}", target_dir.display()))?;
 
-    // Generate both 32-byte seeds.
-    let mut ed_seed = [0u8; 32];
-    let mut ml_seed = [0u8; 32];
-    ciris_crypto::random::fill(&mut ed_seed)
+    // Generate both 32-byte seeds. Zeroizing so they leave no copy behind on the
+    // several `?` paths between here and the write.
+    let mut ed_seed = zeroize::Zeroizing::new([0u8; 32]);
+    let mut ml_seed = zeroize::Zeroizing::new([0u8; 32]);
+    ciris_crypto::random::fill(&mut *ed_seed)
         .map_err(|e| anyhow::anyhow!("mint ed25519 seed: {e}"))?;
-    ciris_crypto::random::fill(&mut ml_seed)
+    ciris_crypto::random::fill(&mut *ml_seed)
         .map_err(|e| anyhow::anyhow!("mint ml-dsa-65 seed: {e}"))?;
 
-    let ed = Ed25519Signer::from_seed(&ed_seed)
+    let ed = Ed25519Signer::from_seed(&*ed_seed)
         .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;
-    let mldsa = MlDsa65Signer::from_seed(&ml_seed)
+    let mldsa = MlDsa65Signer::from_seed(&*ml_seed)
         .map_err(|e| anyhow::anyhow!("build ml-dsa-65 signer from seed: {e}"))?;
 
     // Self content-encryption pubkeys, DERIVED from the Ed25519 seed (verify v8.3.0
@@ -670,8 +678,8 @@ pub async fn mint_portable_software_occurrence(
     let ed_path = target_dir.join(portable_ed_seed_name(alias));
     let ml_path = target_dir.join(portable_mldsa_seed_name(alias));
     let marker_path = target_dir.join(portable_backend_marker_name(alias));
-    write_seed_0600(&ed_path, &ed_seed)?;
-    write_seed_0600(&ml_path, &ml_seed)?;
+    write_seed_0600(&ed_path, &*ed_seed)?;
+    write_seed_0600(&ml_path, &*ml_seed)?;
     std::fs::write(&marker_path, "software")
         .with_context(|| format!("write {}", marker_path.display()))?;
 
@@ -720,16 +728,19 @@ pub async fn mint_local_device_occurrence(
     let mut keyset = mint_portable_software_occurrence(seed_dir, alias).await?;
 
     let raw_pqc = seed_dir.join(portable_mldsa_seed_name(alias));
-    let seed_bytes = std::fs::read(&raw_pqc)
-        .with_context(|| format!("read freshly-minted pqc seed {}", raw_pqc.display()))?;
-    let seed32: [u8; 32] = seed_bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!("freshly-minted ML-DSA-65 seed is not 32 bytes — refusing to seal")
-    })?;
+    let seed_bytes = zeroize::Zeroizing::new(
+        std::fs::read(&raw_pqc)
+            .with_context(|| format!("read freshly-minted pqc seed {}", raw_pqc.display()))?,
+    );
+    let seed32 =
+        zeroize::Zeroizing::new(<[u8; 32]>::try_from(seed_bytes.as_slice()).map_err(|_| {
+            anyhow::anyhow!("freshly-minted ML-DSA-65 seed is not 32 bytes — refusing to seal")
+        })?);
 
     let keys_dir = ciris_verify_core::ceg_outbox::keys_dir();
     std::fs::create_dir_all(&keys_dir)
         .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
-    SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&seed32))
+    SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&*seed32))
         .map_err(|e| anyhow::anyhow!("seal this device's own ML-DSA-65 half under {alias}: {e}"))?;
 
     // Remove the raw half ONLY after the seal round-trips — a failed seal must not
@@ -771,32 +782,34 @@ pub fn open_portable_identity_transiently(
 ) -> Result<ciris_verify_core::self_at_login::HybridSigningIdentity> {
     use ciris_crypto::{ClassicalSigner as _, Ed25519Signer, MlDsa65Signer};
     use ciris_verify_core::self_at_login::HybridSigningIdentity;
-    use zeroize::Zeroize as _;
 
-    let read32 = |name: String| -> Result<[u8; 32]> {
+    let read32 = |name: String| -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let path = dir.join(&name);
-        // `fs::read` lands the key in a heap Vec FIRST. Copying it into the array
-        // and zeroizing only the array leaves the original in freed allocator
-        // memory — so the buffer is wiped too, on every path out.
-        let mut bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        // BOTH the heap buffer and the array. `fs::read` lands the key in a Vec
+        // first, so wiping only the copy leaves the original in freed allocator
+        // memory. `Zeroizing` wipes on DROP rather than at a call someone has to
+        // remember, which is what makes the `?` below safe.
+        let bytes = zeroize::Zeroizing::new(
+            std::fs::read(&path).with_context(|| format!("read {}", path.display()))?,
+        );
         let len = bytes.len();
-        let seed: Result<[u8; 32]> = bytes.as_slice().try_into().map_err(|_| {
-            anyhow::anyhow!(
-                "{} is {len} bytes, not the 32 a seed must be",
-                path.display()
-            )
-        });
-        bytes.zeroize();
-        seed
+        Ok(zeroize::Zeroizing::new(
+            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                anyhow::anyhow!(
+                    "{} is {len} bytes, not the 32 a seed must be",
+                    path.display()
+                )
+            })?,
+        ))
     };
 
-    let mut ed_seed = read32(portable_ed_seed_name(alias))?;
+    let ed_seed = read32(portable_ed_seed_name(alias))?;
     // The PQC half is REQUIRED here, not best-effort. An authorizer that can only
     // sign classically cannot produce the hybrid signature a federation-tier row
     // needs, so accepting one would enrol a device under an identity that cannot
     // actually act — the "optional half" shape this substrate has paid for
     // repeatedly.
-    let mut ml_seed = read32(portable_mldsa_seed_name(alias)).with_context(|| {
+    let ml_seed = read32(portable_mldsa_seed_name(alias)).with_context(|| {
         format!(
             "the post-quantum half of {alias:?} is not in this folder — an identity missing it \
              cannot sign a federation row, so it cannot authorize enrolling a device either. \
@@ -805,9 +818,9 @@ pub fn open_portable_identity_transiently(
     })?;
 
     let build = || -> Result<HybridSigningIdentity> {
-        let ed = Ed25519Signer::from_seed(&ed_seed)
+        let ed = Ed25519Signer::from_seed(&*ed_seed)
             .map_err(|e| anyhow::anyhow!("build ed25519 signer from seed: {e}"))?;
-        let mldsa = MlDsa65Signer::from_seed(&ml_seed)
+        let mldsa = MlDsa65Signer::from_seed(&*ml_seed)
             .map_err(|e| anyhow::anyhow!("build ml-dsa-65 signer from seed: {e}"))?;
         let ed_pub = ed
             .public_key()
@@ -817,13 +830,11 @@ pub fn open_portable_identity_transiently(
         let key_id = fedcode::derive_key_id(alias, &ed_pub);
         Ok(HybridSigningIdentity::new(key_id, ed, mldsa))
     };
-    let out = build();
-
-    // Zeroize on BOTH paths — an early return on a malformed seed must not leave
-    // the other half sitting in freed memory.
-    ed_seed.zeroize();
-    ml_seed.zeroize();
-    out
+    // Both seeds are `Zeroizing`, so they wipe when this function returns —
+    // whichever way it returns. This used to call `.zeroize()` on both AFTER
+    // `build()`, which covers only the paths that reach that line: the `?` on the
+    // ml_seed read above already skipped the ed_seed wipe.
+    build()
 }
 
 /// Discover the portable keyset's **alias** in `dir` by its `<alias>.ed25519.seed`

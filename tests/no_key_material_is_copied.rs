@@ -76,9 +76,13 @@ fn the_authorizer_is_read_into_memory_and_zeroized() {
         .expect("the transient authorizer open");
     let body = &code[i..code[i..].find("\n}\n").map(|j| i + j).unwrap_or(code.len())];
     assert!(
-        body.contains("zeroize()"),
-        "the transient open must WIPE the seeds it read. They are another device's private key \
-         material, held only long enough to prove possession:\n{body}"
+        body.contains("Zeroizing"),
+        "the transient open must WIPE the seeds it read — they are another device's private key \
+         material, held only long enough to prove possession.\n\nIt must do so with `Zeroizing`, \
+         not a `.zeroize()` call: a call is skipped by every early return before it, and this \
+         function has one (the PQC half is REQUIRED, so a missing half returns before the \
+         classical seed would have been wiped). `Zeroizing` wipes on DROP, which covers the `?` \
+         paths and a panic without anyone remembering:\n{body}"
     );
     assert!(
         !body.contains("std::fs::write") && !body.contains("write_seed_0600"),

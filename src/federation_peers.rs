@@ -352,19 +352,57 @@ struct LocalPeerState {
     last_seen: Option<String>,
 }
 
-/// `true` if the key is a canonical / founding bootstrap server — the
-/// AUTHORITATIVE predicate `ciris_persist::federation::admission::is_canonical`
-/// uses: its `identity_type` set contains `identity_type::CANONICAL` (a row can
-/// carry `canonical` only by earning it via anchor-scrub, since the write gate is
-/// the enforcement point). We already hold the row, so we apply the substrate's
-/// set-membership predicate directly instead of the old node-role/key_id-prefix
-/// heuristic (which false-positived every peer node).
-fn is_canonical(rec: &KeyRecord) -> bool {
-    identity_type::set_contains(&rec.identity_type, identity_type::CANONICAL)
+/// `true` if the key is a canonical / founding bootstrap server, **and the quorum
+/// has not withdrawn that role**.
+///
+/// # This was a second opinion, and it disagreed with the first
+///
+/// It read set-membership alone and its doc called that "the AUTHORITATIVE
+/// predicate `admission::is_canonical` uses". That was true at persist v13.0.0.
+/// v13.1.0 (CIRISPersist#377) superseded it: `Engine::is_canonical` now resolves
+/// through `is_canonical_effective`, which is set-membership AND
+/// `lookup_canonical_withdrawal(key_id).is_none()` — in persist's words, "a
+/// WITHDRAWN canonical reads false (the raw set-membership still carries the role
+/// token, but the quorum revoked it)".
+///
+/// So one node answered this two ways depending which surface you asked:
+/// `accord_provision` already calls the tombstone-aware `engine.is_canonical`,
+/// while this rendered `"canonical": true` for a key the accord had de-canonicalised
+/// — on `GET /v1/federation/peers`, the surface an operator would check the
+/// withdrawal ON, and in the canonical tally beside it. The withdraw plane is live
+/// here (`list_canonical_withdrawals`, `supersede_canonical`), so this was not
+/// hypothetical: a successful de-canonicalisation looked like a failed one.
+///
+/// It takes the directory now because the answer is not in the row.
+async fn is_canonical(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    rec: &KeyRecord,
+) -> bool {
+    if !identity_type::set_contains(&rec.identity_type, identity_type::CANONICAL) {
+        return false;
+    }
+    // A read failure is NOT "not canonical" — that would silently demote every
+    // canonical peer during a store outage. Fall back to the role token and let
+    // the outage surface elsewhere, rather than inventing a de-canonicalisation.
+    match dir.lookup_canonical_withdrawal(&rec.key_id).await {
+        Ok(w) => w.is_none(),
+        Err(e) => {
+            tracing::warn!(
+                key_id = %rec.key_id, error = %e,
+                "could not read the canonical-withdrawal tombstone — reporting the role token as \
+                 carried. A withdrawn canonical may read `true` until the store answers again"
+            );
+            true
+        }
+    }
 }
 
-fn to_peer(rec: KeyRecord, sideband: Option<&PeerSideband>) -> LocalPeerState {
-    let canonical = is_canonical(&rec);
+async fn to_peer(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    rec: KeyRecord,
+    sideband: Option<&PeerSideband>,
+) -> LocalPeerState {
+    let canonical = is_canonical(dir, &rec).await;
     LocalPeerState {
         key_id: rec.key_id,
         pubkey_ed25519_base64: rec.pubkey_ed25519_base64,
@@ -403,7 +441,7 @@ async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response>
                 continue; // already collected under an earlier identity_type
             }
             let sideband = sidebands.get(&rec.key_id);
-            peers.push(to_peer(rec, sideband));
+            peers.push(to_peer(dir.as_ref(), rec, sideband).await);
         }
     }
     Ok(peers)
@@ -433,7 +471,7 @@ pub(crate) async fn peer_counts(
             if !seen.insert(rec.key_id.clone()) {
                 continue;
             }
-            if is_canonical(&rec) {
+            if is_canonical(dir.as_ref(), &rec).await {
                 canonical += 1;
             }
         }
@@ -473,7 +511,12 @@ async fn get_peer(State(st): State<PeersState>, Path(key_id): Path<String>) -> R
         Ok(sb) => sb,
         Err(resp) => return resp,
     };
-    let peer = to_peer(rec, sideband.as_ref());
+    let peer = to_peer(
+        st.engine.federation_directory().as_ref(),
+        rec,
+        sideband.as_ref(),
+    )
+    .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({ "peer": peer, "reachability": serde_json::Value::Null })),
@@ -566,7 +609,12 @@ async fn set_peer_trust(
     if let Err(resp) = store_sideband(&st, &key_id, &sideband, &caller.wa_id).await {
         return resp;
     }
-    let peer = to_peer(rec, Some(&sideband));
+    let peer = to_peer(
+        st.engine.federation_directory().as_ref(),
+        rec,
+        Some(&sideband),
+    )
+    .await;
     (StatusCode::OK, Json(serde_json::json!({ "data": peer }))).into_response()
 }
 
@@ -594,7 +642,12 @@ async fn set_peer_appearance(
     if let Err(resp) = store_sideband(&st, &key_id, &sideband, &caller.wa_id).await {
         return resp;
     }
-    let peer = to_peer(rec, Some(&sideband));
+    let peer = to_peer(
+        st.engine.federation_directory().as_ref(),
+        rec,
+        Some(&sideband),
+    )
+    .await;
     (StatusCode::OK, Json(serde_json::json!({ "data": peer }))).into_response()
 }
 
