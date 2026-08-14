@@ -54,6 +54,9 @@ use ciris_persist::prelude::Engine;
 use ciris_persist::service_token_revocation::sqlite::SqliteServiceTokenRevocationBackend;
 use ciris_persist::wa_cert::sqlite::SqliteWaCertBackend;
 use ciris_persist::wa_cert::{Error as WaCertBackendError, WaCert, WaCertService, WaRole};
+// Only the postgres arms hold an `Arc<PostgresBackend>`, and those exist on
+// Linux alone — so the import is unused elsewhere and `-D warnings` fails.
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 /// Why an auth-store access failed.
@@ -145,6 +148,12 @@ impl From<ciris_persist::service_token_revocation::Error> for StoreError {
 /// deployment (CIRISServer#397).
 pub enum AuthCertBackend {
     Sqlite(SqliteWaCertBackend),
+    // persist's `postgres` feature is enabled ONLY on Linux (see Cargo.toml
+    // `[target.'cfg(target_os = "linux")'.dependencies]`), so `PostgresBackend`
+    // and `Engine::postgres_backend()` do not exist elsewhere. Gating the
+    // VARIANT rather than just its construction keeps the exhaustive match a
+    // compile-time proof on every platform.
+    #[cfg(target_os = "linux")]
     Postgres(Arc<ciris_persist::store::PostgresBackend>),
 }
 
@@ -152,18 +161,21 @@ impl WaCertService for AuthCertBackend {
     async fn upsert_wa_cert(&self, cert: WaCert) -> Result<(), WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.upsert_wa_cert(cert).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.upsert_wa_cert(cert).await,
         }
     }
     async fn get_wa_cert(&self, wa_id: &str) -> Result<Option<WaCert>, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.get_wa_cert(wa_id).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.get_wa_cert(wa_id).await,
         }
     }
     async fn get_by_kid(&self, jwt_kid: &str) -> Result<Option<WaCert>, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.get_by_kid(jwt_kid).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.get_by_kid(jwt_kid).await,
         }
     }
@@ -174,6 +186,7 @@ impl WaCertService for AuthCertBackend {
     ) -> Result<Option<WaCert>, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.get_by_oauth(provider, external_id).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.get_by_oauth(provider, external_id).await,
         }
     }
@@ -184,12 +197,14 @@ impl WaCertService for AuthCertBackend {
     ) -> Result<Vec<WaCert>, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.list_by_role(role, limit).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.list_by_role(role, limit).await,
         }
     }
     async fn set_active(&self, wa_id: &str, active: bool) -> Result<bool, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.set_active(wa_id, active).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.set_active(wa_id, active).await,
         }
     }
@@ -200,6 +215,7 @@ impl WaCertService for AuthCertBackend {
     ) -> Result<bool, WaCertBackendError> {
         match self {
             Self::Sqlite(b) => b.update_last_login(wa_id, at).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.update_last_login(wa_id, at).await,
         }
     }
@@ -215,6 +231,7 @@ pub fn wa_cert_backend(engine: &Engine) -> Result<AuthCertBackend, StoreError> {
             sqlite.conn_handle(),
         )));
     }
+    #[cfg(target_os = "linux")]
     if let Some(pg) = engine.postgres_backend() {
         return Ok(AuthCertBackend::Postgres(Arc::clone(pg)));
     }
@@ -224,6 +241,12 @@ pub fn wa_cert_backend(engine: &Engine) -> Result<AuthCertBackend, StoreError> {
 /// The `revoked_service_tokens` backend for this Engine — SQLite or PostgreSQL.
 pub enum AuthRevocationBackend {
     Sqlite(SqliteServiceTokenRevocationBackend),
+    // persist's `postgres` feature is enabled ONLY on Linux (see Cargo.toml
+    // `[target.'cfg(target_os = "linux")'.dependencies]`), so `PostgresBackend`
+    // and `Engine::postgres_backend()` do not exist elsewhere. Gating the
+    // VARIANT rather than just its construction keeps the exhaustive match a
+    // compile-time proof on every platform.
+    #[cfg(target_os = "linux")]
     Postgres(Arc<ciris_persist::store::PostgresBackend>),
 }
 
@@ -236,6 +259,7 @@ impl ciris_persist::service_token_revocation::ServiceTokenRevocationService
     ) -> Result<(), ciris_persist::service_token_revocation::Error> {
         match self {
             Self::Sqlite(b) => b.record_revocation(revocation).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.record_revocation(revocation).await,
         }
     }
@@ -247,6 +271,7 @@ impl ciris_persist::service_token_revocation::ServiceTokenRevocationService
     > {
         match self {
             Self::Sqlite(b) => b.list_revocations().await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.list_revocations().await,
         }
     }
@@ -259,6 +284,7 @@ impl ciris_persist::service_token_revocation::ServiceTokenRevocationService
     > {
         match self {
             Self::Sqlite(b) => b.check_revocation(token_hash).await,
+            #[cfg(target_os = "linux")]
             Self::Postgres(b) => b.check_revocation(token_hash).await,
         }
     }
@@ -270,6 +296,7 @@ pub fn revocation_backend(engine: &Engine) -> Result<AuthRevocationBackend, Stor
             SqliteServiceTokenRevocationBackend::new(sqlite.conn_handle()),
         ));
     }
+    #[cfg(target_os = "linux")]
     if let Some(pg) = engine.postgres_backend() {
         return Ok(AuthRevocationBackend::Postgres(Arc::clone(pg)));
     }
