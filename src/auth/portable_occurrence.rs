@@ -75,6 +75,13 @@ fn http_err(code: StatusCode, msg: impl Into<String>) -> Response {
 /// Owner gate — minting a portable copy of the owner's identity is an apex act.
 /// Reuses the same SYSTEM_ADMIN + FullAccess session check the other owner-only
 /// routes use (mirrors `identity::require_owner`).
+/// Owner gate for the occurrence surfaces.
+///
+/// **Refuses a delegated session.** An ACTIVE occurrence of the owner's self IS
+/// the owner to every signature gate (`verify::signer_acts_for`), so minting one
+/// hands out a key that outranks any delegation and outlives it. In the fold
+/// topology the agent shares the node's host and therefore passes
+/// `require_loopback`, so loopback-gating is not the boundary here — this is.
 async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Response> {
     use crate::auth::roles::{Permission, UserRole};
     use crate::auth::session::resolve_bearer;
@@ -91,8 +98,22 @@ async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Respo
         ));
     };
     match resolve_bearer(engine, token).await {
+            // A DELEGATE MAY NOT DO THIS. `resolve_bearer` hands a `dgrant:`
+            // token the owner's role and FullAccess by design — that is what
+            // makes a delegation useful — so role alone does not distinguish the
+            // owner from someone acting for them. `/v1/accord/*` and
+            // `/v1/auth/device/*` both exclude delegated actors this way; the
+            // omission here was what made those two readable as policy rather
+            // than accident.
+        Ok(Some(caller)) if caller.actor.is_some() => Err(http_err(
+            StatusCode::FORBIDDEN,
+            "minting or enrolling an occurrence of the owner's self is the owner's own act and \
+             is not delegatable — an active occurrence IS the identity to every signature gate, \
+             so it would outrank and outlive the grant that asked for it",
+        )),
         Ok(Some(caller))
-            if caller.role == UserRole::SystemAdmin
+            if caller.actor.is_none()
+                && caller.role == UserRole::SystemAdmin
                 && caller.permissions.contains(&Permission::FullAccess) =>
         {
             Ok(())

@@ -90,6 +90,16 @@ struct LinkResponse {
 /// Refusals carry a `reason_id` like every other refusal here, so "you are not
 /// signed in" and "you are signed in but not the owner" are DIFFERENT answers a
 /// UI can render — a single "forbidden" tells an operator nothing about which.
+/// Owner gate for linking a sign-in identity.
+///
+/// **Refuses a delegated session.** This writes `oauth_provider` /
+/// `oauth_external_id` onto a `wa_cert` row — with `wa_id` omitted, onto the
+/// node's ROOT. `store::get_by_oauth` then resolves that provider pair to ROOT
+/// forever, so a delegate could attach its own Google account and hold
+/// SYSTEM_ADMIN across revocation and restart: the grant is in-memory, the link
+/// is a stored row. `CapabilityVerb::Delegate` is never-delegatable precisely so
+/// a delegate cannot mint further delegations; this mints something strictly
+/// stronger and had no gate at all.
 async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Response> {
     use crate::auth::roles::{Permission, UserRole};
     use crate::auth::session::resolve_bearer;
@@ -107,6 +117,20 @@ async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Respo
         ));
     };
     match resolve_bearer(engine, token).await {
+            // A DELEGATE MAY NOT DO THIS. `resolve_bearer` hands a `dgrant:`
+            // token the owner's role and FullAccess by design — that is what
+            // makes a delegation useful — so role alone does not distinguish the
+            // owner from someone acting for them. `/v1/accord/*` and
+            // `/v1/auth/device/*` both exclude delegated actors this way; the
+            // omission here was what made those two readable as policy rather
+            // than accident.
+        Ok(Some(caller)) if caller.actor.is_some() => Err(refuse(
+            StatusCode::FORBIDDEN,
+            "auth.oauth_link.not_delegatable",
+            "Linking a sign-in identity is the owner's own act. A delegated session cannot do \
+             it — the link outlives the delegation, so it would hand permanent access to \
+             whoever holds a temporary grant.",
+        )),
         Ok(Some(caller))
             if caller.role == UserRole::SystemAdmin
                 && caller.permissions.contains(&Permission::FullAccess) =>
