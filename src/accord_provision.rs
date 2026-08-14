@@ -1159,6 +1159,43 @@ async fn admit_node_impl(
 /// the co-scrub propose/cosign — the touch-required tap on the first `sign_bound`
 /// IS the holder's consent. Returns `(status, message)` on any open failure.
 #[cfg(feature = "pkcs11")]
+/// **Step zero of any ceremony: does THIS build compute a signable digest?**
+///
+/// `authorization_digest` returned the canonical PREIMAGE until persist
+/// v31.2.0 — thousands of bytes, growing with the bundle. A build linked to an
+/// older persist therefore signs different bytes than a current verifier
+/// recomputes, and every authorization it takes is dead on arrival.
+///
+/// That is not a theoretical drift. On 2026-08-14 a full two-holder ceremony was
+/// run on a wheel whose pin was in doubt, and the question "which persist did
+/// that seed come from?" cost a diagnosis on both sides of the substrate — after
+/// the keys had already been touched. The check that would have answered it
+/// instantly is a length: 32 means the hashing form, anything else means this
+/// build predates it.
+///
+/// So it runs BEFORE the YubiKey is opened, on persist's own baked bundle (no
+/// ceremony state needed), and refuses with the number it actually got. A key
+/// tap is a person walking to a safe; spend it only on a build that can produce
+/// a valid signature.
+fn preflight_digest_is_signable() -> Result<(), String> {
+    const EXPECTED: usize = 32; // SHA-256
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let len = crate::mesh_genesis::authorization_digest(baked)
+        .map_err(|e| format!("this build cannot compute an authorization digest at all: {e}"))?
+        .len();
+    if len != EXPECTED {
+        return Err(format!(
+            "REFUSING to spend a holder key: this build's authorization_digest returns \
+             {len} bytes, not {EXPECTED}. It links a persist older than v31.2.0, which \
+             signs the canonical preimage rather than its SHA-256 — so every signature \
+             this ceremony took would be over bytes a current verifier does not \
+             recompute, and the seed would be unusable. Rebuild against persist \
+             v31.2.0 or later, then re-run."
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn open_holder_identity(
     key_id: &str,
     usb_path: &str,
@@ -2470,6 +2507,10 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     };
     let serve_key_id = serve_rec.key_id.clone();
 
+    // Step zero — BEFORE the key is opened. See `preflight_digest_is_signable`.
+    if let Err(e) = preflight_digest_is_signable() {
+        return err(StatusCode::FAILED_DEPENDENCY, &e);
+    }
     let identity = match open_holder_identity(&root, &req.mldsa_usb_path, &req.pkcs11).await {
         Ok(i) => i,
         Err((code, msg)) => return err(code, &msg),
@@ -2794,6 +2835,10 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
             StatusCode::BAD_REQUEST,
             &format!("{key_id} is not a holder carried in this genesis"),
         );
+    }
+    // Step zero — BEFORE the key is opened. See `preflight_digest_is_signable`.
+    if let Err(e) = preflight_digest_is_signable() {
+        return err(StatusCode::FAILED_DEPENDENCY, &e);
     }
     let identity = match open_holder_identity(key_id, &req.mldsa_usb_path, &req.pkcs11).await {
         Ok(i) => i,
