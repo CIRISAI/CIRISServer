@@ -2380,7 +2380,13 @@
     "status_reconfiguring": "Đang khởi động lại nút của bạn...",
     "status_reconfiguring_timeout": "Nút của bạn đang mất nhiều thời gian khởi động lại hơn dự kiến. Vui lòng khởi động lại ứng dụng.",
     "login_setup_complete_relogin": "Thiết lập đã hoàn tất. Nút của bạn đã khởi động lại, vui lòng đăng nhập lại bằng đúng thông tin đăng nhập mà bạn đã dùng để hoàn tất thiết lập.",
-    "accord_new_confer_duty": "Trao một nhiệm vụ cho một federation ID"
+    "accord_new_confer_duty": "Trao một nhiệm vụ cho một federation ID",
+    "keyset_import_cancel": "Chọn thư mục khác",
+    "keyset_import_confirm": "Đăng ký thiết bị này",
+    "keyset_inspect_checking": "Đang kiểm tra thư mục này…",
+    "keyset_inspect_unavailable": "Không thể kiểm tra thư mục này — nút mạng không phản hồi. Điều này không cho biết danh tính của bạn có nằm trong đó hay không; bạn vẫn có thể thử nhập.",
+    "accord_remint_invalid_desc": "Chữ ký của người giữ khác sẽ KHÔNG hoàn tất được nghi thức này — vấn đề nằm ở chính gói dữ liệu. Hãy bắt đầu một nghi thức mới sau khi đã khắc phục.",
+    "accord_remint_invalid_title": "Không thể hoàn tất hạt giống này"
   },
   "nav": {
     "group": {
@@ -3460,7 +3466,9 @@
       "steward_tier_not_adopted": "Cộng đồng này không tuyên bố tầng quản hộ (steward) nào, nên không có hạn chót nào để im lặng vượt qua và không có bể leo thang. Một lá phiếu ở đây sẽ được lưu trữ và không bao giờ được đọc.",
       "store_unavailable": "Không thể tiếp cận được nền tảng.",
       "target_action_unknown": "Hành động bị phản đối không phải là một hàng mà nút này đang giữ, nên phản đối sẽ không đếm được và cửa sổ của nó không giải quyết được.",
-      "unverifiable_signature": "Chữ ký của hàng không xác minh được với các khóa của người ký như đã đăng ký trên nút này."
+      "unverifiable_signature": "Chữ ký của hàng không xác minh được với các khóa của người ký như đã đăng ký trên nút này.",
+      "stamped_envelope_mismatch": "`stamped_envelope` được phản hồi lại không mô tả việc bãi nhiệm trong yêu cầu này. Hãy chạy lại lần chạy thử cho CÁC trường NÀY và yêu cầu những người đồng ký ký vào kết quả mà nó trả về.",
+      "stamped_envelope_required": "các chữ ký đồng thuận đã được cung cấp mà không kèm `stamped_envelope` mà chúng được ký lên. Hãy chạy lần chạy thử, yêu cầu những người đồng ký ký vào `envelope` mà nó trả về, rồi gửi lại envelope đó cùng với các chữ ký scrub của họ — nếu không, chữ ký của họ sẽ bao phủ những byte mà bản gửi này không mang theo và số đại biểu sẽ âm thầm bị tính thiếu một."
     },
     "standing": {
       "action_unknown": "Nút này không giữ hành động nào như vậy. Một phản đối nêu tên một hàng, mà ở đây không có hàng nào để nêu tên.",
@@ -3871,7 +3879,8 @@
       "incomplete_pair": "Cần có cả nhà cung cấp lẫn mã tài khoản. Một nửa của cặp này sẽ liên kết một tài khoản mà sau đó không gì tìm lại được.",
       "no_such_identity": "Không có danh tính nào như vậy trên nút này để liên kết tài khoản vào.",
       "node_unowned": "Nút này chưa có chủ sở hữu, nên chưa có danh tính nào để liên kết tài khoản vào. Hãy nhận quyền sở hữu nút trước.",
-      "store_unavailable": "Nút không thể ghi liên kết vì kho danh tính của nó không khả dụng. Không có gì bị thay đổi."
+      "store_unavailable": "Nút không thể ghi liên kết vì kho danh tính của nó không khả dụng. Không có gì bị thay đổi.",
+      "not_delegatable": "Liên kết một danh tính đăng nhập là hành động của riêng chủ sở hữu. Phiên được ủy quyền không thể thực hiện điều đó — liên kết tồn tại lâu hơn sự ủy quyền, nên nó sẽ trao quyền truy cập vĩnh viễn cho bất kỳ ai đang giữ một quyền tạm thời."
     },
     "session_expired": "Phiên làm việc của bạn không còn hiệu lực. Hãy đăng nhập lại để tiếp tục.",
     "browser_signin": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Đó không phải là nhiệm vụ mà mạng lưới này công nhận. Cấp nó sẽ hiển thị như một thẩm quyền ở đây nhưng sẽ bị từ chối tại mọi cổng.",
       "pkcs11_required": "Việc trao một nhiệm vụ cần tính năng `pkcs11` — người nắm giữ ký bằng YubiKey của mình cùng với nửa ML-DSA được bọc trong USB, đúng như nghi thức đồng ký chuẩn tắc vẫn làm."
     }
+  },
+  "trust_root": {
+    "no_root": "gốc nào? đường dẫn phải nêu rõ root_key_id cần hủy tin cậy"
   }
 }

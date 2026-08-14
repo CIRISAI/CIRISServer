@@ -286,7 +286,6 @@ pub async fn emit_age_assurance_signed(
         attestation_type::SCORES,
         &subject,
         envelope,
-        vec![subject.clone()],
         None, // an age-assurance score is not time-bounded.
     )
     .await

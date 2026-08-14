@@ -682,7 +682,6 @@ async fn delegate(
         attestation_type::DELEGATES_TO,
         &client_id,
         envelope,
-        vec![client_id.clone()],
         // The delegation's absolute expiry (CC 2.4.1.2 `delegation_valid_until`) —
         // makes the graph edge self-expiring in lockstep with the in-memory grant TTL.
         chrono::DateTime::from_timestamp(expires_at as i64, 0),
@@ -970,7 +969,6 @@ async fn approve(
         attestation_type::DELEGATES_TO,
         &actor_key_id,
         envelope,
-        vec![actor_key_id.clone()],
         // CC 2.4.1.2 `delegation_valid_until` — edge expires with the grant TTL.
         chrono::DateTime::from_timestamp(grant_expires_at as i64, 0),
     )
@@ -1284,7 +1282,6 @@ async fn revoke(
                 attestation_type::WITHDRAWS,
                 &client_id,
                 envelope,
-                vec![client_id.clone()],
                 None, // a revocation is permanent — never expires.
             )
             .await

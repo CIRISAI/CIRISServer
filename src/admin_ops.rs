@@ -2045,24 +2045,45 @@ async fn put_revocation_for(
         .local_derived_key_id()
         .await
         .map_err(|e| DeAdmitFailure::local("derive acting key_id", e))?;
+    // ── THE ENVELOPE MUST NAME WHAT IT REVOKES (CIRISPersist#659) ────────────
+    //
+    // This built the envelope and the row side by side and required them to
+    // agree — the CIRISServer#402 class, on the de-conferral plane. persist v31
+    // refuses it, and its own account of the pre-#659 state says why plainly:
+    // the scrub signature covered `revocation_envelope` and nothing else, so
+    // `revocation_id`, `revoked_key_id`, `revoking_key_id`, `reason`,
+    // `revoked_at`, `effective_at` and `scrub_timestamp` were UNSIGNED columns.
+    // One validly-signed revocation, minted by a legitimately slash-conferred
+    // moderator against a key it really did name, could be re-submitted with ANY
+    // OTHER `revoked_key_id` at unboundedly many ids, and every gate returned
+    // Ok(()) — the signature still verified. A single conferral bought an
+    // unbounded de-conferral primitive.
+    //
+    // On a mesh with no platform owner that is the sanction plane: de-admission
+    // IS the moderation system, and there is nobody to appeal a forged one to.
+    //
+    // ORDER MATTERS. `bind_revocation_into_envelope` truncates the row's three
+    // instants to substrate resolution and stamps the envelope FROM the truncated
+    // columns — so the row is built first, bound second, and only THEN
+    // canonicalized and signed. Re-reading `now` after the bind, or signing bytes
+    // built before it, puts us straight back to two authors for one fact.
     let mut envelope = serde_json::json!({
-        "revoked_key_id": revoked_key_id,
-        "revoking_key_id": revoking_key_id,
         "reason": reason,
         "delegation_id": delegation_id,
-        "effective_at": now.to_rfc3339(),
     });
     if let Some(bound) = revoked_after {
-        envelope[ciris_persist::federation::register::REVOKED_AFTER_ENVELOPE_FIELD] =
-            serde_json::json!(bound.to_rfc3339());
+        // NOT stamped by the binder: `check_revocation_bound` owns this field and
+        // its refusal taxonomy, and a producer that writes the bound into the
+        // envelope while leaving the column unset must still be REFUSED rather
+        // than silently repaired. So we set both, and truncate at the producer's
+        // hand exactly as the binder does for its own three.
+        envelope[ciris_persist::federation::register::REVOKED_AFTER_ENVELOPE_FIELD] = serde_json::json!(
+            ciris_persist::federation::admission::truncate_to_substrate_resolution(bound)
+                .to_rfc3339()
+        );
     }
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| DeAdmitFailure::local("canonicalize revocation", e))?;
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .map_err(|e| DeAdmitFailure::local("hybrid-sign revocation", e))?;
-    let revocation = Revocation {
+
+    let mut revocation = Revocation {
         revocation_id: crate::ids::new_id(),
         revoked_key_id: revoked_key_id.to_owned(),
         revoking_key_id: revoking_key_id.clone(),
@@ -2070,16 +2091,34 @@ async fn put_revocation_for(
         revoked_at: now,
         effective_at: now,
         revocation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
+        // Filled from the bytes the binder produces, below — a hash of anything
+        // else would cover an envelope this row does not carry.
+        original_content_hash: String::new(),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
         scrub_key_id: revoking_key_id,
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         observed_region: ciris_persist::federation::verify_coord::region::US.to_owned(),
-        revoked_after,
+        revoked_after: revoked_after
+            .map(ciris_persist::federation::admission::truncate_to_substrate_resolution),
         persist_row_hash: String::new(),
     };
+    ciris_persist::federation::admission::bind_revocation_into_envelope(&mut revocation)
+        .map_err(|e| DeAdmitFailure::local("bind the revocation subject into its envelope", e))?;
+
+    // Sign the BOUND envelope — these bytes now name the key being de-admitted.
+    let canonical =
+        ciris_persist::verify::canonical::ceg_produce_canonicalize(&revocation.revocation_envelope)
+            .map_err(|e| DeAdmitFailure::local("canonicalize revocation", e))?;
+    let sig = engine
+        .sign_hybrid(&canonical)
+        .await
+        .map_err(|e| DeAdmitFailure::local("hybrid-sign revocation", e))?;
+    revocation.original_content_hash = hex::encode(Sha256::digest(&canonical));
+    revocation.scrub_signature_classical = B64.encode(&sig.classical.signature);
+    revocation.scrub_signature_pqc = Some(B64.encode(&sig.pqc.signature));
+
     let id = revocation.revocation_id.clone();
     engine
         .federation_directory()
@@ -3355,7 +3394,9 @@ async fn resolve_owner_authority(
              admin operation on anyone's behalf. Claim ownership first.",
         ));
     };
-    if proof.issuer_key_id != owner {
+    // An OCCURRENCE of the owner issues as the owner (CIRISServer#391): the
+    // delegation is the self's act whichever of the self's devices signed it.
+    if !crate::auth::verify::signer_acts_for(&st.engine, &proof.issuer_key_id, &owner).await {
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "authority_not_the_owner",

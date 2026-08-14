@@ -93,7 +93,7 @@ use ciris_persist::federation::types::delegation_scope::{
     INFRA_ATTEST, INFRA_SERVE, INFRA_STORE, INFRA_TRANSPORT,
 };
 use ciris_persist::federation::types::{
-    attestation_tier, attestation_type, identity_type, Attestation, SignedAttestation,
+    attestation_type, cohort_scope, identity_type, Attestation, SignedAttestation,
 };
 use ciris_persist::federation::{FederationDirectory, SignedKeyRecord};
 use ciris_persist::store::MemoryBackend;
@@ -214,6 +214,17 @@ fn to_persist(rec: &VerifySignedKeyRecord) -> SignedKeyRecord {
 /// Ed25519 over `ceg_produce_canonicalize(envelope)`, ML-DSA-65 over the bound
 /// `canonical ‖ ed_sig` — exactly what persist's CC 5.3.2.4.3.1 ingest gate
 /// Strict-verifies against the attester's REGISTERED pubkeys.
+///
+/// Through the ONE door (CIRISServer#402), in its three-stage form because the
+/// signer here is a `HybridSigningIdentity` held by the fixture rather than the
+/// engine. Hand-rolled beside its envelope, every ceremony row carried an
+/// `asserted_at` no signature covered and no typed-column mirror, which persist
+/// v31 refuses at the mint and at every door (CIRISPersist#598/#643).
+///
+/// `id` is preserved with [`Emit::with_row_id`](ciris_server::attest::Emit::with_row_id):
+/// the ceremony's rows are looked up BY NAME — `charter_of` matches the charter by
+/// id, `install_trust_root_records` re-seeds them under it, and one gate below
+/// asserts the winning grant is `qa-grant-serve`.
 async fn sign_row(
     id: &str,
     attester: &HybridSigningIdentity,
@@ -223,35 +234,26 @@ async fn sign_row(
     asserted_at: chrono::DateTime<chrono::Utc>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Attestation {
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .expect("canonicalize attestation envelope");
+    let stamped = ciris_server::attest::Emit::stamp_at(
+        attester.key_id(),
+        ciris_server::attest::Spec::new(ty, cohort_scope::FEDERATION, envelope)
+            // ABOUT the attested key, with NO subject: a ceremony leg confers, and
+            // `subject_key_ids` would hand its recipient authority to revoke it.
+            .attested_to(attested_key_id)
+            .weighing(Some(1.0))
+            .expiring(expires_at),
+        asserted_at,
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp {id} ({ty}): {e}"));
+
     let (ed_b64, pqc_b64) = attester
-        .sign_bound(&canonical)
+        .sign_bound(stamped.canonical())
         .await
         .expect("bound-hybrid sign attestation envelope");
-    Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: attester.key_id().to_string(),
-        attested_key_id: attested_key_id.to_string(),
-        attestation_type: ty.to_string(),
-        weight: Some(1.0),
-        asserted_at,
-        expires_at,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: ed_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: attester.key_id().to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    stamped
+        .assemble_from_b64(&ed_b64, &pqc_b64)
+        .unwrap_or_else(|e| panic!("assemble {id} ({ty}): {e}"))
 }
 
 /// A signed **charter** — the self-referential `delegates_to(root → root)`

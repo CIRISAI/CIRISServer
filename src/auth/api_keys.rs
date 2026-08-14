@@ -226,10 +226,29 @@ async fn revoke_api_key(
     if let Err(resp) = require_manage_users(&st, &headers).await {
         return resp;
     }
-    // Revoke = deactivate (preserve the row for audit — the agent's semantics).
-    match store::set_active(&st.engine, &wa_id, false).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "no such API key"),
+    // IT MUST BE AN API KEY. `set_active(wa_id, false)` deactivates whatever row
+    // that id names, and this route took the id straight from the path — so it
+    // would disable the owner's ROOT cert as readily as an api-key row, for a
+    // caller holding only `ManageUserPermissions` (granted at AUTHORITY, a level
+    // below SystemAdmin). The wa_id is derivable: ROOT is `wa-root-{key_id}` and
+    // `GET /v1/auth/owner-hint` is unauthenticated.
+    //
+    // The sibling `list_api_keys` already filters on `token_type` — the gate was
+    // asserted in one arm and skipped in the other, which is the shape this
+    // codebase keeps paying for.
+    match store::get(&st.engine, &wa_id).await {
+        Ok(Some(cert)) if cert.token_type != TokenType::ApiKey => err(
+            StatusCode::FORBIDDEN,
+            "that id is not an API key. This route deactivates API keys only — disabling a \
+             user or the owner's certificate is a different act with a different gate.",
+        ),
+        Ok(Some(_)) => match store::set_active(&st.engine, &wa_id, false).await {
+            Ok(true) => StatusCode::NO_CONTENT.into_response(),
+            // The row was there a moment ago; a false here is a race, not a miss.
+            Ok(false) => err(StatusCode::NOT_FOUND, "no such API key"),
+            Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+        },
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such API key"),
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
     }
 }

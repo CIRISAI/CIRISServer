@@ -260,7 +260,8 @@
       "incomplete_pair": "提供方和账户 ID 均为必填项。只填其中一半，会关联一个再也无法找到的账户。",
       "no_such_identity": "本节点上不存在可供关联该账户的身份。",
       "node_unowned": "本节点尚无所有者，因此没有可关联账户的身份。请先认领此节点。",
-      "store_unavailable": "由于身份存储不可用，节点无法写入该关联。未做任何更改。"
+      "store_unavailable": "由于身份存储不可用，节点无法写入该关联。未做任何更改。",
+      "not_delegatable": "关联登录身份是所有者本人的行为。委托会话无法执行此操作——该关联的有效期长于委托期限，否则就会把永久访问权限交给仅持有临时授权的人。"
     },
     "session_expired": "您的会话已失效。请重新登录以继续。"
   },
@@ -394,7 +395,9 @@
       "steward_tier_not_adopted": "本社区未声明监管层级，因此既不存在可以沉默逾越的期限，也不存在升级票池。在此提交的表决票只会被存储，永远不会被读取。",
       "store_unavailable": "无法连接到基底。",
       "target_action_unknown": "被提出异议的动作并非本节点持有的行，因此该异议将无法计数，其窗口也无法结算。",
-      "unverifiable_signature": "该行的签名未能通过本节点所登记的签署者密钥的验证。"
+      "unverifiable_signature": "该行的签名未能通过本节点所登记的签署者密钥的验证。",
+      "stamped_envelope_mismatch": "回传的 `stamped_envelope` 并未描述本请求中的驳回操作。请针对这些字段重新执行试运行，并让联署人对试运行返回的内容进行签名。",
+      "stamped_envelope_required": "提交了联署签名，却缺少其签署所依据的 `stamped_envelope`。请执行试运行，让联署人对其返回的 `envelope` 进行签名，并将该 envelope 连同他们的 scrub 签名一并回传——否则他们的签名所覆盖的字节并不包含在本次提交中，而法定人数仍会悄然将其计为一票。"
     },
     "standing": {
       "action_unknown": "本节点不持有这样的动作。异议要指向某一行，而此处没有可供指向的行。",
@@ -2680,7 +2683,13 @@
     "wallet_trust_degraded": "硬件信任降级",
     "wallet_warning": "警告",
     "login_setup_complete_relogin": "设置已完成。您的节点已重新启动，请使用完成设置时使用的相同凭据重新登录。",
-    "accord_new_confer_duty": "向联邦 ID 授予一项职责"
+    "accord_new_confer_duty": "向联邦 ID 授予一项职责",
+    "keyset_import_cancel": "选择其他文件夹",
+    "keyset_import_confirm": "将此设备加入",
+    "keyset_inspect_checking": "正在检查此文件夹…",
+    "keyset_inspect_unavailable": "无法检查此文件夹 — 该节点没有响应。这并不代表你的身份是否在其中；你仍然可以尝试导入。",
+    "accord_remint_invalid_desc": "其他持有者的签名无法完成此仪式——问题出在捆绑包本身。修复后请重新发起仪式。",
+    "accord_remint_invalid_title": "无法完成此种子"
   },
   "moderation": {
     "ladder": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "这不是本网格所识别的职责。授予它在此处会显示为一种权限，但在每一道闸门都会被拒绝。",
       "pkcs11_required": "授予职责需要 `pkcs11` 功能 —— 持有者须使用其 YubiKey 并配合 USB 封装的 ML-DSA 密钥半份进行签名，与规范的 co-scrub 联署仪式完全一致。"
     }
+  },
+  "trust_root": {
+    "no_root": "哪个根？路径中必须指明要取消信任的 root_key_id"
   }
 }

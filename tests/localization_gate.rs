@@ -319,19 +319,76 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     );
 }
 
-/// The Python guard must pass on the committed tree.
+/// The Python guard must pass on the committed tree — **at the strictness CI
+/// uses**.
+///
+/// # Why `--strict`, and why that word is load-bearing
+///
+/// `.github/workflows/localization.yml` runs the guard with `--strict`, which
+/// fails on WARNINGS as well as errors. This test ran it bare, so a tree with
+/// translation drift — 28 languages missing a key someone added after the last
+/// fan-out — was GREEN locally and RED in CI. That happened, on this branch.
+///
+/// A local gate weaker than the CI gate it mirrors is worse than no local gate:
+/// it does not merely fail to catch the problem, it actively reports that there
+/// isn't one. The developer pushes on its word. Two invocations of one script,
+/// disagreeing about what counts as a failure, is the same two-authors shape this
+/// repo keeps paying for — one plane over, in the tooling rather than the data.
 #[test]
 fn localization_bundles_pass_the_guard() {
     let out = Command::new("python3")
         .arg(repo_root().join(GUARD))
+        // The SAME flag CI passes. If CI's invocation changes, this must follow it
+        // — a green `cargo test` has to mean a green pipeline or it means nothing.
+        .arg("--strict")
         .current_dir(repo_root())
         .output()
         .expect("python3 not available to run the localization guard");
     assert!(
         out.status.success(),
-        "{GUARD} failed on the committed tree:\n{}",
+        "{GUARD} --strict failed on the committed tree:\n{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+/// **The local gate must invoke the guard exactly as CI does.**
+///
+/// The drift above was invisible because nothing compared the two call sites.
+/// This reads the workflow and asserts every flag CI passes to the guard is
+/// passed here too — so the next flag CI gains cannot silently make this test
+/// the weaker of the pair.
+#[test]
+fn the_local_gate_matches_ci_strictness() {
+    let wf = std::fs::read_to_string(repo_root().join(".github/workflows/localization.yml"))
+        .expect("read the localization workflow")
+        .replace("\r\n", "\n");
+    let this = std::fs::read_to_string(repo_root().join("tests/localization_gate.rs"))
+        .expect("read this file")
+        .replace("\r\n", "\n");
+
+    // Every flag CI hands the guard, other than the self-test rung this file
+    // exercises separately.
+    let mut ci_flags: Vec<&str> = wf
+        .lines()
+        .filter(|l| l.contains(GUARD))
+        .flat_map(|l| l.split_whitespace())
+        .filter(|w| w.starts_with("--") && *w != "--self-test")
+        .collect();
+    ci_flags.sort_unstable();
+    ci_flags.dedup();
+    assert!(
+        !ci_flags.is_empty(),
+        "found no guard flags in the workflow — this check is now vacuous, which is worse than \
+         absent. Did the workflow stop invoking {GUARD} by that path?"
+    );
+    for f in ci_flags {
+        assert!(
+            this.contains(&format!("\"{f}\"")),
+            "CI runs the localization guard with `{f}` and this test does not. A local gate that \
+             is weaker than its CI twin reports success on a tree CI will reject — the developer \
+             pushes on its word. Add `.arg(\"{f}\")` above."
+        );
+    }
 }
 
 /// **The gate on the gate.** `--self-test` breaks a synthetic bundle 23 ways —

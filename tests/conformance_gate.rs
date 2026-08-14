@@ -78,40 +78,21 @@ async fn node_key_id(engine: &Engine) -> String {
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key via admission gate");
 }
 
 fn owner_user_signer() -> LocalSigner {
@@ -186,10 +167,31 @@ async fn bind_owner(engine: &Engine) {
         .expect("emit owner-binding delegates_to(user -> node, infra:*)");
 }
 
+/// This node's own `SignedKeyRecord`, as a peer receives it on the wire.
+///
+/// The registration envelope BINDS ITS SUBJECT (CIRISPersist#659) through
+/// persist's own producing half — the same primitive `attest::register_key`
+/// uses. It cannot go through that door itself: the door registers a key HERE,
+/// and what this needs is the serialized record to hand a peer. The pubkeys are
+/// read off a throwaway probe signature for the reason the door states — they
+/// must be the keys that actually sign, not keys re-derived from a seed that
+/// might have diverged.
 async fn self_key_record_json(engine: &Engine) -> String {
     let now = chrono::Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
+    let probe = engine
+        .sign_hybrid(b"ciris:registration:pubkey-probe:v1")
+        .await
+        .expect("self probe sign");
+    let mut envelope = serde_json::json!({ "key_id": key_id });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut envelope,
+        &key_id,
+        identity_type::STEWARD,
+        &BASE64.encode(&probe.classical.public_key),
+        Some(&BASE64.encode(&probe.pqc.public_key)),
+    )
+    .expect("bind this node's subject into its registration envelope");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
     let sig = engine
         .sign_hybrid(&canonical)
@@ -221,12 +223,27 @@ async fn self_key_record_json(engine: &Engine) -> String {
 }
 
 /// A synthetic peer's self-signed `SignedKeyRecord` (hybrid proof-of-possession).
+///
+/// Its registration envelope binds its subject for the same reason this node's
+/// does: the peering route hands it to `register_federation_key`, and persist
+/// v31 refuses an envelope that names no subject — such an envelope stands for
+/// any record it is pasted onto (CIRISPersist#659).
 async fn peer_signed_key_record() -> SignedKeyRecord {
     let ed = SigningKey::from_bytes(&[0xB0; 32]);
     let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{PEER_KEY_ID}-pqc"))
         .expect("peer ML-DSA-65 seed");
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    let ed_pub = BASE64.encode(ed.verifying_key().to_bytes());
+    let pqc_pub = BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"));
+    let mut envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut envelope,
+        PEER_KEY_ID,
+        identity_type::WITNESS,
+        &ed_pub,
+        Some(&pqc_pub),
+    )
+    .expect("bind the peer's subject into its registration envelope");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer registration");
     let original_content_hash = hex::encode(Sha256::digest(&canonical));
     let ed_sig = ed.sign(&canonical).to_bytes();
@@ -236,8 +253,8 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
     let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign peer reg");
     let record = KeyRecord {
         key_id: PEER_KEY_ID.to_string(),
-        pubkey_ed25519_base64: BASE64.encode(ed.verifying_key().to_bytes()),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"))),
+        pubkey_ed25519_base64: ed_pub,
+        pubkey_ml_dsa_65_base64: Some(pqc_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::WITNESS.into(),
         identity_ref: PEER_KEY_ID.to_string(),

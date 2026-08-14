@@ -169,44 +169,40 @@ async fn put_signed(
     envelope: serde_json::Value,
     id: &str,
 ) {
-    use ciris_persist::federation::types::{attestation_tier, cohort_scope, Attestation};
-    use ciris_persist::federation::SignedAttestation;
     use ciris_verify_core::self_at_login::SelfSigner;
 
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize envelope");
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, a
+    // trust-root leg carried no signed `asserted_at` and no typed-column mirror,
+    // so persist v31 refused every one of them (CIRISPersist#598/#643) — and this
+    // helper seeds the legs for most of the QA suite, so one hand-rolled row here
+    // was many red tests over there.
+    //
+    // The symbolic `id` is preserved: these legs are looked up by name, the same
+    // reason the ceremony rows keep theirs (see `Emit::with_row_id`).
+    let stamped = ciris_server::attest::Emit::stamp(
+        attester.key_id(),
+        ciris_server::attest::Spec::new(
+            ty,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        // ABOUT the attested key, with NO subject: a trust-root leg confers, and
+        // `subject_key_ids` would hand its recipient authority to revoke it.
+        .attested_to(attested_key_id)
+        .weighing(Some(1.0)),
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp trust-root leg {id} ({ty}): {e}"));
+
     let (ed_b64, pqc_b64) = attester
-        .sign_bound(&canonical)
+        .sign_bound(stamped.canonical())
         .await
         .expect("bound-hybrid sign");
-    let now = Utc::now();
-    let row = Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: attester.key_id().to_string(),
-        attested_key_id: attested_key_id.to_string(),
-        attestation_type: ty.to_string(),
-        weight: Some(1.0),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: ed_b64,
-        scrub_signature_pqc: Some(pqc_b64),
-        scrub_key_id: attester.key_id().to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    if let Err(e) = engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation: row })
-        .await
-    {
+    let row = stamped
+        .assemble_from_b64(&ed_b64, &pqc_b64)
+        .unwrap_or_else(|e| panic!("assemble trust-root leg {id} ({ty}): {e}"));
+
+    if let Err(e) = ciris_server::attest::put(engine, row).await {
         // A duplicate id is the idempotent re-run; anything else is a real
         // refusal and must not be swallowed into a silently-absent leg.
         let msg = e.to_string();
@@ -392,42 +388,60 @@ pub async fn revoke(
     effective_at: DateTime<Utc>,
     revoked_after: Option<DateTime<Utc>>,
 ) {
+    use ciris_persist::federation::admission::{
+        bind_revocation_into_envelope, truncate_to_substrate_resolution as trunc,
+    };
+
     if revoking.key_id() != revoked_key_id {
         authorize_slash(engine, revoking.key_id()).await;
     }
-    let mut envelope = serde_json::json!({
-        "revoked_key_id": revoked_key_id,
-        "revoking_key_id": revoking.key_id(),
-        "revoked_at": effective_at.to_rfc3339(),
-        "effective_at": effective_at.to_rfc3339(),
-    });
-    if let Some(b) = revoked_after {
-        envelope["revoked_after"] = serde_json::Value::String(b.to_rfc3339());
-    }
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize revocation envelope");
-    let sig = revoking
-        .sign_hybrid(&canonical)
-        .await
-        .expect("hybrid-sign the revocation");
-    let now = Utc::now();
-    let row = Revocation {
+    // The de-conferral plane's half of #659: the signature used to reach only
+    // `revoked_after`, so one validly-signed envelope could be re-submitted
+    // naming ANY other key. persist v31 binds all seven columns into the signed
+    // envelope, and `bind_revocation_into_envelope` is the producer half of the
+    // very projection the gate walks — writing those seven by hand here would be
+    // the second spelling that binding exists to retire.
+    //
+    // The bound is the one member it does NOT write (that stays #570's own gate),
+    // so it is set here — truncated, because a sub-microsecond bound is refused
+    // outright rather than rounded (postgres TIMESTAMPTZ, CIRISPersist#659).
+    let revoked_after = revoked_after.map(trunc);
+    let mut row = Revocation {
         revocation_id: format!("rev-{revoked_key_id}"),
         revoked_key_id: revoked_key_id.to_string(),
         revoking_key_id: revoking.key_id().to_string(),
         reason: None,
         revoked_at: effective_at,
         effective_at,
-        revocation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        revocation_envelope: match revoked_after {
+            Some(b) => serde_json::json!({ "revoked_after": b.to_rfc3339() }),
+            None => serde_json::json!({}),
+        },
+        original_content_hash: String::new(),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
         scrub_key_id: revoking.key_id().to_string(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
+        scrub_timestamp: Utc::now(),
+        pqc_completed_at: Some(Utc::now()),
         observed_region: region::US.to_string(),
         revoked_after,
         persist_row_hash: String::new(),
     };
+    // Binds — and truncates — BEFORE the bytes exist, so the signature covers the
+    // instants the columns actually carry.
+    bind_revocation_into_envelope(&mut row).expect("bind the revocation into its envelope");
+
+    let canonical =
+        ceg_produce_canonicalize(&row.revocation_envelope).expect("canonicalize revocation");
+    let sig = revoking
+        .sign_hybrid(&canonical)
+        .await
+        .expect("hybrid-sign the revocation");
+    row.original_content_hash = hex::encode(Sha256::digest(&canonical));
+    row.scrub_signature_classical = BASE64.encode(&sig.classical.signature);
+    row.scrub_signature_pqc = Some(BASE64.encode(&sig.pqc.signature));
+    row.pqc_completed_at = Some(row.scrub_timestamp);
+
     engine
         .federation_directory()
         .put_revocation(SignedRevocation { revocation: row })

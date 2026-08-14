@@ -37,8 +37,7 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
+    attestation_tier, attestation_type, cohort_scope, identity_type, SignedAttestation,
 };
 use ciris_persist::prelude::{Engine, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -101,7 +100,24 @@ impl NodeB {
         };
 
         let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": NODE_B_KEY_ID });
+        let ed_pub = BASE64.encode(self.ed.verifying_key().to_bytes());
+        let pqc_pub = BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk"));
+        // B's registration envelope must BIND ITS SUBJECT — key_id, identity_type
+        // and both pubkeys. A `{"key_id": …}` envelope names one of the four and
+        // vouches for none of the rest, so the signature over it stands for any
+        // record it is pasted onto, and persist v31 refuses it (CIRISPersist#659).
+        // Bound by persist's OWN binder — the one `attest::register_key` calls —
+        // because this record is a WIRE artifact A receives from B, not something
+        // this node mints.
+        let mut envelope = serde_json::json!({ "key_id": NODE_B_KEY_ID });
+        ciris_persist::federation::admission::bind_subject_into_envelope(
+            &mut envelope,
+            NODE_B_KEY_ID,
+            identity_type::WITNESS,
+            &ed_pub,
+            Some(&pqc_pub),
+        )
+        .expect("bind the subject into B's registration envelope (#659)");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize B registration");
         let original_content_hash = hex::encode(Sha256::digest(&canonical));
 
@@ -114,10 +130,8 @@ impl NodeB {
 
         let record = KeyRecord {
             key_id: NODE_B_KEY_ID.to_string(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
+            pubkey_ed25519_base64: ed_pub,
+            pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             // B (ciris-status) speaks ABOUT services as an external witness.
             identity_type: identity_type::WITNESS.into(),
@@ -153,8 +167,7 @@ impl NodeB {
     /// SAME shape ciris-status (`src/ceg.rs::LivenessEnvelope`) emits and what the
     /// inbound replication route applies into A's corpus via `put_attestation`.
     async fn liveness_for(&self, subject_key_id: &str) -> SignedAttestation {
-        let now = chrono::Utc::now();
-        let valid_until = now + chrono::Duration::minutes(5);
+        let valid_until = chrono::Utc::now() + chrono::Duration::minutes(5);
         let envelope = serde_json::json!({
             "dimension": "health:liveness:v1",
             "score": 1.0,
@@ -164,47 +177,38 @@ impl NodeB {
             "epistemic_mode": "direct",
             "witness_relation": "external",
             "stake": "reputational",
-            "attested_key_id": subject_key_id,
         });
-        // persist v9.0.0's federation-tier ingest gate (CC 5.3.2.4.3.1) re-derives
-        // the canonical bytes via `ceg_produce_canonicalize` and Strict-hybrid-
-        // verifies: Ed25519 over canonical, ML-DSA-65 over the BOUND form
-        // (canonical || ed_sig). Sign exactly that shape (matches signed_key_record
-        // above / production's LocalSigner::sign_hybrid) — the legacy
-        // `canonicalize_envelope_for_signing` (PythonJsonDumps) + unbound ML-DSA
-        // is what the gate now rejects (original_content_hash mismatch).
-        let canonical =
-            ceg_produce_canonicalize(&envelope).expect("canonicalize liveness envelope");
-        let original_content_hash = hex::encode(Sha256::digest(&canonical));
-        let ed_sig = self.ed.sign(&canonical).to_bytes();
+        // Stamped through the ONE door (CIRISServer#402) so the signed envelope
+        // carries the instant and the seven-column mirror the columns are then read
+        // back out of — a row whose columns were a second, independent authorship
+        // is refused at every v31 door (CIRISPersist#598/#643). B holds its own
+        // keys rather than a `LocalSigner`, so it signs the door's canonical bytes
+        // itself: Ed25519 over canonical, ML-DSA-65 over the BOUND form
+        // (canonical || ed_sig) — exactly what the federation-tier ingest gate
+        // (CC 5.3.2.4.3.1) re-derives and Strict-hybrid-verifies.
+        let stamped = ciris_server::attest::Emit::stamp(
+            NODE_B_KEY_ID,
+            ciris_server::attest::Spec::new(
+                attestation_type::SCORES,
+                cohort_scope::FEDERATION,
+                envelope,
+            )
+            .about(subject_key_id)
+            .weighing(Some(1.0))
+            .expiring(Some(valid_until)),
+        )
+        .expect("stamp B's health:liveness row");
+
+        let canonical = stamped.canonical();
+        let ed_sig = self.ed.sign(canonical).to_bytes();
         let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
-        bound.extend_from_slice(&canonical);
+        bound.extend_from_slice(canonical);
         bound.extend_from_slice(&ed_sig);
         let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign liveness");
 
-        let attestation = Attestation {
-            attestation_id: "b-liveness-0001".to_string(),
-            attesting_key_id: NODE_B_KEY_ID.to_string(),
-            attested_key_id: subject_key_id.to_string(),
-            attestation_type: attestation_type::SCORES.to_string(),
-            weight: Some(1.0),
-            asserted_at: now,
-            expires_at: Some(valid_until),
-            attestation_envelope: envelope,
-            original_content_hash,
-            scrub_signature_classical: BASE64.encode(ed_sig),
-            scrub_signature_pqc: Some(BASE64.encode(pqc_sig)),
-            scrub_key_id: NODE_B_KEY_ID.to_string(),
-            additional_scrubs: Vec::new(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            subject_key_ids: vec![subject_key_id.to_string()],
-            withdraws_admission_rule: None,
-            cohort_scope: "federation".to_string(),
-            tier: attestation_tier::FEDERATION.to_string(),
-            promoted_at: None,
-        };
+        let attestation = stamped
+            .assemble_from_b64(&BASE64.encode(ed_sig), &BASE64.encode(pqc_sig))
+            .expect("assemble B's health:liveness row");
         SignedAttestation { attestation }
     }
 }
@@ -225,43 +229,24 @@ async fn node_a_key_id(engine: &Engine) -> String {
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     // A self-signed steward row; pubkeys from the node's own hybrid signer.
     // CEG produce-canonical (V2/JCS) so it matches verify_key_registration.
     // Under the DERIVED key_id (the consent emit attests under emit_attestation_self).
     let key_id = node_a_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node A steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node A steward key via admission gate");
 }
 
 /// The full Node-A directed-consent peering spine: register B's witness key →

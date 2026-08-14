@@ -1128,11 +1128,11 @@ async fn the_federation_identity_zero_names_how_it_was_arrived_at() {
 
     // ── (2) A node with NO peers at all: a TRUE measured ZERO ───────────────
     //
-    // `with_signer_no_genesis_seed` is persist's test-only seam (#387): an
+    // `with_signer_pre_genesis` is persist's test-only seam (#387): an
     // engine with the baked family deliberately skipped, so this zero is a real
     // measurement of an empty directory rather than an artefact.
     let empty = Arc::new(
-        Engine::with_signer_no_genesis_seed(
+        Engine::with_signer_pre_genesis(
             Arc::new(LocalSigner::from_parts(
                 SigningKey::from_bytes(&[0xE4; 32]),
                 "node-no-peers".to_string(),
@@ -1142,7 +1142,7 @@ async fn the_federation_identity_zero_names_how_it_was_arrived_at() {
             "sqlite::memory:",
         )
         .await
-        .expect("Engine::with_signer_no_genesis_seed"),
+        .expect("Engine::with_signer_pre_genesis"),
     );
     let edge = edge_over(&empty, "edge-no-peers", 0x42).await;
     let empty_data = federation_identity(Arc::clone(&empty), edge).await;

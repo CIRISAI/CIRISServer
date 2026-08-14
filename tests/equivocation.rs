@@ -227,8 +227,17 @@ async fn hard_cases(engine: &Engine) -> Vec<ciris_persist::federation::hard_case
 const T0: &str = "2026-08-01T17:00:00Z";
 const T1: &str = "2026-08-01T18:00:00Z";
 
+/// `h` hours from an instant fixed once per process — NOT a fresh clock read
+/// per call.
+///
+/// `expires_at` rides inside the SIGNED envelope now (the emit door stamps it,
+/// CIRISPersist#643), so two calls microseconds apart minted two claims that
+/// genuinely differ in a field the detector then reports as the disagreement.
+/// Every pair here is built to differ in exactly one field, and this is what
+/// makes that true of the bytes rather than only of the intent.
 fn hour_from_now(h: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now() + chrono::Duration::hours(h)
+    static BASE: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    *BASE.get_or_init(chrono::Utc::now) + chrono::Duration::hours(h)
 }
 
 /// **The end-to-end property.** Two claims from ONE peer key about ONE subject
@@ -393,6 +402,19 @@ async fn a_later_revision_records_nothing() {
     assert!(hard_cases(&engine).await.is_empty());
 }
 
+/// **The baked genesis rows are a floor, not noise** (persist v31.1.0).
+///
+/// Since the ceremony root was baked, every `Engine` installs three live
+/// federation-tier attestations at construction — `genesis-charter`,
+/// `genesis-grant:<canonical>` and `genesis-lifecycle`, all attested by A1. A
+/// detector that reads live federation rows therefore sees THREE before this
+/// test seeds anything, and `rows_scanned == 0` stopped being expressible.
+///
+/// The counts below subtract that floor rather than hard-coding 3, so a future
+/// bundle with a different row count does not silently re-break these tests —
+/// and so a reader is not left wondering where the number came from.
+const GENESIS_FLOOR: usize = 3;
+
 /// **The read narrows on validity, in the query.** An expired pair is not a
 /// live contradiction; the `valid_at` pushdown is what makes that true, and it
 /// is the only real bound on this scan.
@@ -422,9 +444,11 @@ async fn an_expired_pair_is_outside_the_live_read() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, 0,
-        "expired rows reached the comparison — the read is not bounded by validity, so \
-         this pass scans the whole corpus forever and reports dead contradictions as live"
+        report.rows_scanned, GENESIS_FLOOR,
+        "expired rows reached the comparison — the read is not bounded by validity, so this \
+         pass scans the whole corpus forever and reports dead contradictions as live. Only the \
+         baked genesis rows should be in scope here; anything above that floor is the seeded \
+         expired pair leaking in."
     );
     assert!(report.contradictions.is_empty());
 }
@@ -464,9 +488,11 @@ async fn an_unpublished_local_draft_is_not_evidence() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, 0,
+        report.rows_scanned, GENESIS_FLOOR,
         "an unpromoted local-tier draft reached the comparison — a row the attester never \
-         published cannot be evidence that it told two peers different things"
+         published cannot be evidence that it told two peers different things. Only the baked \
+         genesis rows should be in scope here; anything above that floor is a local draft that \
+         escaped the tier push-down."
     );
     assert!(hard_cases(&engine).await.is_empty());
 }
@@ -519,6 +545,30 @@ async fn the_nodes_own_key_is_not_exempt() {
 /// keeps the detector from being a machine for manufacturing accusations. Two
 /// rows carrying the SAME signed statement (a replicated duplicate) are one
 /// claim recorded twice.
+///
+/// FAILING ON persist v31.0.0, and the cause is in `src/equivocation.rs`, not in
+/// this fixture. Measured on the pass this test runs:
+/// `same_statement=0 contradictions=1 hard_cases=1 differing_fields=["row"]`.
+///
+/// `classify_pair`'s first arm is `a.original_content_hash == b.original_content_hash`
+/// — "identical signed bytes are the same statement". CIRISPersist#643 stamps a
+/// seven-column `row` mirror INTO the signed envelope, and that mirror carries
+/// the row's own `attestation_id`. Two independently-minted rows therefore can
+/// never share a content hash again, so the `SameStatement` arm is unreachable,
+/// every duplicate falls through to the instant test, and a pair at one instant
+/// is classified `Contradiction`. The detector then writes a CC 6.1.1 N4
+/// `hard_case` accusing an honest producer of equivocating with itself — the
+/// exact outcome this test's own doc says it exists to prevent.
+///
+/// `a_peers_two_claims_at_one_instant_are_detected_and_recorded` is the same
+/// defect's quieter half: `differing_fields` names `row` on every pair, because
+/// the mirror differs by construction.
+///
+/// The fix is one place: compare the SEMANTIC envelope, with the bound mirror
+/// excluded — `classify_pair` and `differing_fields` both reading through a
+/// single "strip what the emit door stamped" projection, so the detector cannot
+/// come to disagree with itself about what a statement is. Left RED because a
+/// detector that manufactures accusations must not be silently accepted.
 #[tokio::test]
 async fn a_duplicated_statement_records_nothing() {
     let (engine, node_key_id) = fixture().await;

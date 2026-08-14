@@ -269,8 +269,39 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // traces yet. `install_baked_trust_root` says so once, loudly, at boot rather
     // than leaving it to be inferred from withheld frames later.
     if let Err(e) = crate::mesh_genesis::install_baked_trust_root(&engine).await {
-        tracing::error!(error = %e, "stage 1 (baked trust root) FAILED — this node has no \
-                                     trust root and will withhold every trace:* row");
+        tracing::debug!(error = %e, "baked trust root did not install");
+    }
+    // WHAT STATE IS THIS NODE ACTUALLY IN? Ask persist, do not infer it from
+    // whether the install returned Err (CIRISServer#400, persist v31.0.0).
+    //
+    // Before this, a failed install logged `stage 1 FAILED` — which reads as a
+    // fault and is wrong twice over. A node that has not had its ceremony yet is
+    // not broken, it is PRE-GENESIS; and an install can partially succeed, which
+    // is worse than either outcome the old message could express. The v31 seed
+    // installs the KEY plane cleanly and its DELEGATION rows are refused (#598:
+    // the charter carries no signed `asserted_at`), so the node looked ROOTED —
+    // family present, `entrenched: true` — while its conferral rows could never
+    // install. persist added a fourth posture leg precisely to catch that.
+    //
+    // Re-derived per call, never cached: the pre-genesis → entrenched transition
+    // happens WHILE THE PROCESS RUNS, because the operator runs the ceremony
+    // against a live node and it becomes rooted without a restart.
+    match engine.genesis_posture().await {
+        p if p.entrenched() => {
+            tracing::info!("trust root entrenched — this node is rooted and serves normally");
+        }
+        p => {
+            let detail = p
+                .banner()
+                .unwrap_or_else(|| "posture unavailable".to_string());
+            tracing::warn!(
+                posture = ?p,
+                "NO TRUST ROOT CONFIGURED — import one or create one (run a genesis ceremony). \
+                 The node runs and reports; every root-requiring gate refuses and trace:* rows \
+                 are withheld until it is rooted. Detail: {detail}"
+            );
+            crate::mesh_genesis::announce_no_trust_root(&detail);
+        }
     }
 
     // CIRISPersist#543 AV-77 (v22.0.0) — ARM the in-band peer de-admission gate.
@@ -863,6 +894,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // (the same conventional path announce_ownership_unclaimed
                         // writes). Only meaningful when a PIN was minted.
                         claim_pin.as_ref().map(|_| cfg.claim_pin_file()),
+                    ))
+                    // TRUST ROOT: import / list / delete (CIRISServer#400).
+                    // CREATE already existed (the genesis ceremony); these are the
+                    // other three verbs. Loopback-gated inside the router — a
+                    // node's trust root is the operator's decision, made at the
+                    // operator's own machine.
+                    .merge(crate::trust_root_api::router(
+                        Arc::clone(&engine),
+                        node_code.key_id.clone(),
                     ))
                     // claim REMOTE ownership (substrate-native, node-to-node):
                     // POST /v1/setup/claim-remote — the LOCAL node decodes the

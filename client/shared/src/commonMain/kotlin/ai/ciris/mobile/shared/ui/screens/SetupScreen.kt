@@ -364,7 +364,20 @@ fun SetupScreen(
                     SetupStep.YOU -> YouStep(viewModel, state)
                     SetupStep.JOIN_FEDERATION -> JoinFederationStep(viewModel, state, apiClient)
                     SetupStep.AI -> AiStep(viewModel, state, apiClient)
-                    SetupStep.COMPLETE -> CompleteStep(onSetupComplete, state.ownershipClaim)
+                    SetupStep.COMPLETE ->
+                        CompleteStep(
+                            onSetupComplete,
+                            state.ownershipClaim,
+                            // The SAME providers the first attempt used — a retry
+                            // that read the PIN differently would be a second way
+                            // to claim, not a retry of the first.
+                            onRetryClaim = {
+                                viewModel.claimLocalNodeOwnership(
+                                    claimPinProvider = claimPinProvider,
+                                    nodeCodeProvider = nodeCodeProvider,
+                                )
+                            },
+                        )
                 }
             }
 
@@ -2109,12 +2122,93 @@ private fun FederationIdentitySection(
                         }
                         DirectoryPickerDialog(
                             show = showImportPicker,
+                            purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
                             onDirectoryPicked = { dir ->
                                 showImportPicker = false
-                                if (dir.isNotBlank()) viewModel.importPortableFromUsb(dir)
+                                // LOOK first (CIRISServer#404). Importing on pick
+                                // meant the operator learned whether the folder
+                                // held their identity by watching the import
+                                // succeed or fail — and this import REPLACES this
+                                // device's identity.
+                                if (dir.isNotBlank()) viewModel.inspectKeysetDir(dir)
                             },
                             onDismiss = { showImportPicker = false },
                         )
+
+                        // ── The verdict on the picked folder ──────────────────
+                        val picked = fed.inspectDir
+                        if (picked != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = picked,
+                                    fontSize = 11.sp,
+                                    color = SetupColors.TextSecondary,
+                                    modifier = Modifier.testable("txt_keyset_inspect_dir"),
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                when {
+                                    fed.inspecting ->
+                                        Text(
+                                            text = localizedString("mobile.keyset_inspect_checking"),
+                                            fontSize = 12.sp,
+                                            color = SetupColors.TextSecondary,
+                                            modifier = Modifier.testable("txt_keyset_inspecting"),
+                                        )
+                                    // "Could not ask" is NOT "nothing there".
+                                    // Saying the second when the first is true
+                                    // tells the operator their good USB is bad.
+                                    fed.inspectUnavailable ->
+                                        Text(
+                                            text =
+                                                localizedString(
+                                                    "mobile.keyset_inspect_unavailable"
+                                                ),
+                                            fontSize = 12.sp,
+                                            color = SetupColors.ErrorText,
+                                            modifier =
+                                                Modifier.testable("txt_keyset_inspect_unavailable"),
+                                        )
+                                    else ->
+                                        fed.inspection?.let { v ->
+                                            Text(
+                                                text = (if (v.importable) "✓  " else "✕  ") + v.detail,
+                                                fontSize = 12.sp,
+                                                color =
+                                                    if (v.importable) SetupColors.SuccessText
+                                                    else SetupColors.ErrorText,
+                                                modifier =
+                                                    Modifier.testable("txt_keyset_inspect_detail"),
+                                            )
+                                        }
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row {
+                                    TextButton(
+                                        // Enabled ONLY on a folder the importer
+                                        // itself says it would accept — the button
+                                        // and the outcome come from one answer.
+                                        enabled =
+                                            !fed.inProgress &&
+                                                !fed.inspecting &&
+                                                (fed.inspection?.importable == true ||
+                                                    fed.inspectUnavailable),
+                                        onClick = { viewModel.importPortableFromUsb(picked) },
+                                        modifier =
+                                            Modifier.testableClickable("btn_keyset_import_confirm") {
+                                                viewModel.importPortableFromUsb(picked)
+                                            },
+                                    ) { Text(localizedString("mobile.keyset_import_confirm")) }
+                                    TextButton(
+                                        onClick = { viewModel.clearKeysetInspection() },
+                                        modifier =
+                                            Modifier.testableClickable("btn_keyset_import_cancel") {
+                                                viewModel.clearKeysetInspection()
+                                            },
+                                    ) { Text(localizedString("mobile.keyset_import_cancel")) }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2698,6 +2792,8 @@ private fun CompleteStep(
     onSetupComplete: () -> Unit,
     ownershipClaim: ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState =
         ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState(),
+    /** Retry the self-claim — offered only for a RECOVERABLE failure. */
+    onRetryClaim: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Hold here until the LOCAL-node ownership self-claim settles (success or
@@ -2712,6 +2808,11 @@ private fun CompleteStep(
     Column(
         modifier = modifier
             .fillMaxSize()
+            // SCROLLS. Without this the column clips whatever does not fit, so
+            // enlarging the error box changed nothing — the box grew and the
+            // window cut it at the same place. A failure surface that cannot be
+            // scrolled to is a failure surface that does not exist.
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -2768,11 +2869,24 @@ private fun CompleteStep(
                 )
             }
             ownershipClaim.error != null -> {
-                Text(
-                    text = "Couldn't claim this node yet: ${ownershipClaim.error}",
-                    color = SetupColors.TextSecondary,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center,
+                // A refused claim is UNRECOVERABLE by retrying: the node said no,
+                // and pressing on repeats the same request. It used to render as
+                // 13sp secondary text under a still-spinning progress ring — the
+                // same weight as a hint — so a failed setup looked like a slow
+                // one (CIRISServer#401).
+                ai.ciris.mobile.shared.ui.components.FailurePanel(
+                    title = "This node could not be claimed",
+                    detail = ownershipClaim.error ?: "",
+                    // The kind comes from where the failure HAPPENED, not from
+                    // grepping its message here.
+                    kind =
+                        if (ownershipClaim.errorRecoverable) {
+                            ai.ciris.mobile.shared.ui.components.FailureKind.Recoverable
+                        } else {
+                            ai.ciris.mobile.shared.ui.components.FailureKind.Unrecoverable
+                        },
+                    context = "first-run claim",
+                    onRetry = if (ownershipClaim.errorRecoverable) onRetryClaim else null,
                     modifier = Modifier.testable("setup_ownership_error"),
                 )
             }
@@ -2780,7 +2894,11 @@ private fun CompleteStep(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        CircularProgressIndicator(color = SetupColors.Primary)
+        // The spinner belongs to work still in flight. Leaving it turning under a
+        // failure is what made a dead setup read as a slow one.
+        if (ownershipClaim.error == null) {
+            CircularProgressIndicator(color = SetupColors.Primary)
+        }
     }
 }
 

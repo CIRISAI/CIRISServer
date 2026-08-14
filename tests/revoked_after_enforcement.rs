@@ -15,10 +15,15 @@
 //! a revoked key passes the first half and silently reimplements the
 //! all-or-nothing behaviour the bound exists to replace.
 //!
-//! The fixtures also pin the axis: every seeded row's ROW COLUMN `asserted_at`
-//! is `Utc::now()` (persist stamps it at write) while its SIGNED envelope
-//! `asserted_at` is backdated. A check keyed on the column would find nothing
-//! here and look healthy doing it — CIRISServer#350's lesson, re-armed.
+//! The fixtures USED to pin the axis by holding the two apart: the ROW COLUMN
+//! `asserted_at` was `Utc::now()` while the SIGNED envelope's was backdated, so a
+//! check keyed on the column found nothing here and looked healthy doing it
+//! (CIRISServer#350). persist v31 retired that shape at the substrate — #598
+//! binds the column TO the signed instant at every door, and a row where they
+//! diverge is now refused rather than stored — so the two axes cannot be seeded
+//! apart any more, here or by an attacker. The gates below therefore measure
+//! enforcement (which reads consult the bound at all), and the divergence they
+//! were also guarding against is now the substrate's own invariant.
 
 use std::sync::Arc;
 
@@ -31,8 +36,7 @@ use sha2::{Digest, Sha256};
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    KeyRecord, SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::federation::KeyStatementStanding;
 use ciris_persist::prelude::{Engine, LocalSigner};
@@ -115,36 +119,20 @@ async fn register_self(engine: &Engine) -> String {
         .local_derived_key_id()
         .await
         .expect("derive node federation key_id");
-    let now = Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::NODE.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::NODE,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node key");
     key_id
 }
 
@@ -199,9 +187,9 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
     signer
 }
 
-/// Seed one federation-tier `scores` row signed by `attester`, carrying a CHOSEN
-/// signed instant in its envelope. The row column stays `Utc::now()` — the two
-/// axes, held apart on purpose.
+/// Seed one federation-tier `scores` row signed by `attester` at the CHOSEN
+/// instant `signed_at` — which is now the envelope's signed `asserted_at` and the
+/// row column alike (see this module's header).
 #[allow(clippy::too_many_arguments)]
 async fn seed_score(
     engine: &Engine,
@@ -211,6 +199,10 @@ async fn seed_score(
     score: f64,
     confidence: f64,
 ) -> String {
+    // No `asserted_at` here: the stamp writes it from `signed_at`, TRUNCATED to
+    // the substrate's microsecond floor. Writing it by hand put a nanosecond
+    // instant into the signed bytes, which persist v31 refuses outright rather
+    // than rounding (CIRISPersist#598).
     let envelope = serde_json::json!({
         (paths::DIMENSION): DIM,
         "attesting_key_id": attester.key_id(),
@@ -218,45 +210,30 @@ async fn seed_score(
         "score": score,
         "confidence": confidence,
         "witness_relation": "external",
-        "asserted_at": signed_at.to_rfc3339(),
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize score envelope");
-    let sig = attester
-        .sign_hybrid(&canonical)
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        cohort_scope::FEDERATION,
+        envelope,
+    );
+    spec.attested_key_id = Some(subject.to_string());
+    spec.subject_key_ids = Vec::new();
+    let spec = spec.weighing(Some(score));
+    let spec = spec.expiring(Some(Utc::now() + Duration::days(7)));
+    // Through the ONE door (CIRISServer#402), stamped AT `signed_at`. Hand-rolled
+    // beside its envelope, this row carried no signed `asserted_at` and no
+    // typed-column mirror — persist v31 refuses both (CIRISPersist#598/#643), so
+    // the fixture was proving the substrate accepts a shape this server does not
+    // produce. The id is now MINTED INTO the signed bytes rather than composed
+    // from the inputs, so callers take it back from the emit.
+    let row = ciris_server::attest::Emit::stamp_at(attester.key_id(), spec, signed_at)
+        .expect("stamp federation-tier score row")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(attester))
         .await
-        .expect("hybrid-sign the score");
-    let now = Utc::now();
-    let attestation_id = format!("att-{}-{}-{}", attester.key_id(), subject, score);
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: attester.key_id().to_string(),
-        attested_key_id: subject.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: Some(score),
-        // The UNSIGNED column: deliberately `now`, never the signed instant.
-        asserted_at: now,
-        expires_at: Some(now + Duration::days(7)),
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: attester.key_id().to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
+        .expect("sign federation-tier score row");
+    ciris_server::attest::put(engine, row)
         .await
-        .expect("put federation-tier score row");
-    attestation_id
+        .expect("put federation-tier score row")
 }
 
 fn hours_ago(h: i64) -> DateTime<Utc> {
@@ -462,43 +439,59 @@ async fn the_detector_drops_post_bound_rows_and_keeps_pre_bound_evidence() {
 
 // ─── (3) auth::ownership — owner-binding resolution ──────────────────────────
 
-/// Emit a genuinely user-signed owner-binding whose SIGNED envelope instant is
-/// `signed_at` (the row column stays `Utc::now()`).
+/// Emit a genuinely user-signed owner-binding whose signed instant is `signed_at`.
+///
+/// The row column now equals that same instant rather than a fresh `Utc::now()`:
+/// persist v31 (CIRISPersist#598) refuses the divergence, because a column no
+/// signature covers is a replay knob for whoever writes the row. This fixture
+/// builds the binding exactly as the claiming node does — through
+/// [`ciris_server::attest`] — and hands the receiving side the same three things
+/// the wire carries, so it exercises the real apply path rather than a shape only
+/// this test produces.
 async fn bind_owner(
     engine: &Engine,
     owner: &LocalSigner,
     node_key_id: &str,
     signed_at: DateTime<Utc>,
 ) {
+    use ciris_server::attest::{Emit, Spec};
     use ciris_server::auth::ownership::{
-        build_owner_binding_envelope, canonicalize_owner_binding_envelope,
-        persist_user_signed_owner_binding, OWNER_BINDING_INFRA_SCOPES,
+        build_owner_binding_envelope, persist_user_signed_owner_binding, OWNER_BINDING_INFRA_SCOPES,
     };
     let scopes: Vec<String> = OWNER_BINDING_INFRA_SCOPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    let envelope = build_owner_binding_envelope(
+    let stamped = Emit::stamp_at(
         owner.key_id(),
-        node_key_id,
-        &scopes,
-        &signed_at.to_rfc3339(),
+        Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::SELF,
+            build_owner_binding_envelope(owner.key_id(), node_key_id, &scopes)
+                .expect("build owner-binding envelope"),
+        )
+        .about(node_key_id),
+        signed_at,
     )
-    .expect("build owner-binding envelope");
-    let canonical = canonicalize_owner_binding_envelope(&envelope).expect("canonicalize binding");
+    .expect("stamp owner-binding");
     let sig = owner
-        .sign_hybrid(&canonical)
+        .sign_hybrid(stamped.canonical())
         .await
         .expect("owner hybrid-signs the binding");
+    let ed = BASE64.encode(&sig.classical.signature);
+    let pqc = BASE64.encode(&sig.pqc.signature);
+    let envelope = stamped
+        .assemble(sig)
+        .expect("assemble owner-binding")
+        .attestation_envelope;
     persist_user_signed_owner_binding(
         engine,
         envelope,
         owner.key_id(),
         node_key_id,
         cohort_scope::SELF,
-        &canonical,
-        &BASE64.encode(&sig.classical.signature),
-        &BASE64.encode(&sig.pqc.signature),
+        &ed,
+        &pqc,
     )
     .await
     .expect("persist owner-binding");

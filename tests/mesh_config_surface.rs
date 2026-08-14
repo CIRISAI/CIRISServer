@@ -38,7 +38,7 @@ use ciris_persist::federation::mesh_config::{
 use ciris_persist::federation::trust_root::{TRUST_ACCEPTS_DIMENSION, TRUST_CONFERS_DIMENSION};
 use ciris_persist::federation::types::{
     algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    KeyRecord, SignedAttestation, SignedKeyRecord,
+    KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::federation::{
     MeshConfigBaseline, MeshConfigForm, MeshConfigKey, MeshConfigRefusalReason,
@@ -181,37 +181,21 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key");
 }
 
 async fn bind_owner(engine: &Engine) {
@@ -267,7 +251,6 @@ async fn put_delegation(
     dimension: &str,
     signer: Option<&LocalSigner>,
 ) -> String {
-    let now = chrono::Utc::now();
     let envelope = serde_json::json!({
         "kind": "delegates_to",
         "dimension": dimension,
@@ -275,44 +258,37 @@ async fn put_delegation(
         "attested_key_id": attested,
         "scope": ["infra:serve", "infra:attest"],
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize delegation");
-    let sig = match signer {
-        Some(s) => s.sign_hybrid(&canonical).await.expect("sign delegation"),
-        None => engine
-            .sign_hybrid(&canonical)
+    // Through the ONE door (CIRISServer#402): the stamp binds the instant and the
+    // seven-column mirror INTO the bytes that get signed, so the columns are read
+    // back out of the envelope rather than authored a second time beside it — the
+    // divergence persist v31 refuses at every door (CIRISPersist#598/#643). The
+    // `deleg-…` id is symbolic: the fixture hands it to the surface as
+    // `delegation_id`, so it is data and must survive the mint.
+    let attestation_id = format!("deleg-{attesting}-{attested}-{dimension}");
+    let stamped = ciris_server::attest::Emit::stamp(
+        attesting,
+        ciris_server::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .about(attested),
+    )
+    .and_then(|e| e.with_row_id(&attestation_id))
+    .expect("stamp the delegation row");
+    let row = match signer {
+        Some(s) => stamped
+            .sign_and_assemble(ciris_server::attest::KeySigner::Local(s))
+            .await
+            .expect("sign delegation"),
+        None => stamped
+            .sign_and_assemble(ciris_server::attest::KeySigner::Engine(engine))
             .await
             .expect("node-sign delegation"),
     };
-    let attestation_id = format!("deleg-{attesting}-{attested}-{dimension}");
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: attesting.to_string(),
-        attested_key_id: attested.to_string(),
-        attestation_type: attestation_type::DELEGATES_TO.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: attesting.to_string(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![attested.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
+    ciris_server::attest::put(engine, row)
         .await
-        .expect("put delegation");
-    attestation_id
+        .expect("put delegation")
 }
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {

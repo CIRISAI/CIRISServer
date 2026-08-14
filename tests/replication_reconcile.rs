@@ -25,10 +25,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::SigningKey;
 
 use ciris_edge::replication::{
     EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig,
@@ -36,14 +33,12 @@ use ciris_edge::replication::{
 use ciris_edge::transport::{
     InboundFrame, Transport, TransportError, TransportId, TransportSendOutcome,
 };
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
-use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
-};
+use ciris_keyring::MlDsa65SoftwareSigner;
+use ciris_persist::federation::types::{attestation_type, identity_type, SignedKeyRecord};
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
+use ciris_verify_core::federation_self_record::produce_self_key_record;
+use ciris_verify_core::self_at_login::HybridSigningIdentity;
 
 use ciris_server::peer;
 use ciris_server::replication_reconcile;
@@ -53,6 +48,9 @@ use ciris_server::PeerB;
 mod log_capture;
 
 const NODE_A_KEY_ID: &str = "ciris-server";
+/// Deterministic `valid_from` for every peer-minted record — verify's producer is
+/// clock-free on purpose, so the signed bytes are reproducible.
+const VALID_FROM: &str = "2026-07-01T00:00:00Z";
 
 // ── Node A: in-memory hybrid-signed Engine (mirrors peer_replication.rs) ──────
 
@@ -86,95 +84,59 @@ async fn node_a_key_id(engine: &Engine) -> String {
 }
 
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     let key_id = node_a_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node A steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node A steward key via admission gate");
 }
 
 /// A peer node with a real hybrid identity that can self-sign its admission record
 /// (so A's `register_peer_key` admission gate genuinely verifies it).
 struct Peer {
     key_id: String,
-    ed: SigningKey,
-    mldsa: MlDsa65SoftwareSigner,
+    identity: HybridSigningIdentity,
 }
 
 impl Peer {
     fn new(key_id: &str, ed_seed: u8, ml_seed: u8) -> Self {
+        use ciris_crypto::{Ed25519Signer, MlDsa65Signer};
         Peer {
             key_id: key_id.to_string(),
-            ed: SigningKey::from_bytes(&[ed_seed; 32]),
-            mldsa: MlDsa65SoftwareSigner::from_seed_bytes(&[ml_seed; 32], format!("{key_id}-pqc"))
-                .expect("peer ML-DSA-65 seed"),
+            identity: HybridSigningIdentity::new(
+                key_id.to_string(),
+                Ed25519Signer::from_seed(&[ed_seed; 32]).expect("peer ed25519 seed"),
+                MlDsa65Signer::from_seed(&[ml_seed; 32]).expect("peer ML-DSA-65 seed"),
+            ),
         }
     }
 
+    /// B's self-signed admission record, built by **B's own producer** —
+    /// verify-core's `produce_self_key_record`, which is what a real peer runs.
+    ///
+    /// The hand-rolled `{"key_id": …}` envelope this replaces named one of the four
+    /// subject fields and vouched for none of the rest, so it stood for any record
+    /// it was pasted onto; persist v31 refuses it at the admission gate
+    /// (CIRISPersist#659 / CIRISVerify#252). The producer binds all four into the
+    /// bytes it signs, and that is the same projection persist checks.
     async fn signed_key_record(&self) -> SignedKeyRecord {
-        let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": self.key_id });
-        let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer reg");
-        let original_content_hash = hex::encode(Sha256::digest(&canonical));
-        let ed_sig = self.ed.sign(&canonical).to_bytes();
-        let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
-        bound.extend_from_slice(&canonical);
-        bound.extend_from_slice(&ed_sig);
-        let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign peer reg");
-        let record = KeyRecord {
-            key_id: self.key_id.clone(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
-            algorithm: algorithm::HYBRID.into(),
-            identity_type: identity_type::WITNESS.into(),
-            identity_ref: self.key_id.clone(),
-            valid_from: now,
-            valid_until: None,
-            registration_envelope: envelope,
-            original_content_hash,
-            scrub_signature_classical: BASE64.encode(ed_sig),
-            scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-            scrub_key_id: self.key_id.clone(),
-            scrub_timestamp: now,
-            pqc_completed_at: Some(now),
-            persist_row_hash: String::new(),
-            capability_roles: Vec::new(),
-            attestation_evidence: None,
-            consent_role: None,
-            additional_scrubs: Vec::new(),
-        };
-        SignedKeyRecord { record }
+        let rec = produce_self_key_record(&self.identity, identity_type::WITNESS, VALID_FROM, &[])
+            .await
+            .expect("peer self-signed key record");
+        // The same serde round-trip `test_bless::maybe_test_bless_self` adopts
+        // through — verify's producer shape IS persist's wire shape.
+        serde_json::from_value(serde_json::to_value(&rec).expect("verify record -> json"))
+            .expect("verify record -> persist SignedKeyRecord")
     }
 
     async fn peer_config(&self) -> PeerB {
@@ -332,7 +294,6 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
 /// non-`consent:replication` dimension satisfies the test's actual intent.
 /// Do not "restore" capacity here; it will fail closed.
 async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
-    let now = chrono::Utc::now();
     let nk = node_a_key_id(engine).await;
     let envelope = serde_json::json!({
         "dimension": "health:liveness:v1",
@@ -340,39 +301,26 @@ async fn put_noise_scores(engine: &Engine, subject_key_id: &str) {
         "subject_key_ids": [subject_key_id],
         "score": 0.9,
         "cohort_scope": "federation",
-        "asserted_at": now.to_rfc3339(),
+        // No `asserted_at` — the stamp writes it, truncated (CIRISPersist#598).
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize noise");
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let sig = engine.sign_hybrid(&canonical).await.expect("sign noise");
-    let attestation = Attestation {
-        attestation_id: "a-noise-0001".to_string(),
-        attesting_key_id: nk.clone(),
-        attested_key_id: subject_key_id.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: Some(0.9),
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: nk.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![subject_key_id.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put noise scores row");
+    let spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about(subject_key_id);
+    let spec = spec.weighing(Some(0.9));
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
+    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
+    // accepts a shape this server does not produce.
+    ciris_server::attest::emit(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        spec,
+    )
+    .await
+    .expect("put noise scores row");
 }
 
 // ── Test 2: reconcile_once registers new + deregisters gone + skips unadmitted ─

@@ -89,8 +89,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    KeyRecord, SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, Attestation, KeyRecord,
+    SignedKeyRecord,
 };
 use ciris_persist::prelude::{verify_hybrid, Engine, HybridPolicy, LocalSigner};
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,27 @@ pub use ciris_persist::federation::types::delegation_scope::INFRA_NETWORK_PRESEN
 /// `infra:serve` — serve reads / relay / store / transport (the serve-only
 /// floor an unowned node is limited to).
 pub use ciris_persist::federation::types::delegation_scope::INFRA_SERVE;
+
+/// **Now, truncated to microseconds** (persist v31.0.0, CIRISPersist#598).
+///
+/// `Utc::now()` carries nanoseconds. Postgres `TIMESTAMPTZ` stores microseconds,
+/// so a nanosecond-precision instant is not merely rounded on the way in — it
+/// changes the ANSWER: persist's own words, *"the same op sequence would be a
+/// strict order on sqlite/memory and a TIE on postgres."*
+///
+/// That is a fold deciding differently depending on which backend a node runs.
+/// The producer truncates so both backends see the same instant, and persist
+/// refuses sub-microsecond values rather than silently accepting a value it
+/// cannot round-trip.
+///
+/// Every timestamp this module puts on a signed row goes through here. One
+/// call site left on `Utc::now()` reintroduces the divergence for exactly the
+/// rows that site writes, and it would fail only on postgres — which is the
+/// deployment least likely to be the one you tested.
+fn now_micros() -> chrono::DateTime<chrono::Utc> {
+    use chrono::SubsecRound as _;
+    chrono::Utc::now().trunc_subsecs(6)
+}
 
 /// The canonical owner-binding scope set: identity + membership standing
 /// (community + family seats) + serve, all infra-class, in sorted (canonical)
@@ -257,14 +278,20 @@ fn scope_set_of(envelope: &serde_json::Value) -> Vec<String> {
 /// FIRST; an `agency:*` (or legacy agency) scope is rejected before the envelope
 /// is shaped — the CC 1.13.5 invariant on the *producer* side. The scope set is
 /// sorted + deduped so the JCS bytes are deterministic for a given (user, node,
-/// scope-set, asserted_at).
+/// scope-set).
 ///
-/// `asserted_at` is threaded IN as an explicit RFC-3339 string so the same
-/// envelope (and therefore the same canonical bytes) can be rebuilt/echoed
-/// across the 2-phase claim: phase 1 stamps `asserted_at = now`, returns the
-/// envelope + its canonical bytes; phase 2 re-canonicalizes the SAME envelope
-/// the client echoed back (no fresh timestamp) so the bytes match what the user
-/// signed.
+/// # This is the DIMENSION BODY, not the whole envelope
+///
+/// It carries what an owner-binding MEANS. It does not carry `asserted_at`, the
+/// row id, or the typed-column mirror — those are stamped by
+/// [`crate::attest::Emit::stamp`] on the way to the signature, because every one
+/// of them must agree with a column and only the substrate knows the whole list.
+///
+/// It used to take `asserted_at` as a parameter, and that parameter was the
+/// defect: whoever called this chose the instant, and whoever built the row chose
+/// another one. persist v31 refuses the divergence (CIRISPersist#598), rightly —
+/// a column no signature covers is a replay knob. The instant is now sampled
+/// exactly once, inside the stamp, before the bytes exist.
 ///
 /// The `scope` array is the shape the substrate delegation walk's
 /// scope-containment predicate reads; `attesting_key_id` is the user (so the
@@ -273,7 +300,6 @@ pub fn build_owner_binding_envelope(
     responsible_user_key_id: &str,
     node_key_id: &str,
     infra_scopes: &[String],
-    asserted_at_rfc3339: &str,
 ) -> Result<serde_json::Value, OwnershipError> {
     // CC 1.13.5: refuse to build an agency binding — the producer-side gate.
     if !scopes_are_infra_only(infra_scopes) {
@@ -291,7 +317,6 @@ pub fn build_owner_binding_envelope(
         "node_key_id": node_key_id,
         "delegation_purpose": OWNER_BINDING_PURPOSE,
         "scope": scopes,
-        "asserted_at": asserted_at_rfc3339,
     }))
 }
 
@@ -332,21 +357,25 @@ pub fn canonicalize_owner_binding_envelope(
 /// user MUST be registered before this call (phase 1 registers them). Returns the
 /// persisted attestation id.
 ///
-/// ## cohort_scope follows the CLAIM (CIRISServer#125 — self-balancing ownership)
+/// ## cohort_scope is CHECKED here, not chosen here (CIRISPersist#643)
 ///
-/// The persisted `cohort_scope` is the cohort the node was CLAIMED under (the
-/// caller threads it from the validated claim; `self` by default). It is NOT in
-/// the user-signed envelope ([`build_owner_binding_envelope`] — see that fn's
-/// fields), so it is pure persisted-row metadata: setting it here cannot affect
-/// the signature the receiver re-verifies. A `self`-scoped binding self-replicates
-/// to the owner's other `identity_occurrences` (CEG §10.1.4) and is structurally
-/// invisible to the federation (cohort `self`/`family` ⇒ no `holds_bytes`), while
-/// the `tier` stays `federation` (the row is GENUINELY hybrid-signed, so it must
-/// pass — and benefit from — the federation-tier ingest re-verify gate; `local`
+/// `cohort_scope` used to be pure row metadata this function stamped from the
+/// claim — the receiving node deciding how widely the owner's ownership claim
+/// would be published, with the owner's signature saying nothing about it.
+/// persist v31 binds it into the signed mirror, so it now arrives already stated
+/// by the owner and the `cohort_scope` argument becomes a CHECK: it must equal
+/// what the owner signed, or the binding is refused. A receiver that silently
+/// preferred its own value would be re-publishing someone else's claim to an
+/// audience they never agreed to, and would in any case mint a row every peer
+/// refuses.
+///
+/// The tier stays `federation` — the row is genuinely hybrid-signed and must keep
+/// passing (and benefiting from) the federation-tier ingest re-verify; `local`
 /// tier would BOTH skip that re-verify AND mean "private to the producing
-/// occurrence", defeating the §10.1.4 self-replication this design needs).
-/// Promotion to community/federation participation is a later opt-in that widens
-/// `cohort_scope` only.
+/// occurrence", defeating the §10.1.4 self-replication this design needs. A
+/// `self`-scoped binding self-replicates to the owner's other
+/// `identity_occurrences` and is structurally invisible to the federation
+/// (cohort `self`/`family` ⇒ no `holds_bytes`).
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_user_signed_owner_binding(
     engine: &Engine,
@@ -354,49 +383,85 @@ pub async fn persist_user_signed_owner_binding(
     responsible_user_key_id: &str,
     node_key_id: &str,
     cohort_scope: &str,
-    canonical: &[u8],
     user_ed25519_sig_b64: &str,
     user_ml_dsa_65_sig_b64: &str,
 ) -> Result<String, OwnershipError> {
-    let now = chrono::Utc::now();
-    let original_content_hash = hex::encode(Sha256::digest(canonical));
+    // ── Re-open the row the owner signed ──────────────────────────────────────
+    //
+    // Every column comes back out of the signed envelope; nothing is re-decided
+    // here. This function used to hand-roll a 21-field `Attestation` beside the
+    // envelope and require the two to agree — the CIRISServer#402 class, and the
+    // reason first-run claim broke four separate ways on v31.
+    //
+    // Adoption TRANSPORTS a claim; it does not test one. The binding check inside
+    // `assemble` is tautological on an adopted row (the columns were read out of
+    // the mirror), so the two real defences are the ones below and the caller's
+    // signature verification — see [`crate::attest`].
+    let adopted = crate::attest::Emit::adopt(&envelope)
+        .map_err(|e| OwnershipError::Validation(e.to_string()))?;
 
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        // Issuer = the responsible user (the delegation walk resolves the
-        // user → node edge via list_attestations_by(user) / _for(node)).
-        attesting_key_id: responsible_user_key_id.to_owned(),
-        attested_key_id: node_key_id.to_owned(),
-        attestation_type: attestation_type::DELEGATES_TO.to_owned(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        // GENUINELY USER-SIGNED: the responsible party's OWN hybrid signatures
-        // over the canonical bytes, with scrub_key_id = the user's key. The
-        // owner-binding now cryptographically asserts the user's own ownership.
-        scrub_signature_classical: user_ed25519_sig_b64.to_owned(),
-        scrub_signature_pqc: Some(user_ml_dsa_65_sig_b64.to_owned()),
-        scrub_key_id: responsible_user_key_id.to_owned(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![node_key_id.to_owned()],
-        withdraws_admission_rule: None,
-        // CIRISServer#125: FOLLOW the claim's cohort (self by default), NOT a
-        // hardcoded FEDERATION. tier stays `federation` — the row is genuinely
-        // hybrid-signed and MUST keep passing the federation-tier ingest re-verify.
-        cohort_scope: cohort_scope.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
+    // ── Check the signed claims against what THIS node independently knows ────
+    //
+    // These are the checks that are NOT tautological: each compares a field the
+    // owner signed against a fact this node holds on its own account. Without
+    // them a perfectly-valid binding for a different node, a different owner, or
+    // a wider audience would be adopted here purely because its signature checks
+    // out.
+    let mirror_says = |field: &str, signed: &str, ours: &str| {
+        OwnershipError::Validation(format!(
+            "owner-binding `{field}` is {signed:?} in the envelope the owner SIGNED, but this \
+             node is applying it as {ours:?}. Refused rather than reconciled: the signed value is \
+             the owner's statement and the local value is this node's, and silently preferring \
+             either one is how a claim gets applied to something its owner never agreed to \
+             (CIRISPersist#643)"
+        ))
     };
+    if adopted.attesting_key_id() != responsible_user_key_id {
+        return Err(mirror_says(
+            "attesting_key_id",
+            adopted.attesting_key_id(),
+            responsible_user_key_id,
+        ));
+    }
+    if adopted.attested_key_id() != node_key_id {
+        return Err(mirror_says(
+            "attested_key_id",
+            adopted.attested_key_id(),
+            node_key_id,
+        ));
+    }
+    if adopted.cohort_scope() != cohort_scope {
+        return Err(mirror_says(
+            "cohort_scope",
+            adopted.cohort_scope(),
+            cohort_scope,
+        ));
+    }
+    if adopted.attestation_type() != attestation_type::DELEGATES_TO {
+        return Err(mirror_says(
+            "attestation_type",
+            adopted.attestation_type(),
+            attestation_type::DELEGATES_TO,
+        ));
+    }
+    // The node must be able to revoke the binding that names it. A row conferring
+    // authority over this node with this node absent from `subject_key_ids` is
+    // authority nobody here can ever withdraw.
+    if !adopted.subject_key_ids().iter().any(|k| k == node_key_id) {
+        return Err(OwnershipError::Validation(format!(
+            "owner-binding `subject_key_ids` {:?} does not name this node ({node_key_id}). \
+             `subject_key_ids` is what grants revocation authority, so a binding that confers \
+             authority over this node without naming it as a subject is authority this node can \
+             never withdraw",
+            adopted.subject_key_ids(),
+        )));
+    }
 
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
+    // ── Assemble from the owner's OWN signature halves + store ────────────────
+    let row = adopted
+        .assemble_from_b64(user_ed25519_sig_b64, user_ml_dsa_65_sig_b64)
+        .map_err(|e| OwnershipError::Validation(e.to_string()))?;
+    let attestation_id = crate::attest::put(engine, row)
         .await
         .map_err(|e| OwnershipError::Persist(e.to_string()))?;
 
@@ -482,29 +547,96 @@ pub struct SignedOwnerBinding {
 ///
 /// Refuses to build an agency binding ([`build_owner_binding_envelope`] gates
 /// `scopes_are_infra_only` first — CC 1.13.5).
+///
+/// # `cohort_scope` is signed here, not stamped there (CIRISPersist#643)
+///
+/// The audience of the binding used to be chosen by the RECEIVING node and
+/// written onto the row unsigned — so the node being claimed decided how widely
+/// its owner's ownership claim was published, and the owner's signature said
+/// nothing about it. persist v31 binds `cohort_scope` into the signed mirror,
+/// which ends that: the owner states the audience, the receiver checks it against
+/// the cohort the claim was made under, and a mismatch is refused rather than
+/// silently resolved in the receiver's favour. That is the contextual-integrity
+/// reading too — widening who can see a claim is the claimant's call.
 pub async fn build_signed_owner_binding(
     user_signer: &LocalSigner,
     node_key_id: &str,
     infra_scopes: &[String],
+    cohort_scope: &str,
 ) -> Result<SignedOwnerBinding, OwnershipError> {
     let user_key_id = user_signer.key_id().to_string();
-    let now = chrono::Utc::now();
-    let envelope =
-        build_owner_binding_envelope(&user_key_id, node_key_id, infra_scopes, &now.to_rfc3339())?;
-    let canonical = canonicalize_owner_binding_envelope(&envelope)?;
+
+    // ── ONE AUTHOR FOR THE ROW AND ITS ENVELOPE (CIRISServer#402) ─────────────
+    //
+    // This used to build the envelope here and the row on the RECEIVING side,
+    // independently, and require them to agree. persist v31 refuses every way
+    // they can disagree and found four of them on this one claim: the missing
+    // subject binding (#659), the divergent `asserted_at` column (#598), its
+    // sub-microsecond precision (#598), and the absent typed-column mirror
+    // (#643). Each arrived as its own 500 on a live first-run claim, and each
+    // looked like its own small bug. They are one bug — two authors for one fact
+    // — so they get one cure: [`crate::attest`], the only door that mints a row.
+    //
+    // The row is ASSEMBLED here, on the claiming node, and its envelope is what
+    // travels. That is deliberate: a binding the substrate would refuse now fails
+    // in front of the operator running the claim, rather than as a 500 from a
+    // machine whose logs they cannot read.
+    let stamped = crate::attest::Emit::stamp(
+        &user_key_id,
+        crate::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope,
+            build_owner_binding_envelope(&user_key_id, node_key_id, infra_scopes)?,
+        )
+        // The node is the subject: `subject_key_ids` is what will let it be
+        // revoked, so it is signed rather than stamped by whoever stores the row.
+        .about(node_key_id),
+    )
+    .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?;
 
     // HYBRID-sign the canonical bytes with the USER's signer (the responsible
     // party's key) — the substrate produces both halves + carries both pubkeys.
     let sig = user_signer
-        .sign_hybrid(&canonical)
+        .sign_hybrid(stamped.canonical())
         .await
         .map_err(|e| OwnershipError::Sign(e.to_string()))?;
+    let ed25519_pubkey_b64 = B64.encode(&sig.classical.public_key);
+    let ml_dsa_65_pubkey_b64 = B64.encode(&sig.pqc.public_key);
+    let ed25519_sig_b64 = B64.encode(&sig.classical.signature);
+    let ml_dsa_65_sig_b64 = B64.encode(&sig.pqc.signature);
+
+    // Assemble the row the RECEIVER will assemble, and put ITS envelope on the
+    // wire. Assembling is what re-checks the seven-column binding at the mint;
+    // discarding the row afterwards is the point — this node does not store it.
+    let envelope = stamped
+        .assemble(sig)
+        .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?
+        .attestation_envelope;
 
     // ALSO sign the key REGISTRATION envelope so the receiver can admit the user's
     // federation_keys row through the canonical register_federation_key gate
-    // (CIRISServer#31) — the same `{ "key_id" }` PoP shape every other identity
-    // registers under, canonicalized identically (ceg_produce_canonicalize).
-    let reg_envelope = serde_json::json!({ "key_id": user_key_id });
+    // (CIRISServer#31), canonicalized identically (ceg_produce_canonicalize).
+    //
+    // persist v31.0.0 (#659) — the envelope must BIND ITS SUBJECT: key_id,
+    // identity_type and both pubkey legs. A bare `{ "key_id" }` is refused, and
+    // the refusal is the whole point: "every signature over this row is verified
+    // over those bytes ONLY, so an envelope that does not name its subject stands
+    // for ANY record it is pasted onto."
+    //
+    // This broke FIRST-RUN CLAIM outright on v31 — the owner-binding's user key
+    // could not register, so `setup/root` answered 500 and the wizard looped.
+    // The binder must run on BOTH sides over identical bytes: here before
+    // signing, and in `apply_signed_owner_binding` before verifying. They are in
+    // this one module precisely so they cannot drift apart.
+    let mut reg_envelope = serde_json::json!({ "key_id": user_key_id });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut reg_envelope,
+        &user_key_id,
+        identity_type::USER,
+        &ed25519_pubkey_b64,
+        Some(&ml_dsa_65_pubkey_b64),
+    )
+    .map_err(OwnershipError::Sign)?;
     let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
     let reg_sig = user_signer
         .sign_hybrid(&reg_canonical)
@@ -514,10 +646,10 @@ pub async fn build_signed_owner_binding(
     Ok(SignedOwnerBinding {
         envelope,
         attesting_key_id: user_key_id,
-        ed25519_pubkey_b64: B64.encode(&sig.classical.public_key),
-        ml_dsa_65_pubkey_b64: B64.encode(&sig.pqc.public_key),
-        ed25519_sig_b64: B64.encode(&sig.classical.signature),
-        ml_dsa_65_sig_b64: B64.encode(&sig.pqc.signature),
+        ed25519_pubkey_b64,
+        ml_dsa_65_pubkey_b64,
+        ed25519_sig_b64,
+        ml_dsa_65_sig_b64,
         reg_envelope_ed25519_sig_b64: Some(B64.encode(&reg_sig.classical.signature)),
         reg_envelope_ml_dsa_65_sig_b64: Some(B64.encode(&reg_sig.pqc.signature)),
     })
@@ -632,7 +764,6 @@ pub async fn apply_signed_owner_binding(
         &binding.attesting_key_id,
         this_node_key_id,
         cohort_scope,
-        &canonical,
         &binding.ed25519_sig_b64,
         &binding.ml_dsa_65_sig_b64,
     )
@@ -671,8 +802,20 @@ async fn register_user_key(
         }
     }
 
-    let now = chrono::Utc::now();
-    let reg_envelope = serde_json::json!({ "key_id": binding.attesting_key_id });
+    let now = now_micros();
+    // Reconstruct the SAME subject-bound envelope the signer produced (#659).
+    // Identical binder, identical inputs — the receiver derives the preimage
+    // rather than trusting one supplied on the wire, which is what makes the
+    // signature mean anything.
+    let mut reg_envelope = serde_json::json!({ "key_id": binding.attesting_key_id });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut reg_envelope,
+        &binding.attesting_key_id,
+        identity_type::USER,
+        &binding.ed25519_pubkey_b64,
+        Some(&binding.ml_dsa_65_pubkey_b64),
+    )
+    .map_err(OwnershipError::Sign)?;
     let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
 
     // CIRISServer#31: prefer the AUTHORITATIVE admission gate. When the binding
@@ -778,67 +921,30 @@ pub async fn emit_steward_binding(
     infra_scopes: &[String],
 ) -> Result<String, OwnershipError> {
     let responsible_user_key_id = user_signer.key_id().to_string();
-    let now = chrono::Utc::now();
-    let envelope = build_owner_binding_envelope(
-        &responsible_user_key_id,
-        node_key_id,
-        infra_scopes,
-        &now.to_rfc3339(),
-    )?;
 
-    let canonical = canonicalize_owner_binding_envelope(&envelope)?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-
-    // Hybrid-sign over the canonical bytes with the USER's signer — attester ==
-    // signer == scrub_key_id (the v9.0.0 federation-tier ingest gate verifies the
-    // row against `attesting_key_id`'s registered pubkeys).
+    // Through the ONE door (CIRISServer#402). This used to hand-roll a 21-field
+    // row beside the envelope; see [`crate::attest`] for why every such site is
+    // an instance of the same defect rather than a set of small ones.
     //
-    // NOTE (DRY audit): persist v13.2.0 exposes `Engine::emit_attestation(signer,
-    // input)`, but it is NOT a drop-in here. It attributes the row to
-    // `signer.derived_key_id()` (= `derive_key_id(signer.key_id(), pubkey)`),
-    // whereas this owner-binding flow passes a USER signer whose `key_id()` is
-    // ALREADY the registered (derived) federation id — so `emit_attestation` would
-    // DOUBLE-derive it (`<id>-<fp>-<fp>`) and the `attesting_key_id` FK to
-    // `federation_keys` would fail. `register_user_key` / `build_signed_owner_binding`
-    // / `is_steward_bound` all key on `signer.key_id()` end-to-end; adopting the
-    // substrate primitive would require re-keying that whole owner-binding wire
-    // contract onto derived ids. Kept hand-rolled (attester == `signer.key_id()`).
-    let sig = user_signer
-        .sign_hybrid(&canonical)
-        .await
-        .map_err(|e| OwnershipError::Sign(e.to_string()))?;
-
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: responsible_user_key_id.clone(),
-        attested_key_id: node_key_id.to_owned(),
-        attestation_type: attestation_type::DELEGATES_TO.to_owned(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        // The responsible user produced the bytes (attester == signer).
-        scrub_key_id: responsible_user_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![node_key_id.to_owned()],
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    // NOTE (DRY audit): `Engine::emit_attestation` is NOT a drop-in here. It
+    // attributes the row to `signer.derived_key_id()`, whereas this flow passes a
+    // USER signer whose `key_id()` is ALREADY the registered (derived) federation
+    // id — so it would DOUBLE-derive (`<id>-<fp>-<fp>`) and the `attesting_key_id`
+    // FK to `federation_keys` would fail. `crate::attest::emit` uses
+    // `signer.key_id()` verbatim, which is the contract `register_user_key` /
+    // `build_signed_owner_binding` / `is_steward_bound` key on end to end.
+    let attestation_id = crate::attest::emit(
+        engine,
+        crate::attest::KeySigner::Local(user_signer),
+        crate::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::FEDERATION,
+            build_owner_binding_envelope(&responsible_user_key_id, node_key_id, infra_scopes)?,
+        )
+        .about(node_key_id),
+    )
+    .await
+    .map_err(|e| OwnershipError::Persist(e.to_string()))?;
 
     tracing::info!(
         responsible_user = %responsible_user_key_id,
@@ -866,9 +972,14 @@ pub async fn emit_signed_attestation(
     engine: &Engine,
     signer: &LocalSigner,
     attestation_type: &str,
-    attested_key_id: &str,
+    // ONE parameter, not two (CIRISServer#402). `attested_key_id` (what the
+    // delegation walk joins on) and `subject_key_ids` (what lets that subject
+    // revoke) used to be passed separately, and every one of the four callers
+    // passed `vec![attested_key_id]` — two arguments for one fact, with a silent
+    // failure mode if they ever drifted: a row conferring authority nobody can
+    // withdraw. `Spec::about` sets both, so drifting is no longer expressible.
+    subject_key_id: &str,
     envelope: serde_json::Value,
-    subject_key_ids: Vec<String>,
     // The edge's absolute expiry (CC 2.4.1.2 `delegation_valid_until`). `Some` makes
     // the attestation self-expiring: `steward_bindings_of` folds edge expiry, so a
     // lapsed delegation stops conferring authority WITHOUT a `withdraws` and survives
@@ -876,45 +987,22 @@ pub async fn emit_signed_attestation(
     // hardcoded behavior — correct for non-time-bounded rows like `scores`/`withdraws`).
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<String, OwnershipError> {
-    let attester = signer.key_id().to_string();
-    let now = chrono::Utc::now();
-    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?;
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let sig = signer
-        .sign_hybrid(&canonical)
-        .await
-        .map_err(|e| OwnershipError::Sign(e.to_string()))?;
-    let attestation_id = crate::ids::new_id();
-    let attestation = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: attester.clone(),
-        attested_key_id: attested_key_id.to_owned(),
-        attestation_type: attestation_type.to_owned(),
-        weight: None,
-        asserted_at: now,
-        expires_at,
-        attestation_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: B64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        scrub_key_id: attester.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids,
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
-    Ok(attestation_id)
+    // Through the ONE door (CIRISServer#402) — see [`crate::attest`]. The
+    // `signer.key_id()` (not `derived_key_id()`) contract is the whole reason
+    // this helper exists rather than `Engine::emit_attestation`; it is documented
+    // above and carried by `crate::attest::emit`.
+    crate::attest::emit(
+        engine,
+        crate::attest::KeySigner::Local(signer),
+        crate::attest::Spec::new(attestation_type, cohort_scope::FEDERATION, envelope)
+            .expiring(expires_at)
+            // `attested_key_id` and `subject_key_ids` are set together and to the
+            // same key: the first is what the delegation walk joins on, the
+            // second is what lets that subject later revoke.
+            .about(subject_key_id),
+    )
+    .await
+    .map_err(|e| OwnershipError::Persist(e.to_string()))
 }
 
 // ─── Read the owner-binding (is the node owned?) ────────────────────────────
@@ -1060,7 +1148,7 @@ async fn owner_binding_stands(engine: &Engine, node_key_id: &str, owner: &str) -
     // `owner_of` and the single-owner admission gate both key on. Re-deriving
     // "what an owner-binding IS" here would put this check and the resolver on
     // two definitions of one relation.
-    let now = chrono::Utc::now();
+    let now = now_micros();
     let bindings: Vec<&Attestation> = rows
         .iter()
         .filter(|a| {
@@ -1165,20 +1253,32 @@ pub struct PromotedOwnerBinding {
 /// pubkeys — so the SAME already-proven signature admits at the wider scope. No
 /// fresh signing, no user signer needed.
 ///
-/// The substrate exposes no in-place cohort-widening or supersede primitive, and
-/// `Engine::attestation_promote` only flips the **tier** local → federation (our
-/// owner-binding is already federation-tier, so it would no-op), so re-persisting
-/// the proven envelope at the wider cohort via `put_attestation` (which re-verifies
-/// it) is the substrate-native promote. `promoted_at` cannot be set through
-/// `put_attestation` (its INSERT omits the column) and is not read by any
-/// owner-binding / cohort / announce gate, so it stays `None`; `cohort_scope:
-/// federation` is the observable promoted state.
+/// # Why this needs the owner's signer (CIRISPersist#643)
+///
+/// It did not use to. The promote re-persisted the owner's EXISTING envelope and
+/// their original signatures under a wider `cohort_scope`, on the reasoning that
+/// the cohort was pure row metadata outside the signed bytes — so the already-
+/// proven signature re-verified and no user signer was needed.
+///
+/// That reasoning was the defect, and persist v31 removed its premise.
+/// `cohort_scope` is now inside the signed typed-column mirror, which means the
+/// old promote is not merely refused, it is INCOHERENT: it asked the owner's
+/// signature to vouch for an audience the owner never stated. A node could widen
+/// its owner's ownership claim from `self` to the whole federation without the
+/// owner's key being present, and the resulting row carried the owner's signature
+/// while saying something the owner had not signed.
+///
+/// So promotion is now what it always should have been: **the owner making a
+/// wider claim**, signed at the moment they make it. The signer must be the
+/// SAME owner already bound — a node that can reach *a* signer must not be able
+/// to promote with it.
 ///
 /// Idempotent: a no-op (returns `attestation_id: None`) when a federation-cohort
 /// owner-binding for (owner → node) already exists. Errors if the node is not yet
 /// owner-bound (you cannot announce an ownership you do not hold).
 pub async fn promote_owner_binding_to_federation(
     engine: &Engine,
+    owner_signer: &LocalSigner,
     node_key_id: &str,
 ) -> Result<PromotedOwnerBinding, OwnershipError> {
     // The node MUST already be owned — `is_steward_bound` resolves the responsible
@@ -1189,6 +1289,23 @@ pub async fn promote_owner_binding_to_federation(
                 .into(),
         )
     })?;
+
+    // …and the key doing the promoting MUST be that owner's. Widening the
+    // audience of an ownership claim is the claimant's act; a different signer
+    // making it is a third party publishing someone else's claim.
+    // An OCCURRENCE of the owner is the owner (CIRISServer#391) — a device enrolled
+    // the correct way signs with its OWN fresh key, bound as an occurrence, so an
+    // id equality check here would refuse every such device from announcing.
+    if !crate::auth::verify::signer_acts_for(engine, owner_signer.key_id(), &owner).await {
+        return Err(OwnershipError::Validation(format!(
+            "promote refused: this node is owner-bound to {owner}, but the promotion would be \
+             signed by {}, which is neither that identity nor an active occurrence of it. \
+             Widening the audience of an ownership claim is the OWNER's act — CIRISPersist#643 \
+             puts `cohort_scope` inside the signed bytes precisely so a node cannot publish its \
+             owner's claim more widely than the owner stated",
+            owner_signer.key_id(),
+        )));
+    }
 
     // Read this node's inbound owner-binding edges (federation tier). The
     // responsible-party binding is the live `delegates_to(owner → node)` with the
@@ -1224,59 +1341,28 @@ pub async fn promote_owner_binding_to_federation(
         });
     }
 
-    // The existing (self/family-scoped) owner-binding to widen.
+    // The narrower binding whose scopes the wider claim carries forward. Read the
+    // scope set off the ROW rather than re-deriving it from the constant: the
+    // promotion must say what the owner already said, at a wider audience, and
+    // nothing more.
     let existing = rows.iter().find(|a| is_owner_binding(a)).ok_or_else(|| {
         OwnershipError::Validation(
             "no responsible-party owner-binding found on this node to promote".into(),
         )
     })?;
+    let infra_scopes = scope_set_of(&existing.attestation_envelope);
 
-    // Re-persist the SAME envelope + the owner's ORIGINAL hybrid signatures at
-    // cohort_scope=federation. New id; tier stays federation (the `put_attestation`
-    // INSERT defaults it); promoted_at stays None (the INSERT omits the column — a
-    // substrate limitation, and the field is not load-bearing for ownership).
-    let now = chrono::Utc::now();
-    let attestation_id = crate::ids::new_id();
-    let promoted = Attestation {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: existing.attesting_key_id.clone(),
-        attested_key_id: existing.attested_key_id.clone(),
-        attestation_type: existing.attestation_type.clone(),
-        weight: existing.weight,
-        asserted_at: now,
-        expires_at: existing.expires_at,
-        attestation_envelope: existing.attestation_envelope.clone(),
-        // Unchanged hash over the unchanged canonical envelope — the federation-tier
-        // ingest gate re-derives + cross-checks it (and re-verifies the sigs below).
-        original_content_hash: existing.original_content_hash.clone(),
-        scrub_signature_classical: existing.scrub_signature_classical.clone(),
-        scrub_signature_pqc: existing.scrub_signature_pqc.clone(),
-        scrub_key_id: existing.scrub_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: existing.pqc_completed_at,
-        persist_row_hash: String::new(),
-        subject_key_ids: existing.subject_key_ids.clone(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_owned(),
-        tier: attestation_tier::FEDERATION.to_owned(),
-        promoted_at: None,
-    };
-
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation {
-            attestation: promoted,
-        })
-        .await
-        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    // A NEW binding, freshly signed by the owner at the wider cohort. The old one
+    // is left in place: it is a true statement about a narrower audience, and
+    // `is_steward_bound` folds both.
+    let attestation_id =
+        emit_steward_binding(engine, owner_signer, node_key_id, &infra_scopes).await?;
 
     tracing::info!(
         responsible_user = %owner,
         node_key_id = %node_key_id,
         attestation_id = %attestation_id,
-        "promoted owner-binding delegates_to(owner → node) self → FEDERATION \
-         (announce opt-in; same user signature re-verified at the wider cohort)"
+        "promoted owner-binding to cohort_scope=federation (owner re-signed at the wider audience)"
     );
     Ok(PromotedOwnerBinding {
         responsible_user_key_id: owner,

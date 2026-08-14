@@ -139,7 +139,8 @@ jobs:
           python-version: "3.12"
       # ── Build + stage the per-platform desktop JAR BEFORE maturin ──────────
       # The Compose uber-jar is named CIRIS-<platform>-<ver>.jar by the gradle
-      # plugin (e.g. CIRIS-linux-x64-2.6.0.jar). maturin then bundles it into
+      # plugin (e.g. CIRIS-linux-x64-1.5.171.jar — packaging metadata derived from
+      # the release version, NOT the client identity). maturin then bundles it into
       # the wheel via [tool.maturin] include (see pyproject.toml). System Java
       # only — no JRE is bundled, keeping each wheel under PyPI's 100 MB cap.
       - uses: actions/setup-java@v4

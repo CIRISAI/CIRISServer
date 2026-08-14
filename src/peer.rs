@@ -659,8 +659,6 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
         });
     }
 
-    let now = chrono::Utc::now();
-
     // ── The RC29 LOCKED consent:replication grant (CEG §5.6.8.15, resolves
     //    CIRISRegistry#98). A bare `scores` Attestation. ──────────────────────
     //
@@ -766,7 +764,12 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
         "cohort_scope": cohort_scope::FEDERATION,
         "witness_relation": "self",
         "topical_relation": "bilateral_pair",
-        "asserted_at": now.to_rfc3339(),
+        // NO `asserted_at` HERE (CIRISServer#402 / CIRISPersist#598). The stamp
+        // writes it — once, truncated to the substrate's resolution — and
+        // `assemble` reads the row column back out of it. A producer that sets it
+        // is honoured and NOT truncated, so a hand-written `Utc::now()` lands with
+        // nanoseconds postgres cannot store and the put is refused. It made every
+        // write on this path fail on v31.
         // §4.2.2.3 payload member (subject_kind + its payload), NOT envelope fields.
         "subject_kind": SUBJECT_KIND_CONSENT_REPLICATION,
         "payload": payload,

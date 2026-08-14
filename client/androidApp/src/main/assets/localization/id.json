@@ -2380,7 +2380,13 @@
     "status_reconfiguring": "Memulai ulang node Anda...",
     "status_reconfiguring_timeout": "Node Anda membutuhkan waktu lebih lama dari yang diharapkan untuk dimulai ulang. Silakan mulai ulang aplikasi.",
     "login_setup_complete_relogin": "Penyiapan selesai. Node Anda telah dimulai ulang, jadi silakan masuk kembali dengan kredensial yang sama seperti yang Anda gunakan saat menyelesaikan penyiapan.",
-    "accord_new_confer_duty": "Berikan sebuah tugas pada ID federasi"
+    "accord_new_confer_duty": "Berikan sebuah tugas pada ID federasi",
+    "keyset_import_cancel": "Pilih folder lain",
+    "keyset_import_confirm": "Daftarkan perangkat ini",
+    "keyset_inspect_checking": "Memeriksa folder ini…",
+    "keyset_inspect_unavailable": "Tidak dapat memeriksa folder ini — node tidak merespons. Ini tidak menunjukkan apakah identitas Anda ada di dalamnya; Anda tetap bisa mencoba mengimpor.",
+    "accord_remint_invalid_desc": "Tanda tangan pemegang lain TIDAK akan menyelesaikan seremoni ini — masalahnya ada pada bundel itu sendiri. Mulai seremoni baru setelah masalah tersebut diperbaiki.",
+    "accord_remint_invalid_title": "Seed ini tidak dapat diselesaikan"
   },
   "nav": {
     "group": {
@@ -3460,7 +3466,9 @@
       "grounds_absent": "grounds wajib diisi. Keberatan yang diajukan tanpa alasan yang tercatat tidak dapat dibedakan dari keberatan yang diajukan karena alasan yang buruk — dan alasan itu dicatat, tidak pernah ditafsirkan.",
       "node_unowned": "Node ini tidak memiliki pihak yang bertanggung jawab (owner-binding), sehingga ia tidak membaca maupun berbicara di ranah bersama siapa pun atas nama mereka. Klaim kepemilikan terlebih dahulu.",
       "not_owner": "Permukaan ranah bersama memerlukan peran pemilik (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id wajib diisi: satu suara menjawab pertanyaan tentang SATU keberatan."
+      "objection_absent": "objection_id wajib diisi: satu suara menjawab pertanyaan tentang SATU keberatan.",
+      "stamped_envelope_mismatch": "`stamped_envelope` yang digemakan tidak menggambarkan pembatalan dalam permintaan ini. Jalankan ulang uji coba (dry run) untuk BIDANG-BIDANG INI dan minta para penanda tangan pendamping menandatangani apa yang dikembalikannya.",
+      "stamped_envelope_required": "tanda tangan pendamping diberikan tanpa `stamped_envelope` yang menjadi dasar pembuatannya. Jalankan uji coba (dry run), minta para penanda tangan pendamping menandatangani `envelope` yang dikembalikannya, lalu kirim kembali envelope tersebut beserta scrub mereka — jika tidak, tanda tangan mereka mencakup byte yang tidak dibawa oleh pengiriman ini dan kuorum diam-diam menghitung satu."
     },
     "standing": {
       "action_unknown": "Node ini tidak memegang tindakan tersebut. Keberatan menyebut sebuah baris, dan di sini tidak ada baris untuk disebut.",
@@ -3871,7 +3879,8 @@
       "incomplete_pair": "Penyedia dan id akun keduanya wajib diisi. Setengah pasangan akan menautkan akun yang tidak dapat ditemukan lagi.",
       "no_such_identity": "Tidak ada identitas seperti itu pada node ini untuk ditautkan dengan akun tersebut.",
       "node_unowned": "Node ini belum memiliki pemilik, jadi tidak ada identitas untuk ditautkan dengan sebuah akun. Klaim node terlebih dahulu.",
-      "store_unavailable": "Node tidak dapat menulis tautan tersebut karena penyimpanan identitasnya tidak tersedia. Tidak ada yang diubah."
+      "store_unavailable": "Node tidak dapat menulis tautan tersebut karena penyimpanan identitasnya tidak tersedia. Tidak ada yang diubah.",
+      "not_delegatable": "Menautkan identitas masuk adalah tindakan pemilik sendiri. Sesi yang didelegasikan tidak dapat melakukannya — tautan tersebut bertahan lebih lama daripada delegasinya, sehingga akan memberikan akses permanen kepada siapa pun yang memegang izin sementara."
     },
     "session_expired": "Sesi Anda sudah tidak berlaku. Masuk lagi untuk melanjutkan.",
     "browser_signin": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Itu bukan tugas yang dikenali oleh mesh ini. Memberikannya akan tampak sebagai wewenang di sini dan akan ditolak di setiap gerbang.",
       "pkcs11_required": "Melimpahkan sebuah tugas memerlukan fitur `pkcs11` — pemegangnya menandatangani dengan YubiKey miliknya ditambah paruh ML-DSA yang dibungkus USB, persis seperti yang dilakukan upacara co-scrub kanonik."
     }
+  },
+  "trust_root": {
+    "no_root": "root yang mana? path harus menyebutkan root_key_id yang ingin dicabut kepercayaannya"
   }
 }

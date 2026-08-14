@@ -2398,7 +2398,13 @@
     "status_reconfiguring": "Ń tún node rẹ bẹ̀rẹ̀...",
     "status_reconfiguring_timeout": "Node rẹ ń gba àkókò gùn ju bí a ṣe retí lọ láti tún bẹ̀rẹ̀. Jọ̀wọ́ tún áàpù náà bẹ̀rẹ̀.",
     "login_setup_complete_relogin": "Ìṣètò ti parí. Node rẹ tún bẹ̀rẹ̀, nítorí náà jọ̀wọ́ wọlé padà pẹ̀lú àwọn ẹ̀rí ìdánimọ̀ kan náà tí o lò láti parí ìṣètò.",
-    "accord_new_confer_duty": "Fi ojúṣe fún ID àjọṣepọ̀"
+    "accord_new_confer_duty": "Fi ojúṣe fún ID àjọṣepọ̀",
+    "keyset_import_cancel": "Yan fódà mìíràn",
+    "keyset_import_confirm": "Forúkọ ẹ̀rọ yìí sílẹ̀",
+    "keyset_inspect_checking": "Ń ṣàyẹ̀wò fódà yìí…",
+    "keyset_inspect_unavailable": "A kò lè ṣàyẹ̀wò fódà yìí — kókó náà kò dáhùn. Èyí kò sọ ohunkóhun nípa bóyá ìdánimọ̀ rẹ wà nínú rẹ̀; o ṣì lè gbìyànjú ìkó-wọlé náà.",
+    "accord_remint_invalid_desc": "Ìbùwọ́lù olùdìmú mìíràn KÒ NÍÍ parí ayẹyẹ yìí — ìdì náà fúnra rẹ̀ ni ìṣòro náà. Bẹ̀rẹ̀ ayẹyẹ tuntun lẹ́yìn tí a bá ti tún un ṣe.",
+    "accord_remint_invalid_title": "A kò lè parí irúgbìn yìí"
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",
@@ -3460,7 +3466,9 @@
       "grounds_absent": "grounds jẹ́ dandan. Àtakò tí a gbé sókè láìní ìdí tí a ṣàkọsílẹ̀ kò ṣe é yà sọ́tọ̀ kúrò nínú èyí tí a gbé sókè fún ìdí burúkú — a sì ń ṣàkọsílẹ̀ ìdí, a kì í túmọ̀ rẹ̀ láé.",
       "node_unowned": "Nódù yìí kò ní ẹni tí ó ní ojúṣe fún un (ìdè-onílé), nítorí náà kò ka ohun-ìní àjọpín ẹnikẹ́ni bẹ́ẹ̀ ni kò sọ̀rọ̀ nínú rẹ̀ fún ẹnikẹ́ni. Gba ìní rẹ̀ ná.",
       "not_owner": "Ojú ohun-ìní àjọpín béèrè ipa onílé (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id jẹ́ dandan: ìbò kan ń dá ìbéèrè nípa ÀTAKÒ KAN ṣoṣo lóhùn."
+      "objection_absent": "objection_id jẹ́ dandan: ìbò kan ń dá ìbéèrè nípa ÀTAKÒ KAN ṣoṣo lóhùn.",
+      "stamped_envelope_mismatch": "`stamped_envelope` tí a dá padà kò ṣàpèjúwe ìfagilé tí ó wà nínú ìbéèrè yìí. Tún ìdánwò gbígbẹ ṣe fún ÀWỌN AYE WỌ̀NYÍ, kí o sì jẹ́ kí àwọn alábàáfọwọ́sí fọwọ́sí ohun tí ó bá dá padà.",
+      "stamped_envelope_required": "A pèsè àwọn ìfọwọ́sí-àjùmọ̀ láìsí `stamped_envelope` tí a fi ṣe wọ́n. Ṣe ìdánwò gbígbẹ náà, jẹ́ kí àwọn alábàáfọwọ́sí fọwọ́sí `envelope` tí ó dá padà, kí o sì rán envelope yẹn padà pẹ̀lú àwọn scrub wọn — bí bẹ́ẹ̀ kọ́, ìfọwọ́sí wọn yóò bo àwọn báìtì tí ìfisílẹ̀ yìí kò gbé, quorum yóò sì ka ọ̀kan ní ìdákẹ́jẹ́ẹ́."
     },
     "standing": {
       "action_unknown": "Nódù yìí kò ní irú ìṣe bẹ́ẹ̀. Àtakò máa ń dárúkọ ilà kan, kò sì sí ilà kankan níbí láti dárúkọ.",
@@ -3871,7 +3879,8 @@
       "incomplete_pair": "A nílò olùpèsè àti id àkàǹtì méjèèjì. Ìdajì tọ́kọtaya kan yóò so àkàǹtì tí kò sí ohun tí ó lè rí i mọ́.",
       "no_such_identity": "Kò sí ìdánimọ̀ bẹ́ẹ̀ lórí node yìí láti so àkàǹtì náà mọ́.",
       "node_unowned": "Node yìí kò tí ì ní olóhun, nítorí náà kò sí ìdánimọ̀ tí a lè so àkàǹtì mọ́. Gba node náà ní àkọ́kọ́.",
-      "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà."
+      "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà.",
+      "not_delegatable": "Dídá ìdánimọ̀ ìwọlé pọ̀ jẹ́ iṣẹ́ olóhun fúnra rẹ̀. Ìjókòó àṣojú kò lè ṣe é — àsopọ̀ náà máa wà pẹ́ ju ìfàṣẹpàṣẹ náà lọ, nítorí náà yóò fi ààyè tí kò lópin lé ẹnikẹ́ni tí ó ní àṣẹ ìgbà díẹ̀ lọ́wọ́."
     },
     "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú.",
     "browser_signin": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Ìyẹn kì í ṣe iṣẹ́-àṣẹ tí àwọ̀n yìí mọ̀. Fífún ní i yóò farahàn bí àṣẹ níhìn-ín, a ó sì kọ̀ ọ́ ní gbogbo ẹnu-ọ̀nà.",
       "pkcs11_required": "Fífúnni ní ojúṣe nílò ẹ̀yà `pkcs11` — ẹni tó gbà á ni yóò fọwọ́ sí i pẹ̀lú YubiKey rẹ̀ àti ìdajì ML-DSA tí a fi USB wé, gẹ́gẹ́ bí ààtò ìlànà co-scrub tí ó jẹ́ ìpìlẹ̀ ṣe ń ṣe."
     }
+  },
+  "trust_root": {
+    "no_root": "gbòngbò wo? ọ̀nà náà gbọ́dọ̀ dárúkọ root_key_id láti yọ ìgbẹ́kẹ̀lé kúrò"
   }
 }

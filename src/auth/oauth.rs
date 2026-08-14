@@ -1047,6 +1047,24 @@ pub enum OAuthResolveError {
     NoLocalIdentity { provider: String },
     /// The substrate refused the read.
     Store(store::StoreError),
+    /// **This build cannot start an OAuth flow with that provider at all** — no
+    /// usable client id (CIRISServer#387).
+    ///
+    /// A DISTINCT variant, not a reuse of [`Self::NoLocalIdentity`], and the
+    /// distinction is the whole point. Both are "you cannot sign in this way", so
+    /// folding them looked like a kindness: which half of a credential a build is
+    /// missing is an operator fact, not a visitor's, and the folded message avoided
+    /// saying. But it did not merely withhold — it ASSERTED two things that are
+    /// false here: that the visitor signed in with the provider (the flow never
+    /// started), and that claiming the node with that account would fix it (it
+    /// cannot; there is no credential to start the flow with). An operator who
+    /// believes the message goes and tries exactly the thing that is guaranteed to
+    /// fail, which is worse than being told nothing.
+    ///
+    /// Withholding an operator detail is fine. Naming a remedy that cannot work is
+    /// not. This says only what the visitor needs — this node cannot do it, use a
+    /// password — and still names no credential half.
+    ProviderUnavailable { provider: String },
 }
 
 impl From<store::StoreError> for OAuthResolveError {
@@ -1062,6 +1080,7 @@ impl OAuthResolveError {
         match self {
             Self::NoLocalIdentity { .. } => "auth.oauth.no_local_identity",
             Self::Store(_) => "auth.oauth.store_unavailable",
+            Self::ProviderUnavailable { .. } => "auth.oauth.provider_unavailable",
         }
     }
 
@@ -1073,6 +1092,10 @@ impl OAuthResolveError {
                  Claim this node with this account, or ask the node's owner to grant it access."
             ),
             Self::Store(e) => format!("The node could not read its identity store: {e}"),
+            Self::ProviderUnavailable { provider } => format!(
+                "This node cannot sign you in with {provider} — this build has no {provider} \
+                 sign-in configured. Sign in with a username and password instead."
+            ),
         }
     }
 }
@@ -1219,9 +1242,14 @@ struct ProviderInfo {
 
 async fn list_providers(State(st): State<OAuthState>) -> Response {
     let store = st.providers.lock().unwrap();
+    // A provider with no client id is NOT available, and listing it is what lets
+    // a dead sign-in button render (CIRISServer#387). "Configured" and "usable"
+    // are two questions, and this endpoint is asked the second one — a caller
+    // deciding which buttons to draw cannot act on the first.
     let providers: Vec<ProviderInfo> = store
         .by_provider
         .iter()
+        .filter(|(_, c)| !c.client_id.trim().is_empty())
         .map(|(p, c)| ProviderInfo {
             provider: p.clone(),
             client_id: c.client_id.clone(),
@@ -1300,11 +1328,19 @@ async fn oauth_login(
         match store.by_provider.get(&provider) {
             Some(c) if !c.client_id.trim().is_empty() => c.client_id.clone(),
             // Configured-but-blank and absent are the same answer to the user
-            // ("this node cannot sign you in with {provider}"), and deliberately
-            // NOT distinguished in the response: which half of a credential a
-            // build is missing is an operator fact, not a visitor's.
+            // ("this node cannot sign you in with {provider}"), and still
+            // deliberately not distinguished: which half of a credential a build
+            // is missing is an operator fact, not a visitor's.
+            //
+            // What they are NOT is the same answer as `NoLocalIdentity`. That
+            // reuse shipped, and it told an operator they had signed in with
+            // Google and should claim the node with that account — on a build
+            // with no Google credential, so the flow had never started and the
+            // remedy could not work. Withholding an operator detail is fine;
+            // naming a remedy that cannot work sends them down a guaranteed dead
+            // end (CIRISServer#387).
             _ => {
-                let e = OAuthResolveError::NoLocalIdentity {
+                let e = OAuthResolveError::ProviderUnavailable {
                     provider: provider.clone(),
                 };
                 tracing::warn!(
@@ -1637,6 +1673,11 @@ async fn finish_oauth_login(
                 // 403 about authorization, not a 5xx about the node being broken.
                 OAuthResolveError::NoLocalIdentity { .. } => StatusCode::FORBIDDEN,
                 OAuthResolveError::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+                // Unreachable from the exchange — the login handler refuses long
+                // before a code exists. Matched explicitly rather than by `_` so
+                // that if a future path CAN reach it, the compiler makes someone
+                // decide the status instead of silently inheriting one.
+                OAuthResolveError::ProviderUnavailable { .. } => StatusCode::NOT_IMPLEMENTED,
             };
             (
                 status,

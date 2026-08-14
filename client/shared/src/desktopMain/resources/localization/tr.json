@@ -2380,7 +2380,13 @@
     "status_reconfiguring": "Düğümünüz yeniden başlatılıyor...",
     "status_reconfiguring_timeout": "Düğümünüzün yeniden başlatılması beklenenden uzun sürüyor. Lütfen uygulamayı yeniden başlatın.",
     "login_setup_complete_relogin": "Kurulum tamamlandı. Düğümünüz yeniden başlatıldı; lütfen kurulumu tamamlarken kullandığınız kimlik bilgileriyle yeniden oturum açın.",
-    "accord_new_confer_duty": "Bir federasyon kimliğine görev ver"
+    "accord_new_confer_duty": "Bir federasyon kimliğine görev ver",
+    "keyset_inspect_checking": "Bu klasör kontrol ediliyor…",
+    "keyset_inspect_unavailable": "Bu klasör kontrol edilemedi — düğüm yanıt vermedi. Bu, kimliğinizin klasörde olup olmadığı hakkında bir şey söylemez; yine de içe aktarmayı deneyebilirsiniz.",
+    "keyset_import_confirm": "Bu cihazı kaydet",
+    "keyset_import_cancel": "Başka bir klasör seç",
+    "accord_remint_invalid_desc": "Başka bir sahibin imzası bu töreni tamamlamayacak — sorunun kaynağı paketin kendisi. Sorun giderildikten sonra yeni bir tören başlatın.",
+    "accord_remint_invalid_title": "Bu tohum tamamlanamaz"
   },
   "nav": {
     "group": {
@@ -3460,7 +3466,9 @@
       "grounds_absent": "grounds zorunludur. Kaydedilmiş bir gerekçesi olmadan ortaya konan bir itiraz, kötü bir gerekçeyle ortaya konandan ayırt edilemez — ve gerekçeler kaydedilir, asla yorumlanmaz.",
       "node_unowned": "Bu düğümün sorumlu bir tarafı (owner-binding) yok; dolayısıyla kimse adına kimsenin müştereklerini ne okur ne de orada söz söyler. Önce sahipliği üstlenin.",
       "not_owner": "Müşterekler yüzeyi sahip (SYSTEM_ADMIN) rolünü gerektirir.",
-      "objection_absent": "objection_id zorunludur: bir oy, TEK bir itiraz hakkındaki bir soruyu yanıtlar."
+      "objection_absent": "objection_id zorunludur: bir oy, TEK bir itiraz hakkındaki bir soruyu yanıtlar.",
+      "stamped_envelope_mismatch": "yankılanan `stamped_envelope`, bu istekteki reddetme işlemini tanımlamıyor. Deneme çalıştırmasını BU alanlar için yeniden çalıştırın ve ortak imzalayanların, çalıştırmanın döndürdüğü içeriği imzalamasını sağlayın.",
+      "stamped_envelope_required": "ortak imzalar, üzerinde oluşturuldukları `stamped_envelope` olmadan gönderildi. Deneme çalıştırmasını çalıştırın, ortak imzalayanların döndürülen `envelope` içeriğini imzalamasını sağlayın ve o zarfı scrub'larıyla birlikte geri gönderin — aksi halde imzaları, bu gönderimin taşımadığı baytları kapsar ve yeter sayı sessizce bir imzayı saymış olur."
     },
     "standing": {
       "action_unknown": "Bu düğüm böyle bir eylem tutmuyor. Bir itiraz bir satırı adlandırır ve burada adlandırılacak bir satır yok.",
@@ -3871,7 +3879,8 @@
       "incomplete_pair": "Hem sağlayıcı hem de hesap kimliği gereklidir. Çiftin yarısı, bir daha hiçbir şeyin bulamayacağı bir hesabı bağlar.",
       "no_such_identity": "Bu düğümde hesabın bağlanabileceği böyle bir kimlik yok.",
       "node_unowned": "Bu düğümün henüz bir sahibi yok, bu nedenle hesabın bağlanabileceği bir kimlik de yok. Önce düğümün sahipliğini alın.",
-      "store_unavailable": "Kimlik deposu kullanılamadığı için düğüm bağlantıyı yazamadı. Hiçbir şey değiştirilmedi."
+      "store_unavailable": "Kimlik deposu kullanılamadığı için düğüm bağlantıyı yazamadı. Hiçbir şey değiştirilmedi.",
+      "not_delegatable": "Bir oturum açma kimliğini bağlamak, sahibinin bizzat yapması gereken bir işlemdir. Devredilmiş bir oturum bunu yapamaz — bağlantı, devrin süresinden daha uzun süre geçerli kalır; bu da geçici bir yetkiyi elinde tutan kişiye kalıcı erişim vermek anlamına gelir."
     },
     "session_expired": "Oturumunuz artık geçerli değil. Devam etmek için tekrar oturum açın.",
     "browser_signin": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Bu, ağın tanıdığı bir görev değil. Verilmesi burada yetki olarak görünür ve her kapıda reddedilirdi.",
       "pkcs11_required": "Bir görev devretmek için `pkcs11` özelliği gerekir — tıpkı kanonik ortak imza (co-scrub) töreninde olduğu gibi, sahibi YubiKey'i ve USB ile sarmalanmış ML-DSA yarısını kullanarak imzalar."
     }
+  },
+  "trust_root": {
+    "no_root": "hangi kök? yol, güveni kaldırılacak root_key_id değerini belirtmelidir"
   }
 }

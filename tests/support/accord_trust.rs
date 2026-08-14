@@ -107,9 +107,6 @@ pub async fn put_signed_by_many(
     mut envelope: serde_json::Value,
 ) {
     let who = signers[0];
-    use ciris_persist::federation::types::{attestation_tier, cohort_scope, Attestation};
-    use ciris_persist::federation::SignedAttestation;
-    use ciris_persist::verify::canonical::ceg_produce_canonicalize;
     use sha2::{Digest, Sha256};
     let id = hex::encode(Sha256::digest(
         format!("{}/{attested}/{ty}", who.key_id).as_bytes(),
@@ -121,12 +118,31 @@ pub async fn put_signed_by_many(
     {
         envelope["id"] = serde_json::json!(id);
     }
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize");
-    let (ed, pqc) = who.sign_bytes(&canonical);
+
+    // Through the ONE door (CIRISServer#402). A co-signed seed row is exactly the
+    // case persist's assemble-without-put exists for: the canonical bytes must
+    // exist for the OTHER signers before there is a row, and hand-rolling one here
+    // left it with no signed `asserted_at` and no typed-column mirror — refused on
+    // v31 (CIRISPersist#598/#643). The deterministic `id` is preserved because
+    // these seeds are looked up by name.
+    let stamped = ciris_server::attest::Emit::stamp(
+        &who.key_id,
+        ciris_server::attest::Spec::new(
+            ty,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        .attested_to(attested)
+        .weighing(Some(1.0)),
+    )
+    .and_then(|e| e.with_row_id(&id))
+    .unwrap_or_else(|e| panic!("stamp seed row {ty} by {} about {attested}: {e}", who.key_id));
+
+    let (ed, pqc) = who.sign_bytes(stamped.canonical());
     let extra: Vec<ciris_persist::federation::types::ScrubSig> = signers[1..]
         .iter()
         .map(|s| {
-            let (e2, p2) = s.sign_bytes(&canonical);
+            let (e2, p2) = s.sign_bytes(stamped.canonical());
             ciris_persist::federation::types::ScrubSig {
                 scrub_key_id: s.key_id.clone(),
                 scrub_signature_classical: e2,
@@ -134,44 +150,21 @@ pub async fn put_signed_by_many(
             }
         })
         .collect();
-    let now = chrono::Utc::now();
+    let mut row = stamped
+        .assemble_from_b64(&ed, &pqc)
+        .unwrap_or_else(|e| panic!("assemble seed row {ty} by {} about {attested}: {e}", who.key_id));
+    row.additional_scrubs = extra;
+
     // NOT `let _ =`. A swallowed put here made `edge_exists` read false with no
     // hint why — the row had been refused for an unregistered signer and the
     // test blamed the walk. A discarded Result during investigation is how an
     // instrument lies to you.
-    e.federation_directory()
-        .put_attestation(SignedAttestation {
-            attestation: Attestation {
-                attestation_id: id,
-                attesting_key_id: who.key_id.clone(),
-                attested_key_id: attested.to_string(),
-                attestation_type: ty.to_string(),
-                weight: Some(1.0),
-                asserted_at: now,
-                expires_at: None,
-                attestation_envelope: envelope,
-                original_content_hash: hex::encode(Sha256::digest(&canonical)),
-                scrub_signature_classical: ed,
-                scrub_signature_pqc: Some(pqc),
-                scrub_key_id: who.key_id.clone(),
-                additional_scrubs: extra,
-                scrub_timestamp: now,
-                pqc_completed_at: Some(now),
-                persist_row_hash: String::new(),
-                subject_key_ids: Vec::new(),
-                withdraws_admission_rule: None,
-                cohort_scope: cohort_scope::FEDERATION.to_string(),
-                tier: attestation_tier::FEDERATION.to_string(),
-                promoted_at: None,
-            },
-        })
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "seed row {ty} by {} about {attested} refused: {e}",
-                who.key_id
-            )
-        });
+    ciris_server::attest::put(e, row).await.unwrap_or_else(|err| {
+        panic!(
+            "seed row {ty} by {} about {attested} refused: {err}",
+            who.key_id
+        )
+    });
 }
 
 /// Register `key_id` as a user identity on this node.

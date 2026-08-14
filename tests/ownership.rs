@@ -23,8 +23,7 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, identity_type, Attestation, KeyRecord,
-    SignedAttestation, SignedKeyRecord,
+    algorithm, attestation_type, identity_type, KeyRecord, SignedKeyRecord,
 };
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
@@ -65,36 +64,20 @@ async fn node(key_id: &str) -> Arc<Engine> {
 /// role) via the canonical admission gate — the FK precondition for emitting
 /// inbound `delegates_to` rows against it.
 async fn register_node(engine: &Engine, key_id: &str) {
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize node envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("node sign");
-    let record = KeyRecord {
-        key_id: key_id.to_string(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: "node".into(),
-        identity_ref: key_id.to_string(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.to_string(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        key_id,
+        "node",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node key via admission gate");
 }
 
 /// Register a party from a signer, with the signer's REAL hybrid pubkeys, under
@@ -306,46 +289,29 @@ async fn is_steward_bound_false_when_revoked() {
 /// signer.
 async fn emit_withdraws(engine: &Engine, granter: &LocalSigner, target: &str) {
     let granter_key_id = granter.key_id().to_string();
-    let now = chrono::Utc::now();
     let envelope = serde_json::json!({
         "kind": "withdraws",
         "dimension": "ownership:withdraw:node:v1",
         "attesting_key_id": granter_key_id,
         "node_key_id": target,
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize withdraws");
-    let sig = granter
-        .sign_hybrid(&canonical)
-        .await
-        .expect("sign withdraws");
-    let attestation = Attestation {
-        attestation_id: format!("withdraw-{granter_key_id}-{target}"),
-        attesting_key_id: granter_key_id.clone(),
-        attested_key_id: target.to_string(),
-        attestation_type: attestation_type::WITHDRAWS.to_string(),
-        weight: None,
-        asserted_at: now,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: granter_key_id.clone(),
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        subject_key_ids: vec![target.to_string()],
-        withdraws_admission_rule: None,
-        cohort_scope: "federation".to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation { attestation })
-        .await
-        .expect("put withdraws");
+    let spec = ciris_server::attest::Spec::new(
+        attestation_type::WITHDRAWS,
+        ciris_persist::federation::types::cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about(target);
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
+    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
+    // accepts a shape this server does not produce.
+    ciris_server::attest::emit(
+        engine,
+        ciris_server::attest::KeySigner::Local(granter),
+        spec,
+    )
+    .await
+    .expect("put withdraws");
 }
 
 // ─── (4) the first-run 1-phase claim establishes the owner-binding + cohort ──
@@ -439,6 +405,7 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
         &user,
         node_key_id,
         &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build signed owner-binding");
@@ -586,6 +553,7 @@ async fn claim_rejects_tampered_binding_and_signature() {
         &user,
         node_key_id,
         &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build binding");
@@ -684,6 +652,7 @@ async fn claim_with_agency_scope_built_is_refused_by_builder() {
         &user,
         "ciris-agency-node",
         &["agency:act_on_behalf".to_string()],
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect_err("agency scope must be refused at build time");
@@ -703,6 +672,7 @@ async fn claim_without_cohort_scope_is_rejected() {
         &user,
         node_key_id,
         &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build binding");
@@ -740,6 +710,7 @@ async fn claim_with_wrong_pin_is_rejected() {
         &user,
         node_key_id,
         &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build binding");
@@ -783,6 +754,7 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
         &user,
         node_key_id,
         &infra_scopes(),
+        ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("build signed owner-binding");
@@ -815,10 +787,13 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
 
     // Promote → a FEDERATION-cohort owner-binding is persisted (new id), and the
     // node is still owner-bound to the same user.
-    let promoted =
-        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
-            .await
-            .expect("promote owner-binding");
+    let promoted = ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &engine,
+        &user,
+        node_key_id,
+    )
+    .await
+    .expect("promote owner-binding");
     assert_eq!(promoted.responsible_user_key_id, user_key_id);
     assert!(
         promoted.attestation_id.is_some(),
@@ -839,15 +814,20 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
             .iter()
             .any(|e| e.attestation_type == attestation_type::DELEGATES_TO
                 && e.cohort_scope == cohort_scope::FEDERATION),
-        "a federation-cohort owner-binding now exists (the re-persisted proven envelope \
-         admitted through the federation-tier ingest re-verify gate)"
+        "a federation-cohort owner-binding now exists — freshly signed by the OWNER at the wider \
+         audience. Since CIRISPersist#643 put `cohort_scope` inside the signed mirror, re-filing \
+         the owner's old signature under a new label would have their signature vouching for an \
+         audience they never stated."
     );
 
     // Idempotent: a second promote is a no-op (already federation-scoped).
-    let again =
-        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
-            .await
-            .expect("idempotent re-promote");
+    let again = ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &engine,
+        &user,
+        node_key_id,
+    )
+    .await
+    .expect("idempotent re-promote");
     assert!(
         again.attestation_id.is_none(),
         "re-promote is an idempotent no-op (already federation-scoped)"
@@ -861,10 +841,13 @@ async fn promote_unowned_node_is_refused() {
     let node_key_id = "ciris-promote-unowned";
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
-    let e =
-        ciris_server::auth::ownership::promote_owner_binding_to_federation(&engine, node_key_id)
-            .await
-            .expect_err("promote of an unowned node must fail");
+    let e = ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &engine,
+        &user_signer("ciris-promote-nobody"),
+        node_key_id,
+    )
+    .await
+    .expect_err("promote of an unowned node must fail");
     assert!(matches!(e, OwnershipError::Validation(_)));
 }
 

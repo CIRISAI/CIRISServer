@@ -18,7 +18,9 @@
 //!
 //!   `(attesting_key_id, attested_key_id, dimension, SIGNED assertion instant)`
 //!
-//! and their `original_content_hash` differs. Nothing weaker works. "Same
+//! and their CLAIM differs — see [`claim_view`] for what "the claim" is, and why
+//! `original_content_hash` stopped being able to answer that. Nothing weaker
+//! works than this predicate itself, though: "same
 //! subject and dimension at overlapping validity, different content" — the ask
 //! as first written — fires on every honest restatement: a `capacity:*` row
 //! stays live for seven days while the scorer re-measures hourly, so two live
@@ -198,9 +200,31 @@ fn dimension_of(a: &Attestation) -> Option<String> {
 /// dimension)`. THE predicate — every arm of the detector routes through here,
 /// so there is one place where "what is a contradiction" is decided.
 pub fn classify_pair(a: &Attestation, b: &Attestation) -> PairVerdict {
-    // Identical signed bytes are the same statement however they are dated —
-    // checked first so a duplicate never has to survive the instant logic.
-    if a.original_content_hash == b.original_content_hash {
+    // The same CLAIM is the same statement however it is dated or whichever row
+    // carried it — checked first so a duplicate never has to survive the instant
+    // logic.
+    //
+    // This compared `original_content_hash`, on the reasoning that identical
+    // signed bytes are identical statements. True, and no longer sufficient in
+    // the direction that matters: since CIRISPersist#643 those bytes include the
+    // row's own `attestation_id`, so two byte-identical CLAIMS hash differently
+    // and this arm stopped firing entirely. A peer restating itself, or a
+    // replicated copy of one row, then fell through to the instant logic and was
+    // classified a CONTRADICTION — the detector accusing an honest peer of
+    // equivocating, on a mesh with no one to appeal to.
+    //
+    // `claim_digest` compares the envelope MINUS the row's bookkeeping, through
+    // the substrate's own canonicalizer so two nodes agree on the bytes. The
+    // fallback to the stored hash keeps the old behaviour for an envelope that
+    // will not canonicalize rather than silently calling such a pair distinct.
+    let same_claim = match (
+        claim_digest(&a.attestation_envelope),
+        claim_digest(&b.attestation_envelope),
+    ) {
+        (Some(da), Some(db)) => da == db,
+        _ => a.original_content_hash == b.original_content_hash,
+    };
+    if same_claim {
         return PairVerdict::SameStatement;
     }
     let (Some(ta), Some(tb)) = (
@@ -317,9 +341,26 @@ impl Contradiction {
     }
 }
 
-/// Top-level envelope keys whose values differ (including keys present in only
+/// A stable digest of [`claim_view`] — the replacement for comparing
+/// `original_content_hash`, which now covers the row's identity and so differs
+/// on every pair by construction.
+///
+/// Canonicalized through the SAME producer gate the substrate signs with, so two
+/// nodes computing this over the same claim get the same bytes; a local
+/// `to_string()` would make the answer depend on serde's map ordering.
+fn claim_digest(envelope: &serde_json::Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(
+        &crate::attest::claim_view(envelope),
+    )
+    .ok()?;
+    Some(hex::encode(Sha256::digest(&canonical)))
+}
+
+/// Top-level CLAIM keys whose values differ (including keys present in only
 /// one). Sorted, so the evidence reads the same on every node.
 fn differing_fields(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
+    let (a, b) = (crate::attest::claim_view(a), crate::attest::claim_view(b));
     let (Some(oa), Some(ob)) = (a.as_object(), b.as_object()) else {
         return Vec::new();
     };

@@ -95,7 +95,7 @@ fn node_signer() -> Arc<LocalSigner> {
 }
 
 /// Build an in-memory ciris-server [`Engine`] on the **test-genesis-seam** — NO baked
-/// genesis (persist `with_signer_no_genesis_seed`, CIRISPersist#387). The accord /
+/// genesis (persist `with_signer_pre_genesis`, CIRISPersist#387). The accord /
 /// family / membership / ceremony QA establishes its OWN HUMANITY_ACCORD family + holder
 /// roster from scratch; the prod bake (A1/B1/C1 seats, entrenched family, the 2-of-3
 /// canonical server — persist v13.3.0/#386 + v13.4.0/#390) would otherwise collide with
@@ -103,9 +103,9 @@ fn node_signer() -> Arc<LocalSigner> {
 /// QA's own signatures don't match). Only the node's own key is registered.
 pub async fn node() -> Arc<Engine> {
     let engine = Arc::new(
-        Engine::with_signer_no_genesis_seed(node_signer(), "sqlite::memory:")
+        Engine::with_signer_pre_genesis(node_signer(), "sqlite::memory:")
             .await
-            .expect("Engine::with_signer_no_genesis_seed (sqlite::memory:)"),
+            .expect("Engine::with_signer_pre_genesis (sqlite::memory:)"),
     );
     register_node_self(&engine).await;
     engine

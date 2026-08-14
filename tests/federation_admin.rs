@@ -53,13 +53,19 @@ fn to_persist(v: &VerifySignedKeyRecord) -> SignedKeyRecord {
 const NODE_A_KEY_ID: &str = "ciris-server";
 const PEER_KEY_ID: &str = "ciris-status";
 
+/// This node's deterministic Ed25519 / ML-DSA-65 seeds. Named because
+/// [`self_key_record_json`] must mint the SAME identity the engine signs under —
+/// two copies of a seed is two identities the moment one of them is edited.
+const NODE_ED_SEED: [u8; 32] = [0xA1; 32];
+const NODE_PQC_SEED: [u8; 32] = [0xA2; 32];
+
 /// Stand up THIS node: an in-memory substrate keyed by a HYBRID node-identity
 /// signer so `sign_hybrid` (the self-record + consent emit) works. Mirrors
 /// `tests/peer_replication.rs::node_a`.
 async fn node() -> Arc<Engine> {
-    let signing_key = SigningKey::from_bytes(&[0xA1; 32]);
+    let signing_key = SigningKey::from_bytes(&NODE_ED_SEED);
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_A_KEY_ID}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&NODE_PQC_SEED, format!("{NODE_A_KEY_ID}-pqc"))
             .expect("node ML-DSA-65 seed"),
     );
     let signer = Arc::new(LocalSigner::from_parts(
@@ -89,40 +95,21 @@ async fn node_a_key_id(engine: &Engine) -> String {
 /// `put_attestation` attesting-key FK precondition for the consent emit. Under
 /// the DERIVED key_id (peer.rs's emit now flows through emit_attestation_self).
 async fn register_self(engine: &Engine) {
-    let now = chrono::Utc::now();
     let key_id = node_a_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key via admission gate");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key via admission gate");
 }
 
 /// The responsible-party (owner) user key_id the owner-binding tests use.
@@ -221,38 +208,31 @@ fn owner_user_signer() -> LocalSigner {
 
 /// Build THIS node's own self-signed `SignedKeyRecord` JSON exactly as
 /// `compose::self_key_record_json` does (so the GET served value matches).
+///
+/// Through verify's single-source `produce_self_key_record` — the SAME producer
+/// `compose::build_self_key_record` rides — over an identity minted from the node's
+/// own seeds, so key_id and both pubkeys are this engine's. The hand-rolled
+/// `{"key_id": …}` envelope this used to build was a stale copy of a shape production
+/// left behind: it named neither the identity type nor either pubkey, so the served
+/// record no longer registered anywhere (CIRISPersist#659), which is precisely what
+/// the round-trip test below asks.
 async fn self_key_record_json(engine: &Engine) -> String {
-    let now = chrono::Utc::now();
+    use ciris_crypto::{Ed25519Signer, MlDsa65Signer};
     let key_id = node_a_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine
-        .sign_hybrid(&canonical)
-        .await
-        .expect("self hybrid sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    serde_json::to_string(&SignedKeyRecord { record }).expect("serialize self key record")
+    let identity = HybridSigningIdentity::new(
+        key_id,
+        Ed25519Signer::from_seed(&NODE_ED_SEED).expect("node ed25519 signer"),
+        MlDsa65Signer::from_seed(&NODE_PQC_SEED).expect("node ml-dsa-65 signer"),
+    );
+    let record = produce_self_key_record(
+        &identity,
+        identity_type::STEWARD,
+        &chrono::Utc::now().to_rfc3339(),
+        &[],
+    )
+    .await
+    .expect("produce this node's self-signed key record");
+    serde_json::to_string(&record).expect("serialize self key record")
 }
 
 /// A synthetic PEER's self-signed `SignedKeyRecord` (proof-of-possession) — the
@@ -266,7 +246,23 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
         .expect("peer ML-DSA-65 seed");
 
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    let ed_pub = BASE64.encode(ed.verifying_key().to_bytes());
+    let pqc_pub = BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"));
+    // The peer's registration envelope must BIND ITS SUBJECT — key_id,
+    // identity_type and both pubkeys — or the signature over it stands for any
+    // record it is pasted onto, and this node's admission gate refuses it
+    // (CIRISPersist#659). Bound by persist's OWN binder, the one
+    // `attest::register_key` calls; the door itself is not usable here because
+    // this is the record a REMOTE peer produces and the owner POSTs.
+    let mut envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut envelope,
+        PEER_KEY_ID,
+        identity_type::WITNESS,
+        &ed_pub,
+        Some(&pqc_pub),
+    )
+    .expect("bind the subject into the peer's registration envelope (#659)");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer registration");
     let original_content_hash = hex::encode(Sha256::digest(&canonical));
 
@@ -278,8 +274,8 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
 
     let record = KeyRecord {
         key_id: PEER_KEY_ID.to_string(),
-        pubkey_ed25519_base64: BASE64.encode(ed.verifying_key().to_bytes()),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"))),
+        pubkey_ed25519_base64: ed_pub,
+        pubkey_ml_dsa_65_base64: Some(pqc_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::WITNESS.into(),
         identity_ref: PEER_KEY_ID.to_string(),

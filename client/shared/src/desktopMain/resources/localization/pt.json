@@ -2380,7 +2380,13 @@
     "status_reconfiguring": "Reiniciando seu nó...",
     "status_reconfiguring_timeout": "Seu nó está demorando mais do que o esperado para reiniciar. Por favor, reinicie o aplicativo.",
     "login_setup_complete_relogin": "A configuração foi concluída. O seu nó foi reiniciado, por isso inicie sessão novamente com as mesmas credenciais que utilizou para concluir a configuração.",
-    "accord_new_confer_duty": "Conferir um dever a um ID de federação"
+    "accord_new_confer_duty": "Conferir um dever a um ID de federação",
+    "keyset_import_cancel": "Escolher outra pasta",
+    "keyset_import_confirm": "Inscrever este dispositivo",
+    "keyset_inspect_checking": "A verificar esta pasta…",
+    "keyset_inspect_unavailable": "Não foi possível verificar esta pasta — o nó não respondeu. Isto não diz nada sobre se a sua identidade está lá; pode mesmo assim tentar a importação.",
+    "accord_remint_invalid_title": "Esta semente não pode ser concluída",
+    "accord_remint_invalid_desc": "A assinatura de outro titular NÃO concluirá esta cerimónia — o problema está no próprio pacote. Inicie uma nova cerimónia assim que este for corrigido."
   },
   "nav": {
     "group": {
@@ -3460,7 +3466,9 @@
       "grounds_absent": "grounds é obrigatório. Uma objeção levantada sem motivo registrado é indistinguível de uma levantada por um motivo ruim — e os fundamentos são registrados, nunca interpretados.",
       "node_unowned": "Este nó não tem responsável (vínculo de propriedade), portanto não lê nem fala no bem comum de ninguém em nome de outrem. Reivindique a propriedade primeiro.",
       "not_owner": "A superfície do bem comum exige o papel de proprietário (SYSTEM_ADMIN).",
-      "objection_absent": "objection_id é obrigatório: um voto responde a uma pergunta sobre UMA objeção."
+      "objection_absent": "objection_id é obrigatório: um voto responde a uma pergunta sobre UMA objeção.",
+      "stamped_envelope_mismatch": "o `stamped_envelope` devolvido não descreve a dispensa desta solicitação. Execute novamente a simulação para ESTES campos e peça aos cossignatários que assinem o que ela retornar.",
+      "stamped_envelope_required": "foram fornecidas cossinaturas sem o `stamped_envelope` sobre o qual foram feitas. Execute a simulação, peça aos cossignatários que assinem o `envelope` que ela retornar e devolva esse envelope junto com os scrubs deles — caso contrário, as assinaturas deles cobrem bytes que este envio não carrega e o quórum conta uma em silêncio."
     },
     "standing": {
       "action_unknown": "Este nó não mantém tal ação. Uma objeção nomeia uma linha, e aqui não há linha alguma a nomear.",
@@ -3871,7 +3879,8 @@
       "incomplete_pair": "São necessários tanto o fornecedor como o id da conta. Metade de um par associa uma conta que nada volta a encontrar.",
       "no_such_identity": "Não existe essa identidade neste nó à qual associar a conta.",
       "node_unowned": "Este nó ainda não tem proprietário, pelo que não há nenhuma identidade à qual associar uma conta. Reivindique primeiro o nó.",
-      "store_unavailable": "O nó não conseguiu escrever a associação porque o seu repositório de identidades está indisponível. Nada foi alterado."
+      "store_unavailable": "O nó não conseguiu escrever a associação porque o seu repositório de identidades está indisponível. Nada foi alterado.",
+      "not_delegatable": "Vincular uma identidade de início de sessão é um ato próprio do titular. Uma sessão delegada não pode fazê-lo — o vínculo dura mais do que a delegação, portanto entregaria acesso permanente a quem detém uma concessão temporária."
     },
     "session_expired": "A sua sessão já não é válida. Inicie sessão novamente para continuar.",
     "browser_signin": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Esse não é um dever que esta malha reconhece. Concedê-lo apareceria como autoridade aqui e seria recusado em todos os portões.",
       "pkcs11_required": "Conferir um dever exige o recurso `pkcs11` — o titular assina com a sua YubiKey mais a metade ML-DSA guardada no USB, exatamente como faz a cerimônia canônica de co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "qual raiz? o caminho deve indicar o root_key_id cuja confiança será removida"
   }
 }

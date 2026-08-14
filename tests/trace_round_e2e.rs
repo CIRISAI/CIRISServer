@@ -171,9 +171,14 @@ fn arm_test_trust_root(holders: &[ciris_persist::federation::operational::test_s
 async fn confer_roles(on: &Node, who: &Node, roles: &[&str]) {
     use ciris_persist::federation::operational::test_support::signed_canonical_record_with_roles;
     let holders = genesis_holders();
+    // persist v31.0.0 (#659): the registration envelope now binds `key_id` AND
+    // both pubkey legs, so the fixture must pass the subject's real pubkeys.
+    // Before, an authority's signature over any envelope lifted onto any row.
     let rec = signed_canonical_record_with_roles(
         &who.key_id,
         identity_type::NODE,
+        &who.ed_pub,
+        Some(&who.pqc_pub),
         roles.iter().map(|r| (*r).to_owned()).collect(),
         serde_json::json!({ "key_id": who.key_id, "conferred_by": "test-anchor-genesis" }),
         &[&holders[0], &holders[1]], // 2-of-3
@@ -392,7 +397,11 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         "subject_key_ids": [agent.key_id],
         "score": 1.0,
         "cohort_scope": cohort_scope::SELF,
-        "asserted_at": chrono::Utc::now().to_rfc3339(),
+        // NO `asserted_at` here: the emit chokepoint stamps it, TRUNCATED to the
+        // microsecond floor postgres can hold. A producer that writes the field
+        // itself is honoured rather than overwritten, so a hand-written
+        // `Utc::now()` put nanoseconds into the signed bytes — which persist v31
+        // refuses outright rather than rounding (CIRISPersist#598).
     });
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trace_envelope)
         .expect("trace envelope");

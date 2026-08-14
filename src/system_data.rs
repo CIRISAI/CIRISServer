@@ -40,8 +40,27 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
 
-/// Owner gate — SYSTEM_ADMIN + FullAccess (mirrors `portable_occurrence::require_owner`).
-async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Response> {
+/// Owner gate — SYSTEM_ADMIN + FullAccess, and **the caller must be the owner
+/// themselves, not a delegate acting for them**.
+///
+/// Returns the [`SessionCaller`] rather than `()`. That is the fix, not a
+/// refactor: this returned `Result<(), Response>` and threw the caller away, so
+/// `require_verb` could not be applied here even in principle — and
+/// [`CapabilityVerb::Wipe`] is on the NEVER-DELEGATABLE list
+/// ([`crate::auth::gate::CapabilityVerb::never_delegatable`]), whose own doc
+/// names "`/v1/system/data/*`" as the surface it protects.
+///
+/// The consequence was that a device-grant bearer with the narrowest possible
+/// allow-list could POST `/v1/system/data/wipe-signing-key` and permanently
+/// destroy this node's identity keys — `resolve_bearer` hands a `dgrant:` token
+/// the owner's role and FullAccess by design, and the grant's own allow-list is
+/// only consulted by the verb gate that was absent. Both the server floor and the
+/// grant's constraints were bypassed by omission. `admin_ops` gates the identical
+/// act correctly, which is what makes this an oversight rather than a policy.
+async fn require_owner(
+    engine: &Engine,
+    headers: &HeaderMap,
+) -> Result<crate::auth::session::SessionCaller, Response> {
     use crate::auth::roles::{Permission, UserRole};
     use crate::auth::session::resolve_bearer;
 
@@ -58,11 +77,17 @@ async fn require_owner(engine: &Engine, headers: &HeaderMap) -> Result<(), Respo
     };
     match resolve_bearer(engine, token).await {
         Ok(Some(caller))
-            if caller.role == UserRole::SystemAdmin
+            if caller.actor.is_none()
+                && caller.role == UserRole::SystemAdmin
                 && caller.permissions.contains(&Permission::FullAccess) =>
         {
-            Ok(())
+            Ok(caller)
         }
+        Ok(Some(caller)) if caller.actor.is_some() => Err(err(
+            StatusCode::FORBIDDEN,
+            "wiping this node's data or signing keys is the owner's own act and is never \
+             delegatable — a delegated session cannot perform it, whatever its grant permits",
+        )),
         Ok(Some(_)) => Err(err(
             StatusCode::FORBIDDEN,
             "data wipe requires the owner (SYSTEM_ADMIN) role",
@@ -123,7 +148,16 @@ async fn reset_account(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = require_owner(&st.engine, &headers).await {
+    let caller = match require_owner(&st.engine, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    // Belt and braces: the gate above refuses a delegated session outright, and
+    // this asks the verb question the never-list answers, so a future change to
+    // either one alone cannot re-open the path.
+    if let Some(resp) =
+        crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Wipe)
+    {
         return resp;
     }
     let req: ResetAccountRequest = serde_json::from_slice(&body).unwrap_or(ResetAccountRequest {
@@ -209,7 +243,13 @@ async fn wipe_signing_key(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = require_owner(&st.engine, &headers).await {
+    let caller = match require_owner(&st.engine, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    if let Some(resp) =
+        crate::auth::gate::require_verb(&caller, crate::auth::gate::CapabilityVerb::Wipe)
+    {
         return resp;
     }
     let req: WipeSigningKeyRequest =

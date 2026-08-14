@@ -1159,6 +1159,145 @@ async fn admit_node_impl(
 /// the co-scrub propose/cosign — the touch-required tap on the first `sign_bound`
 /// IS the holder's consent. Returns `(status, message)` on any open failure.
 #[cfg(feature = "pkcs11")]
+/// **Step zero of any ceremony: does THIS build compute a signable digest?**
+///
+/// `authorization_digest` returned the canonical PREIMAGE until persist
+/// v31.2.0 — thousands of bytes, growing with the bundle. A build linked to an
+/// older persist therefore signs different bytes than a current verifier
+/// recomputes, and every authorization it takes is dead on arrival.
+///
+/// That is not a theoretical drift. On 2026-08-14 a full two-holder ceremony was
+/// run on a wheel whose pin was in doubt, and the question "which persist did
+/// that seed come from?" cost a diagnosis on both sides of the substrate — after
+/// the keys had already been touched. The check that would have answered it
+/// instantly is a length: 32 means the hashing form, anything else means this
+/// build predates it.
+///
+/// So it runs BEFORE the YubiKey is opened, on persist's own baked bundle (no
+/// ceremony state needed), and refuses with the number it actually got. A key
+/// tap is a person walking to a safe; spend it only on a build that can produce
+/// a valid signature.
+fn preflight_digest_is_signable() -> Result<(), String> {
+    const EXPECTED: usize = 32; // SHA-256
+    let baked = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let len = crate::mesh_genesis::authorization_digest(baked)
+        .map_err(|e| format!("this build cannot compute an authorization digest at all: {e}"))?
+        .len();
+    if len != EXPECTED {
+        return Err(format!(
+            "REFUSING to spend a holder key: this build's authorization_digest returns \
+             {len} bytes, not {EXPECTED}. It links a persist older than v31.2.0, which \
+             signs the canonical preimage rather than its SHA-256 — so every signature \
+             this ceremony took would be over bytes a current verifier does not \
+             recompute, and the seed would be unusable. Rebuild against persist \
+             v31.2.0 or later, then re-run."
+        ));
+    }
+    Ok(())
+}
+
+/// How many PIN attempts the inserted PIV token has left, read WITHOUT a PIN.
+///
+/// `ykman piv info` prints `PIN tries remaining:      2/3` and needs no
+/// authentication to say so. Returns None when there is no token, no `ykman`,
+/// or the line is not where we expect it — this informs messages, it never
+/// gates on its own.
+fn piv_pin_tries_remaining() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("ykman")
+        .args(["piv", "info"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let raw = text
+        .lines()
+        .find(|l| l.to_ascii_lowercase().contains("pin tries remaining"))?
+        .rsplit(':')
+        .next()?
+        .trim()
+        .to_string();
+    let (a, b) = raw.split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// The Ed25519 public key sitting in the token's PIV slot, base64 of the raw 32
+/// bytes — the same encoding a `KeyRecord` carries. Readable with NO PIN.
+///
+/// Ed25519 SubjectPublicKeyInfo is a fixed 12-byte header followed by the key,
+/// so the raw key is the trailing 32 bytes of the DER.
+fn piv_slot_pubkey_b64(slot: &str) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let out = std::process::Command::new("ykman")
+        .args(["piv", "keys", "export", slot, "-"])
+        .output()
+        .ok()?;
+    let pem = String::from_utf8_lossy(&out.stdout);
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .concat();
+    let der = B64.decode(body.trim()).ok()?;
+    if der.len() < 32 {
+        return None;
+    }
+    Some(B64.encode(&der[der.len() - 32..]))
+}
+
+/// **Do not spend a PIN attempt discovering the wrong key is inserted.**
+///
+/// A PIV PIN locks after three wrong tries and then needs the PUK. On
+/// 2026-08-14 an operator had B1's YubiKey in the slot with the card set to A1,
+/// typed A1's PIN, and burned one of B1's three attempts to find out — the only
+/// signal being a `C_Login` failure the card never displayed.
+///
+/// Both facts needed to prevent that are readable with NO PIN: the slot's public
+/// key, and the tries remaining.
+///
+/// **This refuses only on POSITIVE identification** — the inserted key parsed
+/// cleanly AND matches a DIFFERENT holder in the roster. Anything else (no
+/// `ykman`, no token, an unreadable slot, a key matching nobody) returns Ok and
+/// lets the normal path run. A guard on the ceremony's critical path must fail
+/// open: refusing a legitimate holder because a subprocess printed something
+/// unexpected would be worse than the hazard it prevents.
+fn piv_preflight_matches_holder(expected_key_id: &str, piv_slot: &str) -> Result<(), String> {
+    let roster = ciris_persist::federation::genesis::effective_accord_holder_records();
+    // Only meaningful when the caller names a seated holder; otherwise there is
+    // no roster to be wrong about.
+    let expected = match roster.iter().find(|h| h.record.key_id == expected_key_id) {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let inserted = match piv_slot_pubkey_b64(piv_slot) {
+        Some(k) => k,
+        None => return Ok(()), // could not look — not the same as "wrong key"
+    };
+    if inserted == expected.record.pubkey_ed25519_base64 {
+        return Ok(());
+    }
+    // It is not the expected holder. Refuse ONLY if we can say who it IS.
+    let actual = roster
+        .iter()
+        .find(|h| h.record.pubkey_ed25519_base64 == inserted);
+    match actual {
+        Some(other) => {
+            let tries = piv_pin_tries_remaining()
+                .map(|(n, m)| format!(" This token has {n} of {m} PIN attempts left."))
+                .unwrap_or_default();
+            Err(format!(
+                "the YubiKey in the reader is {}, but this step is signing as {}. \
+                 No PIN attempt has been spent. Insert {}'s YubiKey (and its USB), \
+                 or switch this step to {}.{tries}",
+                other.record.key_id, expected_key_id, expected_key_id, other.record.key_id,
+            ))
+        }
+        // Parsed a key that belongs to no seated holder. Could equally be a
+        // format we do not understand, so let the normal path decide.
+        None => Ok(()),
+    }
+}
+
 pub(crate) async fn open_holder_identity(
     key_id: &str,
     usb_path: &str,
@@ -1199,16 +1338,37 @@ pub(crate) async fn open_holder_identity(
         provision: false,
         ..Pkcs11Options::default()
     };
+    // BEFORE the PIN is spent: is this even the right token? See
+    // `piv_preflight_matches_holder` — refuses only on positive identification.
+    if let Err(msg) = piv_preflight_matches_holder(key_id, &piv_slot) {
+        return Err((StatusCode::BAD_REQUEST, msg));
+    }
+
     let yubikey_ed = match crate::identity::open_yubikey_ed25519_signer(opts) {
         Ok(s) => Arc::<dyn ciris_keyring::HardwareSigner>::from(s),
         Err(e) => {
+            // A wrong PIN costs one of three attempts and the operator cannot
+            // see the counter. Say what it is now, while there is still a
+            // decision to make — "2 left" and "1 left before lockout" call for
+            // very different next moves.
+            let tries = match piv_pin_tries_remaining() {
+                Some((0, _)) => " This token's PIN is now LOCKED — unlock it with the PUK \
+                                  (`ykman piv access unblock-pin`) before retrying."
+                    .to_string(),
+                Some((1, m)) => format!(
+                    " WARNING: 1 of {m} PIN attempts left — one more wrong PIN LOCKS this \
+                     token and it will need the PUK."
+                ),
+                Some((n, m)) => format!(" {n} of {m} PIN attempts remain."),
+                None => String::new(),
+            };
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
                     "couldn't open your YubiKey's slot-{piv_slot} key: {e} — is the YubiKey \
-                     inserted and the PIN correct?"
+                     inserted and the PIN correct?{tries}"
                 ),
-            ))
+            ));
         }
     };
     let mldsa =
@@ -2292,7 +2452,34 @@ async fn genesis_ceremony_response(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let have = bundle.authorizations.len();
-    let complete = crate::mesh_genesis::verify_bundle(&bundle).is_ok();
+    // TWO questions, and `.is_ok()` used to collapse them into one answer:
+    //
+    //   1. "does this bundle still need signatures?"   → have < needed
+    //   2. "is this bundle valid?"                     → everything else
+    //
+    // A card holding one boolean renders both as "not done yet", so a bundle
+    // failing (2) sent an operator to fetch a holder that cannot help — measured
+    // during the 2026-08-14 ceremony, where `have=2 needed=2 complete=false` was
+    // read as a quorum shortfall when it was CIRISPersist#683. So keep the
+    // REASON: `blocked_by` is None when only more signatures are wanted, and
+    // carries the verifier's own words when the bundle is the problem.
+    let verdict = crate::mesh_genesis::verify_bundle(&bundle);
+    let complete = verdict.is_ok();
+    let blocked_by = match &verdict {
+        Ok(()) => None,
+        // A genuine shortfall is not a fault — the ceremony is simply mid-flight.
+        Err(crate::mesh_genesis::GenesisError::QuorumNotMet { .. }) => None,
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(reason) = &blocked_by {
+        tracing::error!(
+            have,
+            needed,
+            reason = %reason,
+            "Trust Root: this genesis is INVALID — another holder's signature will NOT \
+             complete it. Fix the bundle, then re-run the ceremony."
+        );
+    }
     let fingerprint = crate::mesh_genesis::fingerprint(&bundle).unwrap_or_default();
 
     // On completion the minting node adopts the root its holders just created:
@@ -2352,6 +2539,9 @@ async fn genesis_ceremony_response(
             "authorizations_have": have,
             "authorizations_needed": needed,
             "complete": complete,
+            // Absent while the ceremony is merely mid-flight; present when the
+            // bundle itself is the problem and MORE SIGNATURES WILL NOT HELP.
+            "blocked_by": blocked_by,
             "fingerprint": fingerprint,
             // The root this node now trusts (empty until the ceremony completes).
             "node_trusts_root": trusts_root,
@@ -2383,7 +2573,7 @@ async fn propose_genesis_impl(_st: ProvisionState, _req: ProposeGenesisRequest) 
 
 #[cfg(feature = "pkcs11")]
 async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) -> Response {
-    use ciris_persist::federation::types::{attestation_type, Attestation, SignedAttestation};
+    use ciris_persist::federation::types::{attestation_type, SignedAttestation};
     use ciris_verify_core::self_at_login::SelfSigner;
 
     let holders = ciris_persist::federation::genesis::effective_accord_holder_records();
@@ -2440,6 +2630,10 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     };
     let serve_key_id = serve_rec.key_id.clone();
 
+    // Step zero — BEFORE the key is opened. See `preflight_digest_is_signable`.
+    if let Err(e) = preflight_digest_is_signable() {
+        return err(StatusCode::FAILED_DEPENDENCY, &e);
+    }
     let identity = match open_holder_identity(&root, &req.mldsa_usb_path, &req.pkcs11).await {
         Ok(i) => i,
         Err((code, msg)) => return err(code, &msg),
@@ -2528,42 +2722,40 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
         envelope: serde_json::Value,
         att_type: &str,
     ) -> Result<SignedAttestation, String> {
-        use sha2::Digest as _;
-        let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-            .map_err(|e| format!("canonicalize {id}: {e}"))?;
+        // ── Through the ONE door (CIRISServer#402) ────────────────────────────
+        //
+        // This is the CEREMONY path, and it is the one place where hand-rolling
+        // the row was not merely untidy but disqualifying: persist v31 refuses
+        // any attestation carrying no signed typed-column mirror, so a bundle
+        // built the old way produces rows that "can never be installed" — a root
+        // that reads Entrenched, renders no banner, and confers nothing
+        // (CIRISPersist#648). The genesis bundle must be v31-shaped or the
+        // ceremony is theatre.
+        //
+        // The symbolic id is preserved deliberately; see `Emit::with_row_id`.
+        let mut spec = crate::attest::Spec::new(
+            att_type,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        .weighing(Some(1.0));
+        spec.attested_key_id = Some(attested_key_id.to_string());
+        // NOT `Spec::about`: a ceremony row attests the family and names NO
+        // subject. `subject_key_ids` grants revocation authority, and CIRISPersist
+        // #658's authority-injection case is precisely a key appended there — the
+        // charter that grants everything is the last row to hand that out.
+        let stamped = crate::attest::Emit::stamp(signer.key_id(), spec)
+            .and_then(|e| e.with_row_id(id))
+            .map_err(|e| format!("stamp {id}: {e}"))?;
+
         let (ed, pqc) = signer
-            .sign_bound(&canonical)
+            .sign_bound(stamped.canonical())
             .await
             .map_err(|e| format!("sign {id}: {e}"))?;
-        let now = chrono::Utc::now();
-        Ok(SignedAttestation {
-            attestation: Attestation {
-                attestation_id: id.to_string(),
-                attesting_key_id: signer.key_id().to_string(),
-                attested_key_id: attested_key_id.to_string(),
-                attestation_type: att_type.to_string(),
-                weight: Some(1.0),
-                asserted_at: now,
-                // Deliberately no expiry on the charter/grant themselves: the
-                // revocable, user-owned act is the `delegates_to(user → root)`
-                // trust edge, which the operator writes on attach and can delete.
-                expires_at: None,
-                attestation_envelope: envelope,
-                original_content_hash: hex::encode(sha2::Sha256::digest(&canonical)),
-                scrub_signature_classical: ed,
-                scrub_signature_pqc: Some(pqc),
-                scrub_key_id: signer.key_id().to_string(),
-                additional_scrubs: Vec::new(),
-                scrub_timestamp: now,
-                pqc_completed_at: Some(now),
-                persist_row_hash: String::new(),
-                subject_key_ids: Vec::new(),
-                withdraws_admission_rule: None,
-                cohort_scope: "federation".to_string(),
-                tier: ciris_persist::federation::types::attestation_tier::FEDERATION.to_string(),
-                promoted_at: None,
-            },
-        })
+        let row = stamped
+            .assemble_from_b64(&ed, &pqc)
+            .map_err(|e| format!("assemble {id}: {e}"))?;
+        Ok(SignedAttestation { attestation: row })
     }
 
     let family_key_id =
@@ -2766,6 +2958,10 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
             StatusCode::BAD_REQUEST,
             &format!("{key_id} is not a holder carried in this genesis"),
         );
+    }
+    // Step zero — BEFORE the key is opened. See `preflight_digest_is_signable`.
+    if let Err(e) = preflight_digest_is_signable() {
+        return err(StatusCode::FAILED_DEPENDENCY, &e);
     }
     let identity = match open_holder_identity(key_id, &req.mldsa_usb_path, &req.pkcs11).await {
         Ok(i) => i,

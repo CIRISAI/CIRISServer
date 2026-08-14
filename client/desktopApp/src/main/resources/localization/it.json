@@ -260,7 +260,8 @@
       "incomplete_pair": "Sono richiesti sia il provider sia l'ID dell'account. Metà di una coppia collega un account che poi nulla potrà più ritrovare.",
       "no_such_identity": "Su questo nodo non esiste un'identità a cui collegare l'account.",
       "node_unowned": "Questo nodo non ha ancora un proprietario, quindi non esiste alcuna identità a cui collegare un account. Rivendica prima il nodo.",
-      "store_unavailable": "Il nodo non è riuscito a scrivere il collegamento perché il suo archivio delle identità non è disponibile. Non è stata apportata alcuna modifica."
+      "store_unavailable": "Il nodo non è riuscito a scrivere il collegamento perché il suo archivio delle identità non è disponibile. Non è stata apportata alcuna modifica.",
+      "not_delegatable": "Il collegamento di un'identità di accesso è un atto che spetta solo al proprietario. Una sessione delegata non può eseguirlo: il collegamento sopravvive alla delega e concederebbe quindi un accesso permanente a chi detiene un'autorizzazione temporanea."
     },
     "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare."
   },
@@ -394,7 +395,9 @@
       "steward_tier_not_adopted": "Questa comunità non ha dichiarato alcun livello di steward, quindi non esiste alcun termine oltre il quale restare in silenzio né alcun bacino di escalation. Un voto qui verrebbe conservato e mai letto.",
       "store_unavailable": "Non è stato possibile raggiungere il substrato.",
       "target_action_unknown": "L'azione contestata non è una riga che questo nodo detiene, quindi l'obiezione sarebbe non conteggiabile e la sua finestra non risolvibile.",
-      "unverifiable_signature": "La firma della riga non è stata verificata rispetto alle chiavi del firmatario così come registrate su questo nodo."
+      "unverifiable_signature": "La firma della riga non è stata verificata rispetto alle chiavi del firmatario così come registrate su questo nodo.",
+      "stamped_envelope_mismatch": "lo `stamped_envelope` restituito non descrive la rimozione indicata in questa richiesta. Esegui di nuovo l'esecuzione di prova per QUESTI campi e fai firmare ai co-firmatari ciò che restituisce.",
+      "stamped_envelope_required": "sono state fornite co-firme senza lo `stamped_envelope` su cui erano state apposte. Esegui l'esecuzione di prova, fai firmare ai co-firmatari l'`envelope` che restituisce e reinvia quell'envelope insieme ai loro scrub: altrimenti le loro firme coprono byte che questo invio non contiene e il quorum ne conta silenziosamente una."
     },
     "standing": {
       "action_unknown": "Questo nodo non detiene alcuna azione di questo tipo. Un'obiezione indica una riga, e qui non c'è alcuna riga da indicare.",
@@ -2680,7 +2683,13 @@
     "wallet_trust_degraded": "Fiducia Hardware Degradata",
     "wallet_warning": "Avviso",
     "login_setup_complete_relogin": "La configurazione è completata. Il tuo nodo è stato riavviato: accedi di nuovo con le stesse credenziali che hai usato per completare la configurazione.",
-    "accord_new_confer_duty": "Conferisci un dovere a un ID di federazione"
+    "accord_new_confer_duty": "Conferisci un dovere a un ID di federazione",
+    "keyset_import_cancel": "Scegli un'altra cartella",
+    "keyset_import_confirm": "Registra questo dispositivo",
+    "keyset_inspect_checking": "Controllo di questa cartella in corso…",
+    "keyset_inspect_unavailable": "Non è stato possibile controllare questa cartella: il nodo non ha risposto. Questo non dice nulla sul fatto che la tua identità sia presente o meno; puoi comunque provare l'importazione.",
+    "accord_remint_invalid_desc": "La firma di un altro titolare NON completerà questa cerimonia — il problema è il bundle stesso. Avvia una nuova cerimonia una volta risolto.",
+    "accord_remint_invalid_title": "Impossibile completare questo seed"
   },
   "moderation": {
     "ladder": {
@@ -3951,5 +3960,8 @@
       "unknown_duty": "Questo non è un dovere riconosciuto da questa mesh. Concederlo apparirebbe qui come autorità e verrebbe rifiutato a ogni porta.",
       "pkcs11_required": "Il conferimento di un dovere richiede la funzionalità `pkcs11`: il titolare firma con la propria YubiKey e con la metà ML-DSA incapsulata nella USB, esattamente come avviene nella cerimonia canonica di co-scrub."
     }
+  },
+  "trust_root": {
+    "no_root": "quale root? il percorso deve specificare il root_key_id di cui revocare la fiducia"
   }
 }

@@ -54,9 +54,8 @@ use ciris_persist::federation::reverse_quorum::{
     ESCALATION_RESPONDENT_FLOOR, OBJECTION_THRESHOLD,
 };
 use ciris_persist::federation::types::{
-    algorithm, attestation_tier, attestation_type, cohort_scope, identity_type, Attestation,
-    Community, CommunityMember, KeyRecord, ScrubSig, SignedAttestation, SignedCommunity,
-    SignedKeyRecord,
+    algorithm, attestation_type, cohort_scope, identity_type, Attestation, Community,
+    CommunityMember, KeyRecord, ScrubSig, SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::Cohort;
 use ciris_persist::prelude::{Engine, LocalSigner};
@@ -197,37 +196,21 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
 }
 
 async fn register_self(engine: &Engine) {
-    let now = Utc::now();
     let key_id = node_key_id(engine).await;
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
-    let sig = engine.sign_hybrid(&canonical).await.expect("self sign");
-    let record = KeyRecord {
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: BASE64.encode(&sig.classical.public_key),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(&sig.pqc.public_key)),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::STEWARD.into(),
-        identity_ref: key_id.clone(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id.clone(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    engine
-        .register_federation_key(SignedKeyRecord { record })
-        .await
-        .expect("register node steward key");
+    // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
+    // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
+    // identity type nor either pubkey, and persist v31 refuses it — an envelope
+    // that does not name its subject stands for any record it is pasted onto
+    // (CIRISPersist#659).
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Engine(engine),
+        &key_id,
+        identity_type::STEWARD,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register node steward key");
 }
 
 async fn bind_owner(engine: &Engine) {
@@ -345,45 +328,49 @@ async fn emit_action(
         "attested_key_id": key_id,
         "nonce": id,
     });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize action envelope");
-    let sig = author.sign_hybrid(&canonical).await.expect("sign action");
-    let attestation = Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: key_id.clone(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: Some(1.0),
-        asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    };
-    engine
-        .federation_directory()
-        .put_attestation(SignedAttestation {
-            attestation: attestation.clone(),
-        })
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        cohort_scope::FEDERATION,
+        envelope,
+    );
+    spec.attested_key_id = Some(key_id.to_string());
+    spec.subject_key_ids = Vec::new();
+    let spec = spec.weighing(Some(1.0));
+    // Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+    // row carried no signed `asserted_at` and no typed-column mirror — persist v31
+    // refuses both (CIRISPersist#598/#643), so the fixture was proving the substrate
+    // accepts a shape this server does not produce.
+    //
+    // The ROW is returned, not just its id: callers read `attestation_id`,
+    // `attesting_key_id` and `asserted_at` off it — and `asserted_at` is now the
+    // stamped, truncated instant rather than a second clock read, which is the
+    // point.
+    // `stamp_at`, not `stamp`: callers choose the action's instant and the whole
+    // escalation clock is a function of it, so letting the door read the wall
+    // clock instead would silently discard the argument.
+    let row = ciris_server::attest::Emit::stamp_at(author.key_id(), spec, asserted_at)
+        .expect("stamp action")
+        .sign_and_assemble(ciris_server::attest::KeySigner::Local(author))
+        .await
+        .expect("sign action");
+    ciris_server::attest::put(engine, row.clone())
         .await
         .expect("put action");
-    attestation
+    row
 }
 
 /// Sign one envelope as `signer` and wrap it as a row on this plane. Used for
 /// the PEERS' rows — the ones that would arrive over replication — so their
 /// signatures are genuine and persist re-verifies each against this node's
 /// registered pubkeys.
+///
+/// Through the ONE door (CIRISServer#402). Hand-rolled beside its envelope, this
+/// row carried no signed `asserted_at` and no typed-column mirror — persist v31
+/// refuses both (CIRISPersist#598/#643), so the peers' rows were a shape no peer
+/// could actually have sent.
+///
+/// The symbolic `id` is preserved: a ballot names the objection it answers BY
+/// ID, so these ids are wiring, not decoration.
 async fn peer_row(
     signer: &LocalSigner,
     envelope: serde_json::Value,
@@ -391,32 +378,21 @@ async fn peer_row(
     actor: &str,
     asserted_at: DateTime<Utc>,
 ) -> Attestation {
-    let key_id = signer.key_id().to_string();
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer row");
-    let sig = signer.sign_hybrid(&canonical).await.expect("sign peer row");
-    Attestation {
-        attestation_id: id.to_string(),
-        attesting_key_id: key_id.clone(),
-        attested_key_id: actor.to_string(),
-        attestation_type: attestation_type::SCORES.to_string(),
-        weight: None,
+    ciris_server::attest::Emit::stamp_at(
+        signer.key_id(),
+        ciris_server::attest::Spec::new(
+            attestation_type::SCORES,
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .attested_to(actor),
         asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: BASE64.encode(&sig.classical.signature),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
-        scrub_key_id: key_id,
-        additional_scrubs: Vec::new(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: Some(asserted_at),
-        persist_row_hash: String::new(),
-        subject_key_ids: Vec::new(),
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::FEDERATION.to_string(),
-        tier: attestation_tier::FEDERATION.to_string(),
-        promoted_at: None,
-    }
+    )
+    .and_then(|e| e.with_row_id(id))
+    .unwrap_or_else(|e| panic!("stamp peer row {id}: {e}"))
+    .sign_and_assemble(ciris_server::attest::KeySigner::Local(signer))
+    .await
+    .unwrap_or_else(|e| panic!("sign peer row {id}: {e}"))
 }
 
 /// A peer raises an objection through persist's own 1-of-N door.
@@ -637,8 +613,9 @@ fn dismissal_body(
     objection_id: &str,
     scrubs: Vec<ScrubSig>,
     dry_run: bool,
+    stamped_envelope: Option<serde_json::Value>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "cohort": "community",
         "cohort_key_id": community,
         "action_id": action_id,
@@ -646,11 +623,27 @@ fn dismissal_body(
         "grounds": "the cohort holds that this objection does not stand",
         "additional_scrubs": scrubs,
         "dry_run": dry_run,
-    })
+    });
+    // Echo the dry run's envelope back. The stamp mints the row id and the
+    // instant, so a second stamp is a different document and every co-signature
+    // over the first verifies against nothing (CIRISPersist#598/#643).
+    if let Some(e) = stamped_envelope {
+        body["stamped_envelope"] = e;
+    }
+    body
 }
 
 /// Ask the route for the canonical bytes, have `cosigners` sign exactly those,
-/// and submit. The m-of-n is over these bytes and no others.
+/// and submit — echoing the dry run's envelope back so the submission carries the
+/// document they signed.
+///
+/// The echo is the contract, not a convenience. The emit stamp mints the row id
+/// and the instant AT STAMP TIME (CIRISPersist#598/#643), and persist re-verifies
+/// base and additional scrubs alike over the STORED envelope. So a submission
+/// that re-stamps carries bytes no co-signer ever saw: the node's own scrub
+/// counts and every other verifies against nothing, and the m-of-n silently
+/// counts one — the quorum failing OPEN on the operator, which is the direction
+/// that matters for a moderation gate.
 async fn node_dismisses(
     f: &Fixture,
     community: &str,
@@ -661,7 +654,7 @@ async fn node_dismisses(
     let (status, dry) = post(
         f,
         ROUTE_DISMISS,
-        &dismissal_body(community, action_id, objection_id, Vec::new(), true),
+        &dismissal_body(community, action_id, objection_id, Vec::new(), true, None),
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "dry-run: {dry}");
@@ -685,7 +678,14 @@ async fn node_dismisses(
     post(
         f,
         ROUTE_DISMISS,
-        &dismissal_body(community, action_id, objection_id, scrubs, false),
+        &dismissal_body(
+            community,
+            action_id,
+            objection_id,
+            scrubs,
+            false,
+            Some(envelope),
+        ),
     )
     .await
 }
@@ -970,7 +970,13 @@ async fn property_3_silence_escalates_and_counts_respondents_not_roster() {
     assert_eq!(status, reqwest::StatusCode::OK, "{raised}");
     let objection_id = raised["objection_id"].as_str().expect("id").to_owned();
 
-    let deadline = t0 + Duration::seconds(WINDOW_SECS + STEWARD_SECS);
+    // Off the ACTION's own instant, not off `t0`. The two differ now: the emit
+    // door truncates `asserted_at` to the substrate's microsecond resolution
+    // before signing it (CIRISPersist#598), so the row's instant is `t0` minus
+    // its nanoseconds — and the deadline the route reports is a function of the
+    // row. Recomputing it from the raw clock read asserted a deadline for a
+    // different action.
+    let deadline = action.asserted_at + Duration::seconds(WINDOW_SECS + STEWARD_SECS);
 
     // ── BEFORE the deadline. The duty-holders may still answer. This is the
     //    healthy in-progress state and must NOT read as silence.

@@ -1002,6 +1002,11 @@ class AccordViewModel(
             // Sticky: once any step re-blessed the canonical, the whole ceremony did.
             serveNodeReblessed = res.serveNodeReblessed ||
                 (_genesisSeed.value?.serveNodeReblessed ?: false),
+            // NOT sticky — the opposite of serveNodeReblessed. This is the
+            // CURRENT verdict on the CURRENT bundle: a later step that fixes the
+            // bundle must clear it, or the card would keep telling the operator
+            // the seed is unrepairable after it stopped being so.
+            blockedBy = res.blockedBy,
         )
     }
 

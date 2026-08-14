@@ -19,7 +19,7 @@
 //! the CALLER's concern (the family's `consensus_protocol`), not this module's —
 //! these are the mechanism, the policy lives in the specialization.
 
-use ciris_persist::federation::cohort::{Cohort, RevokeSpec, RosterMember};
+use ciris_persist::federation::cohort::{AdmitSpec, Cohort, RevokeSpec, RosterMember};
 use ciris_persist::federation::types::Family;
 use ciris_persist::federation::Error as FedError;
 use ciris_persist::prelude::Engine;
@@ -73,14 +73,28 @@ pub async fn lookup(engine: &Engine, family_key_id: &str) -> Result<Option<Famil
 /// Add one identity to a family roster (idempotent on `member.key_id` — an existing
 /// member is a no-op returning `Ok(false)`). The family must exist. Substrate-native
 /// via the uniform cohort surface (CIRISPersist#249 G1).
+///
+/// # `spec` is the authority, and persist v31 requires it
+///
+/// [`AdmitSpec`] carries the claimed `authority_key_id` plus hybrid signatures over
+/// `JCS(signing_envelope())` of the **GROWN** record — the roster as it will be
+/// AFTER the addition. Before v31 an authenticated caller could grow a roster
+/// without signing the result, so a signature over one shape lifted onto another.
+/// The caller must produce a genuine spec; there is no unsigned path.
+///
+/// NOTE: this helper currently has **no caller in this crate**. The accord's own
+/// roster changes go through `supersede_family_with_quorum`, which is the
+/// quorum-gated path. Kept as a thin pass-through so the substrate's requirement
+/// is what a future caller meets — not softened here.
 pub async fn add_member(
     engine: &Engine,
     family_key_id: &str,
     member: RosterMember,
+    spec: &AdmitSpec,
 ) -> Result<bool, FedError> {
     engine
         .federation_directory()
-        .add_member(Cohort::Family, family_key_id, member)
+        .add_member(Cohort::Family, family_key_id, member, spec)
         .await
 }
 
@@ -118,11 +132,19 @@ pub async fn swap_member(
     family_key_id: &str,
     out_key_id: &str,
     incoming: RosterMember,
-    spec: RevokeSpec,
+    revoke_spec: RevokeSpec,
+    admit_spec: &AdmitSpec,
 ) -> Result<bool, FedError> {
     engine
         .federation_directory()
-        .swap_member(Cohort::Family, family_key_id, out_key_id, incoming, spec)
+        .swap_member(
+            Cohort::Family,
+            family_key_id,
+            out_key_id,
+            incoming,
+            revoke_spec,
+            admit_spec,
+        )
         .await
 }
 

@@ -888,7 +888,15 @@ fun CIRISApp(
                 startupViewModel.setKeepTimerAlive(true)
                 startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_reconfiguring"))
 
-                val maxReconfigPolls = 240 // ~4 minutes at 1s cadence
+                // TIERED, not one flat number (CIRISServer#401). 60s on ordinary
+                // hardware; 240s on 32-bit ARM, which is fully supported and
+                // genuinely slower to bring a node up. The old flat 240s made the
+                // fast majority wait out the slow minority's budget, and four
+                // minutes of spinner is indistinguishable from a hang — the
+                // timeout that existed to produce a clear message produced the
+                // longest possible ambiguity instead.
+                val maxReconfigPolls =
+                    ai.ciris.mobile.shared.ui.components.StartupBudget.seconds()
                 var reconfigPolls = 0
                 var routed = false
                 while (reconfigPolls < maxReconfigPolls) {
@@ -1856,6 +1864,35 @@ fun CIRISApp(
                     claimPinProvider = { pythonRuntimeProtocol.claimPin() },
                     nodeCodeProvider = { pythonRuntimeProtocol.localNodeCode.value },
                     onSetupComplete = {
+                        // A FAILED CLAIM IS TERMINAL (CIRISServer#401).
+                        //
+                        // The wizard reaching its last step is not the same as the node
+                        // being owned. When the claim was rejected the ViewModel already
+                        // recorded `claimed=false` with the reason — and this handler ran
+                        // anyway, kept "the OWNER session established by the claim" that
+                        // no claim had established, declared setup complete, and entered
+                        // the reconfiguring hold to wait for a restart that could not
+                        // change anything. It then re-entered every ~2s: a spin whose
+                        // every line says success while `owned-nodes` reports
+                        // `owner=<UNCLAIMED>`.
+                        //
+                        // Observed on the persist v31 adoption, where the owner-binding's
+                        // registration envelope was refused for not binding its subject
+                        // (#659). The claim could never succeed, and the UI never said so.
+                        //
+                        // Stop, and surface the reason. The operator can retry or read the
+                        // error; both beat a loop that looks like progress.
+                        val claimState = setupViewModel.state.value.ownershipClaim
+                        if (!claimState.claimed) {
+                            platformLog(
+                                TAG,
+                                "[WARN] onSetupComplete REFUSED — the node was not claimed " +
+                                    "(claimed=false). Not entering the reconfiguring hold: " +
+                                    "there is nothing for a restart to settle. error=" +
+                                    (claimState.error ?: "<none recorded>"),
+                            )
+                            return@SetupScreen
+                        }
                         platformLog(TAG, "[INFO] onSetupComplete called - exchanging tokens...")
                         // After setup completes, exchange OAuth ID token for CIRIS access token
                         // Run on IO dispatcher to avoid blocking main thread during network/file operations

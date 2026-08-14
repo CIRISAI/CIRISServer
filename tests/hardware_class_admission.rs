@@ -101,7 +101,23 @@ impl Device {
     async fn key_record(&self, evidence: Option<serde_json::Value>) -> SignedKeyRecord {
         use ed25519_dalek::Signer as _;
         let now = chrono::Utc::now();
-        let envelope = serde_json::json!({ "key_id": self.key_id });
+        let ed_pub = BASE64.encode(self.ed.verifying_key().to_bytes());
+        let pqc_pub = BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk"));
+        // The registration envelope must BIND ITS SUBJECT — key_id, identity_type
+        // and both pubkeys — or the signature over it stands for any record it is
+        // pasted onto (CIRISPersist#659). Bound by persist's OWN binder, the one
+        // `attest::register_key` calls, rather than a local re-spelling of it; the
+        // door itself is not usable here because this fixture must also carry
+        // `attestation_evidence`, which is the whole subject of the file.
+        let mut envelope = serde_json::json!({ "key_id": self.key_id });
+        ciris_persist::federation::admission::bind_subject_into_envelope(
+            &mut envelope,
+            &self.key_id,
+            identity_type::NODE,
+            &ed_pub,
+            Some(&pqc_pub),
+        )
+        .expect("bind the subject into the registration envelope (#659)");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");
         let ed_sig = self.ed.sign(&canonical).to_bytes();
         let mut bound = canonical.clone();
@@ -113,10 +129,8 @@ impl Device {
             .expect("ml-dsa sign registration");
         let record = KeyRecord {
             key_id: self.key_id.clone(),
-            pubkey_ed25519_base64: BASE64.encode(self.ed.verifying_key().to_bytes()),
-            pubkey_ml_dsa_65_base64: Some(
-                BASE64.encode(self.mldsa.public_key().await.expect("ml-dsa pk")),
-            ),
+            pubkey_ed25519_base64: ed_pub,
+            pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             // A NODE row — the whole point: persist's own hardware gate does NOT run
             // for this identity_type (it fires only for `accord_holder`), so before

@@ -36,22 +36,19 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::SigningKey;
 
 use ciris_edge::replication::{
     CohortProvider, EnvelopeKind, FederationDirectoryReplicationBridge, ReplicationDirectory,
 };
 use ciris_edge::transport::federation_session::{FederationSession, KexAlgorithm, PeerKexPubkeys};
 use ciris_keyring::self_enc_keys::SelfEncKeys;
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _, SealedEd25519Signer};
+use ciris_keyring::{MlDsa65SoftwareSigner, SealedEd25519Signer};
 use ciris_persist::federation::types::{
-    algorithm, identity_type, IdentityOccurrence, KeyRecord, OccurrenceTransportBinding,
-    SignedIdentityOccurrence, SignedKeyRecord,
+    identity_type, IdentityOccurrence, OccurrenceTransportBinding, SignedIdentityOccurrence,
 };
 use ciris_persist::federation::{EncryptionPubkeys, FederationDirectory};
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_verify_core::transport_binding::{
     compute_destination_hash, produce_signed_identity_occurrence,
 };
@@ -85,49 +82,32 @@ async fn engine(key_id: &str, ed_seed: [u8; 32], ml_seed: [u8; 32]) -> Arc<Engin
     )
 }
 
-/// A self-signed proof-of-possession `SignedKeyRecord` for a hybrid software identity
-/// (the shape `register_federation_key`'s admission gate verifies). Mirrors
-/// `peer_replication.rs`.
-async fn self_signed_key_record(
-    key_id: &str,
-    ed_seed: &[u8; 32],
-    ml_seed: &[u8; 32],
-) -> SignedKeyRecord {
-    let ed = SigningKey::from_bytes(ed_seed);
-    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(ml_seed, format!("{key_id}-pqc"))
-        .expect("ML-DSA seed");
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": key_id });
-    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");
-    let original_content_hash = hex::encode(Sha256::digest(&canonical));
-    let ed_sig = ed.sign(&canonical).to_bytes();
-    let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
-    bound.extend_from_slice(&canonical);
-    bound.extend_from_slice(&ed_sig);
-    let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign reg");
-    let record = KeyRecord {
-        key_id: key_id.to_string(),
-        pubkey_ed25519_base64: BASE64.encode(ed.verifying_key().to_bytes()),
-        pubkey_ml_dsa_65_base64: Some(BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"))),
-        algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::NODE.into(),
-        identity_ref: key_id.to_string(),
-        valid_from: now,
-        valid_until: None,
-        registration_envelope: envelope,
-        original_content_hash,
-        scrub_signature_classical: BASE64.encode(ed_sig),
-        scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-        scrub_key_id: key_id.to_string(),
-        scrub_timestamp: now,
-        pqc_completed_at: Some(now),
-        persist_row_hash: String::new(),
-        capability_roles: Vec::new(),
-        attestation_evidence: None,
-        consent_role: None,
-        additional_scrubs: Vec::new(),
-    };
-    SignedKeyRecord { record }
+/// Admit a hybrid software node identity through the ONE key door
+/// (CIRISServer#402), which writes a registration envelope that BINDS ITS SUBJECT
+/// — key_id, identity_type and both pubkeys. The `{"key_id": …}` envelope this
+/// fixture used to hand-roll vouched for none of the rest, so its signature stood
+/// for any record it was pasted onto, and persist v31 refuses it
+/// (CIRISPersist#659).
+async fn register_node(engine: &Engine, key_id: &str, ed_seed: &[u8; 32], ml_seed: &[u8; 32]) {
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(ml_seed, format!("{key_id}-pqc"))
+            .expect("ML-DSA seed"),
+    );
+    let signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(ed_seed),
+        key_id.to_string(),
+        Some(pqc),
+        Some(format!("{key_id}-pqc")),
+    );
+    ciris_server::attest::register_key(
+        engine,
+        ciris_server::attest::KeySigner::Local(&signer),
+        key_id,
+        identity_type::NODE,
+        serde_json::Value::Null,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("register {key_id}: {e}"));
 }
 
 /// A hybrid `SelfSigner` over software seeds (the portable-mint pattern) — used to
@@ -178,9 +158,16 @@ async fn signed_self_occurrence(
         "app_name": app,
         "aspects": aspects,
     });
+    // `attesting_key_id` rides INSIDE the signed envelope, and it is who SIGNS —
+    // never who is claimed. The carrier field outside the bytes is compared against
+    // this one (CIRISVerify#252), so an occurrence lifted from its producer and
+    // re-presented under a substituted signer is refused as SubjectMismatch before
+    // any signature is checked. Reading it off `signer` is what makes Mallory's
+    // forgery below a genuine forgery rather than a self-inconsistent envelope.
     let envelope = serde_json::json!({
         "identity_key_id": key_id,
         "occurrence_key_id": key_id,
+        "attesting_key_id": signer.key_id(),
         "transport_destination": tb_env,
         "encryption_pubkeys": {
             "x25519_base64": enc.x25519_base64,
@@ -188,6 +175,7 @@ async fn signed_self_occurrence(
         },
         "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
+    let attesting_key_id = signer.key_id().to_string();
     let (signed_envelope, signature) = produce_signed_identity_occurrence(signer, envelope)
         .await
         .expect("produce signed occurrence");
@@ -209,7 +197,7 @@ async fn signed_self_occurrence(
             }),
             persist_row_hash: String::new(),
         },
-        attesting_key_id: key_id.to_string(),
+        attesting_key_id,
         signed_envelope,
         signature,
     }
@@ -221,18 +209,12 @@ async fn signed_occurrence_custody_replication_and_seal() {
     //    registered on both (the gate resolves the ATTESTING key from the directory).
     let engine_a = engine(NODE_A_KEY_ID, [0xA0; 32], [0xA2; 32]).await;
     let engine_b = engine(NODE_B_KEY_ID, NODE_B_ED_SEED, NODE_B_ML_SEED).await;
-    for rec in [
-        self_signed_key_record(NODE_B_KEY_ID, &NODE_B_ED_SEED, &NODE_B_ML_SEED).await,
-        self_signed_key_record(MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED).await,
+    for (key_id, ed_seed, ml_seed) in [
+        (NODE_B_KEY_ID, &NODE_B_ED_SEED, &NODE_B_ML_SEED),
+        (MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED),
     ] {
-        engine_b
-            .register_federation_key(rec.clone())
-            .await
-            .expect("register on B");
-        engine_a
-            .register_federation_key(rec)
-            .await
-            .expect("register on A");
+        register_node(&engine_b, key_id, ed_seed, ml_seed).await;
+        register_node(&engine_a, key_id, ed_seed, ml_seed).await;
     }
     let dir_a = directory_of(&engine_a);
     let dir_b = directory_of(&engine_b);
@@ -272,7 +254,11 @@ async fn signed_occurrence_custody_replication_and_seal() {
     let mallory_signer = hybrid_identity(MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED);
     let mallory_enc = ciris_server::identity::derive_self_enc_pubkeys(&MALLORY_ED_SEED)
         .expect("mallory enc keys");
-    let mut forged = signed_self_occurrence(
+    // Mallory signs under her OWN key id (inside the envelope and out) — an
+    // honestly-signed occurrence that simply claims someone else's identity. Naming
+    // B as the attester instead would be refused as a self-inconsistent envelope
+    // and would never reach `signer_acts_for`, which is the check under test.
+    let forged = signed_self_occurrence(
         NODE_B_KEY_ID,   // claims B's identity...
         &mallory_signer, // ...but Mallory signs
         &mallory_enc,
@@ -281,7 +267,6 @@ async fn signed_occurrence_custody_replication_and_seal() {
         chrono::Utc::now(),
     )
     .await;
-    forged.attesting_key_id = MALLORY_KEY_ID.to_string();
     assert!(
         dir_a.put_identity_occurrence(forged).await.is_err(),
         "a forged occurrence (valid Mallory signature, B's identity) MUST be rejected \
