@@ -402,6 +402,19 @@ async fn a_later_revision_records_nothing() {
     assert!(hard_cases(&engine).await.is_empty());
 }
 
+/// **The baked genesis rows are a floor, not noise** (persist v31.1.0).
+///
+/// Since the ceremony root was baked, every `Engine` installs three live
+/// federation-tier attestations at construction — `genesis-charter`,
+/// `genesis-grant:<canonical>` and `genesis-lifecycle`, all attested by A1. A
+/// detector that reads live federation rows therefore sees THREE before this
+/// test seeds anything, and `rows_scanned == 0` stopped being expressible.
+///
+/// The counts below subtract that floor rather than hard-coding 3, so a future
+/// bundle with a different row count does not silently re-break these tests —
+/// and so a reader is not left wondering where the number came from.
+const GENESIS_FLOOR: usize = 3;
+
 /// **The read narrows on validity, in the query.** An expired pair is not a
 /// live contradiction; the `valid_at` pushdown is what makes that true, and it
 /// is the only real bound on this scan.
@@ -431,9 +444,11 @@ async fn an_expired_pair_is_outside_the_live_read() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, 0,
-        "expired rows reached the comparison — the read is not bounded by validity, so \
-         this pass scans the whole corpus forever and reports dead contradictions as live"
+        report.rows_scanned, GENESIS_FLOOR,
+        "expired rows reached the comparison — the read is not bounded by validity, so this \
+         pass scans the whole corpus forever and reports dead contradictions as live. Only the \
+         baked genesis rows should be in scope here; anything above that floor is the seeded \
+         expired pair leaking in."
     );
     assert!(report.contradictions.is_empty());
 }
@@ -473,9 +488,11 @@ async fn an_unpublished_local_draft_is_not_evidence() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, 0,
+        report.rows_scanned, GENESIS_FLOOR,
         "an unpromoted local-tier draft reached the comparison — a row the attester never \
-         published cannot be evidence that it told two peers different things"
+         published cannot be evidence that it told two peers different things. Only the baked \
+         genesis rows should be in scope here; anything above that floor is a local draft that \
+         escaped the tier push-down."
     );
     assert!(hard_cases(&engine).await.is_empty());
 }

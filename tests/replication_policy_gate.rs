@@ -16,11 +16,34 @@
 //! `capability:infra:serve` to public) flips a hash → this build fails → the
 //! change cannot ship silently across the triple. Re-pinning is a deliberate,
 //! reviewed act that travels with the substrate bump.
+//!
+//! # v31.1.0 re-pin — the 15th wire kind (reviewed 2026-08-14)
+//!
+//! Both hashes moved for ONE coherent addition, verified by diffing persist
+//! v31.0.0 → v31.1.0 rather than by trusting the bump:
+//!
+//! `EnvelopeKind::AccordQuorumEvidence` joins the wire vocabulary (14 → 15),
+//! admitted by `QuorumFromOwnDirectory` + `StewardRosterFromDirectory`, and
+//! projecting to a new `RoleWithdrawals` plane. `consent_grammar` places it on
+//! the `StructuralPlane`.
+//!
+//! That is CIRISPersist#662's fix, and it is the replicate-evidence rule made
+//! concrete: `federation_role_withdrawals` rows carry NO signature columns, so
+//! shipping them would be a derived verdict asking the receiver to trust the
+//! sender. Instead the SIGNED accord quorum evidence travels and each receiver
+//! re-derives the withdrawal from its own directory.
+//!
+//! Impact on this server: none that changes behaviour. We never name an
+//! `EnvelopeKind` variant in `src/` (only edge's re-export, in a test), so the
+//! new kind cannot break an exhaustive match, and we neither produce nor consume
+//! `AccordQuorumEvidence`. What it does mean is that a node will now SEE this
+//! kind on the wire, which is the point — it is how a de-canonicalisation
+//! reaches us at all.
 
-/// persist v21 (`ciris_persist::federation::replication_policy`) — the 14-kind
+/// persist v21 (`ciris_persist::federation::replication_policy`) — the 15-kind
 /// APPLY (admission + projection) policy hash.
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
-    "351912ead0aab4847f40d2b54a7a326546c37d43507deb38ea24d6094d29d63b";
+    "3af30bccf437679ecccba325e2db055824b4721eeac069fc30a38d7a0723bbef";
 
 /// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
@@ -58,7 +81,7 @@ fn persist_replication_policy_hash_pinned() {
         RATIFIED_REPLICATION_POLICY_HASH,
         "persist's replication ADMISSION/PROJECTION policy drifted — a change to \
          which signed CEG claim gates (or which projections fan out for) any of \
-         the 14 EnvelopeKinds. Reconcile FSD/CEG_REPLICATION_MODEL.md §4 and \
+         the 15 EnvelopeKinds. Reconcile FSD/CEG_REPLICATION_MODEL.md §4 and \
          re-pin only as a reviewed act (CIRISPersist#502).",
     );
 }

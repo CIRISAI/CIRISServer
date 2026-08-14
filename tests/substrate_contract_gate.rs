@@ -16,6 +16,29 @@
 //! act that travels WITH the persist/edge version bump — never a quiet edit.
 //!
 //! Pinned against persist v21.10.0 (`cf345df`) + edge v15.0.0 (`5c03230`).
+//!
+//! # v31.1.0 re-pin — the 15th wire kind (reviewed 2026-08-14)
+//!
+//! Both hashes moved for ONE coherent addition, verified by diffing persist
+//! v31.0.0 → v31.1.0 rather than by trusting the bump:
+//!
+//! `EnvelopeKind::AccordQuorumEvidence` joins the wire vocabulary (14 → 15),
+//! admitted by `QuorumFromOwnDirectory` + `StewardRosterFromDirectory`, and
+//! projecting to a new `RoleWithdrawals` plane. `consent_grammar` places it on
+//! the `StructuralPlane`.
+//!
+//! That is CIRISPersist#662's fix, and it is the replicate-evidence rule made
+//! concrete: `federation_role_withdrawals` rows carry NO signature columns, so
+//! shipping them would be a derived verdict asking the receiver to trust the
+//! sender. Instead the SIGNED accord quorum evidence travels and each receiver
+//! re-derives the withdrawal from its own directory.
+//!
+//! Impact on this server: none that changes behaviour. We never name an
+//! `EnvelopeKind` variant in `src/` (only edge's re-export, in a test), so the
+//! new kind cannot break an exhaustive match, and we neither produce nor consume
+//! `AccordQuorumEvidence`. What it does mean is that a node will now SEE this
+//! kind on the wire, which is the point — it is how a de-canonicalisation
+//! reaches us at all.
 
 // ─────────────────────────── persist: namespace-superset manifest ──────────
 
@@ -34,7 +57,7 @@ const RATIFIED_VENDORED_MANIFEST_VERSION: &str = "0.3.0";
 /// dimensions changes (which cohorts route which kinds). A silent change would
 /// re-scope who may replicate what → this must be a reviewed re-pin.
 const RATIFIED_CONSENT_GRAMMAR_HASH: &str =
-    "2064b567c60062fe9583ea983224d977db7440c8d240d6902a2db50e3e157d05";
+    "b66870da9639c8560538a26c566168fea9759139eaa67ad4116ff8a5f290d69f";
 
 // ─────────────────────────── persist: transform algebra ────────────────────
 
@@ -49,7 +72,7 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 // ─────────────────────────── persist: envelope vocabulary ──────────────────
 
 /// persist v21 (`ciris_persist::federation::envelope`) — the wire
-/// envelope-vocabulary hash (the 14 EnvelopeKind names + their claim shape).
+/// envelope-vocabulary hash (the 15 EnvelopeKind names + their claim shape).
 /// Flips when a wire kind is added/renamed/reshaped. A silent change would
 /// desync producers and readers across the triple → reviewed re-pin only.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
