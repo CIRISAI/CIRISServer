@@ -6,13 +6,15 @@
 
 use ciris_persist::federation::envelope::{paths, ENVELOPE_VOCABULARY_SHA256};
 
-use crate::ladder::{assert_proven, cargo_pin, cargo_toml, tag_on_line, VOCABULARY_SINGLE_SOURCED};
+use crate::ladder::{
+    assert_proven, cargo_pin, tag_on_line, workspace_manifests, VOCABULARY_SINGLE_SOURCED,
+};
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
 pub const TARGET_VERIFY: &str = "v13.3.1";
 pub const TARGET_PERSIST: &str = "v32.1.0";
-pub const TARGET_EDGE: &str = "v17.0.0";
+pub const TARGET_EDGE: &str = "v17.3.0";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -67,30 +69,78 @@ fn gate_substrate_pins_at_target() {
 /// failure is a wall of "expected `ciris_keyring::X`, found `ciris_keyring::X`",
 /// which reads as a compiler bug and is not one.
 ///
-/// This walks the WHOLE manifest — root `[dependencies]`, `[dev-dependencies]`,
-/// and every `[target.*]` table — because a partial move usually happens in the
-/// table nobody re-reads.
+/// This walks every manifest in the WORKSPACE — the root's `[dependencies]`,
+/// `[dev-dependencies]` and every `[target.*]` table, plus each `[workspace]
+/// members` manifest — because a partial move usually happens in the table
+/// nobody re-reads.
+///
+/// # Why "workspace", and not just "manifest"
+///
+/// It read the root manifest alone until the edge v17.3.0 adoption, where the
+/// root moved to v17.3.0 and `crates/ciris-lens-core` stayed on v17.0.0. The
+/// lock then carried TWO `ciris-edge` stanzas — the exact condition the message
+/// below describes — and this gate passed, because the second pin was in a file
+/// it never opened.
+///
+/// That is the repo's recurring shape: one name answering two questions. The
+/// gate was named for a property of the dependency GRAPH but scoped to a single
+/// FILE, and the two agree right up until a workspace member disagrees. Note
+/// that lens-core is the member CI compiles in a separate step for exactly this
+/// family of reason (CIRISServer#373) — nothing about it is incidental.
 #[test]
 fn gate_substrate_pins_move_together() {
-    let toml = cargo_toml();
+    let manifests = workspace_manifests();
+
+    // DID IT LOOK? A scanner that silently examined only the root would pass this
+    // gate for the same reason the old one did, and read identically from the
+    // outside. So name what was examined and refuse a root-only scan while a
+    // member is declared — the distinct-zeroes rule: "found no mismatch" and
+    // "never opened the file" must not be the same result.
+    let examined: Vec<&str> = manifests.iter().map(|(p, _)| p.as_str()).collect();
+    let root_text = &manifests[0].1;
+    let declared: Vec<String> = root_text
+        .split_once("members = [")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(inner, _)| {
+            inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                .collect()
+        })
+        .unwrap_or_default();
+    for m in &declared {
+        let want = format!("{m}/Cargo.toml");
+        assert!(
+            examined.iter().any(|p| *p == want),
+            "workspace member `{m}` was NEVER EXAMINED by this gate — it scanned {examined:?}. \
+             An unscanned member is how a second `ciris-edge` tag reached Cargo.lock while this \
+             gate stayed green."
+        );
+    }
+
     let mut split: Vec<String> = Vec::new();
     for (repo, crates) in REPOS {
-        let mut seen: Vec<(usize, String, String)> = Vec::new();
-        for (n, line) in toml.lines().enumerate() {
-            for c in *crates {
-                if let Some(tag) = tag_on_line(line, c) {
-                    seen.push((n + 1, (*c).to_string(), tag));
+        // (file, line, crate, tag) across EVERY manifest in the workspace — the
+        // dependency graph is a workspace-wide fact, not a per-manifest one.
+        let mut seen: Vec<(String, usize, String, String)> = Vec::new();
+        for (path, toml) in &manifests {
+            for (n, line) in toml.lines().enumerate() {
+                for c in *crates {
+                    if let Some(tag) = tag_on_line(line, c) {
+                        seen.push((path.clone(), n + 1, (*c).to_string(), tag));
+                    }
                 }
             }
         }
-        let Some((_, _, first)) = seen.first().cloned() else {
+        let Some((_, _, _, first)) = seen.first().cloned() else {
             split.push(format!("  {repo}: no pinned crate found at all"));
             continue;
         };
-        for (line_no, krate, tag) in &seen {
+        for (path, line_no, krate, tag) in &seen {
             if *tag != first {
                 split.push(format!(
-                    "  {repo}: {krate} at Cargo.toml:{line_no} is {tag}, but the first {repo} pin \
+                    "  {repo}: {krate} at {path}:{line_no} is {tag}, but the first {repo} pin \
                      is {first}"
                 ));
             }
