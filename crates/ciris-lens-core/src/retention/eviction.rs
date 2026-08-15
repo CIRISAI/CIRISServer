@@ -209,6 +209,10 @@ mod tests {
             rows: 1000,
             oldest_ts: Some(oldest),
             newest_ts: Some(newest),
+            // v32.1.0 (CIRISPersist#606) — retention bands on the row's own
+            // instants; the ADMISSION instant is a liveness signal, not read
+            // here, so None is honest rather than a copy of the line above.
+            newest_admitted_at: None,
         };
         s.total_disk_bytes = bytes;
         s
@@ -312,6 +316,10 @@ mod tests {
             rows: 100,
             oldest_ts: Some(t("2026-01-01T00:00:00Z")),
             newest_ts: Some(t("2026-05-28T00:00:00Z")),
+            // v32.1.0 (CIRISPersist#606) — retention bands on the row's own
+            // instants; the ADMISSION instant is a liveness signal, not read
+            // here, so None is honest rather than a copy of the line above.
+            newest_admitted_at: None,
         };
         let plan = plan_eviction(&summary, &policy, now);
         let (from_ts, to_ts) = plan.archive_audit_range.expect("must archive");
@@ -334,6 +342,10 @@ mod tests {
             rows: 100,
             oldest_ts: Some(t("2026-05-25T00:00:00Z")),
             newest_ts: Some(t("2026-05-28T00:00:00Z")),
+            // v32.1.0 (CIRISPersist#606) — retention bands on the row's own
+            // instants; the ADMISSION instant is a liveness signal, not read
+            // here, so None is honest rather than a copy of the line above.
+            newest_admitted_at: None,
         };
         let plan = plan_eviction(&summary, &policy, now);
         assert!(plan.archive_audit_range.is_none());
