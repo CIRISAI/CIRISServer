@@ -2560,15 +2560,24 @@ class SetupViewModel(
             // For BYOK mode, we still need OAuth fields if user authenticated via OAuth
             // This allows OAuth users to use their own API keys while still using OAuth for login
             // HA addon mode is treated as external auth (SUPERVISOR_TOKEN) - no password needed
-            val isOAuthUser = currentState.isGoogleAuth && currentState.googleUserId != null
-            val isExternalAuthUser = isOAuthUser || currentState.isHAAddonMode
-
-            // Determine the effective OAuth provider
-            val effectiveOAuthProvider = when {
-                currentState.isHAAddonMode -> "home_assistant"
-                isOAuthUser -> currentState.oauthProvider
-                else -> null
-            }
+            // ONE derivation, shared with the CIRIS-proxy branch — see
+            // SetupState.isExternalAuth. This used to read
+            // `isGoogleAuth && googleUserId != null`, which asked a DIFFERENT
+            // question than the proxy branch did: an OAuth sign-in whose provider
+            // returned no subject id fell through as a PASSWORD account, and
+            // `/v1/setup/complete` correctly refused it with "New user password
+            // must be at least 8 characters" — to someone who had just signed in
+            // with Google and never set a password.
+            //
+            // `googleUserId` is evidence about WHICH account, not about WHETHER
+            // OAuth happened, so it must not gate this.
+            val isExternalAuthUser = currentState.isExternalAuth
+            val effectiveOAuthProvider = currentState.effectiveOAuthProvider
+            // OAuth SPECIFICALLY (HA add-on is external auth but not OAuth), for
+            // the username shape and the oauth_* identity fields below. Note this
+            // no longer requires a subject id: a provider that returns none still
+            // authenticated the user, and `oauth_external_id` simply goes null.
+            val isOAuthUser = currentState.isGoogleAuth
 
             CompleteSetupRequest(
                 llm_provider = providerId,
