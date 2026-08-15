@@ -104,6 +104,40 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: mesh-harness
 
+      # This was the ONLY Rust-building workflow in the repo off the shared
+      # centipede — Swatinem's GHA L1 alone, so every run recompiled the whole
+      # substrate from source at ~26 min a PR. The build below is a plain linux
+      # release build, exactly what the L2 layers already hold.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT=linux-x86_64
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE}"
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+
       - name: Build the test-anchor wheel once
         run: |
           cargo build --release --features test-anchor,python

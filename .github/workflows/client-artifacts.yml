@@ -199,6 +199,11 @@ jobs:
 
   windows-installer:
     name: Windows desktop installer
+    # jpackage/MSI packaging only — the Kotlin compile it depends on is already
+    # proven by `android-apk` on ubuntu in this same workflow. On a PR this
+    # occupies a scarce Windows slot to re-check packaging that changes far less
+    # often than the code. Runs on main and on the tag (both `push`).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: windows-latest
     # 0.5.166 raised this from 40. `lto = "thin"` + `codegen-units = 1`
     # (CIRISServer#378) roughly doubles the final ciris-server link, and this

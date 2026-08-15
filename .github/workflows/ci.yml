@@ -69,7 +69,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Scarce-lane policy. macOS and Windows runners come from an ORG-WIDE
+        # concurrency pool shared with CIRISPersist/Edge/Verify/Agent, so a job
+        # queued here delays the whole substrate — the contention we measured.
+        # PRs run the ubuntu lane; main runs all three, immediately after merge
+        # and well before any tag. A PR that touches platform-specific code can
+        # opt back in with the `ci:full` label.
+        os: ${{ fromJSON((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -305,4 +311,9 @@ jobs:
   # downstream of `ciris-server-ios` changes.
   ios:
     name: ios PyO3 abi3
+    # The single largest macOS consumer in this repo: two ~19-minute jobs. It now
+    # runs in three places for one cut (PR, main, and the tag via release.yml),
+    # and only the tag's build is load-bearing — that one produces the shipped
+    # asset. Keep it off the PR lane; main still proves it before any tag.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     uses: ./.github/workflows/ios-asset.yml
