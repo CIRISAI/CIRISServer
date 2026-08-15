@@ -641,6 +641,47 @@ pub fn cargo_toml() -> String {
     std::fs::read_to_string(repo().join("Cargo.toml")).expect("Cargo.toml must be readable")
 }
 
+/// Every manifest in the workspace: the root, plus each `[workspace] members`
+/// entry, as `(display path, contents)`.
+///
+/// A gate that reads only the root manifest answers "are the ROOT pins
+/// consistent?" while claiming to answer "is this crate in the graph twice?".
+/// Those are different questions, and the edge v17.3.0 adoption is where they
+/// came apart: the root moved, `crates/ciris-lens-core` stayed on v17.0.0, and
+/// the resulting `Cargo.lock` carried TWO `ciris-edge` stanzas — the precise
+/// condition `gate_substrate_pins_move_together` exists to refuse. It passed.
+///
+/// Member paths are read from `[workspace] members` rather than globbed, so a
+/// member that is declared but missing fails loudly instead of going uncounted.
+pub fn workspace_manifests() -> Vec<(String, String)> {
+    let root = cargo_toml();
+    let mut out = vec![("Cargo.toml".to_string(), root.clone())];
+
+    // `members = ["a", "b"]`, possibly spread over several lines.
+    let members = root
+        .split_once("members = [")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(inner, _)| inner.to_string())
+        .unwrap_or_default();
+
+    for m in members
+        .split(',')
+        .map(|s| s.trim().trim_matches('"'))
+        .filter(|s| !s.is_empty() && !s.starts_with('#'))
+    {
+        let rel = format!("{m}/Cargo.toml");
+        let text = std::fs::read_to_string(repo().join(&rel)).unwrap_or_else(|e| {
+            panic!(
+                "workspace member `{m}` is declared in [workspace] members but its manifest \
+                 could not be read ({rel}): {e}. A member whose manifest cannot be read is a \
+                 member whose pins are UNCHECKED."
+            )
+        });
+        out.push((rel, text));
+    }
+    out
+}
+
 fn pin_in(toml: &str, crate_name: &str) -> Option<(usize, String)> {
     for (n, line) in toml.lines().enumerate() {
         if let Some(tag) = tag_on_line(line, crate_name) {
