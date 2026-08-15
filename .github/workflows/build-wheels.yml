@@ -3,7 +3,13 @@ name: build-wheels
 # Reusable wheel-build matrix — the SINGLE source of truth for how every
 # ciris-server abi3 wheel is built. Called by:
 #   • publish-pypi.yml  (on a v* tag)        → builds + uploads, then gated + published
-#   • warm-release-cache.yml (on main, gated) → builds to WARM the release cache
+#   (warm-release-cache.yml used to call this on main to pre-warm the cache. It
+#   was removed: the deps layers are written by the SUBSTRATE repos' own CI
+#   (CIRISPersist/CIRISEdge/CIRISVerify each save their layer), and the server
+#   layer is saved by this workflow's own tag run. Measured on v0.5.173, the
+#   warm run saved `-s0.5.173` at 20:55 — 38 minutes AFTER the tag run had
+#   already restored at 20:17 — and the key is version-scoped, so nothing ever
+#   read it again. ~225 runner-minutes per cut for a ~3-minute saving.)
 #
 # Why one shared workflow: the warmer and the release MUST build byte-identically
 # or the cache they share never hits. Keeping the steps in one place guarantees
@@ -25,7 +31,7 @@ name: build-wheels
 #     mozilla-actions/sccache-action step + RUSTC_WRAPPER=sccache on the raw
 #     `maturin build`, mirroring PR #215's client-artifacts wiring) since they do
 #     NOT use maturin-action. GHA-scoped: a tag run only READS default-branch
-#     entries, so warm-release-cache.yml (on main, substrate-bump-gated) builds the
+#     entries, so the substrate repos' CI populates the deps layers and the tag run saves the
 #     wheels on main to POPULATE it; the tag publish then restores it warm. Without
 #     that warm the Windows tag build is 100% cold (v0.5.91: 0% sccache hits).
 
@@ -77,7 +83,7 @@ jobs:
       # was effectively cold. sccache keys on compilation-unit content, so it is
       # mtime-immune and hits across substrate bumps for unchanged crates (this is
       # why the maturin-action macOS/Windows legs already reach ~86%). Warmed on
-      # main by warm-release-cache.yml (substrate-bump-gated), restored on a tag.
+      # the substrate repos' own CI (each saves its layer); restored on a tag.
       - name: Set up sccache (compiler cache over GHA)
         uses: mozilla-actions/sccache-action@v0.0.9
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
@@ -613,7 +619,7 @@ jobs:
           rust-toolchain: "1.97.0"
           args: --release --strip --out dist
           # maturin-action's built-in compiler cache (sccache over the GHA cache
-          # backend), warmed on main by warm-release-cache.yml calling this same
+          # backend), written by the substrate repos' own CI, and by this workflow's own tag run — formerly also by
           # workflow. Restores main-scoped sccache objects on a tag publish.
           sccache: true
       # ── Verify-FFI fold smoke (CIRISServer#232) ─────────────────────────────
@@ -974,7 +980,7 @@ jobs:
           rust-toolchain: "1.97.0"
           args: --release --strip --out dist
           # Compiler cache (sccache over the GHA backend), warmed on main via
-          # warm-release-cache.yml. Restore-on-tag; harmless otherwise.
+          # the substrate repos' own CI. Restore-on-tag; harmless otherwise.
           sccache: true
       # ── Verify-FFI fold smoke (CIRISServer#232) ─────────────────────────────
       # We fold ciris-verify-ffi (rlib) into _native, but NOTHING in our Rust calls

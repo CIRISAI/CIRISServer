@@ -214,7 +214,7 @@ jobs:
           if-no-files-found: error
 
       # Populate the cross-repo CIRISCache blob on main under the SERVER key
-      # (release runs on tags, so this is restore-only here; the warm-release-cache
+      # (release runs on tags, so this is restore-only here; the substrate repos' CI
       # main run does the save). Guard kept for correctness.
       - name: CIRISCache save (server layer, main only)
         uses: CIRISAI/CIRISCache/save@v1

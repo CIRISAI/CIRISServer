@@ -231,7 +231,7 @@ jobs:
       # NOTE (CIRISServer#274): the maturin compile below is warmed by
       # maturin-action's OWN sccache (`sccache: true`), the SAME mechanism +
       # GHA-cache namespace publish-pypi's windows wheel uses — so this now shares
-      # its warm entries (warm-release-cache warms it on main). The old raw-maturin
+      # its entries (the substrate repos' CI writes the deps layers). The old raw-maturin
       # + mozilla-actions/sccache-action wiring wrote to a DIFFERENT sccache pool
       # and got 0.00% hits here while the publish wheel got 88% on the same commit.
 
