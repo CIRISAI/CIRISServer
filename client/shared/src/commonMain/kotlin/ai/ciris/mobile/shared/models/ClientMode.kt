@@ -61,7 +61,7 @@ fun clientModeFrom(cognitiveState: String?, serviceCount: Int): ClientMode =
  * comment asserting "IN THIS REPO there is no sync script" is true there and
  * FALSE here; do not let it travel back with a vendor sync.
  */
-const val CLIENT_VERSION = "0.5.173"
+const val CLIENT_VERSION = "0.5.174"
 
 /**
  * Whether [nodeVersion] differs materially from [CLIENT_VERSION] — i.e. a

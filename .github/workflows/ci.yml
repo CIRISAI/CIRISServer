@@ -317,3 +317,87 @@ jobs:
     # asset. Keep it off the PR lane; main still proves it before any tag.
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     uses: ./.github/workflows/ios-asset.yml
+  # ── Genesis validation on POSTGRES (CIRISServer#382) ──────────────────────
+  #
+  # The genesis checks in `tests/genesis_bundle_validate.rs` ran on
+  # `sqlite::memory:` only — and SQLite is the backend structurally unable to
+  # see the defect they exist to catch. CIRISServer#381 is the proof: the baked
+  # bundle signs SYMBOLIC attestation ids (`genesis-charter`, `genesis-grant:…`,
+  # `genesis-lifecycle`), Postgres had them in a `uuid`-typed column and aborted
+  # stage 1 at character 0, while SQLite — which has no `uuid` type — stored the
+  # identical bundle fine. Two production agents crash-looped 151 and 223 times
+  # while this suite was green, green precisely BECAUSE it only asked the immune
+  # backend.
+  #
+  # The fixture now takes `CIRIS_TEST_DSN`; this is the leg that passes it. The
+  # ubuntu lane, so it costs nothing from the scarce macOS/Windows pool and can
+  # stay on PRs where it belongs. `ci_runs_the_genesis_validation_on_postgres`
+  # fails the build if this job is ever deleted — a parametric fixture with
+  # nobody passing the parameter is sqlite-only with extra steps.
+  genesis-postgres:
+    name: genesis validation (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ciris
+          POSTGRES_DB: ciris
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      # persist's `postgres` feature is auto-on for linux targets (see the
+      # [target.'cfg(target_os = "linux")'] table in Cargo.toml) — no --features.
+      CIRIS_TEST_DSN: postgres://postgres:ciris@127.0.0.1:5432/ciris
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: genesis-postgres
+      - name: System deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/azure-cli.sources
+          sudo apt-get update
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT=linux-x86_64
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+          } >> "$GITHUB_OUTPUT"
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+      # `--test-threads=1`: these share ONE database (unlike sqlite::memory:,
+      # which hands every test a private one), so they must not interleave.
+      - name: genesis_bundle_validate against postgres
+        run: cargo test --test genesis_bundle_validate -- --test-threads=1

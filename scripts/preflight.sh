@@ -108,6 +108,14 @@ L1=( "clippy"              "cargo clippy --all-targets -- -D warnings"
      "tests"               "cargo test"
      "tests-lens-core"     "cargo test -p ciris-lens-core --lib"
      "noise-floor"         "cargo test --test noise_floor -- --nocapture" )
+# The genesis checks default to `sqlite::memory:`, so running them bare here
+# would duplicate the `tests` lane and prove nothing about Postgres. The wrapper
+# supplies a database (yours via CIRIS_TEST_DSN, else a throwaway container) and
+# REFUSES if it cannot — a skip that prints ok is how CIRISServer#381 shipped.
+if [ "$FAST" = "0" ]; then
+  L1+=( "genesis-postgres" \
+        "scripts/with_test_postgres.sh cargo test --test genesis_bundle_validate -- --test-threads=1" )
+fi
 
 L2=( "clippy-python"       "cargo clippy --lib --features python -- -D warnings" )
 
