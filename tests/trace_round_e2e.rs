@@ -695,6 +695,13 @@ fn msg_name(m: &ReplicationMessage) -> &'static str {
         ReplicationMessage::Deliver(_) => "Deliver",
         ReplicationMessage::Fetch(_) => "Fetch",
         ReplicationMessage::Pull(_) => "Pull",
+        // v16.3.0 / CIRISEdge#474 — the cursor plane's request verb, and the
+        // discipline above working as intended: adopting edge broke this build,
+        // which is how the sixth verb got named instead of silently counted as
+        // "other". `CursorPull` → `Deliver`, resumed on `evidence_at`, carrying
+        // `accord_quorum_evidence` — the first kind served off a cursor rather
+        // than the content-hash Summary/Diff/Fetch flow.
+        ReplicationMessage::CursorPull(_) => "CursorPull",
     }
 }
 
