@@ -58,7 +58,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::admission;
 use ciris_persist::federation::types::CommunityMember;
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::Engine;
 use serde::Serialize;
 
@@ -102,9 +101,7 @@ pub async fn community_has_live_moderator(
     engine: &Engine,
     community_key_id: &str,
 ) -> Result<bool, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let Some(community) = directory
         .lookup_community(community_key_id)
         .await
@@ -280,9 +277,7 @@ pub async fn auto_promotion_outcome(
     engine: &Engine,
     community_key_id: &str,
 ) -> Result<PromotionOutcome, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let Some(community) = directory
         .lookup_community(community_key_id)
         .await
@@ -379,9 +374,7 @@ pub fn rank_candidates(
 /// True iff `member` is an eligible auto-promotion candidate (owner-bound). A
 /// thin re-export of persist's leaf for the caller / tests.
 pub async fn is_eligible_candidate(engine: &Engine, member: &CommunityMember) -> bool {
-    let Some(directory) = engine.sqlite_backend() else {
-        return false;
-    };
+    let directory = engine.federation_directory();
     admission::is_steward_bound(directory.as_ref(), &member.key_id)
         .await
         .unwrap_or(false)

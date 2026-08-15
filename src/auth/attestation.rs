@@ -23,7 +23,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -95,15 +94,7 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
         );
     }
 
-    let directory = match st.engine.sqlite_backend() {
-        Some(d) => d,
-        None => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no SQLite federation directory",
-            )
-        }
-    };
+    let directory = st.engine.federation_directory();
 
     let attestation_envelope = match ciris_persist::federation::envelope::EnvelopeCore::from_value(
         req.attestation_envelope,

@@ -15,7 +15,6 @@
 
 use axum::http::HeaderMap;
 use ciris_persist::prelude::{verify_hybrid_via_directory, Engine, HybridPolicy};
-use ciris_persist::FederationDirectory;
 
 /// `x-ciris-signing-key-id` — the signer's `federation_keys.key_id`.
 pub const HEADER_KEY_ID: &str = "x-ciris-signing-key-id";
@@ -58,10 +57,7 @@ pub async fn verify_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    let directory = engine
-        .sqlite_backend()
-        .ok_or(VerifyError::NoDirectory)?
-        .clone();
+    let directory = engine.federation_directory();
     verify_hybrid_via_directory(
         &*directory,
         body,
@@ -85,9 +81,7 @@ pub async fn signer_acts_for(engine: &Engine, signer: &str, identity_key_id: &st
     if signer == identity_key_id {
         return true;
     }
-    let Some(directory) = engine.sqlite_backend() else {
-        return false;
-    };
+    let directory = engine.federation_directory();
     match directory
         .list_identity_occurrences_active(identity_key_id)
         .await

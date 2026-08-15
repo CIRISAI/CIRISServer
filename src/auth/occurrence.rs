@@ -44,7 +44,6 @@ use axum::{Json, Router};
 use ciris_persist::federation::types::{IdentityOccurrence, IdentityOccurrenceRevocation};
 use ciris_persist::federation::{EncryptionPubkeys, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, HybridPolicy};
-use ciris_persist::FederationDirectory;
 use serde::{Deserialize, Serialize};
 
 use super::verify::{self, VerifyError};
@@ -556,9 +555,7 @@ async fn list_occurrences(
     State(st): State<OccurrenceState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let Some(directory) = st.engine.sqlite_backend() else {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory");
-    };
+    let directory = st.engine.federation_directory();
     match directory
         .list_identity_occurrences_active(&q.identity_key_id)
         .await

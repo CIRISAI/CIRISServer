@@ -52,7 +52,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -299,9 +298,7 @@ async fn emit_age_assurance_inner(
     band: AgeBand,
     promote: bool,
 ) -> Result<String, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let dimension = age_dimension(level, band);
     let envelope = serde_json::json!({
         (paths::DIMENSION): dimension,
@@ -352,7 +349,7 @@ async fn emit_age_assurance_inner(
 /// [`AgeBand::Minor`] (deny adult content), never permissive. [`viewer_or_minor`]
 /// is the helper that encodes that default.
 pub async fn read_age_level(engine: &Engine, subject_key_id: &str) -> Option<AgeAssurance> {
-    let directory = engine.sqlite_backend()?;
+    let directory = engine.federation_directory();
     // Both the subject's own (`by`) and subject-targeted (`for`) rows; an
     // age-assurance row is self-attested so `by` is the primary source.
     let rows = directory.list_attestations_by(subject_key_id).await.ok()?;

@@ -58,7 +58,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -172,9 +171,7 @@ pub async fn enable_watchlist(
     signer_key_id: &str,
     enable: &WatchlistEnable,
 ) -> Result<String, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let envelope = serde_json::json!({
         (paths::DIMENSION): enable.dimension(),
         "group_key_id": enable.group_key_id,
@@ -225,9 +222,7 @@ pub async fn disable_watchlist(
     group_key_id: &str,
     watchlist_id: &str,
 ) -> Result<String, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let dimension = format!("{WATCHLIST_DIMENSION_PREFIX}{watchlist_id}");
     let envelope = serde_json::json!({
         (paths::DIMENSION): dimension,
@@ -272,9 +267,7 @@ pub async fn watchlist_enables_for_group(
     engine: &Engine,
     group_key_id: &str,
 ) -> Vec<WatchlistEnable> {
-    let Some(directory) = engine.sqlite_backend() else {
-        return Vec::new();
-    };
+    let directory = engine.federation_directory();
     let Ok(rows) = directory.list_attestations_for(group_key_id).await else {
         return Vec::new();
     };

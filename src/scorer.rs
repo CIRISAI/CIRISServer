@@ -49,7 +49,7 @@ use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::hard_case::ConsentState;
 use ciris_persist::federation::types::cohort_scope;
 use ciris_persist::federation::EmitAttestationInput;
-use ciris_persist::prelude::{CallerScope, Engine, ReadEngine, TraceFilter, TraceSummary};
+use ciris_persist::prelude::{CallerScope, Engine, TraceFilter, TraceSummary};
 
 use crate::key_standing;
 
@@ -267,23 +267,21 @@ pub fn spawn(
 /// Public so the integration test can drive a single deterministic pass without
 /// waiting on the timer. Returns the number of `capacity:*` attestations emitted.
 pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) -> Result<usize> {
-    let backend = engine
-        .sqlite_backend()
-        .context("capacity scorer requires a SQLite-backed Engine")?
-        .clone();
-
     // Enumerate the agents present in the corpus by their agent_id_hash (the
     // AV-9 per-agent key on every trace summary). We page the unfiltered trace
     // window once and group — the read surface has no distinct-agent primitive.
-    let page = backend
-        .list_trace_summaries(
-            TraceFilter::default(),
-            None,
-            cfg.window,
-            CallerScope::Unauthenticated,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("list trace summaries: {e}"))?;
+    // Through the ONE door (src/backend.rs). Asking for SQLite by name here
+    // meant every pass on a postgres node returned Err and no agent was ever
+    // scored — 21 ticks, 21 failures, observed on the scout node.
+    let page = crate::backend::list_trace_summaries(
+        engine,
+        TraceFilter::default(),
+        None,
+        cfg.window,
+        CallerScope::Unauthenticated,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("list trace summaries: {e}"))?;
 
     // Group summaries by agent_id_hash → that agent's feature rows.
     let mut by_agent: std::collections::BTreeMap<String, Vec<&TraceSummary>> =
@@ -451,16 +449,16 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         // This is the same inversion asked of the substrate in CIRISEdge#433 and
         // CIRISPersist#565: an absence is an event, and the instrument that
         // reports it must say which branch produced it.
-        let raw_trace_events = backend
-            .list_trace_summaries(
-                TraceFilter::default(),
-                None,
-                cfg.window,
-                CallerScope::Unauthenticated,
-            )
-            .await
-            .map(|p| p.items.len())
-            .unwrap_or(usize::MAX);
+        let raw_trace_events = crate::backend::list_trace_summaries(
+            engine,
+            TraceFilter::default(),
+            None,
+            cfg.window,
+            CallerScope::Unauthenticated,
+        )
+        .await
+        .map(|p| p.items.len())
+        .unwrap_or(usize::MAX);
         let narrowing = if consent_unreadable_agents > 0 {
             // FIRST, ahead of every corpus narrowing below: the traces arrived
             // and were read fine; what failed is the CC#46 gate's own input.
