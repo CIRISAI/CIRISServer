@@ -36,7 +36,16 @@ on:
 
 # Supersede stale runs on the same ref (PR re-push); tag refs are distinct.
 concurrency:
-  group: client-artifacts-${{ github.ref }}
+  # Keyed on the COMMIT, not the ref. A merge and the tag pointing at it are the
+  # same tree under two refs (refs/heads/main, refs/tags/vX), so a ref-keyed
+  # group put them in different buckets and this workflow built the desktop JAR
+  # and the APK twice for byte-identical source. That is a straight doubling of
+  # the most expensive artifact in the repo.
+  #
+  # The later run wins, and on a cut the later run is the TAG — the one that
+  # attaches release assets. The main-push run only uploads workflow artifacts
+  # for humans, so losing it to the tag costs nothing.
+  group: client-artifacts-${{ github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -190,6 +199,11 @@ jobs:
 
   windows-installer:
     name: Windows desktop installer
+    # jpackage/MSI packaging only — the Kotlin compile it depends on is already
+    # proven by `android-apk` on ubuntu in this same workflow. On a PR this
+    # occupies a scarce Windows slot to re-check packaging that changes far less
+    # often than the code. Runs on main and on the tag (both `push`).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: windows-latest
     # 0.5.166 raised this from 40. `lto = "thin"` + `codegen-units = 1`
     # (CIRISServer#378) roughly doubles the final ciris-server link, and this
@@ -222,7 +236,7 @@ jobs:
       # NOTE (CIRISServer#274): the maturin compile below is warmed by
       # maturin-action's OWN sccache (`sccache: true`), the SAME mechanism +
       # GHA-cache namespace publish-pypi's windows wheel uses — so this now shares
-      # its warm entries (warm-release-cache warms it on main). The old raw-maturin
+      # its entries (the substrate repos' CI writes the deps layers). The old raw-maturin
       # + mozilla-actions/sccache-action wiring wrote to a DIFFERENT sccache pool
       # and got 0.00% hits here while the publish wheel got 88% on the same commit.
 
