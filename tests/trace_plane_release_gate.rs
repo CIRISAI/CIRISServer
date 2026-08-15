@@ -170,7 +170,12 @@ async fn newest_admitted(engine: &Engine) -> Option<DateTime<Utc>> {
         .await
         .expect("storage summary")
         .trace_events
-        .newest_ts
+        // v32.1.0 (CIRISPersist#606). This helper is NAMED `newest_admitted` and
+        // its doc promises the same value the surface reads — it was reading
+        // `newest_ts`, the PRODUCER's assertion, because that was the only field
+        // persist offered. Now that the surface bands on this node's own
+        // admission instant, anchoring here keeps the promise the name made.
+        .newest_admitted_at
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -199,9 +204,15 @@ async fn newest_admitted(engine: &Engine) -> Option<DateTime<Utc>> {
 async fn a_second_arrival_moves_the_band_and_a_dark_plane_goes_green_again() {
     const PRODUCER: &str = "ciris-agent-bootstrap-25uzoxtlro";
     // The RCA's own instants.
-    let first = at("2026-08-03T23:30:00Z");
-    let found_at = at("2026-08-05T13:55:00Z");
-    let recovery = at("2026-08-05T14:10:00Z");
+    // The PRODUCER's timestamp on the posted row — still the fixture's, because
+    // that is what the sender asserts. It is no longer what the plane bands on.
+    let produced_at = at("2026-08-03T23:30:00Z");
+    // Both are now RELATIVE to the real admission instant (bound below), because
+    // the plane bands on this node's clock. The original absolute dates encoded
+    // the same intervals against the producer's timestamp: ~38h to darkness,
+    // then a recovery a quarter-hour later.
+    const HOURS_TO_DARK: i64 = 38;
+    const RECOVERY_AFTER_MINUTES: i64 = 15;
 
     let engine = node(0xE0, "node-release-gate").await;
     let refusals = IngestRefusals::new();
@@ -212,7 +223,7 @@ async fn a_second_arrival_moves_the_band_and_a_dark_plane_goes_green_again() {
     let (status, body) = post(
         Arc::clone(&engine),
         &refusals,
-        accord_batch::build_batch_bytes_at(&sk, PRODUCER, "trace-gate-0001", first),
+        accord_batch::build_batch_bytes_at(&sk, PRODUCER, "trace-gate-0001", produced_at),
     )
     .await;
     assert_eq!(
@@ -230,11 +241,20 @@ async fn a_second_arrival_moves_the_band_and_a_dark_plane_goes_green_again() {
         serde_json::json!(1),
         "verify-before-persist must have RUN, not been skipped: {body}"
     );
-    assert_eq!(
-        newest_admitted(&engine).await,
-        Some(first),
-        "the row's own instant must be what the corpus reports"
+    // v32.1.0 (CIRISPersist#606) — the corpus reports THIS NODE's admission
+    // instant, not the row's own. A test cannot dictate that value, so it reads
+    // it back and anchors everything on it. Asserting the fixture's producer
+    // timestamp here would be asserting the exact coupling #606 removed.
+    let first = newest_admitted(&engine)
+        .await
+        .expect("the corpus reports an admission instant for the row just accepted");
+    assert!(
+        first > at("2026-01-01T00:00:00Z"),
+        "the admission instant must be a real clock reading, not a default"
     );
+
+    let found_at = first + Duration::hours(HOURS_TO_DARK);
+    let recovery = found_at + Duration::minutes(RECOVERY_AFTER_MINUTES);
 
     let live = operator_surface::operator_state(
         &engine,
@@ -278,23 +298,29 @@ async fn a_second_arrival_moves_the_band_and_a_dark_plane_goes_green_again() {
         serde_json::json!(1),
         "a deduplicated re-POST would leave the corpus unchanged and prove nothing: {body}"
     );
-    assert_eq!(
-        newest_admitted(&engine).await,
-        Some(recovery),
-        "MAX(trace_events.ts) must follow the newest arrival — a reading anchored to the corpus's \
-         OLDEST row survives every single-admission test and never recovers"
+    // The PROPERTY is that it MOVES. v32.1.0 (CIRISPersist#606) makes the value
+    // this node's own admission instant, which no test can dictate — so assert
+    // the movement rather than a number, which is what this leg was always for.
+    // A reading anchored to the corpus's OLDEST row survives every
+    // single-admission test and never recovers; that is what this catches.
+    let second = newest_admitted(&engine)
+        .await
+        .expect("the corpus reports an admission instant after the recovery batch");
+    assert!(
+        second > first,
+        "the corpus instant did not advance after a second admission: {first} -> {second}"
     );
 
     let green_again = operator_surface::operator_state(
         &engine,
         Err("no edge in this fixture".to_owned()),
         Some(&refusals),
-        &opts(recovery + Duration::minutes(5)),
+        &opts(second + Duration::minutes(5)),
     )
     .await;
     assert_eq!(
         green_again["trace_plane"]["last_admitted_at"],
-        serde_json::json!(recovery),
+        serde_json::json!(second),
         "the band must be reading the NEW arrival: {}",
         green_again["trace_plane"]
     );
@@ -589,7 +615,9 @@ async fn the_watch_says_it_out_loud_and_then_stops_saying_it() {
     use ciris_server::trace_plane_watch::{tick, Emit, Watch};
 
     const PRODUCER: &str = "ciris-agent-bootstrap-25uzoxtlro";
-    let admitted = at("2026-08-03T23:30:00Z");
+    // The PRODUCER's timestamp on the posted row. The watch bands on THIS node's
+    // admission instant (CIRISPersist#606), read back after the POST below.
+    let produced_at = at("2026-08-03T23:30:00Z");
 
     let engine = node(0xE5, "node-watch").await;
     let refusals = IngestRefusals::new();
@@ -598,10 +626,15 @@ async fn the_watch_says_it_out_loud_and_then_stops_saying_it() {
     let (status, _) = post(
         Arc::clone(&engine),
         &refusals,
-        accord_batch::build_batch_bytes_at(&sk, PRODUCER, "trace-watch-0001", admitted),
+        accord_batch::build_batch_bytes_at(&sk, PRODUCER, "trace-watch-0001", produced_at),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Anchor on what the plane actually bands on (CIRISPersist#606).
+    let admitted = newest_admitted(&engine)
+        .await
+        .expect("the corpus reports an admission instant for the accepted row");
 
     let mut watch = Watch::new();
 

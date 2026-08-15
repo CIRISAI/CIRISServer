@@ -69,9 +69,10 @@ fn detailed_content_is_redacted_before_it_can_federate() {
          passes by examining nothing"
     );
 
-    let modified = EgressScrubber
+    let outcome = EgressScrubber
         .scrub_batch(&mut env)
         .expect("detailed scrubs with regex + walker; no NER required");
+    let modified = outcome.fields_modified;
 
     let out = rendered(&env);
     assert!(
@@ -94,10 +95,19 @@ fn detailed_content_is_redacted_before_it_can_federate() {
 fn generic_passes_through_untouched() {
     let mut env = batch_at("generic");
     let before = rendered(&env);
-    let modified = EgressScrubber
+    let outcome = EgressScrubber
         .scrub_batch(&mut env)
         .expect("generic is a no-op");
-    assert_eq!(modified, 0, "generic has no content to redact");
+    assert_eq!(
+        outcome.fields_modified, 0,
+        "generic has no content to redact"
+    );
+    // v32.1.0 (#690) — the outcome must also STATE the treatment, not just count.
+    assert!(!outcome.ner_ran, "generic must not claim a NER pass");
+    assert_eq!(
+        outcome.applied_trace_level, "generic",
+        "the outcome's level must match what was actually applied"
+    );
     assert_eq!(
         before,
         rendered(&env),

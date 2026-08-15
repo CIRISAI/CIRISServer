@@ -67,7 +67,7 @@
 
 use ciris_persist::pipeline::scrub::{ner, scrub_trace};
 use ciris_persist::schema::{BatchEnvelope, BatchEvent, TraceLevel};
-use ciris_persist::scrub::{ScrubError, Scrubber};
+use ciris_persist::scrub::{ScrubError, ScrubOutcome, Scrubber};
 
 /// Routes each event in a batch through persist's scrub pipeline.
 ///
@@ -77,10 +77,11 @@ use ciris_persist::scrub::{ScrubError, Scrubber};
 pub struct EgressScrubber;
 
 impl Scrubber for EgressScrubber {
-    fn scrub_batch(&self, env: &mut BatchEnvelope) -> Result<usize, ScrubError> {
+    fn scrub_batch(&self, env: &mut BatchEnvelope) -> Result<ScrubOutcome, ScrubError> {
         // A node can be BUILT with NER and still not have a model, so ask at
         // runtime. `FullTraces` without a model becomes `Detailed`, content and
         // claim together.
+        let ner_ran = ner::is_configured() && env.trace_level == TraceLevel::FullTraces;
         let level = match env.trace_level {
             TraceLevel::FullTraces if !ner::is_configured() => {
                 tracing::warn!(
@@ -132,6 +133,26 @@ impl Scrubber for EgressScrubber {
                 "egress scrub redacted content before it could be sealed and federated"
             );
         }
-        Ok(modified)
+
+        // v32.1.0 (CIRISPersist#690) — STATE what was done, do not merely count
+        // it. `fields_modified: 0` is the honest output of both "NER ran and
+        // found nothing" and "no scrubber ran", and a receiver enforcing
+        // "properly scrubbed" has to tell those apart. persist binds this
+        // statement into the signed scrub envelope, so it travels with the row.
+        //
+        // `applied_trace_level` is the level the content was ACTUALLY treated
+        // at — already downgraded above when no model is loaded — so the
+        // envelope agrees with the label rather than contradicting it.
+        Ok(ScrubOutcome {
+            fields_modified: modified,
+            ner_ran,
+            applied_trace_level: level.as_str().to_string(),
+            // NOT KNOWABLE HERE. persist exposes `ner::is_configured()` but
+            // nothing that identifies WHICH model answered, so there is no
+            // honest value to put here — and inventing one would defeat the
+            // field's purpose, which is telling a receiver what instrument ran.
+            // Raised upstream rather than filled with a guess.
+            scrubber_model_digest: None,
+        })
     }
 }

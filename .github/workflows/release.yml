@@ -372,16 +372,31 @@ jobs:
             RUN_ID=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
                       --repo "$GITHUB_REPOSITORY" --limit 20 \
                       --json databaseId,createdAt 2>/dev/null \
-                      | jq -r 'sort_by(.createdAt) | reverse | .[0].databaseId // empty')
+                      | jq -r 'sort_by(.createdAt) | reverse | .[0].databaseId // empty' 2>/dev/null) || RUN_ID=
             if [ -n "$RUN_ID" ]; then
+              # EVERY probe below is guarded. This step runs under `set -euo
+              # pipefail`, and an UNGUARDED `X=$(... | jq ...)` aborts the whole
+              # step when jq gets malformed input — which is what a flaky `gh api`
+              # produces. CIRISServer#409: this poll is written to allow 45
+              # minutes and died 4 minutes in with 41 unspent, so v0.5.172 and
+              # v0.5.173 both published WITHOUT the iOS asset while the artifact
+              # they wanted existed and was good.
+              #
+              # A transient must cost one attempt, not the budget. Only two things
+              # may end this loop: the iOS jobs actually finishing, or the 45
+              # minutes running out.
               JOBS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
                       --paginate --jq '.jobs[] | {name, status, conclusion}' 2>/dev/null \
-                      | jq -s '.' || echo '[]')
-              TOTAL=$(echo "$JOBS"   | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re))] | length')
-              PENDING=$(echo "$JOBS" | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re)) | select(.status != "completed")] | length')
+                      | jq -s '.' 2>/dev/null || echo '[]')
+              echo "$JOBS" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+                echo "attempt ${attempt}/45: job list unreadable (transient) — retrying, budget intact"
+                JOBS='[]'
+              }
+              TOTAL=$(echo "$JOBS"   | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re))] | length' 2>/dev/null) || TOTAL=0
+              PENDING=$(echo "$JOBS" | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re)) | select(.status != "completed")] | length' 2>/dev/null) || PENDING=1
               if [ "$TOTAL" != "0" ] && [ "$PENDING" = "0" ]; then
                 FAILED=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
-                          '[.[] | select(.name|test($re)) | select(.conclusion != "success") | .name] | join(", ")')
+                          '[.[] | select(.name|test($re)) | select(.conclusion != "success") | .name] | join(", ")' 2>/dev/null) || FAILED=
                 if [ -n "$FAILED" ]; then
                   echo "::error::The iOS build itself failed in ci.yml run ${RUN_ID}: ${FAILED}. The asset is not publishable. Fix the iOS leg; do not re-tag."
                   exit 1
@@ -390,7 +405,7 @@ jobs:
                 # Report unrelated reds — they do not block the asset, but they
                 # must never be invisible from here.
                 OTHER=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
-                         '[.[] | select(.name|test($re)|not) | select(.conclusion == "failure") | .name] | join(", ")')
+                         '[.[] | select(.name|test($re)|not) | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null) || OTHER=
                 if [ -n "$OTHER" ]; then
                   echo "::warning::ci.yml run ${RUN_ID} is RED for reasons unrelated to iOS: ${OTHER}. Publishing the iOS asset anyway — those jobs do not build it — but that CI failure still needs fixing."
                 fi
@@ -511,3 +526,35 @@ jobs:
             release/SHA256SUMS.pem
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-spec') || contains(github.ref_name, '-beta') }}
+
+      # ── The release is UPLOADED above; now say whether it is COMPLETE ───────
+      #
+      # CIRISServer#409. Publishing an incomplete release and reporting success
+      # is how v0.5.172 shipped without its iOS asset unnoticed: the step emitted
+      # a `::warning::`, the job went green, and the only consumer that cares —
+      # CIRISAgent's `refresh-ios-substrate.yml` — SKIPS silently when it finds no
+      # iOS asset. Both ends of that chain declined to fail, so a missing platform
+      # was invisible from either side.
+      #
+      # This runs AFTER the upload deliberately. Failing earlier would publish
+      # nothing at all and lose the platforms that did build; failing here keeps
+      # the release and makes its incompleteness loud.
+      #
+      # The allow-fail ARM lanes are treated the same way: a tarball that is
+      # supposed to exist and does not is a red build, whatever produced it.
+      - name: Refuse to call an incomplete release successful
+        run: |
+          set -uo pipefail
+          MISSING=""
+          for want in ios x86_64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            ls release/*"${want}"*.tar.gz >/dev/null 2>&1 || MISSING="${MISSING} ${want}"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::This release is INCOMPLETE — missing:${MISSING}."
+            echo "The tag and its assets are published; what did build is on the release."
+            echo "Do NOT re-tag. Fix the failing build job and re-run it, then re-run"
+            echo "this workflow so the missing asset attaches to the SAME tag."
+            exit 1
+          fi
+          echo "✓ every required platform asset is present"
+

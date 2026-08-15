@@ -225,15 +225,63 @@ struct OAuthState {
     providers: Arc<Mutex<ProviderConfigStore>>,
     handoff: Arc<Mutex<HandoffStore>>,
     client: Arc<dyn ProviderClient>,
-    /// Base URL the OAuth callback is registered under (e.g.
-    /// `https://app.ciris.ai`); the per-provider callback path is appended. The
-    /// agent reads `OAUTH_CALLBACK_BASE_URL`.
-    callback_base: String,
+    /// Boot-resolved fallback for the callback base. **Read
+    /// [`OAuthState::callback_base`] instead** — it consults the live config
+    /// first and only falls back to this.
+    ///
+    /// This used to be the only source, captured here at compose time. A folded
+    /// node therefore built its OAuth router before anything could tell it its
+    /// public origin, so `PUT /v1/config/auth.oauth_callback_base_url` appeared
+    /// to do nothing and the emitted `redirect_uri` stayed on the loopback
+    /// default — which read as "the node cannot know its public origin" rather
+    /// than "the value must be set before boot" (CIRISServer#412).
+    boot_callback_base: String,
+}
+
+impl OAuthState {
+    /// The base the callback URL is built from, read LIVE.
+    ///
+    /// `auth.oauth_callback_base_url` is a `config:*` CEG key, so an operator or
+    /// a folded agent can set it at any time; taking effect only on the next
+    /// restart is an ordering constraint nothing announces. OAuth logins are
+    /// rare, so a config read per login costs nothing next to that surprise.
+    ///
+    /// Falls back to the boot-resolved value when the key is unset or unreadable
+    /// — an unreadable config must not silently change where users are sent.
+    async fn callback_base(&self) -> String {
+        match crate::graph_config::get_str(
+            &self.engine,
+            crate::config_reconcile::KEY_OAUTH_CALLBACK_BASE_URL,
+        )
+        .await
+        {
+            Ok(Some(v)) if !v.trim().is_empty() => v,
+            Ok(_) => self.boot_callback_base.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key = crate::config_reconcile::KEY_OAUTH_CALLBACK_BASE_URL,
+                    fallback = %self.boot_callback_base,
+                    "could not read the OAuth callback base from config — using the \
+                     boot-resolved value. A redirect_uri that does not match what the \
+                     provider has registered will be REFUSED by the provider."
+                );
+                self.boot_callback_base.clone()
+            }
+        }
+    }
 }
 
 /// The per-provider OAuth callback URL (the agent's `get_oauth_callback_url`):
 /// `{base}/v1/auth/oauth/{provider}/callback`. This MUST match the
 /// `redirect_uri` the provider has registered and the one sent at authorize time.
+/// Test-visible wrapper for [`oauth_callback_url`] — the emitted URI must equal
+/// the path the router serves, and a provider compares that string exactly.
+#[doc(hidden)]
+pub fn oauth_callback_url_for_test(base: &str, provider: &str) -> String {
+    oauth_callback_url(base, provider)
+}
+
 fn oauth_callback_url(base: &str, provider: &str) -> String {
     format!(
         "{}/v1/auth/oauth/{provider}/callback",
@@ -1373,7 +1421,7 @@ async fn oauth_login(
     // app-supplied post-login `redirect_uri`, which is validated above and would
     // be carried separately in real deployments). This matches the agent, which
     // always sends `get_oauth_callback_url(provider)` to the provider.
-    let callback = oauth_callback_url(&st.callback_base, &provider);
+    let callback = oauth_callback_url(&st.callback_base().await, &provider);
     let url = st
         .client
         .authorize_url(&provider, &client_id, &state, &callback, &code_challenge);
@@ -1428,7 +1476,7 @@ async fn oauth_callback(
             None => return err(StatusCode::NOT_FOUND, "provider not configured"),
         }
     };
-    let redirect_uri = oauth_callback_url(&st.callback_base, &provider);
+    let redirect_uri = oauth_callback_url(&st.callback_base().await, &provider);
     let ident = match st
         .client
         .exchange_code(
@@ -1728,7 +1776,7 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
         providers: Arc::new(Mutex::new(ProviderConfigStore::default())),
         handoff: Arc::new(Mutex::new(HandoffStore::default())),
         client: Arc::new(HttpProviderClient::default()),
-        callback_base,
+        boot_callback_base: callback_base,
     };
     Router::new()
         .route(
