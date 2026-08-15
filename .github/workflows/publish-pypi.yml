@@ -34,6 +34,15 @@ permissions:
   contents: read
   packages: write   # build-wheels (reusable) CIRISCache save on main — CIRISServer#99
 
+# One publish per tag at a time. `cancel-in-progress` is deliberately FALSE:
+# a re-run raced against the original would leave a half-uploaded set of wheels,
+# and PyPI uploads are not reversible. A second run WAITS rather than
+# interrupting — the failure mode of queueing is a delay, the failure mode of
+# cancelling is a partial release.
+concurrency:
+  group: publish-pypi-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Build every platform wheel + the sdist via the shared reusable workflow.
   # On a tag, github.ref is refs/tags/v* → the substrate cache layers restore

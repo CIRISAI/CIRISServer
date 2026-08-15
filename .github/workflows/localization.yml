@@ -22,6 +22,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: localization-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   localization:
     name: Localization guard (vendored client)

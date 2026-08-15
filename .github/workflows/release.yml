@@ -48,6 +48,15 @@ permissions:
 # of the conformance fabric; it must attest its own builds.
 # ============================================================================
 
+# One publish per tag at a time. `cancel-in-progress` is deliberately FALSE:
+# a re-run raced against the original would leave a half-uploaded GitHub release,
+# and PyPI uploads are not reversible. A second run WAITS rather than
+# interrupting — the failure mode of queueing is a delay, the failure mode of
+# cancelling is a partial release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-native:
     name: Build (${{ matrix.target }})

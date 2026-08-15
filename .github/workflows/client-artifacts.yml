@@ -36,7 +36,16 @@ on:
 
 # Supersede stale runs on the same ref (PR re-push); tag refs are distinct.
 concurrency:
-  group: client-artifacts-${{ github.ref }}
+  # Keyed on the COMMIT, not the ref. A merge and the tag pointing at it are the
+  # same tree under two refs (refs/heads/main, refs/tags/vX), so a ref-keyed
+  # group put them in different buckets and this workflow built the desktop JAR
+  # and the APK twice for byte-identical source. That is a straight doubling of
+  # the most expensive artifact in the repo.
+  #
+  # The later run wins, and on a cut the later run is the TAG — the one that
+  # attaches release assets. The main-push run only uploads workflow artifacts
+  # for humans, so losing it to the tag costs nothing.
+  group: client-artifacts-${{ github.sha }}
   cancel-in-progress: true
 
 permissions:
