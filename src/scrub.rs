@@ -39,25 +39,34 @@
 //! |---|---|
 //! | `Generic` | no-op — carries no content text by design |
 //! | `Detailed` | walker + regex redaction over the field catalog |
-//! | `FullTraces` | walker + regex + NER, and **REFUSES** when NER is absent |
+//! | `FullTraces` | walker + regex + NER — **only if a model is loaded** |
 //!
-//! That refusal is deliberate upstream design, and we keep it: a `FullTraces`
-//! batch scrubbed without NER would silently lose multilingual entity coverage,
-//! and persist's mission note is explicit that partial scrubbing is worse than
-//! none because it leaks the assumption that the rest *was* scrubbed. An `Err`
-//! here fails the ingest and the batch is rejected — nothing partially-scrubbed
-//! is ever persisted.
+//! # `FullTraces` DOWNGRADES when NER is absent — it does not refuse
 //!
-//! # NER is a build decision, not a runtime one
+//! `full_traces` is opt-in and the agents that opt in are exactly the ones doing
+//! research. Refusing their batches would take them dark on a node whose only
+//! fault is a missing model file, so a batch that asks for `FullTraces` on a
+//! node without NER is scrubbed at `Detailed` and **the level is rewritten to
+//! match**, loudly.
 //!
-//! The NER backends live behind persist's `scrub-ner` / `scrub-ort` features
-//! (Candle + tokenizers + hf-hub, or ORT). This build enables `scrub` only, so
-//! `Detailed` is fully covered and `FullTraces` is refused rather than
-//! under-scrubbed. Turning NER on is a wheel-size question measured against the
-//! PyPI ceiling, and it belongs in the same commit as that measurement.
+//! Rewriting the level is the honest part. `trace_level` is the CLAIM about what
+//! treatment the content received, so a trace that got the regex pass must say
+//! `detailed` — otherwise the corpus carries rows labelled `full_traces` that
+//! never saw a NER pass, and every downstream reader that trusts the label is
+//! wrong. Downgrading the content without downgrading the claim would be the
+//! same defect this module exists to close.
+//!
+//! # NER is a build decision AND a deployment one
+//!
+//! The backends live behind persist's `scrub-ner` / `scrub-ort` features
+//! (measured: **+1.01 MiB** of binary, which fits the PyPI ceiling with ~6.8 MiB
+//! to spare). The MODEL does not ship — XLM-R INT8 is ~280 MB, and persist
+//! resolves it from `CIRISLENS_NER_MODEL_DIR` or an HF-Hub fetch. So the feature
+//! being compiled in does not mean NER is available on any given node, which is
+//! exactly why this is a runtime check and not a `#[cfg]`.
 
-use ciris_persist::pipeline::scrub::scrub_trace;
-use ciris_persist::schema::{BatchEnvelope, BatchEvent};
+use ciris_persist::pipeline::scrub::{ner, scrub_trace};
+use ciris_persist::schema::{BatchEnvelope, BatchEvent, TraceLevel};
 use ciris_persist::scrub::{ScrubError, Scrubber};
 
 /// Routes each event in a batch through persist's scrub pipeline.
@@ -69,12 +78,39 @@ pub struct EgressScrubber;
 
 impl Scrubber for EgressScrubber {
     fn scrub_batch(&self, env: &mut BatchEnvelope) -> Result<usize, ScrubError> {
-        let level = env.trace_level;
+        // A node can be BUILT with NER and still not have a model, so ask at
+        // runtime. `FullTraces` without a model becomes `Detailed`, content and
+        // claim together.
+        let level = match env.trace_level {
+            TraceLevel::FullTraces if !ner::is_configured() => {
+                tracing::warn!(
+                    requested = "full_traces",
+                    applied = "detailed",
+                    "NO NER MODEL LOADED — this batch asked for full_traces and got the \
+                     regex/walker pass only. Multilingual entity coverage is NOT applied, \
+                     and the trace_level is being rewritten to `detailed` so the corpus \
+                     does not carry rows claiming a scrub they never received. Stage a \
+                     model (CIRISLENS_NER_MODEL_DIR) to restore full_traces."
+                );
+                TraceLevel::Detailed
+            }
+            other => other,
+        };
+        if level != env.trace_level {
+            env.trace_level = level;
+        }
         let mut modified = 0usize;
 
         for event in env.events.iter_mut() {
             match event {
-                BatchEvent::CompleteTrace { trace, .. } => {
+                BatchEvent::CompleteTrace {
+                    trace,
+                    trace_level: event_level,
+                } => {
+                    // §7 gating requires the event's level to equal the batch's;
+                    // a downgrade that updated only one of them would fail the
+                    // envelope's own consistency check downstream.
+                    *event_level = level;
                     // Round-trip through JSON because the pipeline walks values,
                     // not persist's typed structs. Failure to serialize is an
                     // Err, never a skip — a trace we cannot read is a trace we

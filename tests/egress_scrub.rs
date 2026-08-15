@@ -15,7 +15,7 @@
 //! that, and on this node nothing implemented it. These tests are the
 //! verification.
 
-use ciris_persist::schema::BatchEnvelope;
+use ciris_persist::schema::{BatchEnvelope, BatchEvent, TraceLevel};
 use ciris_persist::scrub::Scrubber;
 use ciris_server::scrub::EgressScrubber;
 use serde_json::json;
@@ -105,31 +105,56 @@ fn generic_passes_through_untouched() {
     );
 }
 
-/// **The refusal is the feature.** Without NER compiled in, a `full_traces`
-/// batch must be REJECTED, not scrubbed with regex alone.
+/// **The `trace_level` a row carries must match the scrub it received.**
 ///
-/// persist's mission note is explicit: partial scrubbing is worse than none,
-/// because it leaks the assumption that the rest *was* scrubbed. An Err here
-/// fails the ingest, so nothing partially-scrubbed is ever persisted — where the
-/// old `NullScrubber` passed the same batch through completely unredacted and
-/// only logged a warning.
+/// `full_traces` is opt-in, and the agents that opt in are the research ones.
+/// Refusing their batches would take them dark because a model file is missing,
+/// so a `full_traces` batch on a node without NER is scrubbed at `Detailed` and
+/// **relabelled** `detailed`.
+///
+/// The relabelling is the load-bearing half. `trace_level` is the CLAIM about
+/// what treatment the content got; leaving it at `full_traces` after a
+/// regex-only pass would put rows in the corpus asserting a scrub they never
+/// received, and every downstream reader trusting that label would be wrong.
+/// Downgrading content without downgrading the claim is the same defect this
+/// whole module exists to close.
+///
+/// Asserted in BOTH directions against the live NER state, so this test is
+/// meaningful on a machine with a model and on CI without one.
 #[test]
-fn full_traces_is_refused_rather_than_under_scrubbed() {
+fn the_level_a_row_claims_matches_the_scrub_it_received() {
+    let ner_available = ciris_persist::pipeline::scrub::ner::is_configured();
     let mut env = batch_at("full_traces");
-    let before = rendered(&env);
 
-    let result = EgressScrubber.scrub_batch(&mut env);
+    EgressScrubber
+        .scrub_batch(&mut env)
+        .expect("full_traces downgrades when NER is absent — it must never refuse");
 
-    assert!(
-        result.is_err(),
-        "full_traces was ACCEPTED without NER. Regex alone silently drops \
-         multilingual entity coverage, and a batch that is partly scrubbed reads \
-         downstream as fully scrubbed. It must refuse."
-    );
+    let expected = if ner_available {
+        TraceLevel::FullTraces
+    } else {
+        TraceLevel::Detailed
+    };
     assert_eq!(
-        before,
-        rendered(&env),
-        "a refused batch must be left untouched — a half-scrubbed envelope must \
-         never be observable, even on the error path"
+        env.trace_level, expected,
+        "NER available = {ner_available}, so the batch should carry {expected:?}. \
+         A row labelled full_traces that never saw a NER pass is a false claim in \
+         the corpus."
     );
+
+    // The event-level copy must move with it: §7 gating compares the two, and a
+    // downgrade that updated only the envelope would fail that check downstream.
+    for ev in &env.events {
+        let BatchEvent::CompleteTrace { trace_level, .. } = ev;
+        assert_eq!(
+            *trace_level, expected,
+            "the per-event trace_level drifted from the batch's after downgrade"
+        );
+    }
+
+    // Whichever path ran, the content is gone.
+    let out = rendered(&env);
+    for pii in ["alice@example.com", "555-12-9999", "10.0.0.7"] {
+        assert!(!out.contains(pii), "`{pii}` survived the scrub\n{out}");
+    }
 }
