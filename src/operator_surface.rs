@@ -708,10 +708,13 @@ const TRACE_UNAVAILABLE: Msg = (
 /// renders the struct without reading this source still shows it.
 pub const TRACE_PRODUCER_ASSERTED_TS: Msg = (
     "operator.trace_plane.producer_asserted_ts",
-    "`last_admitted_at` is MAX(trace_events.ts) — the trace's own broadcast wall-clock, asserted \
-     by the producer. The substrate stores no server-side admission instant on this table, so a \
-     producer with a skewed clock moves this reading; a far-future row is called out as \
-     `future_dated` rather than banded for exactly that reason.",
+    "`last_admitted_at` is MAX(trace_events.admitted_at) — when THIS node last accepted a trace, \
+     on its own clock (CIRISPersist#606, persist v32.1.0). It is no longer the producer's \
+     assertion, so a peer with a skewed clock can no longer move this node's liveness reading. \
+     `None` on a corpus whose rows all predate the admission column: that reads as \
+     `never_admitted`, which is honest — this node cannot say when it last accepted one — and \
+     deliberately NOT a fallback to the producer's timestamp, which would reinstate the very \
+     coupling this replaced. A far-future row is still called out as `future_dated`.",
 );
 
 /// The trace-plane half as it appears on the wire.
@@ -2027,7 +2030,15 @@ pub(crate) fn corpus_of(
 ) -> Result<TraceCorpus, String> {
     summary
         .map(|s| TraceCorpus {
-            last_admitted_at: s.trace_events.newest_ts,
+            // v32.1.0 (CIRISPersist#606) — THIS node's admission instant, not
+            // the producer's assertion. `newest_ts` is MAX(component timestamp)
+            // from inside the signed CompleteTrace, so banding liveness on it
+            // derived "arrival stopped" from a number supplied by the party that
+            // stopped arriving: a slow producer clock pinned the plane dark
+            // while it was being actively fed, a fast one pinned it green
+            // through any silence. The caveat this surface used to carry
+            // (TRACE_PRODUCER_ASSERTED_TS) is now retired rather than explained.
+            last_admitted_at: s.trace_events.newest_admitted_at,
             rows: s.trace_events.rows,
         })
         .map_err(|e| format!("read the trace corpus aggregate: {e}"))
@@ -2917,12 +2928,14 @@ mod tests {
                 rows: 120_000,
                 oldest_ts: Some(at("2026-01-01T00:00:00Z")),
                 newest_ts: Some(last),
+                newest_admitted_at: Some(last),
             },
             trace_llm_calls: TableUsage {
                 bytes: 0,
                 rows: 7,
                 oldest_ts: None,
                 newest_ts: Some(at("2026-08-05T13:00:00Z")),
+                newest_admitted_at: Some(at("2026-08-05T13:00:00Z")),
             },
             detection_events: TableUsage::default(),
             audit_log: TableUsage::default(),

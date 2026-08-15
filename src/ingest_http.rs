@@ -435,6 +435,11 @@ fn refused_signer(e: &IngestError) -> Option<&str> {
         },
         IngestError::Schema(_)
         | IngestError::Scrub(_)
+        // The mismatch is discovered AFTER verification, so a signer is known —
+        // but this variant carries the claimed label and the applied treatment,
+        // not an identity, and inventing one here would put a name against a
+        // refusal it did not describe. Counted, not attributed.
+        | IngestError::ScrubTreatmentMismatch { .. }
         | IngestError::Store(_)
         | IngestError::Sign(_)
         | IngestError::ScopeRefused(_)
@@ -698,6 +703,11 @@ fn ingest_status(e: &IngestError) -> StatusCode {
         IngestError::Schema(_) => StatusCode::UNPROCESSABLE_ENTITY,
         IngestError::ScopeRefused(_) => StatusCode::FORBIDDEN,
         IngestError::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+        // v32.1.0 (CIRISPersist#690) — the batch claims a trace_level the scrub
+        // did not deliver. 422, not 500: the SENDER can fix it by downgrading
+        // the level or loading a model, and calling it a server fault would send
+        // an operator to the wrong logs.
+        IngestError::ScrubTreatmentMismatch { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         IngestError::Sign(_) | IngestError::Scrub(_) | IngestError::PipelineInvariant { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

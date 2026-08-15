@@ -429,7 +429,13 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
         .await
         .expect("storage summary")
         .trace_events
-        .newest_ts
+        // v32.1.0 (CIRISPersist#606) — read the SAME field the surface bands on.
+        // This used to read `newest_ts` (the producer's assertion) while the
+        // surface now uses this node's admission instant, so the test's `now`
+        // sat days behind the real admission and the plane read `future_dated`.
+        // A test that derives its clock from a different field than the code
+        // under test is measuring something else.
+        .newest_admitted_at
         .expect("a trace landed, so the corpus has a newest instant");
 
     let opts = |now: chrono::DateTime<Utc>| OperatorStateOptions {
@@ -489,6 +495,27 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
     }
 
     // ── (2) 48 hours later, with nothing new admitted ───────────────────────
+    // Read the refusal ledger FIRST, and near the refusals.
+    //
+    // `snapshot_at(now)` PRUNES: it drops every event older than `now - 1h` from
+    // the ledger in place. So reading the surface at `+48h` (below) does not
+    // merely report a stale window — it DESTROYS the 60 refusals, and any later
+    // read sees an empty ledger and says `clean`.
+    //
+    // Two bands, two clocks, and an order that matters: the trace plane is
+    // banded 48h after this node's last admission, the ingest ledger over a
+    // rolling hour. This only held before v32.1.0 because `last_admitted` was
+    // the PRODUCER's fixture timestamp, so `+48h` landed near the refusals by
+    // accident; now that it is this node's real admission instant
+    // (CIRISPersist#606) the accident is gone.
+    let ledger = operator_surface::operator_state(
+        &engine,
+        Err("no edge in this fixture".to_owned()),
+        Some(&refusals),
+        &opts(last_admitted + chrono::Duration::minutes(5)),
+    )
+    .await;
+
     let found_at = last_admitted + chrono::Duration::hours(48);
     let dark = operator_surface::operator_state(
         &engine,
@@ -518,14 +545,14 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
 
     // ── ...and the ingest reading says WHY, and who to go fix ───────────────
     assert_eq!(
-        dark["ingest"]["standing"],
+        ledger["ingest"]["standing"],
         serde_json::json!("stuck_producer"),
         "60 correct refusals from two stable identities is a fault report about someone else: {}",
-        dark["ingest"]
+        ledger["ingest"]
     );
-    assert_eq!(dark["ingest"]["band"], serde_json::json!("red"));
-    assert_eq!(dark["ingest"]["distinct_signers"], serde_json::json!(2));
-    let named: std::collections::HashSet<&str> = dark["ingest"]["top_signers"]
+    assert_eq!(ledger["ingest"]["band"], serde_json::json!("red"));
+    assert_eq!(ledger["ingest"]["distinct_signers"], serde_json::json!(2));
+    let named: std::collections::HashSet<&str> = ledger["ingest"]["top_signers"]
         .as_array()
         .expect("top_signers")
         .iter()
@@ -535,14 +562,14 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
         assert!(
             named.contains(who),
             "the reading must NAME the stuck producer — that is what makes it actionable: {}",
-            dark["ingest"]
+            ledger["ingest"]
         );
     }
     assert_eq!(
-        dark["ingest"]["by_kind"]["verify_unknown_key"],
+        ledger["ingest"]["by_kind"]["verify_unknown_key"],
         serde_json::json!(60),
         "persist's own stable token, carried: {}",
-        dark["ingest"]
+        ledger["ingest"]
     );
 
     // ── (4) The unreadable arm is NOT the same value ────────────────────────
