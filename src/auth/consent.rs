@@ -21,7 +21,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{cohort_scope, LocalAttestationInput};
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -91,15 +90,7 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         );
     }
 
-    let directory = match st.engine.sqlite_backend() {
-        Some(d) => d,
-        None => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no SQLite federation directory",
-            )
-        }
-    };
+    let directory = st.engine.federation_directory();
 
     // The CEG consent envelope. MUST carry a `"dimension"` (the (occurrence,
     // dimension) upsert key + the local-tier gate read it).

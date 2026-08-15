@@ -417,9 +417,7 @@ pub async fn subject_flag(
     requested: Option<ContentFlag>,
     authority: &FlagAuthority,
 ) -> Result<Option<ContentFlag>, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let rows = directory
         .list_attestations_for(subject_key_id)
         .await

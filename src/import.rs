@@ -20,9 +20,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::scrub::EgressScrubber;
 use anyhow::{Context, Result};
 use ciris_persist::prelude::Engine;
-use ciris_persist::scrub::NullScrubber;
 use flate2::read::GzDecoder;
 use serde_json::{json, Map, Value};
 
@@ -164,7 +164,7 @@ pub async fn run(dump_dir: &str) -> Result<()> {
             }
         };
         match engine
-            .receive_and_persist_pre_verified(&bytes, &NullScrubber)
+            .receive_and_persist_pre_verified(&bytes, &EgressScrubber)
             .await
         {
             Ok(s) => {

@@ -1920,6 +1920,31 @@ async fn cosign_canonical_impl(st: ProvisionState, req: CosignCanonicalRequest) 
             )
         }
     };
+    // CIRISVerify#252 (adoption #399, server-specific §2) — BIND the record's
+    // declared identity to its signed envelope BEFORE co-scrubbing it.
+    //
+    // `key_id`, `identity_type` and the pubkeys are sibling fields OUTSIDE
+    // `registration_envelope`, while the authority evidence — roles and the
+    // anchor scrub-signatures — is verified AGAINST that envelope. Unbound, the
+    // two halves may describe different keys: a caller wraps a sibling `key_id`
+    // naming the key you pinned around a genuinely accord-co-scrubbed envelope
+    // for some OTHER key carrying `infra:attest`. That passes an identity
+    // comparison, a role read AND a real >=2-anchor quorum — and this endpoint
+    // would then add OUR anchor's scrub to it, blessing a key nobody blessed.
+    //
+    // Our own producers build both halves coherently, so this only ever refuses
+    // a record we did not author — which is exactly the caller-supplied case.
+    if let Err(e) = partial.record.check_subject_binding() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "refusing to co-scrub `{}`: its registration envelope is not bound to it \
+                 ({e}) — the signed half describes a different subject than the outer \
+                 fields claim (CIRISVerify#252)",
+                partial.record.key_id
+            ),
+        );
+    }
     let target_key_id = partial.record.key_id.clone();
     let identity =
         match open_holder_identity(req.key_id.trim(), req.mldsa_usb_path.trim(), &req.pkcs11).await
@@ -2212,6 +2237,18 @@ async fn cosign_ci_key_impl(st: ProvisionState, req: CosignCiKeyRequest) -> Resp
                 )
             }
         };
+        // Same binding gate as the single-partial path above (CIRISVerify#252).
+        if let Err(e) = partial.record.check_subject_binding() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "refusing to co-scrub `{}`: its registration envelope is not bound to \
+                     it ({e}) — the signed half describes a different subject than the \
+                     outer fields claim (CIRISVerify#252)",
+                    partial.record.key_id
+                ),
+            );
+        }
         let target_key_id = partial.record.key_id.clone();
         let advanced = match append_scrub(partial, &identity).await {
             Ok(r) => r,

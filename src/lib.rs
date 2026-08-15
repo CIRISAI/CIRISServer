@@ -83,6 +83,7 @@ pub mod attest;
 /// `wa_cert` substrate. Public so the wheel exposes the auth API the agent
 /// consumes as a delegate (the single-authority contract).
 pub mod auth;
+pub mod backend;
 /// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
 pub mod benchmarks;
 /// Claim remote ownership — the SUBSTRATE-NATIVE, node-to-node claiming side of
@@ -353,6 +354,7 @@ pub mod retention_loop;
 /// integration test (`tests/safety.rs`) can drive the modules + routers directly.
 pub mod safety;
 pub mod scorer;
+pub mod scrub;
 /// **This node's own signing identity, resolved from the engine rather than
 /// accepted as a parameter** (CIRISServer#372 Level 2). The `--key-id` CLI flag
 /// is an operator LABEL; `Engine::local_derived_key_id()` is what the engine

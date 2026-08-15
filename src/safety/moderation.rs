@@ -46,7 +46,6 @@ use axum::{Json, Router};
 use ciris_persist::federation::admission;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAttestationInput};
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -111,9 +110,7 @@ pub async fn admit_moderation_action(
     community_key_id: &str,
     duty: Duty,
 ) -> Result<bool, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     let scope = duty.scope_token();
     let duty_holders =
         admission::duty_holders_for_community(directory.as_ref(), community_key_id, scope)
@@ -151,9 +148,7 @@ pub async fn emit_moderation_event(
     target_key_ids: &[String],
     payload: serde_json::Value,
 ) -> Result<String, String> {
-    let directory = engine
-        .sqlite_backend()
-        .ok_or_else(|| "no SQLite federation directory".to_string())?;
+    let directory = engine.federation_directory();
     // Every `scores` dimension MUST carry a `:vN` version segment (persist
     // `require_version_segment`, CEG §13.1).
     let dimension = format!("{MODERATION_DIMENSION_PREFIX}{allegation_type}:v1");
@@ -277,9 +272,7 @@ pub async fn read_track_record(
     member_key_id: &str,
     community_key_id: &str,
 ) -> Result<u64, MeritUnreadable> {
-    let Some(directory) = engine.sqlite_backend() else {
-        return Err(MeritUnreadable::NoDirectory);
-    };
+    let directory = engine.federation_directory();
     let rows = directory
         .list_attestations_by(member_key_id)
         .await

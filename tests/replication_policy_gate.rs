@@ -71,8 +71,33 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// v15.22.0 and v16.0.0 (`f43c9736…` all three). So both re-pins are column
 /// changes, not serve-rule relaxations. A hash gate exists to force that reading;
 /// taking the number on trust would make it decoration.
+/// ## v16.3.0 re-pin — the 15th kind, and why it is not a serve relaxation
+///
+/// `6f683311…` → `328d73b0…`, read before accepting (CIRISEdge#474).
+///
+/// The diff against v16.1.0 adds exactly ONE arm to each of the two match
+/// blocks, for the new `EnvelopeKind::AccordQuorumEvidence`:
+///
+/// | axis | value |
+/// |---|---|
+/// | advertise | `cursor:evidence_at` — the dedicated cursor path, not the content-hash Summary/Diff/Fetch flow |
+/// | serve | `public` — a `FederationOnly`-tier bundle, no capability gate |
+/// | receive | `cursor_pull:evidence_at; re-tally admit` |
+///
+/// **`trace:*` is untouched**, which is the invariant this gate exists for: E3
+/// trace-confidentiality (`trace:*` → `capability:infra:serve` only). No
+/// existing kind's advertise scope or serve gate moved; the hash changed because
+/// the match blocks gained a fifteenth arm.
+///
+/// The one value worth pausing on is `serve = "public"` — an ungated serve is
+/// normally exactly what this gate is here to catch. It is acceptable because
+/// the RECEIVE side does not trust it: `apply_replicated_accord_evidence`
+/// **re-tallies the quorum against the receiver's own roster** rather than
+/// accepting the sender's verdict, and the value is deliberately kept out of the
+/// `subject_pull:*` namespace so it cannot be mistaken for a subject-scoped read.
+/// Serving a bundle anyone may verify for themselves is not a disclosure.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "6f683311627689221d886f4245ac7b9fa6715e6f1e135855f52fa7800fb7cda5";
+    "328d73b0a6a5c7e2d1272b81e245ecceeca1d837dd08b0415105e1661ff4a699";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

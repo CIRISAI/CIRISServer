@@ -504,6 +504,11 @@ data class SetupFormState(
     val ownershipClaim: NodeOwnershipClaimState = NodeOwnershipClaimState(),
 
     // Google/Apple OAuth state
+    //
+    // `isGoogleAuth` is misnamed: it is set from `isAuth` for BOTH Google and
+    // Apple (see SetupViewModel's OAuth handler), so it means "authenticated via
+    // an external provider", not "Google specifically". Read it through
+    // [SetupState.isExternalAuth] rather than directly.
     val isGoogleAuth: Boolean = false,
     val googleIdToken: String? = null,
     val googleEmail: String? = null,
@@ -677,6 +682,45 @@ data class SetupFormState(
     val isSubmitting: Boolean = false,
     val submissionError: String? = null
 ) {
+    /**
+     * **Did this user authenticate through an external provider?** — the ONE
+     * derivation, because answering it twice is what broke setup.
+     *
+     * `/v1/setup/complete` computes `is_oauth_user = bool(oauth_provider)` and,
+     * when true, GENERATES a random password for an account that will never use
+     * one. When false it refuses with *"New user password must be at least 8
+     * characters"* — which is correct for a password account and nonsense to
+     * someone who just signed in with Google.
+     *
+     * The two call sites had disagreed. The CIRIS-proxy branch passed
+     * [oauthProvider] straight through; the BYOK branch required
+     * `isGoogleAuth && googleUserId != null`. So a BYOK user who signed in with
+     * OAuth but whose provider returned no subject id read as a PASSWORD user
+     * and was asked for a password they had never set.
+     *
+     * [googleUserId] is evidence about WHICH account, not about WHETHER OAuth
+     * happened, so it must not gate this. [isGoogleAuth] is the authoritative
+     * signal and covers Apple too — it is set from `isAuth` for both providers,
+     * despite the name.
+     *
+     * HA add-on mode counts: SUPERVISOR_TOKEN is external auth with no password
+     * either.
+     */
+    val isExternalAuth: Boolean
+        get() = isGoogleAuth || isHAAddonMode
+
+    /**
+     * The provider to send as `oauth_provider`, or null when this is a genuine
+     * password account. Paired with [isExternalAuth] so the flag and the value
+     * can never disagree.
+     */
+    val effectiveOAuthProvider: String?
+        get() = when {
+            isHAAddonMode -> "home_assistant"
+            isGoogleAuth -> oauthProvider
+            else -> null
+        }
+
     /**
      * Check if using CIRIS proxy mode.
      * Source: SetupViewModel.kt:125-127
