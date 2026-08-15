@@ -330,140 +330,21 @@ jobs:
   # missing silently is precisely the failure that left the client's substrate
   # refresh red since June.
   # ══════════════════════════════════════════════════════════════════════════
+  # ── The iOS asset — BUILT here, not fetched from another workflow ────────
+  #
+  # This job used to poll ci.yml for an artifact it had produced for the same
+  # SHA, then download it. That coupling failed twice: a release cannot fetch
+  # from a run that was cancelled, has not finished, or never ran, and a poll
+  # cannot conjure an artifact that does not exist (CIRISServer#409, #414).
+  #
+  # It now calls the same reusable workflow ci.yml calls, so the release builds
+  # its iOS asset exactly like the seven platform tarballs beside it. The
+  # 45-minute poll, its `set -euo pipefail` guards and the "re-run this job"
+  # remedy in its error text are all gone — there is nothing left to be
+  # transient about.
   ios-asset:
-    name: Fetch iOS asset from CI
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read   # gh run list / gh run download, across workflow runs
-    steps:
-      - uses: actions/checkout@v4
-      - name: Locate the CI run for this commit and download ciris-server-ios
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # ci.yml triggers on push:main + pull_request (NOT on tags), so the
-          # artifact belongs to the CI run of this same SHA on main. If that run
-          # is still in flight (tag pushed right behind the branch push), wait.
-          #
-          # WAIT ON THE JOBS THAT BUILD THE ASSET, NOT ON THE RUN'S CONCLUSION.
-          #
-          # This gate used to select `.conclusion == "success"` over the whole
-          # ci.yml run. A run's conclusion is the AND of every job in it, so any
-          # unrelated red — a rustfmt nit, a clippy lint in a test file — vetoed
-          # a 58 MiB iOS asset that had built perfectly. On v0.5.158 exactly that
-          # happened: `ios PyO3 abi3` (both slices) and `package ios artifacts`
-          # all went green and uploaded `ciris-server-ios`, while rustfmt and two
-          # clippy legs failed, and this job reported "No successful ci.yml run".
-          #
-          # It is the defect class this repo keeps finding: ONE NAME, TWO AXES.
-          # "CI is green" was standing in for "the iOS artifact was built", and
-          # those are different questions over different jobs. Every release from
-          # v0.5.146 to v0.5.158 carries zero iOS assets — the harvest has never
-          # once succeeded, and the run-level gate is why.
-          #
-          # So: poll until the iOS jobs specifically are COMPLETE, then require
-          # THOSE to be green. An unrelated red is reported loudly and does not
-          # veto. A red iOS job still blocks, because then the asset is suspect.
-          IOS_JOBS='^(ios PyO3 abi3|package ios artifacts)'
-          RUN_ID=""
-          for attempt in $(seq 1 45); do
-            RUN_ID=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
-                      --repo "$GITHUB_REPOSITORY" --limit 20 \
-                      --json databaseId,createdAt 2>/dev/null \
-                      | jq -r 'sort_by(.createdAt) | reverse | .[0].databaseId // empty' 2>/dev/null) || RUN_ID=
-            if [ -n "$RUN_ID" ]; then
-              # EVERY probe below is guarded. This step runs under `set -euo
-              # pipefail`, and an UNGUARDED `X=$(... | jq ...)` aborts the whole
-              # step when jq gets malformed input — which is what a flaky `gh api`
-              # produces. CIRISServer#409: this poll is written to allow 45
-              # minutes and died 4 minutes in with 41 unspent, so v0.5.172 and
-              # v0.5.173 both published WITHOUT the iOS asset while the artifact
-              # they wanted existed and was good.
-              #
-              # A transient must cost one attempt, not the budget. Only two things
-              # may end this loop: the iOS jobs actually finishing, or the 45
-              # minutes running out.
-              JOBS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
-                      --paginate --jq '.jobs[] | {name, status, conclusion}' 2>/dev/null \
-                      | jq -s '.' 2>/dev/null || echo '[]')
-              echo "$JOBS" | jq -e 'type == "array"' >/dev/null 2>&1 || {
-                echo "attempt ${attempt}/45: job list unreadable (transient) — retrying, budget intact"
-                JOBS='[]'
-              }
-              TOTAL=$(echo "$JOBS"   | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re))] | length' 2>/dev/null) || TOTAL=0
-              PENDING=$(echo "$JOBS" | jq --arg re "$IOS_JOBS" '[.[] | select(.name|test($re)) | select(.status != "completed")] | length' 2>/dev/null) || PENDING=1
-              if [ "$TOTAL" != "0" ] && [ "$PENDING" = "0" ]; then
-                FAILED=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
-                          '[.[] | select(.name|test($re)) | select(.conclusion != "success") | .name] | join(", ")' 2>/dev/null) || FAILED=
-                if [ -n "$FAILED" ]; then
-                  echo "::error::The iOS build itself failed in ci.yml run ${RUN_ID}: ${FAILED}. The asset is not publishable. Fix the iOS leg; do not re-tag."
-                  exit 1
-                fi
-                echo "✓ all ${TOTAL} iOS job(s) green in ci.yml run ${RUN_ID}"
-                # Report unrelated reds — they do not block the asset, but they
-                # must never be invisible from here.
-                OTHER=$(echo "$JOBS" | jq -r --arg re "$IOS_JOBS" \
-                         '[.[] | select(.name|test($re)|not) | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null) || OTHER=
-                if [ -n "$OTHER" ]; then
-                  echo "::warning::ci.yml run ${RUN_ID} is RED for reasons unrelated to iOS: ${OTHER}. Publishing the iOS asset anyway — those jobs do not build it — but that CI failure still needs fixing."
-                fi
-                break
-              fi
-            fi
-            echo "iOS jobs for ${GITHUB_SHA} not finished yet (${attempt}/45) — waiting 60s"
-            RUN_ID=""
-            sleep 60
-          done
-          if [ -z "$RUN_ID" ]; then
-            echo "::error::Timed out after 45 minutes waiting for the iOS jobs of the ci.yml run on ${GITHUB_SHA}. The iOS release asset is BUILT BY CI (ci.yml: ios-build → ios-package) and published from here. Re-run this job once those jobs have finished. Do not re-tag."
-            exit 1
-          fi
-          mkdir -p ios
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name ciris-server-ios --dir ios
-          ls -la ios/
-      - name: Verify the asset name matches what the client resolves
-        run: |
-          set -euo pipefail
-          # THE cross-file invariant, made executable. CIRISAgent's
-          # tools/update_substrate_libs.py downloads
-          # `{tarball_prefix}-v{version}-ios.tar.gz` where <version> is the
-          # ciris-server version pinned in its requirements.txt — i.e. OUR
-          # Cargo.toml/PyPI version. Its
-          # .github/workflows/refresh-ios-substrate.yml additionally requires
-          # some asset name to match /ios/i before it will refresh at all.
-          # Both are checked here rather than assumed. (Consumer-side tracking
-          # issue: CIRISAI/CIRISAgent#1011.)
-          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-          WANT="ciris-server-v${VERSION}-ios.tar.gz"
-          if [ ! -f "ios/${WANT}" ]; then
-            echo "::error::CI produced $(ls ios/ | tr '\n' ' ') but the client resolves '${WANT}' (Cargo.toml version ${VERSION})."
-            exit 1
-          fi
-          # The tag must agree too: the client forms the release tag as
-          # v{version} from the same pin, so a tag that disagrees with
-          # Cargo.toml means it downloads from a release that does not hold
-          # this asset. PREFIX, not equality — this workflow supports
-          # prerelease tags (`prerelease:` below keys off -rc/-spec/-beta), and
-          # `v0.5.155-rc1` off Cargo.toml 0.5.155 is a legitimate cut. Only a
-          # genuinely different version is an error.
-          case "${GITHUB_REF_NAME}" in
-            "v${VERSION}"|"v${VERSION}-"*) : ;;
-            *)
-              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${VERSION} — the client looks up tag v${VERSION} and asset ${WANT}."
-              exit 1
-              ;;
-          esac
-          echo "✓ ${WANT} matches the client's expected asset name, and tag ${GITHUB_REF_NAME} matches"
-          tar -tzf "ios/${WANT}" | sort
-      - uses: actions/upload-artifact@v4
-        with:
-          # `create-release` globs artifacts/ciris-server-* and special-cases
-          # this name — keep the two in step.
-          name: ciris-server-ios
-          path: ios/*.tar.gz
-          if-no-files-found: error
+    name: ios asset
+    uses: ./.github/workflows/ios-asset.yml
 
   create-release:
     name: Create Release
@@ -497,6 +378,16 @@ jobs:
               cp "$dir"/*.tar.gz release/
               continue
             fi
+            # The reusable ios-asset workflow also uploads the two PER-SLICE
+            # artifacts that `ios-package` combines. They are inputs, not release
+            # assets — and now that the build runs INSIDE this workflow they land
+            # in artifacts/ beside the real ones, where they never used to.
+            # Without this they would be tarred and published as
+            # `ciris-server-<tag>-ios-ios-device.tar.gz`: two assets nobody asked
+            # for, named after an implementation detail.
+            case "$target" in
+              ios-ios-*) continue ;;
+            esac
             tar -czvf "release/ciris-server-${{ github.ref_name }}-${target}.tar.gz" -C "$dir" .
           done
           # The client's release-existence check greps `.assets[].name` for
