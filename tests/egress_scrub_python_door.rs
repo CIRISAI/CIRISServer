@@ -19,6 +19,20 @@
 //!
 //! These pin the contract [`ciris_server::scrub::scrub_envelope_json`] must meet
 //! for persist's `PyCallableScrubber` to accept its output at all.
+//!
+//! # The constraint that was lifted (persist v32.3.0, CIRISPersist#701)
+//!
+//! Under v32.1.0 a Python scrubber could not perform #690's own sanctioned
+//! remedy — treat `full_traces` content at `detailed` and relabel — because the
+//! preservation gate rejected any `trace_level` edit and `applied_trace_level`
+//! was then read back off the unchanged envelope. We reported that; v32.3.0
+//! lets the callable STATE its treated level as a fifth tuple element,
+//! downgrade-only, and persist performs the relabel.
+//!
+//! So the split these now pin is: the ENVELOPE keeps the incoming batch label
+//! (the gate is as strict as ever), the EVENTS keep the downgraded level
+//! (persist relabels only the batch, and the two must agree afterwards), and
+//! the FIFTH ELEMENT carries the truth.
 
 use ciris_server::scrub::scrub_envelope_json;
 
@@ -75,7 +89,7 @@ fn envelope(level: &str) -> String {
 #[test]
 fn the_level_is_never_relabelled_on_the_python_path() {
     for level in ["generic", "detailed", "full_traces"] {
-        let (out, _, _, _) = scrub_envelope_json(&envelope(level)).expect("scrub");
+        let (out, _, _, _, _) = scrub_envelope_json(&envelope(level)).expect("scrub");
         let v: serde_json::Value = serde_json::from_str(&out).expect("json");
 
         assert_eq!(
@@ -85,12 +99,40 @@ fn the_level_is_never_relabelled_on_the_python_path() {
              `scrubber altered trace_level — rejected`.",
             v["trace_level"]
         );
-        assert_eq!(
-            v["events"][0]["trace_level"], level,
-            "the EVENT level was rewritten while the batch level held. §7 requires them \
-             equal, so a half-applied downgrade fails the envelope's own consistency \
-             check downstream — the failure mode that is hardest to read."
+    }
+}
+
+/// **The declared level is the treated level, and it may only go down.**
+///
+/// persist relabels the batch to whatever the fifth element says, refusing any
+/// value that RAISES the level — "a scrubber may REDUCE the level it treated
+/// content at, never raise it", because raising would let a callable launder a
+/// `detailed` pass into a `full_traces` label.
+#[test]
+fn the_declared_level_never_exceeds_the_label() {
+    let rank = |l: &str| match l {
+        "generic" => 0,
+        "detailed" => 1,
+        "full_traces" => 2,
+        other => panic!("unknown level {other}"),
+    };
+    for level in ["generic", "detailed", "full_traces"] {
+        let (_, _, ner_ran, _, applied) = scrub_envelope_json(&envelope(level)).expect("scrub");
+        assert!(
+            rank(&applied) <= rank(level),
+            "declared applied_trace_level `{applied}` is HIGHER than the label `{level}`. \
+             persist refuses that outright, and it is the direction that matters: it would \
+             claim the content got more treatment than it did."
         );
+        if level == "full_traces" && !ner_ran {
+            assert_eq!(
+                applied, "detailed",
+                "no NER pass ran on a `full_traces` batch, so the treated level must be \
+                 declared as `detailed` — that declaration IS the remedy #690 asks for, and \
+                 CIRISPersist#701 is what made it reachable from Python. Declaring \
+                 `full_traces` here is the refusal all over again."
+            );
+        }
     }
 }
 
@@ -110,7 +152,7 @@ fn the_level_is_never_relabelled_on_the_python_path() {
 /// track `ner::is_configured()` rather than the redaction count.
 #[test]
 fn ner_ran_tracks_the_model_not_the_edit_count() {
-    let (_, modified, ner_ran, digest) =
+    let (_, modified, ner_ran, digest, _) =
         scrub_envelope_json(&envelope("full_traces")).expect("scrub");
 
     let configured = ciris_persist::pipeline::scrub::ner::is_configured();
@@ -145,7 +187,7 @@ fn ner_ran_tracks_the_model_not_the_edit_count() {
 /// unredacted while a warning scrolled past.
 #[test]
 fn detailed_actually_redacts_where_nullscrubber_passed_content_through() {
-    let (out, modified, _, _) = scrub_envelope_json(&envelope("detailed")).expect("scrub");
+    let (out, modified, _, _, _) = scrub_envelope_json(&envelope("detailed")).expect("scrub");
 
     assert!(
         modified > 0,
@@ -156,5 +198,107 @@ fn detailed_actually_redacts_where_nullscrubber_passed_content_through() {
         !out.contains("alice@example.com"),
         "the address survived the scrub. This is the leak the refusal drew attention to, \
          and the one that was live on every detailed batch:\n{out}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The role boundary, and the assumption that makes the Engine-level scrubber safe
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **The relay must pass its scrubber EXPLICITLY, never inherit one.**
+///
+/// Capture and relay want opposite things, and `COHABITATION.md` is explicit
+/// about why:
+///
+/// > Scrubbing is the originating client node's egress-filter responsibility
+/// > […] inter-node federation traffic is post-egress-filter by contract.
+///
+/// So `LensCoreHandler` passes `NullScrubber` **deliberately**. Re-scrubbing at
+/// relays causes NER-version content drift across the federation — the same
+/// trace stored differently at relays running different NER versions — and
+/// demands models relays are not provisioned with. Capture is the privacy
+/// boundary; relay is not. Anyone "fixing" that `NullScrubber` to match the
+/// capture path breaks the contract.
+///
+/// # Why this is a test and not a comment
+///
+/// `Engine(scrubber=egress_scrub)` sets an ENGINE-LEVEL default, because
+/// persist's Python `receive_and_persist(body, pre_verified)` takes no scrubber
+/// argument — the Engine field is the only lever Python has. That is safe today
+/// for exactly one reason: **no relay path goes through Python.** The relay is
+/// Rust and names its scrubber at the call site, so the Engine default cannot
+/// reach it.
+///
+/// That is an assumption, not a guarantee, and it is invisible at the place it
+/// would be violated. Route relay traffic through the Python API — or drop the
+/// explicit argument here — and every relayed batch silently starts being
+/// re-scrubbed, producing precisely the drift the contract forbids. Nothing
+/// would fail; the corpus would just diverge across the federation.
+///
+/// So this pins the load-bearing half: **no relay path reaches persist through
+/// Python.** The Rust signature already forces an explicit scrubber argument at
+/// the relay — asserting that would only restate a compiler guarantee. What the
+/// compiler cannot see is a relay routed through `engine.receive_and_persist`
+/// on the Python side, which takes no scrubber and would inherit ours.
+#[test]
+fn no_relay_path_reaches_persist_through_python() {
+    let role =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/ciris-lens-core/src/role");
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    walk(&role, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no sources under {} — the relay moved, so this gate is measuring nothing. \
+         A zero denominator is the error, not a pass.",
+        role.display()
+    );
+
+    // The Python-call shapes that would inherit the Engine-level scrubber.
+    // SPLIT so this predicate cannot match itself.
+    let verb = format!("{}_and_persist", "receive");
+    let mut offenders = Vec::new();
+    for f in &files {
+        let Ok(src) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with("///") || t.starts_with("//!") {
+                continue;
+            }
+            let py_call = line.contains("call_method") && line.contains(verb.as_str());
+            if py_call {
+                offenders.push(format!("  {}:{}  {}", f.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "\nA RELAY REACHES PERSIST THROUGH PYTHON.\n\n{}\n\n\
+         persist's Python `receive_and_persist(body, pre_verified)` takes NO scrubber \
+         argument — it uses the ENGINE-level one. A composed node sets that to \
+         `egress_scrub` so the CAPTURE path redacts (CIRISServer#418), so a relay routed \
+         this way would silently start re-scrubbing relayed traffic.\n\n\
+         That is the drift COHABITATION.md forbids: the same trace stored differently at \
+         relays running different NER versions, and models relays are not provisioned \
+         with. Nothing would fail — the corpus would just diverge across the \
+         federation.\n\n\
+         Relay through the RUST API and name the scrubber (`&NullScrubber`), as \
+         `handler.rs` does.\n",
+        offenders.join("\n")
     );
 }

@@ -40,7 +40,7 @@
 use ciris_crypto::{ml_kem, x25519};
 use ciris_edge::transport::federation_session::{
     FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys, SessionError, SessionHandshakeMsg,
-    ALGORITHM_CLASSICAL_V1, ALGORITHM_HYBRID_V1,
+    ALGORITHM_HYBRID_V1,
 };
 
 /// A fresh responder identity holding both KEX private halves. Mirrors the
