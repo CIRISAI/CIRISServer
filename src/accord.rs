@@ -2236,13 +2236,27 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
                 .unwrap_or(true),
             persist_row_hash: String::new(),
         },
-        // persist v21.0.0 (CIRISPersist#502 E4) added an authority scrub to
-        // `SignedFamily` for the *replicated* `put_family` gate. This record
-        // does not travel that gate: it is admitted by
-        // `supersede_family_with_quorum`, whose authority IS the ≥M prior-roster
-        // hybrid cosignatures (`req.signatures`, re-verified by persist over the
-        // change envelope). The single-authority scrub is unused on that path,
-        // so it is intentionally empty — the quorum is the gate, not a lone key.
+        // ── STALE-BY-PIN, and left empty deliberately (CIRISServer#319 item 1) ──
+        //
+        // This used to say the single-authority scrub is "unused on that path"
+        // because the quorum is the gate. That was true of persist v21.0.0 and is
+        // FALSE at our pin: `supersede_family_with_quorum` reaches
+        // `supersede_family`, which calls `verify_family_admission(self, &new)`
+        // BEFORE ANY WRITE (CIRISPersist#651, v31.0.0 — "superseding is not a
+        // lesser act than creating"). So an empty authority scrub is refused, not
+        // ignored.
+        //
+        // Nothing reaches that refusal today only because the
+        // `HUMANITY_ACCORD_FAMILY_KEY_ID` 409 below fires first, and that is the
+        // only `family_key_id` this endpoint is used with. Any OTHER id from the
+        // caller's JSON would reach persist and fail closed — correctly, but see
+        // the error arm at the bottom of this handler for why the message would
+        // then be actively misleading.
+        //
+        // Filling these in requires a signer for the new family record, which this
+        // handler does not have and should not invent: the quorum cosignatures are
+        // the authorization, and manufacturing a lone authority scrub to satisfy a
+        // gate would assert an authority nobody granted.
         authority_key_id: String::new(),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
@@ -2318,11 +2332,20 @@ async fn family_supersede(
             })),
         )
             .into_response(),
-        // Fail-closed: insufficient quorum / anti-replay / one-seat violation ⇒ 409,
-        // and persist leaves the live family row untouched.
+        // Fail-closed ⇒ 409, and persist leaves the live family row untouched.
+        //
+        // The cause list is NOT exhaustive, and saying so matters: at our pin
+        // `supersede_family` also runs `verify_family_admission` before any write
+        // (CIRISPersist#651), so an admission refusal — including the empty
+        // authority scrub this handler constructs — arrives here too. Naming only
+        // quorum/anti-replay/one-seat would send an operator hunting for a missing
+        // cosignature when persist actually refused the record's shape.
+        //
+        // persist's own message is the accurate one, so it is surfaced verbatim
+        // rather than summarised.
         Err(e) => err(
             StatusCode::CONFLICT,
-            &format!("supersede rejected (quorum / anti-replay / one-seat): {e}"),
+            &format!("supersede rejected by the substrate: {e}"),
         ),
     }
 }
