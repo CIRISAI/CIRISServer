@@ -156,3 +156,92 @@ impl Scrubber for EgressScrubber {
         })
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Python door (CIRISServer#418)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Scrub a batch envelope handed over as JSON, **without relabelling it**.
+///
+/// # Why this exists at all
+///
+/// [`EgressScrubber`] above is wired into this crate's two Rust ingest paths
+/// (`ingest_http.rs`, `import.rs`). The agent does not use either: it builds
+/// persist's `Engine` from PYTHON, and that constructor takes
+/// `scrubber: Option<callable>` defaulting to `NullScrubber`. So a composed node
+/// scrubbed nothing on the path it actually receives traces over, and persist
+/// v32.1.0 turned the long-standing warning into a refusal:
+///
+/// ```text
+/// RuntimeError: engine.receive_and_persist: ValueError:
+///   ('scrub_treatment_mismatch', 'label=full_traces treated_as=full_traces')
+/// ```
+///
+/// Two `Engine` construction sites, and 0.5.173 fixed one. Nothing in the
+/// adoption diff showed it — the break has no signature change anywhere in it,
+/// which is why an API-surface comparison came back clean.
+///
+/// # Why it does NOT downgrade, when the Rust scrubber does
+///
+/// `EgressScrubber` answers `FullTraces`-without-a-model by scrubbing at
+/// `Detailed` and rewriting the label to match, so the row never claims a
+/// treatment it did not receive. That remedy is **structurally unavailable
+/// here**: persist's `PyCallableScrubber` re-reads the envelope after the call
+/// and refuses any callable that moved `trace_level` —
+///
+/// ```text
+/// scrubber altered trace_level — rejected
+/// ```
+///
+/// — then derives `applied_trace_level` from that unchanged envelope. So on the
+/// Python path the sanctioned fix for a missing model cannot be applied by the
+/// scrubber, only by the SENDER relabelling. Downgrading here would replace one
+/// refusal with a second, less informative one, so we restore the level and let
+/// the honest `ner_ran: false` produce persist's documented refusal instead.
+///
+/// **What this therefore does and does not fix.** With a model staged,
+/// `full_traces` now passes, because `ner_ran` is true. At `detailed` and
+/// `generic` content is genuinely redacted where `NullScrubber` passed it
+/// through untouched — the larger real-world win, since production runs
+/// `detailed`. Without a model, `full_traces` is still refused; that is persist
+/// asking for a relabel it will not let us perform, and it is tracked on #418
+/// rather than papered over here.
+///
+/// Returns `(envelope_json, fields_modified, ner_ran, scrubber_model_digest)` —
+/// persist's 4-tuple contract, whose 2-tuple fallback would report `ner_ran:
+/// false` and is deliberately not used.
+pub fn scrub_envelope_json(
+    json: &str,
+) -> Result<(String, usize, bool, Option<String>), ScrubError> {
+    let mut env: BatchEnvelope = serde_json::from_str(json).map_err(ScrubError::Internal)?;
+
+    // Captured BEFORE the scrub so the restore below cannot be fooled by it.
+    let batch_level = env.trace_level;
+    let event_levels: Vec<TraceLevel> = env
+        .events
+        .iter()
+        .map(|e| match e {
+            BatchEvent::CompleteTrace { trace_level, .. } => *trace_level,
+        })
+        .collect();
+
+    let outcome = EgressScrubber.scrub_batch(&mut env)?;
+
+    // Put the labels back exactly as they arrived. The CONTENT keeps whatever
+    // treatment it actually received; only the claim is left alone, because
+    // persist owns the claim on this path and rejects us editing it.
+    env.trace_level = batch_level;
+    for (event, level) in env.events.iter_mut().zip(event_levels) {
+        match event {
+            BatchEvent::CompleteTrace { trace_level, .. } => *trace_level = level,
+        }
+    }
+
+    let out = serde_json::to_string(&env).map_err(ScrubError::Internal)?;
+    Ok((
+        out,
+        outcome.fields_modified,
+        outcome.ner_ran,
+        outcome.scrubber_model_digest,
+    ))
+}

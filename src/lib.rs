@@ -1389,6 +1389,51 @@ mod python {
         rt_block_on(crate::import_traces(&dump_dir))
     }
 
+    /// `ciris_server.egress_scrub` — the scrubber to hand persist's `Engine`.
+    ///
+    /// ```python
+    /// from ciris_server import Engine, egress_scrub
+    /// engine = Engine(dsn, signing_key_id, scrubber=egress_scrub, ...)
+    /// ```
+    ///
+    /// Passing `scrubber=None` (the constructor default) installs persist's
+    /// `NullScrubber`, which redacts NOTHING and, since persist v32.1.0, has its
+    /// `full_traces` batches REFUSED outright (CIRISServer#418). This crate's
+    /// scrubber was already wired into both Rust ingest paths; the agent reaches
+    /// persist through PYTHON, so it never saw one. One binding, same shape as
+    /// `resolve_bearer` (#396).
+    ///
+    /// Returns persist's 4-tuple `(envelope, fields_modified, ner_ran,
+    /// model_digest)`. The legacy 2-tuple is NOT used: persist reads it as
+    /// `ner_ran: false`, which is the very claim that decides the refusal.
+    ///
+    /// See [`crate::scrub::scrub_envelope_json`] for why this does not downgrade
+    /// `full_traces` the way the Rust path does — persist rejects a callable
+    /// that moves `trace_level`, so that remedy is not ours to apply here.
+    #[pyfunction]
+    #[pyo3(name = "egress_scrub")]
+    fn py_egress_scrub(
+        py: Python<'_>,
+        envelope: &Bound<'_, PyAny>,
+    ) -> PyResult<(pyo3::Py<PyAny>, usize, bool, Option<String>)> {
+        // persist hands us a real dict and wants one back, so round-trip through
+        // `json` exactly as it does on its side rather than inventing a second
+        // conversion that could disagree about number/None handling.
+        let json_mod = py.import("json")?;
+        let as_str: String = json_mod
+            .call_method1("dumps", (envelope,))?
+            .extract()
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("envelope is not JSON: {e}"))
+            })?;
+
+        let (out, modified, ner_ran, digest) = crate::scrub::scrub_envelope_json(&as_str)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("egress_scrub: {e}")))?;
+
+        let obj = json_mod.call_method1("loads", (out,))?;
+        Ok((obj.unbind(), modified, ner_ran, digest))
+    }
+
     /// Boot the node with a Python adapter folded in (CIRISServer#80) — the seam
     /// that lets a Python "brain" mount onto the node's router without
     /// re-composing the substrate. `adapter` is a duck-typed Python object (see
@@ -2176,6 +2221,7 @@ mod python {
         let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
+        m.add_function(wrap_pyfunction!(py_egress_scrub, m)?)?;
         m.add_function(wrap_pyfunction!(py_serve_with_python_adapter, m)?)?;
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
