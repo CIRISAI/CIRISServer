@@ -24,7 +24,6 @@ use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::algorithm;
 use ciris_persist::federation::{KeyRecord, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};
-use ciris_persist::FederationDirectory;
 use ed25519_dalek::SigningKey;
 
 use ciris_server::mesh_genesis::{
@@ -89,6 +88,32 @@ async fn install_or_witness_pre_v31(engine: &Arc<Engine>) -> bool {
     }
 }
 
+/// The store every check in this file runs against.
+///
+/// **`sqlite::memory:` unless told otherwise** — and being told otherwise is the
+/// entire point (CIRISServer#382). Set `CIRIS_TEST_DSN` to a Postgres URL and
+/// every genesis check below re-runs against it unchanged.
+///
+/// # Why this knob exists
+///
+/// The genesis validation was sqlite-only, and SQLite is the backend that
+/// **cannot** see the class of defect it is supposed to catch. `CIRISServer#381`
+/// is the proof: the baked bundle signs symbolic attestation ids
+/// (`genesis-charter`, `genesis-grant:…`, `genesis-lifecycle`), Postgres had
+/// them in a `uuid`-typed column, and stage 1 aborted at character 0. SQLite has
+/// no `uuid` type, so the column is TEXT and the identical bundle stored fine.
+///
+/// Same binary, same constant, same value; only Postgres refused. Two production
+/// agents crash-looped 151 and 223 times while this suite was green — it was
+/// green *because* it only ever asked the backend that was immune.
+///
+/// A validator that runs on one backend does not validate a bundle; it validates
+/// a bundle **on that backend**. Those are different claims, and shipping the
+/// first while proving the second is what put this in front of operators.
+fn dsn() -> String {
+    std::env::var("CIRIS_TEST_DSN").unwrap_or_else(|_| "sqlite::memory:".to_string())
+}
+
 async fn fresh_node() -> Arc<Engine> {
     use ciris_keyring::PqcSigner as _;
     let signing_key = SigningKey::from_bytes(&[0x5A; 32]);
@@ -104,10 +129,11 @@ async fn fresh_node() -> Arc<Engine> {
         Some(pqc),
         Some(format!("{NODE_KEY_ID}-pqc")),
     ));
+    let target = dsn();
     let engine = Arc::new(
-        Engine::with_signer(signer, "sqlite::memory:")
+        Engine::with_signer(signer, &target)
             .await
-            .expect("in-memory engine"),
+            .unwrap_or_else(|e| panic!("engine over `{target}`: {e}")),
     );
 
     // Production registers the node's own key BEFORE stage 1 (compose.rs:208
@@ -121,7 +147,19 @@ async fn fresh_node() -> Arc<Engine> {
         .await
         .expect("node identity resolves");
     let ed_pub = BASE64.encode(signing_key_pub);
-    let now = chrono::Utc::now();
+    // FIXED, not `Utc::now()`. Every test in this file calls `fresh_node()`, and
+    // on `sqlite::memory:` each got a private database, so a per-call timestamp
+    // was invisible. Against one shared Postgres they all write the SAME key id
+    // with a DIFFERENT `valid_from`, and persist correctly refuses the second:
+    //
+    //   Conflict("key_id ciris-validator-node-1-… already exists with
+    //            different content")
+    //
+    // The node identity here is already deterministic (a fixed `0x5A` seed); the
+    // clock was the one non-deterministic field in an otherwise fixed record.
+    // Pinning it makes re-registration idempotent, which is what "fresh node"
+    // has to mean on a backend where the store outlives the test.
+    let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed fixture timestamp");
     let record = KeyRecord {
         key_id: node_key_id.clone(),
         pubkey_ed25519_base64: ed_pub.clone(),
@@ -144,9 +182,17 @@ async fn fresh_node() -> Arc<Engine> {
         consent_role: None,
         additional_scrubs: Vec::new(),
     };
+    // Through the TRAIT, never a concrete backend accessor. `put_public_key` is
+    // a `FederationDirectory` method, so this one line works on every backend —
+    // and reaching past the trait for a concrete one is precisely how this
+    // fixture pinned itself to the backend that could not fail (`src/backend.rs`
+    // documents the thirty other sites that did the same).
+    //
+    // The needle is deliberately NOT spelled here: `no_concrete_backend_reach`
+    // below scans this file, and a comment naming the pattern would satisfy the
+    // scan with its own documentation.
     engine
-        .sqlite_backend()
-        .expect("sqlite backend present")
+        .federation_directory()
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("register the validator node's own key");
@@ -765,4 +811,94 @@ async fn stage_one_is_idempotent_across_reboots() {
             grant.verdict
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The two guards that keep CIRISServer#382 fixed.
+//
+// Making the fixture backend-parametric is worth nothing on its own: the knob
+// defaults to sqlite, so a suite that never sets it is sqlite-only again with
+// every test still reporting `ok`. These assert the two ways it can silently
+// revert — the fixture reaching past the trait, and CI not running the other
+// backend at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **This fixture must not reach for a concrete backend.**
+///
+/// `tests/backend_parity.rs` walks `src/` only, which is how the reach in this
+/// file survived while that gate was green — a gate scoped to one directory
+/// making a claim about the crate. (The broader `tests/` sweep is ~20 files and
+/// deliberately not attempted here; several are legitimately sqlite-specific.)
+#[test]
+fn no_concrete_backend_reach() {
+    let src = include_str!("genesis_bundle_validate.rs");
+    // SPLIT so this predicate cannot match itself, the same discipline persist
+    // uses in `attestation_id_is_text_622`.
+    let needles = [
+        format!("sqlite{}()", "_backend"),
+        format!("postgres{}()", "_backend"),
+    ];
+    let mut offenders = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let l = line.trim_start();
+        if l.starts_with("//") || l.starts_with("///") || l.starts_with("//!") {
+            continue;
+        }
+        for n in &needles {
+            if line.contains(n.as_str()) {
+                offenders.push(format!("  line {}: {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the genesis validator reaches past `FederationDirectory` for a concrete backend:\n{}\n\n\
+         That pins these checks to ONE backend. It is how CIRISServer#381 shipped: the \
+         validation ran only on SQLite, which has no `uuid` type and therefore could not \
+         see the defect that crash-looped two Postgres agents 151 and 223 times.",
+        offenders.join("\n")
+    );
+}
+
+/// **CI must actually RUN this against Postgres.**
+///
+/// Compilation coverage is not execution coverage, and a parametric fixture with
+/// nobody passing the parameter is sqlite-only with extra steps. So this asserts
+/// the workflow leg exists, by the same reasoning as the release ladder's
+/// `assert_proven`: the property is "it ran on the other backend", and only
+/// `.github/workflows/` can witness that.
+#[test]
+fn ci_runs_the_genesis_validation_on_postgres() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{} unreadable — this gate cannot run: {e}", dir.display()));
+
+    let mut witness: Option<String> = None;
+    for p in entries.flatten().map(|e| e.path()) {
+        if !p.extension().is_some_and(|x| x == "yml" || x == "yaml") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&p).unwrap_or_default();
+        // Comments stripped BEFORE matching: a note explaining the leg must not
+        // be able to stand in for the leg.
+        let code: String = raw
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if code.contains("CIRIS_TEST_DSN") && code.contains("genesis_bundle_validate") {
+            witness = Some(p.file_name().unwrap().to_string_lossy().into_owned());
+            break;
+        }
+    }
+
+    assert!(
+        witness.is_some(),
+        "NO workflow runs `genesis_bundle_validate` with `CIRIS_TEST_DSN` set.\n\n\
+         The fixture is backend-parametric, but the parameter defaults to sqlite — so \
+         with no CI leg passing a Postgres DSN, every genesis check reports `ok` having \
+         asked only the backend that is structurally unable to fail (CIRISServer#382).\n\n\
+         That is not a hypothetical: it is the exact state in which CIRISServer#381 \
+         reached production."
+    );
 }
