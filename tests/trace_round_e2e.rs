@@ -141,10 +141,20 @@ fn genesis_holders() -> Vec<ciris_persist::federation::operational::test_support
 /// test-anchor genesis synthesizes accord_holder rows for them. MUST run before
 /// any `Engine` is built — the genesis records are resolved at boot.
 ///
-/// Mode A rather than Mode B (mock FIPS custody) deliberately: Mode B's
-/// `MockAttestedMember` does not expose the member's ML-DSA private half, so a
-/// sim cannot SIGN as a mock member yet (CIRISVerify#221). Mode A runs the
-/// legacy quorum bar with real signatures — which is what a ROUND test needs.
+/// Mode A rather than Mode B (mock FIPS custody), and the reason is no longer
+/// the one that used to be written here. This said Mode B's
+/// `MockAttestedMember` "does not expose the member's ML-DSA private half
+/// (CIRISVerify#221)". That closed: at our pin the struct carries
+/// `pub holder: HybridSigningIdentity` (`accord_custody_attestation.rs:833`) and
+/// upstream's own note calls it "a USABLE hybrid signer, not just pubkeys"
+/// (`:1244`), with a deterministic ML-DSA-65 half (`:958`).
+///
+/// Mode A stays here because this is a ROUND test — it wants real signatures over
+/// the legacy quorum bar, not a custody-admission scenario. Mode B belongs in its
+/// own file against persist's
+/// `check_canonical_role_admission_over_roster_with_custody_root`
+/// (`admission.rs:7360`), fed a `MockYubicoCa` root; that is CIRISServer#321 and
+/// it is not blocked by anything upstream.
 fn arm_test_trust_root(holders: &[ciris_persist::federation::operational::test_support::Identity]) {
     let eds: Vec<String> = holders
         .iter()

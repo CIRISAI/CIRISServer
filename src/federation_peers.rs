@@ -444,6 +444,61 @@ async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response>
             peers.push(to_peer(dir.as_ref(), rec, sideband).await);
         }
     }
+
+    // ── Announced-but-not-admitted peers (CIRISServer#289) ──────────────────
+    //
+    // edge has been WRITING these rows all along — `reticulum.rs record_announced_peer`,
+    // whose own comment names `GET /v1/federation/peers` as the intended consumer
+    // (CIRISEdge#362) — and nothing here ever read them. A node you have heard
+    // announce, but never admitted, was invisible in the peer list.
+    //
+    // These are NOT keys. The rows carry no provenance and must never reach a
+    // verification path; they project as `canonical=false, trust="unknown"`,
+    // which is the honest rendering of "heard, not vouched for".
+    //
+    // `to_peer` is deliberately BYPASSED: it resolves trust and canonicality
+    // from the directory, and these keys are by definition absent from it.
+    match dir.list_announced_peers().await {
+        Ok(rows) => {
+            for a in rows {
+                if a.key_id == self_key_id || !seen.insert(a.key_id.clone()) {
+                    // An admitted key wins: it has provenance, this row has none.
+                    continue;
+                }
+                let sideband = sidebands.get(&a.key_id);
+                peers.push(LocalPeerState {
+                    key_id: a.key_id,
+                    pubkey_ed25519_base64: a.pubkey_ed25519_base64,
+                    pubkey_ml_dsa_65_base64: a.pubkey_ml_dsa_65_base64,
+                    canonical: false,
+                    // "unknown" is the DEFAULT, not a constant: an owner who has
+                    // explicitly marked this key (say `blocked`) means it, and a
+                    // bookmark is exactly where that matters most.
+                    trust: sideband
+                        .and_then(|s| s.trust.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    first_seen: a.first_seen_at.to_rfc3339(),
+                    appearance: sideband.and_then(|s| s.appearance.clone()),
+                    alias_override: None,
+                    notes: None,
+                    // The liveness signal an admitted row does not carry.
+                    last_seen: Some(a.last_seen_at.to_rfc3339()),
+                });
+            }
+        }
+        // NOT the 503 the loop above uses. The trait default is
+        // `Error::Unsupported`, so mapping this to SERVICE_UNAVAILABLE would take
+        // the ENTIRE peers endpoint down on any backend without the table — a
+        // strictly worse outcome than the omission this fixes.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "announced-peer bookmarks unavailable — listing admitted peers only. \
+                 Peers this node has heard announce but not admitted will not appear."
+            );
+        }
+    }
+
     Ok(peers)
 }
 
@@ -452,6 +507,18 @@ async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response>
 /// agent's `peer_count_total` / `peer_count_canonical`, which the agent sourced
 /// from its `BootstrapPeerSeeder`; in server mode the federation directory IS
 /// the peer set). `pub(crate)` for [`crate::federation_surface`].
+///
+/// # These count ADMITTED keys only, and deliberately so (CIRISServer#289)
+///
+/// `GET /v1/federation/peers` now also lists announced-but-not-admitted
+/// bookmarks, so its array is LONGER than `peer_count_total`. That divergence is
+/// chosen, not overlooked.
+///
+/// A count is an authority statement — "this node has N peers" — and an announce
+/// is unverified hearsay: anyone can emit one, so counting them would let a
+/// stranger inflate a number the UI presents as standing. The list can afford to
+/// show them because every bookmark renders `canonical=false, trust="unknown"`
+/// beside its own liveness; a bare integer carries no such qualifier.
 pub(crate) async fn peer_counts(
     engine: &Arc<Engine>,
     self_key_id: &str,

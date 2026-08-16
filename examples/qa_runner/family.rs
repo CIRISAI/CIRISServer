@@ -38,13 +38,22 @@ fn revoke_spec() -> RevokeSpec {
         effective_at: chrono::Utc::now(),
         reason: Some("qa-runner".into()),
         witness_set: Vec::new(),
-        // persist v21.0.0 (#502 E4 / CIRISServer#319) — a REPLICATED revocation is
-        // verified by `verify_family_membership_revocation_admission` against the
-        // claimed authority's registered pubkeys. `revoke_member` itself only passes
-        // these through, so a LOCAL qa-runner revoke needs no signature; the fields
-        // are `#[serde(default)]` and additive. Left empty deliberately: this driver
-        // exercises the local cohort path, and an unsigned row would fail CLOSED at
-        // ingest if it ever replicated — which is the correct posture, not a gap.
+        // ── STALE-BY-PIN (CIRISServer#319 item 1) ──────────────────────────
+        //
+        // This used to say a LOCAL revoke needs no signature because only a
+        // REPLICATED one is verified. There is no such distinction at our pin:
+        // `revoke_member(Cohort::Family, ..)` calls
+        // `put_family_membership_revocation` (persist `federation/mod.rs:3010`),
+        // which runs `verify_family_membership_revocation_admission` BEFORE any
+        // other admission step (`store/sqlite.rs:6617`) and hybrid-Strict-verifies
+        // the caller-supplied authority signature. Local and replicated go through
+        // the same door.
+        //
+        // So these empty fields do not mean "unsigned is fine here" — they mean
+        // this driver's revoke is REFUSED, and the `.expect("revoke")` below would
+        // panic rather than exercise anything. Left empty rather than filled with a
+        // manufactured signature: inventing an authority to satisfy a gate is the
+        // defect, not the fix. Wiring a real signer is tracked on #319.
         authority_key_id: String::new(),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
