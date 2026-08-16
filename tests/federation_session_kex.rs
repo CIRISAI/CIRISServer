@@ -233,10 +233,12 @@ fn hybrid_required_succeeds_and_agrees_against_hybrid_peer() {
 /// There is NO classical-only success path *inside* a hybrid handshake: a
 /// `Hybrid` request against a hybrid peer always yields a `Hybrid` wire message
 /// carrying a non-empty ML-KEM-768 ciphertext. (The only way the federation
-/// session emits a `Classical` message is when the peer never advertised the
-/// ML-KEM half AND the caller opted into fallback via `Hybrid` — exercised
-/// separately below.) This nails down that the PQ half is structurally present,
-/// not optional, on the hybrid path the tamper tests above rely on.
+/// session emitted a `Classical` message was when the peer never advertised the
+/// ML-KEM half AND the caller opted into fallback via `Hybrid`; as of
+/// CIRISEdge#481 that path is RETIRED and `initiate` refuses instead —
+/// see the refusal test below.) This nails down that the PQ half is
+/// structurally present, not optional, on the hybrid path the tamper tests
+/// above rely on.
 #[test]
 fn hybrid_path_always_carries_mlkem_ciphertext() {
     let responder = fresh_responder();
@@ -256,24 +258,44 @@ fn hybrid_path_always_carries_mlkem_ciphertext() {
     }
 }
 
-/// Faithfulness check on the negotiation surface the gate depends on: `Hybrid`
-/// (the lenient mode) DOES fall back to classical against a classical-only peer
-/// (documented behaviour — fallback is admitted iff the peer lacks the ML-KEM
-/// half), and that fallback still round-trips. This documents WHY `HybridRequired`
-/// is the policy a caller picks when classical-only must be refused: plain
-/// `Hybrid` would silently accept it.
+/// **There is no lenient mode any more** (CIRISEdge#481, adopted in 0.5.175).
+///
+/// This test used to assert the opposite: that `KexAlgorithm::Hybrid` DOES fall
+/// back to classical against a classical-only peer, that the fallback
+/// round-trips, and that `HybridRequired` was therefore the policy a caller
+/// picked when classical-only had to be refused. All of that was accurate, and
+/// all of it was the hazard.
+///
+/// Edge's audit found the responder accepting a classical handshake
+/// **unconditionally** — an active downgrade reachable in a single message,
+/// sitting beside an envelope-verify path that was already `HybridPolicy::Strict`.
+/// One seam, two answers. With the mesh pre-release and fully PQC-provisioned,
+/// the rollout posture the fallback existed for has no remaining user, so the
+/// classical path is gone rather than deprioritised — which is what actually
+/// closes Fed TM §3.3 Gap C (harvest-now-decrypt-later).
+///
+/// So `Hybrid` and `HybridRequired` are now the same thing at the initiate side.
+/// Keeping this case as a REFUSAL test rather than deleting it preserves the
+/// coverage and records the day the behaviour inverted.
 #[test]
-fn lenient_hybrid_falls_back_to_classical_against_classical_only_peer() {
+fn lenient_hybrid_no_longer_falls_back_against_a_classical_only_peer() {
     let responder = fresh_responder();
     let classical_peer = advertise_classical_only(&responder);
 
-    let (msg, initiator_key) =
-        FederationSession::initiate(&classical_peer, KexAlgorithm::Hybrid).expect("initiate");
-    assert_eq!(
-        msg.algorithm(),
-        ALGORITHM_CLASSICAL_V1,
-        "lenient Hybrid against a classical-only peer must negotiate down to classical"
+    let r = FederationSession::initiate(&classical_peer, KexAlgorithm::Hybrid);
+    assert!(
+        r.is_err(),
+        "lenient `Hybrid` negotiated DOWN to classical against a classical-only peer. \
+         That is the pre-#481 behaviour and it is a downgrade: an attacker who can \
+         strip the ML-KEM half from an advertisement gets a classical session from a \
+         caller who never asked for one."
     );
-    let responder_key = FederationSession::respond(&responder, &msg).expect("respond");
-    assert_eq!(initiator_key.as_bytes(), responder_key.as_bytes());
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(
+        msg.contains("HybridRequiredButPeerLacksMlkem"),
+        "refused, but not for the documented reason — got `{msg}`. The expected \
+         refusal is HybridRequiredButPeerLacksMlkem: `Hybrid` is now identical to \
+         `HybridRequired`, and a DIFFERENT error here means the negotiation surface \
+         moved again and this gate is no longer measuring what it names."
+    );
 }

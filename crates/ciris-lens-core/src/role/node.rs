@@ -56,10 +56,18 @@
 //!   4. `key_id` not permitted by the `PeerAcl` → `403`;
 //!   5. otherwise the request passes through to the handler.
 //!
-//! `HybridPolicy::Strict` is the project's hard-cut default: there is
-//! no classical-only path. Operators mid-PQC-rollout may set
-//! `HybridPolicy::Ed25519Fallback` (matching persist's own
-//! secrets-server rollout posture).
+//! `HybridPolicy::Strict` is the project's hard-cut, and as of 0.5.175 it
+//! is the ONLY posture: both Ed25519 and ML-DSA-65 are required, and the
+//! policy is passed as a literal at the verify call rather than carried in
+//! a field, so there is no knob an operator or a future caller could turn.
+//!
+//! It was previously a `NodeState` field with a `with_hybrid_policy`
+//! setter for "operators mid-PQC-rollout". That setter had ZERO callers,
+//! no config path, and an `#[allow(dead_code)]` keeping it quiet — a
+//! downgrade affordance surviving on an allow. CIRISEdge#481 retired the
+//! same shape on the KEX side after finding a responder that accepted
+//! spoofed classical handshakes; the mesh is pre-release and fully
+//! PQC-provisioned, so the rollout posture it existed for has no user.
 //!
 //! # Endpoints (frozen at v0.5.0 per #18)
 //!
@@ -110,14 +118,6 @@ pub(crate) struct NodeState {
     /// entirely. Any other variant is the production posture and gates
     /// every read on a valid federation-signed request.
     pub(crate) peer_acl: Arc<PeerAcl>,
-    /// Hybrid-verify posture for the auth middleware. Defaults to
-    /// [`HybridPolicy::Strict`] — the project's hard-cut: both
-    /// Ed25519 and ML-DSA-65 are required, no classical-only path.
-    /// Operators mid-PQC-rollout may set
-    /// [`HybridPolicy::Ed25519Fallback`] (matching persist's own
-    /// secrets-server rollout posture) via
-    /// [`NodeState::with_hybrid_policy`].
-    pub(crate) hybrid_policy: HybridPolicy,
     /// RATCHET version stamped onto responses.
     pub(crate) ratchet_version: i32,
     /// Frozen API root path prefix (e.g. `/lens/api/v1`).
@@ -132,16 +132,6 @@ pub(crate) struct NodeState {
 }
 
 impl NodeState {
-    /// Override the hybrid-verify policy (default
-    /// [`HybridPolicy::Strict`]). Kept as a setter so the public
-    /// `read_api` / `read_api_with_extra` constructors stay
-    /// non-breaking for existing call sites.
-    #[allow(dead_code)]
-    pub(crate) fn with_hybrid_policy(mut self, policy: HybridPolicy) -> Self {
-        self.hybrid_policy = policy;
-        self
-    }
-
     /// What fidelity to serve this request at. `None` provider ⇒
     /// [`RowFidelity::Full`] — the pre-knob behaviour, and the one an
     /// unreadable policy must also produce (the host decides that; this
@@ -783,8 +773,8 @@ const HEADER_KEY_ID: &str = "x-ciris-signing-key-id";
 /// Header carrying the base64 Ed25519 signature over the request body.
 const HEADER_ED25519: &str = "x-ciris-signature-ed25519";
 /// Header carrying the base64 ML-DSA-65 signature over the request
-/// body. Optional under `HybridPolicy::Ed25519Fallback`; required
-/// under the default `HybridPolicy::Strict`.
+/// body. REQUIRED — verification is `HybridPolicy::Strict` with no
+/// alternative, so a request without this header is refused.
 const HEADER_ML_DSA_65: &str = "x-ciris-signature-ml-dsa-65";
 
 /// Federation-signed-request auth gate for the frozen read API.
@@ -860,7 +850,9 @@ async fn require_federation_signature(
         &key_id,
         &ed25519,
         ml_dsa_65.as_deref(),
-        state.hybrid_policy,
+        // HARD-CODED, not a field: see the module doc. There is no
+        // classical-only path and no knob that could create one.
+        HybridPolicy::Strict,
         None,
     )
     .await;
@@ -1046,8 +1038,6 @@ impl LensCore {
             engine: Some(engine),
             peer_acl: Arc::new(peer_acl),
             // Hard-cut PQC default. Operators mid-rollout can swap to
-            // Ed25519Fallback via NodeState::with_hybrid_policy.
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version: scoring.ratchet_calibration_version,
             api_root: ux.api_root.clone(),
             fidelity,
@@ -1353,7 +1343,6 @@ mod tests {
         NodeState {
             engine: None,
             peer_acl: Arc::new(PeerAcl::AllowAll),
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version,
             api_root: "/lens/api/v1".to_string(),
             fidelity: None,
@@ -1368,7 +1357,6 @@ mod tests {
         NodeState {
             engine: None,
             peer_acl: Arc::new(PeerAcl::AllowList(vec!["allowed-key".to_string()])),
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version,
             api_root: "/lens/api/v1".to_string(),
             fidelity: None,
@@ -1590,7 +1578,6 @@ mod tests {
         let state = NodeState {
             engine: Some(Arc::new(engine)),
             peer_acl: Arc::new(PeerAcl::AllowList(vec!["allowed-key".to_string()])),
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version: 0,
             api_root: "/lens/api/v1".to_string(),
             fidelity: None,
@@ -1662,7 +1649,6 @@ mod tests {
         NodeState {
             engine: Some(engine),
             peer_acl: Arc::new(PeerAcl::AllowAll),
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version: 0,
             api_root: "/lens/api/v1".to_string(),
             fidelity: Some(Arc::new(move || fidelity)),
@@ -1808,7 +1794,6 @@ mod tests {
         let state = NodeState {
             engine: Some(engine),
             peer_acl: Arc::new(PeerAcl::AllowAll),
-            hybrid_policy: HybridPolicy::Strict,
             ratchet_version: 0,
             api_root: "/lens/api/v1".to_string(),
             fidelity: None,
