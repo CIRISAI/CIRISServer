@@ -1389,6 +1389,10 @@ mod python {
         rt_block_on(crate::import_traces(&dump_dir))
     }
 
+    /// The Python-facing mirror of [`crate::scrub::ScrubbedBatch`] — same five
+    /// fields, with the envelope as a Python dict rather than a JSON string.
+    type PyScrubbedBatch = (pyo3::Py<PyAny>, usize, bool, Option<String>, String);
+
     /// `ciris_server.egress_scrub` — the scrubber to hand persist's `Engine`.
     ///
     /// ```python
@@ -1403,19 +1407,20 @@ mod python {
     /// persist through PYTHON, so it never saw one. One binding, same shape as
     /// `resolve_bearer` (#396).
     ///
-    /// Returns persist's 4-tuple `(envelope, fields_modified, ner_ran,
-    /// model_digest)`. The legacy 2-tuple is NOT used: persist reads it as
-    /// `ner_ran: false`, which is the very claim that decides the refusal.
+    /// Returns persist's **5-tuple** `(envelope, fields_modified, ner_ran,
+    /// model_digest, applied_trace_level)` (persist v32.3.0, CIRISPersist#701).
+    /// The 4- and 2-tuple shapes it still accepts are deliberately unused: both
+    /// report a level equal to the incoming label, which is the exact claim the
+    /// refusal turns on.
     ///
-    /// See [`crate::scrub::scrub_envelope_json`] for why this does not downgrade
-    /// `full_traces` the way the Rust path does — persist rejects a callable
-    /// that moves `trace_level`, so that remedy is not ours to apply here.
+    /// The fifth element is what makes the downgrade honest — `full_traces`
+    /// without a model is treated at `detailed` and SAYS so, and persist
+    /// performs the relabel. Before v32.3.0 that remedy existed only for Rust
+    /// scrubbers; we reported the gap as #701. See
+    /// [`crate::scrub::scrub_envelope_json`].
     #[pyfunction]
     #[pyo3(name = "egress_scrub")]
-    fn py_egress_scrub(
-        py: Python<'_>,
-        envelope: &Bound<'_, PyAny>,
-    ) -> PyResult<(pyo3::Py<PyAny>, usize, bool, Option<String>)> {
+    fn py_egress_scrub(py: Python<'_>, envelope: &Bound<'_, PyAny>) -> PyResult<PyScrubbedBatch> {
         // persist hands us a real dict and wants one back, so round-trip through
         // `json` exactly as it does on its side rather than inventing a second
         // conversion that could disagree about number/None handling.
@@ -1427,11 +1432,11 @@ mod python {
                 pyo3::exceptions::PyValueError::new_err(format!("envelope is not JSON: {e}"))
             })?;
 
-        let (out, modified, ner_ran, digest) = crate::scrub::scrub_envelope_json(&as_str)
+        let (out, modified, ner_ran, digest, applied) = crate::scrub::scrub_envelope_json(&as_str)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("egress_scrub: {e}")))?;
 
         let obj = json_mod.call_method1("loads", (out,))?;
-        Ok((obj.unbind(), modified, ner_ran, digest))
+        Ok((obj.unbind(), modified, ner_ran, digest, applied))
     }
 
     /// Boot the node with a Python adapter folded in (CIRISServer#80) — the seam

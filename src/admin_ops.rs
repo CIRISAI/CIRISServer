@@ -714,8 +714,28 @@ fn open_upper_bound() -> DateTime<Utc> {
 /// correctly (`'-'` sorts below `'2'`, so `>=` admits everything), but relying
 /// on that is relying on an accident of two sign characters; this one is
 /// ordered for the same stated reason its twin is.
+///
+/// # `1000`, not `0000` (persist v32.3.0, CIRISPersist#605)
+///
+/// This was `0000-01-01`, chosen when the only stated requirement was a
+/// four-digit year. persist now REFUSES a bound outside `1000..=9999` rather
+/// than returning the empty set the bad ordering would produce:
+///
+/// ```text
+/// window start bound has year 0, outside the text-orderable range 1000..=9999
+/// ```
+///
+/// That refusal is the #605 fix working — a silent zero turned into an argument
+/// error — and it caught this on adoption. Worth recording how it slipped
+/// through: the exposure check for #605 looked at `MAX_UTC`, found none used as
+/// a window bound, and stopped. The hazard is a RANGE with two ends, and only
+/// one end was examined. `0000` is below the floor for the same textual reason
+/// `+262143-` is above the ceiling.
+///
+/// `1000-01-01` admits every row any producer in this federation can emit —
+/// `asserted_at` values are 20xx — and is inside the range persist will accept.
 fn open_lower_bound() -> DateTime<Utc> {
-    "0000-01-01T00:00:00Z".parse().expect("in-range sentinel")
+    "1000-01-01T00:00:00Z".parse().expect("in-range sentinel")
 }
 
 /// **Where the time window was enforced — MEASURED, not asserted.**
@@ -4309,6 +4329,49 @@ pub fn router(engine: Arc<Engine>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    /// **Both ends of the open window must be orderable AND acceptable.**
+    ///
+    /// `asserted_at` is compared as RFC-3339 TEXT, so a sentinel outside
+    /// four-digit years does not sort the way it reads. persist v32.3.0
+    /// (CIRISPersist#605) stopped returning the empty set for such a bound and
+    /// now REFUSES it, naming the range it will accept:
+    ///
+    /// ```text
+    /// window start bound has year 0, outside the text-orderable range 1000..=9999
+    /// ```
+    ///
+    /// This asserts the property directly, at both ends, because the way it went
+    /// wrong was checking one. The #605 exposure review looked at `MAX_UTC`,
+    /// found it unused as a window bound, and concluded "not exposed" — while
+    /// `open_lower_bound` sat at year `0000`, below persist's floor for the same
+    /// textual reason `+262143-` is above its ceiling. A range has two ends and
+    /// the check had one.
+    #[test]
+    fn both_open_window_sentinels_are_inside_the_orderable_range() {
+        use chrono::Datelike as _;
+        for (name, at) in [
+            ("open_lower_bound", open_lower_bound()),
+            ("open_upper_bound", open_upper_bound()),
+        ] {
+            let y = at.year();
+            assert!(
+                (1000..=9999).contains(&y),
+                "{name}() has year {y}, outside persist's text-orderable range 1000..=9999.                  persist refuses this bound outright (CIRISPersist#605), so every preview                  using it fails with `store_unavailable` — and before that fix it silently                  selected ZERO rows, which is worse."
+            );
+        }
+    }
+
+    /// The lower sentinel must still admit every row a producer can emit, so
+    /// raising it to satisfy the floor above cannot have narrowed the window.
+    #[test]
+    fn the_lower_sentinel_still_admits_every_real_row() {
+        let earliest_real: DateTime<Utc> = "2000-01-01T00:00:00Z".parse().expect("test instant");
+        assert!(
+            open_lower_bound() < earliest_real,
+            "open_lower_bound() no longer sorts below a real `asserted_at`; an `after:`-less              selection would start dropping rows it was asked to include."
+        );
+    }
+
     /// The singular and plural coexist — persist OR-combines them, so naming one
     /// key and a set in the same act selects the union, not the intersection.
     #[test]
