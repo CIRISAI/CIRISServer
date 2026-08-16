@@ -282,11 +282,30 @@ pub fn oauth_callback_url_for_test(base: &str, provider: &str) -> String {
     oauth_callback_url(base, provider)
 }
 
+/// Test hook for [`redirect_uri_for`] — the registered-vs-derived decision.
+pub fn redirect_uri_for_test(registered: Option<&str>, base: &str, provider: &str) -> String {
+    redirect_uri_for(registered, base, provider)
+}
+
 fn oauth_callback_url(base: &str, provider: &str) -> String {
     format!(
         "{}/v1/auth/oauth/{provider}/callback",
         base.trim_end_matches('/')
     )
+}
+
+/// The `redirect_uri` for a flow: the REGISTERED public URL when the deployment
+/// gave us one, the derived shape otherwise.
+///
+/// Both ends of a flow must send byte-identical values — the authorize redirect
+/// and the code exchange — or the provider rejects the exchange after the user
+/// has already consented. Routing both through one function makes that
+/// structural rather than a convention two call sites happen to share.
+fn redirect_uri_for(registered: Option<&str>, base: &str, provider: &str) -> String {
+    match registered {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => oauth_callback_url(base, provider),
+    }
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -303,6 +322,39 @@ struct ProviderConfig {
     client_secret: String,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// **The URL registered with the provider's console** — sent verbatim as
+    /// `redirect_uri`, never derived (CIRISServer#421).
+    ///
+    /// A provider compares `redirect_uri` as an exact STRING, so the only
+    /// authority on its value is the deployment that registered it — and this
+    /// node cannot derive it, because the public URL is not the path the node
+    /// serves.
+    ///
+    /// In the hosted deployment nginx routes the public three-segment URL and
+    /// STRIPS the agent-id before forwarding. That is how ONE Google client
+    /// (datum's) serves every agent: the agent-id exists for proxy routing and
+    /// console registration and never reaches the app. So the node correctly
+    /// receives, and correctly routes, two segments. Deriving `redirect_uri`
+    /// from the path this node serves advertises an INTERNAL path: nginx will
+    /// not route it (its location regex requires the agent segment) and no
+    /// console entry carries it.
+    ///
+    /// It took TWO deltas together, which is why neither alone explained it:
+    /// the derived path lacked the agent-id AND the base fell back to loopback,
+    /// because the config PUT that sets `auth.oauth_callback_base_url` 403s on
+    /// an unclaimed node. The deployment never changed.
+    ///
+    /// The value must come from the agent's OWN environment —
+    /// `{OAUTH_CALLBACK_BASE_URL}/v1/auth/oauth/{CIRIS_AGENT_ID}/{provider}/callback`
+    /// — and NOT from a provisioning file's `callback_url`, which holds the
+    /// registering agent's URL (every non-datum agent would send datum's). It
+    /// travels on `configure_provider`, which is unauthenticated, so it also
+    /// sidesteps the 403 that blocks the owner-gated config key.
+    ///
+    /// `None` keeps the derived shape, so desktop and loopback are untouched:
+    /// desktop registers a loopback redirect that IS the served path.
+    #[serde(default)]
+    callback_url: Option<String>,
 }
 
 /// **The CIRIS Google DESKTOP-app OAuth client, shipped in the wheel.**
@@ -389,6 +441,9 @@ impl Default for ProviderConfigStore {
                     client_id: id.to_string(),
                     client_secret: secret.to_string(),
                     metadata: serde_json::Value::Object(metadata),
+                    // The baked desktop client registers a LOOPBACK redirect,
+                    // which IS the served path — no proxy, nothing to register.
+                    callback_url: None,
                 },
             );
         }
@@ -1317,6 +1372,12 @@ struct ConfigureProviderRequest {
     client_secret: String,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// The registered console URL, built by the agent from its own env. Until
+    /// CIRISServer#421 this was dropped SILENTLY at `200` — the node then
+    /// derived a different URI and the mismatch surfaced one redirect later at
+    /// the provider, as `redirect_uri_mismatch`.
+    #[serde(default)]
+    callback_url: Option<String>,
 }
 
 async fn configure_provider(State(st): State<OAuthState>, body: axum::body::Bytes) -> Response {
@@ -1331,6 +1392,7 @@ async fn configure_provider(State(st): State<OAuthState>, body: axum::body::Byte
             client_id: req.client_id,
             client_secret: req.client_secret,
             metadata: req.metadata,
+            callback_url: req.callback_url,
         },
     );
     (
@@ -1371,6 +1433,13 @@ async fn oauth_login(
     // A button that cannot work is worse than no button, and the honest place
     // to say so is here rather than at the code exchange the user never reaches.
     // Same `reason_id` the exchange already uses, so a client binds ONE key.
+    let registered_callback = {
+        let store = st.providers.lock().unwrap();
+        store
+            .by_provider
+            .get(&provider)
+            .and_then(|c| c.callback_url.clone())
+    };
     let client_id = {
         let store = st.providers.lock().unwrap();
         match store.by_provider.get(&provider) {
@@ -1421,7 +1490,11 @@ async fn oauth_login(
     // app-supplied post-login `redirect_uri`, which is validated above and would
     // be carried separately in real deployments). This matches the agent, which
     // always sends `get_oauth_callback_url(provider)` to the provider.
-    let callback = oauth_callback_url(&st.callback_base().await, &provider);
+    let callback = redirect_uri_for(
+        registered_callback.as_deref(),
+        &st.callback_base().await,
+        &provider,
+    );
     let url = st
         .client
         .authorize_url(&provider, &client_id, &state, &callback, &code_challenge);
@@ -1469,14 +1542,24 @@ async fn oauth_callback(
             None => return err(StatusCode::BAD_REQUEST, "invalid or expired oauth state"),
         }
     };
-    let (client_id, client_secret) = {
+    let (client_id, client_secret, registered_callback) = {
         let store = st.providers.lock().unwrap();
         match store.by_provider.get(&provider) {
-            Some(c) => (c.client_id.clone(), c.client_secret.clone()),
+            Some(c) => (
+                c.client_id.clone(),
+                c.client_secret.clone(),
+                c.callback_url.clone(),
+            ),
             None => return err(StatusCode::NOT_FOUND, "provider not configured"),
         }
     };
-    let redirect_uri = oauth_callback_url(&st.callback_base().await, &provider);
+    // MUST equal what the authorize redirect sent — the provider compares the
+    // string and rejects the exchange otherwise. Same resolver, same inputs.
+    let redirect_uri = redirect_uri_for(
+        registered_callback.as_deref(),
+        &st.callback_base().await,
+        &provider,
+    );
     let ident = match st
         .client
         .exchange_code(
@@ -1791,6 +1874,26 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
             "/v1/auth/oauth/{provider}/callback",
             axum::routing::get(oauth_callback),
         )
+        // ── DEFENCE IN DEPTH ONLY: `/v1/auth/oauth/{agent_id}/{provider}/…` ──
+        //
+        // In the hosted deployment the node NEVER sees this shape. nginx owns
+        // the public three-segment URL and strips the agent-id before
+        // forwarding, so what arrives here is two segments — which is why the
+        // routes above are correct and always were.
+        //
+        // These exist for a direct-to-node request that skips the proxy. They
+        // are NOT the fix for CIRISServer#421 and must not be mistaken for it:
+        // that defect is in what this node EMITS (see `redirect_uri_for`), not
+        // in what it routes. Anyone reading these and concluding the emitted
+        // URI should be made to match them would re-break every hosted login.
+        .route(
+            "/v1/auth/oauth/{agent_id}/{provider}/login",
+            axum::routing::get(oauth_login),
+        )
+        .route(
+            "/v1/auth/oauth/{agent_id}/{provider}/callback",
+            axum::routing::get(oauth_callback),
+        )
         .route("/v1/auth/native/google", axum::routing::post(native_google))
         .route("/v1/auth/native/apple", axum::routing::post(native_apple))
         .with_state(st.clone())
@@ -1946,6 +2049,7 @@ mod tests {
             client_id: "   ".to_string(),
             client_secret: String::new(),
             metadata: serde_json::Value::Null,
+            callback_url: None,
         };
         assert!(
             blank.client_id.trim().is_empty(),

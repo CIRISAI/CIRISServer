@@ -20,22 +20,46 @@
 //! `{ node_code, claim_pin, cohort_scope }`), owner/operator-gated. This is the
 //! op the app calls; the local node does ALL the crypto + node-to-node.
 //!
-//! ## The local USER identity — and the keyring gap (FILED UPSTREAM)
+//! ## The local USER identity — hardware-custodied, and wired end to end
 //!
 //! Step 2 MUST sign as the **responsible user**, not the node's steward key (the
 //! owner-binding asserts an accountable *human* is responsible). The substrate
 //! `Engine` holds exactly ONE [`LocalSigner`](ciris_persist::prelude::LocalSigner)
-//! — the node's steward identity — and `ciris-keyring` v5.11.0 ships NO
-//! user-identity / YubiKey(PKCS#11) signer accessor. So the local node must be
-//! handed a user-role `LocalSigner` explicitly (config-provided user key seeds,
-//! wired into [`router`]). Until the keyring grows a user-identity / hardware
-//! (PKCS#11) accessor, that is the only way to sign as a distinct user.
+//! — the node's steward identity — so the user signer is resolved separately, at
+//! REQUEST time, by [`crate::compose::resolve_user_signer`].
 //!
-//! **GAP to file upstream (likely a `ciris-keyring` ask):** a user-identity
-//! signer surface — load/seal a user-role Ed25519+ML-DSA-65 keypair distinct from
-//! the node steward key, ideally backed by a YubiKey/PKCS#11 token — so the
-//! responsible human's owner-binding signature can be hardware-custodied by the
+//! That resolution opens the fed-ID under the custody backend its mint RECORDED
+//! (`<seed_dir>/<alias>.backend`), via
+//! [`crate::identity::hardware_user_local_signer`]: software seed,
+//! platform-sealed, or **PKCS#11**. The classical half comes back as a
+//! `HardwareSigner`, so an identity minted with
+//! `ciris-server identity create --backend pkcs11` signs this owner-binding
+//! **from the token** — the responsible human's signature is custodied by the
 //! human, not co-resident with the node's steward key.
+//!
+//! Release of that signer is a choke point: a VERIFIED owner session, or the
+//! first-run bootstrap window (re-checked inside `resolve_user_signer`, so it can
+//! never wield the fed-ID on an already-owned node).
+//!
+//! **Consequence for remote claiming:** a node can only claim on behalf of an
+//! owner whose key it can OPEN. That is structural, not a deployment detail —
+//! extend this to remote *agent* claim and the same rule applies.
+//!
+//! The one custody asymmetry left is inherent rather than missing: the
+//! ML-DSA-65 half is platform-sealed under the alias
+//! (`get_platform_sealed_mldsa65_signer`), because no PKCS#11 token performs
+//! ML-DSA-65. Classical half on the token, PQC half sealed to the machine.
+//!
+//! # Correcting the note that used to be here
+//!
+//! This section previously read "`ciris-keyring` v5.11.0 ships NO user-identity /
+//! YubiKey(PKCS#11) signer accessor" and carried a **GAP to file upstream**. That
+//! ask SHIPPED and was adopted — the pinned keyring has `user_identity.rs` +
+//! `pkcs11.rs` and `get_user_identity_signer`, and this crate has consumed them
+//! since the `identity create --backend` CLI landed. The comment outlived its
+//! subject by many substrate versions and, read at face value, would tell the
+//! next person that hardware custody of the owner key is impossible when it is
+//! already the shipping path.
 
 use std::sync::Arc;
 use std::time::Duration;
