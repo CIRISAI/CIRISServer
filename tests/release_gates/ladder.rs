@@ -1391,7 +1391,20 @@ fn gate0_preflight_runs_what_ci_runs() {
             .trim_start_matches("- ")
             .trim_start_matches("run:")
             .trim();
-        if t.starts_with("cargo ") && !t.contains("--version") && !t.contains("--help") {
+        // `cargo` AND `python3`. It used to be cargo-only, which left every
+        // non-cargo CI step invisible to this gate — a hole, not a scope
+        // decision: `tools/check_evidence.py` and the #38 cohort_scope ratchet
+        // are as much "what CI runs" as any cargo command, and preflight
+        // silently not running them is the exact drift this exists to catch.
+        //
+        // It also pins their ARGUMENTS, which matters for the ratchet: the
+        // comparison is the whole command string, so raising the ceiling in
+        // ci.yml without raising it in preflight.sh fails HERE rather than
+        // producing a preflight that passes what CI rejects.
+        if (t.starts_with("cargo ") || t.starts_with("python3 "))
+            && !t.contains("--version")
+            && !t.contains("--help")
+        {
             if PLATFORM_ONLY.contains(&job.as_str()) {
                 continue;
             }

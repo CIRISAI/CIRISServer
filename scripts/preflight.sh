@@ -128,6 +128,11 @@ fi
 # Lane 4 builds nothing, so it needs no target dir and always runs alongside.
 L4=( "rustfmt"             "cargo fmt --all --check"
      "evidence"            "python3 tools/check_evidence.py"
+     # The #38 ratchet. Lives here with the other python guards rather than in a
+     # cargo lane: it builds nothing, so it costs a subprocess. The ceiling must
+     # match ci.yml — a preflight that passes what CI fails is worse than no
+     # preflight, because it teaches people to trust it.
+     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 41"
      "localization"        "python3 client/tools/check_localization_sync.py --strict"
      "client-version"      "./scripts/sync-client-version.sh --check"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )

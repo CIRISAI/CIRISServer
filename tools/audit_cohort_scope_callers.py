@@ -44,7 +44,12 @@ _EMIT = re.compile(r"\b(put_attestation|attestation_upsert_local|emit_signed_att
 def main() -> int:
     ap = argparse.ArgumentParser(description="cohort_scope emit-site audit (CIRISServer#38)")
     ap.add_argument("--strict", action="store_true",
-                    help="exit 1 if any federation-scope site is found")
+                    help="exit 1 if ANY federation-scope site is found. Not usable as a "
+                         "CI gate while the 41 reviewed sites exist — see --max-federation.")
+    ap.add_argument("--max-federation", type=int, default=None, metavar="N",
+                    help="RATCHET: exit 1 if the federation-scope site count EXCEEDS N. "
+                         "This is the CI gate. --strict is all-or-nothing and therefore "
+                         "always fails, which is why it went unused (CIRISServer#38).")
     args = ap.parse_args()
 
     fed: list[tuple[str, int, str]] = []
@@ -88,6 +93,32 @@ def main() -> int:
 
     if args.strict and fed:
         print(f"\nFAIL (--strict): {len(fed)} federation-scope site(s) need explicit review.")
+        return 1
+
+    # The RATCHET, and the reason this tool can finally gate CI.
+    #
+    # `--strict` fails whenever a single federation-scope site exists. There are
+    # 41 reviewed ones, so it could never be turned on — which is exactly why it
+    # sat unused since v0.5.11 while the audit it performs went unrun. A tool
+    # nobody can enable is a tool nobody runs.
+    #
+    # A ceiling grandfathers the reviewed sites and fails only on a NEW one, so
+    # the audit becomes a gate against drift rather than an unmeetable demand.
+    if args.max_federation is not None and len(fed) > args.max_federation:
+        print(
+            f"\nFAIL (--max-federation={args.max_federation}): {len(fed)} federation-scope "
+            f"emit site(s), {len(fed) - args.max_federation} more than the reviewed baseline."
+        )
+        print(
+            "A federation-scope emit publishes to the BROADEST audience. Post-v6.0.0 the "
+            "default is the smallest scope for the audience (anonymity-by-default), so a new "
+            "federation site is an explicit widening and needs to be a deliberate one."
+        )
+        print(
+            "If the new site is intended, review it and raise the ceiling in "
+            ".github/workflows/ci.yml in the SAME commit — never after, and never by "
+            "deleting the flag."
+        )
         return 1
     return 0
 

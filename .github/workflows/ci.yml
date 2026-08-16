@@ -165,6 +165,23 @@ jobs:
       # `cargo test` builds, and on the maintainer's box a workspace-wide build
       # OOMs. This keeps the local command untouched and names the package.
       - run: cargo test -p ciris-lens-core --lib
+      # ── cohort_scope drift ratchet (CIRISServer#38) ─────────────────────────
+      #
+      # `tools/audit_cohort_scope_callers.py` has existed since v0.5.11 and was
+      # never wired to anything, so the audit it performs went unrun. Its
+      # `--strict` flag is why: it fails whenever ANY federation-scope emit site
+      # exists, and 41 reviewed ones do — an unmeetable demand nobody could turn
+      # on. A tool nobody can enable is a tool nobody runs.
+      #
+      # The ceiling grandfathers those 41 and fails only on a NEW one. Post-v6.0.0
+      # the default scope is the smallest for the audience (anonymity-by-default),
+      # so a new federation-scope emit is an explicit widening of who can see a
+      # row, and it should be a deliberate act rather than a diff nobody read.
+      #
+      # RAISING THIS NUMBER IS THE REVIEW. Do it in the same commit as the new
+      # site, never after, and never by dropping the flag.
+      - name: cohort_scope emit-site ratchet (CIRISServer#38)
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 41
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
