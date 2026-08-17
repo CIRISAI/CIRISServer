@@ -260,6 +260,16 @@ struct HandoffPayload {
     external_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
+    /// The provider's ID token, forwarded to the app that started this flow
+    /// (CIRISServer#434).
+    ///
+    /// This is the field whose absence made CIRIS_PROXY unselectable on
+    /// desktop: the mode needs a Google ID token as its `api_key`, the native
+    /// clients hold one already, and the desktop client's only view of the
+    /// provider response is this payload. Omitted entirely when the flow
+    /// produced none, so a client can tell "no ID token" from "empty string".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
 }
 
 impl HandoffStore {
@@ -562,6 +572,22 @@ pub struct OAuthIdentity {
     pub external_id: String,
     pub email: Option<String>,
     pub name: Option<String>,
+    /// The provider's OIDC **ID token**, when the flow produced one
+    /// (CIRISServer#434).
+    ///
+    /// Google returns it in the SAME token response as `access_token`, and this
+    /// node was parsing that response and dropping the field. The native mobile
+    /// path had one — it arrives as the login credential — so mobile worked and
+    /// desktop did not, from one omission.
+    ///
+    /// It is functional, not decorative: CIRIS_PROXY mode sends the Google ID
+    /// token AS the LLM api_key, so a desktop user signed in with Google was
+    /// told "Google sign-in is required" while signed in with Google, and could
+    /// not select the proxy at all.
+    ///
+    /// `None` wherever the flow genuinely has none — an opaque-token provider,
+    /// or a path that never saw one. Absent is a fact, not a failure.
+    pub id_token: Option<String>,
 }
 
 /// The provider HTTP seam: authz-URL construction, code→token exchange + userinfo,
@@ -761,6 +787,13 @@ impl HttpProviderClient {
             .get("access_token")
             .and_then(|v| v.as_str())
             .ok_or("google token response missing access_token")?;
+        // Same response, one field over (CIRISServer#434). Not required: a
+        // provider or scope combination that yields no id_token must still log
+        // the user in, so this is Option and never an error arm.
+        let id_token = token
+            .get("id_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let info: serde_json::Value = self
             .http
             .get("https://www.googleapis.com/oauth2/v2/userinfo")
@@ -788,6 +821,9 @@ impl HttpProviderClient {
             .map(str::to_owned)
             .or_else(|| email.clone());
         Ok(OAuthIdentity {
+            // The field this whole issue is about: captured above from the
+            // SAME token response (CIRISServer#434).
+            id_token,
             provider: "google".into(),
             external_id,
             email,
@@ -884,6 +920,8 @@ impl HttpProviderClient {
             }
         }
         Ok(OAuthIdentity {
+            // GitHub is OAuth2, not OIDC — there is no id_token to omit.
+            id_token: None,
             provider: "github".into(),
             external_id,
             email,
@@ -950,6 +988,8 @@ impl HttpProviderClient {
             .map(str::to_owned)
             .or_else(|| email.clone());
         Ok(OAuthIdentity {
+            // Discord issues no OIDC id_token on this flow.
+            id_token: None,
             provider: "discord".into(),
             external_id,
             email,
@@ -1015,6 +1055,9 @@ impl HttpProviderClient {
             .ok_or("Google ID token missing user ID (sub claim).")?
             .to_string();
         Ok(OAuthIdentity {
+            // The native path's login credential IS the id_token — carry it
+            // through so both surfaces answer the same question the same way.
+            id_token: Some(id_token.to_string()),
             provider: "google".into(),
             external_id: sub,
             email: info
@@ -1104,6 +1147,8 @@ impl HttpProviderClient {
             .ok_or("Apple ID token missing user ID (sub claim).")?
             .to_string();
         Ok(OAuthIdentity {
+            // Apple's native credential is likewise the id_token.
+            id_token: Some(id_token.to_string()),
             provider: "apple".into(),
             external_id: sub,
             email: claims
@@ -1389,6 +1434,7 @@ pub async fn test_support_resolve_oauth_user(
     email: Option<&str>,
 ) -> Result<String, String> {
     let ident = OAuthIdentity {
+        id_token: None,
         provider: provider.to_string(),
         external_id: external_id.to_string(),
         email: email.map(str::to_owned),
@@ -2197,6 +2243,11 @@ struct ResolvedLogin {
     external_id: String,
     email: Option<String>,
     name: Option<String>,
+    /// The provider's OIDC ID token when the flow produced one
+    /// (CIRISServer#434). Resolution does not USE it — it is carried so the
+    /// browser responder can hand it to the desktop app, which cannot see the
+    /// provider response the way a native client can.
+    id_token: Option<String>,
 }
 
 /// Shared core: determine role, RESOLVE the local identity, mint the session —
@@ -2233,6 +2284,7 @@ async fn resolve_login(
         external_id: ident.external_id.clone(),
         email: ident.email.clone(),
         name: ident.name.clone(),
+        id_token: ident.id_token.clone(),
     })
 }
 
@@ -2313,6 +2365,7 @@ async fn browser_finish(
                         provider: r.provider.clone(),
                         external_id: r.external_id.clone(),
                         email: r.email.clone(),
+                        id_token: r.id_token.clone(),
                     }),
                 );
             }
@@ -2386,11 +2439,55 @@ async fn browser_finish(
 /// the fallback should name the port that actually answers.
 pub const DEFAULT_OAUTH_CALLBACK_BASE_URL: &str = "http://127.0.0.1:4243";
 
+/// The callback base a DEPLOYMENT declares before the process starts
+/// (CIRISServer#435).
+///
+/// Server 0.5 moved configuration into `config:*` and retired the env vars, which
+/// is right for values an operator changes at runtime. This one is not that: it
+/// is known before boot, identical on every boot, and — critically — writing it
+/// requires `PUT /v1/config/...`, which requires an owner session, which an
+/// UNCLAIMED node cannot have.
+///
+/// That produced an ordering paradox on a fresh deployment: signing in is how an
+/// operator claims the node, and the key that is unwritable until the node is
+/// claimed is the one that makes signing in work. The node fell back to
+/// `127.0.0.1:4243`, which no provider console has registered, so the flow died
+/// at the provider with a `redirect_uri_mismatch` — the same class as #421,
+/// arriving by configuration rather than by derivation.
+///
+/// Precedence is deliberate and one-directional: the stored `config:*` value
+/// WINS when present (an operator who has set it at runtime meant it), the
+/// environment fills the boot-time hole, and the loopback default is the last
+/// resort. So this can only ever help a node that would otherwise have had
+/// nothing.
+///
+/// Both spellings are accepted: `CIRIS_OAUTH_CALLBACK_BASE_URL` for this
+/// project's prefix convention, and the `OAUTH_CALLBACK_BASE_URL` the agent's
+/// deployments already set — refusing to read a variable the fleet has been
+/// setting all along would be a distinction with no user on the other side of it.
+fn callback_base_from_env() -> Option<String> {
+    for key in ["CIRIS_OAUTH_CALLBACK_BASE_URL", "OAUTH_CALLBACK_BASE_URL"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                tracing::info!(
+                    env = key,
+                    callback_base = %v,
+                    "OAuth callback base taken from the environment — no stored \
+                     auth.oauth_callback_base_url yet (CIRISServer#435)"
+                );
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 /// The OAuth front-door router.
 ///
 /// `callback_base` is the boot-resolved `auth.oauth_callback_base_url` config:*
-/// value (Server 0.5 — replaces the `OAUTH_CALLBACK_BASE_URL` env); an empty value
-/// falls back to [`DEFAULT_OAUTH_CALLBACK_BASE_URL`].
+/// value. Empty falls back to the ENVIRONMENT, then to
+/// [`DEFAULT_OAUTH_CALLBACK_BASE_URL`] — see [`callback_base_from_env`].
 pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
     router_with_client(
         engine,
@@ -2413,7 +2510,7 @@ pub fn router_with_client(
     client: Arc<dyn ProviderClient>,
 ) -> Router {
     let callback_base = if callback_base.trim().is_empty() {
-        DEFAULT_OAUTH_CALLBACK_BASE_URL.to_string()
+        callback_base_from_env().unwrap_or_else(|| DEFAULT_OAUTH_CALLBACK_BASE_URL.to_string())
     } else {
         callback_base
     };
@@ -2714,6 +2811,7 @@ mod tests {
             provider: "google".into(),
             external_id: "123".into(),
             email: Some("a@b.c".into()),
+            id_token: None,
         };
         let v = serde_json::to_value(&p).expect("serializes");
         assert_eq!(
@@ -2781,7 +2879,137 @@ mod tests {
             provider: "google".into(),
             external_id: "sub-1".into(),
             email: None,
+            id_token: None,
         })
+    }
+
+    /// The desktop app's ONLY view of the provider's ID token is this payload
+    /// (CIRISServer#434) — and "absent" must stay distinguishable from "empty".
+    ///
+    /// The mobile clients get their ID token as the login credential they
+    /// themselves supplied, so they never noticed this field missing. Desktop
+    /// signs in through a browser and can see only what the hand-off carries,
+    /// which is why CIRIS_PROXY — a mode whose api_key IS a Google ID token —
+    /// was unselectable there while the user was demonstrably signed in with
+    /// Google.
+    #[test]
+    fn the_handoff_forwards_the_id_token_when_the_provider_issued_one() {
+        let mut p = match complete("sess:t") {
+            HandoffOutcome::Complete(p) => p,
+            _ => unreachable!(),
+        };
+
+        // No ID token: the key is ABSENT, never `null` and never "". A client
+        // reading it can act on the difference between "this provider issues
+        // none" and "one arrived but was empty".
+        let v = serde_json::to_value(&p).expect("serializes");
+        assert!(
+            v.get("id_token").is_none(),
+            "a flow with no ID token must omit the key entirely, got {v:?}"
+        );
+
+        p.id_token = Some("eyJhbGciOi.PAYLOAD.sig".into());
+        let v = serde_json::to_value(&p).expect("serializes");
+        assert_eq!(
+            v.get("id_token").and_then(|x| x.as_str()),
+            Some("eyJhbGciOi.PAYLOAD.sig"),
+            "the ID token must reach the app VERBATIM — it is a signed \
+             credential, so any re-encoding invalidates it"
+        );
+        // Flat, alongside the session — not nested under a sub-object the
+        // existing clients would have to learn about.
+        assert!(
+            v.get("access_token").is_some(),
+            "still the flat grant shape"
+        );
+    }
+
+    /// The boot-time hole #435 fills, and the precedence that keeps it safe.
+    ///
+    /// Serialized on one test rather than split across three: these mutate
+    /// PROCESS environment, and cargo runs unit tests on threads of one
+    /// process, so separate `#[test]` fns would race each other's `set_var`.
+    #[test]
+    fn the_callback_base_falls_back_to_the_environment_but_never_over_config() {
+        // A helper's `let _ =` on a Result would be a hard no elsewhere in this
+        // tree; remove_var returns unit, so there is no outcome being discarded.
+        fn clear() {
+            std::env::remove_var("CIRIS_OAUTH_CALLBACK_BASE_URL");
+            std::env::remove_var("OAUTH_CALLBACK_BASE_URL");
+        }
+
+        clear();
+        assert_eq!(
+            callback_base_from_env(),
+            None,
+            "a deployment that declared nothing must read as nothing — the \
+             loopback default is then chosen by the caller, visibly"
+        );
+
+        // The project-prefixed spelling.
+        std::env::set_var("CIRIS_OAUTH_CALLBACK_BASE_URL", "https://node.example");
+        assert_eq!(
+            callback_base_from_env().as_deref(),
+            Some("https://node.example")
+        );
+
+        // The bare spelling the agent's deployments already set.
+        clear();
+        std::env::set_var("OAUTH_CALLBACK_BASE_URL", "https://legacy.example");
+        assert_eq!(
+            callback_base_from_env().as_deref(),
+            Some("https://legacy.example"),
+            "the fleet has been setting this name all along; refusing to read \
+             it would be a distinction with no user behind it"
+        );
+
+        // Prefixed WINS over bare when a deployment sets both.
+        std::env::set_var("CIRIS_OAUTH_CALLBACK_BASE_URL", "https://node.example");
+        assert_eq!(
+            callback_base_from_env().as_deref(),
+            Some("https://node.example")
+        );
+
+        // Set-but-empty is NOT a declaration. An unset var in a compose file
+        // expands to "", and that must not beat the default with nothing.
+        clear();
+        std::env::set_var("CIRIS_OAUTH_CALLBACK_BASE_URL", "   ");
+        assert_eq!(
+            callback_base_from_env(),
+            None,
+            "whitespace-only is an unexpanded variable, not a callback base"
+        );
+
+        clear();
+    }
+
+    /// The capture site itself: Google returns `id_token` in the SAME response
+    /// this node already parses for `access_token`, and the node was reading
+    /// one field and dropping the other.
+    ///
+    /// Pins the read, not the plumbing — the plumbing is type-checked, but
+    /// nothing would make a compiler complain if this parse were deleted and
+    /// every downstream `Option` quietly went `None` forever.
+    #[test]
+    fn the_google_exchange_reads_the_id_token_from_the_token_response() {
+        let src = include_str!("oauth.rs");
+        let body: String = src
+            .split("async fn exchange_google(")
+            .nth(1)
+            .expect("exchange_google present")
+            .split("\n    async fn ")
+            .next()
+            .expect("function ends")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains(r#"get("id_token")"#),
+            "exchange_google must read id_token out of the token response \
+             (CIRISServer#434); without this read the field is None forever \
+             and desktop CIRIS_PROXY silently stops working again"
+        );
     }
 
     /// The collected outcome's access token, when it is a Complete.

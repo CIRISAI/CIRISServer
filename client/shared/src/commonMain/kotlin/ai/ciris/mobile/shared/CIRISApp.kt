@@ -1690,7 +1690,13 @@ fun CIRISApp(
                                         // back to inventing a unique name by hand.
                                         setupViewModel.setGoogleAuthState(
                                             isAuth = true,
-                                            idToken = null,
+                                            // The node forwards the provider's ID token
+                                            // through the hand-off (CIRISServer#434).
+                                            // This was hard-coded null, so desktop
+                                            // CIRIS_PROXY — whose api_key IS this token —
+                                            // was configured with an empty key while the
+                                            // user was demonstrably signed in with Google.
+                                            idToken = collected.idToken,
                                             email = collected.email,
                                             userId = collected.externalId,
                                             provider = collected.provider,
