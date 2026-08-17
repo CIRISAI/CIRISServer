@@ -143,3 +143,38 @@ fn registered_wins_and_absent_falls_back() {
 
     let _ = SERVED;
 }
+
+/// **The native path never references the hand-off page** (CIRISServer#429).
+///
+/// The native token exchange used to share the callback's responder, so a
+/// native success was answered with the browser's HTML hand-off page and the
+/// Apple client's hand-rolled decoder died on it — after Apple had already
+/// said yes. The split keeps two responders; this asserts the native one
+/// stays out of the browser's page, source-slice over comment-stripped code
+/// (this file's own assertions would otherwise match themselves — the
+/// self-reference that has bitten oauth.rs four times).
+#[test]
+fn the_native_path_never_references_the_handoff_page() {
+    let src = router_src();
+    let after = src
+        .split("async fn native_login(")
+        .nth(1)
+        .expect("native_login present in oauth.rs");
+    // Bound at the next async fn OR the page const's own DEFINITION, whichever
+    // comes first — the const lives between native_login and the next handler,
+    // and a slice that swallows the definition fails on correct source.
+    let end = after
+        .find("\nasync fn ")
+        .unwrap_or(after.len())
+        .min(after.find("\nconst HANDOFF_PAGE").unwrap_or(after.len()));
+    let body: String = after[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !body.contains("HANDOFF_PAGE"),
+        "the native token exchange references HANDOFF_PAGE — an SDK decoder is about to \
+         receive HTML where it expects `{{access_token, …}}`, which is #429 verbatim"
+    );
+}

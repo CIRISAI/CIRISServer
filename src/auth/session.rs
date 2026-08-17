@@ -4,9 +4,13 @@
 //!
 //! Sessions are NOT a persist primitive (confirmed: persist has `TokenType::
 //! Session` rows + `set_active`/`last_login` but no per-session revocation API).
-//! So the session issuer is fabric-owned logic over `wa_cert` rows — exactly as
-//! the agent did it: a session is a short-lived bearer keyed to an authenticated
-//! `wa_id`, revoked by `set_active(false)`.
+//! So the session issuer is fabric-owned logic over `wa_cert` rows — a session
+//! is a short-lived bearer keyed to an authenticated `wa_id`. Logout revokes
+//! THE SESSION (an in-process nonce revocation set — see
+//! [`revoke_session_token`]), never the cert: `set_active(false)` deactivates
+//! the IDENTITY, which is a different act with a different gate
+//! (CIRISServer#403 — logout used to do exactly that, locking the owner out of
+//! their own node irreversibly and reopening first-run).
 //!
 //! Routes (port of `routes/auth.py`):
 //! - `POST /v1/auth/login`     — username+password → session token.
@@ -15,8 +19,8 @@
 //! - `POST /v1/auth/refresh`   — re-issue a session token.
 //! - `GET  /v1/auth/owner-hint`— unauth'd founding-owner hint (masked).
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -27,6 +31,7 @@ use ciris_persist::prelude::Engine;
 use ciris_persist::wa_cert::WaRole;
 use serde::{Deserialize, Serialize};
 
+use super::refusal::refuse;
 use super::roles::{permissions_for, Permission, Role, UserRole};
 use super::store;
 
@@ -132,7 +137,7 @@ struct LoginRequest {
 /// bookkeeping the others do. The token type and the TTL are policy; policy in
 /// four places is policy that will disagree. [`SessionGrant::issue`] is now the
 /// only thing that calls [`issue_session_token`] outside this module's own tests.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct SessionGrant {
     pub access_token: String,
     pub token_type: &'static str,
@@ -182,25 +187,29 @@ impl SessionGrant {
 /// identity and no bearer, so there was nothing for a client to hold.
 /// The per-node secret that makes a session token's random half LOAD-BEARING.
 ///
-/// Generated once and held for the process. A restart mints a new one, which
-/// invalidates outstanding sessions — the fail-SAFE direction, and the same
-/// posture CIRISServer#125 chose for the client (memory-only, re-login on a
-/// fresh launch).
-static SESSION_SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-
-fn session_secret() -> &'static [u8; 32] {
-    SESSION_SECRET.get_or_init(|| {
-        let mut k = [0u8; 32];
-        ciris_crypto::random::fill(&mut k).expect("CSPRNG for the session secret");
-        k
-    })
-}
+/// Generated once at first use and held for the process. A restart mints a new
+/// one, which invalidates outstanding sessions — the fail-SAFE direction, and
+/// the same posture CIRISServer#125 chose for the client (memory-only,
+/// re-login on a fresh launch).
+///
+/// `RwLock` rather than `OnceLock` because the secret can now ROTATE in-process:
+/// when the logout revocation set reaches [`REVOKED_SESSION_CAP`] the cap is
+/// enforced by rotating this secret and clearing the set (see
+/// [`revoke_session_token`]), which kills every outstanding session — exactly
+/// the documented restart semantics, applied without the restart. The cost is
+/// one uncontended read-lock per MAC.
+static SESSION_SECRET: LazyLock<RwLock<[u8; 32]>> = LazyLock::new(|| {
+    let mut k = [0u8; 32];
+    ciris_crypto::random::fill(&mut k).expect("CSPRNG for the session secret");
+    RwLock::new(k)
+});
 
 /// `HMAC-SHA256(secret, wa_id || 0x1f || nonce)`, base64url.
 fn session_mac(wa_id: &str, nonce: &str) -> String {
     use base64::Engine as _;
     use hmac::Mac as _;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(session_secret())
+    let key = *SESSION_SECRET.read().expect("session secret lock");
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&key)
         .expect("HMAC accepts a 32-byte key");
     mac.update(wa_id.as_bytes());
     mac.update(&[0x1f]);
@@ -248,8 +257,15 @@ pub fn test_support_issue_session_token(wa_id: &str) -> String {
     issue_session_token(wa_id)
 }
 
-/// Verify a session token's MAC. `false` for anything not minted by this process.
-fn session_token_is_authentic(token: &str) -> bool {
+/// Verify a session token's MAC. `false` for anything not minted by this process
+/// (under the CURRENT secret — a rotation fails every earlier mint, by design).
+///
+/// This answers "did we mint it", and ONLY that. "Is it still live" is
+/// [`session_is_revoked`]'s question; [`session_token_is_authentic`] composes
+/// the two. Logout needs them apart: a revoked-but-genuine token logging out
+/// again is a 204 (already done), while a forged one is a 401 — folding the
+/// questions would make double-logout indistinguishable from an attack.
+fn session_mac_verifies(token: &str) -> bool {
     use subtle::ConstantTimeEq as _;
     let Some(rest) = token.strip_prefix("sess:") else {
         return false;
@@ -266,6 +282,93 @@ fn session_token_is_authentic(token: &str) -> bool {
     };
     let expected = session_mac(wa_id, nonce);
     expected.as_bytes().ct_eq(mac.as_bytes()).into()
+}
+
+/// The token's nonce segment (`sess:<wa_id>:<NONCE>.<mac>`), unverified.
+/// Used only as the revocation-set key — never for a decision on its own.
+fn session_nonce(token: &str) -> Option<&str> {
+    let (nonce, _mac) = token
+        .strip_prefix("sess:")?
+        .rsplit_once(':')?
+        .1
+        .split_once('.')?;
+    Some(nonce)
+}
+
+/// **Why the revocation set is bounded, and why the bound ROTATES rather than
+/// evicts** (CIRISServer#403).
+///
+/// Tokens are stateless and carry no expiry, so a logged-out token must stay
+/// revoked for the life of the secret that MAC'd it — and an authenticated
+/// caller can loop refresh→logout to mint unbounded distinct nonces, making an
+/// unbounded set a real memory vector. But FIFO/LRU eviction is WRONG here:
+/// evicting an entry silently UN-revokes a logged-out token (age is no proxy
+/// for expiry when tokens never expire). So on hitting the cap the session
+/// secret is rotated and the set cleared: every outstanding session dies, which
+/// is the documented restart semantics — fail-safe, loud, and never quietly
+/// resurrecting a credential the user ended.
+#[doc(hidden)]
+pub const REVOKED_SESSION_CAP: usize = 4096;
+
+/// Nonces of sessions ended by logout. The NONCE, not the whole token: 192
+/// random bits make it unique per mint, and the stored value is not a
+/// credential (without the MAC half it authenticates nothing). Shape after
+/// `mesh_relay`'s replay guard, minus the eviction — see [`REVOKED_SESSION_CAP`]
+/// for why eviction is replaced by rotation.
+static REVOKED_SESSION_NONCES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Has this (authentic) token been ended by logout?
+fn session_is_revoked(token: &str) -> bool {
+    let Some(nonce) = session_nonce(token) else {
+        return false; // unparseable ⇒ the MAC gate already refuses it
+    };
+    REVOKED_SESSION_NONCES
+        .lock()
+        .expect("session revocation lock")
+        .contains(nonce)
+}
+
+/// The composite gate every session-consuming door checks: minted by this
+/// process AND not ended by logout. This is the ONE choke point — `wa_id_from_
+/// token` sits behind it, so no handler can act on a revoked session's identity.
+fn session_token_is_authentic(token: &str) -> bool {
+    session_mac_verifies(token) && !session_is_revoked(token)
+}
+
+/// End the session `token` names (CIRISServer#403). Returns `true` iff the
+/// token is one this process minted — including one ALREADY revoked, so a
+/// double logout stays idempotent. `false` means forged/foreign: nothing was
+/// revoked and the caller should refuse.
+///
+/// At [`REVOKED_SESSION_CAP`] the secret rotates and the set clears instead of
+/// evicting — see the cap's doc for why eviction would silently un-revoke.
+pub(crate) fn revoke_session_token(token: &str) -> bool {
+    if !session_mac_verifies(token) {
+        return false;
+    }
+    let Some(nonce) = session_nonce(token) else {
+        return false; // unreachable once the MAC verified, but never panic here
+    };
+    let mut revoked = REVOKED_SESSION_NONCES
+        .lock()
+        .expect("session revocation lock");
+    if revoked.len() >= REVOKED_SESSION_CAP {
+        let mut k = [0u8; 32];
+        ciris_crypto::random::fill(&mut k).expect("CSPRNG for the rotated session secret");
+        *SESSION_SECRET.write().expect("session secret lock") = k;
+        revoked.clear();
+        tracing::warn!(
+            cap = REVOKED_SESSION_CAP,
+            "session revocation set reached its cap — ROTATED the session secret and cleared \
+             the set. Every outstanding session is now invalid (the same semantics as a node \
+             restart); every signed-in user must log in again. This is the fail-safe answer: \
+             evicting old entries instead would silently resurrect logged-out tokens."
+        );
+        return true; // the rotation revoked this token along with everything else
+    }
+    revoked.insert(nonce.to_string());
+    true
 }
 
 /// The `wa_id` an **authentic** session token names (`sess:<wa_id>:<nonce>.<mac>`).
@@ -592,9 +695,10 @@ pub fn revoke_delegated_grants_for(client_id: &str) -> usize {
 /// 1. it MUST be a fabric session token (`sess:<wa_id>:<rand>`) — anything else
 ///    (API key, `service:` token, `username:password`) is NOT a session and
 ///    returns `Ok(None)` so the caller can fall through to those other auth modes
-///    exactly as the agent's dispatch chain did;
-/// 2. the bound `wa_cert` row must exist and be `active` — a logged-out/revoked
-///    session (`set_active(false)`) fails closed (`Ok(None)`).
+///    exactly as the agent's dispatch chain did; a session ended by logout fails
+///    the composite gate here too (CIRISServer#403);
+/// 2. the bound `wa_cert` row must exist and be `active` — a deactivated
+///    IDENTITY (`set_active(false)`) fails closed (`Ok(None)`).
 pub async fn resolve_bearer(
     engine: &Engine,
     bearer_token: &str,
@@ -606,6 +710,14 @@ pub async fn resolve_bearer(
     // token namespace that never touches the wa_cert store.
     if bearer_token.starts_with(DELEGATED_TOKEN_PREFIX) {
         let Some(grant) = lookup_delegated_grant(bearer_token) else {
+            // EVERY miss says which branch missed (CIRISServer#389) — four
+            // silent `Ok(None)`s made "401" a guess among four causes with
+            // four different fixes.
+            tracing::info!(
+                branch = "token_unrecognized",
+                "bearer refused: a dgrant-prefixed token that no live delegated grant matches — \
+                 expired, revoked, or minted before this process started"
+            );
             return Ok(None); // unknown or expired delegated token — fail closed.
         };
         // GRAPH RE-CHECK (CEG-native authority): the bearer is only a session
@@ -656,6 +768,14 @@ pub async fn resolve_bearer(
     }
 
     let Some(wa_id) = wa_id_from_token(bearer_token) else {
+        // Not necessarily an error — API keys and service tokens fall through
+        // here by design — but it must be SAYABLE, because a revoked session
+        // also lands here and used to vanish without a line (CIRISServer#389).
+        tracing::info!(
+            branch = "not_a_token",
+            "bearer is not a live session token (not sess-shaped, MAC does not verify, or the \
+             session was ended by logout) — falling through to the other auth modes"
+        );
         return Ok(None); // not a session token — let other auth modes handle it.
     };
     // THE GATE (CIRISServer#394). Everything below this line trusts `wa_id`, and
@@ -669,9 +789,21 @@ pub async fn resolve_bearer(
         return Ok(None);
     }
     let Some(cert) = store::get(engine, wa_id).await? else {
+        tracing::info!(
+            branch = "cert_absent",
+            wa_id,
+            "bearer refused: the session's MAC verifies but no wa_cert row carries its wa_id — \
+             the token outlived its account, or this node is reading a different database"
+        );
         return Ok(None);
     };
     if !cert.active {
+        tracing::info!(
+            branch = "cert_inactive",
+            wa_id,
+            "bearer refused: the session's wa_cert row is INACTIVE — the identity was \
+             deactivated (api-key revoke, duplicate-pair retirement, or an admin act)"
+        );
         return Ok(None);
     }
     let role = UserRole::from_wa_role(cert.role);
@@ -734,7 +866,11 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
                      alone is refused)"
                 );
             }
-            return err(StatusCode::UNAUTHORIZED, "invalid credentials");
+            return refuse(
+                StatusCode::UNAUTHORIZED,
+                "auth.login.invalid_credentials",
+                "invalid credentials",
+            );
         }
         // An ambiguous NAME is not a store outage and must not read as one — the
         // store is fine, the graph is not. It is also not "invalid credentials":
@@ -752,16 +888,28 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
                 "login REFUSED: this name resolves to more than one active cert. Choosing one \
                  would authenticate the caller as whichever the node ordered first."
             );
-            return err(StatusCode::CONFLICT, e.to_string());
+            return refuse(
+                StatusCode::CONFLICT,
+                "auth.login.ambiguous_name",
+                e.to_string(),
+            );
         }
         Err(e) => {
             tracing::warn!(error = %e, "login failed: identity store unavailable");
-            return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}"));
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.login.store_unavailable",
+                format!("store: {e}"),
+            );
         }
     };
     if !cert.active {
         tracing::info!(wa_id = %cert.wa_id, "login failed: account is inactive");
-        return err(StatusCode::FORBIDDEN, "account is inactive");
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "auth.login.account_inactive",
+            "account is inactive",
+        );
     }
     let Some(hash) = cert.password_hash.as_deref() else {
         tracing::info!(
@@ -769,7 +917,11 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
             "login failed: cert resolved but has NO password_hash (an OAuth-only or \
              not-yet-provisioned identity)"
         );
-        return err(StatusCode::UNAUTHORIZED, "no password set for this account");
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "auth.login.no_password_set",
+            "no password set for this account",
+        );
     };
     if !verify_password(&req.password, hash) {
         tracing::info!(
@@ -777,7 +929,14 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
             "login failed: password mismatch — the cert WAS resolved, so this is the credential, \
              not the identifier (PBKDF2-HMAC-SHA256, 100k iters, base64(salt32||key32))"
         );
-        return err(StatusCode::UNAUTHORIZED, "invalid credentials");
+        // The SAME reason_id and the byte-identical body as the resolve miss
+        // above — a caller must not be able to probe which accounts exist
+        // (pinned by tests/login_identifier.rs).
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "auth.login.invalid_credentials",
+            "invalid credentials",
+        );
     }
 
     let _ = store::touch_login(&st.engine, &cert.wa_id).await;
@@ -798,20 +957,48 @@ async fn login(State(st): State<SessionState>, body: axum::body::Bytes) -> Respo
 
 // ─── POST /v1/auth/logout ───────────────────────────────────────────────────
 
-async fn logout(State(st): State<SessionState>, headers: HeaderMap) -> Response {
-    let Some(wa_id) = bearer(&headers).and_then(|t| wa_id_from_token(t).map(str::to_owned)) else {
-        return err(
+/// End the CALLING SESSION, and only it (CIRISServer#403).
+///
+/// This used to `set_active(false)` the token's `wa_cert` — revoking the
+/// IDENTITY, not the session. On a personal node that cert is the owner's ROOT,
+/// so logging out locked the owner out of their own node irreversibly (nothing
+/// reactivates a ROOT) and, with zero active roots, REOPENED first-run — the
+/// next claimant could own the node. One tap on "sign out" did all of that.
+///
+/// Now logout is state-free at the store: the session's nonce goes into the
+/// in-process revocation set ([`revoke_session_token`]) and the cert is never
+/// touched. Sibling token B under the same `wa_id` stays live — sessions are
+/// individually revocable, exactly what "log out" means.
+///
+/// Idempotent by construction: a second logout of the same token still MAC-
+/// verifies (the gate here is [`session_mac_verifies`], NOT the composite), so
+/// it answers 204 again. Only a token this process never minted gets a 401.
+async fn logout(headers: HeaderMap) -> Response {
+    let Some(token) = bearer(&headers) else {
+        return refuse(
             StatusCode::UNAUTHORIZED,
+            "auth.session.missing_bearer",
             "missing or malformed bearer token",
         );
     };
-    // Revoke = mark inactive (the agent's `revoke_api_key` semantics: preserve
-    // the row for audit). NOTE: this deactivates the WA cert; a per-session
-    // revocation list is the finer-grained future increment (sessions are not a
-    // persist primitive).
-    match store::set_active(&st.engine, &wa_id, false).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+    // A DELEGATED grant is registry-backed, not MAC-backed: logging out drops
+    // the registry row. Removal of an absent row is the same end state (the
+    // bearer is dead either way), so this too is idempotent.
+    if token.starts_with(DELEGATED_TOKEN_PREFIX) {
+        DELEGATED_GRANTS
+            .lock()
+            .expect("delegated grants lock")
+            .remove(token);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if revoke_session_token(token) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        refuse(
+            StatusCode::UNAUTHORIZED,
+            "auth.session.invalid_token",
+            "not a session token this node minted — nothing to log out",
+        )
     }
 }
 

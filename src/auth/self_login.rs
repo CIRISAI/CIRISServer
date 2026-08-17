@@ -29,6 +29,7 @@ use ciris_persist::federation::EncryptionPubkeys;
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
+use super::refusal::refuse;
 use super::verify::{self, VerifyError};
 
 #[derive(Clone)]
@@ -102,23 +103,33 @@ struct SelfLoginResponse {
     transport_destinations_registered: usize,
 }
 
-fn err(code: StatusCode, msg: impl Into<String>) -> Response {
-    (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
-}
-
 async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: Bytes) -> Response {
+    // EVERY refusal below is typed + logged via `refuse` (CIRISServer#389).
+    // These six arms were the SILENT ones: a signed login ceremony could be
+    // refused with a bare string and nothing in the node's log to say the
+    // request had even arrived — the exact shape that cost the #1028 adoption.
+    //
     // (1) Verify the request signature over its exact body bytes.
     let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
         Ok(c) => c,
         Err(VerifyError::MissingHeader(h)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
+            return refuse(
+                StatusCode::UNAUTHORIZED,
+                "auth.self_login.missing_signature_header",
+                format!("missing {h}"),
+            )
         }
         Err(VerifyError::NoDirectory) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.self_login.no_directory",
+                "no federation directory",
+            )
         }
         Err(VerifyError::SignatureInvalid(e)) => {
-            return err(
+            return refuse(
                 StatusCode::UNAUTHORIZED,
+                "auth.self_login.signature_invalid",
                 format!("signature verification failed: {e}"),
             )
         }
@@ -127,14 +138,21 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
     // (2) Parse.
     let req: SelfLoginRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request body: {e}")),
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "auth.self_login.malformed_body",
+                format!("bad request body: {e}"),
+            )
+        }
     };
 
     // (3) Admission (§5.6.8.8): the signer must be the identity itself or an
     // admitted occurrence of it — the consenting user OR the generating agent.
     if !verify::signer_acts_for(&st.engine, &caller.key_id, &req.identity_key_id).await {
-        return err(
+        return refuse(
             StatusCode::FORBIDDEN,
+            "auth.self_login.signer_not_admitted",
             "signer is neither the identity key nor an admitted occurrence of it",
         );
     }
@@ -176,8 +194,9 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
             )
                 .into_response()
         }
-        Err(e) => err(
+        Err(e) => refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "auth.self_login.substrate_error",
             format!("self_at_login: {e}"),
         ),
     }

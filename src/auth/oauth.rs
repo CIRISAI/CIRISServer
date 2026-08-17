@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use ciris_persist::prelude::Engine;
@@ -43,6 +43,7 @@ use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 use serde::{Deserialize, Serialize};
 
 use super::roles::UserRole;
+use super::session;
 use super::store;
 
 /// One pending authorization: its expiry and its PKCE verifier.
@@ -58,6 +59,27 @@ struct Pending {
     /// with it, and afterwards exchanges it — once — for the bearer. Bound to
     /// the same one-use CSRF entry so a nonce cannot outlive its authorization.
     app_nonce: Option<String>,
+    /// Where to send the BROWSER after a successful sign-in (CIRISServer#429,
+    /// CIRISAgent#1057 finding 5).
+    ///
+    /// `oauth_login` validated `redirect_uri` and then DROPPED it, so a web
+    /// client that asked to land on `/dashboard` always got the static
+    /// hand-off page. Carried here — on the same one-use entry as the PKCE
+    /// verifier — so the callback can 303 the browser where the flow asked.
+    post_login_redirect: Option<String>,
+}
+
+/// What consuming a one-use CSRF state yields — everything the callback needs
+/// that was decided at `oauth_login` time. A struct rather than a widening
+/// tuple: three positional `Option<String>`s is how a nonce ends up passed as
+/// a redirect.
+struct ConsumedState {
+    /// RFC 7636 verifier — presented at the token exchange.
+    code_verifier: String,
+    /// The desktop app's nonce, when an app started this flow.
+    app_nonce: Option<String>,
+    /// The validated post-login browser destination, when the flow asked.
+    post_login_redirect: Option<String>,
 }
 
 /// In-memory CSRF + PKCE state store (issue #847 — one-use token, 600s TTL).
@@ -84,7 +106,11 @@ impl CsrfStore {
     /// Issue a one-use state token and its PKCE verifier.
     /// Returns `(state, code_challenge)` — the challenge goes in the authorize
     /// URL; the verifier stays here.
-    fn issue(&mut self, app_nonce: Option<String>) -> (String, String) {
+    fn issue(
+        &mut self,
+        app_nonce: Option<String>,
+        post_login_redirect: Option<String>,
+    ) -> (String, String) {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
         const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -111,6 +137,7 @@ impl CsrfStore {
                 deadline: Instant::now() + Duration::from_secs(600),
                 code_verifier,
                 app_nonce,
+                post_login_redirect,
             },
         );
         (token, code_challenge)
@@ -119,10 +146,25 @@ impl CsrfStore {
     /// One-use consume: returns the PKCE verifier iff the token was issued and
     /// unexpired. `None` means the exchange must be refused — a missing verifier
     /// and a wrong one are the same answer here, deliberately.
-    fn consume(&mut self, token: &str) -> Option<(String, Option<String>)> {
+    fn consume(&mut self, token: &str) -> Option<ConsumedState> {
         self.prune();
         let p = self.pending.remove(token)?;
-        (p.deadline > Instant::now()).then_some((p.code_verifier, p.app_nonce))
+        (p.deadline > Instant::now()).then_some(ConsumedState {
+            code_verifier: p.code_verifier,
+            app_nonce: p.app_nonce,
+            post_login_redirect: p.post_login_redirect,
+        })
+    }
+
+    /// Is some UNCONSUMED authorization still carrying `app_nonce`? The
+    /// hand-off poll asks this to tell "the human is still typing their
+    /// password" (keep polling) from "this flow is dead" (stop) —
+    /// CIRISServer#425.
+    fn has_pending_nonce(&mut self, app_nonce: &str) -> bool {
+        self.prune();
+        self.pending
+            .values()
+            .any(|p| p.app_nonce.as_deref() == Some(app_nonce))
     }
 
     fn prune(&mut self) {
@@ -141,8 +183,8 @@ impl CsrfStore {
 /// proves the app is the one that opened the browser.
 #[derive(Default)]
 struct HandoffStore {
-    ready: HashMap<String, (HandoffPayload, Instant)>,
-    /// **The most recent completed sign-in, whatever tab finished it.**
+    ready: HashMap<String, (HandoffOutcome, Instant)>,
+    /// **The most recent terminal sign-in outcome, whatever tab finished it.**
     ///
     /// The nonce binds a session to the app that opened the browser, which is
     /// the right default. But a desktop user has real browsers with real tabs:
@@ -152,12 +194,51 @@ struct HandoffStore {
     /// app waited forever, because the completed flow came from a tab opened at
     /// the plain `/login` URL.
     ///
-    /// So a completed sign-in is ALSO parked here and a local app may claim it
+    /// So a terminal outcome is ALSO parked here and a local app may claim it
     /// when its own nonce does not resolve. This is a deliberate weakening of
     /// the binding, and it is bounded: loopback-only (enforced by a layer on the
     /// route, not by a comment), one-time, and expiring in minutes. On a desktop
     /// the only process that can reach it is the app the human is looking at.
-    recent: Option<(HandoffPayload, Instant)>,
+    recent: Option<(HandoffOutcome, Instant)>,
+    /// **Flows between CSRF-consume and outcome-park** (CIRISServer#425, the
+    /// race).
+    ///
+    /// `oauth_callback` consumes the one-use CSRF entry BEFORE the provider
+    /// exchange — a live network round trip. A poll landing in that window sees
+    /// no pending entry and no outcome, and without this map would be told
+    /// "expired" about a flow that is SUCCEEDING. An entry here means "the
+    /// callback holds your flow right now: keep polling". Inserted right after
+    /// a successful consume, removed when [`Self::park`] records the terminal
+    /// outcome; the TTL prune is a leak-guard for a callback that dies between
+    /// the two (nothing else removes the entry).
+    in_flight: HashMap<String, Instant>,
+}
+
+/// How long an in-flight marker may outlive its insert. Generous next to the
+/// provider client's 15s HTTP timeout — a too-short window here IS the race
+/// this map exists to close, while a leaked entry merely keeps an abandoned
+/// poller at 204 until the prune.
+const IN_FLIGHT_TTL: Duration = Duration::from_secs(300);
+
+/// A terminal sign-in outcome, parked for the app that started the flow
+/// (CIRISServer#425).
+///
+/// The slot used to hold only successes, so from the polling app's side
+/// "provider refused" and "human still typing" were the same 204 forever — a
+/// desktop app had NO way to learn its sign-in had failed. Terminal now means
+/// terminal: success parks `Complete`, a failed exchange parks `Failed`, and
+/// the poll can finally distinguish pending / complete / failed / expired.
+#[derive(Debug, Clone)]
+enum HandoffOutcome {
+    Complete(HandoffPayload),
+    Failed {
+        /// The stable localization id the client binds (`auth.oauth.*`).
+        reason_id: &'static str,
+        /// English fallback — NEVER the raw upstream body (that goes to the
+        /// node log only; it can carry anything the provider felt like saying).
+        message: String,
+        provider: String,
+    },
 }
 
 /// What a desktop app collects: the session AND who it belongs to.
@@ -165,13 +246,16 @@ struct HandoffStore {
 /// The identity is not decoration. On first run the wizard derives the
 /// federation-ID name from `<provider>-<subject>`, so an app that collected only
 /// a bearer would have a session and no idea whose it was.
+///
+/// The session half is the flattened [`session::SessionGrant`] — the ONE
+/// issuance shape (CIRISServer#393). The wire bytes are identical to the
+/// hand-rolled fields this used to carry (same keys, same 86_400), so the
+/// change is structural only: the hand-off can no longer disagree with
+/// `/v1/auth/login` about what a session looks like.
 #[derive(Debug, Clone, Serialize)]
 struct HandoffPayload {
-    access_token: String,
-    token_type: &'static str,
-    expires_in: u64,
-    user_id: String,
-    role: String,
+    #[serde(flatten)]
+    session: session::SessionGrant,
     provider: String,
     external_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,34 +263,50 @@ struct HandoffPayload {
 }
 
 impl HandoffStore {
-    fn park(&mut self, nonce: Option<String>, payload: HandoffPayload) {
+    fn park(&mut self, nonce: Option<String>, outcome: HandoffOutcome) {
         self.prune();
         let deadline = Instant::now() + Duration::from_secs(300);
         if let Some(n) = nonce {
-            self.ready.insert(n, (payload.clone(), deadline));
+            // The flow has its terminal outcome — it is no longer in flight.
+            self.in_flight.remove(&n);
+            self.ready.insert(n, (outcome.clone(), deadline));
         }
         // Always claimable by a local app, even when no nonce came back.
-        self.recent = Some((payload, deadline));
+        self.recent = Some((outcome, deadline));
     }
     /// Collect ONCE. A second read gets nothing, so a leaked nonce cannot be
     /// replayed after the app has taken its session.
-    fn collect(&mut self, nonce: &str) -> Option<HandoffPayload> {
+    fn collect(&mut self, nonce: &str) -> Option<HandoffOutcome> {
         self.prune();
-        if let Some((payload, deadline)) = self.ready.remove(nonce) {
+        if let Some((outcome, deadline)) = self.ready.remove(nonce) {
             if deadline > Instant::now() {
                 self.recent = None; // claimed; do not hand it out twice
-                return Some(payload);
+                return Some(outcome);
             }
         }
         None
     }
 
-    /// Claim the most recent completed sign-in regardless of nonce. One-time.
-    fn collect_recent(&mut self) -> Option<HandoffPayload> {
+    /// Claim the most recent terminal outcome regardless of nonce. One-time.
+    fn collect_recent(&mut self) -> Option<HandoffOutcome> {
         self.prune();
-        let (payload, deadline) = self.recent.take()?;
-        (deadline > Instant::now()).then_some(payload)
+        let (outcome, deadline) = self.recent.take()?;
+        (deadline > Instant::now()).then_some(outcome)
     }
+
+    /// Mark `nonce`'s flow as being processed by the callback RIGHT NOW —
+    /// between CSRF consume and outcome park (see the `in_flight` field).
+    fn begin_flight(&mut self, nonce: &str) {
+        self.prune();
+        self.in_flight.insert(nonce.to_string(), Instant::now());
+    }
+
+    /// Is `nonce`'s flow inside the consume→park window?
+    fn is_in_flight(&mut self, nonce: &str) -> bool {
+        self.prune();
+        self.in_flight.contains_key(nonce)
+    }
+
     fn prune(&mut self) {
         let now = Instant::now();
         self.ready.retain(|_, (_, d)| *d > now);
@@ -215,6 +315,8 @@ impl HandoffStore {
                 self.recent = None;
             }
         }
+        self.in_flight
+            .retain(|_, started| now.duration_since(*started) < IN_FLIGHT_TTL);
     }
 }
 
@@ -1417,8 +1519,21 @@ struct LoginQuery {
 async fn oauth_login(
     State(st): State<OAuthState>,
     Path(provider): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<LoginQuery>,
 ) -> Response {
+    // The provider segment is caller-controlled and flows into refusal text —
+    // gate its SHAPE before anything reads it (CIRISServer#424, the XSS half).
+    if !provider_name_is_wellformed(&provider) {
+        return browser_refusal(
+            &headers,
+            StatusCode::NOT_FOUND,
+            "auth.oauth.provider_unavailable",
+            NOT_A_PROVIDER_NAME,
+            "No such sign-in provider",
+            None,
+        );
+    }
     // REFUSE AT THE DOOR, TYPED (CIRISServer#387).
     //
     // This is the first thing a user touches — the button — and until now the
@@ -1465,31 +1580,46 @@ async fn oauth_login(
                     "oauth login refused: no usable client id for this provider — the wheel was \
                      built without the credential, or with only half of it (CIRISServer#387)"
                 );
-                return (
+                // This is a BROWSER leg — the human just clicked a sign-in
+                // button — so the refusal is a page (CIRISServer#424); JSON
+                // only when explicitly asked for.
+                return browser_refusal(
+                    &headers,
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "error": e.message(),
-                        "reason_id": e.reason_id(),
-                    })),
-                )
-                    .into_response();
+                    "auth.oauth.provider_unavailable",
+                    &e.message(),
+                    "This sign-in is not available here",
+                    None,
+                );
             }
         }
     };
     // issue #846 redirect-uri validation: only relative or https allowed.
     let redirect_uri = q.redirect_uri.unwrap_or_else(|| "/".to_string());
     if !is_safe_redirect(&redirect_uri) {
-        return err(StatusCode::BAD_REQUEST, "unsafe redirect_uri");
+        return browser_refusal(
+            &headers,
+            StatusCode::BAD_REQUEST,
+            "auth.oauth.unsafe_redirect",
+            "unsafe redirect_uri",
+            "That link can't be followed",
+            None,
+        );
     }
+    // The post-login destination rides the one-use CSRF entry to the callback
+    // (CIRISServer#429; the drop was CIRISAgent#1057 finding 5). "/" is the
+    // no-preference default the client sends, not a destination.
+    let post_login_redirect = Some(redirect_uri).filter(|r| r != "/");
     // The verifier stays in the store; only its S256 challenge goes to the browser.
     let (state, code_challenge) = {
         let mut csrf = st.csrf.lock().unwrap();
-        csrf.issue(q.app_nonce.clone())
+        csrf.issue(q.app_nonce.clone(), post_login_redirect)
     };
-    // The provider redirect_uri is ALWAYS our registered callback (not the
-    // app-supplied post-login `redirect_uri`, which is validated above and would
-    // be carried separately in real deployments). This matches the agent, which
-    // always sends `get_oauth_callback_url(provider)` to the provider.
+    // The provider redirect_uri is ALWAYS our registered callback — the
+    // app-supplied post-login `redirect_uri` is a DIFFERENT axis (where the
+    // BROWSER goes after we finish) and is carried on the CSRF entry above.
+    // This matches the agent, which always sends
+    // `get_oauth_callback_url(provider)` to the provider.
     let callback = redirect_uri_for(
         registered_callback.as_deref(),
         &st.callback_base().await,
@@ -1529,19 +1659,61 @@ struct CallbackQuery {
 async fn oauth_callback(
     State(st): State<OAuthState>,
     Path(provider): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
+    // Shape-gate the caller-controlled provider segment FIRST — it flows into
+    // refusal text on every arm below (CIRISServer#424).
+    if !provider_name_is_wellformed(&provider) {
+        return browser_refusal(
+            &headers,
+            StatusCode::NOT_FOUND,
+            "auth.oauth.provider_unavailable",
+            NOT_A_PROVIDER_NAME,
+            "No such sign-in provider",
+            None,
+        );
+    }
     // CSRF: fail-closed on missing/expired/replayed state (issue #847).
     // One-use: consuming the state YIELDS the PKCE verifier. A replayed or
     // expired state and a missing verifier are the same refusal — there is no
     // path that exchanges a code without the secret that committed to it.
-    let (code_verifier, app_nonce) = {
+    //
+    // NO outcome can be parked on this arm: the app_nonce lives INSIDE the
+    // entry that failed to consume, so there is no slot to address. The polling
+    // client is covered by the hand-off's own 410 (`auth.oauth.flow_expired`) —
+    // no pending entry, no in-flight marker, no outcome IS the expired verdict.
+    let consumed = {
         let mut csrf = st.csrf.lock().unwrap();
         match csrf.consume(&q.state) {
             Some(v) => v,
-            None => return err(StatusCode::BAD_REQUEST, "invalid or expired oauth state"),
+            None => {
+                return browser_refusal(
+                    &headers,
+                    StatusCode::BAD_REQUEST,
+                    "auth.oauth.state_invalid",
+                    "invalid or expired oauth state",
+                    "This sign-in attempt has expired",
+                    None,
+                )
+            }
         }
     };
+    let ConsumedState {
+        code_verifier,
+        app_nonce,
+        post_login_redirect,
+    } = consumed;
+    // ── THE RACE (CIRISServer#425): the one-use state is now GONE, and the
+    // provider exchange below is a live network round trip. A hand-off poll in
+    // that window would see no pending entry and no outcome and conclude
+    // "expired" about a flow that is succeeding. Mark the flow in-flight for
+    // the poll to see; `park` (success or failure) clears the marker. ──────────
+    if let Some(n) = &app_nonce {
+        if let Ok(mut h) = st.handoff.lock() {
+            h.begin_flight(n);
+        }
+    }
     let (client_id, client_secret, registered_callback) = {
         let store = st.providers.lock().unwrap();
         match store.by_provider.get(&provider) {
@@ -1550,7 +1722,28 @@ async fn oauth_callback(
                 c.client_secret.clone(),
                 c.callback_url.clone(),
             ),
-            None => return err(StatusCode::NOT_FOUND, "provider not configured"),
+            None => {
+                // Terminal for the app too: park the failure so the poller
+                // learns its flow is dead instead of waiting forever (#425).
+                if let Ok(mut h) = st.handoff.lock() {
+                    h.park(
+                        app_nonce,
+                        HandoffOutcome::Failed {
+                            reason_id: "auth.oauth.provider_unavailable",
+                            message: PROVIDER_NOT_CONFIGURED.to_string(),
+                            provider: provider.clone(),
+                        },
+                    );
+                }
+                return browser_refusal(
+                    &headers,
+                    StatusCode::NOT_FOUND,
+                    "auth.oauth.provider_unavailable",
+                    PROVIDER_NOT_CONFIGURED,
+                    "This sign-in is not available here",
+                    post_login_redirect.as_deref(),
+                );
+            }
         }
     };
     // MUST equal what the authorize redirect sent — the provider compares the
@@ -1573,9 +1766,43 @@ async fn oauth_callback(
         .await
     {
         Ok(i) => i,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, e),
+        Err(e) => {
+            // The RAW upstream string goes to the LOG ONLY. It is a provider's
+            // arbitrary body and this response is a 502 — http_log captures
+            // 4xx/5xx response bodies, so anything placed in the body lands in
+            // the log ANYWAY, plus in the human's browser and their next paste.
+            tracing::warn!(
+                provider = %provider,
+                upstream = %e,
+                "oauth code exchange FAILED at the provider — raw upstream error retained \
+                 here only (CIRISServer#424)"
+            );
+            let message = format!(
+                "the {provider} sign-in could not be completed — the provider rejected the \
+                 code exchange. Try again; if it keeps failing, this node's log has the \
+                 provider's answer."
+            );
+            if let Ok(mut h) = st.handoff.lock() {
+                h.park(
+                    app_nonce,
+                    HandoffOutcome::Failed {
+                        reason_id: "auth.oauth.exchange_failed",
+                        message: message.clone(),
+                        provider: provider.clone(),
+                    },
+                );
+            }
+            return browser_refusal(
+                &headers,
+                StatusCode::BAD_GATEWAY,
+                "auth.oauth.exchange_failed",
+                &message,
+                "Sign-in didn't complete",
+                post_login_redirect.as_deref(),
+            );
+        }
     };
-    finish_oauth_login(&st, ident, app_nonce).await
+    browser_finish(&st, ident, app_nonce, post_login_redirect, &headers).await
 }
 
 // ─── POST /v1/auth/native/{google,apple} ────────────────────────────────────
@@ -1617,10 +1844,26 @@ fn native_audiences(store: &ProviderConfigStore, provider: &str) -> Vec<String> 
     auds
 }
 
+/// The `POST /v1/auth/native/{provider}` responder — JSON UNCONDITIONALLY
+/// (decision D1, CIRISServer#429).
+///
+/// The native exchange is called by SDK code (the mobile apps' hand-rolled
+/// decoders), never by a browser. It used to share `finish_oauth_login` with
+/// the callback, so a native success was answered with the HANDOFF PAGE — a
+/// blob of HTML where the app's decoder expected `{access_token, …}`, and the
+/// Apple flow failed AFTER Apple had said yes. No Accept-negotiation here:
+/// every default HTTP client sends `Accept: */*`, and negotiating on that is
+/// precisely how the page reached the decoder.
 async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response {
     let req: NativeTokenRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+        Err(e) => {
+            return super::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "auth.oauth.malformed_body",
+                format!("bad request: {e}"),
+            )
+        }
     };
     let audiences = {
         let store = st.providers.lock().unwrap();
@@ -1632,9 +1875,44 @@ async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response 
         .await
     {
         Ok(i) => i,
-        Err(e) => return err(StatusCode::UNAUTHORIZED, e),
+        // The provider-facing sentences are UNCHANGED (they teach the remedy);
+        // the stable id is what was missing (CIRISServer#389).
+        Err(e) => {
+            return super::refusal::refuse(
+                StatusCode::UNAUTHORIZED,
+                "auth.oauth.native_token_invalid",
+                e,
+            )
+        }
     };
-    finish_oauth_login(st, ident, None).await
+    match resolve_login(st, &ident).await {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(NativeTokenResponse {
+                session: r.session,
+                email: r.email,
+                name: r.name,
+            }),
+        )
+            .into_response(),
+        Err(e) => resolve_refusal_json(&e, &ident.provider),
+    }
+}
+
+/// The native token-exchange response body — the shape
+/// `client/openapi.json#/components/schemas/NativeTokenResponse` publishes,
+/// pinned by `the_native_response_carries_every_field_the_published_spec_requires`.
+///
+/// `token_type` MUST serialize: the Apple client's hand-rolled decoder declares
+/// it non-null, so an omitted field fails their decode after a successful
+/// sign-in. `email`/`name` are emitted ALWAYS (null when absent) — the spec
+/// declares them nullable, not omittable.
+#[derive(Debug, Serialize)]
+struct NativeTokenResponse {
+    #[serde(flatten)]
+    session: session::SessionGrant,
+    email: Option<String>,
+    name: Option<String>,
 }
 
 /// What the human sees in the browser once a desktop sign-in completes.
@@ -1647,6 +1925,135 @@ const HANDOFF_PAGE: &str = "<!doctype html><meta charset=utf-8>\
 <body style=\"font-family:system-ui;margin:4rem auto;max-width:32rem;text-align:center\">\
 <h2>You're signed in</h2>\
 <p>You can close this window and return to CIRIS.</p>";
+
+/// Minimal HTML escaping for text and attribute positions — the five
+/// characters that end a text node, an attribute, or open a tag. No dependency:
+/// this is the whole job, and a crate would be one more thing to audit.
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The provider path segment is CALLER-CONTROLLED input; only this shape is a
+/// provider name. Rejecting everything else at the door (CIRISServer#424) is
+/// half of the XSS posture — [`esc`] on every interpolation is the other half,
+/// and BOTH are load-bearing: the gate keeps hostile strings out of logs and
+/// error flows entirely, the escape makes the page safe even for strings that
+/// arrive by some future path this gate does not cover.
+fn provider_name_is_wellformed(provider: &str) -> bool {
+    (1..=32).contains(&provider.len())
+        && provider
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Does this request prefer JSON over a human page? Browser routes (login
+/// redirect, provider callback) consult this so a programmatic caller can still
+/// get `{error, reason_id}`; native routes NEVER call it — they are JSON
+/// unconditionally (decision D1: Accept-negotiation on a native route is what
+/// re-breaks #429 for `Accept: */*`, which every default HTTP client sends).
+fn wants_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("application/json"))
+}
+
+/// A human-readable refusal page for the BROWSER legs of the flow
+/// (CIRISServer#424).
+///
+/// The provider callback and the login redirect are only ever reached by a
+/// human's browser, and they answered refusals in JSON — a wall of
+/// `{"error":…}` where a person needed to be told what happened and what to do
+/// next. Same inline-style school as [`HANDOFF_PAGE`]; `reason_id` rides in
+/// small print so a screenshot is diagnosable; `back` renders a real link when
+/// the flow knows where the human came from.
+///
+/// EVERY interpolation goes through [`esc`] — `provider` flows from the URL
+/// path into refusal text, and unescaped that is reflected XSS (pinned by
+/// `a_browser_refusal_escapes_the_provider_name`).
+fn browser_error_page(
+    reason_id: &str,
+    headline: &str,
+    explanation: &str,
+    next_step: &str,
+    back: Option<&str>,
+) -> String {
+    let back_link = back
+        .map(|b| format!("<p><a href=\"{}\">Go back and try again</a></p>", esc(b)))
+        .unwrap_or_default();
+    format!(
+        "<!doctype html><meta charset=utf-8>\
+         <title>{title}</title>\
+         <body style=\"font-family:system-ui;margin:4rem auto;max-width:32rem;text-align:center\">\
+         <h2>{headline}</h2>\
+         <p>{explanation}</p>\
+         <p>{next_step}</p>\
+         {back_link}\
+         <p style=\"color:#888;font-size:0.8rem\">{reason}</p>",
+        title = esc(headline),
+        headline = esc(headline),
+        explanation = esc(explanation),
+        next_step = esc(next_step),
+        back_link = back_link,
+        reason = esc(reason_id),
+    )
+}
+
+/// Per D2: the one remedy line every browser refusal offers. The OAuth-linking
+/// surfaces exist but have no working caller in any client, so suggesting a
+/// link flow would send a human somewhere nothing can complete — the #387
+/// lesson again (never name a remedy that cannot work).
+const BROWSER_NEXT_STEP: &str = "Sign in with your local username and password.";
+
+/// The refusal for a path segment that is not even provider-SHAPED. A const so
+/// the id↔text pairing the localization guard scrapes stays the one at
+/// `auth.oauth.provider_unavailable`'s primary (unconfigured-provider) arm.
+const NOT_A_PROVIDER_NAME: &str = "that is not a recognisable sign-in provider name";
+
+/// The callback's answer when its provider vanished between authorize and
+/// exchange (an operator re-POSTed `/providers` mid-flow, or the state was
+/// minted by an older process).
+const PROVIDER_NOT_CONFIGURED: &str = "provider not configured";
+
+/// The hand-off poll's terminal "stop polling" id — a const so log sites can
+/// name it without the localization guard pairing the id with a LOG line as
+/// its English text.
+const FLOW_EXPIRED_REASON: &str = "auth.oauth.flow_expired";
+
+/// One browser-leg refusal: HTML for the human, `{error, reason_id}` JSON when
+/// the caller explicitly asked for JSON (`Accept: application/json`). Logs with
+/// the reason_id either way — the browser page is the one refusal surface an
+/// operator can otherwise never grep for.
+fn browser_refusal(
+    headers: &HeaderMap,
+    code: StatusCode,
+    reason_id: &'static str,
+    msg: &str,
+    headline: &str,
+    back: Option<&str>,
+) -> Response {
+    if wants_json(headers) {
+        return super::refusal::refuse(code, reason_id, msg);
+    }
+    tracing::info!(reason_id, "auth refused (browser page): {msg}");
+    (
+        code,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        browser_error_page(reason_id, headline, msg, BROWSER_NEXT_STEP, back),
+    )
+        .into_response()
+}
 
 #[derive(Debug, Deserialize)]
 struct HandoffQuery {
@@ -1670,12 +2077,27 @@ struct HandoffQuery {
 /// [`router`]), NOT to the whole OAuth router — the provider callback has to
 /// stay reachable by whatever browser the human used.
 ///
-/// `204 No Content` means *not yet* — the human has not finished in the browser.
-/// That is a DIFFERENT answer from "no such nonce", and the app polls on the
-/// first while giving up on neither silently: a 404 here would make "still
-/// typing your password" indistinguishable from "this flow is dead".
+/// The poll's four answers, in resolution order (CIRISServer#425):
+///  1. a TERMINAL outcome bound to this nonce → `200` with `"status"`
+///     `"complete"` (the flattened session payload) or `"failed"` (the typed
+///     reason);
+///  2. (`allow_unbound` only) the recent slot's terminal outcome → same `200`s;
+///  3. the flow is still PENDING — an unconsumed authorization carries this
+///     nonce, or the callback holds it between CSRF-consume and outcome-park
+///     (the in-flight window, THE race) → `204` *not yet*;
+///  4. nothing anywhere → `410` `{"status":"expired", …}` — this flow is dead
+///     and polling harder will not revive it.
+///
+/// `204` means *keep waiting* and ONLY that. It used to also mean "your flow
+/// failed" (failures parked nothing) and "no such flow ever existed" — three
+/// verdicts folded into the one answer the client reads as *still typing*.
+///
+/// The `"status"` member is ADDITIVE: the generated client decodes with
+/// `ignoreUnknownKeys`, so a `complete` body decodes exactly as before, and a
+/// `failed` body simply fails their payload decode → they keep polling →
+/// today's behaviour, never a wrong state.
 async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuery>) -> Response {
-    let payload = st.handoff.lock().ok().and_then(|mut h| {
+    let outcome = st.handoff.lock().ok().and_then(|mut h| {
         h.collect(&q.app_nonce).or_else(|| {
             // Only when the caller asks. The bound path is the default, so a
             // client that has not waited for its own flow never takes someone
@@ -1695,14 +2117,65 @@ async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuer
             p
         })
     });
-    match payload {
-        // Serialize the payload ITSELF. This previously wrapped the whole
-        // struct as `{"access_token": {…}}` — the client's decode then failed,
-        // returned null, and the app polled forever against a hand-off that had
-        // been parked correctly all along. A shape defect on the one hop where
-        // "nothing yet" and "malformed" look identical to the caller.
-        Some(p) => (StatusCode::OK, Json(p)).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+    match outcome {
+        // Serialize the payload ITSELF (plus the additive status). This
+        // previously wrapped the whole struct as `{"access_token": {…}}` — the
+        // client's decode then failed, returned null, and the app polled
+        // forever against a hand-off that had been parked correctly all along.
+        Some(HandoffOutcome::Complete(p)) => {
+            let mut body = serde_json::to_value(&p).unwrap_or_default();
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("status".into(), serde_json::json!("complete"));
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Some(HandoffOutcome::Failed {
+            reason_id,
+            message,
+            provider,
+        }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "failed",
+                "error": message,
+                "reason_id": reason_id,
+                "provider": provider,
+            })),
+        )
+            .into_response(),
+        None => {
+            // Still pending? Either the authorization is unconsumed (human
+            // still at the provider) or the callback is mid-exchange (the
+            // in-flight window). Check the in-flight side FIRST — it holds the
+            // handoff lock the shortest time and covers the racing case.
+            let pending = st
+                .handoff
+                .lock()
+                .map(|mut h| h.is_in_flight(&q.app_nonce))
+                .unwrap_or(false)
+                || st
+                    .csrf
+                    .lock()
+                    .map(|mut c| c.has_pending_nonce(&q.app_nonce))
+                    .unwrap_or(false);
+            if pending {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                tracing::info!(
+                    reason_id = FLOW_EXPIRED_REASON,
+                    "hand-off poll for a flow with no pending authorization, no in-flight \
+                     exchange, and no outcome — telling the app to stop polling"
+                );
+                (
+                    StatusCode::GONE,
+                    Json(serde_json::json!({
+                        "status": "expired",
+                        "reason_id": FLOW_EXPIRED_REASON,
+                    })),
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
@@ -1713,37 +2186,101 @@ async fn native_apple(State(st): State<OAuthState>, body: axum::body::Bytes) -> 
     native_login(&st, "apple", &body).await
 }
 
-/// Shared tail: determine role, RESOLVE the local identity, return it.
-async fn finish_oauth_login(
+/// Everything a completed provider authentication resolves to on THIS node:
+/// the minted session plus the identity facts each responder shapes its answer
+/// from. The core of the #429 split — one resolution, two responders (native
+/// JSON, browser page/redirect), so the answer's FORM can never again leak
+/// across surfaces.
+struct ResolvedLogin {
+    session: session::SessionGrant,
+    provider: String,
+    external_id: String,
+    email: Option<String>,
+    name: Option<String>,
+}
+
+/// Shared core: determine role, RESOLVE the local identity, mint the session —
+/// and say NOTHING about how to answer the caller (CIRISServer#429).
+///
+/// `finish_oauth_login` fused those axes: the native token exchange shared it
+/// with the provider callback, so a native success was answered with the
+/// browser's hand-off PAGE and the Apple app's decoder choked on HTML after
+/// Apple had said yes.
+async fn resolve_login(
+    st: &OAuthState,
+    ident: &OAuthIdentity,
+) -> Result<ResolvedLogin, OAuthResolveError> {
+    let role = determine_role(&st.engine, ident.email.as_deref()).await;
+    let user_id = resolve_oauth_user(&st.engine, ident, role).await?;
+    // NO AUTO-MINT HERE (CIRISServer#391). This used to call
+    // `auto_mint_root_if_needed(&user_id)` — passing the OAuth wa_id as if it
+    // were a federation identity, which would mint
+    // `wa-root-oauth-google-<external_id>`: an owner named after a door,
+    // holding no key. Ownership is the CLAIM's job, from the fed-ID, on one
+    // path for OAuth and password alike. See `determine_role`.
+    //
+    // Mint the session THIS sign-in earns, through SessionGrant::issue — THE
+    // issuance point (session.rs documents it as the sole caller of
+    // `issue_session_token`, and the direct call here was the violation).
+    // `SESSION_TTL_SECS` is the 86_400 this path hard-coded, so the wire is
+    // unchanged — and OAuth now deliberately INHERITS however the
+    // login-vs-refresh lifetime disagreement (session.rs) is later resolved,
+    // instead of holding a fourth private copy of the policy.
+    let session = session::SessionGrant::issue(&user_id, &role);
+    Ok(ResolvedLogin {
+        session,
+        provider: ident.provider.clone(),
+        external_id: ident.external_id.clone(),
+        email: ident.email.clone(),
+        name: ident.name.clone(),
+    })
+}
+
+/// Status for a typed resolve failure — one mapping, both responders.
+fn resolve_error_status(e: &OAuthResolveError) -> StatusCode {
+    match e {
+        // The provider authenticated them; WE have no binding. That is a
+        // 403 about authorization, not a 5xx about the node being broken.
+        OAuthResolveError::NoLocalIdentity { .. } => StatusCode::FORBIDDEN,
+        OAuthResolveError::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+        // Unreachable from the exchange — the login handler refuses long
+        // before a code exists. Matched explicitly rather than by `_` so
+        // that if a future path CAN reach it, the compiler makes someone
+        // decide the status instead of silently inheriting one.
+        OAuthResolveError::ProviderUnavailable { .. } => StatusCode::NOT_IMPLEMENTED,
+    }
+}
+
+/// The MACHINE answer to a typed resolve failure — today's status mapping and
+/// today's JSON body, byte-for-byte (the native surface's published contract).
+/// A TYPED refusal, carrying the localization id AND an English fallback: the
+/// live failure was `store: wa_cert: invalid argument: pubkey required` — a
+/// store-internal message an operator can do nothing with, at a 5xx that
+/// blamed the node for a request that was actually well-formed.
+fn resolve_refusal_json(e: &OAuthResolveError, provider: &str) -> Response {
+    tracing::info!(reason_id = e.reason_id(), provider, "oauth sign-in refused");
+    (
+        resolve_error_status(e),
+        Json(serde_json::json!({
+            "error": e.message(),
+            "reason_id": e.reason_id(),
+            "provider": provider,
+        })),
+    )
+        .into_response()
+}
+
+/// The BROWSER responder: park the terminal outcome for the polling app, then
+/// answer the human (CIRISServer#429/#424/#425).
+async fn browser_finish(
     st: &OAuthState,
     ident: OAuthIdentity,
     app_nonce: Option<String>,
+    post_login_redirect: Option<String>,
+    headers: &HeaderMap,
 ) -> Response {
-    let role = determine_role(&st.engine, ident.email.as_deref()).await;
-    match resolve_oauth_user(&st.engine, &ident, role).await {
-        Ok(user_id) => {
-            // Auto-mint ROOT for a SYSTEM_ADMIN OAuth user (CIRISServer#19, port of
-            // `_auto_mint_system_admin_if_needed`): the first OAuth user (setup
-            // wizard) is determined SYSTEM_ADMIN, so the founder's OAuth identity is
-            // elevated to WaRole::Root → UserRole::SystemAdmin, reaching the
-            // owner-gated POST /v1/federation/peering. The user_id (the bound
-            // wa_cert) IS the identity bound; mint is idempotent. Non-admin OAuth
-            // logins are a no-op; a store failure is logged, never fatal to login.
-            // NO AUTO-MINT HERE (CIRISServer#391). This called
-            // `auto_mint_root_if_needed(&user_id)` — passing the OAuth wa_id as if
-            // it were a federation identity, which would mint
-            // `wa-root-oauth-google-<external_id>`: an owner named after a door,
-            // holding no key. Ownership is the CLAIM's job, from the fed-ID, on one
-            // path for OAuth and password alike. See `determine_role`.
-            // Mint the session THIS sign-in earns — the same opaque token the
-            // password path issues, so everything downstream resolves it the
-            // same way.
-            let access_token = super::session::issue_session_token(&user_id);
-
-            // A desktop app started this in a browser: park the bearer for it to
-            // collect once, and give the human a page that says so. Without this
-            // the app is a different process watching a browser succeed with no
-            // way to learn the result.
+    match resolve_login(st, &ident).await {
+        Ok(r) => {
             // WHETHER a hand-off was parked is the single most useful line in
             // this flow. Without it, "the app never noticed" is indistinguishable
             // from "the browser never finished" — and a sign-in completed through
@@ -1755,7 +2292,7 @@ async fn finish_oauth_login(
             // distinction is exactly what a reader of this log needs.
             tracing::info!(
                 nonce_bound = app_nonce.is_some(),
-                user_id = %user_id,
+                user_id = %r.session.user_id,
                 "oauth callback completed — session parked ({})",
                 if app_nonce.is_some() {
                     "bound to the app_nonce that started this flow"
@@ -1765,58 +2302,65 @@ async fn finish_oauth_login(
                      recent slot"
                 }
             );
-            // ALWAYS park, and ALWAYS answer the browser with a page. The
-            // callback is only ever reached by a provider redirecting a HUMAN's
-            // browser, so JSON here was never something a client could consume —
-            // and rendering the bearer into a page would put a live session in
-            // browser history.
-            {
-                if let Ok(mut h) = st.handoff.lock() {
-                    h.park(
-                        app_nonce.clone(),
-                        HandoffPayload {
-                            access_token: access_token.clone(),
-                            token_type: "Bearer",
-                            expires_in: 86_400,
-                            user_id: user_id.clone(),
-                            role: role.as_str().to_string(),
-                            provider: ident.provider.clone(),
-                            external_id: ident.external_id.clone(),
-                            email: ident.email.clone(),
-                        },
-                    );
-                }
-                (
+            // ALWAYS park. A desktop app started this in a browser: the bearer
+            // is collected once over the loopback hand-off. Never render it
+            // into the page — that would put a live session in browser history.
+            if let Ok(mut h) = st.handoff.lock() {
+                h.park(
+                    app_nonce.clone(),
+                    HandoffOutcome::Complete(HandoffPayload {
+                        session: r.session.clone(),
+                        provider: r.provider.clone(),
+                        external_id: r.external_id.clone(),
+                        email: r.email.clone(),
+                    }),
+                );
+            }
+            match post_login_redirect {
+                // The flow asked for a destination (a web client's own page):
+                // 303 See Other, the redirect-after-POST-shaped answer. Token
+                // delivery to the web page is deliberately OUT of scope (D3) —
+                // the session still travels only via the hand-off.
+                Some(dest) => axum::response::Redirect::to(&dest).into_response(),
+                None => (
                     StatusCode::OK,
                     [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     HANDOFF_PAGE,
                 )
-                    .into_response()
+                    .into_response(),
             }
         }
-        // A TYPED refusal, carrying the localization id AND an English fallback.
-        // The live failure was `store: wa_cert: invalid argument: pubkey required`
-        // — a store-internal message an operator can do nothing with, at a 5xx
-        // that blamed the node for a request that was actually well-formed.
         Err(e) => {
-            let status = match e {
-                // The provider authenticated them; WE have no binding. That is a
-                // 403 about authorization, not a 5xx about the node being broken.
-                OAuthResolveError::NoLocalIdentity { .. } => StatusCode::FORBIDDEN,
-                OAuthResolveError::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
-                // Unreachable from the exchange — the login handler refuses long
-                // before a code exists. Matched explicitly rather than by `_` so
-                // that if a future path CAN reach it, the compiler makes someone
-                // decide the status instead of silently inheriting one.
-                OAuthResolveError::ProviderUnavailable { .. } => StatusCode::NOT_IMPLEMENTED,
-            };
+            // Terminal outcome FIRST (#425): the polling app must learn its
+            // flow died, or it waits forever on a 204 that will never change.
+            if let Ok(mut h) = st.handoff.lock() {
+                h.park(
+                    app_nonce,
+                    HandoffOutcome::Failed {
+                        reason_id: e.reason_id(),
+                        message: e.message(),
+                        provider: ident.provider.clone(),
+                    },
+                );
+            }
+            if wants_json(headers) {
+                return resolve_refusal_json(&e, &ident.provider);
+            }
+            tracing::info!(
+                reason_id = e.reason_id(),
+                provider = %ident.provider,
+                "oauth sign-in refused (browser page)"
+            );
             (
-                status,
-                Json(serde_json::json!({
-                    "error": e.message(),
-                    "reason_id": e.reason_id(),
-                    "provider": ident.provider,
-                })),
+                resolve_error_status(&e),
+                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                browser_error_page(
+                    e.reason_id(),
+                    "Sign-in didn't complete",
+                    &e.message(),
+                    BROWSER_NEXT_STEP,
+                    post_login_redirect.as_deref(),
+                ),
             )
                 .into_response()
         }
@@ -1848,6 +2392,26 @@ pub const DEFAULT_OAUTH_CALLBACK_BASE_URL: &str = "http://127.0.0.1:4243";
 /// value (Server 0.5 — replaces the `OAUTH_CALLBACK_BASE_URL` env); an empty value
 /// falls back to [`DEFAULT_OAUTH_CALLBACK_BASE_URL`].
 pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
+    router_with_client(
+        engine,
+        callback_base,
+        Arc::new(HttpProviderClient::default()),
+    )
+}
+
+/// [`router`] with the provider-HTTP seam injectable — the ONLY difference.
+///
+/// Exists because `router` hard-coded `HttpProviderClient::default()`, which
+/// made every route-level property here untestable without live providers: the
+/// [`ProviderClient`] trait was built as a test seam and then buried behind the
+/// one constructor tests must use. Production composes through [`router`];
+/// tests inject a stub (`tests/oauth_surface_shapes.rs`).
+#[doc(hidden)]
+pub fn router_with_client(
+    engine: Arc<Engine>,
+    callback_base: String,
+    client: Arc<dyn ProviderClient>,
+) -> Router {
     let callback_base = if callback_base.trim().is_empty() {
         DEFAULT_OAUTH_CALLBACK_BASE_URL.to_string()
     } else {
@@ -1858,7 +2422,7 @@ pub fn router(engine: Arc<Engine>, callback_base: String) -> Router {
         csrf: Arc::new(Mutex::new(CsrfStore::default())),
         providers: Arc::new(Mutex::new(ProviderConfigStore::default())),
         handoff: Arc::new(Mutex::new(HandoffStore::default())),
-        client: Arc::new(HttpProviderClient::default()),
+        client,
         boot_callback_base: callback_base,
     };
     Router::new()
@@ -1917,7 +2481,7 @@ mod tests {
     #[test]
     fn csrf_is_one_use_and_expiring() {
         let mut s = CsrfStore::default();
-        let (t, _challenge) = s.issue(None);
+        let (t, _challenge) = s.issue(None, None);
         assert!(s.consume(&t).is_some(), "issued token must verify once");
         assert!(s.consume(&t).is_none(), "token must not be reusable");
         assert!(s.consume("never-issued").is_none());
@@ -1934,8 +2498,11 @@ mod tests {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
         let mut s = CsrfStore::default();
-        let (state, challenge) = s.issue(None);
-        let (verifier, _nonce) = s.consume(&state).expect("verifier on first consume");
+        let (state, challenge) = s.issue(None, None);
+        let verifier = s
+            .consume(&state)
+            .expect("verifier on first consume")
+            .code_verifier;
 
         // RFC 7636 §4.1 — 43..128 unreserved chars.
         assert!(
@@ -2089,10 +2656,40 @@ mod tests {
     #[test]
     fn the_app_nonce_is_bound_to_the_one_use_state() {
         let mut s = CsrfStore::default();
-        let (state, _c) = s.issue(Some("app-nonce-123".into()));
-        let (_v, nonce) = s.consume(&state).expect("first consume");
-        assert_eq!(nonce.as_deref(), Some("app-nonce-123"));
+        let (state, _c) = s.issue(Some("app-nonce-123".into()), None);
+        let consumed = s.consume(&state).expect("first consume");
+        assert_eq!(consumed.app_nonce.as_deref(), Some("app-nonce-123"));
         assert!(s.consume(&state).is_none(), "state is still one-use");
+    }
+
+    /// The post-login destination survives the round trip on the SAME one-use
+    /// entry as the verifier — it was validated at `oauth_login` and then
+    /// DROPPED, which is CIRISAgent#1057 finding 5: a web client that asked
+    /// for `/dashboard` always landed on the static hand-off page.
+    #[test]
+    fn the_post_login_redirect_rides_the_one_use_state() {
+        let mut s = CsrfStore::default();
+        let (state, _c) = s.issue(None, Some("/dashboard".into()));
+        let consumed = s.consume(&state).expect("first consume");
+        assert_eq!(consumed.post_login_redirect.as_deref(), Some("/dashboard"));
+        assert!(s.consume(&state).is_none(), "state is still one-use");
+    }
+
+    /// `has_pending_nonce` answers "is the human still at the provider" — the
+    /// hand-off poll's *keep waiting* verdict before the callback ever runs
+    /// (CIRISServer#425).
+    #[test]
+    fn a_pending_authorization_is_visible_by_its_nonce_until_consumed() {
+        let mut s = CsrfStore::default();
+        let (state, _c) = s.issue(Some("n-pending".into()), None);
+        assert!(s.has_pending_nonce("n-pending"), "unconsumed ⇒ pending");
+        assert!(!s.has_pending_nonce("some-other-nonce"));
+        let _ = s.consume(&state);
+        assert!(
+            !s.has_pending_nonce("n-pending"),
+            "consumed ⇒ no longer pending here — the in-flight marker on the \
+             HandoffStore takes over for the exchange window"
+        );
     }
 
     /// **The hand-off response shape**, asserted on the SERIALIZED bytes.
@@ -2107,11 +2704,13 @@ mod tests {
     #[test]
     fn the_handoff_payload_serializes_flat() {
         let p = HandoffPayload {
-            access_token: "sess:wa-x:abc".into(),
-            token_type: "Bearer",
-            expires_in: 86_400,
-            user_id: "oauth-google-123".into(),
-            role: "SYSTEM_ADMIN".into(),
+            session: session::SessionGrant {
+                access_token: "sess:wa-x:abc".into(),
+                token_type: "Bearer",
+                expires_in: 86_400,
+                role: "SYSTEM_ADMIN".into(),
+                user_id: "oauth-google-123".into(),
+            },
             provider: "google".into(),
             external_id: "123".into(),
             email: Some("a@b.c".into()),
@@ -2153,8 +2752,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            body.contains("Json(p)"),
-            "oauth_handoff must return the payload itself"
+            body.contains("serde_json::to_value(&p)"),
+            "oauth_handoff must serialize the payload ITSELF (the additive status member is \
+             inserted into that same object, never wrapped around it)"
         );
         assert!(
             !body.contains(r#""access_token":"#),
@@ -2168,22 +2768,36 @@ mod tests {
     /// stray tab opened at the plain `/login` URL and carried no nonce. The
     /// binding is still preferred; this is the fallback that makes the feature
     /// work for a human with real browser tabs.
-    #[test]
-    fn a_nonceless_signin_is_claimable_once_from_the_recent_slot() {
-        let payload = |t: &str| HandoffPayload {
-            access_token: t.into(),
-            token_type: "Bearer",
-            expires_in: 1,
-            user_id: "wa-x".into(),
-            role: "SYSTEM_ADMIN".into(),
+    /// Test fixture: a Complete outcome around a flattened payload.
+    fn complete(token: &str) -> HandoffOutcome {
+        HandoffOutcome::Complete(HandoffPayload {
+            session: session::SessionGrant {
+                access_token: token.into(),
+                token_type: "Bearer",
+                expires_in: 1,
+                role: "SYSTEM_ADMIN".into(),
+                user_id: "wa-x".into(),
+            },
             provider: "google".into(),
             external_id: "sub-1".into(),
             email: None,
-        };
+        })
+    }
+
+    /// The collected outcome's access token, when it is a Complete.
+    fn token_of(o: Option<HandoffOutcome>) -> Option<String> {
+        match o {
+            Some(HandoffOutcome::Complete(p)) => Some(p.session.access_token),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_nonceless_signin_is_claimable_once_from_the_recent_slot() {
         let mut h = HandoffStore::default();
-        h.park(None, payload("sess:no-nonce"));
+        h.park(None, complete("sess:no-nonce"));
         assert_eq!(
-            h.collect_recent().map(|p| p.access_token).as_deref(),
+            token_of(h.collect_recent()).as_deref(),
             Some("sess:no-nonce")
         );
         assert!(
@@ -2194,7 +2808,7 @@ mod tests {
         // Claiming BY NONCE must also consume the recent slot, or the same
         // session could be handed out twice.
         let mut h2 = HandoffStore::default();
-        h2.park(Some("n".into()), payload("sess:bound"));
+        h2.park(Some("n".into()), complete("sess:bound"));
         assert!(h2.collect("n").is_some());
         assert!(
             h2.collect_recent().is_none(),
@@ -2206,25 +2820,208 @@ mod tests {
     #[test]
     fn a_parked_session_is_collected_exactly_once() {
         let mut h = HandoffStore::default();
-        h.park(
-            Some("n1".to_string()),
-            HandoffPayload {
-                access_token: "sess:wa-x:abc".into(),
-                token_type: "Bearer",
-                expires_in: 1,
-                user_id: "wa-x".into(),
-                role: "SYSTEM_ADMIN".into(),
-                provider: "google".into(),
-                external_id: "sub-1".into(),
-                email: None,
-            },
-        );
-        assert_eq!(
-            h.collect("n1").map(|p| p.access_token).as_deref(),
-            Some("sess:wa-x:abc")
-        );
+        h.park(Some("n1".to_string()), complete("sess:wa-x:abc"));
+        assert_eq!(token_of(h.collect("n1")).as_deref(), Some("sess:wa-x:abc"));
         assert!(h.collect("n1").is_none(), "second collection must be empty");
         assert!(h.collect("never-parked").is_none());
+    }
+
+    /// **A terminal failure is observable on the hand-off slot**
+    /// (CIRISServer#425). The slot used to hold only successes, so a desktop
+    /// app whose sign-in FAILED at the node polled a 204 forever — "provider
+    /// refused" and "human still typing" were the same answer.
+    #[test]
+    fn a_terminal_failure_is_observable_on_the_handoff_slot() {
+        let mut h = HandoffStore::default();
+        h.park(
+            Some("n-fail".to_string()),
+            HandoffOutcome::Failed {
+                reason_id: "auth.oauth.exchange_failed",
+                message: "the provider rejected the code exchange".into(),
+                provider: "google".into(),
+            },
+        );
+        match h.collect("n-fail") {
+            Some(HandoffOutcome::Failed {
+                reason_id,
+                provider,
+                ..
+            }) => {
+                assert_eq!(reason_id, "auth.oauth.exchange_failed");
+                assert_eq!(provider, "google");
+            }
+            other => panic!("expected the parked failure, got {other:?}"),
+        }
+        assert!(
+            h.collect("n-fail").is_none(),
+            "a failure is one-time exactly like a success — a replayed nonce learns nothing"
+        );
+    }
+
+    /// **The consume→park window reads as PENDING, not expired** — the #425
+    /// race, at the store level. `oauth_callback` consumes the one-use state
+    /// BEFORE the provider round trip; in that window the only pending signal
+    /// is the in-flight marker, and `park` (either outcome) retires it.
+    #[test]
+    fn the_exchange_window_is_pending_via_the_in_flight_marker() {
+        let mut csrf = CsrfStore::default();
+        let (state, _c) = csrf.issue(Some("n-race".into()), None);
+        let mut h = HandoffStore::default();
+
+        let consumed = csrf.consume(&state).expect("consume");
+        let nonce = consumed.app_nonce.expect("nonce");
+        h.begin_flight(&nonce);
+
+        assert!(
+            !csrf.has_pending_nonce("n-race"),
+            "the CSRF entry is gone — without the in-flight marker this window reads expired"
+        );
+        assert!(h.collect("n-race").is_none(), "no outcome yet");
+        assert!(
+            h.is_in_flight("n-race"),
+            "the in-flight marker IS the pending verdict inside the exchange window"
+        );
+
+        h.park(Some(nonce), complete("sess:raced"));
+        assert!(!h.is_in_flight("n-race"), "park retires the marker");
+        assert!(h.collect("n-race").is_some());
+    }
+
+    /// **A native success is JSON, never the hand-off page** (CIRISServer#429).
+    /// Source-slice over the comment-stripped native path: the defect was the
+    /// native exchange sharing the browser's responder, and the Apple client's
+    /// decoder receiving HTML after Apple said yes.
+    #[test]
+    fn native_success_is_json_never_the_handoff_page() {
+        let src = include_str!("oauth.rs");
+        let after = src
+            .split("async fn native_login(")
+            .nth(1)
+            .expect("native_login present");
+        // Bound the slice at the next async fn OR the page const's own
+        // definition, whichever comes first — the const is DEFINED between
+        // native_login and the next handler, and a slice that swallows the
+        // definition fails on correct source (the self-reference lesson this
+        // file has now paid for five times).
+        let end = after
+            .find("\nasync fn ")
+            .unwrap_or(after.len())
+            .min(after.find("\nconst HANDOFF_PAGE").unwrap_or(after.len()));
+        let body: String = after[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("Json("),
+            "the native path must answer in JSON"
+        );
+        assert!(
+            !body.contains("HANDOFF_PAGE"),
+            "the native path must NEVER reference the browser hand-off page — that is #429"
+        );
+        assert!(
+            !body.contains("wants_json"),
+            "and it must not Accept-negotiate either (D1): every default HTTP client sends \
+             `Accept: */*`, and negotiating on that is exactly how the page reached the decoder"
+        );
+    }
+
+    /// **THE GATE THAT WOULD HAVE CAUGHT #429**: every field the PUBLISHED spec
+    /// (`client/openapi.json` — the file the client generator consumes) marks
+    /// required is present and non-null in what the native path serializes,
+    /// plus `token_type`, which the Apple client's hand-rolled decoder declares
+    /// non-null despite the spec leaving it defaulted.
+    #[test]
+    fn the_native_response_carries_every_field_the_published_spec_requires() {
+        let spec_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("client/openapi.json");
+        let spec: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&spec_path).expect("client/openapi.json unreadable"),
+        )
+        .expect("client/openapi.json is not valid JSON");
+        let mut required: Vec<String> = spec
+            .pointer("/components/schemas/NativeTokenResponse/required")
+            .and_then(|v| v.as_array())
+            .expect("the published spec declares NativeTokenResponse.required")
+            .iter()
+            .map(|v| v.as_str().expect("required names are strings").to_string())
+            .collect();
+        assert!(
+            !required.is_empty(),
+            "an empty required list would make this gate vacuous"
+        );
+        // The published spec defaults token_type rather than requiring it, but
+        // the Apple decoder treats it as non-null — hold the stronger line.
+        required.push("token_type".to_string());
+
+        let body = serde_json::to_value(NativeTokenResponse {
+            session: session::SessionGrant {
+                access_token: "sess:wa-x:nonce.mac".into(),
+                token_type: "Bearer",
+                expires_in: 86_400,
+                role: "SYSTEM_ADMIN".into(),
+                user_id: "wa-x".into(),
+            },
+            email: None,
+            name: None,
+        })
+        .expect("serializes");
+        for field in &required {
+            assert!(
+                body.get(field).is_some_and(|v| !v.is_null()),
+                "NativeTokenResponse omits (or nulls) `{field}`, which the published spec \
+                 requires — the generated client's decode fails on exactly this, after the \
+                 provider already said yes"
+            );
+        }
+        // And the nullable identity fields are EMITTED (null, not absent) —
+        // the spec declares them nullable, not omittable.
+        for field in ["email", "name"] {
+            assert!(
+                body.get(field).is_some(),
+                "`{field}` must serialize even when absent (as null)"
+            );
+        }
+    }
+
+    /// **A browser refusal escapes the provider name** — the XSS pin
+    /// (CIRISServer#424). `provider` comes from the URL path and flows into
+    /// error text; rendered unescaped as HTML that is reflected XSS. Both
+    /// halves are pinned: the escape, and the shape gate that keeps hostile
+    /// segments out of the flow entirely.
+    #[test]
+    fn a_browser_refusal_escapes_the_provider_name() {
+        let hostile = "<script>alert(1)</script>";
+        let reason = "auth.oauth.provider_unavailable";
+        let page = browser_error_page(
+            reason,
+            "Sign-in didn't complete",
+            &format!("This node cannot sign you in with {hostile}."),
+            BROWSER_NEXT_STEP,
+            Some("/dash\"><script>alert(2)</script>"),
+        );
+        assert!(
+            !page.contains("<script>alert"),
+            "the hostile provider string reached the page UNESCAPED — reflected XSS"
+        );
+        assert!(
+            page.contains("&lt;script&gt;alert(1)"),
+            "the text position must carry the escaped form"
+        );
+        assert!(
+            page.contains("&quot;&gt;&lt;script&gt;"),
+            "the back-link ATTRIBUTE position must escape quotes too — breaking out of an \
+             href is the same XSS one character later"
+        );
+
+        // The shape gate is the other half: a hostile segment never becomes a
+        // provider at all.
+        assert!(!provider_name_is_wellformed(hostile));
+        assert!(!provider_name_is_wellformed(""));
+        assert!(!provider_name_is_wellformed(&"a".repeat(33)));
+        assert!(provider_name_is_wellformed("google"));
+        assert!(provider_name_is_wellformed("my-fork_2"));
     }
 
     /// Google is configured out of the box IFF the build injected the client.

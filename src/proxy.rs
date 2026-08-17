@@ -90,10 +90,32 @@ async fn proxy(State(st): State<ProxyState>, req: Request) -> Response {
     };
 
     let mut builder = Response::builder().status(status);
-    // Hop-by-hop headers (transfer-encoding, connection) must not be copied
-    // verbatim onto a re-framed body; drop them and let axum re-frame.
+    // Headers that describe the UPSTREAM HOP, not the resource, must not be
+    // republished as this node's own:
+    //  - the RFC 9110 §7.6.1 connection-specific set (Connection + everything
+    //    it governs) describes the proxy↔upstream connection, and copying it
+    //    onto a re-framed body corrupts framing (the original two-entry list
+    //    existed for exactly that);
+    //  - `Date` and `Server` are the RESPONDER's stamps. A folded node was
+    //    republishing the brain's `date` and `server: uvicorn` as its own —
+    //    two `Date`s on one response once the node's stack adds its own header
+    //    (the mirror of the agent-side duplicate-Date finding), and a Rust
+    //    node introducing itself as a Python server.
+    const SKIP: &[header::HeaderName] = &[
+        header::CONNECTION,
+        header::TRANSFER_ENCODING,
+        header::TE,
+        header::TRAILER,
+        header::UPGRADE,
+        header::PROXY_AUTHENTICATE,
+        header::PROXY_AUTHORIZATION,
+        header::DATE,
+        header::SERVER,
+    ];
     for (k, v) in resp_headers.iter() {
-        if k == header::TRANSFER_ENCODING || k == header::CONNECTION {
+        // `Keep-Alive` and `Proxy-Connection` are connection-specific too but
+        // predate the constants table — matched by name.
+        if SKIP.contains(k) || k == "keep-alive" || k == "proxy-connection" {
             continue;
         }
         builder = builder.header(k, v);
