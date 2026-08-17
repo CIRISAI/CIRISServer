@@ -177,9 +177,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .context("resolve the engine's derived federation key_id (the node's one identity)")?;
     cfg.occurrence_id = cfg.key_id.clone();
     let cfg = cfg;
+    // CIRISServer#410 — stamp the node's self-name the moment the one identity
+    // exists: every health route's `node` block flips "unresolved" →
+    // "identified" HERE, so a probe of this node's port can name it from this
+    // point on (and could already name the process before it, via the lazily
+    // minted instance_id).
+    crate::node_identity::stamp(&cfg.key_id, &cfg.home);
     tracing::info!(
         key_id = %cfg.key_id,
         keystore_alias = %cfg.keystore_alias,
+        // #410: a subprocess launcher that owns this stdout can scrape the
+        // instance_id here and later match it against a port probe's answer.
+        instance_id = %crate::node_identity::instance_id(),
         "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
 
@@ -1334,7 +1343,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             }),
         )
         .await
-        .context("start read API")?;
+        .context("start read API");
+        // CIRISServer#410 — a failed read-API start used to surface as ONE
+        // opaque line ("start read API: Address already in use") and the
+        // operator guessed who held the port. Ask the port itself before
+        // giving up: if a CIRIS node answers `/health` there, its `node` block
+        // names the holder. Enriched on ANY start error (the error is
+        // anyhow-wrapped by lens-core, so matching EADDRINUSE would be a
+        // downcast fight; a probe on a non-bind failure is harmless — it finds
+        // nothing and reports `unverifiable`). Probe AFTER the failure only —
+        // probing before the bind would race the very listener this node is
+        // about to start.
+        let read = match read {
+            Ok(read) => read,
+            Err(err) => {
+                return Err(enrich_read_api_bind_error(err, cfg.read_api_addr().port()).await);
+            }
+        };
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
         // #279: the listener is now guaranteed BOUND here (lens-core binds
         // synchronously before spawning the accept loop and a bind failure is
@@ -1534,8 +1559,104 @@ async fn local_identity_json(
                 serde_json::Value::String(wire_key_id.to_string()),
             );
         }
+        // CIRISServer#410 — the desktop launcher already probes /v1/identity,
+        // so the per-process instance identity rides here too: `key_id` alone
+        // cannot distinguish "my node, restarted" from "my node's PREVIOUS
+        // process still holding the port".
+        obj.insert(
+            "instance_id".into(),
+            serde_json::Value::String(crate::node_identity::instance_id().to_string()),
+        );
+        obj.insert(
+            "started_at".into(),
+            serde_json::Value::String(crate::node_identity::started_at_rfc3339()),
+        );
     }
     serde_json::to_string(&v).context("serialize identity aggregate JSON")
+}
+
+/// CIRISServer#410 — turn an opaque read-API start failure into a named
+/// culprit, best-effort: probe `GET /health` on the port this node wanted and
+/// classify whoever answers with [`crate::node_identity::port_holder_verdict`].
+/// The ORIGINAL error is always what returns — the probe can only ADD context,
+/// never mask the cause — and a dead/foreign/non-CIRIS port simply reads
+/// `unverifiable`.
+async fn enrich_read_api_bind_error(err: anyhow::Error, port: u16) -> anyhow::Error {
+    use crate::node_identity::PortHolderVerdict;
+    let probed: Option<serde_json::Value> = async {
+        reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()
+    }
+    .await;
+    let our_key = crate::node_identity::resolved_key_id();
+    let verdict = crate::node_identity::port_holder_verdict(
+        crate::node_identity::instance_id(),
+        our_key.as_deref(),
+        probed.as_ref(),
+    );
+    // The holder's own `node` block (top-level on /health; tolerate the
+    // `data` envelope like the verdict does), for the log + the error text.
+    let node = probed
+        .as_ref()
+        .and_then(|b| {
+            b.get("node")
+                .or_else(|| b.get("data").and_then(|d| d.get("node")))
+        })
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| {
+        node.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("null")
+            .to_string()
+    };
+    let holder = if node.is_null() {
+        "no CIRIS `node` block answered on the port".to_string()
+    } else {
+        format!(
+            "the port answered as key_id={} instance_id={} started_at={}",
+            field("key_id"),
+            field("instance_id"),
+            field("started_at"),
+        )
+    };
+    let remedy = match verdict {
+        PortHolderVerdict::Match => {
+            "the probe reached THIS process's own listener, so the failure is \
+             not a port collision — read the underlying error"
+        }
+        PortHolderVerdict::MismatchSameKey => {
+            "a PRIOR serve of this same node still holds the port — stop it \
+             (ciris_server.shutdown_node(), or kill the old process) and retry"
+        }
+        PortHolderVerdict::MismatchForeign => {
+            "a DIFFERENT CIRIS node owns this port — point this node at another \
+             read-API port, or stop the other node if it is not meant to run here"
+        }
+        PortHolderVerdict::Unverifiable => {
+            "whatever holds the port did not identify itself (not a CIRIS node, \
+             or one predating the `node` health block) — `ss -ltnp` names the \
+             process"
+        }
+    };
+    tracing::error!(
+        port,
+        verdict = verdict.as_str(),
+        holder = %holder,
+        "read API failed to start — probed the port for a CIRIS `node` block [#410]"
+    );
+    err.context(format!(
+        "read API could not start on port {port}. Port probe verdict: \
+         {verdict} ({holder}). {remedy}.",
+        verdict = verdict.as_str(),
+    ))
 }
 
 /// Self-publish this node's **reticulum transport-tier binding** (dest-hash +
