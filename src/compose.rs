@@ -417,14 +417,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // serve-only-until-owned floor + the require_owner_bound gate stay EXACTLY as-is.
     // On a successful claim the founder's identity becomes WaRole::Root →
     // UserRole::SystemAdmin, which is what the owner-gated peering requires. Idempotent.
-    let bootstrap_outcome = match crate::auth::bootstrap::bootstrap_if_needed(&engine).await {
-        Ok(outcome) => {
-            tracing::info!(?outcome, "root-user bootstrap evaluated");
-            outcome
-        }
-        // A bad seed must not silently downgrade owner-claim to "open forever"; fail boot.
-        Err(e) => return Err(anyhow::anyhow!("root-user bootstrap: {e}")),
-    };
+    let bootstrap_outcome =
+        match crate::auth::bootstrap::bootstrap_if_needed(&engine, &cfg.key_id).await {
+            Ok(outcome) => {
+                tracing::info!(?outcome, "root-user bootstrap evaluated");
+                outcome
+            }
+            // A bad seed must not silently downgrade owner-claim to "open forever"; fail boot.
+            Err(e) => return Err(anyhow::anyhow!("root-user bootstrap: {e}")),
+        };
 
     // The node's OWN self-signed SignedKeyRecord as JSON — built ONCE at boot
     // (stable for the node's lifetime), served verbatim by
