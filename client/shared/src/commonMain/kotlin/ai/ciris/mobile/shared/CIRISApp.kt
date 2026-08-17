@@ -698,6 +698,22 @@ fun CIRISApp(
     val nodeSwitcherViewModel: NodeSwitcherViewModel = viewModel {
         NodeSwitcherViewModel(apiClient)
     }
+    // Keep the composable node-vs-agent gate in step across node switches
+    // (CIRISServer#390): the startup probe answered for the ORIGINAL node, and
+    // a switch to a different kind of node otherwise left the whole UI (agent
+    // wording, the 22 cognitive lights) branching on the stale verdict. The VM
+    // re-derives the mode against the new node's merged health and publishes
+    // it here; the shared API client's own gate is pushed inside switchTo().
+    val switchedMode by nodeSwitcherViewModel.switchedMode.collectAsState()
+    LaunchedEffect(switchedMode) {
+        switchedMode?.let { mode ->
+            if (clientMode != mode) {
+                platformLog(TAG, "[INFO][gate] clientMode re-derived on node switch → $mode")
+                clientMode = mode
+                startupViewModel.setClientMode(mode)
+            }
+        }
+    }
     val consentObjectsViewModel: ConsentObjectsViewModel = viewModel {
         ConsentObjectsViewModel(apiClient)
     }
@@ -819,46 +835,85 @@ fun CIRISApp(
             platformLog(TAG, "[INFO] Startup READY, checking first-run status...")
 
             // ─── Derive the ONE node-vs-agent gate (server now reachable) ────
-            // Probe the NODE's /v1/health ONCE for its version (the mismatch
-            // banner) and its role. The node's own health is deliberately bare —
-            // `role: "fabric-node"`, `services: {}`, no cognitive_state — and
-            // /v1/health is a substrate prefix that is never proxied, so the
-            // AGENT enrichment can only come from the brain's /v1/system/health.
-            // Probe that second and let it upgrade the gate: AGENT iff either
-            // surface reports a cognitive_state / a non-empty service map.
+            // PRIMARY verdict: the NODE's /v1/system/health, which since server
+            // 0.5.168 (CIRISServer#390) is the MERGED health — the folded
+            // brain's cognitive_state/services over the node's own, plus the
+            // three-state `agent.{folded,reachable}`. One probe answers both
+            // "is the node up?" (+ version for the mismatch banner) and "is
+            // there a brain, and is it talking?".
             try {
-                val nodeHealth = apiClient.getNodeHealth(nodeBaseUrl)
+                var nodeHealth = apiClient.getNodeHealth(nodeBaseUrl)
                 nodeVersion = nodeHealth.version
-                var mode = ai.ciris.mobile.shared.models.clientModeFrom(
-                    nodeHealth.cognitiveState, nodeHealth.serviceCount
+                var probe = ai.ciris.mobile.shared.models.clientModeFrom(
+                    nodeHealth.cognitiveState, nodeHealth.serviceCount,
+                    nodeHealth.agentFolded, nodeHealth.agentReachable,
                 )
-                if (mode.isNode) {
-                    // Bare node health — ask the brain whether it is running on top.
-                    runCatching { apiClient.getSystemStatus() }
-                        .onSuccess { sys ->
-                            mode = ai.ciris.mobile.shared.models.clientModeFrom(
-                                sys.cognitive_state, sys.services_total
+                // UNDETERMINED is a retry signal, not a verdict. The fold boots
+                // the brain on a daemon thread AFTER the node composes, so a
+                // probe at READY can legitimately see folded=true/reachable=false
+                // — a brain that EXISTS but has not bound yet. Committing to
+                // NODE here latched the gate and hid the 22 cognitive lights
+                // for the whole session (the live #390 client defect). Bounded
+                // by the same tiered device budget as the reconfigure hold.
+                if (probe.undetermined) {
+                    val maxModePolls =
+                        ai.ciris.mobile.shared.ui.components.StartupBudget.seconds()
+                    var modePolls = 0
+                    platformLog(TAG, "[INFO][gate] brain folded but not answering yet — retrying up to ${maxModePolls}s")
+                    while (probe.undetermined && modePolls < maxModePolls) {
+                        kotlinx.coroutines.delay(1000)
+                        modePolls++
+                        runCatching { apiClient.getNodeHealth(nodeBaseUrl) }.onSuccess { nh ->
+                            nodeHealth = nh
+                            nodeVersion = nh.version
+                            probe = ai.ciris.mobile.shared.models.clientModeFrom(
+                                nh.cognitiveState, nh.serviceCount,
+                                nh.agentFolded, nh.agentReachable,
                             )
                         }
-                        .onFailure { e ->
-                            platformLog(TAG, "[DEBUG][gate] brain health absent (${e.message?.take(60)}) — bare NODE")
-                        }
+                    }
                 }
-                clientMode = mode
-                // Node mode has no 22 cognitive service lights — drive the count
-                // from the gate rather than the hardcoded agent default.
-                startupViewModel.setClientMode(mode)
-                // Push the gate into the shared API client so EVERY poller that
-                // shares it stops calling AGENT-only endpoints (history / billing
-                // / llm config / WA / adapters / capacity / agent audit / verify)
-                // on a bare node — those 404/405 and just flood the log.
-                apiClient.setClientMode(mode)
-                platformLog(
-                    TAG,
-                    "[INFO][gate] clientMode=$mode (role=${nodeHealth.role}, " +
-                        "cognitive_state=${nodeHealth.cognitiveState}, services=${nodeHealth.serviceCount}, " +
-                        "version=${nodeHealth.version})",
-                )
+                if (probe.undetermined) {
+                    // A brain we KNOW exists never answered within the budget.
+                    // Leave the gate UNSET (agent-default wording, same as a
+                    // failed probe) rather than latch NODE against it — a later
+                    // path (node switch, next launch) can still resolve it.
+                    platformLog(TAG, "[WARN][gate] brain folded but unreachable for the whole budget — leaving clientMode unset")
+                } else {
+                    var mode = probe.mode
+                    if (mode.isNode) {
+                        // Merged health says bare node. KEEP the direct-brain
+                        // fallback for pre-0.5.168 nodes (no folded enrichment)
+                        // and split deployments where the brain lives on its
+                        // own port: ask the brain's /v1/system/health before
+                        // concluding NODE.
+                        runCatching { apiClient.getSystemStatus() }
+                            .onSuccess { sys ->
+                                mode = ai.ciris.mobile.shared.models.clientModeFrom(
+                                    sys.cognitive_state, sys.services_total
+                                )
+                            }
+                            .onFailure { e ->
+                                platformLog(TAG, "[DEBUG][gate] brain health absent (${e.message?.take(60)}) — bare NODE")
+                            }
+                    }
+                    clientMode = mode
+                    // Node mode has no 22 cognitive service lights — drive the count
+                    // from the gate rather than the hardcoded agent default.
+                    startupViewModel.setClientMode(mode)
+                    // Push the gate into the shared API client so EVERY poller that
+                    // shares it stops calling AGENT-only endpoints (history / billing
+                    // / llm config / WA / adapters / capacity / agent audit / verify)
+                    // on a bare node — those 404/405 and just flood the log.
+                    apiClient.setClientMode(mode)
+                    platformLog(
+                        TAG,
+                        "[INFO][gate] clientMode=$mode (role=${nodeHealth.role}, " +
+                            "cognitive_state=${nodeHealth.cognitiveState}, services=${nodeHealth.serviceCount}, " +
+                            "folded=${nodeHealth.agentFolded}, reachable=${nodeHealth.agentReachable}, " +
+                            "version=${nodeHealth.version})",
+                    )
+                }
             } catch (e: Exception) {
                 // Probe failed — leave the gate unset (defaults to agent wording).
                 platformLog(TAG, "[WARN][gate] clientMode probe failed: ${e.message?.take(80)}")

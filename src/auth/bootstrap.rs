@@ -281,12 +281,51 @@ pub fn system_wa_cert(root_wa_id: &str) -> WaCert {
 ///
 /// The serve-only-until-owned floor + the `require_owner_bound` gate are UNCHANGED
 /// — this function only stopped pre-seeding a root from env.
-pub async fn bootstrap_if_needed(engine: &Engine) -> Result<BootstrapOutcome, BootstrapError> {
+///
+/// `node_key_id` is THIS node's steward key — the anchor the owner-lockout
+/// self-heal below reads the CEG owner-binding against.
+pub async fn bootstrap_if_needed(
+    engine: &Engine,
+    node_key_id: &str,
+) -> Result<BootstrapOutcome, BootstrapError> {
     // `list_by_role` returns only ACTIVE certs — mirrors the agent's `has_root`.
     let existing = store::list_by_role(engine, WaRole::Root, 1).await?;
     if !existing.is_empty() {
         tracing::debug!("root WA already present — bootstrap is a no-op (idempotent)");
         return Ok(BootstrapOutcome::AlreadyBootstrapped);
+    }
+
+    // ── Owner-lockout self-heal (CIRISServer#403) ────────────────────────────
+    //
+    // Zero ACTIVE roots with a LIVE owner-binding edge is a state no legitimate
+    // flow produces: the claim activates the ROOT it mints, and the two
+    // deliberate `set_active(false)` callers (api-key revoke, duplicate-pair
+    // retirement) never touch an identity-derived ROOT. It IS what a pre-#403
+    // logout left behind — logout deactivated the owner's cert — and without
+    // this arm the node would fall through to NoSeedAvailable, mint a fresh
+    // claim PIN, and reopen first-run on a node that HAS an owner.
+    //
+    // The CEG owner-binding is the source of truth for who owns this node, so
+    // when it names an owner whose derived ROOT row exists but is inactive,
+    // reactivate the row. This heals on the restart the operator performs
+    // anyway — no PIN ceremony, no lossy re-claim, and a fresh node (no
+    // binding, no row) still takes the NoSeedAvailable path untouched.
+    if let Some(owner) = super::ownership::is_steward_bound(engine, node_key_id).await {
+        let wa_id = root_wa_id_for_identity(&owner);
+        if let Some(cert) = store::get(engine, &wa_id).await? {
+            if cert.role == WaRole::Root && !cert.active {
+                store::set_active(engine, &wa_id, true).await?;
+                tracing::warn!(
+                    wa_id = %wa_id,
+                    owner = %owner,
+                    "SELF-HEAL: this node's CEG owner-binding names an owner whose ROOT cert \
+                     was INACTIVE with no other active root — the pre-#403 logout-deactivates-\
+                     the-owner defect, or a hand-edit. Reactivated the owner's ROOT; first-run \
+                     stays closed and no claim PIN is minted."
+                );
+                return Ok(BootstrapOutcome::AlreadyBootstrapped);
+            }
+        }
     }
 
     tracing::info!(
@@ -798,16 +837,18 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
         Err(_) => None,
     };
     let Some(expected) = armed else {
-        return Some(err(
+        return Some(super::refusal::refuse(
             StatusCode::UNAUTHORIZED,
+            "auth.claim.not_armed",
             "this node is not armed for a first-run claim (no one-time PIN) — \
              ownership may already be claimed",
         ));
     };
 
     let Some(supplied) = req.claim_pin.as_deref() else {
-        return Some(err(
+        return Some(super::refusal::refuse(
             StatusCode::UNAUTHORIZED,
+            "auth.claim.pin_missing",
             "first-run ROOT claim must carry `claim_pin` (the one-time PIN printed \
              on this node's console at boot)",
         ));
@@ -830,7 +871,11 @@ fn verify_claim_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Response>
     if len_ok && bytes_eq {
         return None;
     }
-    Some(err(StatusCode::UNAUTHORIZED, "invalid one-time claim PIN"))
+    Some(super::refusal::refuse(
+        StatusCode::UNAUTHORIZED,
+        "auth.claim.pin_invalid",
+        "invalid one-time claim PIN",
+    ))
 }
 
 /// **Is the node's sole ROOT an OAuth placeholder this claim may ADOPT?**

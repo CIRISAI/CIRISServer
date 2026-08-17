@@ -252,7 +252,14 @@
     "not_the_owner": "Hai effettuato l'accesso, ma non come proprietario di questo nodo. Questa azione richiede l'account del proprietario (accesso completo).",
     "oauth": {
       "no_local_identity": "L'accesso con quell'account è riuscito, ma questo nodo non ha alcuna identità collegata ad esso. Rivendica questo nodo con questo account oppure chiedi al proprietario del nodo di collegarlo.",
-      "store_unavailable": "Il nodo non è riuscito a leggere il proprio archivio delle identità, quindi l'accesso non è stato completato. Si tratta di un problema del nodo, non del tuo account."
+      "store_unavailable": "Il nodo non è riuscito a leggere il proprio archivio delle identità, quindi l'accesso non è stato completato. Si tratta di un problema del nodo, non del tuo account.",
+      "exchange_failed": "Il provider ha rifiutato lo scambio di accesso, quindi l'accesso non è stato completato. Riprova; se l'errore persiste, il log del nodo contiene la risposta del provider.",
+      "flow_expired": "Questo tentativo di accesso è scaduto. Ricomincia dalla schermata di accesso.",
+      "malformed_body": "Il nodo non è riuscito a leggere la richiesta. Controlla i campi e riprova.",
+      "native_token_invalid": "Il provider non è riuscito a verificare quel token di accesso. Accedi di nuovo per ottenerne uno nuovo.",
+      "provider_unavailable": "Questo nodo non può autenticarti con quel provider — in questa build non è configurato un accesso di questo tipo. Accedi invece con nome utente e password.",
+      "state_invalid": "stato oauth non valido o scaduto",
+      "unsafe_redirect": "redirect_uri non sicuro"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Quell'account è già collegato a un'altra identità su questo nodo. Scollegalo prima da lì — un account provider appartiene a una sola identità.",
@@ -263,7 +270,31 @@
       "store_unavailable": "Il nodo non è riuscito a scrivere il collegamento perché il suo archivio delle identità non è disponibile. Non è stata apportata alcuna modifica.",
       "not_delegatable": "Il collegamento di un'identità di accesso è un atto che spetta solo al proprietario. Una sessione delegata non può eseguirlo: il collegamento sopravvive alla delega e concederebbe quindi un accesso permanente a chi detiene un'autorizzazione temporanea."
     },
-    "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare."
+    "session_expired": "La tua sessione non è più valida. Accedi di nuovo per continuare.",
+    "claim": {
+      "not_armed": "questo nodo non è predisposto per una rivendicazione iniziale (nessun PIN monouso) — la proprietà potrebbe essere già stata rivendicata",
+      "pin_invalid": "PIN di rivendicazione monouso non valido",
+      "pin_missing": "la rivendicazione ROOT iniziale deve includere `claim_pin` (il PIN monouso stampato sulla console di questo nodo all'avvio)"
+    },
+    "login": {
+      "account_inactive": "l'account non è attivo",
+      "ambiguous_name": "Questo nome di accesso appartiene a più di un account su questo nodo, quindi accedere con esso sarebbe solo un tentativo alla cieca. Usa invece l'id del tuo account, oppure chiedi al proprietario del nodo di risolvere il duplicato.",
+      "invalid_credentials": "credenziali non valide",
+      "no_password_set": "nessuna password impostata per questo account",
+      "store_unavailable": "Il nodo non è riuscito a leggere il proprio archivio delle identità, quindi non è stato possibile completare l'accesso. È un problema del nodo, non del tuo account."
+    },
+    "self_login": {
+      "malformed_body": "Il nodo non è riuscito a leggere la richiesta di accesso. Controlla i campi e riprova.",
+      "missing_signature_header": "Nella richiesta di accesso manca l'intestazione della firma, quindi il nodo non può verificare chi l'ha inviata.",
+      "no_directory": "nessuna directory di federazione",
+      "signature_invalid": "La firma della richiesta di accesso non è stata verificata, quindi il nodo non può fidarsi di chi l'ha inviata.",
+      "signer_not_admitted": "il firmatario non è né la chiave di identità né un'occorrenza ammessa di essa",
+      "substrate_error": "Il substrato del nodo ha rifiutato la cerimonia di accesso. Nulla è stato modificato — controlla il log del nodo per la causa."
+    },
+    "session": {
+      "invalid_token": "non è un token di sessione emesso da questo nodo — non c'è nulla da disconnettere",
+      "missing_bearer": "token bearer mancante o malformato"
+    }
   },
   "common_back": "Indietro",
   "common_cancel": "Annulla",

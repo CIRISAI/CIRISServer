@@ -131,7 +131,9 @@ async fn seed_import_utility_creates_root_then_bootstrap_is_idempotent_noop() {
     assert_eq!(system.parent_wa_id.as_deref(), Some("wa-2025-06-14-ROOT00"));
 
     // (b) bootstrap_if_needed with a ROOT present → idempotent no-op (unchanged).
-    let outcome = bootstrap_if_needed(&engine).await.expect("bootstrap");
+    let outcome = bootstrap_if_needed(&engine, "ciris-seed-node")
+        .await
+        .expect("bootstrap");
     assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
     let roots2 = store::list_by_role(&engine, WaRole::Root, 10)
         .await
@@ -149,7 +151,9 @@ async fn seed_import_utility_creates_root_then_bootstrap_is_idempotent_noop() {
 async fn bootstrap_on_fresh_node_is_a_clean_noseed_noop() {
     let engine = node("ciris-noseed-node").await;
 
-    let outcome = bootstrap_if_needed(&engine).await.expect("bootstrap");
+    let outcome = bootstrap_if_needed(&engine, "ciris-noseed-node")
+        .await
+        .expect("bootstrap");
     assert_eq!(outcome, BootstrapOutcome::NoSeedAvailable);
     let roots = store::list_by_role(&engine, WaRole::Root, 10)
         .await

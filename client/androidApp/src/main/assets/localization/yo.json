@@ -3871,7 +3871,14 @@
     "not_the_owner": "O ti wọlé, ṣùgbọ́n kì í ṣe gẹ́gẹ́ bí ẹni tí ó ni node yìí. Ìṣe yìí nílò àkàǹtì olóhun (ìwọlé kíkún).",
     "oauth": {
       "no_local_identity": "Àkàǹtì yẹn wọlé ní àṣeyọrí, ṣùgbọ́n node yìí kò ní ìdánimọ̀ kankan tí a so mọ́ ọn. Gba node yìí pẹ̀lú àkàǹtì yìí, tàbí bèèrè lọ́wọ́ ẹni tí ó ni node náà kí ó so ó mọ́ ọn.",
-      "store_unavailable": "Node náà kò lè ka ilé-ìtọ́jú ìdánimọ̀ rẹ̀, nítorí náà a kò lè parí ìwọlé. Ìṣòro node náà ni èyí, kì í ṣe ti àkàǹtì rẹ."
+      "store_unavailable": "Node náà kò lè ka ilé-ìtọ́jú ìdánimọ̀ rẹ̀, nítorí náà a kò lè parí ìwọlé. Ìṣòro node náà ni èyí, kì í ṣe ti àkàǹtì rẹ.",
+      "exchange_failed": "Olùpèsè náà kọ ìpàṣípààrọ̀ ìwọlé náà, nítorí náà a kò lè parí ìwọlé rẹ. Gbìyànjú lẹ́ẹ̀kan sí i; bí ó bá tún kùnà, àkọsílẹ̀ nóòdù yìí ní ìdáhùn olùpèsè náà.",
+      "flow_expired": "Ìgbìyànjú ìwọlé yìí ti pé àsìkò. Bẹ̀rẹ̀ lẹ́ẹ̀kan sí i láti ojú-ìwé ìwọlé.",
+      "malformed_body": "Nóòdù náà kò lè ka ìbéèrè yẹn. Ṣàyẹ̀wò àwọn àyè ìkúnwọlé kí o sì gbìyànjú lẹ́ẹ̀kan sí i.",
+      "native_token_invalid": "Olùpèsè náà kò lè fọwọ́sí àmì-ìwọlé yẹn. Wọlé lẹ́ẹ̀kan sí i láti gba tuntun.",
+      "provider_unavailable": "Nóòdù yìí kò lè jẹ́ kí o wọlé nípasẹ̀ olùpèsè yẹn — a kò tò irú ìwọlé bẹ́ẹ̀ sí ìtòlẹ́sẹẹsẹ yìí. Dípò bẹ́ẹ̀, wọlé pẹ̀lú orúkọ-olùmúlò àti ọ̀rọ̀ ìpamọ́.",
+      "state_invalid": "ipò oauth tí kò tọ́ tàbí tí ó ti pé àsìkò",
+      "unsafe_redirect": "redirect_uri tí kò ní ààbò"
     },
     "oauth_link": {
       "already_linked_elsewhere": "A ti so àkàǹtì yẹn mọ́ ìdánimọ̀ mìíràn lórí node yìí. Tú u sílẹ̀ níbẹ̀ ní àkọ́kọ́ — àkàǹtì olùpèsè kan jẹ́ ti ìdánimọ̀ kan ṣoṣo.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "A kò parí ìwọlé nínú aṣàwákiri, nítorí náà kò sí ohun tí a yípadà. Gbìyànjú lẹ́ẹ̀kan sí i, tàbí lo àkàntì agbègbè dípò rẹ̀.",
       "waiting": "Parí ìwọlé pẹ̀lú Google nínú aṣàwákiri rẹ, lẹ́yìn náà padà wá síbí."
+    },
+    "claim": {
+      "not_armed": "Ẹ̀rọ yìí kò wà ní ìmúrasílẹ̀ fún ìbéèrè ẹ̀tọ́ ìní àkọ́kọ́ (kò sí PIN ìgbà-kan) — ó ṣeé ṣe kí a ti gba ẹ̀tọ́ ìní rẹ̀ tẹ́lẹ̀.",
+      "pin_invalid": "PIN ìgbà-kan fún ìbéèrè ẹ̀tọ́ ìní kò tọ̀nà",
+      "pin_missing": "Ìbéèrè ROOT àkọ́kọ́ gbọ́dọ̀ gbé `claim_pin` (PIN ìgbà-kan tí a tẹ̀ jáde sórí kọ̀ńsólù ẹ̀rọ yìí nígbà ìbẹ̀rẹ̀)."
+    },
+    "login": {
+      "account_inactive": "àkàǹtì kò ṣiṣẹ́",
+      "ambiguous_name": "Orúkọ ìwọlé yẹn jẹ́ ti àkàǹtì tí ó ju ọ̀kan lọ lórí ẹ̀rọ yìí, nítorí náà ìwọlé pẹ̀lú rẹ̀ yóò jẹ́ àbá lásán. Lo id àkàǹtì rẹ dípò rẹ̀, tàbí bèèrè lọ́wọ́ olóhun ẹ̀rọ yìí láti yanjú ẹ̀dà-méjì náà.",
+      "invalid_credentials": "ìwé-ẹ̀rí ìwọlé kò tọ̀nà",
+      "no_password_set": "kò sí ọ̀rọ̀ ìgbaniwọlé tí a gbé kalẹ̀ fún àkàǹtì yìí",
+      "store_unavailable": "Ẹ̀rọ yìí kò lè ka ibi ìpamọ́ ìdánimọ̀ rẹ̀, nítorí náà a kò lè parí ìwọlé. Ìṣòro ẹ̀rọ yìí ni, kì í ṣe ti àkàǹtì rẹ."
+    },
+    "self_login": {
+      "malformed_body": "Nóòdù náà kò lè ka ìbéèrè ìwọlé yẹn. Ṣàyẹ̀wò àwọn àyè ìkúnwọlé kí o sì gbìyànjú lẹ́ẹ̀kan sí i.",
+      "missing_signature_header": "Ìbéèrè ìwọlé náà kò ní àkọlé ìbuwọ́lù rẹ̀, nítorí náà nódù kò lè jẹ́rìí ẹni tí ó fi ránṣẹ́.",
+      "no_directory": "kò sí àtòjọ ìdàpọ̀",
+      "signature_invalid": "Ìbuwọ́lù ìbéèrè ìwọlé náà kò jẹ́rìí, nítorí náà nódù kò lè gbẹ́kẹ̀lé ẹni tí ó fi ránṣẹ́.",
+      "signer_not_admitted": "olùbuwọ́lù kì í ṣe kọ́kọ́rọ́ ìdánimọ̀, bẹ́ẹ̀ ni kì í ṣe ìfarahàn rẹ̀ tí a ti gbà wọlé",
+      "substrate_error": "Ìpìlẹ̀ nódù kọ ìlànà ìwọlé náà. Kò sí ohunkóhun tí a yí padà — yẹ àkọsílẹ̀ nódù wò fún ìdí rẹ̀."
+    },
+    "session": {
+      "invalid_token": "kì í ṣe àmì-ìgbà tí nódù yìí ṣẹ̀dá — kò sí ohunkóhun láti jáde nínú rẹ̀",
+      "missing_bearer": "àmì àṣẹ (bearer token) kò sí tàbí kò péye"
     }
   },
   "duty": {

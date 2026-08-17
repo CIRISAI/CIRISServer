@@ -63,6 +63,10 @@ async fn plain_health() -> Json<serde_json::Value> {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "conformance": build_conformance(),
+        // CIRISServer#410 — WHO is answering, not just whether something is
+        // up: a bind-collision probe needs the holder's name to classify the
+        // collision (see `crate::node_identity::port_holder_verdict`).
+        "node": crate::node_identity::wire_json(),
     }))
 }
 
@@ -83,6 +87,11 @@ fn node_health() -> serde_json::Value {
             "services": {},
             // CC 2.2 / CC 2.6.4 (CIRISServer#159) — see `build_conformance`.
             "conformance": build_conformance(),
+            // CIRISServer#410 — the node's self-name, on the base BOTH
+            // `/v1/health` and `/v1/system/health` inherit (`folded_health`
+            // merges the brain on top; `node` is deliberately absent from its
+            // allow-list so a brain can never rename the node).
+            "node": crate::node_identity::wire_json(),
         }
     })
 }
@@ -159,6 +168,12 @@ async fn folded_health(State(st): State<BrainState>) -> Json<serde_json::Value> 
     };
     // The brain speaks the same `{"data":{…}}` envelope; tolerate a bare object
     // so a future/older brain shape still contributes what it has.
+    //
+    // ALLOW-LIST, never a blanket merge: the brain contributes ONLY its
+    // cognitive fields. `node` (the #410 self-name a bind-collision probe
+    // trusts) and the substrate fields stay the node's own — a brain that
+    // ships its own `node`/`key_id` must not be able to rename the port's
+    // holder. Gate: tests/folded_health.rs.
     let bd = brain.get("data").unwrap_or(&brain);
     for key in ["cognitive_state", "services", "cognitive", "agent_id"] {
         if let Some(v) = bd.get(key) {

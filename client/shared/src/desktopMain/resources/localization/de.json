@@ -3871,7 +3871,14 @@
     "not_the_owner": "Sie sind angemeldet, aber nicht als Eigentümer dieses Knotens. Für diese Handlung wird das Eigentümerkonto (Vollzugriff) benötigt.",
     "oauth": {
       "no_local_identity": "Die Anmeldung mit diesem Konto war erfolgreich, doch auf diesem Knoten ist keine Identität damit verknüpft. Beanspruchen Sie diesen Knoten mit diesem Konto oder bitten Sie den Eigentümer des Knotens, es zu verknüpfen.",
-      "store_unavailable": "Der Knoten konnte seinen Identitätsspeicher nicht lesen, daher konnte die Anmeldung nicht abgeschlossen werden. Dies ist ein Problem des Knotens, nicht Ihres Kontos."
+      "store_unavailable": "Der Knoten konnte seinen Identitätsspeicher nicht lesen, daher konnte die Anmeldung nicht abgeschlossen werden. Dies ist ein Problem des Knotens, nicht Ihres Kontos.",
+      "exchange_failed": "Der Anbieter hat den Anmeldeaustausch abgelehnt, daher konnte die Anmeldung nicht abgeschlossen werden. Versuchen Sie es erneut; wenn es weiterhin fehlschlägt, enthält das Protokoll des Nodes die Antwort des Anbieters.",
+      "flow_expired": "Dieser Anmeldeversuch ist abgelaufen. Beginnen Sie erneut auf dem Anmeldebildschirm.",
+      "malformed_body": "Der Node konnte diese Anfrage nicht lesen. Überprüfen Sie die Felder und versuchen Sie es erneut.",
+      "native_token_invalid": "Der Anbieter konnte dieses Anmelde-Token nicht verifizieren. Melden Sie sich erneut an, um ein neues zu erhalten.",
+      "provider_unavailable": "Dieser Node kann Sie mit diesem Anbieter nicht anmelden — eine solche Anmeldung ist in diesem Build nicht konfiguriert. Melden Sie sich stattdessen mit Benutzername und Passwort an.",
+      "state_invalid": "ungültiger oder abgelaufener OAuth-State",
+      "unsafe_redirect": "unsichere redirect_uri"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Dieses Konto ist auf diesem Knoten bereits mit einer anderen Identität verknüpft. Heben Sie die Verknüpfung dort zuerst auf – ein Anbieterkonto gehört zu genau einer Identität.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Die Anmeldung wurde im Browser nicht abgeschlossen, daher wurde nichts geändert. Versuche es erneut oder verwende stattdessen ein lokales Konto.",
       "waiting": "Schließe die Anmeldung mit Google in deinem Browser ab und kehre dann hierher zurück."
+    },
+    "claim": {
+      "not_armed": "dieser Node ist nicht für eine Erstübernahme scharfgeschaltet (keine Einmal-PIN) — die Eigentümerschaft wurde möglicherweise bereits beansprucht",
+      "pin_invalid": "ungültige Einmal-PIN für die Übernahme",
+      "pin_missing": "die ROOT-Erstübernahme muss `claim_pin` enthalten (die Einmal-PIN, die beim Start auf der Konsole dieses Nodes ausgegeben wird)"
+    },
+    "login": {
+      "account_inactive": "Konto ist inaktiv",
+      "ambiguous_name": "Dieser Anmeldename gehört auf diesem Node zu mehr als einem Konto; eine Anmeldung damit wäre daher ein Rätselraten. Verwenden Sie stattdessen Ihre Konto-ID, oder bitten Sie den Eigentümer des Nodes, das Duplikat aufzulösen.",
+      "invalid_credentials": "ungültige Anmeldedaten",
+      "no_password_set": "für dieses Konto ist kein Passwort festgelegt",
+      "store_unavailable": "Der Node konnte seinen Identitätsspeicher nicht lesen, daher konnte die Anmeldung nicht abgeschlossen werden. Dies ist ein Problem des Nodes, nicht Ihres Kontos."
+    },
+    "self_login": {
+      "malformed_body": "Der Node konnte diese Login-Anfrage nicht lesen. Überprüfen Sie die Felder und versuchen Sie es erneut.",
+      "missing_signature_header": "Der Anmeldeanfrage fehlt der Signatur-Header, daher kann der Knoten nicht überprüfen, wer sie gesendet hat.",
+      "no_directory": "kein Föderationsverzeichnis",
+      "signature_invalid": "Die Signatur der Anmeldeanfrage konnte nicht verifiziert werden, daher kann der Knoten dem Absender nicht vertrauen.",
+      "signer_not_admitted": "Signierer ist weder der Identitätsschlüssel noch ein zugelassenes Vorkommen davon",
+      "substrate_error": "Das Substrat des Knotens hat die Anmeldezeremonie abgelehnt. Es wurde nichts geändert — die Ursache steht im Protokoll des Knotens."
+    },
+    "session": {
+      "invalid_token": "kein von diesem Knoten ausgestelltes Sitzungstoken — nichts zum Abmelden",
+      "missing_bearer": "fehlendes oder fehlerhaftes Bearer-Token"
     }
   },
   "duty": {

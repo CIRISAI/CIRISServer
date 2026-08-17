@@ -67,6 +67,10 @@ pub mod ownership;
 /// THIS device's user fed-ID. Owner-gated + loopback-only. See
 /// [`portable_occurrence`].
 pub mod portable_occurrence;
+/// The `{error, reason_id}` refusal helper (CIRISServer#389) — binds the
+/// client-facing localization id and the node-side log line in one call, so a
+/// refusal can never again be typed-but-silent or logged-but-untyped.
+pub mod refusal;
 pub mod roles;
 pub mod self_login;
 pub mod session;

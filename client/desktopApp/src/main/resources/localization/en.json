@@ -264,11 +264,30 @@
       "timed_out": "Sign-in wasn't completed in the browser, so nothing was changed. Try again, or use a local account instead.",
       "waiting": "Finish signing in with Google in your browser, then come back here."
     },
+    "claim": {
+      "not_armed": "this node is not armed for a first-run claim (no one-time PIN) — ownership may already be claimed",
+      "pin_invalid": "invalid one-time claim PIN",
+      "pin_missing": "first-run ROOT claim must carry `claim_pin` (the one-time PIN printed on this node's console at boot)"
+    },
+    "login": {
+      "account_inactive": "account is inactive",
+      "ambiguous_name": "That login name belongs to more than one account on this node, so signing in with it would be a guess. Use your account id instead, or ask the node's owner to resolve the duplicate.",
+      "invalid_credentials": "invalid credentials",
+      "no_password_set": "no password set for this account",
+      "store_unavailable": "The node could not read its identity store, so sign-in could not be completed. This is a problem with the node, not with your account."
+    },
     "not_signed_in": "You are not signed in. Sign in as this node's owner, then try again.",
     "not_the_owner": "You are signed in, but not as this node's owner. This act needs the owner account (full access).",
     "oauth": {
+      "exchange_failed": "The provider rejected the sign-in exchange, so sign-in could not be completed. Try again; if it keeps failing, the node's log has the provider's answer.",
+      "flow_expired": "This sign-in attempt has expired. Start again from the sign-in screen.",
+      "malformed_body": "The node could not read that request. Check the fields and try again.",
+      "native_token_invalid": "The provider could not verify that sign-in token. Sign in again to get a fresh one.",
       "no_local_identity": "That account signed in successfully, but this node has no identity linked to it. Claim this node with this account, or ask the node's owner to link it.",
-      "store_unavailable": "The node could not read its identity store, so sign-in could not be completed. This is a problem with the node, not with your account."
+      "provider_unavailable": "This node cannot sign you in with that provider — no such sign-in is configured on this build. Sign in with a username and password instead.",
+      "state_invalid": "invalid or expired oauth state",
+      "store_unavailable": "The node could not read its identity store, so sign-in could not be completed. This is a problem with the node, not with your account.",
+      "unsafe_redirect": "unsafe redirect_uri"
     },
     "oauth_link": {
       "already_linked_elsewhere": "That account is already linked to a different identity on this node. Unlink it there first — one provider account belongs to one identity.",
@@ -276,8 +295,20 @@
       "incomplete_pair": "Both the provider and the account id are required. Half of a pair links an account that nothing can find again.",
       "no_such_identity": "There is no such identity on this node to link the account to.",
       "node_unowned": "This node has no owner yet, so there is no identity to link an account to. Claim the node first.",
-      "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed.",
-      "not_delegatable": "Linking a sign-in identity is the owner's own act. A delegated session cannot do it — the link outlives the delegation, so it would hand permanent access to whoever holds a temporary grant."
+      "not_delegatable": "Linking a sign-in identity is the owner's own act. A delegated session cannot do it — the link outlives the delegation, so it would hand permanent access to whoever holds a temporary grant.",
+      "store_unavailable": "The node could not write the link because its identity store is unavailable. Nothing was changed."
+    },
+    "self_login": {
+      "malformed_body": "The node could not read that login request. Check the fields and try again.",
+      "missing_signature_header": "The login request is missing its signature header, so the node cannot verify who sent it.",
+      "no_directory": "no federation directory",
+      "signature_invalid": "The login request's signature did not verify, so the node cannot trust who sent it.",
+      "signer_not_admitted": "signer is neither the identity key nor an admitted occurrence of it",
+      "substrate_error": "The node's substrate refused the login ceremony. Nothing was changed — check the node's log for the cause."
+    },
+    "session": {
+      "invalid_token": "not a session token this node minted — nothing to log out",
+      "missing_bearer": "missing or malformed bearer token"
     },
     "session_expired": "Your session is no longer valid. Sign in again to continue."
   },

@@ -3871,7 +3871,14 @@
     "not_the_owner": "Vous êtes connecté, mais pas en tant que propriétaire de ce nœud. Cette action requiert le compte propriétaire (accès complet).",
     "oauth": {
       "no_local_identity": "Ce compte s'est connecté avec succès, mais aucune identité de ce nœud ne lui est associée. Revendiquez ce nœud avec ce compte, ou demandez au propriétaire du nœud de l'associer.",
-      "store_unavailable": "Le nœud n'a pas pu lire son magasin d'identités, la connexion n'a donc pas pu aboutir. Le problème vient du nœud, pas de votre compte."
+      "store_unavailable": "Le nœud n'a pas pu lire son magasin d'identités, la connexion n'a donc pas pu aboutir. Le problème vient du nœud, pas de votre compte.",
+      "exchange_failed": "Le fournisseur a rejeté l'échange de connexion, la connexion n'a donc pas pu être finalisée. Réessayez ; si l'échec persiste, le journal du nœud contient la réponse du fournisseur.",
+      "flow_expired": "Cette tentative de connexion a expiré. Recommencez depuis l'écran de connexion.",
+      "malformed_body": "Le nœud n'a pas pu lire cette requête. Vérifiez les champs et réessayez.",
+      "native_token_invalid": "Le fournisseur n'a pas pu vérifier ce jeton de connexion. Reconnectez-vous pour en obtenir un nouveau.",
+      "provider_unavailable": "Ce nœud ne peut pas vous connecter avec ce fournisseur — aucune connexion de ce type n'est configurée sur cette version. Connectez-vous plutôt avec un nom d'utilisateur et un mot de passe.",
+      "state_invalid": "état oauth invalide ou expiré",
+      "unsafe_redirect": "redirect_uri non sécurisé"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Ce compte est déjà associé à une autre identité sur ce nœud. Dissociez-le d'abord là-bas — un compte de fournisseur appartient à une seule identité.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "La connexion n'a pas été terminée dans le navigateur, aucune modification n'a donc été effectuée. Réessayez ou utilisez plutôt un compte local.",
       "waiting": "Terminez la connexion avec Google dans votre navigateur, puis revenez ici."
+    },
+    "claim": {
+      "not_armed": "ce nœud n'est pas armé pour une revendication de premier démarrage (pas de PIN à usage unique) — la propriété a peut-être déjà été revendiquée",
+      "pin_invalid": "PIN de revendication à usage unique invalide",
+      "pin_missing": "la revendication ROOT de premier démarrage doit contenir `claim_pin` (le PIN à usage unique affiché sur la console de ce nœud au démarrage)"
+    },
+    "login": {
+      "account_inactive": "le compte est inactif",
+      "ambiguous_name": "Ce nom de connexion appartient à plusieurs comptes sur ce nœud ; s'y connecter reviendrait donc à deviner. Utilisez plutôt votre identifiant de compte, ou demandez au propriétaire du nœud de résoudre le doublon.",
+      "invalid_credentials": "identifiants invalides",
+      "no_password_set": "aucun mot de passe défini pour ce compte",
+      "store_unavailable": "Le nœud n'a pas pu lire son magasin d'identités, la connexion n'a donc pas pu aboutir. C'est un problème du nœud, pas de votre compte."
+    },
+    "self_login": {
+      "malformed_body": "Le nœud n'a pas pu lire cette demande de connexion. Vérifiez les champs et réessayez.",
+      "missing_signature_header": "La requête de connexion ne comporte pas son en-tête de signature, le nœud ne peut donc pas vérifier qui l'a envoyée.",
+      "no_directory": "aucun annuaire de fédération",
+      "signature_invalid": "La signature de la requête de connexion n'a pas pu être vérifiée, le nœud ne peut donc pas faire confiance à son expéditeur.",
+      "signer_not_admitted": "le signataire n'est ni la clé d'identité ni une occurrence admise de celle-ci",
+      "substrate_error": "Le substrat du nœud a refusé la cérémonie de connexion. Rien n'a été modifié — consultez le journal du nœud pour en connaître la cause."
+    },
+    "session": {
+      "invalid_token": "ce n'est pas un jeton de session émis par ce nœud — aucune session à déconnecter",
+      "missing_bearer": "jeton bearer manquant ou mal formé"
     }
   },
   "duty": {

@@ -171,6 +171,75 @@ async fn a_miss_distinguishes_an_empty_store_from_a_name_mismatch() {
     );
 }
 
+/// **ANTI-ENUMERATION PIN** (CIRISServer#389): the two 401 branches — "no cert
+/// resolved" and "password mismatch" — return BYTE-IDENTICAL bodies with the
+/// SAME reason_id. The reason_id is new surface area, and new surface area is
+/// where a distinguisher would sneak in: give the two branches two ids and the
+/// wire says which accounts exist, which is exactly what the shared "invalid
+/// credentials" sentence was closed against.
+#[tokio::test]
+async fn the_two_401_branches_are_byte_identical_including_the_reason_id() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    let e = engine().await;
+    store::upsert(&e, owner("wa-root-jeff", "jeff smith"))
+        .await
+        .expect("stamp the owner ROOT");
+    let app = ciris_server::auth::session::router(e.clone());
+
+    let login = |body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    };
+
+    // Branch 1: the identifier resolves to NOTHING.
+    let miss = app
+        .clone()
+        .oneshot(login(
+            serde_json::json!({"username": "nobody", "password": "whatever"}),
+        ))
+        .await
+        .expect("miss call");
+    assert_eq!(miss.status(), StatusCode::UNAUTHORIZED);
+    let miss_body = miss.into_body().collect().await.expect("body").to_bytes();
+
+    // Branch 2: the identifier resolves, the PASSWORD is wrong.
+    let mismatch = app
+        .clone()
+        .oneshot(login(
+            serde_json::json!({"username": "jeff smith", "password": "wrong"}),
+        ))
+        .await
+        .expect("mismatch call");
+    assert_eq!(mismatch.status(), StatusCode::UNAUTHORIZED);
+    let mismatch_body = mismatch
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+
+    assert_eq!(
+        miss_body, mismatch_body,
+        "the two 401 bodies differ — a caller can now probe which accounts exist by \
+         diffing refusals. Both branches must emit the identical bytes"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&miss_body).expect("json body");
+    assert_eq!(
+        v.get("reason_id").and_then(|x| x.as_str()),
+        Some("auth.login.invalid_credentials"),
+        "one shared reason_id for both causes — the distinction lives in the node's LOG, \
+         where it belongs (that split is the whole of #389)"
+    );
+}
+
 /// The OAuth pair resolves, and is reported as such — so a log line can say
 /// which of the three keys matched rather than leaving it ambiguous.
 #[tokio::test]
