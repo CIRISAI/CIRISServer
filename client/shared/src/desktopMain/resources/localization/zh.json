@@ -252,7 +252,14 @@
     "not_the_owner": "您已登录，但不是本节点的所有者。此操作需要所有者账户（完全访问权限）。",
     "oauth": {
       "no_local_identity": "该账户登录成功，但本节点没有与之关联的身份。请使用此账户认领本节点，或请节点所有者进行关联。",
-      "store_unavailable": "节点无法读取其身份存储，因此无法完成登录。这是节点的问题，与您的账户无关。"
+      "store_unavailable": "节点无法读取其身份存储，因此无法完成登录。这是节点的问题，与您的账户无关。",
+      "exchange_failed": "提供方拒绝了此次登录交换，登录未能完成。请重试；如果仍然失败，节点日志中记录了提供方的答复。",
+      "flow_expired": "此次登录尝试已过期。请从登录页面重新开始。",
+      "malformed_body": "节点无法读取该请求。请检查各字段后重试。",
+      "native_token_invalid": "提供方无法验证该登录令牌。请重新登录以获取新的令牌。",
+      "provider_unavailable": "此节点无法通过该提供方为你登录——当前版本未配置这种登录方式。请改用用户名和密码登录。",
+      "state_invalid": "OAuth state 无效或已过期",
+      "unsafe_redirect": "不安全的 redirect_uri"
     },
     "oauth_link": {
       "already_linked_elsewhere": "该账户已关联到本节点上的另一个身份。请先在那里解除关联——一个提供方账户只能属于一个身份。",
@@ -263,7 +270,31 @@
       "store_unavailable": "由于身份存储不可用，节点无法写入该关联。未做任何更改。",
       "not_delegatable": "关联登录身份是所有者本人的行为。委托会话无法执行此操作——该关联的有效期长于委托期限，否则就会把永久访问权限交给仅持有临时授权的人。"
     },
-    "session_expired": "您的会话已失效。请重新登录以继续。"
+    "session_expired": "您的会话已失效。请重新登录以继续。",
+    "claim": {
+      "not_armed": "此节点未进入首次运行认领状态（没有一次性 PIN）——所有权可能已被认领",
+      "pin_invalid": "一次性认领 PIN 无效",
+      "pin_missing": "首次运行的 ROOT 认领必须携带 `claim_pin`（启动时打印在此节点控制台上的一次性 PIN）"
+    },
+    "login": {
+      "account_inactive": "账户未激活",
+      "ambiguous_name": "该登录名在此节点上对应多个账户，用它登录只能靠猜测。请改用你的账户 ID，或请节点所有者解决重名问题。",
+      "invalid_credentials": "凭据无效",
+      "no_password_set": "此账户未设置密码",
+      "store_unavailable": "此节点无法读取其身份存储，因此无法完成登录。这是节点的问题，与你的账户无关。"
+    },
+    "self_login": {
+      "malformed_body": "节点无法读取该登录请求。请检查各字段后重试。",
+      "missing_signature_header": "登录请求缺少签名标头，因此节点无法验证是谁发送的。",
+      "no_directory": "没有联邦目录",
+      "signature_invalid": "登录请求的签名未通过验证，因此节点无法确认是谁发送的。",
+      "signer_not_admitted": "签名方既不是该身份密钥，也不是它已准入的身份实例",
+      "substrate_error": "节点的基底拒绝了本次登录仪式。未做任何更改——请查看节点日志了解原因。"
+    },
+    "session": {
+      "invalid_token": "这不是本节点签发的会话令牌——没有可注销的会话",
+      "missing_bearer": "缺少 bearer 令牌或其格式不正确"
+    }
   },
   "common_back": "返回",
   "common_cancel": "取消",

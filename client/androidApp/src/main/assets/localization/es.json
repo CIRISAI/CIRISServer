@@ -3871,7 +3871,14 @@
     "not_the_owner": "Has iniciado sesión, pero no como propietario de este nodo. Esta acción requiere la cuenta del propietario (acceso completo).",
     "oauth": {
       "no_local_identity": "Esa cuenta inició sesión correctamente, pero este nodo no tiene ninguna identidad vinculada a ella. Reclama este nodo con esta cuenta o pide al propietario del nodo que la vincule.",
-      "store_unavailable": "El nodo no pudo leer su almacén de identidades, por lo que no se pudo completar el inicio de sesión. Es un problema del nodo, no de tu cuenta."
+      "store_unavailable": "El nodo no pudo leer su almacén de identidades, por lo que no se pudo completar el inicio de sesión. Es un problema del nodo, no de tu cuenta.",
+      "exchange_failed": "El proveedor rechazó el intercambio de inicio de sesión, por lo que no se pudo completar el inicio de sesión. Inténtalo de nuevo; si sigue fallando, el registro del nodo contiene la respuesta del proveedor.",
+      "flow_expired": "Este intento de inicio de sesión ha caducado. Vuelve a empezar desde la pantalla de inicio de sesión.",
+      "malformed_body": "El nodo no pudo leer esa solicitud. Comprueba los campos e inténtalo de nuevo.",
+      "native_token_invalid": "El proveedor no pudo verificar ese token de inicio de sesión. Inicia sesión de nuevo para obtener uno nuevo.",
+      "provider_unavailable": "Este nodo no puede iniciar tu sesión con ese proveedor: ese método de inicio de sesión no está configurado en esta compilación. Inicia sesión con nombre de usuario y contraseña en su lugar.",
+      "state_invalid": "estado de oauth no válido o caducado",
+      "unsafe_redirect": "redirect_uri no seguro"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Esa cuenta ya está vinculada a otra identidad en este nodo. Desvincúlala allí primero: una cuenta de proveedor pertenece a una sola identidad.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "No se completó el inicio de sesión en el navegador, así que no se cambió nada. Vuelve a intentarlo o usa una cuenta local.",
       "waiting": "Termina de iniciar sesión con Google en tu navegador y vuelve aquí."
+    },
+    "claim": {
+      "not_armed": "este nodo no está preparado para una reclamación de primer arranque (sin PIN de un solo uso) — puede que la propiedad ya haya sido reclamada",
+      "pin_invalid": "PIN de reclamación de un solo uso no válido",
+      "pin_missing": "la reclamación ROOT de primer arranque debe incluir `claim_pin` (el PIN de un solo uso impreso en la consola de este nodo al arrancar)"
+    },
+    "login": {
+      "account_inactive": "la cuenta está inactiva",
+      "ambiguous_name": "Ese nombre de inicio de sesión pertenece a más de una cuenta en este nodo, así que iniciar sesión con él sería una suposición. Usa tu id de cuenta en su lugar, o pide al propietario del nodo que resuelva el duplicado.",
+      "invalid_credentials": "credenciales no válidas",
+      "no_password_set": "no hay contraseña configurada para esta cuenta",
+      "store_unavailable": "El nodo no pudo leer su almacén de identidades, así que no se pudo completar el inicio de sesión. Es un problema del nodo, no de tu cuenta."
+    },
+    "self_login": {
+      "malformed_body": "El nodo no pudo leer esa solicitud de inicio de sesión. Comprueba los campos e inténtalo de nuevo.",
+      "missing_signature_header": "A la solicitud de inicio de sesión le falta su encabezado de firma, por lo que el nodo no puede verificar quién la envió.",
+      "no_directory": "no hay directorio de federación",
+      "signature_invalid": "La firma de la solicitud de inicio de sesión no se pudo verificar, por lo que el nodo no puede confiar en quién la envió.",
+      "signer_not_admitted": "el firmante no es ni la clave de identidad ni una ocurrencia admitida de ella",
+      "substrate_error": "El sustrato del nodo rechazó la ceremonia de inicio de sesión. No se cambió nada — consulta el registro del nodo para conocer la causa."
+    },
+    "session": {
+      "invalid_token": "no es un token de sesión emitido por este nodo — no hay nada que cerrar",
+      "missing_bearer": "falta el token bearer o está mal formado"
     }
   },
   "duty": {

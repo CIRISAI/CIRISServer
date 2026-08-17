@@ -3871,7 +3871,14 @@
     "not_the_owner": "Bạn đã đăng nhập, nhưng không phải với tư cách chủ sở hữu của nút này. Hành động này cần tài khoản chủ sở hữu (toàn quyền truy cập).",
     "oauth": {
       "no_local_identity": "Tài khoản đó đã đăng nhập thành công, nhưng nút này không có danh tính nào được liên kết với nó. Hãy nhận quyền sở hữu nút này bằng tài khoản đó, hoặc yêu cầu chủ sở hữu của nút liên kết nó.",
-      "store_unavailable": "Nút không thể đọc kho danh tính của mình, nên không thể hoàn tất việc đăng nhập. Đây là sự cố của nút, không phải của tài khoản bạn."
+      "store_unavailable": "Nút không thể đọc kho danh tính của mình, nên không thể hoàn tất việc đăng nhập. Đây là sự cố của nút, không phải của tài khoản bạn.",
+      "exchange_failed": "Nhà cung cấp đã từ chối bước trao đổi đăng nhập, nên không thể hoàn tất việc đăng nhập. Hãy thử lại; nếu vẫn tiếp tục lỗi, nhật ký của nút có câu trả lời từ nhà cung cấp.",
+      "flow_expired": "Lần đăng nhập này đã hết hạn. Hãy bắt đầu lại từ màn hình đăng nhập.",
+      "malformed_body": "Nút không đọc được yêu cầu đó. Hãy kiểm tra lại các trường và thử lại.",
+      "native_token_invalid": "Nhà cung cấp không xác minh được mã đăng nhập đó. Hãy đăng nhập lại để lấy mã mới.",
+      "provider_unavailable": "Nút này không thể đăng nhập cho bạn bằng nhà cung cấp đó — bản dựng này không cấu hình hình thức đăng nhập như vậy. Hãy đăng nhập bằng tên người dùng và mật khẩu.",
+      "state_invalid": "trạng thái oauth không hợp lệ hoặc đã hết hạn",
+      "unsafe_redirect": "redirect_uri không an toàn"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Tài khoản đó đã được liên kết với một danh tính khác trên nút này. Hãy hủy liên kết ở đó trước — một tài khoản nhà cung cấp chỉ thuộc về một danh tính.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Quá trình đăng nhập trong trình duyệt chưa hoàn tất nên không có gì thay đổi. Hãy thử lại, hoặc dùng tài khoản cục bộ.",
       "waiting": "Hãy hoàn tất đăng nhập bằng Google trong trình duyệt của bạn, rồi quay lại đây."
+    },
+    "claim": {
+      "not_armed": "node này chưa sẵn sàng cho việc xác lập quyền sở hữu lần đầu (không có mã PIN dùng một lần) — quyền sở hữu có thể đã được xác lập",
+      "pin_invalid": "mã PIN xác lập quyền sở hữu dùng một lần không hợp lệ",
+      "pin_missing": "yêu cầu xác lập quyền ROOT lần đầu phải kèm theo `claim_pin` (mã PIN dùng một lần được in trên bảng điều khiển của node này khi khởi động)"
+    },
+    "login": {
+      "account_inactive": "tài khoản không hoạt động",
+      "ambiguous_name": "Tên đăng nhập đó thuộc về nhiều hơn một tài khoản trên node này, nên đăng nhập bằng tên đó sẽ chỉ là phỏng đoán. Hãy dùng id tài khoản của bạn, hoặc đề nghị chủ sở hữu node xử lý trường hợp trùng lặp.",
+      "invalid_credentials": "thông tin đăng nhập không hợp lệ",
+      "no_password_set": "tài khoản này chưa đặt mật khẩu",
+      "store_unavailable": "Node không đọc được kho danh tính của nó, nên không thể hoàn tất đăng nhập. Đây là sự cố của node, không phải của tài khoản bạn."
+    },
+    "self_login": {
+      "malformed_body": "Nút không đọc được yêu cầu đăng nhập đó. Hãy kiểm tra lại các trường và thử lại.",
+      "missing_signature_header": "Yêu cầu đăng nhập thiếu tiêu đề chữ ký, nên nút không thể xác minh ai đã gửi nó.",
+      "no_directory": "không có danh bạ liên bang",
+      "signature_invalid": "Chữ ký của yêu cầu đăng nhập không xác minh được, nên nút không thể tin tưởng ai đã gửi nó.",
+      "signer_not_admitted": "người ký không phải là khóa danh tính, cũng không phải một thể hiện đã được thừa nhận của khóa đó",
+      "substrate_error": "Nền tảng của nút đã từ chối nghi thức đăng nhập. Không có gì bị thay đổi — hãy kiểm tra nhật ký của nút để biết nguyên nhân."
+    },
+    "session": {
+      "invalid_token": "không phải mã phiên do nút này phát hành — không có gì để đăng xuất",
+      "missing_bearer": "thiếu mã bearer hoặc mã bearer sai định dạng"
     }
   },
   "duty": {

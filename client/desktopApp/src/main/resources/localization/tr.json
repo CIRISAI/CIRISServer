@@ -3871,7 +3871,14 @@
     "not_the_owner": "Oturum açtınız, ancak bu düğümün sahibi olarak değil. Bu işlem sahip hesabını (tam erişim) gerektirir.",
     "oauth": {
       "no_local_identity": "Bu hesapla oturum açma başarılı oldu, ancak bu düğümde bu hesaba bağlı bir kimlik yok. Bu hesapla düğümün sahipliğini alın veya düğümün sahibinden bağlamasını isteyin.",
-      "store_unavailable": "Düğüm kimlik deposunu okuyamadı, bu nedenle oturum açma tamamlanamadı. Bu, hesabınızla değil düğümle ilgili bir sorundur."
+      "store_unavailable": "Düğüm kimlik deposunu okuyamadı, bu nedenle oturum açma tamamlanamadı. Bu, hesabınızla değil düğümle ilgili bir sorundur.",
+      "exchange_failed": "Sağlayıcı oturum açma değişimini reddetti, bu nedenle oturum açma tamamlanamadı. Yeniden deneyin; sorun sürerse sağlayıcının yanıtı düğümün günlüğünde yer alır.",
+      "flow_expired": "Bu oturum açma denemesinin süresi doldu. Oturum açma ekranından yeniden başlayın.",
+      "malformed_body": "Düğüm bu isteği okuyamadı. Alanları kontrol edip yeniden deneyin.",
+      "native_token_invalid": "Sağlayıcı bu oturum açma belirtecini doğrulayamadı. Yenisini almak için tekrar oturum açın.",
+      "provider_unavailable": "Bu düğüm sizi o sağlayıcıyla oturum açtıramaz — bu derlemede böyle bir oturum açma yöntemi yapılandırılmamış. Bunun yerine kullanıcı adı ve parolayla oturum açın.",
+      "state_invalid": "geçersiz veya süresi dolmuş oauth durumu",
+      "unsafe_redirect": "güvenli olmayan redirect_uri"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Bu hesap bu düğümdeki başka bir kimliğe zaten bağlı. Önce oradaki bağlantıyı kaldırın — bir sağlayıcı hesabı tek bir kimliğe aittir.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Oturum açma işlemi tarayıcıda tamamlanmadı, bu nedenle hiçbir şey değiştirilmedi. Tekrar deneyin veya bunun yerine yerel bir hesap kullanın.",
       "waiting": "Tarayıcınızda Google ile oturum açma işlemini tamamlayın, ardından buraya geri dönün."
+    },
+    "claim": {
+      "not_armed": "bu düğüm ilk çalıştırma sahiplenmesi için hazırlanmamış (tek kullanımlık PIN yok) — sahiplik zaten talep edilmiş olabilir",
+      "pin_invalid": "geçersiz tek kullanımlık sahiplenme PIN'i",
+      "pin_missing": "ilk çalıştırma ROOT sahiplenmesi `claim_pin` içermelidir (açılışta bu düğümün konsoluna yazdırılan tek kullanımlık PIN)"
+    },
+    "login": {
+      "account_inactive": "hesap etkin değil",
+      "ambiguous_name": "Bu oturum açma adı bu düğümdeki birden fazla hesaba ait; bu nedenle onunla oturum açmak bir tahmin olurdu. Bunun yerine hesap kimliğinizi kullanın veya düğümün sahibinden yinelenen kaydı gidermesini isteyin.",
+      "invalid_credentials": "geçersiz kimlik bilgileri",
+      "no_password_set": "bu hesap için parola belirlenmemiş",
+      "store_unavailable": "Düğüm kimlik deposunu okuyamadı, bu nedenle oturum açma tamamlanamadı. Bu, hesabınızla değil düğümle ilgili bir sorundur."
+    },
+    "self_login": {
+      "malformed_body": "Düğüm bu oturum açma isteğini okuyamadı. Alanları kontrol edip yeniden deneyin.",
+      "missing_signature_header": "Oturum açma isteğinde imza başlığı eksik; bu nedenle düğüm, isteği kimin gönderdiğini doğrulayamıyor.",
+      "no_directory": "federasyon dizini yok",
+      "signature_invalid": "Oturum açma isteğinin imzası doğrulanamadı; bu nedenle düğüm, isteği kimin gönderdiğine güvenemiyor.",
+      "signer_not_admitted": "imzalayan, ne kimlik anahtarının kendisi ne de onun kabul edilmiş bir örneği",
+      "substrate_error": "Düğümün altyapısı oturum açma törenini reddetti. Hiçbir şey değiştirilmedi — nedeni için düğümün günlüğüne bakın."
+    },
+    "session": {
+      "invalid_token": "bu düğümün ürettiği bir oturum belirteci değil — çıkış yapılacak bir şey yok",
+      "missing_bearer": "eksik veya hatalı biçimlendirilmiş taşıyıcı (bearer) belirteci"
     }
   },
   "duty": {

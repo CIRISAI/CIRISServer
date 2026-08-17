@@ -3871,7 +3871,14 @@
     "not_the_owner": "Anda sudah masuk, tetapi bukan sebagai pemilik node ini. Tindakan ini memerlukan akun pemilik (akses penuh).",
     "oauth": {
       "no_local_identity": "Akun tersebut berhasil masuk, tetapi node ini tidak memiliki identitas yang tertaut dengannya. Klaim node ini dengan akun tersebut, atau minta pemilik node untuk menautkannya.",
-      "store_unavailable": "Node tidak dapat membaca penyimpanan identitasnya, sehingga proses masuk tidak dapat diselesaikan. Ini adalah masalah pada node, bukan pada akun Anda."
+      "store_unavailable": "Node tidak dapat membaca penyimpanan identitasnya, sehingga proses masuk tidak dapat diselesaikan. Ini adalah masalah pada node, bukan pada akun Anda.",
+      "exchange_failed": "Penyedia menolak pertukaran proses masuk, sehingga proses masuk tidak dapat diselesaikan. Coba lagi; jika terus gagal, log node berisi jawaban dari penyedia tersebut.",
+      "flow_expired": "Upaya masuk ini telah kedaluwarsa. Mulai lagi dari layar masuk.",
+      "malformed_body": "Node tidak dapat membaca permintaan tersebut. Periksa kolom-kolomnya lalu coba lagi.",
+      "native_token_invalid": "Penyedia tidak dapat memverifikasi token masuk tersebut. Masuk lagi untuk mendapatkan token yang baru.",
+      "provider_unavailable": "Node ini tidak dapat memproses masuk Anda dengan penyedia tersebut — tidak ada metode masuk seperti itu yang dikonfigurasikan pada build ini. Gunakan nama pengguna dan kata sandi untuk masuk.",
+      "state_invalid": "status oauth tidak valid atau telah kedaluwarsa",
+      "unsafe_redirect": "redirect_uri tidak aman"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Akun tersebut sudah tertaut ke identitas lain pada node ini. Batalkan tautannya di sana terlebih dahulu — satu akun penyedia hanya untuk satu identitas.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Proses masuk tidak diselesaikan di peramban, jadi tidak ada yang diubah. Coba lagi, atau gunakan akun lokal.",
       "waiting": "Selesaikan proses masuk dengan Google di peramban Anda, lalu kembali ke sini."
+    },
+    "claim": {
+      "not_armed": "node ini tidak disiapkan untuk klaim kepemilikan awal (tidak ada PIN sekali pakai) — kepemilikan mungkin sudah diklaim",
+      "pin_invalid": "PIN klaim sekali pakai tidak valid",
+      "pin_missing": "klaim ROOT saat pertama kali dijalankan harus menyertakan `claim_pin` (PIN sekali pakai yang dicetak di konsol node ini saat boot)"
+    },
+    "login": {
+      "account_inactive": "akun tidak aktif",
+      "ambiguous_name": "Nama masuk tersebut dimiliki oleh lebih dari satu akun pada node ini, sehingga masuk dengan nama itu hanya akan menjadi tebakan. Gunakan id akun Anda, atau minta pemilik node untuk menyelesaikan duplikasi tersebut.",
+      "invalid_credentials": "kredensial tidak valid",
+      "no_password_set": "belum ada kata sandi yang diatur untuk akun ini",
+      "store_unavailable": "Node tidak dapat membaca penyimpanan identitasnya, sehingga proses masuk tidak dapat diselesaikan. Ini masalah pada node, bukan pada akun Anda."
+    },
+    "self_login": {
+      "malformed_body": "Node tidak dapat membaca permintaan masuk tersebut. Periksa kolom-kolomnya lalu coba lagi.",
+      "missing_signature_header": "Permintaan login tidak menyertakan header tanda tangannya, sehingga node tidak dapat memverifikasi siapa pengirimnya.",
+      "no_directory": "tidak ada direktori federasi",
+      "signature_invalid": "Tanda tangan permintaan login tidak lolos verifikasi, sehingga node tidak dapat memercayai siapa pengirimnya.",
+      "signer_not_admitted": "penanda tangan bukan kunci identitas maupun kemunculan kunci tersebut yang telah diakui",
+      "substrate_error": "Substrat node menolak upacara login. Tidak ada yang diubah — periksa log node untuk mengetahui penyebabnya."
+    },
+    "session": {
+      "invalid_token": "bukan token sesi yang diterbitkan oleh node ini — tidak ada sesi untuk dikeluarkan",
+      "missing_bearer": "token bearer tidak ada atau formatnya salah"
     }
   },
   "duty": {

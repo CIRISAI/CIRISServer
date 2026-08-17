@@ -3871,7 +3871,14 @@
     "not_the_owner": "Ka shiga, amma ba a matsayin mai mallakar wannan node ba. Wannan aikin yana buƙatar asusun mai mallaka (cikakken damar shiga).",
     "oauth": {
       "no_local_identity": "An yi nasarar shiga da wannan asusun, amma wannan node ba shi da wata shaida da aka haɗa da shi. Ka mallaki wannan node da wannan asusun, ko ka nemi mai mallakar node ya haɗa shi.",
-      "store_unavailable": "Node ɗin bai iya karanta ma'ajiyar shaidarsa ba, don haka ba a iya kammala shiga ba. Wannan matsala ce ta node, ba ta asusunka ba."
+      "store_unavailable": "Node ɗin bai iya karanta ma'ajiyar shaidarsa ba, don haka ba a iya kammala shiga ba. Wannan matsala ce ta node, ba ta asusunka ba.",
+      "exchange_failed": "Mai bada sabis ɗin ya ƙi musayar shiga, don haka ba a iya kammala shiga ba. Sake gwadawa; idan har yana ci gaba da gazawa, log ɗin na'urar yana ɗauke da amsar mai bada sabis.",
+      "flow_expired": "Wannan yunƙurin shiga ya ƙare. Fara sake daga allon shiga.",
+      "malformed_body": "Na'urar ba ta iya karanta wannan buƙatar ba. Duba filayen sannan ka sake gwadawa.",
+      "native_token_invalid": "Mai bada sabis ɗin bai iya tabbatar da wannan token ɗin shiga ba. Sake shiga don samun sabo.",
+      "provider_unavailable": "Wannan na'urar ba za ta iya shigar da kai ta wannan mai bada sabis ba — ba a saita irin wannan shiga a wannan sigar ba. Maimakon haka, ka shiga da sunan mai amfani da kalmar sirri.",
+      "state_invalid": "yanayin oauth mara inganci ko wanda ya ƙare",
+      "unsafe_redirect": "redirect_uri mara aminci"
     },
     "oauth_link": {
       "already_linked_elsewhere": "An riga an haɗa wannan asusun da wata shaida daban a wannan node. Ka fara cire haɗin a wurin — asusun mai bayarwa guda yana na shaida guda ɗaya.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Ba a kammala shiga ba a cikin burauza, don haka ba a canza komai ba. Sake gwadawa, ko a yi amfani da asusun cikin gida maimakon haka.",
       "waiting": "Kammala shiga da Google a cikin burauzarka, sannan ka dawo nan."
+    },
+    "claim": {
+      "not_armed": "ba a shirya wannan node don da'awar farkon amfani ba (babu PIN na lokaci ɗaya) — mai yiwuwa an riga an yi da'awar mallaka",
+      "pin_invalid": "PIN na da'awa na lokaci ɗaya ba daidai ba ne",
+      "pin_missing": "da'awar ROOT ta farkon amfani dole ta ƙunshi `claim_pin` (PIN na lokaci ɗaya da aka buga a kan console na wannan node a lokacin ƙaddamarwa)"
+    },
+    "login": {
+      "account_inactive": "asusun ba ya aiki",
+      "ambiguous_name": "Wannan sunan shiga na asusu fiye da ɗaya ne a kan wannan node, don haka shiga da shi zai zama hasashe kawai. Maimakon haka ka yi amfani da lambar shaidar asusunka (id), ko ka nemi mai wannan node ya warware kwafin.",
+      "invalid_credentials": "bayanan shiga ba daidai ba ne",
+      "no_password_set": "ba a saita kalmar sirri don wannan asusun ba",
+      "store_unavailable": "Node ɗin ya kasa karanta ma'ajiyar bayanan shaidarsa, don haka ba a iya kammala shiga ba. Wannan matsala ce ta node ɗin, ba ta asusunka ba."
+    },
+    "self_login": {
+      "malformed_body": "Na'urar ba ta iya karanta wannan buƙatar shiga ba. Duba filayen sannan ka sake gwadawa.",
+      "missing_signature_header": "Buƙatar shiga ba ta ɗauke da kanun sa hannunta ba, don haka node ɗin ba zai iya tantance wanda ya aiko ta ba.",
+      "no_directory": "babu kundin tarayya",
+      "signature_invalid": "Sa hannun buƙatar shiga bai tabbata ba, don haka node ɗin ba zai iya amincewa da wanda ya aiko ta ba.",
+      "signer_not_admitted": "mai sa hannu ba maɓallin shaida ba ne, kuma ba karɓaɓɓen bayyanar wannan maɓallin ba ne",
+      "substrate_error": "Substrate ɗin node ɗin ya ƙi tsarin shiga. Ba a canza kome ba — duba log ɗin node ɗin domin sanin dalilin."
+    },
+    "session": {
+      "invalid_token": "ba token ɗin zama da wannan node ya ƙirƙira ba ne — babu abin da za a fitar",
+      "missing_bearer": "babu bearer token ko kuma tsarinsa ba daidai ba ne"
     }
   },
   "duty": {

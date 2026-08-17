@@ -3871,7 +3871,14 @@
     "not_the_owner": "Umeingia, lakini si kama mmiliki wa nodi hii. Kitendo hiki kinahitaji akaunti ya mmiliki (ufikiaji kamili).",
     "oauth": {
       "no_local_identity": "Akaunti hiyo imeingia kwa mafanikio, lakini nodi hii haina utambulisho uliounganishwa nayo. Dai nodi hii kwa akaunti hii, au mwombe mmiliki wa nodi aiunganishe.",
-      "store_unavailable": "Nodi haikuweza kusoma hifadhi yake ya utambulisho, hivyo kuingia hakukukamilika. Hili ni tatizo la nodi, si la akaunti yako."
+      "store_unavailable": "Nodi haikuweza kusoma hifadhi yake ya utambulisho, hivyo kuingia hakukukamilika. Hili ni tatizo la nodi, si la akaunti yako.",
+      "exchange_failed": "Mtoa huduma alikataa ubadilishano wa kuingia, kwa hivyo kuingia hakukukamilika. Jaribu tena; ikiendelea kushindwa, kumbukumbu ya nodi ina jibu la mtoa huduma.",
+      "flow_expired": "Jaribio hili la kuingia limeisha muda wake. Anza upya kutoka skrini ya kuingia.",
+      "malformed_body": "Nodi haikuweza kusoma ombi hilo. Angalia sehemu zake na ujaribu tena.",
+      "native_token_invalid": "Mtoa huduma hakuweza kuthibitisha tokeni hiyo ya kuingia. Ingia tena ili kupata mpya.",
+      "provider_unavailable": "Nodi hii haiwezi kukuingiza kwa kutumia mtoa huduma huyo — hakuna njia hiyo ya kuingia iliyosanidiwa katika toleo hili. Ingia kwa jina la mtumiaji na nenosiri badala yake.",
+      "state_invalid": "hali ya oauth si sahihi au imeisha muda",
+      "unsafe_redirect": "redirect_uri isiyo salama"
     },
     "oauth_link": {
       "already_linked_elsewhere": "Akaunti hiyo tayari imeunganishwa na utambulisho mwingine kwenye nodi hii. Itenganishe huko kwanza — akaunti moja ya mtoa huduma ni ya utambulisho mmoja.",
@@ -3886,6 +3893,30 @@
     "browser_signin": {
       "timed_out": "Kuingia hakukukamilika katika kivinjari, kwa hivyo hakuna kilichobadilishwa. Jaribu tena, au tumia akaunti ya karibu badala yake.",
       "waiting": "Maliza kuingia kwa kutumia Google katika kivinjari chako, kisha urudi hapa."
+    },
+    "claim": {
+      "not_armed": "nodi hii haijaandaliwa kwa dai la matumizi ya kwanza (hakuna PIN ya matumizi moja) — huenda umiliki tayari umedaiwa",
+      "pin_invalid": "PIN ya dai ya matumizi moja si sahihi",
+      "pin_missing": "dai la ROOT la matumizi ya kwanza lazima libebe `claim_pin` (PIN ya matumizi moja inayochapishwa kwenye konsoli ya nodi hii wakati wa kuwasha)"
+    },
+    "login": {
+      "account_inactive": "akaunti haiko hai",
+      "ambiguous_name": "Jina hilo la kuingia ni la akaunti zaidi ya moja kwenye nodi hii, kwa hivyo kuingia nalo kungekuwa ni kubahatisha. Tumia kitambulisho cha akaunti yako badala yake, au muombe mmiliki wa nodi asuluhishe hilo jina lililojirudia.",
+      "invalid_credentials": "vitambulisho si sahihi",
+      "no_password_set": "hakuna nenosiri lililowekwa kwa akaunti hii",
+      "store_unavailable": "Nodi haikuweza kusoma hifadhi yake ya utambulisho, kwa hivyo kuingia hakukukamilika. Hili ni tatizo la nodi, si la akaunti yako."
+    },
+    "self_login": {
+      "malformed_body": "Nodi haikuweza kusoma ombi hilo la kuingia. Angalia sehemu zake na ujaribu tena.",
+      "missing_signature_header": "Ombi la kuingia halina kichwa chake cha sahihi, kwa hivyo nodi haiwezi kuthibitisha ni nani aliyelituma.",
+      "no_directory": "hakuna saraka ya shirikisho",
+      "signature_invalid": "Sahihi ya ombi la kuingia haikuthibitika, kwa hivyo nodi haiwezi kuamini ni nani aliyelituma.",
+      "signer_not_admitted": "mtia sahihi si ufunguo wa utambulisho wala tukio lake lililokubaliwa",
+      "substrate_error": "Substrate ya nodi ilikataa sherehe ya kuingia. Hakuna kilichobadilishwa — angalia kumbukumbu ya nodi ili kujua sababu."
+    },
+    "session": {
+      "invalid_token": "si tokeni ya kipindi iliyotengenezwa na nodi hii — hakuna cha kutoka",
+      "missing_bearer": "tokeni ya bearer haipo au ina muundo mbaya"
     }
   },
   "duty": {
