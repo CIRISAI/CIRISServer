@@ -5349,21 +5349,25 @@ class CIRISApiClient(
     }
 
     /**
-     * Probe the node's structured server health at `/v1/health` (unauthenticated —
+     * Probe the node's MERGED health at `/v1/system/health` (unauthenticated —
      * liveness is public). Returns the [NodeHealth] facts that drive the universal
      * client's node-vs-agent gate ([ai.ciris.mobile.shared.models.ClientMode]) and
      * the version-mismatch banner: the node `version`, its `role`
-     * (`"fabric-node"` for a bare node), and the optional `cognitive_state` (present
-     * only when an agent enriches the endpoint).
+     * (`"fabric-node"` for a bare node), the optional `cognitive_state`, and the
+     * three-state `data.agent.{folded,reachable}` verdict.
      *
-     * `/v1/health` is a SUBSTRATE prefix — served natively by the NODE on :4243 and
-     * never proxied from the brain, and the Python brain on :8080 does not serve it
-     * at all. Callers must therefore pass the NODE base URL; the [baseUrl] default
-     * is kept only for clients already constructed against the node.
+     * `/v1/system/health` (not `/v1/health`) since server 0.5.168 (CIRISServer#390):
+     * that endpoint is the node's own health enriched with the folded brain's
+     * `cognitive_state`/`services` plus `agent.{folded,reachable}` — a strict
+     * superset of `/v1/health` (`version` still arrives for the mismatch banner),
+     * and the ONLY surface where a folded agent does not read as a bare node.
+     * Still served natively by the NODE on :4243; callers must pass the NODE base
+     * URL — the [baseUrl] default is kept only for clients already constructed
+     * against the node.
      */
     suspend fun getNodeHealth(nodeUrl: String = baseUrl): NodeHealth {
         val method = "getNodeHealth"
-        logDebug(method, "Probing node health at $nodeUrl/v1/health")
+        logDebug(method, "Probing node health at $nodeUrl/v1/system/health")
 
         val client = io.ktor.client.HttpClient {
             install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
@@ -5374,7 +5378,7 @@ class CIRISApiClient(
         }
 
         return try {
-            val response = client.get("$nodeUrl/v1/health") {
+            val response = client.get("$nodeUrl/v1/system/health") {
                 authHeader()?.let { header("Authorization", it) }
             }
 
@@ -5382,21 +5386,7 @@ class CIRISApiClient(
                 throw RuntimeException("Node health failed: ${response.status}")
             }
 
-            val body = response.bodyAsText()
-            val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-            val data = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
-
-            val cognitiveState = data?.get("cognitive_state")?.jsonPrimitive?.contentOrNull
-            var serviceCount = 0
-            data?.get("services")?.jsonObject?.forEach { (_, _) -> serviceCount++ }
-
-            NodeHealth(
-                status = data?.get("status")?.jsonPrimitive?.contentOrNull ?: "unknown",
-                role = data?.get("role")?.jsonPrimitive?.contentOrNull,
-                version = data?.get("version")?.jsonPrimitive?.contentOrNull,
-                cognitiveState = cognitiveState,
-                serviceCount = serviceCount
-            )
+            parseNodeHealth(response.bodyAsText())
         } finally {
             client.close()
         }
@@ -12879,18 +12869,58 @@ data class SystemHealthData(
 )
 
 /**
- * Structured server health from `/v1/health` — the facts the universal client's
- * node-vs-agent gate keys off (see [ai.ciris.mobile.shared.models.ClientMode]).
+ * The node's merged health from `/v1/system/health` — the facts the universal
+ * client's node-vs-agent gate keys off (see [ai.ciris.mobile.shared.models.ClientMode]).
  * A bare node reports `role="fabric-node"` with no [cognitiveState] and an empty
- * service map; an agent enriches the endpoint with [cognitiveState] + services.
+ * service map; a folded agent's [cognitiveState] + services are merged over the
+ * node's own health by the server (0.5.168, CIRISServer#390).
+ *
+ * [agentFolded]/[agentReachable] carry the server's THREE-state verdict
+ * (`data.agent.{folded,reachable}`): no brain, brain answering, and brain
+ * attached-but-not-answering are different facts. The defaults are `false` so a
+ * pre-0.5.168 envelope (no `agent` block) parses as "nothing known about a
+ * brain" — the shape the two-arg `clientModeFrom` already handled.
  */
 data class NodeHealth(
     val status: String,
     val role: String?,
     val version: String?,
     val cognitiveState: String?,
-    val serviceCount: Int
+    val serviceCount: Int,
+    val agentFolded: Boolean = false,
+    val agentReachable: Boolean = false
 )
+
+/**
+ * Parse a `/v1/system/health` response body into [NodeHealth]. Pure — split out
+ * of [CIRISApiClient.getNodeHealth] so the wire contract is testable without
+ * Ktor (the DeadmitRefusalWireTest pattern): the Kotlin read is pinned against
+ * the envelopes the Rust side emits (`tests/folded_health.rs`).
+ *
+ * Tolerates a bare object (no `{"data":{…}}` envelope) for the same reason the
+ * server's merge does (`src/health.rs`): being strict over a shape difference
+ * would reintroduce the exact failure this surface exists to close — a real
+ * agent rendered as a bare node.
+ */
+fun parseNodeHealth(body: String): NodeHealth {
+    val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    val root = json.parseToJsonElement(body).jsonObject
+    val data = root["data"]?.jsonObject ?: root
+
+    var serviceCount = 0
+    data["services"]?.jsonObject?.forEach { (_, _) -> serviceCount++ }
+    val agent = data["agent"]?.jsonObject
+
+    return NodeHealth(
+        status = data["status"]?.jsonPrimitive?.contentOrNull ?: "unknown",
+        role = data["role"]?.jsonPrimitive?.contentOrNull,
+        version = data["version"]?.jsonPrimitive?.contentOrNull,
+        cognitiveState = data["cognitive_state"]?.jsonPrimitive?.contentOrNull,
+        serviceCount = serviceCount,
+        agentFolded = agent?.get("folded")?.jsonPrimitive?.booleanOrNull ?: false,
+        agentReachable = agent?.get("reachable")?.jsonPrimitive?.booleanOrNull ?: false
+    )
+}
 
 data class UnifiedTelemetryData(
     val health: String,
