@@ -997,7 +997,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::auth::session::router(Arc::clone(&engine)))
                     // OAuth front-door + native google/apple. The callback base
                     // is the boot-resolved config:* auth.oauth_callback_base_url
-                    // (Server 0.5 — replaces OAUTH_CALLBACK_BASE_URL).
+                    // (Server 0.5). Its default is EMPTY, and the router treats
+                    // empty as "nothing stored" — falling back to
+                    // OAUTH_CALLBACK_BASE_URL in the environment before the
+                    // loopback default. Not a reversal of the config-as-graph
+                    // move: writing this key needs an owner session, which needs
+                    // a sign-in, which is what the key configures, so a fresh
+                    // deployment could never write it (CIRISServer#435).
                     .merge(crate::auth::oauth::router(
                         Arc::clone(&engine),
                         initial_config.oauth_callback_base_url.clone(),

@@ -202,7 +202,21 @@ async fn an_unresolved_node_still_names_its_instance_and_a_stamp_identifies_it()
     // path, the pid and the bound addr; the wire may not.
     let local: serde_json::Value =
         serde_json::from_str(&node_identity::local_json()).expect("local_json parses");
-    assert_eq!(local["home"], "/tmp/deadbeef00c0ffee/ciris-home-410");
+    // Compared against the SAME absolutization the stamp performs, not against
+    // the literal above: `stamp` resolves the path so the fingerprint cannot
+    // vary with the process's cwd, and on Windows that turns `/tmp/...` into
+    // `D:\tmp\...`. Re-stating the POSIX spelling here asserted the test
+    // host's path syntax rather than the property — and failed the whole
+    // windows leg of CI on exactly that.
+    let expected_home = std::path::absolute(home)
+        .unwrap_or_else(|_| home.to_path_buf())
+        .display()
+        .to_string();
+    assert_eq!(
+        local["home"], expected_home,
+        "the local accessor exposes the RESOLVED home path in full — that is \
+         the whole difference between it and the wire block"
+    );
     assert!(local["pid"].is_u64(), "local carries the pid: {local}");
 }
 

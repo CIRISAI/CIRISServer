@@ -98,26 +98,44 @@ struct StubProvider {
     gate: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
+/// The stub answers the way Google does: an ID token arrives in the SAME
+/// response as the access token (CIRISServer#434), so any hop that drops it
+/// between the exchange and the app is visible end-to-end.
 fn ident(sub: &str) -> OAuthIdentity {
     OAuthIdentity {
         provider: "google".to_string(),
         external_id: sub.to_string(),
         email: Some(format!("{sub}@example.com")),
         name: Some(sub.to_string()),
+        id_token: Some(format!("stub-id-token-for-{sub}")),
+    }
+}
+
+/// A provider that issues NO ID token — an OAuth2-only seam like GitHub. The
+/// sign-in must still succeed; absence is a fact about the provider, not a
+/// failure of the flow.
+fn ident_without_id_token(sub: &str) -> OAuthIdentity {
+    OAuthIdentity {
+        id_token: None,
+        ..ident(sub)
     }
 }
 
 #[async_trait::async_trait]
 impl ProviderClient for StubProvider {
+    /// Echoes the `redirect_uri` back, which is what makes the node's resolved
+    /// callback base observable from OUTSIDE the process (CIRISServer#435) —
+    /// exactly as a real provider console sees it, and exactly the value that
+    /// mismatches when the node guessed loopback.
     fn authorize_url(
         &self,
         _provider: &str,
         _client_id: &str,
         state: &str,
-        _redirect_uri: &str,
+        redirect_uri: &str,
         _code_challenge: &str,
     ) -> String {
-        format!("https://stub.invalid/authorize?state={state}")
+        format!("https://stub.invalid/authorize?state={state}&redirect_uri={redirect_uri}")
     }
     async fn exchange_code(
         &self,
@@ -134,6 +152,7 @@ impl ProviderClient for StubProvider {
         }
         match code {
             "ok-owner" => Ok(ident(OWNER_SUB)),
+            "ok-no-id-token" => Ok(ident_without_id_token(OWNER_SUB)),
             "ok-unknown" => Ok(ident("sub-stranger")),
             other => Err(format!(
                 "stub upstream refused code {other:?}: 502 from provider"
@@ -156,11 +175,20 @@ impl ProviderClient for StubProvider {
 
 /// A claimed node's router with the stub seam, provider pre-configured.
 async fn app_with(gate: Option<(Arc<Notify>, Arc<Notify>)>) -> axum::Router {
+    app_with_callback_base(gate, "http://127.0.0.1:4243").await
+}
+
+/// [`app_with`] with the stored `auth.oauth_callback_base_url` chosen by the
+/// caller — `""` is the UNCLAIMED node that has never been able to write one.
+async fn app_with_callback_base(
+    gate: Option<(Arc<Notify>, Arc<Notify>)>,
+    callback_base: &str,
+) -> axum::Router {
     let e = engine().await;
     claimed_owner(&e).await;
     let app = oauth::router_with_client(
         e,
-        "http://127.0.0.1:4243".to_string(),
+        callback_base.to_string(),
         Arc::new(StubProvider { gate }),
     );
     // Configure the provider the way an operator (or the manager) does.
@@ -217,6 +245,28 @@ async fn start_flow(app: &axum::Router, query: &str) -> String {
         .split('&')
         .next()
         .expect("state value")
+        .to_string()
+}
+
+/// [`start_flow`] but returning the WHOLE authorize URL — the redirect_uri the
+/// provider is handed is the subject of the #435 test, not just the state.
+async fn start_flow_url(app: &axum::Router, query: &str) -> String {
+    let r = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/auth/oauth/google/login{query}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("login call");
+    assert_eq!(r.status(), StatusCode::TEMPORARY_REDIRECT);
+    r.headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .expect("authorize redirect")
         .to_string()
 }
 
@@ -379,6 +429,144 @@ async fn a_callback_success_is_a_page_and_the_handoff_completes() {
     assert!(
         v.get("access_token").is_some_and(|x| x.is_string()),
         "the flattened session payload, exactly as before the status member"
+    );
+}
+
+/// **The ID token survives every hop from the provider to the app**
+/// (CIRISServer#434).
+///
+/// The desktop client cannot see the provider's response — its only view is
+/// the hand-off. So CIRIS_PROXY, whose `api_key` IS a Google ID token, told
+/// users signed in with Google that Google sign-in was required, and the mode
+/// could not be selected at all. The native clients were fine because they
+/// supply the ID token themselves as the login credential.
+///
+/// Driven END TO END deliberately. A struct-level check passes while any
+/// middle hop drops the field — verified: nulling it in `resolve_login` left
+/// the serialization test green, and only this test caught it. Same lesson
+/// this file's `serde_json::to_value(&p)` assertion already recorded.
+#[tokio::test]
+async fn the_id_token_reaches_the_app_through_the_whole_browser_flow() {
+    let app = app_with(None).await;
+    let state = start_flow(&app, "?app_nonce=n-idtok").await;
+
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-owner", &state, None))
+        .await
+        .expect("callback");
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let v = body_json(
+        app.clone()
+            .oneshot(handoff_req("n-idtok"))
+            .await
+            .expect("handoff poll"),
+    )
+    .await;
+    assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("complete"));
+    assert_eq!(
+        v.get("id_token").and_then(|x| x.as_str()),
+        Some(format!("stub-id-token-for-{OWNER_SUB}").as_str()),
+        "the ID token the provider issued must reach the app VERBATIM — it is \
+         a signed credential, so any hop that re-encodes or drops it breaks \
+         desktop CIRIS_PROXY"
+    );
+    // It rides ALONGSIDE the session, not instead of it.
+    assert!(
+        v.get("access_token").is_some_and(|x| x.is_string()),
+        "the flattened session grant is unchanged"
+    );
+}
+
+/// A provider that issues no ID token still signs the user in, and the key is
+/// ABSENT rather than null or empty (CIRISServer#434).
+///
+/// The distinct-zero half: a client must be able to tell "this provider issues
+/// none" from "one arrived and was empty".
+#[tokio::test]
+async fn a_provider_with_no_id_token_still_signs_in_and_omits_the_key() {
+    let app = app_with(None).await;
+    let state = start_flow(&app, "?app_nonce=n-noid").await;
+
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-no-id-token", &state, None))
+        .await
+        .expect("callback");
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "no ID token is not a sign-in failure"
+    );
+
+    let v = body_json(
+        app.clone()
+            .oneshot(handoff_req("n-noid"))
+            .await
+            .expect("handoff poll"),
+    )
+    .await;
+    assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("complete"));
+    assert!(
+        v.get("access_token").is_some_and(|x| x.is_string()),
+        "the session is issued regardless"
+    );
+    assert!(
+        v.get("id_token").is_none(),
+        "absent, never null and never empty string — got {v:?}"
+    );
+}
+
+/// **What the provider is actually told the callback is** (CIRISServer#435).
+///
+/// A fresh deployment could not write `auth.oauth_callback_base_url`: doing so
+/// needs an owner session, getting an owner session needs signing in, and
+/// signing in is what the key configures. The node fell back to
+/// `127.0.0.1:4243`, no provider console has that registered, and the flow died
+/// at the provider with `redirect_uri_mismatch`.
+///
+/// Asserted through the AUTHORIZE REDIRECT because that is where the value
+/// leaves the node — the same string the provider compares against its
+/// allow-list. A test of the resolver alone leaves the wiring uncovered
+/// (verified: making env beat stored config passed every other test here).
+#[tokio::test]
+async fn the_callback_base_reaching_the_provider_prefers_config_then_env() {
+    fn clear() {
+        std::env::remove_var("CIRIS_OAUTH_CALLBACK_BASE_URL");
+        std::env::remove_var("OAUTH_CALLBACK_BASE_URL");
+    }
+    // Serialized in one test: these mutate PROCESS environment, and the other
+    // tests in this binary run on sibling threads.
+    clear();
+
+    // A node with a STORED value ignores the environment completely. An
+    // operator who set this at runtime meant it, and a stale deployment
+    // variable must never silently override them.
+    std::env::set_var("CIRIS_OAUTH_CALLBACK_BASE_URL", "https://env.example");
+    let app = app_with_callback_base(None, "https://stored.example").await;
+    let url = start_flow_url(&app, "?app_nonce=n-cfg").await;
+    assert!(
+        url.contains("redirect_uri=https://stored.example/"),
+        "stored config must win over the environment, got {url}"
+    );
+
+    // The boot hole: nothing stored — the deployment's declaration is used
+    // instead of a loopback address no provider console has ever seen.
+    let app = app_with_callback_base(None, "").await;
+    let url = start_flow_url(&app, "?app_nonce=n-env").await;
+    assert!(
+        url.contains("redirect_uri=https://env.example/"),
+        "an unclaimed node must use the declared base, got {url}"
+    );
+
+    // Nothing stored and nothing declared: the loopback default, unchanged.
+    clear();
+    let app = app_with_callback_base(None, "").await;
+    let url = start_flow_url(&app, "?app_nonce=n-def").await;
+    assert!(
+        url.contains("redirect_uri=http://127.0.0.1:4243/"),
+        "the last-resort default is unchanged for local development, got {url}"
     );
 }
 

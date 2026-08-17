@@ -375,6 +375,9 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
         external_id: "108423319902184623111".to_string(),
         email: Some("eric@ciris.ai".to_string()),
         name: Some("Eric".to_string()),
+        // Remote claim binds an identity; it never forwards a provider token
+        // (CIRISServer#434 is the desktop hand-off, a different surface).
+        id_token: None,
     };
 
     let result = claim_remote::claim_remote(
