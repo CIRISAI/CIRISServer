@@ -139,6 +139,48 @@ async fn an_unreachable_brain_is_distinguished_from_no_brain() {
     );
 }
 
+/// **The brain cannot rename the node** (CIRISServer#410). The `node` block is
+/// the port's own name — the thing a bind-collision probe trusts to decide
+/// which process to kill — so a folded brain that ships its own `node` (or a
+/// stray `key_id`) must not overwrite it. The merge is an allow-list of
+/// cognitive fields; this pins that `node` never joins it.
+#[tokio::test]
+async fn a_folded_brain_cannot_overwrite_the_nodes_own_name() {
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": {
+            "status": "ok",
+            "cognitive_state": "WORK",
+            "node": {
+                "standing": "identified",
+                "instance_id": "brain-forged-instance",
+                "key_id": "brain-forged-key",
+            },
+            "key_id": "brain-forged-key",
+        }
+    }))
+    .await;
+
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+
+    // The brain's cognitive half still merges…
+    assert_eq!(v["data"]["cognitive_state"], "WORK");
+    // …but the node's own name survives: the served instance_id is THIS
+    // process's, not the brain's forgery.
+    assert_eq!(
+        v["data"]["node"]["instance_id"],
+        ciris_server::node_identity::instance_id(),
+        "a folded brain must not be able to rename the node: {v}"
+    );
+    assert_ne!(v["data"]["node"]["instance_id"], "brain-forged-instance");
+    assert_ne!(v["data"]["node"]["key_id"], "brain-forged-key");
+    // And the brain's stray top-level key_id does not ride in beside it.
+    assert!(
+        v["data"]["key_id"].is_null(),
+        "no brain key_id may join the node's health envelope: {v}"
+    );
+    h.abort();
+}
+
 /// A brain that answers a BARE object rather than the `{"data":{…}}` envelope
 /// still contributes. Being strict here would reintroduce the same outcome —
 /// a real agent rendered as a bare node — over a shape difference.

@@ -287,6 +287,14 @@ pub mod mesh_relay;
 /// In-process node lifecycle control — the `shutdown_node()` stop handle that
 /// frees `:4243` deterministically on an embedded-fold restart (CIRISServer#276).
 pub mod node_control;
+/// **The node's self-name** (CIRISServer#410): a per-process `instance_id`
+/// (minted lazily, so it exists for the health poll that races a failing
+/// compose) + the stamped key/home identity, served as the `node` block on
+/// every health route so a held port can be ASKED who holds it — plus the pure
+/// four-way port-holder verdict a launcher mirrors. The full home path never
+/// rides the wire; the in-process accessor (`ciris_server.node_identity()`)
+/// carries the superset.
+pub mod node_identity;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the
@@ -2140,6 +2148,20 @@ mod python {
         crate::compose_status::snapshot_json()
     }
 
+    /// In-process node self-name (CIRISServer#410). Returns a JSON string: the
+    /// wire `node` block (`standing`, `instance_id`, `started_at`, `key_id`,
+    /// `home_id`) plus the LOCAL-ONLY superset — `pid`, the FULL `home` path
+    /// and `bound_addr`. The superset stays in-process because the wire block
+    /// is served on `0.0.0.0` and the home path leaks the OS username; an
+    /// embedding host that owns the process may see all of it. Callable at any
+    /// time from any thread (the instance id mints on first read, so this
+    /// answers even while — or after — compose fails).
+    #[pyfunction]
+    #[pyo3(name = "node_identity")]
+    fn py_node_identity() -> String {
+        crate::node_identity::local_json()
+    }
+
     /// `ciris_server.shutdown_node(timeout_secs=30.0)` — stop the node started by
     /// `serve_with_python_adapter` and DON'T return until `:4243` is bindable
     /// again (CIRISServer#276). The embedded fold's clean-restart primitive:
@@ -2243,6 +2265,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_node_identity, m)?)?;
         m.add_function(wrap_pyfunction!(py_shutdown_node, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
