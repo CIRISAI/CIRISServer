@@ -71,12 +71,18 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 
 // ─────────────────────────── persist: envelope vocabulary ──────────────────
 
-/// persist v21 (`ciris_persist::federation::envelope`) — the wire
-/// envelope-vocabulary hash (the 15 EnvelopeKind names + their claim shape).
+/// persist v36.1.0 (`ciris_persist::federation::envelope`) — the wire
+/// envelope-vocabulary hash (the EnvelopeKind names + their claim shape).
 /// Flips when a wire kind is added/renamed/reshaped. A silent change would
 /// desync producers and readers across the triple → reviewed re-pin only.
+///
+/// Re-pinned at the v36 adopt: v36.0.0 (#642) added `consent_supersedes` to the
+/// signed envelope, making consent ordering CAUSAL instead of resting on a
+/// producer-chosen wall clock. Reviewed and accepted — the key lives only inside
+/// the signed envelope, so it has no unsigned column twin to diverge from, which
+/// is why persist shipped it with no migration.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "1213fd3cf3109df92805cb1f6b0e39ae7637812b4fba23206a7860ba381107b2";
+    "c159bc2ec76176c8573b24b4052c5f0b93e3dae75d615f2d221c1f460a2d7cac";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 

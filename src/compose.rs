@@ -3392,6 +3392,35 @@ async fn build_edge(
         // into leviculum's valid band edge-side; an override can't escape the
         // DoS bound.)
         link_keepalive: Some(std::time::Duration::from_secs(30)),
+        // CIRISEdge#492 (v17.5.0) — legacy-path posture. `interfaces` is empty
+        // above, so the legacy `listen_addr` + `bootstrap_peers` path is what
+        // runs and these two govern it.
+        //
+        // Both `None` = pre-v17.5.0 behaviour, unchanged. A substrate adopt is
+        // the wrong place to move a fabric node's network posture.
+        //
+        // `ifac: None` at THIS layer. Not "no IFAC" as a policy — the member-only
+        // posture and its rotating PQC passphrase are EDGE's to hold
+        // (CIRISEdge#492 + persist v34's `key_grant` TransitMembership scope,
+        // rotated by supersession). The composition root declaring an IFAC here
+        // would be a second place that decides who may transit, competing with
+        // the layer that actually distributes the material — and a passphrase
+        // spelled in two places is the shape this codebase keeps paying for.
+        //
+        // Contrast the lens relay, which sets `transit: Some(false)`: that is a
+        // node declaring it relays for NOBODY, which is its own fact to state.
+        // Whom we relay FOR is edge's.
+        ifac: None,
+        // `transit: None` = leviculum's default (relay-by-default). Relay stays
+        // ON here deliberately: this node IS the NAT-traversal infra, and a
+        // mobile edge holding one outbound link to 0.0.0.0:4242 gets its inbound
+        // routed back down that link only because this port carries transit.
+        // `Some(false)` would silently strand every NAT'd peer.
+        //
+        // Distinct from `enable_transport` above — that is the node-wide
+        // Transport-node mode; this is the legacy path's relay posture. Two axes,
+        // not one knob spelled twice.
+        transit: None,
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The

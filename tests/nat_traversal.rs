@@ -61,6 +61,15 @@ fn transport_node_flag_maps_into_reticulum_config() {
         interfaces: vec![],
         enable_transport: enabled,
         link_keepalive: Some(Duration::from_secs(30)), // CIRISEdge#363
+        // CIRISEdge#492 — mirror the composition root (`compose.rs`): the
+        // fabric node leaves both legacy-path knobs at their defaults, so this
+        // fixture must too. `transit: Some(false)` here would make the fixture
+        // describe a LEAF port while the test's whole subject is packet
+        // FORWARDING, and it would stop matching the config `build_edge`
+        // actually constructs — which is the one thing this test exists to
+        // check.
+        ifac: None,
+        transit: None,
     };
 
     assert!(

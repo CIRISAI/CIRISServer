@@ -935,8 +935,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "17.4.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v17.4.1#abee3686e2ee5f52282619f5fbce7771d126544a"
+version = "17.7.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v17.7.0#fca5d5ec80c482bb54c6a4eacbea2f6d3d496b3e"
 dependencies = [
  "async-trait",
  "axum",
@@ -1056,8 +1056,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "32.3.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v32.3.0#5d1cd36e3d9fd8131cfc38ff4b023667a8d42b6d"
+version = "36.1.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v36.1.0#d991a8a1a1b4fe681e8aee38d7b1d7a2b74479be"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3584,8 +3584,8 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviculum-core"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.18.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.18.0%2Bciris.1#ea2ceff213a1332202230ac3eb0d133e655d4ded"
 dependencies = [
  "aes",
  "cbc",
@@ -3602,8 +3602,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.18.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.18.0%2Bciris.1#ea2ceff213a1332202230ac3eb0d133e655d4ded"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -3613,10 +3613,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.18.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.18.0%2Bciris.1#ea2ceff213a1332202230ac3eb0d133e655d4ded"
 dependencies = [
  "clap 4.6.6",
+ "futures",
  "hmac 0.12.1",
  "if-addrs",
  "leviculum-core",

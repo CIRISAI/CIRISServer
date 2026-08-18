@@ -143,6 +143,38 @@ impl LensCore {
             // CIRISEdge#363: 30s bootstrap link keepalive so links survive the
             // Key/IdentityOccurrence anti-entropy exchange (clamped edge-side).
             link_keepalive: Some(std::time::Duration::from_secs(30)),
+            // CIRISEdge#492 (v17.5.0) — the two legacy-path posture knobs. This
+            // relay uses the legacy path (`interfaces` is empty), so both apply.
+            //
+            // `None` on each reproduces pre-v17.5.0 behaviour EXACTLY, which is
+            // what an adopt should do: a substrate re-pin must not silently move
+            // a node's network posture. Both are deliberate opt-ins.
+            //
+            // `ifac: None` = an OPEN port. Not an oversight — turning IFAC on
+            // means a member-only port, and the passphrase for it is supposed to
+            // arrive through persist's `key_grant` TransitMembership scope. This
+            // repo has ZERO call sites for that surface, so enabling IFAC today
+            // would mean an operator distributing a shared secret by hand — the
+            // stopgap #492 exists to REPLACE. It becomes correct once we consume
+            // the grant surface, and that is its own cut.
+            ifac: None,
+            // `transit: Some(false)` — a DECLARED leaf port. Relay transport is
+            // limited to CIRIS peers as of this release, and a lens relay is not
+            // the CIRIS fabric node: it terminates traffic for its own role and
+            // relays for nobody.
+            //
+            // This is a posture decision made deliberately alongside the adopt,
+            // not a mechanical consequence of it. Before v17.5.0 the legacy path
+            // took leviculum's relay-by-default, so `enable_transport: false`
+            // above declared a leaf node whose port would still carry transit for
+            // strangers — the declaration and the behaviour disagreed, and only
+            // the arrival of this field made the gap expressible.
+            //
+            // `Some(false)` is not the same as the `None` default: a declared
+            // non-transit port never rebroadcasts announces and DROPS any relay
+            // crossing it, so peers stop building paths that expect transit here
+            // rather than building them and having them fail.
+            transit: Some(false),
         };
 
         // Auth bundle — wire the federation signer into the authenticated

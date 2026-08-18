@@ -434,16 +434,48 @@ async fn gather_delivery_status(
                                 let authority = ns::registry::authority_for(dim).class;
                                 let is_tombstone =
                                     ns::is_withdraw_or_revocation(&a.attestation_type);
-                                let proj =
-                                    ns::projection_for(&a.cohort_scope, authority, is_tombstone);
+                                // persist v35 added the PLANE, v36 decomposed the
+                                // Attestation plane per dimension family. These
+                                // rows are attestations, and `dim` is already in
+                                // hand for `authority_for` above — so the plane
+                                // costs no new read, which is what persist's
+                                // inventory predicted for this site.
+                                //
+                                // Adopted straight to v36 rather than through v35
+                                // first: at v35 the Attestation row was DEFERRED
+                                // to pre-#713 behaviour, so a v35-only rewrite
+                                // here would have been pure spelling that looked
+                                // behavioural — teaching the next reader that the
+                                // site had been re-verified when nothing about
+                                // its answers had changed.
+                                let proj = ns::projection_for(
+                                    ns::Plane::Attestation { dimension: dim },
+                                    &a.cohort_scope,
+                                    authority,
+                                    is_tombstone,
+                                );
                                 // Edge's publish-own arm: SelfOwn advertises iff
                                 // the producer is in the node's OWN self-set.
                                 // These rows came from `list_attestations_by(node)`,
                                 // so the producer IS this node — hence SelfOwn
                                 // here is ADVERTISED, not withheld.
+                                //
+                                // v36's two new audience kinds are reported, never
+                                // guessed. `Capability` gates on a token this
+                                // surface cannot resolve (it has no peer in hand —
+                                // it is describing OUR OWN rows), and `Subject`
+                                // gates on the row's subject set. Answering either
+                                // with a bare true/false here would be exactly the
+                                // parallel-predicate drift the comment above this
+                                // block was written about, so they fall out of the
+                                // advertised count and are surfaced by name in
+                                // `by_projection` instead.
                                 let advertised = match proj {
                                     ns::Projection::Global | ns::Projection::Cohort => true,
                                     ns::Projection::SelfOwn => a.attesting_key_id == node,
+                                    ns::Projection::Capability(_) | ns::Projection::Subject => {
+                                        false
+                                    }
                                 };
                                 *by_projection
                                     .entry(format!(
