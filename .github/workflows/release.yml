@@ -223,8 +223,27 @@ jobs:
       # cross-compiled artifact cannot be executed on the runner. One lane
       # proving the surface is enough: the handler is target-independent, and a
       # lane that cannot run the check says so rather than pretending.
+      # REPORT-ONLY FOR NOW — deliberately, and this is why.
+      #
+      # v1 of this gate FAILED the 0.5.179 release on a bug of its own: it
+      # discovered the port by grepping a block-buffered log that stays empty
+      # while the node lives, so it timed out on a healthy artifact. Its happy
+      # path had never once executed, and it was wired to block the build
+      # anyway. That cost a release and answered nothing.
+      #
+      # v2 has all four of its branches exercised (happy, assertions-bite,
+      # stranger-on-port, boot-death) — but ONE branch still cannot be tested
+      # off-CI: a real binary booting and serving, because the dev host's ports
+      # are held. Blocking a release on a branch that has never run is exactly
+      # the mistake that produced 0.5.179.
+      #
+      # So it REPORTS here and does not block. Its job this release is to
+      # ANSWER the question that started this — does the shipped artifact serve
+      # web_signin and managed? — which the log answers either way. Flip
+      # continue-on-error off once it has come up green on a real boot.
       - name: Verify the artifact serves its documented surface (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux'
+        continue-on-error: true
         shell: bash
         run: |
           chmod +x stage/ciris-server
