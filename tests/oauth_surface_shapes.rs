@@ -725,12 +725,12 @@ async fn the_providers_endpoint_states_the_nodes_deployment_shape() {
         Some(true),
         "a page needs to know whether the browser flow is served at all"
     );
-    // A BARE ORIGIN is a direct node. scout is hosted but not path-prefixed,
-    // and the hostname literal got exactly this case wrong.
-    assert_eq!(
-        v.get("managed").and_then(|x| x.as_bool()),
-        Some(false),
-        "a bare origin is a direct node, however it is hosted: {v:?}"
+    // `managed` is stated, and it is an AUTH-POLICY fact — whether this node
+    // admits MULTIPLE logins — not a statement about its URL. See the
+    // dedicated test below for the property that matters.
+    assert!(
+        v.get("managed").is_some_and(|x| x.is_boolean()),
+        "the node must state its managed posture: {v:?}"
     );
     assert_eq!(
         v.get("exchange_query_key").and_then(|x| x.as_str()),
@@ -739,48 +739,22 @@ async fn the_providers_endpoint_states_the_nodes_deployment_shape() {
     );
 }
 
-/// A path-prefixed gateway IS managed — derived from the routing value, never
-/// from a hostname.
+/// **`managed` is an AUTH-POLICY fact and must NOT move with the URL** (#439).
+///
+/// A first draft derived it from whether the callback base carried a path — a
+/// ROUTING question wearing the name of a policy one, which is this repo's own
+/// axis-fusion class. `managed` means the deployment admits MULTIPLE logins:
+/// CIRIS Manager provisions people ahead of time, so a stranger signing in gets
+/// an observer default rather than the `NoLocalIdentity` refusal a personal
+/// node gives. scout is managed because it allows many users, not because of
+/// how it is addressed.
+///
+/// So the property under test is an INDEPENDENCE, not a value: four callback
+/// bases of deliberately different shapes must all report the SAME posture,
+/// because none of them says anything about who may log in. The path-derived
+/// draft fails this — it answers true for two of them and false for two.
 #[tokio::test]
-async fn a_path_prefixed_callback_base_reads_as_managed() {
-    let app = app_with_callback_base(None, "https://agents.ciris.ai/api/scout").await;
-    let v = body_json(
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/oauth/providers")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("providers"),
-    )
-    .await;
-    assert_eq!(
-        v.get("managed").and_then(|x| x.as_bool()),
-        Some(true),
-        "a path-prefixed base is a gateway deployment: {v:?}"
-    );
-}
-
-/// **`managed` is DERIVED, and these are the cases that prove it** (#439).
-///
-/// Written after a mutation survived. Reverting the derivation to the old
-/// hostname literal — `callback_base.contains("agents.ciris.ai")` — passed both
-/// earlier assertions, because a bare origin (not managed) and
-/// `agents.ciris.ai/api/scout` (prefixed, managed) happen to agree with the
-/// literal. A gate whose cases agree with the thing it replaced tests nothing.
-///
-/// These two disagree in opposite directions, so no hostname literal can pass
-/// both:
-///
-/// | callback base | derived | `contains("agents.ciris.ai")` |
-/// |---|---|---|
-/// | `https://gateway.example.com/api/scout` | managed | NOT managed |
-/// | `https://agents.ciris.ai` (bare) | NOT managed | managed |
-#[tokio::test]
-async fn managed_is_derived_from_the_route_not_from_a_hostname() {
+async fn managed_is_an_auth_policy_and_does_not_move_with_the_callback_base() {
     async fn managed_for(base: &str) -> bool {
         let app = app_with_callback_base(None, base).await;
         let v = body_json(
@@ -801,16 +775,28 @@ async fn managed_is_derived_from_the_route_not_from_a_hostname() {
             .expect("managed is stated")
     }
 
-    // A gateway that is NOT the literal, but IS path-prefixed.
-    assert!(
-        managed_for("https://gateway.example.com/api/scout").await,
-        "a path-prefixed deployment is managed whatever its hostname — this is \
-         the case the literal got wrong for every node except one"
+    let bare = managed_for("https://node.example").await;
+    let prefixed = managed_for("https://gateway.example/api/scout").await;
+    let loopback = managed_for("http://127.0.0.1:4243").await;
+    let deep = managed_for("https://gateway.example/a/b/c").await;
+
+    assert_eq!(
+        [bare, prefixed, loopback, deep],
+        [bare; 4],
+        "managed moved with the callback base — it is a statement about who may \
+         LOG IN, and a URL says nothing about that. (bare={bare}, \
+         prefixed={prefixed}, loopback={loopback}, deep={deep})"
     );
-    // The literal's own hostname, served BARE — a direct node.
+
+    // And it is the SAME predicate the admission gate uses, so what a client is
+    // told cannot drift from what the node does. Under the test harness no
+    // managed indicator is present, so this is the personal-node answer.
     assert!(
-        !managed_for("https://agents.ciris.ai").await,
-        "a bare origin is a direct node even at the hostname the literal named"
+        !bare,
+        "a test process is not a managed deployment — if this flips, \
+         `deployment::is_managed()` has started reading something the harness \
+         happens to satisfy, and every client would be told a node admits \
+         strangers when it refuses them"
     );
 }
 

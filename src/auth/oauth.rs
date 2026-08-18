@@ -1585,27 +1585,29 @@ async fn list_providers(State(st): State<OAuthState>) -> Response {
             })
             .collect()
     };
-    // THE NODE STATES ITS OWN DEPLOYMENT SHAPE (CIRISServer#439).
+    // THE NODE STATES ITS OWN DEPLOYMENT FACTS (CIRISServer#439).
     //
     // CIRISGUI decided whether it was talking to a managed deployment with
     // `window.location.hostname === 'agents.ciris.ai'` — a hostname literal in
     // the client. Every other hosted node, scout included, was therefore
-    // classified unmanaged and had its API base URL built wrong.
+    // classified unmanaged. A client cannot derive this; the node can, and now
+    // says so.
     //
-    // A client cannot derive this. The node can: it knows its callback base at
-    // boot and already prints it. So it says so here, and the client reads a
-    // fact instead of pattern-matching a string it had to be told in advance.
-    // Same shape as the #410 lesson — a surface that cannot answer a question
-    // forces the caller to guess, and the guess is what breaks on the node that
-    // was not in the literal.
+    // **`managed` is an AUTH-POLICY fact, not a routing one.** A managed
+    // deployment is one that admits MULTIPLE logins — CIRIS Manager provisions
+    // people ahead of time, so a stranger signing in gets an observer default
+    // instead of a refusal. A personal node has one owner and refuses the rest
+    // (`NoLocalIdentity`, `resolve_oauth_user` above).
+    //
+    // A first draft of this endpoint derived `managed` from whether the
+    // callback base carried a PATH — a routing question wearing the name of a
+    // policy one. That is this repo's own axis-fusion class: one name, two
+    // questions, and the answer right for neither. `deployment::is_managed()`
+    // is the SAME predicate `resolve_oauth_user` gates admission on, so what a
+    // client is told here cannot drift from what the node actually does — the
+    // whole point of the node answering instead of the client guessing.
+    let managed = crate::deployment::is_managed();
     let callback_base = st.callback_base().await;
-    // MANAGED means "reached through a path-prefixed gateway", which is exactly
-    // what a callback base carrying a path says. A bare origin is a direct
-    // node. Derived from the value that actually routes, never from a hostname.
-    let managed = callback_base
-        .split("://")
-        .nth(1)
-        .is_some_and(|rest| rest.contains('/'));
     (
         StatusCode::OK,
         Json(serde_json::json!({
