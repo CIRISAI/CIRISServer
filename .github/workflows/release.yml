@@ -207,6 +207,29 @@ jobs:
           if [ "${{ runner.os }}" != "Windows" ]; then strip "$BIN" || true; fi
           cp "$BIN" stage/
 
+      # ASK THE ARTIFACT WHAT IT SERVES, before anyone can install it
+      # (CIRISServer#439).
+      #
+      # 0.5.178 published, and then an afternoon went into arguing whether the
+      # binary contained `web_signin` — one side running `strings` on the
+      # release asset, the other on a local rebuild, both reasoning from a proxy
+      # because nothing could answer the only question that mattered: what does
+      # the shipped thing actually return? This workflow built, stripped,
+      # signed, uploaded and published without once asking its own output to
+      # respond.
+      #
+      # Runs on the STAGED, STRIPPED binary — the exact bytes that get uploaded,
+      # not the pre-strip one — and only on the native linux target, because a
+      # cross-compiled artifact cannot be executed on the runner. One lane
+      # proving the surface is enough: the handler is target-independent, and a
+      # lane that cannot run the check says so rather than pretending.
+      - name: Verify the artifact serves its documented surface (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x stage/ciris-server
+          ./scripts/verify_release_surface.sh stage/ciris-server
+
       - uses: actions/upload-artifact@v4
         with:
           name: ciris-server-${{ matrix.target }}
