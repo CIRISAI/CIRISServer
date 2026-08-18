@@ -570,6 +570,250 @@ async fn the_callback_base_reaching_the_provider_prefers_config_then_env() {
     );
 }
 
+/// **A WEB sign-in comes back with something the page can redeem**
+/// (CIRISServer#439).
+///
+/// The web branch used to redirect to the destination carrying NOTHING. The
+/// sign-in had succeeded and the session was parked on a loopback-only route a
+/// remote browser cannot reach, so the page saw no token and no `error` — and
+/// CIRISGUI's bare `else` reported `oauth_failed` on a SUCCESSFUL sign-in.
+/// "No session came back" and "the provider refused" were one branch.
+///
+/// What this must NOT become is the old contract. A live bearer in the redirect
+/// lands in history, in `Referer`, and in every proxy log on the path, which is
+/// why it was removed. So the assertions below are two-sided: a code IS
+/// present, and the session is NOT.
+#[tokio::test]
+async fn a_web_signin_redirect_carries_a_redemption_code_and_never_the_session() {
+    let app = app_with(None).await;
+    let state = start_flow(&app, "?app_nonce=n-web&redirect_uri=/dashboard").await;
+
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-owner", &state, None))
+        .await
+        .expect("callback");
+    assert_eq!(r.status(), StatusCode::SEE_OTHER, "D3: 303 to the page");
+    let loc = r
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .expect("redirect location")
+        .to_string();
+
+    assert!(
+        loc.starts_with("/dashboard"),
+        "still the caller's own destination: {loc}"
+    );
+    assert!(
+        loc.contains("ciris_code="),
+        "the page must receive a redemption code or it cannot tell success from \
+         refusal — that is the whole defect: {loc}"
+    );
+    // THE HALF THAT MUST NEVER REGRESS.
+    for forbidden in ["access_token", "token_type", "user_id=", "sess:"] {
+        assert!(
+            !loc.contains(forbidden),
+            "`{forbidden}` is back in the redirect URL — a bearer in a URL is \
+             the unsafe contract this replaced: {loc}"
+        );
+    }
+
+    // Redeem it: the session arrives in the BODY, once.
+    let code = loc
+        .split("ciris_code=")
+        .nth(1)
+        .expect("code present")
+        .split('&')
+        .next()
+        .expect("code value")
+        .to_string();
+    let ex = |c: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/auth/oauth/exchange")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"code":"{c}"}}"#)))
+            .expect("request")
+    };
+
+    let first = app.clone().oneshot(ex(&code)).await.expect("exchange");
+    assert_eq!(first.status(), StatusCode::OK);
+    let v = body_json(first).await;
+    assert!(
+        v.get("access_token").is_some_and(|x| x.is_string()),
+        "the session rides the BODY: {v:?}"
+    );
+    assert_eq!(v.get("provider").and_then(|x| x.as_str()), Some("google"));
+
+    // ONE redemption. A code recovered from history later is spent.
+    let second = app
+        .clone()
+        .oneshot(ex(&code))
+        .await
+        .expect("exchange again");
+    assert_eq!(
+        second.status(),
+        StatusCode::UNAUTHORIZED,
+        "a redeemed code must not issue a second session"
+    );
+    let v2 = body_json(second).await;
+    assert_eq!(
+        v2.get("reason_id").and_then(|x| x.as_str()),
+        Some("auth.oauth.exchange_code_invalid")
+    );
+}
+
+/// An unknown code and a spent code are the SAME refusal — telling them apart
+/// confirms a real code to whoever is probing, and no page can act on it.
+#[tokio::test]
+async fn an_unknown_exchange_code_is_refused_indistinguishably() {
+    let app = app_with(None).await;
+    let r = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/oauth/exchange")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"code":"never-existed"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("exchange");
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let v = body_json(r).await;
+    assert_eq!(
+        v.get("reason_id").and_then(|x| x.as_str()),
+        Some("auth.oauth.exchange_code_invalid"),
+        "same id as a SPENT code — see the other test: {v:?}"
+    );
+}
+
+/// **The node states its deployment shape** (CIRISServer#439 finding 2).
+///
+/// CIRISGUI decided "managed" with `hostname === 'agents.ciris.ai'`, so every
+/// other hosted node — scout included — was classified unmanaged and built its
+/// API base URL wrong. A client cannot derive this; the node knows it at boot.
+#[tokio::test]
+async fn the_providers_endpoint_states_the_nodes_deployment_shape() {
+    // A bare origin. Deliberately NOT a real deployment's hostname: this
+    // asserts the SHAPE rule, and naming a live host here would read as a claim
+    // about how that host is actually deployed.
+    let app = app_with_callback_base(None, "https://node.example").await;
+    let v = body_json(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/oauth/providers")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("providers"),
+    )
+    .await;
+
+    assert_eq!(
+        v.get("callback_base").and_then(|x| x.as_str()),
+        Some("https://node.example"),
+        "the node must state the base its redirects resolve against: {v:?}"
+    );
+    assert_eq!(
+        v.get("web_signin").and_then(|x| x.as_bool()),
+        Some(true),
+        "a page needs to know whether the browser flow is served at all"
+    );
+    // A BARE ORIGIN is a direct node. scout is hosted but not path-prefixed,
+    // and the hostname literal got exactly this case wrong.
+    assert_eq!(
+        v.get("managed").and_then(|x| x.as_bool()),
+        Some(false),
+        "a bare origin is a direct node, however it is hosted: {v:?}"
+    );
+    assert_eq!(
+        v.get("exchange_query_key").and_then(|x| x.as_str()),
+        Some("ciris_code"),
+        "the key is read from the node, not spelled a second time in the client"
+    );
+}
+
+/// A path-prefixed gateway IS managed — derived from the routing value, never
+/// from a hostname.
+#[tokio::test]
+async fn a_path_prefixed_callback_base_reads_as_managed() {
+    let app = app_with_callback_base(None, "https://agents.ciris.ai/api/scout").await;
+    let v = body_json(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/oauth/providers")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("providers"),
+    )
+    .await;
+    assert_eq!(
+        v.get("managed").and_then(|x| x.as_bool()),
+        Some(true),
+        "a path-prefixed base is a gateway deployment: {v:?}"
+    );
+}
+
+/// **`managed` is DERIVED, and these are the cases that prove it** (#439).
+///
+/// Written after a mutation survived. Reverting the derivation to the old
+/// hostname literal — `callback_base.contains("agents.ciris.ai")` — passed both
+/// earlier assertions, because a bare origin (not managed) and
+/// `agents.ciris.ai/api/scout` (prefixed, managed) happen to agree with the
+/// literal. A gate whose cases agree with the thing it replaced tests nothing.
+///
+/// These two disagree in opposite directions, so no hostname literal can pass
+/// both:
+///
+/// | callback base | derived | `contains("agents.ciris.ai")` |
+/// |---|---|---|
+/// | `https://gateway.example.com/api/scout` | managed | NOT managed |
+/// | `https://agents.ciris.ai` (bare) | NOT managed | managed |
+#[tokio::test]
+async fn managed_is_derived_from_the_route_not_from_a_hostname() {
+    async fn managed_for(base: &str) -> bool {
+        let app = app_with_callback_base(None, base).await;
+        let v = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/v1/auth/oauth/providers")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("providers"),
+        )
+        .await;
+        v.get("managed")
+            .and_then(|x| x.as_bool())
+            .expect("managed is stated")
+    }
+
+    // A gateway that is NOT the literal, but IS path-prefixed.
+    assert!(
+        managed_for("https://gateway.example.com/api/scout").await,
+        "a path-prefixed deployment is managed whatever its hostname — this is \
+         the case the literal got wrong for every node except one"
+    );
+    // The literal's own hostname, served BARE — a direct node.
+    assert!(
+        !managed_for("https://agents.ciris.ai").await,
+        "a bare origin is a direct node even at the hostname the literal named"
+    );
+}
+
 /// D3: a flow that asked for `redirect_uri=/dashboard` gets a 303 See Other to
 /// it — and the session STILL travels only via the hand-off (no token in the
 /// redirect).
@@ -593,11 +837,23 @@ async fn a_callback_success_with_a_post_login_redirect_303s_to_it() {
         .get("location")
         .and_then(|v| v.to_str().ok())
         .expect("location");
-    assert_eq!(loc, "/dashboard");
+    // The DESTINATION is still the caller's, unchanged. What is appended is a
+    // single-use redemption code (CIRISServer#439) — the page previously got
+    // nothing at all and could not tell a successful sign-in from a refusal.
     assert!(
-        !loc.contains("sess:"),
-        "no token may ride the redirect — web token delivery is out of scope (D3)"
+        loc.starts_with("/dashboard"),
+        "the caller's own destination, not the node's: {loc}"
     );
+    // THE PROPERTY THIS TEST WAS WRITTEN FOR, unchanged and now stated more
+    // strongly. D3's "web token delivery is out of scope" has been answered —
+    // but answered with a code, never with the bearer. A token in a URL lands
+    // in history, `Referer`, and every proxy log on the path.
+    for forbidden in ["sess:", "access_token", "token_type"] {
+        assert!(
+            !loc.contains(forbidden),
+            "`{forbidden}` may never ride the redirect: {loc}"
+        );
+    }
 
     let h = app
         .clone()

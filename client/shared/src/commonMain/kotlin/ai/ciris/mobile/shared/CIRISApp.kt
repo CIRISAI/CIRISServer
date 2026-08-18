@@ -1019,7 +1019,16 @@ fun CIRISApp(
                 maxRetries = 60,  // Wait up to 30 seconds (60 * 500ms)
                 onStatusUpdate = { status ->
                     startupViewModel.setStatus(status)
-                }
+                },
+                // SAY WHY (CIRISServer#439). Routing straight to the password
+                // form is the correct destination, but silent: the user asked
+                // for setup and got a login box. Without this line the node
+                // looks broken — which is exactly how this arrived, as a bug
+                // report about first-run OAuth.
+                onClaimedNodeDetected = {
+                    loginStatusMessage =
+                        LocalizationHelper.getString("mobile.login_node_already_claimed")
+                },
             )
 
             startupViewModel.setKeepTimerAlive(false)
@@ -4206,7 +4215,12 @@ private suspend fun checkFirstRunStatus(
     apiBaseUrl: String,
     nodeBaseUrl: String,
     maxRetries: Int = 0,
-    onStatusUpdate: ((String) -> Unit)? = null
+    onStatusUpdate: ((String) -> Unit)? = null,
+    /// Fires when the brain claimed first-run but the NODE is already owned
+    /// (CIRISServer#439). The caller shows the user WHY they are being asked to
+    /// sign in rather than set up — "not first run" alone is a silent answer to
+    /// a question they did not know they had asked.
+    onClaimedNodeDetected: (() -> Unit)? = null
 ): Boolean? {
     var attempts = 0
     while (attempts <= maxRetries) {
@@ -4215,6 +4229,36 @@ private suspend fun checkFirstRunStatus(
             val client = CIRISApiClient(apiBaseUrl)
             val setupStatus = client.getSetupStatus()
             platformLog("checkFirstRunStatus", "[INFO] Got setup status: setup_required=${setupStatus.data.setup_required}")
+            // THE BRAIN'S ANSWER IS NOT THE WHOLE QUESTION (CIRISServer#439).
+            //
+            // "Is this a first run?" depends on TWO stores, and this path was
+            // reading one: the brain answers from its own config (`.env`
+            // present?), while the NODE independently knows whether it has been
+            // claimed. Wipe the brain's config on a node that is already owned
+            // and the two disagree — observed live: brain
+            // `setup_required=true` beside node `setup_required=false` with a
+            // standing owner binding.
+            //
+            // The user is then shown the first-run wizard/login for a node that
+            // already has an owner, and a Google sign-in there is REFUSED by the
+            // node (`auth.oauth.no_local_identity`) — correctly, because the
+            // owner is a local credential with no OAuth identity linked. The
+            // node was right every time; the client asked the wrong store.
+            //
+            // Only probed when the brain says first-run: that is the sole answer
+            // an owned node can contradict, so a configured node pays nothing.
+            // The degrade branches below ALREADY apply this rule — the same
+            // `nodeHasOwner` call with the same reasoning — so the happy path
+            // was the one place the rule was missing, not a new policy.
+            if (setupStatus.data.setup_required && nodeHasOwner(nodeBaseUrl)) {
+                platformLog(
+                    "checkFirstRunStatus",
+                    "[WARN] brain says first-run but the NODE already has an owner → NOT first-run. " +
+                        "Sign in with the existing credential; the wizard would re-claim an owned node."
+                )
+                onClaimedNodeDetected?.invoke()
+                return false
+            }
             return setupStatus.data.setup_required
         } catch (e: Exception) {
             // FAST-PATH degrade (ciris-server node client): a 404 / deserialize

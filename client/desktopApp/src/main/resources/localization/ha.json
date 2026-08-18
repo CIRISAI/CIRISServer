@@ -2404,7 +2404,8 @@
     "keyset_inspect_checking": "Ana duba wannan babban fayil…",
     "keyset_inspect_unavailable": "An kasa duba wannan babban fayil — kumburin bai amsa ba. Wannan bai nuna ko shaidarka tana ciki ba ko a'a; har yanzu kana iya gwada shigo da ita.",
     "accord_remint_invalid_desc": "Sa hannun wani mai riƙe BA ZAI kammala wannan bikin ba — kunshin da kansa shi ne matsalar. Fara sabon biki bayan an gyara shi.",
-    "accord_remint_invalid_title": "Ba za a iya kammala wannan seed ba"
+    "accord_remint_invalid_title": "Ba za a iya kammala wannan seed ba",
+    "login_node_already_claimed": "An riga an saita wannan kumburi. Ka shiga da bayanan shiga da ka ƙirƙira — mayen saitin zai yi ƙoƙarin sake mallakarsa."
   },
   "conscience": {
     "ponder_attempted": "Na yi ƙoƙarin {action}",

@@ -2386,7 +2386,8 @@
     "keyset_import_confirm": "Bu cihazı kaydet",
     "keyset_import_cancel": "Başka bir klasör seç",
     "accord_remint_invalid_desc": "Başka bir sahibin imzası bu töreni tamamlamayacak — sorunun kaynağı paketin kendisi. Sorun giderildikten sonra yeni bir tören başlatın.",
-    "accord_remint_invalid_title": "Bu tohum tamamlanamaz"
+    "accord_remint_invalid_title": "Bu tohum tamamlanamaz",
+    "login_node_already_claimed": "Bu düğüm zaten kurulmuş. Oluşturduğunuz kimlik bilgileriyle oturum açın — kurulum sihirbazı onu yeniden sahiplenmeye çalışırdı."
   },
   "nav": {
     "group": {
