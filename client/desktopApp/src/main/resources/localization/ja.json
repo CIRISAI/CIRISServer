@@ -2386,7 +2386,8 @@
     "keyset_inspect_checking": "このフォルダーを確認しています…",
     "keyset_inspect_unavailable": "このフォルダーを確認できませんでした — ノードから応答がありませんでした。これは、お客様のIDがフォルダー内にあるかどうかを示すものではありません。インポートはそのままお試しいただけます。",
     "accord_remint_invalid_desc": "他の保持者の署名ではこの儀式は完了しません — 問題はバンドル自体にあります。修正後、新しい儀式を開始してください。",
-    "accord_remint_invalid_title": "このシードは完了できません"
+    "accord_remint_invalid_title": "このシードは完了できません",
+    "login_node_already_claimed": "このノードはすでにセットアップ済みです。作成した認証情報でサインインしてください。セットアップウィザードを使うと、再度クレームを試みてしまいます。"
   },
   "nav": {
     "group": {

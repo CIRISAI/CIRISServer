@@ -2720,7 +2720,8 @@
     "keyset_inspect_checking": "Controllo di questa cartella in corso…",
     "keyset_inspect_unavailable": "Non è stato possibile controllare questa cartella: il nodo non ha risposto. Questo non dice nulla sul fatto che la tua identità sia presente o meno; puoi comunque provare l'importazione.",
     "accord_remint_invalid_desc": "La firma di un altro titolare NON completerà questa cerimonia — il problema è il bundle stesso. Avvia una nuova cerimonia una volta risolto.",
-    "accord_remint_invalid_title": "Impossibile completare questo seed"
+    "accord_remint_invalid_title": "Impossibile completare questo seed",
+    "login_node_already_claimed": "Questo nodo è già configurato. Accedi con le credenziali che hai creato: la configurazione guidata proverebbe a rivendicarlo di nuovo."
   },
   "moderation": {
     "ladder": {

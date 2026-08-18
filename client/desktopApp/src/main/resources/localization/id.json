@@ -2386,7 +2386,8 @@
     "keyset_inspect_checking": "Memeriksa folder ini…",
     "keyset_inspect_unavailable": "Tidak dapat memeriksa folder ini — node tidak merespons. Ini tidak menunjukkan apakah identitas Anda ada di dalamnya; Anda tetap bisa mencoba mengimpor.",
     "accord_remint_invalid_desc": "Tanda tangan pemegang lain TIDAK akan menyelesaikan seremoni ini — masalahnya ada pada bundel itu sendiri. Mulai seremoni baru setelah masalah tersebut diperbaiki.",
-    "accord_remint_invalid_title": "Seed ini tidak dapat diselesaikan"
+    "accord_remint_invalid_title": "Seed ini tidak dapat diselesaikan",
+    "login_node_already_claimed": "Node ini sudah disiapkan. Masuk dengan kredensial yang Anda buat — panduan penyiapan akan mencoba mengklaimnya lagi."
   },
   "nav": {
     "group": {

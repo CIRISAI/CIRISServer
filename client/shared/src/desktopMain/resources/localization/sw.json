@@ -2312,7 +2312,8 @@
     "keyset_inspect_checking": "Inakagua folda hii…",
     "keyset_inspect_unavailable": "Imeshindwa kukagua folda hii — nodi haikujibu. Hii haisemi chochote kuhusu iwapo utambulisho wako umo ndani; bado unaweza kujaribu kuingiza.",
     "accord_remint_invalid_desc": "Saini ya mshikaji mwingine HAITAKAMILISHA sherehe hii — kifurushi chenyewe ndicho tatizo. Anza sherehe mpya baada ya kurekebishwa.",
-    "accord_remint_invalid_title": "Mbegu hii haiwezi kukamilishwa"
+    "accord_remint_invalid_title": "Mbegu hii haiwezi kukamilishwa",
+    "login_node_already_claimed": "Nodi hii tayari imesanidiwa. Ingia ukitumia taarifa za kuingia ulizounda — mchawi wa usanidi angejaribu kuidai tena."
   },
   "prompts": {
     "dma": {

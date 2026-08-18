@@ -2404,7 +2404,8 @@
     "keyset_inspect_checking": "Ń ṣàyẹ̀wò fódà yìí…",
     "keyset_inspect_unavailable": "A kò lè ṣàyẹ̀wò fódà yìí — kókó náà kò dáhùn. Èyí kò sọ ohunkóhun nípa bóyá ìdánimọ̀ rẹ wà nínú rẹ̀; o ṣì lè gbìyànjú ìkó-wọlé náà.",
     "accord_remint_invalid_desc": "Ìbùwọ́lù olùdìmú mìíràn KÒ NÍÍ parí ayẹyẹ yìí — ìdì náà fúnra rẹ̀ ni ìṣòro náà. Bẹ̀rẹ̀ ayẹyẹ tuntun lẹ́yìn tí a bá ti tún un ṣe.",
-    "accord_remint_invalid_title": "A kò lè parí irúgbìn yìí"
+    "accord_remint_invalid_title": "A kò lè parí irúgbìn yìí",
+    "login_node_already_claimed": "A ti ṣètò node yìí tẹ́lẹ̀. Wọlé pẹ̀lú àwọn ẹ̀rí ìdánimọ̀ tí o ṣẹ̀dá — olùtọ́nisọ́nà ìṣètò yóò gbìyànjú láti tún un gbà."
   },
   "conscience": {
     "ponder_attempted": "Mo gbìyànjú láti {action}",

@@ -2312,7 +2312,8 @@
     "keyset_inspect_checking": "Dieser Ordner wird geprüft…",
     "keyset_inspect_unavailable": "Dieser Ordner konnte nicht geprüft werden – der Knoten hat nicht geantwortet. Das sagt nichts darüber aus, ob Ihre Identität darin enthalten ist; Sie können den Import trotzdem versuchen.",
     "accord_remint_invalid_desc": "Die Signatur eines weiteren Inhabers wird diese Zeremonie NICHT abschließen — das Bundle selbst ist das Problem. Starten Sie eine neue Zeremonie, sobald es behoben ist.",
-    "accord_remint_invalid_title": "Dieser Seed kann nicht abgeschlossen werden"
+    "accord_remint_invalid_title": "Dieser Seed kann nicht abgeschlossen werden",
+    "login_node_already_claimed": "Dieser Knoten ist bereits eingerichtet. Melden Sie sich mit den von Ihnen erstellten Zugangsdaten an — der Einrichtungsassistent würde erneut versuchen, ihn zu beanspruchen."
   },
   "prompts": {
     "dma": {

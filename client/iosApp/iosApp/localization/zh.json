@@ -2720,7 +2720,8 @@
     "keyset_inspect_checking": "正在检查此文件夹…",
     "keyset_inspect_unavailable": "无法检查此文件夹 — 该节点没有响应。这并不代表你的身份是否在其中；你仍然可以尝试导入。",
     "accord_remint_invalid_desc": "其他持有者的签名无法完成此仪式——问题出在捆绑包本身。修复后请重新发起仪式。",
-    "accord_remint_invalid_title": "无法完成此种子"
+    "accord_remint_invalid_title": "无法完成此种子",
+    "login_node_already_claimed": "此节点已完成设置。请使用你创建的凭据登录——设置向导会尝试重新认领该节点。"
   },
   "moderation": {
     "ladder": {

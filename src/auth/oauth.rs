@@ -173,6 +173,73 @@ impl CsrfStore {
     }
 }
 
+/// **A single-use, short-lived code that redeems ONE parked browser sign-in**
+/// (CIRISServer#439).
+///
+/// # Why this exists rather than the token that used to be here
+///
+/// The web client's contract was `?access_token=…&token_type=…&role=…&user_id=…`
+/// on the redirect. That is a live 24h BEARER in a URL: it lands in browser
+/// history, in the `Referer` of every subsequent request, and in the access log
+/// of every proxy in between. Removing it was right. But nothing replaced it,
+/// so the browser flow completed at the node and the page had no way to learn
+/// it had — CIRISGUI reports `oauth_failed` on a sign-in that SUCCEEDED,
+/// because "no session came back" and "the provider refused" are the same
+/// branch there.
+///
+/// The desktop answer — poll the loopback hand-off — cannot work here: the
+/// browser IS the client, and it is not on the node's loopback.
+///
+/// # Why a code in a URL is not a token in a URL
+///
+/// This code authenticates nothing on its own. It names a parked outcome and
+/// nothing else, it dies on first redemption, and it expires in
+/// [`WEB_EXCHANGE_TTL`]. A leaked one — from history, a `Referer`, a proxy log
+/// — is already spent or already stale. That is the OAuth authorization-code
+/// pattern applied to our own issuance, and it is the reason the session
+/// itself travels only in a POST response BODY.
+#[derive(Debug, Default)]
+struct WebExchangeStore {
+    codes: HashMap<String, (HandoffOutcome, Instant)>,
+}
+
+/// 60 seconds: an SPA redeems on mount, one round trip after the redirect. Long
+/// enough for a slow page load, short enough that a code recovered from history
+/// later is dead. Deliberately far below the hand-off's 300s, because a URL is
+/// a much worse place to hold something than a desktop app's memory.
+const WEB_EXCHANGE_TTL: Duration = Duration::from_secs(60);
+
+/// The query key the node appends to a web client's post-login destination.
+/// Named for what it is — a redemption code, not a token — so a reader of a URL
+/// or a log is not misled about what they are looking at.
+pub const WEB_EXCHANGE_QUERY_KEY: &str = "ciris_code";
+
+impl WebExchangeStore {
+    fn prune(&mut self) {
+        let now = Instant::now();
+        self.codes.retain(|_, (_, deadline)| *deadline > now);
+    }
+    /// Park an outcome under a fresh code and return it.
+    fn mint(&mut self, outcome: HandoffOutcome) -> String {
+        use base64::Engine as _;
+        self.prune();
+        // 32 bytes from the same CSPRNG the CSRF state and PKCE verifier use —
+        // 256 bits, so the code cannot be guessed inside its 60s life.
+        let mut raw = [0u8; 32];
+        ciris_crypto::random::fill(&mut raw).expect("CSPRNG for the web exchange code");
+        let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        self.codes
+            .insert(code.clone(), (outcome, Instant::now() + WEB_EXCHANGE_TTL));
+        code
+    }
+    /// Redeem ONCE. A second redemption of the same code gets nothing, so a
+    /// code recovered from history cannot re-issue a session.
+    fn redeem(&mut self, code: &str) -> Option<HandoffOutcome> {
+        self.prune();
+        self.codes.remove(code).map(|(o, _)| o)
+    }
+}
+
 /// **Desktop hand-off** — a completed browser sign-in, waiting to be collected
 /// by the app that started it.
 ///
@@ -336,6 +403,12 @@ struct OAuthState {
     csrf: Arc<Mutex<CsrfStore>>,
     providers: Arc<Mutex<ProviderConfigStore>>,
     handoff: Arc<Mutex<HandoffStore>>,
+    /// Browser sign-ins waiting to be redeemed by the PAGE that started them
+    /// (CIRISServer#439). Distinct from [`Self::handoff`] on purpose: that one
+    /// is loopback-gated because it hands a bearer to a desktop app; this one
+    /// is reachable from anywhere and therefore hands out nothing until a
+    /// single-use code is presented.
+    web_exchange: Arc<Mutex<WebExchangeStore>>,
     client: Arc<dyn ProviderClient>,
     /// Boot-resolved fallback for the callback base. **Read
     /// [`OAuthState::callback_base`] instead** — it consults the live config
@@ -1492,23 +1565,66 @@ struct ProviderInfo {
 }
 
 async fn list_providers(State(st): State<OAuthState>) -> Response {
-    let store = st.providers.lock().unwrap();
-    // A provider with no client id is NOT available, and listing it is what lets
-    // a dead sign-in button render (CIRISServer#387). "Configured" and "usable"
-    // are two questions, and this endpoint is asked the second one — a caller
-    // deciding which buttons to draw cannot act on the first.
-    let providers: Vec<ProviderInfo> = store
-        .by_provider
-        .iter()
-        .filter(|(_, c)| !c.client_id.trim().is_empty())
-        .map(|(p, c)| ProviderInfo {
-            provider: p.clone(),
-            client_id: c.client_id.clone(),
-        })
-        .collect();
+    // Scoped so the guard is DROPPED before the await below — a `MutexGuard`
+    // held across an await point makes the future non-Send and the handler
+    // stops being a `Handler`. The compiler says so as a trait-bound failure on
+    // the route, several lines away from the lock that caused it.
+    let providers: Vec<ProviderInfo> = {
+        let store = st.providers.lock().unwrap();
+        // A provider with no client id is NOT available, and listing it is what lets
+        // a dead sign-in button render (CIRISServer#387). "Configured" and "usable"
+        // are two questions, and this endpoint is asked the second one — a caller
+        // deciding which buttons to draw cannot act on the first.
+        store
+            .by_provider
+            .iter()
+            .filter(|(_, c)| !c.client_id.trim().is_empty())
+            .map(|(p, c)| ProviderInfo {
+                provider: p.clone(),
+                client_id: c.client_id.clone(),
+            })
+            .collect()
+    };
+    // THE NODE STATES ITS OWN DEPLOYMENT FACTS (CIRISServer#439).
+    //
+    // CIRISGUI decided whether it was talking to a managed deployment with
+    // `window.location.hostname === 'agents.ciris.ai'` — a hostname literal in
+    // the client. Every other hosted node, scout included, was therefore
+    // classified unmanaged. A client cannot derive this; the node can, and now
+    // says so.
+    //
+    // **`managed` is an AUTH-POLICY fact, not a routing one.** A managed
+    // deployment is one that admits MULTIPLE logins — CIRIS Manager provisions
+    // people ahead of time, so a stranger signing in gets an observer default
+    // instead of a refusal. A personal node has one owner and refuses the rest
+    // (`NoLocalIdentity`, `resolve_oauth_user` above).
+    //
+    // A first draft of this endpoint derived `managed` from whether the
+    // callback base carried a PATH — a routing question wearing the name of a
+    // policy one. That is this repo's own axis-fusion class: one name, two
+    // questions, and the answer right for neither. `deployment::is_managed()`
+    // is the SAME predicate `resolve_oauth_user` gates admission on, so what a
+    // client is told here cannot drift from what the node actually does — the
+    // whole point of the node answering instead of the client guessing.
+    let managed = crate::deployment::is_managed();
+    let callback_base = st.callback_base().await;
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "providers": providers })),
+        Json(serde_json::json!({
+            "providers": providers,
+            // Does this node serve the BROWSER sign-in flow (redirect →
+            // callback → single-use code)? A page that cannot redeem a code
+            // should not offer the button.
+            "web_signin": true,
+            // The base every OAuth redirect on this node resolves against —
+            // the same string the provider console must have registered.
+            "callback_base": callback_base,
+            "managed": managed,
+            // The query key the callback appends to a web client's
+            // post-login destination. Named on the wire so a client reads the
+            // key from the node rather than hard-coding a second copy of it.
+            "exchange_query_key": WEB_EXCHANGE_QUERY_KEY,
+        })),
     )
         .into_response()
 }
@@ -2111,6 +2227,75 @@ struct HandoffQuery {
     allow_unbound: bool,
 }
 
+/// `POST /v1/auth/oauth/exchange` — a WEB page redeems its sign-in
+/// (CIRISServer#439).
+///
+/// The browser arrives at its own post-login destination carrying
+/// `?ciris_code=…`; it POSTs that code here and receives the session in the
+/// response BODY. One redemption per code.
+///
+/// **Deliberately NOT loopback-gated**, unlike the desktop hand-off. That route
+/// is reachable by any local process and hands out a bearer for the asking, so
+/// the network boundary is what protects it. This one is reachable from
+/// anywhere and hands out nothing without a 256-bit single-use code — the code
+/// IS the authorisation, which is why it may cross the network the hand-off may
+/// not.
+///
+/// A wrong, spent, or expired code is one refusal with one reason id. The three
+/// are NOT distinguished on the wire: telling a caller that a code was "already
+/// redeemed" rather than "never existed" confirms a real code to whoever is
+/// probing, and no legitimate page can act on the difference.
+async fn oauth_exchange(
+    State(st): State<OAuthState>,
+    Json(body): Json<ExchangeRequest>,
+) -> Response {
+    let outcome = st
+        .web_exchange
+        .lock()
+        .ok()
+        .and_then(|mut w| w.redeem(&body.code));
+    match outcome {
+        Some(HandoffOutcome::Complete(p)) => {
+            tracing::info!(provider = %p.provider, "web sign-in redeemed");
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(&p).unwrap_or_default()),
+            )
+                .into_response()
+        }
+        // A FAILED flow is parked too, so the page can render the real reason
+        // instead of inventing one. This is the browser half of #425.
+        Some(HandoffOutcome::Failed {
+            reason_id,
+            message,
+            provider,
+        }) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": message,
+                "reason_id": reason_id,
+                "provider": provider,
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "This sign-in code is not valid. It may have already been \
+                          used, or it may have expired — start the sign-in again.",
+                "reason_id": "auth.oauth.exchange_code_invalid",
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// The body of [`oauth_exchange`].
+#[derive(Debug, serde::Deserialize)]
+struct ExchangeRequest {
+    code: String,
+}
+
 /// `GET /v1/auth/oauth/handoff?app_nonce=…` — the desktop app collects the
 /// session its browser sign-in produced.
 ///
@@ -2371,10 +2556,54 @@ async fn browser_finish(
             }
             match post_login_redirect {
                 // The flow asked for a destination (a web client's own page):
-                // 303 See Other, the redirect-after-POST-shaped answer. Token
-                // delivery to the web page is deliberately OUT of scope (D3) —
-                // the session still travels only via the hand-off.
-                Some(dest) => axum::response::Redirect::to(&dest).into_response(),
+                // 303 See Other, the redirect-after-POST-shaped answer.
+                //
+                // CIRISServer#439 — the destination now carries a single-use
+                // REDEMPTION CODE. Before this, the web branch redirected with
+                // nothing at all: the sign-in had succeeded, the session was
+                // parked on a loopback-only route the browser cannot reach, and
+                // the page had no way to tell "no session came back" from "the
+                // provider refused" — so CIRISGUI reported `oauth_failed` on a
+                // SUCCESSFUL sign-in.
+                //
+                // What is NOT restored is the old contract
+                // (`?access_token=…&role=…`): a live bearer in a URL lands in
+                // history, in `Referer`, and in every proxy log on the path.
+                // The code below names a parked outcome, dies on first
+                // redemption, and expires in 60s; the session itself is handed
+                // over only in the body of `POST /v1/auth/oauth/exchange`.
+                Some(dest) => {
+                    let code = st.web_exchange.lock().ok().map(|mut w| {
+                        w.mint(HandoffOutcome::Complete(HandoffPayload {
+                            session: r.session.clone(),
+                            provider: r.provider.clone(),
+                            external_id: r.external_id.clone(),
+                            email: r.email.clone(),
+                            id_token: r.id_token.clone(),
+                        }))
+                    });
+                    match code {
+                        Some(c) => {
+                            let sep = if dest.contains('?') { '&' } else { '?' };
+                            axum::response::Redirect::to(&format!(
+                                "{dest}{sep}{WEB_EXCHANGE_QUERY_KEY}={c}"
+                            ))
+                            .into_response()
+                        }
+                        // The store is poisoned. Redirect anyway — the sign-in
+                        // DID succeed and stranding the user on a blank node
+                        // page helps nobody — but say so, because a destination
+                        // with no code is the exact condition the page cannot
+                        // otherwise distinguish from a refusal.
+                        None => {
+                            tracing::error!(
+                                "web exchange store unavailable — redirecting without a \
+                                 redemption code; the page will report no session"
+                            );
+                            axum::response::Redirect::to(&dest).into_response()
+                        }
+                    }
+                }
                 None => (
                     StatusCode::OK,
                     [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -2519,6 +2748,7 @@ pub fn router_with_client(
         csrf: Arc::new(Mutex::new(CsrfStore::default())),
         providers: Arc::new(Mutex::new(ProviderConfigStore::default())),
         handoff: Arc::new(Mutex::new(HandoffStore::default())),
+        web_exchange: Arc::new(Mutex::new(WebExchangeStore::default())),
         client,
         boot_callback_base: callback_base,
     };
@@ -2557,6 +2787,13 @@ pub fn router_with_client(
         )
         .route("/v1/auth/native/google", axum::routing::post(native_google))
         .route("/v1/auth/native/apple", axum::routing::post(native_apple))
+        // The web redemption route is NOT inside the loopback layer below —
+        // see `oauth_exchange`: the single-use code IS the authorisation, so
+        // this one may cross the network the hand-off may not.
+        .route(
+            "/v1/auth/oauth/exchange",
+            axum::routing::post(oauth_exchange),
+        )
         .with_state(st.clone())
         // The desktop hand-off, LOOPBACK-GATED on its own sub-router. It returns
         // a session BEARER and this node binds 0.0.0.0:4243, so the gate has to

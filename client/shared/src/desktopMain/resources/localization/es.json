@@ -2312,7 +2312,8 @@
     "wallet_transfer_note": "Transferir a otra dirección de Base para cobro en fiat",
     "wallet_transfer_success": "¡Transferencia exitosa! TX: {tx}",
     "wallet_trust_degraded": "Confianza de Hardware Degradada",
-    "wallet_warning": "Advertencia"
+    "wallet_warning": "Advertencia",
+    "login_node_already_claimed": "Este nodo ya está configurado. Inicia sesión con las credenciales que creaste: el asistente de configuración intentaría reclamarlo de nuevo."
   },
   "prompts": {
     "dma": {
