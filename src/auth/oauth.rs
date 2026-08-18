@@ -2227,6 +2227,116 @@ struct HandoffQuery {
     allow_unbound: bool,
 }
 
+/// `GET /v1/auth/signin-state` — **what will happen if someone signs in right
+/// now, answered by the code that decides it** (CIRISServer#439).
+///
+/// # Why this exists
+///
+/// Sign-in has ten distinct outcomes across desktop, browser, mobile, managed
+/// and personal nodes, and until now no client could ask which one it was in.
+/// Every surface guessed, and every surface guessed differently: the GUI
+/// pattern-matched a hostname, the desktop client asked the brain about a fact
+/// only the node holds, and a user who was refused for a good reason saw either
+/// a raw JSON wall or a spinner that never resolved.
+///
+/// The refusals were correct. What was missing was any way to see the state
+/// BEFORE walking into it.
+///
+/// # The load-bearing field is `new_identity.outcome`
+///
+/// It says what a previously-unknown identity would get — claim the node, be
+/// admitted as an observer, or be refused — and it is computed from the SAME
+/// two predicates `resolve_oauth_user` gates on. It cannot drift from the
+/// behaviour it describes, because it is not a second description of it.
+///
+/// A refusal carries its `reason_id` and a remedy the user can actually
+/// perform. Where the honest remedy is currently impossible — a locally-claimed
+/// node cannot have an OAuth identity linked (#432) — it says so, rather than
+/// printing an instruction that dead-ends. That mistake is already documented
+/// one file over; this endpoint is where it would otherwise be repeated.
+///
+/// Unauthenticated by nature: it is consulted BEFORE a session exists, and it
+/// discloses only what `/v1/auth/owner-hint` and
+/// `/v1/auth/oauth/providers` already do.
+async fn signin_state(State(st): State<OAuthState>, req: axum::extract::Request) -> Response {
+    // ANSWERED FOR THIS CALLER, not in the abstract. The same node truthfully
+    // gives a loopback desktop app and a remote browser DIFFERENT answers about
+    // how a session reaches them, and collapsing the two is how the
+    // loopback-only hand-off became invisible to browsers. Same predicate the
+    // gate enforces — never a second copy of the rule.
+    let loopback = super::loopback::caller_is_loopback(req.extensions());
+    let first_run = super::bootstrap::is_first_run(&st.engine).await;
+    let managed = crate::deployment::is_managed();
+    let callback_base = st.callback_base().await;
+    let providers: Vec<String> = {
+        let store = st.providers.lock().unwrap();
+        store
+            .by_provider
+            .iter()
+            .filter(|(_, c)| !c.client_id.trim().is_empty())
+            .map(|(p, _)| p.clone())
+            .collect()
+    };
+
+    // The three arms of `resolve_oauth_user`, in its order, for an identity this
+    // node has never seen.
+    let (outcome, reason_id, remedy) = if first_run {
+        (
+            "claims_this_node",
+            None,
+            "Signing in with any configured provider will CLAIM this node and              make that account its owner.",
+        )
+    } else if managed {
+        (
+            "admitted_as_observer",
+            None,
+            "This deployment admits multiple people. A new account signs in with              observer permissions.",
+        )
+    } else {
+        (
+            "refused",
+            Some("auth.oauth.no_local_identity"),
+            // The remedy STOPS at what is possible. Linking an OAuth identity to
+            // an existing owner is #432 and both surfaces are dead, so telling
+            // the user to "link it from settings" would dead-end them — the
+            // ProviderUnavailable mistake this codebase already paid for once.
+            "This node has one owner and does not create accounts for whoever              signs in. Sign in as the existing owner, or have them claim a new              node for you.",
+        )
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            // Has anyone claimed this node? The single question the desktop
+            // client was asking the BRAIN, which cannot know it.
+            "claimed": !first_run,
+            // Does this deployment admit MULTIPLE logins (CIRIS Manager
+            // provisions people ahead of time)? An auth policy, never a URL
+            // shape — same predicate the admission gate uses.
+            "managed": managed,
+            // Is the browser redirect flow served here at all? A page that
+            // cannot redeem a code should not draw the button.
+            "web_signin": true,
+            "callback_base": callback_base,
+            "exchange_query_key": WEB_EXCHANGE_QUERY_KEY,
+            "providers": providers,
+            // HOW A SESSION REACHES *YOU*. The hand-off is loopback-gated
+            // because it hands over a bearer for the asking; the exchange code
+            // may cross the network because the code IS the authorisation. A
+            // caller told the wrong one waits forever on a route it cannot
+            // reach — the original defect, stated as a fact instead.
+            "session_delivery": if loopback { "loopback_handoff" } else { "exchange_code" },
+            "caller_is_loopback": loopback,
+            "new_identity": {
+                "outcome": outcome,
+                "reason_id": reason_id,
+                "remedy": remedy,
+            },
+        })),
+    )
+        .into_response()
+}
+
 /// `POST /v1/auth/oauth/exchange` — a WEB page redeems its sign-in
 /// (CIRISServer#439).
 ///
@@ -2794,6 +2904,7 @@ pub fn router_with_client(
             "/v1/auth/oauth/exchange",
             axum::routing::post(oauth_exchange),
         )
+        .route("/v1/auth/signin-state", axum::routing::get(signin_state))
         .with_state(st.clone())
         // The desktop hand-off, LOOPBACK-GATED on its own sub-router. It returns
         // a session BEARER and this node binds 0.0.0.0:4243, so the gate has to
