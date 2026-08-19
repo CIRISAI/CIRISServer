@@ -746,13 +746,24 @@ class CIRISApiClient(
         waId: String? = null,
     ): Boolean {
         val method = "preprovisionOAuthEmail"
+        // Per-call client, matching every other hand-rolled route in this file
+        // (`getAgentMode`, `postLocalShutdown`): there is no class-level
+        // `httpClient` here, only `httpClientConfig`. My first version assumed
+        // one and CI's Kotlin compile was the first thing to say otherwise.
+        val client = io.ktor.client.HttpClient {
+            install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
+            install(io.ktor.client.plugins.HttpTimeout) {
+                requestTimeoutMillis = 10000
+                connectTimeoutMillis = 5000
+            }
+        }
         return try {
             val body = buildJsonObject {
                 put("provider", provider)
                 put("email", email)
                 waId?.let { put("wa_id", it) }
             }
-            val r = httpClient.post("$baseUrl/v1/self/oauth-link") {
+            val r = client.post("$baseUrl/v1/self/oauth-link") {
                 authHeader()?.let { header("Authorization", it) }
                 contentType(ContentType.Application.Json)
                 setBody(body)
@@ -770,6 +781,8 @@ class CIRISApiClient(
         } catch (e: Exception) {
             logInfo(method, "link request failed: ${e.message}")
             false
+        } finally {
+            client.close()
         }
     }
 
