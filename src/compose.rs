@@ -918,6 +918,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
                     ))
+                    // TRUST ROOT, the federation-facing read: GET
+                    // /v1/trust-root/bundle. Deliberately NOT loopback-gated —
+                    // unlike the import/list/delete verbs above, which are the
+                    // operator's own act, this is how a peer bootstrapping into
+                    // the mesh fetches the portable root and checks it against
+                    // its own roster. The bundle is self-authenticating and the
+                    // outer envelope claims no authority; see the module docs
+                    // for why signing the wrapper would be worthless
+                    // (CIRISRegistry#133 — this is what retires
+                    // /v1/steward-key).
+                    .merge(crate::trust_root_broadcast::router(
+                        Arc::clone(&engine),
+                        node_code.key_id.clone(),
+                    ))
                     // claim REMOTE ownership (substrate-native, node-to-node):
                     // POST /v1/setup/claim-remote — the LOCAL node decodes the
                     // target NodeCode, builds + hybrid-signs the owner-binding
