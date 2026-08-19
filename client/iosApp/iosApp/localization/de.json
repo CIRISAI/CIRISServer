@@ -3888,7 +3888,8 @@
       "no_such_identity": "Auf diesem Knoten gibt es keine solche Identität, mit der das Konto verknüpft werden könnte.",
       "node_unowned": "Dieser Knoten hat noch keinen Eigentümer, daher gibt es keine Identität, mit der ein Konto verknüpft werden könnte. Beanspruchen Sie zuerst den Knoten.",
       "store_unavailable": "Der Knoten konnte die Verknüpfung nicht schreiben, da sein Identitätsspeicher nicht verfügbar ist. Es wurde nichts geändert.",
-      "not_delegatable": "Das Verknüpfen einer Anmeldeidentität ist eine höchstpersönliche Handlung des Eigentümers. Eine delegierte Sitzung kann dies nicht tun – die Verknüpfung überdauert die Delegation und würde damit dauerhaften Zugriff an denjenigen übergeben, der nur eine befristete Berechtigung besitzt."
+      "not_delegatable": "Das Verknüpfen einer Anmeldeidentität ist eine höchstpersönliche Handlung des Eigentümers. Eine delegierte Sitzung kann dies nicht tun – die Verknüpfung überdauert die Delegation und würde damit dauerhaften Zugriff an denjenigen übergeben, der nur eine befristete Berechtigung besitzt.",
+      "already_has_identity": "Für dieses Konto ist bereits eine Anmeldeidentität verknüpft. Entfernen Sie sie zuerst, wenn Sie sie ersetzen möchten."
     },
     "session_expired": "Ihre Sitzung ist nicht mehr gültig. Melden Sie sich erneut an, um fortzufahren.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "kein von diesem Knoten ausgestelltes Sitzungstoken — nichts zum Abmelden",
       "missing_bearer": "fehlendes oder fehlerhaftes Bearer-Token"
+    },
+    "link": {
+      "ambiguous_handle": "Senden Sie entweder eine Konto-ID oder eine E-Mail-Adresse, nicht beides – sie bedeuten Unterschiedliches."
     }
   },
   "duty": {

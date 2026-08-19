@@ -60,7 +60,23 @@ struct LinkRequest {
     #[serde(default)]
     wa_id: Option<String>,
     provider: String,
-    external_id: String,
+    /// The provider's subject id, when the caller HAS it — the agent's own
+    /// migration path does, because it is copying a pair that already exists.
+    ///
+    /// Optional since CIRISServer#448: no human can look up their own Google
+    /// `sub`, so a person linking their account cannot supply this. They supply
+    /// `email` instead and the pair binds itself on the next sign-in.
+    #[serde(default)]
+    external_id: Option<String>,
+    /// PRE-PROVISION by address. Written to the cert's `oauth_links.email`,
+    /// which `resolve_oauth_user` treats as a provisioning slot: the first
+    /// successful sign-in for that address stamps the verified pair onto this
+    /// cert and the address stops being load-bearing.
+    ///
+    /// This is the handle an operator actually holds — you know a colleague's
+    /// address, and you know your own.
+    #[serde(default)]
+    email: Option<String>,
     #[serde(default)]
     account_name: Option<String>,
     #[serde(default)]
@@ -188,7 +204,35 @@ async fn link_handler(
             )
         }
     };
-    if req.provider.trim().is_empty() || req.external_id.trim().is_empty() {
+    let has_sub = req
+        .external_id
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let has_email = req
+        .email
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    // EXACTLY ONE handle, and refusing both is not pedantry: a request naming a
+    // subject id AND an address is asking two different questions (bind this
+    // verified pair / hold this slot open for whoever proves that address), and
+    // guessing which the caller meant is how a link surface becomes a takeover
+    // surface.
+    if has_sub && has_email {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "auth.link.ambiguous_handle",
+            // MUST match `auth.link.ambiguous_handle` in en.json byte for byte: the
+            // localization gate refuses a bundle whose English says something the
+            // wire does not, because every one of the 28 translations is made FROM
+            // the bundle. "external_id" is a wire name anyway — a human reading
+            // this has an account id and an address, not a field name.
+            "Send either an account id or an email address, not both — they mean \
+             different things.",
+        );
+    }
+    if req.provider.trim().is_empty() || (!has_sub && !has_email) {
         return refuse(
             StatusCode::BAD_REQUEST,
             "auth.oauth_link.incomplete_pair",
@@ -197,7 +241,18 @@ async fn link_handler(
         );
     }
     let provider = req.provider.trim().to_ascii_lowercase();
-    let external_id = req.external_id.trim().to_string();
+    let external_id = req
+        .external_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let email = req
+        .email
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
 
     // Target: the named cert, else the node's ROOT (the owner).
     let target = match &req.wa_id {
@@ -242,6 +297,63 @@ async fn link_handler(
 
     // REFUSE a steal. If this pair already resolves to a DIFFERENT certificate,
     // linking would either silently move an identity between people or leave two
+    // ── PRE-PROVISION BY ADDRESS (CIRISServer#448) ─────────────────────────
+    //
+    // No pair to bind yet: record the address as a provisioning slot and let
+    // `resolve_oauth_user` stamp the verified pair on the first sign-in that
+    // proves it. This is the branch a HUMAN uses, because an address is the
+    // only handle they have.
+    //
+    // Refuses a target that already carries a pair. That cert belongs to an
+    // identity; re-provisioning it by address is the takeover this surface must
+    // never offer, and the same rule holds in `find_preprovisioned_by_email`.
+    if !email.is_empty() {
+        if target.oauth_external_id.is_some() {
+            return refuse(
+                StatusCode::CONFLICT,
+                "auth.oauth_link.already_has_identity",
+                "That account already has a linked sign-in identity. Remove it first \
+                 if you mean to replace it.",
+            );
+        }
+        let mut cert = target.clone();
+        let mut links = cert
+            .oauth_links
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = links.as_object_mut() {
+            obj.insert(
+                "email".to_string(),
+                serde_json::Value::String(email.clone()),
+            );
+        }
+        cert.oauth_links = Some(links);
+        if let Err(e) = store::upsert(&st.engine, cert).await {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.oauth_link.store_unavailable",
+                format!("store: {e}"),
+            );
+        }
+        tracing::info!(
+            wa_id = %target.wa_id,
+            provider = %provider,
+            "oauth link: PRE-PROVISIONED by address — the next sign-in proving this \
+             address binds its verified pair to this cert"
+        );
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "wa_id": target.wa_id,
+                "provider": provider,
+                "pre_provisioned_email": email,
+                "linked": false,
+                "note": "Sign in with that provider using this address to complete the link.",
+            })),
+        )
+            .into_response();
+    }
+
     // certs claiming one human. Mirrors the upstream ValueError.
     match store::get_by_oauth(&st.engine, &provider, &external_id).await {
         Ok(Some(other)) if other.wa_id != target.wa_id => {

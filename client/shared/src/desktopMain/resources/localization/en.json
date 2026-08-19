@@ -269,6 +269,9 @@
       "pin_invalid": "invalid one-time claim PIN",
       "pin_missing": "first-run ROOT claim must carry `claim_pin` (the one-time PIN printed on this node's console at boot)"
     },
+    "link": {
+      "ambiguous_handle": "Send either an account id or an email address, not both — they mean different things."
+    },
     "login": {
       "account_inactive": "account is inactive",
       "ambiguous_name": "That login name belongs to more than one account on this node, so signing in with it would be a guess. Use your account id instead, or ask the node's owner to resolve the duplicate.",
@@ -290,6 +293,7 @@
       "unsafe_redirect": "unsafe redirect_uri"
     },
     "oauth_link": {
+      "already_has_identity": "That account already has a linked sign-in identity. Remove it first if you mean to replace it.",
       "already_linked_elsewhere": "That account is already linked to a different identity on this node. Unlink it there first — one provider account belongs to one identity.",
       "bad_request": "The node could not read that request. Check the fields and try again.",
       "incomplete_pair": "Both the provider and the account id are required. Half of a pair links an account that nothing can find again.",
@@ -439,12 +443,12 @@
       "session_absent": "No session token was presented. The commons surface is owner-only.",
       "session_invalid": "That session is invalid or expired.",
       "sign_failed": "This node could not sign the row, so nothing was submitted.",
+      "stamped_envelope_mismatch": "the echoed `stamped_envelope` does not describe the dismissal in this request. Re-run the dry run for THESE fields and have the co-signers sign what it returns.",
+      "stamped_envelope_required": "co-signatures were supplied without the `stamped_envelope` they were made over. Run the dry run, have the co-signers sign the `envelope` it returns, and send that envelope back with their scrubs — otherwise their signatures cover bytes this submission does not carry and the quorum silently counts one.",
       "steward_tier_not_adopted": "This community declared no steward tier, so there is no deadline to be silent past and no escalated pool. A ballot here would be stored and never read.",
       "store_unavailable": "The substrate could not be reached.",
       "target_action_unknown": "The objected-to action is not a row this node holds, so the objection would be uncountable and its window unresolvable.",
-      "unverifiable_signature": "The row's signature did not verify against the signer's keys as registered on this node.",
-      "stamped_envelope_mismatch": "the echoed `stamped_envelope` does not describe the dismissal in this request. Re-run the dry run for THESE fields and have the co-signers sign what it returns.",
-      "stamped_envelope_required": "co-signatures were supplied without the `stamped_envelope` they were made over. Run the dry run, have the co-signers sign the `envelope` it returns, and send that envelope back with their scrubs — otherwise their signatures cover bytes this submission does not carry and the quorum silently counts one."
+      "unverifiable_signature": "The row's signature did not verify against the signer's keys as registered on this node."
     },
     "standing": {
       "action_unknown": "This node holds no such action. An objection names a row, and there is no row here to name.",
@@ -588,36 +592,6 @@
     "holder_desc": "The accord holder whose key signs this conferral. The app holds no keys — the local node opens the hardware and signs.",
     "holder_label": "Holder key_id",
     "holder_placeholder": "A1",
-    "not_started": "Nothing proposed yet. Fill in the conferral and propose the first signature.",
-    "pending_hint": "Not conferred yet — hand the partial to the next holder to cosign.",
-    "propose_button": "Propose",
-    "section_conferral": "The conferral",
-    "section_holder": "Signing holder",
-    "section_status": "Signatures",
-    "signatures": "{have} of {need} signatures",
-    "subject_label": "Subject fed-ID (key_id)",
-    "subject_placeholder": "eric-moore-v2-portable-…",
-    "subtitle": "Confer a moderation duty on another self, and say exactly how far they may pass it on. Every conferral is co-signed by the accord holders before it takes effect.",
-    "title": "Delegate moderation duty",
-    "usb_label": "ML-DSA USB folder",
-    "usb_placeholder": "/media/…",
-    "verb_help": "Slash removes; moderate hides and warns; review only flags for a human.",
-    "verb_label": "Duty",
-    "verb_moderate": "moderate — emit a moderation event on the delegator's behalf",
-    "verb_review": "review — file a reconsideration (report → scores) on the delegator's behalf",
-    "verb_slash": "slash — take something away: quarantine, and time-bounded de-admission",
-    "section_source": "Conferred by",
-    "source_loading": "Reading the conferring authority from this node…",
-    "source_unreadable": "Could not read the conferring authority: {error}. Nothing can be conferred until this node can name who is granting it.",
-    "source_quorum": "Adopted at {quorum} — this grant does nothing until that many distinct seats have signed it.",
-    "source_quorum_entrenched": "Adopted at {quorum}, entrenched — the threshold is constitutionally fixed and cannot be lowered to pass this grant.",
-    "source_seats": "{count} live seats: {seats}",
-    "source_explainer": "The grant is made BY THE FAMILY, not by the seat that signs first. A single holder cannot confer this alone — that is the difference between the accord acting and a person acting in its name.",
-    "verbs_label": "Duties to confer",
-    "verbs_help": "Pick every duty this grant should carry. They travel together as one set on one grant — you do not need a separate ceremony per duty.",
-    "verb_consent_revocation": "consent_revocation — revoke consent on the delegator's behalf",
-    "verb_takedown": "takedown — publish a takedown notice on the delegator's behalf",
-    "verbs_none": "No duty selected. A grant with no scope confers nothing.",
     "ladder_label": "What this unlocks",
     "ladder_none": "Nothing on the enforcement ladder — these duties authorize emitting, not enforcing.",
     "ladder_note": "The ladder's own rungs, from this node's admin ops. A rung is reachable only while a live grant carries its scope.",
@@ -627,8 +601,38 @@
     "ladder_t2": "tier 2 · quarantine / un-quarantine",
     "ladder_t3": "tier 3 · descend (also requires a QUORUM)",
     "ladder_t4": "tier 4 · de-admit / re-admit, refuse-writes / accept-writes",
+    "not_started": "Nothing proposed yet. Fill in the conferral and propose the first signature.",
+    "pending_hint": "Not conferred yet — hand the partial to the next holder to cosign.",
+    "propose_button": "Propose",
+    "section_conferral": "The conferral",
+    "section_holder": "Signing holder",
+    "section_source": "Conferred by",
+    "section_status": "Signatures",
+    "signatures": "{have} of {need} signatures",
+    "source_explainer": "The grant is made BY THE FAMILY, not by the seat that signs first. A single holder cannot confer this alone — that is the difference between the accord acting and a person acting in its name.",
+    "source_loading": "Reading the conferring authority from this node…",
+    "source_quorum": "Adopted at {quorum} — this grant does nothing until that many distinct seats have signed it.",
+    "source_quorum_entrenched": "Adopted at {quorum}, entrenched — the threshold is constitutionally fixed and cannot be lowered to pass this grant.",
+    "source_seats": "{count} live seats: {seats}",
+    "source_unreadable": "Could not read the conferring authority: {error}. Nothing can be conferred until this node can name who is granting it.",
+    "subject_label": "Subject fed-ID (key_id)",
+    "subject_placeholder": "eric-moore-v2-portable-…",
+    "subtitle": "Confer a moderation duty on another self, and say exactly how far they may pass it on. Every conferral is co-signed by the accord holders before it takes effect.",
+    "title": "Delegate moderation duty",
     "usb_browse": "Browse",
-    "usb_guidance": "The folder on the removable volume holding the wrapped ML-DSA-65 half. The private key never leaves it — this node opens it in place and signs."
+    "usb_guidance": "The folder on the removable volume holding the wrapped ML-DSA-65 half. The private key never leaves it — this node opens it in place and signs.",
+    "usb_label": "ML-DSA USB folder",
+    "usb_placeholder": "/media/…",
+    "verb_consent_revocation": "consent_revocation — revoke consent on the delegator's behalf",
+    "verb_help": "Slash removes; moderate hides and warns; review only flags for a human.",
+    "verb_label": "Duty",
+    "verb_moderate": "moderate — emit a moderation event on the delegator's behalf",
+    "verb_review": "review — file a reconsideration (report → scores) on the delegator's behalf",
+    "verb_slash": "slash — take something away: quarantine, and time-bounded de-admission",
+    "verb_takedown": "takedown — publish a takedown notice on the delegator's behalf",
+    "verbs_help": "Pick every duty this grant should carry. They travel together as one set on one grant — you do not need a separate ceremony per duty.",
+    "verbs_label": "Duties to confer",
+    "verbs_none": "No duty selected. A grant with no scope confers nothing."
   },
   "errors": {
     "adapter_not_available": "Adapter manager not available",
@@ -3950,6 +3954,9 @@
   "trust_platform": "Platform",
   "trust_play_integrity": "Play Integrity",
   "trust_play_validates": "Play Integrity validates app authenticity",
+  "trust_root": {
+    "no_root": "which root? the path must name the root_key_id to un-trust"
+  },
   "trust_running": "Running",
   "trust_verify_desc": "Verification status and details",
   "trust_verify_disclaimer": "Trust verification is advisory only",
@@ -3992,8 +3999,5 @@
   "wa_reject": "Reject",
   "wa_resolve": "Resolve",
   "wa_service_status": "Service Status",
-  "wa_status": "Status",
-  "trust_root": {
-    "no_root": "which root? the path must name the root_key_id to un-trust"
-  }
+  "wa_status": "Status"
 }

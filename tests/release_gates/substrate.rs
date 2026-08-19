@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v13.3.1";
-pub const TARGET_PERSIST: &str = "v32.3.0";
-pub const TARGET_EDGE: &str = "v17.4.1";
+pub const TARGET_VERIFY: &str = "v13.6.1";
+pub const TARGET_PERSIST: &str = "v37.1.0";
+pub const TARGET_EDGE: &str = "v18.0.2";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -178,7 +178,12 @@ fn gate_substrate_pins_move_together() {
 #[test]
 fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     /// The vocabulary hash adopted with persist v30.0.0.
-    const ADOPTED: &str = "1213fd3cf3109df92805cb1f6b0e39ae7637812b4fba23206a7860ba381107b2";
+    // Moved at the v36 adopt, in the order this gate demands: persist's
+    // CHANGELOG read in full first, every affected site fixed, ADOPTED updated
+    // last. v36.0.0 (#642) added `consent_supersedes` to the signed envelope —
+    // consent ordering became CAUSAL rather than resting on a producer-chosen
+    // wall clock, which `DEFAULT_MAX_TOUCH_SKEW` (300s) could not bound.
+    const ADOPTED: &str = "e019ecb873f662399c13515414849a8d055d5ec2f0893e21f74cdccf6f60a111";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

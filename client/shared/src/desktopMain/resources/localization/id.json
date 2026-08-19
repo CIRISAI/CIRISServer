@@ -3888,7 +3888,8 @@
       "no_such_identity": "Tidak ada identitas seperti itu pada node ini untuk ditautkan dengan akun tersebut.",
       "node_unowned": "Node ini belum memiliki pemilik, jadi tidak ada identitas untuk ditautkan dengan sebuah akun. Klaim node terlebih dahulu.",
       "store_unavailable": "Node tidak dapat menulis tautan tersebut karena penyimpanan identitasnya tidak tersedia. Tidak ada yang diubah.",
-      "not_delegatable": "Menautkan identitas masuk adalah tindakan pemilik sendiri. Sesi yang didelegasikan tidak dapat melakukannya — tautan tersebut bertahan lebih lama daripada delegasinya, sehingga akan memberikan akses permanen kepada siapa pun yang memegang izin sementara."
+      "not_delegatable": "Menautkan identitas masuk adalah tindakan pemilik sendiri. Sesi yang didelegasikan tidak dapat melakukannya — tautan tersebut bertahan lebih lama daripada delegasinya, sehingga akan memberikan akses permanen kepada siapa pun yang memegang izin sementara.",
+      "already_has_identity": "Akun tersebut sudah memiliki identitas masuk yang tertaut. Hapus dulu jika Anda ingin menggantinya."
     },
     "session_expired": "Sesi Anda sudah tidak berlaku. Masuk lagi untuk melanjutkan.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "bukan token sesi yang diterbitkan oleh node ini — tidak ada sesi untuk dikeluarkan",
       "missing_bearer": "token bearer tidak ada atau formatnya salah"
+    },
+    "link": {
+      "ambiguous_handle": "Kirim salah satu saja: id akun atau alamat email, jangan keduanya — keduanya berarti hal yang berbeda."
     }
   },
   "duty": {

@@ -343,6 +343,82 @@ pub async fn live_oauth_holders(
     Ok(live)
 }
 
+/// Find an ACTIVE cert an owner PRE-PROVISIONED for this email address
+/// (CIRISServer#448).
+///
+/// # The case this exists for
+///
+/// An owner adds a colleague in Users. They know that person's ADDRESS; they do
+/// not know, and cannot look up, their Google `sub`. Until this existed the node
+/// matched only `(provider, external_id)`, so a deliberately provisioned human
+/// was refused on the node they had been added to — the node ignoring its own
+/// operator.
+///
+/// # The line this does NOT cross
+///
+/// `oauth.rs` warns that "a stranger who can reach the port should get NOTHING
+/// for proving they control some unrelated email", and that remains exactly
+/// true. This matches an email an OWNER WROTE onto a cert, never an email a
+/// caller asserts about themselves: an unprovisioned address matches no row and
+/// is refused as before. Provisioning is the authorisation; the OAuth
+/// verification only proves the presenter is who the provider says.
+///
+/// Matching is case-insensitive on the whole address. That is deliberately
+/// coarser than the RFC (a local-part may be case-sensitive) because the input
+/// is a human typing a colleague's address into a form, and refusing
+/// `Guest@Example.org` for a cert provisioned as `guest@example.org` would be a
+/// correctness argument that costs an operator an afternoon.
+///
+/// Returns `None` when more than one cert claims the address, rather than
+/// picking: two certs provisioned for one human is a state an operator must
+/// resolve, and choosing silently would bind the identity to whichever row the
+/// index happened to return.
+pub async fn find_preprovisioned_by_email(
+    engine: &Engine,
+    email: &str,
+) -> Result<Option<WaCert>, StoreError> {
+    let want = email.trim().to_ascii_lowercase();
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let mut hits: Vec<WaCert> = Vec::new();
+    for role in [WaRole::Root, WaRole::Authority, WaRole::Observer] {
+        for c in list_by_role(engine, role, 512).await? {
+            if !c.active {
+                continue;
+            }
+            // Only a cert with NO oauth pair yet is a provisioning slot. One
+            // that already carries a pair belongs to a different identity, and
+            // matching it on email would REBIND a live account by address.
+            if c.oauth_external_id.is_some() {
+                continue;
+            }
+            let provisioned = c
+                .oauth_links
+                .as_ref()
+                .and_then(|v| v.get("email"))
+                .and_then(|v| v.as_str())
+                .map(|e| e.trim().to_ascii_lowercase());
+            if provisioned.as_deref() == Some(want.as_str()) {
+                hits.push(c);
+            }
+        }
+    }
+    match hits.len() {
+        0 => Ok(None),
+        1 => Ok(hits.pop()),
+        n => {
+            tracing::warn!(
+                matches = n,
+                "oauth sign-in: {n} active certs are pre-provisioned for the same email — \
+                 refusing to choose. An operator must retire the duplicates; binding to \
+                 whichever row the index returned would be arbitrary."
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// Resolve a provider pair to its WA cert. **RETIRED CERTS DO NOT ANSWER**
 /// (CIRISServer#395).
 ///
@@ -582,6 +658,40 @@ pub async fn set_active(engine: &Engine, wa_id: &str, active: bool) -> Result<bo
 }
 
 /// Stamp `last_login` (login bookkeeping).
+/// Stamp a verified provider pair onto a PRE-PROVISIONED cert
+/// (CIRISServer#448).
+///
+/// Called once, on the first successful sign-in of a human an owner added by
+/// email. After this the cert carries the pair, so `get_by_oauth` resolves them
+/// directly and the email path is never consulted for this person again —
+/// which matters, because email is the WEAKER handle and should stop being
+/// load-bearing the moment a verified subject id exists.
+///
+/// Refuses to overwrite an existing pair. A cert that already names an identity
+/// belongs to that human, and rebinding it by address is precisely the takeover
+/// this whole path must not enable.
+pub async fn bind_oauth_identity(
+    engine: &Engine,
+    wa_id: &str,
+    provider: &str,
+    external_id: &str,
+) -> Result<bool, StoreError> {
+    let Some(mut cert) = get(engine, wa_id).await? else {
+        return Ok(false);
+    };
+    if cert.oauth_external_id.is_some() {
+        tracing::warn!(
+            wa_id = %wa_id,
+            "refusing to rebind a cert that already carries an oauth identity"
+        );
+        return Ok(false);
+    }
+    cert.oauth_provider = Some(provider.to_string());
+    cert.oauth_external_id = Some(external_id.to_string());
+    upsert(engine, cert).await?;
+    Ok(true)
+}
+
 pub async fn touch_login(engine: &Engine, wa_id: &str) -> Result<bool, StoreError> {
     Ok(wa_cert_backend(engine)?
         .update_last_login(wa_id, chrono::Utc::now())

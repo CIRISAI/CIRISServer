@@ -3888,7 +3888,8 @@
       "no_such_identity": "Không có danh tính nào như vậy trên nút này để liên kết tài khoản vào.",
       "node_unowned": "Nút này chưa có chủ sở hữu, nên chưa có danh tính nào để liên kết tài khoản vào. Hãy nhận quyền sở hữu nút trước.",
       "store_unavailable": "Nút không thể ghi liên kết vì kho danh tính của nó không khả dụng. Không có gì bị thay đổi.",
-      "not_delegatable": "Liên kết một danh tính đăng nhập là hành động của riêng chủ sở hữu. Phiên được ủy quyền không thể thực hiện điều đó — liên kết tồn tại lâu hơn sự ủy quyền, nên nó sẽ trao quyền truy cập vĩnh viễn cho bất kỳ ai đang giữ một quyền tạm thời."
+      "not_delegatable": "Liên kết một danh tính đăng nhập là hành động của riêng chủ sở hữu. Phiên được ủy quyền không thể thực hiện điều đó — liên kết tồn tại lâu hơn sự ủy quyền, nên nó sẽ trao quyền truy cập vĩnh viễn cho bất kỳ ai đang giữ một quyền tạm thời.",
+      "already_has_identity": "Tài khoản đó đã có danh tính đăng nhập được liên kết. Hãy gỡ bỏ trước nếu bạn muốn thay thế."
     },
     "session_expired": "Phiên làm việc của bạn không còn hiệu lực. Hãy đăng nhập lại để tiếp tục.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "không phải mã phiên do nút này phát hành — không có gì để đăng xuất",
       "missing_bearer": "thiếu mã bearer hoặc mã bearer sai định dạng"
+    },
+    "link": {
+      "ambiguous_handle": "Chỉ gửi mã tài khoản hoặc địa chỉ email, không gửi cả hai — chúng có ý nghĩa khác nhau."
     }
   },
   "duty": {

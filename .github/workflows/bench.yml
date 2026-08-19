@@ -52,7 +52,26 @@ jobs:
           # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
           # 403s and tanks apt-get update (its packages are not needed here).
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
-          sudo apt-get update
+          # AND drop the AZURE UBUNTU MIRROR itself (CIRISServer#449). Removing
+          # the Microsoft repos above was not enough: the runner image makes
+          # `azure.archive.ubuntu.com` the PRIMARY Ubuntu mirror via
+          # /etc/apt/apt-mirrors.txt, and when it stops answering, apt retries it
+          # for the InRelease of every suite before falling back. Observed three
+          # times on one PR: `clippy + test` wedged 68 min, `traceflow ladder`
+          # 75 min to a timeout-failure, and the retry of the first wedged again
+          # at the identical `Ign:` lines. A job that hangs for an hour reads as
+          # a slow test suite, which is why it cost a day before anyone looked.
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo find /etc/apt/sources.list.d -type f -exec \
+            sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} + 2>/dev/null || true
+          # Bounded: retry a few times, cap each connection, and cap the whole
+          # step. Without the outer `timeout` a stalled mirror consumes the job's
+          # entire budget and the failure names the job, never the cause.
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
           sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
       # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
       # Single leg: PLAT=linux-x86_64. Restore verify→persist→edge→server; SAVE

@@ -118,6 +118,37 @@ check /v1/auth/signin-state    '.new_identity|has("outcome")'  'signin-state.new
 # the actual front door: start a flow with NO redirect_uri and NO app_nonce,
 # exactly as a GUI does, and require the node to send us somewhere carrying a
 # code. A 200 here means the hand-off page came back, which is the defect.
+# CONFIGURE A STUB PROVIDER SO THE FLOW IS ACTUALLY DRIVABLE.
+#
+# On 0.5.181 this check reported `skip — no provider configured` and exercised
+# nothing: a freshly booted CI node has no OAuth provider, so `/login` 404s.
+# A gate that skips in the only environment it ever runs in is not a gate — it
+# is the same "cannot fail in the direction that matters" shape it was written
+# to catch, which is why the skip was made loud rather than silent.
+#
+# `POST /v1/auth/oauth/providers` (`configure_provider`) is deliberately
+# UNAUTHENTICATED, so a throwaway config needs no session. The credentials are
+# obvious fakes and never leave this temp node: the flow under test ends at the
+# provider REDIRECT, which is built from the client_id without contacting
+# anyone. We never complete an exchange, so no secret is ever used.
+#
+# Only when we booted the node ourselves — never against a node handed to us via
+# CIRIS_VERIFY_BASE_URL, where writing config would be a side effect on
+# someone else's process.
+if [[ -z "${CIRIS_VERIFY_BASE_URL:-}" ]]; then
+  cfg_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+    -X POST "$BASE/v1/auth/oauth/providers" \
+    -H 'Content-Type: application/json' \
+    -d '{"provider":"google","client_id":"release-surface-check.invalid","client_secret":"not-a-real-secret"}' \
+    2>/dev/null || true)"
+  case "$cfg_code" in
+    2*) echo "  ok    stub provider configured for the flow check" ;;
+    *)  echo "  FAIL  could not configure a stub provider (HTTP ${cfg_code:-none}) — \
+the front-door check cannot run, and a skip here would hide exactly the defect \
+it exists to catch" >&2; fail=1 ;;
+  esac
+fi
+
 echo "Front-door browser flow:"
 # `|| true` on BOTH: under `set -euo pipefail` a grep that matches nothing exits
 # 1 and kills the script mid-assignment — which is how the first draft of this

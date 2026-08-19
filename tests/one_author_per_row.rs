@@ -138,8 +138,26 @@ fn nothing_outside_the_door_builds_a_row() {
         let (shipping, _fixtures) = split_at_cfg_test(&code);
         for (n, line) in shipping.lines().enumerate() {
             // `-> Attestation {` is a return type, not a construction.
+            //
+            // `Plane::Attestation { dimension }` is persist v36's PLANE enum
+            // variant (#713's per-dimension decomposition), not a row. It names
+            // which plane `projection_for` should answer for; it allocates no
+            // row, signs nothing and stores nothing, so #402's two-authors
+            // hazard cannot arise from it. The token `Attestation {` now spells
+            // two different things — the row struct and this variant — which is
+            // this repo's own one-name-two-things class arriving inside a gate
+            // written to catch it.
+            //
+            // Excluded by the PATH SEGMENT before it, not by a looser pattern:
+            // only `Plane::Attestation` is skipped, so `federation::Attestation
+            // {` and a bare `Attestation {` still offend. Exempting the FILE
+            // instead — which this gate's failure message offers — would have
+            // been the wrong lever: EXEMPT is file-scoped, so it would blind the
+            // gate to every real row construction in `federation_delivery.rs`
+            // forever, to silence one line that was never a row.
             let constructs = line.contains("Attestation {")
                 && !line.contains("SignedAttestation {")
+                && !line.contains("Plane::Attestation {")
                 && !line.contains("->");
             if constructs {
                 offenders.push(format!("{path}:{}: {}", n + 1, line.trim()));

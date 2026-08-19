@@ -237,7 +237,46 @@ impl WithholdClass {
             // below, because reading them as a fault would send an operator
             // hunting for a defect in a mesh doing exactly what it was told.
             | WithholdReason::ConfigPaused
-            | WithholdReason::QuarantinedAuthor => Self::Policy,
+            | WithholdReason::QuarantinedAuthor
+            // edge v18.0.0 (CIRISEdge#499 workstream F) — the accord relay gate.
+            // These two are DECISIONS, not failures. CC 4.2.1: "a node that
+            // never trusted the accord … is simply not reached", and a key that
+            // names a root it holds no live seat on is not authoritative just
+            // for naming it. An operator seeing either should look at the trust
+            // edge or the roster, not hunt for a defect.
+            | WithholdReason::AccordRelayNoTrustEdge
+            | WithholdReason::AccordRelaySignerNotSeated
+            // persist's classifier says the row is simply not on the accord
+            // family — a determination, not a failure to make one.
+            | WithholdReason::AccordRelayObjectNotAccord
+            // edge v18.0.0 (CIRISEdge#499) — scope-native addressing. Each of
+            // these is the scope gate REACHING A VERDICT: the blob's scope does
+            // not admit the arrival scope, the request came in on an address
+            // derived from another group's MLS exporter_secret (the
+            // cross-group probe the design exists to refuse), or the peer is
+            // not in the record's own roster. Refusing is the feature.
+            | WithholdReason::BlobArrivalScopeInsufficient
+            | WithholdReason::BlobArrivalGroupMismatch
+            | WithholdReason::HoldingScopePeerNotInRoster
+            // #169 LXMF — operator posture and advertised limits. Not a
+            // propagation node; not holding mail for that destination; a
+            // transient ID parked for someone else (the cross-recipient
+            // mailbox probe per-destination scoping exists to catch); a stamp
+            // below the cost this node ADVERTISES; a peer-sync form
+            // leviculum-lxmf deliberately does not implement; a ceiling that
+            // refused carriage before doing work; a full mailbox refusing
+            // rather than silently evicting; and a parked message evicted at
+            // its retention window — the bounded-retention promise being KEPT.
+            // An operator who sees these should change configuration if they
+            // meant something else, and otherwise leave them alone.
+            | WithholdReason::LxmfPropagationDisabled
+            | WithholdReason::LxmfDestinationNotServed
+            | WithholdReason::LxmfMailboxScopeMismatch
+            | WithholdReason::LxmfStampBelowCost
+            | WithholdReason::LxmfPeerSyncUnsupported
+            | WithholdReason::LxmfFrameOversized
+            | WithholdReason::LxmfMailboxFull
+            | WithholdReason::LxmfRetentionExpired => Self::Policy,
             // Fail-closed on a failed read, or a missing local wiring input.
             WithholdReason::LocalIdentityMissing
             | WithholdReason::SendSetUnresolved
@@ -247,11 +286,68 @@ impl WithholdClass {
             // could-not-ask versus a verdict, the distinction this surface exists
             // to keep. Fail-closed, and Red: the node withheld without knowing
             // whether it had to.
-            | WithholdReason::QuarantineReadError => Self::Fault,
+            | WithholdReason::QuarantineReadError
+            // "I CANNOT JUDGE" — kept apart from the two accord VERDICTS below,
+            // which is the distinction CIRISPersist#713 wrote a mutation to
+            // protect: an unjudgeable root reported as an unseated signer is an
+            // admission of ignorance dressed as an accusation. Roster
+            // unresolvable = go sync the family record; unresolved = the check
+            // never ran (a wiring/timing fact, fail-closed). Both are things to
+            // go fix, so Fault — the band the other read failures already use.
+            | WithholdReason::AccordRelayRosterUnresolvable
+            | WithholdReason::AccordRelayUnresolved
+            // CIRISEdge#499 / CIRISPersist#744 — every one of these is the node
+            // being UNABLE to decide, which is categorically different from
+            // deciding no. Scope undeterminable; an audience KIND with no
+            // peer-set mechanism on this plane; the gate armed with no
+            // FederationDirectory wired; the authority walk erroring; the
+            // recipient set answering "I cannot judge"; and the recipient read
+            // returning Err. All of them are something to go wire or go fix.
+            | WithholdReason::BlobScopeUndeterminable
+            | WithholdReason::HoldingScopeUndeterminable
+            | WithholdReason::HoldingScopeProjectionUnsupported
+            | WithholdReason::HoldingScopeDirectoryMissing
+            | WithholdReason::HoldingScopeAuthorityUnresolved
+            | WithholdReason::HoldingScopeRecipientSetUnresolved
+            | WithholdReason::HoldingScopeRecipientReadError
+            // The requester's identity did not resolve, so there is no
+            // destination to scope a mailbox to. Fail-closed and Red: the node
+            // withheld without being able to establish who was asking.
+            | WithholdReason::LxmfRequesterUnidentified => Self::Fault,
             // Local state that cannot be put on the wire at all.
             WithholdReason::EnvelopeUnfetchable
             | WithholdReason::RowNotSerializable
-            | WithholdReason::RowHashUndecodable => Self::Integrity,
+            | WithholdReason::RowHashUndecodable
+            // The ROW is the problem, which is what Integrity means here.
+            // Unreadable = it does not deserialize into persist's row type, so
+            // there is nothing to hand the relay verb. MirrorUnbound = the
+            // RowMirror is absent (a pre-#643 unstamped row) or DIVERGES, so
+            // the typed columns assert nothing and persist's
+            // `check_row_column_binding` refuses it.
+            //
+            // Edge keeps those two apart deliberately and we preserve it: a
+            // DIVERGENCE is a security event (a relay rewriting a signed row's
+            // identity, verb, signer or subject while the signature still
+            // verifies), while a missing mirror is a producer-vintage problem.
+            // Same band, different findings — the band carries the operator's
+            // urgency, not the diagnosis.
+            | WithholdReason::AccordRelayObjectUnreadable
+            | WithholdReason::AccordRelayMirrorUnbound
+            // CIRISPersist#733 — the accord_root contract, and both arms are
+            // properties of the ARTIFACT. Unnamed: the row is on the accord
+            // family and nothing in it names the accord it acts under, so it
+            // asserts authority it never identifies. Disagrees: ONE ARTIFACT
+            // ASSERTING TWO ACCORDS — the signed key and the drill-dimension
+            // rule name different roots, which persist refuses outright rather
+            // than silently preferring either, because the problem is not
+            // which to pick.
+            | WithholdReason::AccordRelayObjectRootUnnamed
+            | WithholdReason::AccordRelayObjectRootDisagrees
+            // A private roster declared at Public cohort scope is a
+            // self-contradictory holding, not a policy choice.
+            | WithholdReason::HoldingScopePublicGroup
+            // The bytes do not decode as the wire this endpoint speaks.
+            | WithholdReason::LxmfWireUnparseable => Self::Integrity,
         }
     }
 

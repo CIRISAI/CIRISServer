@@ -3888,7 +3888,8 @@
       "no_such_identity": "No existe esa identidad en este nodo para vincularle la cuenta.",
       "node_unowned": "Este nodo aún no tiene propietario, así que no hay ninguna identidad a la que vincular una cuenta. Reclama el nodo primero.",
       "store_unavailable": "El nodo no pudo escribir el vínculo porque su almacén de identidades no está disponible. No se cambió nada.",
-      "not_delegatable": "Vincular una identidad de inicio de sesión es un acto propio del titular. Una sesión delegada no puede hacerlo: el vínculo sobrevive a la delegación, por lo que otorgaría acceso permanente a quien posea una concesión temporal."
+      "not_delegatable": "Vincular una identidad de inicio de sesión es un acto propio del titular. Una sesión delegada no puede hacerlo: el vínculo sobrevive a la delegación, por lo que otorgaría acceso permanente a quien posea una concesión temporal.",
+      "already_has_identity": "Esa cuenta ya tiene una identidad de inicio de sesión vinculada. Elimínala primero si quieres reemplazarla."
     },
     "session_expired": "Tu sesión ya no es válida. Inicia sesión de nuevo para continuar.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "no es un token de sesión emitido por este nodo — no hay nada que cerrar",
       "missing_bearer": "falta el token bearer o está mal formado"
+    },
+    "link": {
+      "ambiguous_handle": "Envía un id de cuenta o una dirección de correo electrónico, no ambos: significan cosas distintas."
     }
   },
   "duty": {

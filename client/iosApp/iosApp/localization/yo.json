@@ -3888,7 +3888,8 @@
       "no_such_identity": "Kò sí ìdánimọ̀ bẹ́ẹ̀ lórí node yìí láti so àkàǹtì náà mọ́.",
       "node_unowned": "Node yìí kò tí ì ní olóhun, nítorí náà kò sí ìdánimọ̀ tí a lè so àkàǹtì mọ́. Gba node náà ní àkọ́kọ́.",
       "store_unavailable": "Node náà kò lè kọ ìsopọ̀ náà nítorí pé ilé-ìtọ́jú ìdánimọ̀ rẹ̀ kò sí. Kò sí ohun tí a yípadà.",
-      "not_delegatable": "Dídá ìdánimọ̀ ìwọlé pọ̀ jẹ́ iṣẹ́ olóhun fúnra rẹ̀. Ìjókòó àṣojú kò lè ṣe é — àsopọ̀ náà máa wà pẹ́ ju ìfàṣẹpàṣẹ náà lọ, nítorí náà yóò fi ààyè tí kò lópin lé ẹnikẹ́ni tí ó ní àṣẹ ìgbà díẹ̀ lọ́wọ́."
+      "not_delegatable": "Dídá ìdánimọ̀ ìwọlé pọ̀ jẹ́ iṣẹ́ olóhun fúnra rẹ̀. Ìjókòó àṣojú kò lè ṣe é — àsopọ̀ náà máa wà pẹ́ ju ìfàṣẹpàṣẹ náà lọ, nítorí náà yóò fi ààyè tí kò lópin lé ẹnikẹ́ni tí ó ní àṣẹ ìgbà díẹ̀ lọ́wọ́.",
+      "already_has_identity": "Àkàǹtì yẹn ti ní ìdánimọ̀ ìwọlé tí a so mọ́ ọn. Yọ ọ́ kúrò lákọ̀ọ́kọ́ bí o bá fẹ́ fi mìíràn rọ́pò rẹ̀."
     },
     "session_expired": "Ìjókòó rẹ kò wúlò mọ́. Wọlé lẹ́ẹ̀kan sí i láti tẹ̀ síwájú.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "kì í ṣe àmì-ìgbà tí nódù yìí ṣẹ̀dá — kò sí ohunkóhun láti jáde nínú rẹ̀",
       "missing_bearer": "àmì àṣẹ (bearer token) kò sí tàbí kò péye"
+    },
+    "link": {
+      "ambiguous_handle": "Fi ìdánimọ̀ àkàǹtì tàbí àdírẹ́sì ìmẹ́ìlì ránṣẹ́, kì í ṣe àwọn méjèèjì — ohun ọ̀tọ̀ọ̀tọ̀ ni wọ́n túmọ̀ sí."
     }
   },
   "duty": {
