@@ -908,8 +908,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "13.3.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.3.1#82960ea7eb49db1a14535501042179e17635beed"
+version = "13.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.6.1#281f486074f80b7f13030bf471a66b18cd773c61"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -935,8 +935,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "17.4.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v17.4.1#abee3686e2ee5f52282619f5fbce7771d126544a"
+version = "18.0.2"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v18.0.2#2fd0c95c2d21fa6b375f1ea534b7f2f22392ba7c"
 dependencies = [
  "async-trait",
  "axum",
@@ -990,8 +990,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "13.3.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.3.1#82960ea7eb49db1a14535501042179e17635beed"
+version = "13.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.6.1#281f486074f80b7f13030bf471a66b18cd773c61"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1056,8 +1056,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "32.3.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v32.3.0#5d1cd36e3d9fd8131cfc38ff4b023667a8d42b6d"
+version = "37.1.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v37.1.0#9c17a9f2012813c2baf7247050763592cb6bc417"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1149,8 +1149,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "13.3.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.3.1#82960ea7eb49db1a14535501042179e17635beed"
+version = "13.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.6.1#281f486074f80b7f13030bf471a66b18cd773c61"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1191,8 +1191,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "13.3.1"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.3.1#82960ea7eb49db1a14535501042179e17635beed"
+version = "13.6.1"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v13.6.1#281f486074f80b7f13030bf471a66b18cd773c61"
 dependencies = [
  "aes-gcm",
  "android_logger",
@@ -3584,8 +3584,8 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviculum-core"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.20.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.20.0%2Bciris.1#8775f1f838d7b47886193599884a859633363c1a"
 dependencies = [
  "aes",
  "cbc",
@@ -3602,8 +3602,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.20.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.20.0%2Bciris.1#8775f1f838d7b47886193599884a859633363c1a"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -3613,10 +3613,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.16.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.16.0%2Bciris.1#f8641c7ceda89b414fc29804193103643f990923"
+version = "0.20.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.20.0%2Bciris.1#8775f1f838d7b47886193599884a859633363c1a"
 dependencies = [
  "clap 4.6.6",
+ "futures",
  "hmac 0.12.1",
  "if-addrs",
  "leviculum-core",

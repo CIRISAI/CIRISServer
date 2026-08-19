@@ -61,6 +61,22 @@ fn transport_node_flag_maps_into_reticulum_config() {
         interfaces: vec![],
         enable_transport: enabled,
         link_keepalive: Some(Duration::from_secs(30)), // CIRISEdge#363
+        // CIRISEdge#492 — mirror the composition root (`compose.rs`): the
+        // fabric node leaves both legacy-path knobs at their defaults, so this
+        // fixture must too. `transit: Some(false)` here would make the fixture
+        // describe a LEAF port while the test's whole subject is packet
+        // FORWARDING, and it would stop matching the config `build_edge`
+        // actually constructs — which is the one thing this test exists to
+        // check.
+        ifac: None,
+        transit: None,
+        // Mirrors the composition root (`compose.rs`), which is this fixture's
+        // whole job: a NAT-traversal fixture that diverges from the real config
+        // proves the fixture works, not the node. Both fields are new in edge
+        // v18.0.1 — capacity per CIRISEdge#508 (d), visibility per #499, where
+        // `false` would make a node point-to-point only.
+        control_channel_capacity: Some(4096),
+        federation_visible: true,
     };
 
     assert!(
