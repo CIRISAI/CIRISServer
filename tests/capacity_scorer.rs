@@ -717,7 +717,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
     assert!(
         log.alarms().is_empty(),
         "the consented path must not alarm:\n{}",
-        log.render()
+        log.render_or_explain()
     );
 
     // (2) BREAK the gate's only input. Nothing about the subject's answer has
@@ -738,7 +738,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
         !alarms.is_empty(),
         "an unreadable CC#46 consent fold was reported with NO alarm at all — the gate went \
          blind and the pass read as routine.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         alarms
@@ -746,7 +746,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
             .any(|e| e.message.contains("consent fold") && e.message.contains("FAILED TO READ")),
         "no alarm names the CONSENT FOLD as what failed. The reader has to be sent to the \
          consent plane, not the trace plane — the traces arrived and were read fine.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -754,7 +754,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
             .all(|e| !e.message.contains("steady state, not a fault")),
         "the pass reported a blind consent gate as a healthy steady state — the exact \
          collapse CIRISServer#351 is about.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -762,7 +762,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
             .any(|e| e.message.contains("NOT a decline")),
         "the per-agent line must say the subject did not decline: \"no consent\" and \"no \
          answer\" are opposite facts about the subject.\n{}",
-        log.render()
+        log.render_or_explain()
     );
 
     // (3) RESTORE — same corpus, same subject, same grant. The fold is readable
@@ -781,7 +781,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
         log.alarms().is_empty(),
         "with the fold readable again the pass must be quiet — an alarm that never clears is \
          the same instrument failure pointed the other way:\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -789,7 +789,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
             .any(|e| e.message.contains("steady state, not a fault")),
         "the restored pass must be AUDIBLE about being healthy, not merely silent — a silent \
          pass and a dead loop look identical from outside (CIRISServer#315).\n{}",
-        log.render()
+        log.render_or_explain()
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -930,7 +930,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
     assert!(
         log.alarms().is_empty(),
         "the cold path must not alarm:\n{}",
-        log.render()
+        log.render_or_explain()
     );
     let rows_after_cold = capacity_rows(&node).await;
     assert_eq!(rows_after_cold, 1, "exactly one capacity row after leg 1");
@@ -966,7 +966,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
         !alarms.is_empty(),
         "an unreadable standing-rows read was reported with NO alarm at all — the coalescer \
          went blind and the pass read as routine.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         alarms
@@ -974,7 +974,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
             .any(|e| e.message.contains("STANDING-ROWS READ FAILED")),
         "no alarm names the STANDING-ROWS READ as what failed. The reader must be sent to the \
          capacity plane, not the trace plane — the traces arrived and were read fine.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -982,7 +982,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
             .all(|e| !e.message.contains("steady state, not a fault")),
         "the pass reported a blind coalescer as a healthy steady state — the exact collapse \
          CIRISServer#374 is about.\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -990,7 +990,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
             .any(|e| e.message.contains("NOT \"nothing stands\"")),
         "the per-agent line must say this was not an empty corpus: \"no rows stand\" and \"the \
          rows could not be read\" are opposite facts.\n{}",
-        log.render()
+        log.render_or_explain()
     );
 
     // (3) RESTORE — same corpus, same subject, same grant, same score. The read
@@ -1014,7 +1014,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
         log.alarms().is_empty(),
         "with the read working again the pass must be quiet — an alarm that never clears is \
          the same instrument failure pointed the other way:\n{}",
-        log.render()
+        log.render_or_explain()
     );
     assert!(
         log.events()
@@ -1022,7 +1022,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
             .any(|e| e.message.contains("steady state, not a fault")),
         "the restored pass must be AUDIBLE about being healthy, not merely silent — a silent \
          pass and a dead loop look identical from outside (CIRISServer#315).\n{}",
-        log.render()
+        log.render_or_explain()
     );
 
     let _ = std::fs::remove_dir_all(&dir);

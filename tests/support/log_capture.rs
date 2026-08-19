@@ -75,6 +75,31 @@ impl Log {
     }
 
     /// Human-readable dump for assertion messages.
+    /// Render, but NEVER to the empty string.
+    ///
+    /// A CI failure (0.5.182 adopt) printed this into an assertion message and
+    /// produced nothing at all, so the report read as "the healthy line was
+    /// missing from the log" when what actually happened was "no events were
+    /// captured". Those are different worlds with different fixes — the first
+    /// is a scorer bug, the second is this harness not seeing the events —
+    /// and an empty render collapses them into the more alarming one.
+    ///
+    /// `capture` attaches its subscriber to the FUTURE, so anything the code
+    /// under test `tokio::spawn`s emits into the global dispatcher instead and
+    /// is invisible here. That is scheduling-dependent, which is why it showed
+    /// up on a loaded CI runner and never locally.
+    pub fn render_or_explain(&self) -> String {
+        let n = self.events().len();
+        if n == 0 {
+            return "(NO EVENTS CAPTURED AT ALL — this is a capture failure, not a \
+                    missing log line. `capture` subscribes the future it wraps; work the \
+                    code under test spawns onto other tasks emits into the global \
+                    dispatcher and never reaches this Log.)"
+                .to_string();
+        }
+        format!("{n} event(s) captured:\n{}", self.render())
+    }
+
     pub fn render(&self) -> String {
         self.events()
             .iter()
