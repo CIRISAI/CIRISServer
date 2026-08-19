@@ -3888,7 +3888,8 @@
       "no_such_identity": "Bu düğümde hesabın bağlanabileceği böyle bir kimlik yok.",
       "node_unowned": "Bu düğümün henüz bir sahibi yok, bu nedenle hesabın bağlanabileceği bir kimlik de yok. Önce düğümün sahipliğini alın.",
       "store_unavailable": "Kimlik deposu kullanılamadığı için düğüm bağlantıyı yazamadı. Hiçbir şey değiştirilmedi.",
-      "not_delegatable": "Bir oturum açma kimliğini bağlamak, sahibinin bizzat yapması gereken bir işlemdir. Devredilmiş bir oturum bunu yapamaz — bağlantı, devrin süresinden daha uzun süre geçerli kalır; bu da geçici bir yetkiyi elinde tutan kişiye kalıcı erişim vermek anlamına gelir."
+      "not_delegatable": "Bir oturum açma kimliğini bağlamak, sahibinin bizzat yapması gereken bir işlemdir. Devredilmiş bir oturum bunu yapamaz — bağlantı, devrin süresinden daha uzun süre geçerli kalır; bu da geçici bir yetkiyi elinde tutan kişiye kalıcı erişim vermek anlamına gelir.",
+      "already_has_identity": "Bu hesabın zaten bağlı bir oturum açma kimliği var. Değiştirmek istiyorsanız önce onu kaldırın."
     },
     "session_expired": "Oturumunuz artık geçerli değil. Devam etmek için tekrar oturum açın.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "bu düğümün ürettiği bir oturum belirteci değil — çıkış yapılacak bir şey yok",
       "missing_bearer": "eksik veya hatalı biçimlendirilmiş taşıyıcı (bearer) belirteci"
+    },
+    "link": {
+      "ambiguous_handle": "Bir hesap kimliği veya bir e-posta adresi gönderin, ikisini birden değil — bunlar farklı şeyler anlamına gelir."
     }
   },
   "duty": {

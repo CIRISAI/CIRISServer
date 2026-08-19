@@ -717,6 +717,62 @@ class CIRISApiClient(
         }
     }
 
+    // ─── OAuth linking (CIRISServer#432 / #448) ──────────────────────────────
+    //
+    // POST /v1/self/oauth-link. The node has served this route all along and
+    // NOTHING called it — the generated `UsersApi.linkOauthAccount…` targets
+    // `/v1/users/{id}/oauth-links`, which comes from the AGENT's spec and which
+    // this node does not route. Two halves, each pointing at a counterpart that
+    // did not exist.
+    //
+    // It takes an EMAIL, not a provider subject id. That distinction is the
+    // whole reason the surface was unusable before: nobody can look up their own
+    // Google `sub`, so a form asking for one is a form nobody can complete. An
+    // address is the handle a person actually has. The node records it as a
+    // provisioning slot and binds the verified pair on the next sign-in.
+    /**
+     * Pre-provision an OAuth sign-in for [email] on this node.
+     *
+     * Omit [waId] to target the node's owner — the case a person linking their
+     * own account is in. Requires an owner session.
+     *
+     * Returns `true` when the node accepted the provisioning. The link itself
+     * completes on the NEXT sign-in with that provider, which is why the node
+     * answers `linked: false` here and says so in its `note`.
+     */
+    suspend fun preprovisionOAuthEmail(
+        email: String,
+        provider: String = "google",
+        waId: String? = null,
+    ): Boolean {
+        val method = "preprovisionOAuthEmail"
+        return try {
+            val body = buildJsonObject {
+                put("provider", provider)
+                put("email", email)
+                waId?.let { put("wa_id", it) }
+            }
+            val r = httpClient.post("$baseUrl/v1/self/oauth-link") {
+                authHeader()?.let { header("Authorization", it) }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (r.status.value in 200..299) {
+                logInfo(method, "pre-provisioned $provider sign-in for an address on ${waId ?: "the owner"}")
+                true
+            } else {
+                // Surface the node's typed reason rather than a status code: it
+                // distinguishes "already has an identity" from "not the owner",
+                // and those need different things from the person reading it.
+                logInfo(method, "node refused the link: ${r.status.value} ${r.bodyAsText()}")
+                false
+            }
+        } catch (e: Exception) {
+            logInfo(method, "link request failed: ${e.message}")
+            false
+        }
+    }
+
     // ─── Agent Mode (global) ─────────────────────────────────────────────────
     // GET/PUT /v1/system/agent-mode — drives federation transport posture.
     // Hand-rolled (not via SDK) because the route is newer than the SDK regen

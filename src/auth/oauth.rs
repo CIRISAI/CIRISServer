@@ -1286,6 +1286,37 @@ pub async fn resolve_oauth_user(
         );
         return Ok(existing.wa_id);
     }
+    // ── A PRE-PROVISIONED HUMAN IS NOT A STRANGER (CIRISServer#448) ────────
+    //
+    // No cert carries this PAIR, but an owner may have added this person by
+    // EMAIL — which is the only handle an operator actually has, since nobody
+    // can look up a colleague's Google `sub`. Binding here turns "added in
+    // Users" into "can sign in", which is what an operator means by it.
+    //
+    // The pair is stamped onto the provisioned cert on this first successful
+    // sign-in, so every later sign-in resolves at `get_by_oauth` above and this
+    // path is never consulted again. Provisioning authorises; the pair is what
+    // is thereafter checked.
+    //
+    // Deliberately BEFORE the personal-node refusal below: a provisioned human
+    // must not be refused for the node being personal, which is the entire
+    // point of an owner having provisioned them.
+    if let Some(email) = ident.email.as_deref() {
+        if let Some(slot) = store::find_preprovisioned_by_email(engine, email).await? {
+            store::bind_oauth_identity(engine, &slot.wa_id, &ident.provider, &ident.external_id)
+                .await?;
+            let _ = store::touch_login(engine, &slot.wa_id).await;
+            tracing::info!(
+                provider = %ident.provider,
+                subject = %redact_subject(&ident.external_id),
+                wa_id = %slot.wa_id,
+                role = ?slot.role,
+                "oauth sign-in bound to a PRE-PROVISIONED identity (matched by email) — \
+                 the owner added this person, so they are not a stranger"
+            );
+            return Ok(slot.wa_id);
+        }
+    }
     // No cert carries this identity yet. NOT a refusal — we create below — and
     // saying "REFUSED" here put a warning in the log for the ordinary first
     // sign-in, immediately followed by "CREATED". A log that cries wolf on the
@@ -2193,11 +2224,24 @@ fn browser_error_page(
     )
 }
 
-/// Per D2: the one remedy line every browser refusal offers. The OAuth-linking
-/// surfaces exist but have no working caller in any client, so suggesting a
-/// link flow would send a human somewhere nothing can complete — the #387
-/// lesson again (never name a remedy that cannot work).
-const BROWSER_NEXT_STEP: &str = "Sign in with your local username and password.";
+/// Per D2: the one remedy line every browser refusal offers.
+///
+/// **The linking sentence is BACK, and only because the action now works**
+/// (CIRISServer#448). It was removed at 0.5.177 because the OAuth-link surfaces
+/// had no working caller, and naming a remedy a human cannot perform is the
+/// #387 lesson this file has paid for twice.
+///
+/// What changed is not the copy — it is that `POST /v1/self/oauth-link` now
+/// accepts an EMAIL. That matters because the old surface required an
+/// `external_id`, and no human can look up their own Google `sub`; the remedy
+/// was impossible in a way no rewording could fix. An address is a handle an
+/// owner actually holds, `resolve_oauth_user` treats a recorded address as a
+/// provisioning slot, and the next sign-in binds the verified pair.
+///
+/// If that path is ever removed, this sentence comes out in the same commit.
+const BROWSER_NEXT_STEP: &str =
+    "Sign in with your local username and password. To use this provider instead, \
+     add your email address to your account first — the next sign-in will link it.";
 
 /// The refusal for a path segment that is not even provider-SHAPED. A const so
 /// the id↔text pairing the localization guard scrapes stays the one at

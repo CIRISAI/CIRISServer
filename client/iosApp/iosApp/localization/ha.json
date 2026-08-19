@@ -3888,7 +3888,8 @@
       "no_such_identity": "Babu irin wannan shaida a wannan node da za a haɗa asusun da ita.",
       "node_unowned": "Wannan node ba shi da mai mallaka tukuna, don haka babu shaidar da za a haɗa asusu da ita. Ka fara mallakar node ɗin.",
       "store_unavailable": "Node ɗin bai iya rubuta haɗin ba saboda ma'ajiyar shaidarsa ba ta samuwa. Ba a canza komai ba.",
-      "not_delegatable": "Haɗa shaidar shiga aiki ne na mai shi kaɗai. Zaman wakilci ba zai iya yin sa ba — haɗin yana wanzuwa fiye da wakilcin, don haka zai ba da damar shiga ta dindindin ga duk wanda ke riƙe da izini na ɗan lokaci."
+      "not_delegatable": "Haɗa shaidar shiga aiki ne na mai shi kaɗai. Zaman wakilci ba zai iya yin sa ba — haɗin yana wanzuwa fiye da wakilcin, don haka zai ba da damar shiga ta dindindin ga duk wanda ke riƙe da izini na ɗan lokaci.",
+      "already_has_identity": "Wannan asusun ya riga yana da shaidar shiga da aka haɗa. Ka fara cire ta idan kana son maye gurbinta."
     },
     "session_expired": "Zamanka ya ƙare. Ka sake shiga don ci gaba.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "ba token ɗin zama da wannan node ya ƙirƙira ba ne — babu abin da za a fitar",
       "missing_bearer": "babu bearer token ko kuma tsarinsa ba daidai ba ne"
+    },
+    "link": {
+      "ambiguous_handle": "Aika ko dai ID na asusu ko adireshin imel, ba duka biyu ba — suna nufin abubuwa daban-daban."
     }
   },
   "duty": {

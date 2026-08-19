@@ -3888,7 +3888,8 @@
       "no_such_identity": "Aucune identité de ce type n'existe sur ce nœud à laquelle associer le compte.",
       "node_unowned": "Ce nœud n'a pas encore de propriétaire, il n'y a donc aucune identité à laquelle associer un compte. Revendiquez d'abord le nœud.",
       "store_unavailable": "Le nœud n'a pas pu écrire l'association car son magasin d'identités est indisponible. Rien n'a été modifié.",
-      "not_delegatable": "Associer une identité de connexion est un acte propre au propriétaire. Une session déléguée ne peut pas le faire : le lien survit à la délégation, ce qui reviendrait à confier un accès permanent au titulaire d'une autorisation temporaire."
+      "not_delegatable": "Associer une identité de connexion est un acte propre au propriétaire. Une session déléguée ne peut pas le faire : le lien survit à la délégation, ce qui reviendrait à confier un accès permanent au titulaire d'une autorisation temporaire.",
+      "already_has_identity": "Ce compte possède déjà une identité de connexion liée. Supprimez-la d'abord si vous souhaitez la remplacer."
     },
     "session_expired": "Votre session n'est plus valide. Reconnectez-vous pour continuer.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "ce n'est pas un jeton de session émis par ce nœud — aucune session à déconnecter",
       "missing_bearer": "jeton bearer manquant ou mal formé"
+    },
+    "link": {
+      "ambiguous_handle": "Envoyez soit un identifiant de compte, soit une adresse e-mail, mais pas les deux — ils n'ont pas la même signification."
     }
   },
   "duty": {

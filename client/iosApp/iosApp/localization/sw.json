@@ -3888,7 +3888,8 @@
       "no_such_identity": "Hakuna utambulisho kama huo kwenye nodi hii wa kuunganisha akaunti nao.",
       "node_unowned": "Nodi hii bado haina mmiliki, hivyo hakuna utambulisho wa kuunganisha akaunti nao. Dai nodi kwanza.",
       "store_unavailable": "Nodi haikuweza kuandika kiungo kwa sababu hifadhi yake ya utambulisho haipatikani. Hakuna kilichobadilishwa.",
-      "not_delegatable": "Kuunganisha utambulisho wa kuingia ni kitendo cha mmiliki mwenyewe. Kipindi kilichokabidhiwa hakiwezi kufanya hivyo — kiungo hudumu zaidi ya ukabidhi, hivyo kingempa mtu yeyote mwenye ruhusa ya muda ufikiaji wa kudumu."
+      "not_delegatable": "Kuunganisha utambulisho wa kuingia ni kitendo cha mmiliki mwenyewe. Kipindi kilichokabidhiwa hakiwezi kufanya hivyo — kiungo hudumu zaidi ya ukabidhi, hivyo kingempa mtu yeyote mwenye ruhusa ya muda ufikiaji wa kudumu.",
+      "already_has_identity": "Akaunti hiyo tayari ina utambulisho wa kuingia uliounganishwa. Iondoe kwanza ikiwa unakusudia kuibadilisha."
     },
     "session_expired": "Kipindi chako hakitumiki tena. Ingia tena ili kuendelea.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "si tokeni ya kipindi iliyotengenezwa na nodi hii — hakuna cha kutoka",
       "missing_bearer": "tokeni ya bearer haipo au ina muundo mbaya"
+    },
+    "link": {
+      "ambiguous_handle": "Tuma kitambulisho cha akaunti au anwani ya barua pepe, si vyote viwili — vina maana tofauti."
     }
   },
   "duty": {

@@ -3888,7 +3888,8 @@
       "no_such_identity": "Não existe essa identidade neste nó à qual associar a conta.",
       "node_unowned": "Este nó ainda não tem proprietário, pelo que não há nenhuma identidade à qual associar uma conta. Reivindique primeiro o nó.",
       "store_unavailable": "O nó não conseguiu escrever a associação porque o seu repositório de identidades está indisponível. Nada foi alterado.",
-      "not_delegatable": "Vincular uma identidade de início de sessão é um ato próprio do titular. Uma sessão delegada não pode fazê-lo — o vínculo dura mais do que a delegação, portanto entregaria acesso permanente a quem detém uma concessão temporária."
+      "not_delegatable": "Vincular uma identidade de início de sessão é um ato próprio do titular. Uma sessão delegada não pode fazê-lo — o vínculo dura mais do que a delegação, portanto entregaria acesso permanente a quem detém uma concessão temporária.",
+      "already_has_identity": "Essa conta já tem uma identidade de início de sessão vinculada. Remova-a primeiro se quiser substituí-la."
     },
     "session_expired": "A sua sessão já não é válida. Inicie sessão novamente para continuar.",
     "browser_signin": {
@@ -3918,6 +3919,9 @@
     "session": {
       "invalid_token": "não é um token de sessão emitido por este nó — nada a encerrar",
       "missing_bearer": "token bearer ausente ou malformado"
+    },
+    "link": {
+      "ambiguous_handle": "Envie um id de conta ou um endereço de e-mail, não os dois — eles significam coisas diferentes."
     }
   },
   "duty": {
