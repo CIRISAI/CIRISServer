@@ -630,30 +630,47 @@ pub const SERVER_DECLARED_GAPS: &[DeclaredGap] = &[
 ];
 
 pub fn server_evidence_rows() -> Vec<String> {
-    SERVER_FIELD_CONFORMANCE
-        .iter()
-        .map(|c| {
-            format!(
-                "{}\t{}\tCIRISServer\t{}\tciris-server@v{}",
-                c.cc,
-                c.clm,
-                c.evidence,
-                env!("CARGO_PKG_VERSION"),
-            )
-        })
-        .chain(SERVER_CLAIM_EVIDENCE.iter().map(|c| {
-            format!(
-                "{}\t{}\tCIRISServer\t{}\tciris-server@v{}",
-                c.cc,
-                c.clm,
-                c.evidence,
-                env!("CARGO_PKG_VERSION"),
-            )
-        }))
+    // THE HEADER ROW IS DATA, NOT DECORATION (CIRISServer#352).
+    //
+    // The Constitution's `check_claims.py` strips `#` lines and hands the rest
+    // to `csv.DictReader`, which takes the first remaining line as the header.
+    // With the column names living only inside a comment, DictReader consumed
+    // the first real ROW as the header — `fieldnames` came back as
+    // `['3.1', 'CLM-nsproc-dimension', 'CIRISServer', …]` — and every later row
+    // lacked a `decimal_id` and was silently skipped. Vendoring the file added a
+    // manifest that resolved nothing and reported nothing.
+    //
+    // That is the same failure this release fixes in the sign-in path: silence
+    // reading as coverage. The names match CIRISPersist's manifest EXACTLY
+    // (`decimal_id`, not our comment's older `cc_section`) because the consumer
+    // keys on them and two spellings is how the two files drift.
+    std::iter::once("decimal_id\tclaim_id\trepo\tpath#symbol\tcrate@version".to_string())
         .chain(
-            SERVER_DECLARED_GAPS
+            SERVER_FIELD_CONFORMANCE
                 .iter()
-                .map(|g| format!("{}\t{}\tCIRISServer\t{}\topen", g.cc, g.clm, g.tracked_at,)),
+                .map(|c| {
+                    format!(
+                        "{}\t{}\tCIRISServer\t{}\tciris-server@v{}",
+                        c.cc,
+                        c.clm,
+                        c.evidence,
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                })
+                .chain(SERVER_CLAIM_EVIDENCE.iter().map(|c| {
+                    format!(
+                        "{}\t{}\tCIRISServer\t{}\tciris-server@v{}",
+                        c.cc,
+                        c.clm,
+                        c.evidence,
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                }))
+                .chain(
+                    SERVER_DECLARED_GAPS.iter().map(|g| {
+                        format!("{}\t{}\tCIRISServer\t{}\topen", g.cc, g.clm, g.tracked_at,)
+                    }),
+                ),
         )
         .collect()
 }

@@ -1227,3 +1227,81 @@ async fn a_hostile_provider_segment_is_refused_and_never_reflected() {
         );
     }
 }
+
+/// **A browser signing in at a plain `/login` must receive a code**
+/// (CIRISServer#445).
+///
+/// The field report: three attempts, three successful authentications, ZERO
+/// redemption codes minted in six hours on a managed node advertising
+/// `web_signin: true`. The identity resolved every time and the session was
+/// parked somewhere the browser that started the flow could not reach.
+///
+/// The cause was a `.filter(|r| r != "/")` on the post-login destination, which
+/// collapsed "no destination given" and "the destination is the site root" onto
+/// the same `None` — and the callback read `None` as "serve the desktop
+/// hand-off page", a loopback-only route. A plain `/login` is the front door of
+/// every managed deployment, so that arm was the normal case, not the stray one.
+///
+/// This drives the flow with NO `redirect_uri` at all, which is exactly what a
+/// GUI front door does.
+#[tokio::test]
+async fn a_plain_browser_login_still_gets_a_redemption_code() {
+    let app = app_with(None).await;
+    // NO app_nonce and NO redirect_uri — a browser at the front door.
+    let state = start_flow(&app, "").await;
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-owner", &state, None))
+        .await
+        .expect("callback");
+    assert_eq!(
+        r.status(),
+        StatusCode::SEE_OTHER,
+        "a browser sign-in must be redirected with a code, not handed the \
+         loopback-only hand-off page it cannot use (status was {})",
+        r.status()
+    );
+    let dest = r
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .expect("location")
+        .to_owned();
+
+    assert!(
+        dest.contains("ciris_code="),
+        "a browser sign-in with no redirect_uri got no redemption code — it \
+         cannot reach the loopback hand-off, so the session is unreachable: {dest}"
+    );
+    // And still never the old contract.
+    for leak in ["access_token=", "token_type=", "sess:"] {
+        assert!(
+            !dest.contains(leak),
+            "a live bearer leaked into the redirect URL: {dest}"
+        );
+    }
+}
+
+/// A DESKTOP flow (one carrying `app_nonce`) must still land on the hand-off
+/// page, not be redirected to `/` — the app polls the loopback route and a
+/// redirect would be noise. This is the half the #445 fix must not break.
+#[tokio::test]
+async fn a_desktop_flow_still_lands_on_the_handoff_page() {
+    let app = app_with(None).await;
+    let state = start_flow(&app, "?app_nonce=n-445").await;
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-owner", &state, None))
+        .await
+        .expect("callback");
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "a desktop flow carrying app_nonce still gets the hand-off page (200), \
+         not a redirect — the app polls the loopback route"
+    );
+    assert!(
+        r.headers().get("location").is_none(),
+        "a desktop flow must not be redirected"
+    );
+}

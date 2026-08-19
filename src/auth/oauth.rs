@@ -1771,7 +1771,28 @@ async fn oauth_login(
     // The post-login destination rides the one-use CSRF entry to the callback
     // (CIRISServer#429; the drop was CIRISAgent#1057 finding 5). "/" is the
     // no-preference default the client sends, not a destination.
-    let post_login_redirect = Some(redirect_uri).filter(|r| r != "/");
+    // WHERE THE SESSION IS DELIVERED IS A QUESTION ABOUT THE CALLER, NOT ABOUT
+    // WHETHER THEY PASSED AN OPTIONAL PARAM (CIRISServer#445).
+    //
+    // This line used to read `.filter(|r| r != "/")`, which collapsed TWO
+    // different states onto `None`: "no destination was given" and "the
+    // destination is the site root". The callback then read `None` as "serve the
+    // desktop hand-off page" — a LOOPBACK-ONLY route. So a browser signing in
+    // at a plain `/login`, which is the front door of every managed
+    // deployment, authenticated successfully and was handed a page it could
+    // never use. Zero redemption codes were minted in six hours on a node
+    // advertising `web_signin: true`.
+    //
+    // The collapse is only correct when a DESKTOP APP started the flow: it
+    // carries an `app_nonce`, it polls the loopback hand-off, and a redirect to
+    // `/` would be noise. A browser without a nonce has no other way to receive
+    // the session, so it keeps `/` as a real destination and gets a code.
+    //
+    // Deliberately NOT keyed on `ConnectInfo`: a managed node behind a reverse
+    // proxy sees the proxy's loopback address, so "is the caller local" is
+    // unanswerable HERE even though it is answerable at `/v1/auth/signin-state`,
+    // where the caller connects directly.
+    let post_login_redirect = Some(redirect_uri).filter(|r| r != "/" || q.app_nonce.is_none());
     // The verifier stays in the store; only its S256 challenge goes to the browser.
     let (state, code_challenge) = {
         let mut csrf = st.csrf.lock().unwrap();
@@ -2644,9 +2665,9 @@ async fn browser_finish(
                 if app_nonce.is_some() {
                     "bound to the app_nonce that started this flow"
                 } else {
-                    "NO app_nonce: this sign-in was started from a plain /login URL \
-                     (a stray tab), so it is claimable only via the loopback-gated \
-                     recent slot"
+                    "no app_nonce: a BROWSER sign-in (the normal case on a node \
+                     serving a web GUI) — the session is delivered by redemption \
+                     code, and is additionally claimable via the loopback slot"
                 }
             );
             // ALWAYS park. A desktop app started this in a browser: the bearer

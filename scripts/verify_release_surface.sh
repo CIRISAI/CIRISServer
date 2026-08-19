@@ -107,6 +107,62 @@ check /v1/auth/signin-state    'has("claimed")'                'signin-state.cla
 check /v1/auth/signin-state    'has("session_delivery")'       'signin-state.session_delivery'
 check /v1/auth/signin-state    '.new_identity|has("outcome")'  'signin-state.new_identity.outcome'
 
+# THE SURFACE BEING PRESENT IS NOT THE FLOW WORKING (CIRISServer#445).
+#
+# 0.5.180 passed every check above and still could not sign a browser in: the
+# callback handed a remote browser the loopback-only hand-off page and minted no
+# redemption code. Six hours, three attempts, zero codes — on a node that
+# answered `web_signin: true` to this very script.
+#
+# Asserting a field EXISTS cannot fail in the direction that matters. So drive
+# the actual front door: start a flow with NO redirect_uri and NO app_nonce,
+# exactly as a GUI does, and require the node to send us somewhere carrying a
+# code. A 200 here means the hand-off page came back, which is the defect.
+echo "Front-door browser flow:"
+# `|| true` on BOTH: under `set -euo pipefail` a grep that matches nothing exits
+# 1 and kills the script mid-assignment — which is how the first draft of this
+# very block printed NOTHING at all and looked like it had passed. A gate that
+# dies silently is worse than no gate.
+login_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+  "$BASE/v1/auth/oauth/google/login" 2>/dev/null || true)"
+login_hdrs="$(curl -s -o /dev/null -D - --max-time 8 \
+  "$BASE/v1/auth/oauth/google/login" 2>/dev/null || true)"
+loc="$(printf '%s' "$login_hdrs" | grep -i '^location:' 2>/dev/null | tail -1 | tr -d '\r' | cut -d' ' -f2- || true)"
+
+if [[ -z "$login_code" || "$login_code" == "000" ]]; then
+  # THE ENDPOINT DID NOT ANSWER. Distinct from "answered, no provider" — the
+  # first is a broken artifact, the second is an unconfigured one, and calling
+  # both "skip" is how a silence reads as coverage.
+  echo "  FAIL  /login did not answer at all" >&2; fail=1
+elif [[ -z "$loc" ]]; then
+  # Answered, but did not redirect. TWO different worlds, and the whole point of
+  # this block is that they must not share an outcome:
+  #
+  #   * no provider configured  → genuinely unexercisable, report and move on
+  #   * provider configured     → THE #445 DEFECT. A browser asked to sign in and
+  #                               got a page instead of a trip to the provider.
+  #
+  # The providers list is what tells them apart, so ask it rather than guess. A
+  # first draft of this check reported BOTH as "skip" and exited 0 — it would
+  # have passed the very release it was written for.
+  provider_count="$(curl -sf --max-time 8 "$BASE/v1/auth/oauth/providers" 2>/dev/null \
+    | jq -r '(.providers // []) | length' 2>/dev/null || echo 0)"
+  if [[ "${provider_count:-0}" -gt 0 ]]; then
+    echo "  FAIL  /login answered $login_code with NO redirect while $provider_count \
+provider(s) are configured — a browser gets a page it cannot use, not a sign-in" >&2
+    fail=1
+  else
+    echo "  skip  /login answered $login_code, no provider configured — not exercised" >&2
+  fi
+else
+  case "$loc" in
+    *accounts.google.com*|*oauth*|*authorize*)
+      echo "  ok    /login redirects to the provider" ;;
+    *)
+      echo "  FAIL  /login did not reach a provider: ${loc:0:120}" >&2; fail=1 ;;
+  esac
+fi
+
 if (( fail )); then
   echo "" >&2
   echo "The artifact does not serve its own documented surface. Do NOT publish it." >&2
