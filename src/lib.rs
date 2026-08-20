@@ -110,6 +110,33 @@ pub mod commons_surface;
 /// Gated by `tests/compliance_map.rs`.
 pub mod compliance;
 mod compose;
+
+/// **The self-occurrence envelope builder, exposed for tests** (CIRISServer#454).
+///
+/// `compose` is private, and this is the one thing inside it a test genuinely
+/// must call rather than re-implement: the producer and
+/// `tests/occurrence_kex_e2e.rs` each had their own envelope, they disagreed on
+/// `attesting_key_id`, and the test's copy was the correct one. It passed for
+/// months beside a producer refused on every boot.
+///
+/// Re-exported rather than made `pub` wholesale so the seam is exactly one
+/// function wide, and named so nobody mistakes it for a runtime API.
+#[doc(hidden)]
+pub fn test_support_self_occurrence_envelope(
+    key_id: &str,
+    transport_destination: &serde_json::Value,
+    enc_x25519_base64: &str,
+    enc_ml_kem_768_base64: &str,
+    asserted_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    compose::self_occurrence_envelope(
+        key_id,
+        transport_destination,
+        enc_x25519_base64,
+        enc_ml_kem_768_base64,
+        asserted_at,
+    )
+}
 /// **The CEG consumer-composition tier** (CC 4.4 / CC 4.4.1 / CC 4.4.2 /
 /// CC 4.4.3.8 / CC 4.4.3.9 / CC 3.4.9) — the MUST behind this node's `CCC`
 /// (CEG-Conforming Consumer) wire declaration: *"A CEG-Conforming Consumer MUST
