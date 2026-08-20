@@ -7,7 +7,7 @@
 //! | route | the CEG object it moves | the persist primitive |
 //! |---|---|---|
 //! | `GET /v1/contacts` | `consent:replication:v1` grants, revocation-folded | [`crate::peer::replication_peers_from_consent`] → `list_consent_peers` |
-//! | `POST /v1/contacts` | one `consent:replication:v1` grant | [`crate::peer::emit_replication_consent`] |
+//! | `POST /v1/contacts` | one `consent:replication:v1` grant | [`crate::peer::ensure_replication_consent_covers`] |
 //! | `POST /v1/chat` | a 2-member [`Community`] | `Engine::put_community_self_signed` |
 //! | `POST /v1/chat/{id}/messages` | a `chat:message:v1` `scores` attestation | `attestation_upsert_local` + `attestation_promote(community)` |
 //! | `GET /v1/chat/{id}/messages` | the same rows, read back | `active_community_members` + `list_attestations_by` |
@@ -19,8 +19,11 @@
 //! question was what "add" writes. A contact is not an annotation and not a
 //! table: it is the statement *"this node consents to replicate to that key"* —
 //! which is exactly `consent:replication:v1`, and exactly the edge that makes a
-//! chat message actually reach the other side. So `POST /v1/contacts` emits that
-//! grant (idempotent), and `GET /v1/contacts` reads
+//! chat message actually reach the other side. So `POST /v1/contacts` ENSURES that
+//! grant covers `chat:` — emitting it, or widening a narrower standing one by
+//! superseding it (PR #464 P1: an already-peered key holds a
+//! `capacity:`/`trace:`-only grant, and a plain emit was a silent no-op against
+//! it) — and `GET /v1/contacts` reads
 //! [`crate::peer::replication_peers_from_consent`] — persist's
 //! `list_consent_peers` projection, which has the `withdraws`/`supersedes` fold
 //! ALREADY applied. Un-contacting is therefore the ordinary CEG withdraw of the
@@ -353,8 +356,18 @@ struct AddContactResponse {
     key_id: String,
     /// The `consent:replication:v1` grant row that IS the contact relationship.
     consent_attestation_id: String,
-    /// `false` when the grant already stood (the call is idempotent).
+    /// `false` when the standing grant already covered every required prefix —
+    /// the true no-op. `true` when a grant row was written, whether it was the
+    /// first grant for this peer or a widening one.
     freshly_emitted: bool,
+    /// The narrower grant this call superseded, when it widened one (PR #464
+    /// P1: an already-peered key holds a `capacity:`/`trace:`-only grant).
+    /// `null` on a first grant or a no-op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_attestation_id: Option<String>,
+    /// The prefix set the live grant now covers. `chat:` being present is what
+    /// makes this contact's messages eligible to replicate to them.
+    consent_prefixes: Vec<String>,
     /// The contact's ACTIVE identity occurrences, resolved from the directory.
     occurrence_key_ids: Vec<String>,
     /// The community id a chat with this contact will converge on.
@@ -435,11 +448,21 @@ async fn add_contact(
         .map(|o| o.occurrence_key_id)
         .collect();
 
-    // THE contact object. Idempotent: an existing grant is returned, not
-    // re-emitted.
+    // THE contact object — ENSURED, not merely emitted (PR #464 P1).
+    //
+    // `emit_replication_consent` alone was wrong here in the one case that
+    // matters most: a peer this node had already FEDERATED with holds a grant
+    // covering `capacity:`/`trace:` only, and that function's guard matches on
+    // (subject, dimension) without ever comparing prefixes — so adding an
+    // already-peered key as a contact returned success while `chat:` rows
+    // stayed ineligible to replicate to them. The people you know best were
+    // exactly the people you could not message.
+    //
+    // `ensure_replication_consent_covers` asks the question the guard did not:
+    // does the LIVE grant cover `chat:`? If not it supersedes it with the union.
     let mut prefixes = crate::peer::default_attestation_prefixes();
     prefixes.push(CHAT_ATTESTATION_PREFIX.to_owned());
-    let grant = match crate::peer::emit_replication_consent(
+    let grant = match crate::peer::ensure_replication_consent_covers(
         &st.engine,
         &owner.node_key_id,
         &key_id,
@@ -452,7 +475,9 @@ async fn add_contact(
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "contacts.consent_emit_failed",
-                format!("emit consent:replication:v1 grant: {e}"),
+                format!(
+                    "ensure consent:replication:v1 grant covers {CHAT_ATTESTATION_PREFIX}: {e}"
+                ),
             )
         }
     };
@@ -463,6 +488,8 @@ async fn add_contact(
             key_id,
             consent_attestation_id: grant.attestation_id,
             freshly_emitted: grant.freshly_emitted,
+            superseded_attestation_id: grant.superseded_attestation_id,
+            consent_prefixes: grant.prefixes,
             occurrence_key_ids,
             chat_community_id,
         }),

@@ -303,6 +303,59 @@ async fn fixture() -> (Arc<Engine>, String, String, tokio::task::JoinHandle<()>)
     (engine, base, owner, handle)
 }
 
+/// `GET /v1/contacts` as the owner, decoded.
+async fn contacts_list(client: &reqwest::Client, base: &str, owner: &str) -> serde_json::Value {
+    let resp = client
+        .get(format!("{base}/v1/contacts"))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("GET /v1/contacts");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("contacts json")
+}
+
+/// The revocation-FOLDED live grants this node holds for `peer` — persist's
+/// `list_live_consent_grants_by` filtered to the peer. This is the read that
+/// decides what actually replicates, so it is the read the widening tests
+/// assert on: the HTTP response says what the server BELIEVES, this says what
+/// the corpus holds.
+async fn live_grants_for(
+    engine: &Engine,
+    node: &str,
+    peer: &str,
+) -> Vec<ciris_persist::federation::types::Attestation> {
+    engine
+        .federation_directory()
+        .list_live_consent_grants_by(node)
+        .await
+        .expect("list_live_consent_grants_by")
+        .into_iter()
+        .filter(|a| a.subject_key_ids.iter().any(|s| s == peer))
+        .collect()
+}
+
+/// The prefix set the single live grant covers, sorted. Panics if the peer has
+/// no live grant — an absent grant and an empty one are different facts and the
+/// tests must not collapse them onto `vec![]`.
+async fn live_grant_prefixes(engine: &Engine, node: &str, peer: &str) -> Vec<String> {
+    let live = live_grants_for(engine, node, peer).await;
+    assert_eq!(
+        live.len(),
+        1,
+        "expected exactly one live consent grant for {peer}, found {}",
+        live.len()
+    );
+    let mut prefixes: Vec<String> = live[0].attestation_envelope["payload"]["attestation_prefixes"]
+        .as_array()
+        .expect("attestation_prefixes array")
+        .iter()
+        .map(|v| v.as_str().expect("prefix string").to_owned())
+        .collect();
+    prefixes.sort();
+    prefixes
+}
+
 /// `POST /v1/contacts` + `POST /v1/chat` in one step — the precondition for the
 /// message tests.
 async fn open_chat(client: &reqwest::Client, base: &str, owner: &str) -> String {
@@ -424,6 +477,338 @@ async fn an_unknown_fed_id_is_refused_with_a_typed_reason() {
     assert_eq!(resp.status(), 404);
     let json: serde_json::Value = resp.json().await.expect("refusal json");
     assert_eq!(json["reason_id"], "contacts.unknown_fed_id");
+}
+
+/// **THE PR #464 P1 REGRESSION.** Federate with a peer the ordinary way FIRST —
+/// which leaves a standing `consent:replication:v1` grant covering `capacity:` /
+/// `trace:` and nothing else — and only then add them as a contact.
+///
+/// This is the case the old code got wrong, and it got it wrong in the direction
+/// that hides: `emit_replication_consent`'s guard matched on (subject, dimension)
+/// and returned the first hit without ever comparing prefixes, so `POST
+/// /v1/contacts` answered 200 while `chat:` stayed uncovered. The contacts who
+/// had peered first — the ones you actually know — were exactly the ones you
+/// could not message. Nothing 404s, nothing 403s; the messages simply never
+/// become eligible to replicate.
+///
+/// So the assertion is on the EFFECTIVE folded grant, not on the response: read
+/// `list_live_consent_grants_by` back and demand `chat:` is in the payload of the
+/// one grant that survives the fold.
+#[tokio::test]
+async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
+    let (engine, base, owner, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+
+    // Ordinary federation peering: the boot/peering default prefix set.
+    let peered = ciris_server::peer::emit_replication_consent(
+        &engine,
+        &node,
+        CONTACT_KEY_ID,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("pre-existing federation peering grant");
+    assert!(peered.freshly_emitted);
+    assert_eq!(
+        live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
+        vec!["capacity:".to_string(), "trace:".to_string()],
+        "the fixture must actually start NARROW, or this test proves nothing"
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    let status = resp.status();
+    let body = resp.text().await.expect("add contact body");
+    assert_eq!(status, 200, "add contact: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("add contact json");
+    assert_eq!(
+        json["superseded_attestation_id"],
+        serde_json::json!(peered.attestation_id),
+        "the widening must NAME the narrower grant it retires: {json}"
+    );
+    assert_eq!(json["freshly_emitted"], true);
+    assert_ne!(
+        json["consent_attestation_id"],
+        serde_json::json!(peered.attestation_id)
+    );
+
+    // THE assertion: the EFFECTIVE folded grant covers chat:, and it is the ONLY
+    // live grant for this peer.
+    assert_eq!(
+        live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
+        vec![
+            "capacity:".to_string(),
+            "chat:".to_string(),
+            "trace:".to_string()
+        ],
+        "the widened grant must carry the UNION — dropping capacity:/trace: would \
+         trade one dead plane for two"
+    );
+    let live = live_grants_for(&engine, &node, CONTACT_KEY_ID).await;
+    assert_eq!(live.len(), 1, "exactly one grant may be live for a peer");
+    assert_eq!(live[0].attestation_id, json["consent_attestation_id"]);
+
+    // The contact is still a contact — a widening must not drop the peer out of
+    // the revocation-folded set on its way through.
+    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
+        .await
+        .expect("consent peer set");
+    assert!(peers.iter().any(|p| p == CONTACT_KEY_ID), "{peers:?}");
+
+    // And a SECOND add is now a true no-op: nothing written, nothing superseded.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts (again)");
+    assert_eq!(resp.status(), 200);
+    let again: serde_json::Value = resp.json().await.expect("re-add json");
+    assert_eq!(
+        again["freshly_emitted"], false,
+        "second add must be a no-op: {again}"
+    );
+    assert!(again["superseded_attestation_id"].is_null());
+    assert_eq!(
+        again["consent_attestation_id"],
+        json["consent_attestation_id"]
+    );
+    assert_eq!(
+        live_grants_for(&engine, &node, CONTACT_KEY_ID).await.len(),
+        1,
+        "a no-op must not append a grant"
+    );
+}
+
+/// A widening PRESERVES the operator's policy on every axis but prefixes. An
+/// owner who narrowed the audience or time-boxed the grant through
+/// `POST /v1/federation/consent` must not have that reverted by someone adding a
+/// contact — a silent policy reset is the same class of defect as the silent
+/// no-op, just pointing the other way.
+#[tokio::test]
+async fn widening_preserves_the_standing_grants_policy() {
+    let (engine, base, owner, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        audience: Some(cohort_scope::SPECIES.to_string()),
+        principle: Some("analyze".to_string()),
+        purpose: Some("a purpose the owner wrote down".to_string()),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        &node,
+        CONTACT_KEY_ID,
+        &["trace:"],
+        &opts,
+    )
+    .await
+    .expect("owner-policy grant");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    let status = resp.status();
+    let body = resp.text().await.expect("add contact body");
+    assert_eq!(status, 200, "add contact: {body}");
+
+    let live = live_grants_for(&engine, &node, CONTACT_KEY_ID).await;
+    assert_eq!(live.len(), 1);
+    let payload = &live[0].attestation_envelope["payload"];
+    assert_eq!(payload["audience"], cohort_scope::SPECIES);
+    assert_eq!(payload["principle"], "analyze");
+    assert_eq!(payload["purpose"], "a purpose the owner wrote down");
+    // The prefix axis DID move — that is the point of the call — to the union of
+    // the standing `trace:` and what `add_contact` requires. Every other axis
+    // above is unchanged, which is the property this test exists for.
+    assert_eq!(
+        payload["attestation_prefixes"],
+        serde_json::json!(["capacity:", "chat:", "trace:"]),
+        "the union must be sorted + deduped so the JCS bytes are stable"
+    );
+}
+
+/// Withdraw a consent grant the way the CEG says to: a `withdraws` composer over
+/// the grant's `attestation_id`, authored by the grant's own author (this node).
+///
+/// Built through persist's OWN `withdraws_attestation_envelope` rather than a
+/// hand-rolled object — the same builder `admin_ops::emit_about_peer` uses — so
+/// the test cannot pass against an envelope shape production never writes. Note
+/// it emits no `dimension`, which is the same rule the widening composer obeys.
+///
+/// `subject_key_ids` stays EMPTY on purpose: the node is the grant's PRODUCER,
+/// not its subject, so this is not a §10.1.3 subject-side revocation and needs
+/// no bound-hybrid signature. A withdraw naming itself as subject would.
+async fn withdraw_consent_grant(engine: &Engine, peer: &str, grant_attestation_id: &str) {
+    let envelope = ciris_persist::federation::withdraws_attestation_envelope(
+        grant_attestation_id,
+        attestation_type::SCORES,
+    );
+    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+        .expect("withdraws envelope");
+    let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
+        attestation_type::WITHDRAWS,
+        core,
+        cohort_scope::FEDERATION.to_string(),
+    );
+    input.attested_key_id = Some(peer.to_string());
+    engine
+        .emit_attestation_self(input)
+        .await
+        .expect("withdraw the consent grant");
+}
+
+/// **REVOCATION MUST BE FREE.** The guard that decides whether a grant already
+/// stands used to scan `list_attestations_by`, which folds nothing — so a
+/// WITHDRAWN grant still answered "already present", and `emit_replication_consent`
+/// returned success having written nothing. Withdrawing consent to a peer
+/// permanently poisoned re-consenting to them: every later peering call was a
+/// silent no-op with no live grant behind it.
+///
+/// A revocation that costs you the ability to ever re-consent is one nobody can
+/// afford to exercise, which makes it not a revocation at all. This pins the
+/// primitive directly — `emit_replication_consent`, the call peering and boot
+/// make — rather than only the route on top of it.
+#[tokio::test]
+async fn emit_replication_consent_re_grants_after_a_withdraw() {
+    let (engine, _base, _owner, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+
+    let first = ciris_server::peer::emit_replication_consent(
+        &engine,
+        &node,
+        CONTACT_KEY_ID,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("first grant");
+    assert!(first.freshly_emitted);
+    assert_eq!(
+        live_grants_for(&engine, &node, CONTACT_KEY_ID).await.len(),
+        1
+    );
+
+    withdraw_consent_grant(&engine, CONTACT_KEY_ID, &first.attestation_id).await;
+
+    // The withdraw must actually have landed, or the re-grant below proves
+    // nothing about the fold.
+    assert!(
+        live_grants_for(&engine, &node, CONTACT_KEY_ID)
+            .await
+            .is_empty(),
+        "the withdraw must clear the live grant"
+    );
+    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
+        .await
+        .expect("consent peer set");
+    assert!(!peers.iter().any(|p| p == CONTACT_KEY_ID), "{peers:?}");
+
+    // RE-CONSENT. Under the old guard this returned freshly_emitted:false and
+    // wrote nothing, leaving the peer permanently unreachable.
+    let second = ciris_server::peer::emit_replication_consent(
+        &engine,
+        &node,
+        CONTACT_KEY_ID,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("re-grant after withdraw");
+    assert!(
+        second.freshly_emitted,
+        "re-consenting after a withdraw must write a real grant, not report the withdrawn one"
+    );
+    assert_ne!(second.attestation_id, first.attestation_id);
+    let live = live_grants_for(&engine, &node, CONTACT_KEY_ID).await;
+    assert_eq!(live.len(), 1, "exactly one live grant after re-consent");
+    assert_eq!(live[0].attestation_id, second.attestation_id);
+    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
+        .await
+        .expect("consent peer set");
+    assert!(
+        peers.iter().any(|p| p == CONTACT_KEY_ID),
+        "the peer must be replicable again: {peers:?}"
+    );
+}
+
+/// The same property through the CONTACTS route: un-contact someone, then add
+/// them back. The user-visible shape of the defect above — "I removed them and
+/// now I can't add them again", with the UI reporting success every time.
+#[tokio::test]
+async fn re_adding_an_un_contacted_person_restores_a_live_grant() {
+    let (engine, base, owner, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200);
+    let first: serde_json::Value = resp.json().await.expect("add contact json");
+    let first_id = first["consent_attestation_id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    // Un-contact: the ordinary CEG withdraw of the grant row, which is what the
+    // module doc promises un-contacting IS.
+    withdraw_consent_grant(&engine, CONTACT_KEY_ID, &first_id).await;
+    let listed = contacts_list(&client, &base, &owner).await;
+    assert_eq!(
+        listed["total"], 0,
+        "a withdrawn contact must leave the list: {listed}"
+    );
+
+    // Add them back.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts (re-add)");
+    let status = resp.status();
+    let body = resp.text().await.expect("re-add body");
+    assert_eq!(status, 200, "re-add: {body}");
+    let second: serde_json::Value = serde_json::from_str(&body).expect("re-add json");
+    assert_eq!(
+        second["freshly_emitted"], true,
+        "re-add must write a grant: {second}"
+    );
+    assert_ne!(
+        second["consent_attestation_id"],
+        serde_json::json!(first_id)
+    );
+    assert!(
+        second["superseded_attestation_id"].is_null(),
+        "a re-grant is not a widening — there was nothing live to supersede"
+    );
+    assert_eq!(
+        live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
+        vec![
+            "capacity:".to_string(),
+            "chat:".to_string(),
+            "trace:".to_string()
+        ]
+    );
+    let listed = contacts_list(&client, &base, &owner).await;
+    assert_eq!(listed["total"], 1, "the contact must be back: {listed}");
+    assert_eq!(listed["contacts"][0]["key_id"], CONTACT_KEY_ID);
 }
 
 // ─── 2. Chat creation converges ─────────────────────────────────────────────
