@@ -426,6 +426,18 @@ harness = false
 name = "sig_overhead"
 harness = false
 
+# Chat throughput + MEMORY PRESSURE — the four-phase bench behind
+# .github/workflows/chat-bench.yml, modelled on CIRISAgent's memory-benchmark.yml
+# (cold start / 100-message warm / 1000-message burst / idle tail, RSS sampled at
+# every boundary). Drives the REAL `contacts_chat::router` over a bound listener
+# against an in-memory engine — no criterion, because what is being measured is a
+# SHAPE across phases, not a distribution around one operation. `harness = false`
+# and one JSON object per phase on stdout (jsonl).
+# `cargo bench --bench chat_throughput`.
+[[bench]]
+name = "chat_throughput"
+harness = false
+
 # Mesh-propagation benchmark — N in-process software-key nodes; ONE group-A
 # publisher advertises a synthetic "video" and a FountainSwarmRuntime per node
 # converges the holding-claim to its cohort ONLY. Measures propagation latency /
