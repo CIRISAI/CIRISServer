@@ -125,14 +125,22 @@ jobs:
       # would have emptied the bundle into the APK the day a root localization/
       # dir appeared — every source gate green, every shipped artifact
       # English-only. Localization is the product; assert it on the artifact.
-      - name: Assert the APK carries all 30 locale files
+      - name: Assert the APK carries the exact committed localization set
         run: |
           set -euo pipefail
+          # SET equality against the bundle the APK packs, not a count: a count
+          # lets a dropped language and a stray json cancel out, and it also
+          # hard-codes "29 locales + manifest" into a workflow that should not
+          # need editing the day language 30 lands.
           APK=$(ls client/androidApp/build/outputs/apk/debug/CIRIS-Server-*-debug.apk | head -1)
-          N=$(unzip -l "$APK" | grep -cE 'assets/localization/.*\.json' || true)
-          echo "locale json files in APK: $N"
-          if [ "$N" -ne 30 ]; then
-            echo "::error::APK carries $N locale files, expected 30 (29 languages + manifest)." \
+          unzip -l "$APK" | grep -oE 'assets/localization/[^ ]+\.json' \
+            | xargs -rn1 basename | sort > /tmp/apk_locales
+          ls client/androidApp/src/main/assets/localization/*.json \
+            | xargs -rn1 basename | sort > /tmp/src_locales
+          echo "APK carries $(wc -l < /tmp/apk_locales) localization files (committed: $(wc -l < /tmp/src_locales))"
+          if ! diff -u /tmp/src_locales /tmp/apk_locales; then
+            echo "::error::APK localization set differs from the committed bundle" \
+                 "(see diff above: '-' = missing from APK, '+' = stray in APK)." \
                  "The committed bundles are green — this is a BUILD-TIME stripping," \
                  "the class CIRISServer#465 removed. Do not ship."
             exit 1
@@ -155,14 +163,18 @@ jobs:
           ls -lh desktopApp/build/compose/jars/
 
       # ── Same assertion for the jar (see the APK step's comment) ─────────────
-      - name: Assert the jar carries all 30 locale files
+      - name: Assert the jar carries the exact committed localization set
         run: |
           set -euo pipefail
           JAR=$(ls client/desktopApp/build/compose/jars/*.jar | head -1)
-          N=$(unzip -l "$JAR" | grep -cE 'localization/.*\.json' || true)
-          echo "locale json files in jar: $N"
-          if [ "$N" -ne 30 ]; then
-            echo "::error::jar carries $N locale files, expected 30. Build-time stripping" \
+          unzip -l "$JAR" | grep -oE '(^|[ /])localization/[^ ]+\.json' \
+            | xargs -rn1 basename | sort -u > /tmp/jar_locales
+          ls client/shared/src/desktopMain/resources/localization/*.json \
+            | xargs -rn1 basename | sort > /tmp/src_locales
+          echo "jar carries $(wc -l < /tmp/jar_locales) localization files (committed: $(wc -l < /tmp/src_locales))"
+          if ! diff -u /tmp/src_locales /tmp/jar_locales; then
+            echo "::error::jar localization set differs from the committed bundle" \
+                 "(see diff above: '-' = missing, '+' = stray). Build-time stripping" \
                  "(CIRISServer#465 class) — the committed bundles will still be green. Do not ship."
             exit 1
           fi
