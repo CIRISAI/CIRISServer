@@ -1,5 +1,6 @@
 package ai.ciris.mobile.shared.platform
 
+import ai.ciris.mobile.shared.models.CLIENT_VERSION
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.request.*
@@ -16,29 +17,51 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.BufferedReader
 
 /**
- * Desktop PythonRuntime implementation.
+ * Desktop PythonRuntime implementation — drives a local **ciris-server** node.
  *
- * Starts the CIRIS Python backend automatically if not already running,
- * then reads stdout to drive the UI with real service startup progress.
+ * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it): this
+ * whole file is the NODE launcher. The re-vendor replaced it wholesale with
+ * CIRISAgent's agent launcher, which starts the Python `ciris-agent` on :8080 —
+ * so the desktop node build never started a node at all. Everything below that
+ * names `ciris-server`, :4242/:4243, `/v1/identity` or the node home is ours.
  *
- * The server URL can be configured via CIRIS_API_URL environment variable.
+ * NOTE: despite the `PythonRuntime` name (shared expect/actual contract), the
+ * desktop node client launches the Rust/pip-packaged **ciris-server** binary, NOT
+ * the Python `ciris-agent`. ciris-server is the federation node: it owns the
+ * substrate, mints hardware-rooted identities and serves the read API the app
+ * talks to.
+ *
+ * PREREQUISITE: the `ciris-server` console command must be on PATH. Install with:
+ *     pip install ciris-server==<version>   (the app names the exact version, [CLIENT_VERSION], in its error message)
+ *
+ * PORTS: the node listens on its base port (default :4242). ciris-server serves its
+ * read/control API (the v1 identity, self-identity, setup, federation, auth and the
+ * lens api v1 route families) at base port + 1 — so with the default node port :4242
+ * the API is at :4243, which is the URL this runtime reports and probes.
+ *
+ * The server URL can be overridden via the CIRIS_API_URL environment variable.
  */
 actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     private var _serverUrl: String = run {
         val envUrl = System.getenv("CIRIS_API_URL")
         println("[PythonRuntime.desktop] CIRIS_API_URL env: $envUrl")
-        envUrl ?: "http://localhost:8080"
+        // NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+        // default to the ciris-server read API — node base :4242 → API :4243.
+        // The re-vendor put back the agent's :8080, which points the whole
+        // startup gate at a Python agent this build never launches.
+        envUrl ?: "http://127.0.0.1:4243"
     }
     private var _initialized = false
     private var _serverStarted = false
     private var _outputLineCallback: ((String) -> Unit)? = null
 
     // ── First-run ownership claim PIN / NodeCode, captured from node stdout ──
-    // The local node prints an "OWNERSHIP UNCLAIMED" banner on a fresh,
-    // unclaimed boot. The banner carries the PUBLIC NodeCode and the one-time
-    // CLAIM PIN. The PIN is CONSOLE-ONLY (never served over HTTP), so the only
-    // client-side way to obtain it is to scrape the stdout of the process we
-    // ourselves launched. The setup flow reads these to self-claim ownership of
+    // The local ciris-server prints an "OWNERSHIP UNCLAIMED" banner on a fresh,
+    // unclaimed boot (see CIRISServer/src/auth/bootstrap.rs
+    // `announce_ownership_unclaimed`). The banner carries the PUBLIC NodeCode and
+    // the one-time CLAIM PIN. The PIN is CONSOLE-ONLY (never served over HTTP), so
+    // the only client-side way to obtain it is to scrape the stdout of the process
+    // we ourselves launched. The setup flow reads these to self-claim ownership of
     // this local node on COMPLETE.
     private val _localClaimPin = MutableStateFlow<String?>(null)
     private val _localNodeCode = MutableStateFlow<String?>(null)
@@ -116,52 +139,110 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     }
 
     /**
-     * Fallback CLAIM-PIN capture: read the local node's durable `<home>/claim_pin`
-     * file when the stdout banner capture missed it (e.g. the node was already
-     * running, so we never owned its stdout). Console-only-over-HTTP is preserved —
-     * this is a same-machine file read (first-run op-level access). No-op if the PIN
-     * is already captured or the file is absent/empty.
+     * **The claim PIN, from the node's durable file — the PRIMARY path.**
+     *
+     * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+     * the METHOD NAME is upstream's ([PythonRuntimeProtocol.readLocalClaimPin] —
+     * the vendor renamed our `claimPin()` and iOS now implements the same
+     * member, so we adopt it rather than restore a signature commonMain no
+     * longer declares). The BODY is ours: the node-declared path (#395), the
+     * bounded retry, and the diagnostic that says WHY no PIN was found.
+     *
+     * Not a fallback. The stdout banner only reaches us when this process
+     * launched the node, which is FALSE in the shipped wheel: the Python
+     * launcher starts the node and then spawns this UI, so the banner capture
+     * never runs and first-run claim failed with "claim PIN not captured" while
+     * the PIN sat readable at `<home>/claim_pin`.
+     *
+     * Retries for a bounded window because at first run the node writes the file
+     * during boot — absent a moment after launch means NOT YET, not never. Each
+     * attempt re-reads, so a PIN that appears late is still found. (Upstream's
+     * single-shot read returns `null` in exactly that window, which is the race
+     * this loop exists to close.)
+     *
+     * Prefers whatever the banner already captured (identical value, no I/O),
+     * then the file. Still never over HTTP: a 0600 read inside the node's own
+     * home is first-run operator-level access, and `setup/root` verifies the PIN
+     * regardless.
      */
-    private fun readClaimPinFromFileIfMissing() {
-        if (_localClaimPin.value != null) return
-        val pin = runCatching { readClaimPinFile() }.getOrNull()
-        if (!pin.isNullOrEmpty()) {
-            _localClaimPin.value = pin
-            println("[PythonRuntime.desktop] Captured CLAIM PIN from ${nodeHomeDir().path}/claim_pin (file fallback).")
+    override suspend fun readLocalClaimPin(): String? {
+        _localClaimPin.value?.let { return it }
+        repeat(20) { attempt ->
+            readClaimPinFromFileIfMissing()
+            _localClaimPin.value?.let {
+                println("[PythonRuntime.desktop] claim PIN resolved (attempt ${attempt + 1})")
+                return it
+            }
+            kotlinx.coroutines.delay(500)
         }
+        println(
+            "[PythonRuntime.desktop] claim PIN NOT resolvable: no boot banner and no readable " +
+                "PIN file after 10s (asked the node: ${declaredClaimPinFile() ?: "<no path declared>"}; " +
+                "guessed: ${java.io.File(nodeHomeDir(), "claim_pin").path}) — the node may be " +
+                "claimed already (the PIN is consumed on claim), or the file is not readable by " +
+                "this user (it is 0600 in the node's home; the wizard must run as the same user " +
+                "that started the node)."
+        )
+        return null
     }
 
     /**
-     * Race-free, on-demand read of the durable `<home>/claim_pin` file (0600).
-     * The node writes claim_pin a few seconds after health answers, so the
-     * boot-time latch above can miss it; the setup flow calls this at claim time
-     * (well after boot) when the file is guaranteed present. See
-     * [PythonRuntimeProtocol.readLocalClaimPin].
+     * **Ask the node where it wrote the PIN file** (`GET /v1/setup/status` →
+     * `claim_pin_file`) — CIRISServer#395.
+     *
+     * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+     * upstream has no such endpoint, so the vendored file went back to guessing
+     * the path from the APP's environment only.
+     *
+     * The node is the only party that KNOWS its home: it was told at startup.
+     * Every client-side derivation ([nodeHomeDir]) reads the APP's environment
+     * instead, so any topology where the two differ — a launcher passing
+     * `--home`, a container, systemd, sudo — pointed the read at a path the node
+     * never wrote.
+     *
+     * Only the PATH crosses the wire; the PIN never does. The proof of operator
+     * presence is still the same-uid read of a 0600 file, which is why saying
+     * where it is costs nothing.
+     *
+     * `null` on an old server, a claimed node (PIN consumed), or any error — the
+     * caller falls back to the environment guess.
      */
-    override suspend fun readLocalClaimPin(): String? = runCatching { readClaimPinFile() }.getOrNull()
-
-    private fun readClaimPinFile(): String? {
-        val pinFile = java.io.File(nodeHomeDir(), "claim_pin")
-        return if (pinFile.canRead()) pinFile.readText().trim().ifEmpty { null } else null
-    }
+    private suspend fun declaredClaimPinFile(): String? = runCatching {
+        val body = httpClient.get("$_serverUrl/v1/setup/status").bodyAsText()
+        // Deliberately a narrow scrape rather than a full model bind: this runs on
+        // the first-run path against a server that may be mid-boot, and a strict
+        // decode failure here must not cost us the PIN.
+        Regex("\"claim_pin_file\"\\s*:\\s*\"([^\"]+)\"")
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+    }.getOrNull()
 
     /**
-     * Per-user data directory for the local node's substrate/keyring. Mirrors
-     * `ciris_engine.logic.utils.path_resolution.get_ciris_home()` so the agent
-     * backend and this fallback resolve the SAME home:
-     *   1. `/app` when CIRIS-Manager-managed,
-     *   2. `$CIRIS_HOME` when set (explicit override),
-     *   3. `~/ciris` otherwise (installed mode).
+     * Read the node's durable `<home>/claim_pin` (0600) into the flow. No-op if
+     * already captured or the file is absent/empty. Called by [readLocalClaimPin].
      */
-    private fun nodeHomeDir(): java.io.File {
-        val managed = java.io.File("/app/agent").isDirectory ||
-            java.io.File("/app/.ciris_manager").isDirectory
-        return when {
-            managed -> java.io.File("/app")
-            else -> {
-                val env = System.getenv("CIRIS_HOME")
-                if (!env.isNullOrBlank()) java.io.File(env)
-                else java.io.File(System.getProperty("user.home", "."), "ciris")
+    private suspend fun readClaimPinFromFileIfMissing() {
+        if (_localClaimPin.value != null) return
+        // The node's OWN answer first, the environment guess second. The guess is
+        // kept only for a server too old to declare the path — it is the source
+        // that was wrong whenever app and node resolved home differently (#395).
+        val candidates = listOfNotNull(
+            declaredClaimPinFile()?.let { java.io.File(it) to "declared by the node" },
+            java.io.File(nodeHomeDir(), "claim_pin") to "guessed from this app's environment",
+        )
+        for ((pinFile, provenance) in candidates) {
+            runCatching {
+                if (pinFile.canRead()) {
+                    val pin = pinFile.readText().trim()
+                    if (pin.isNotEmpty()) {
+                        _localClaimPin.value = pin
+                        println("[PythonRuntime.desktop] Captured CLAIM PIN from ${pinFile.path} ($provenance).")
+                        return
+                    }
+                }
+            }.onFailure {
+                println("[PythonRuntime.desktop] claim_pin read failed at ${pinFile.path} ($provenance): ${it.message}")
             }
         }
     }
@@ -180,27 +261,17 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
      */
     private suspend fun checkExistingServer(): ExistingServerState {
         return try {
-            val response = httpClient.get("$_serverUrl/v1/system/health")
-            if (response.status != HttpStatusCode.OK) {
-                return ExistingServerState.NOT_RUNNING
-            }
-
-            val body = response.bodyAsText()
-            val stateMatch = Regex(""""cognitive_state"\s*:\s*"(\w+)"""").find(body)
-            val cognitiveState = stateMatch?.groupValues?.get(1)?.uppercase() ?: ""
-
-            when (cognitiveState) {
-                "WORK", "SETUP", "WAKEUP", "PLAY", "SOLITUDE", "DREAM" -> ExistingServerState.HEALTHY
-                "SHUTDOWN" -> ExistingServerState.STUCK_SHUTDOWN
-                "" -> {
-                    // Empty cognitive_state means server is still initializing
-                    println("[PythonRuntime.desktop] Server responding but cognitive_state empty (still starting)")
-                    ExistingServerState.HEALTHY
-                }
-                else -> {
-                    println("[PythonRuntime.desktop] Unknown cognitive_state: $cognitiveState - treating as healthy")
-                    ExistingServerState.HEALTHY
-                }
+            // NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+            // ciris-server readiness: GET /v1/identity returning 200 means the
+            // node's read API is up. There is no agent-style cognitive_state /
+            // SHUTDOWN concept here, so any 2xx == HEALTHY. Upstream probes
+            // /v1/system/health and demands a WORK/SETUP cognitive_state, which
+            // a node NEVER reports — every boot read as NOT_RUNNING.
+            val response = httpClient.get("$_serverUrl/v1/identity")
+            if (response.status.value in 200..299) {
+                ExistingServerState.HEALTHY
+            } else {
+                ExistingServerState.NOT_RUNNING
             }
         } catch (_: Exception) {
             ExistingServerState.NOT_RUNNING
@@ -211,7 +282,24 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
      * Get port from server URL.
      */
     private fun getPort(): String {
-        return Regex(":(\\d+)").find(_serverUrl)?.groupValues?.get(1) ?: "8080"
+        return Regex(":(\\d+)").find(_serverUrl)?.groupValues?.get(1) ?: "4243"
+    }
+
+    /**
+     * Resolve the node's BASE listen port from the API URL.
+     *
+     * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+     * upstream has one port (:8080) because the agent serves its API on the port
+     * it listens on. The node does not — the +1 offset is the whole reason this
+     * helper exists.
+     *
+     * ciris-server serves its read API at (node listen port + 1), and the URL
+     * this runtime carries is the API URL. So the node should listen on
+     * (API port - 1). With the default API :4243 the node listens on :4242.
+     */
+    private fun getNodeListenPort(): String {
+        val apiPort = getPort().toIntOrNull() ?: 4243
+        return (apiPort - 1).toString()
     }
 
     /**
@@ -259,44 +347,106 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     }
 
     /**
-     * Launch ciris-agent --adapter api as a subprocess.
-     * Tries ciris-agent first (pip-installed), then falls back to python main.py.
+     * Launch the local **ciris-server** node as a subprocess.
+     *
+     * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+     * THE defect this restore exists for. The vendored version launched
+     * `ciris-agent --adapter api --port 8080` (falling back to `python main.py`),
+     * so the desktop node build started an agent and NEVER STARTED THE NODE — and
+     * when neither was installed it only WARNED and waited for a server that was
+     * never coming. Missing `ciris-server` now fails fast with an actionable message.
+     *
+     * This is the federation node client — it launches `ciris-server`, NOT the
+     * Python `ciris-agent`. The `ciris-server` console command is installed via:
+     *
+     *     pip install ciris-server==<version>   ([CLIENT_VERSION] — kept fresh by the release stamp)
+     *
+     * The node is started as:
+     *
+     *     ciris-server --home <appDataDir>/ciris --key-id ciris-client
+     *
+     * The node listens on its base port (default :4242) and serves its read API
+     * at base+1 (:4243), which is the URL this runtime reports/probes. If the
+     * `ciris-server` binary is not found on PATH a clear error is raised so the
+     * startup sequence fails fast with an actionable message (rather than hanging
+     * on the readiness probe waiting for a server that will never come up).
+     *
      * Captures stdout and forwards to the output callback for UI updates.
      */
     private fun launchServerProcess() {
-        println("[PythonRuntime.desktop] Launching backend...")
+        println("[PythonRuntime.desktop] Launching local ciris-server node...")
 
-        // Parse port from server URL
-        val port = Regex(":(\\d+)").find(_serverUrl)?.groupValues?.get(1) ?: "8080"
-
-        // Try ciris-agent first (pip-installed command)
-        val cirisAgent = findExecutable("ciris-agent")
-        if (cirisAgent != null) {
-            println("[PythonRuntime.desktop] Found ciris-agent at: $cirisAgent")
-            _serverProcess = ProcessBuilder(cirisAgent, "--adapter", "api", "--port", port)
-                .redirectErrorStream(true)  // Merge stderr into stdout
-                .start()
-            println("[PythonRuntime.desktop] Started ciris-agent (PID: ${_serverProcess?.pid()})")
-            startStdoutReader()
-            return
+        val cirisServer = findExecutable("ciris-server")
+        if (cirisServer == null) {
+            throw RuntimeException(
+                "Could not find the 'ciris-server' executable on PATH.\n\n" +
+                "This is the local CIRIS federation node — install it with:\n" +
+                "    pip install ciris-server==$CLIENT_VERSION\n\n" +
+                "Then make sure the 'ciris-server' console command is on your PATH " +
+                "(the same environment this app launches from) and restart the app."
+            )
         }
 
-        // Fallback: python main.py from repo root
-        val repoRoot = findRepoRoot()
-        val mainPy = repoRoot?.resolve("main.py")
-        if (mainPy != null && mainPy.exists()) {
-            val python = findExecutable("python3") ?: findExecutable("python") ?: "python3"
-            println("[PythonRuntime.desktop] Falling back to: $python ${mainPy.absolutePath}")
-            _serverProcess = ProcessBuilder(python, mainPy.absolutePath, "--adapter", "api", "--port", port)
-                .directory(repoRoot)
-                .redirectErrorStream(true)  // Merge stderr into stdout
-                .start()
-            println("[PythonRuntime.desktop] Started python server (PID: ${_serverProcess?.pid()})")
-            startStdoutReader()
-            return
-        }
+        val home = nodeHomeDir().absolutePath
+        println("[PythonRuntime.desktop] Found ciris-server at: $cirisServer")
+        println("[PythonRuntime.desktop] Node home: $home (node listens on :${getNodeListenPort()}, API on :${getPort()})")
 
-        println("[PythonRuntime.desktop] WARNING: Could not find ciris-agent or main.py - waiting for external server")
+        _serverProcess = ProcessBuilder(
+            cirisServer,
+            "--home", home,
+            "--key-id", "ciris-client",
+        )
+            .redirectErrorStream(true)  // Merge stderr into stdout
+            .start()
+        println("[PythonRuntime.desktop] Started ciris-server (PID: ${_serverProcess?.pid()})")
+        startStdoutReader()
+    }
+
+    /**
+     * Per-user data directory for the local node's substrate/keyring. Mirrors
+     * CIRISAgent's `ciris_engine.logic.utils.path_resolution.get_ciris_home()`
+     * (and the `ciris-server` wheel's desktop launcher) so the node, the agent
+     * brain, and the bare `ciris-server` command all resolve the SAME home:
+     *   1. `/app` when CIRIS-Manager-managed,
+     *   2. `$CIRIS_HOME` when set (explicit override),
+     *   3. `~/ciris` otherwise (installed mode) — cross-platform, NOT the OS
+     *      app-data dir, so it matches the agent.
+     * Created if missing.
+     *
+     * NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it): the
+     * $HOME step and the mkdirs. Upstream reads only CIRIS_HOME then `user.home`,
+     * and never creates the directory — but WE pass this path to the node as
+     * `--home`, so it has to exist and it has to be the path the node itself
+     * resolves.
+     */
+    private fun nodeHomeDir(): java.io.File {
+        val managed = java.io.File("/app/agent").isDirectory ||
+            java.io.File("/app/.ciris_manager").isDirectory
+        val dir = when {
+            managed -> java.io.File("/app")
+            else -> {
+                // Resolve the node's home the way the NODE resolves it, in order:
+                //   CIRIS_HOME  — set explicitly by the launcher that started it
+                //   HOME        — what the node process itself used
+                //   user.home   — last resort
+                //
+                // `user.home` alone was wrong: the JVM reads it from the passwd
+                // entry, NOT from $HOME, so any process started with an
+                // overridden HOME (a container, a systemd unit, sudo, a sandboxed
+                // run) had the app looking in /home/<user>/ciris while the node
+                // wrote to $HOME/ciris. The claim PIN was then "not captured"
+                // with the file sitting readable a directory away.
+                val explicit = System.getenv("CIRIS_HOME")
+                val home = System.getenv("HOME")
+                when {
+                    !explicit.isNullOrBlank() -> java.io.File(explicit)
+                    !home.isNullOrBlank() -> java.io.File(home, "ciris")
+                    else -> java.io.File(System.getProperty("user.home", "."), "ciris")
+                }
+            }
+        }
+        if (!dir.exists()) dir.mkdirs()
+        return dir
     }
 
     /**
@@ -332,7 +482,8 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
      * found, latch the one-time CLAIM PIN and/or the NodeCode into the StateFlows
      * the setup flow reads.
      *
-     * Matches the banner form (one token per line, inside a box):
+     * Matches the banner emitted by CIRISServer/src/auth/bootstrap.rs
+     * `announce_ownership_unclaimed`, e.g. (one token per line, inside a box):
      *
      *     ║    NodeCode : CIRIS-V1-AAAA-BBBB-CCCC-...
      *     ║    CLAIM PIN: 7F3K-Q9MZ   (one-time; console-only — NEVER over HTTP)
@@ -420,38 +571,27 @@ actual class PythonRuntime actual constructor() : PythonRuntimeProtocol {
     }
 
     actual override suspend fun checkHealth(): Result<Boolean> = runCatching {
-        val response = httpClient.get("$_serverUrl/v1/system/health")
-        if (response.status != HttpStatusCode.OK) {
-            return@runCatching false
-        }
-
-        // Parse JSON to check cognitive_state == "WORK" or "SETUP" (first-run)
-        val body = response.bodyAsText()
-        val stateMatch = Regex(""""cognitive_state"\s*:\s*"(\w+)"""").find(body)
-        val cognitiveState = stateMatch?.groupValues?.get(1) ?: ""
-
-        // WORK = normal ready, SETUP = first-run ready (case-insensitive)
-        val upper = cognitiveState.uppercase()
-        val isReady = upper == "WORK" || upper == "SETUP"
+        // NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+        // ciris-server readiness: GET /v1/identity returning 200 means the node's
+        // read API is up and serving. There is no agent-style cognitive_state to
+        // inspect; a 2xx is the node-up signal the startup gate waits on.
+        val response = httpClient.get("$_serverUrl/v1/identity")
+        val isReady = response.status.value in 200..299
         if (!isReady) {
-            println("[PythonRuntime.desktop] Not ready yet - cognitive_state: $cognitiveState")
+            println("[PythonRuntime.desktop] Not ready yet - GET /v1/identity -> ${response.status.value}")
         }
         isReady
     }
 
     actual override suspend fun getServicesStatus(): Result<Pair<Int, Int>> = runCatching {
-        // Use unauthenticated startup-status endpoint for service counts
-        val response = httpClient.get("$_serverUrl/v1/system/startup-status")
-        if (response.status != HttpStatusCode.OK) {
-            return@runCatching Pair(0, 0)
-        }
-        val body = response.bodyAsText()
-        // Parse services_online and services_total from startup-status response
-        val onlineMatch = Regex(""""services_online"\s*:\s*(\d+)""").find(body)
-        val totalMatch = Regex(""""services_total"\s*:\s*(\d+)""").find(body)
-        val online = onlineMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-        val total = totalMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-        Pair(online, total)
+        // NODE VENDOR DRIFT #15 (restored after the 2.9.28 re-vendor dropped it):
+        // ciris-server has no agent-style /v1/system/startup-status service-count
+        // endpoint. Degrade gracefully: treat the node as a single "service" that
+        // is online once its read API answers. This lets the startup service loop
+        // complete promptly (online == total) instead of waiting on the slower
+        // health-only fallback. Returns (0, 0) while the node is not yet up.
+        val up = checkHealth().getOrNull() == true
+        if (up) Pair(1, 1) else Pair(0, 0)
     }
 
     actual override suspend fun getPrepStatus(): Result<Pair<Int, Int>> {
