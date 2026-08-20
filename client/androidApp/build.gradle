@@ -195,25 +195,19 @@ android {
     }
 }
 
-// Sync localization JSON files from main repo to assets
-// This ensures mobile has all translated strings available at runtime
-task syncLocalizationAssets(type: Sync) {
-    description = "Sync localization JSON files from main repo to assets"
-
-    from("../../localization") {
-        include "*.json"
-        // Exclude manifest.json (not needed at runtime)
-        exclude "manifest.json"
-    }
-    into "src/main/assets/localization"
-}
-
-// Make preBuild depend on localization sync
-tasks.whenTaskAdded { task ->
-    if (task.name == "preBuild") {
-        task.dependsOn syncLocalizationAssets
-    }
-}
+// NODE VENDOR DRIFT #9 (CIRISServer#465): upstream's syncLocalizationAssets is
+// REMOVED, not carried. It was `Sync` — destination-owning — from
+// ../../localization (the AGENT repo's root dir) into the COMMITTED assets
+// bundle. Here that source does not exist, so Gradle skipped it NO-SOURCE; the
+// day anyone creates a root localization/ dir, Sync makes the committed bundle
+// match an empty source and every locale silently vanishes from the built APK
+// while all committed-bundle gates stay green. Upstream's own
+// syncBackendLocalization (below) documents this exact hazard for another dir
+// and deliberately uses a non-destructive copy instead. Our bundles are
+// committed and mirrored by client/tools/check_localization_sync.py; no
+// build-time sync is wanted. The client-artifacts workflow now asserts the
+// BUILT artifact carries all 30 locale files, so a regression here fails CI
+// rather than shipping silent.
 
 // Generate obfuscated secrets file for Python
 // Reads from ~/.<key_name> files (not in git) and generates XOR-obfuscated Python

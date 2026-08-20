@@ -60,17 +60,6 @@ kotlin {
     jvmToolchain(17)
 }
 
-// Sync localization JSON files from main repo to resources
-tasks.register<Sync>("syncLocalizationResources") {
-    description = "Sync localization JSON files from main repo to resources"
-    from("../../localization") {
-        include("*.json")
-        exclude("manifest.json")
-    }
-    into("src/main/resources/localization")
-}
-
-// Ensure localization resources are synced before processing resources
-tasks.named("processResources") {
-    dependsOn("syncLocalizationResources")
-}
+// NODE VENDOR DRIFT #9 (CIRISServer#465): upstream's syncLocalizationResources
+// is REMOVED — same destination-owning Sync hazard as androidApp's
+// syncLocalizationAssets (see that file's comment for the full account).

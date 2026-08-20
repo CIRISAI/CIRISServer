@@ -118,6 +118,26 @@ jobs:
              "androidApp/build/outputs/apk/debug/CIRIS-Server-$VERSION-debug.apk"
           ls -lh androidApp/build/outputs/apk/debug/
 
+      # ── THE ARTIFACT CARRIES ITS LANGUAGES (CIRISServer#465) ────────────────
+      #
+      # Every localization gate in this repo checks the COMMITTED bundles; none
+      # checked what actually ships. Upstream's build carried a Sync task that
+      # would have emptied the bundle into the APK the day a root localization/
+      # dir appeared — every source gate green, every shipped artifact
+      # English-only. Localization is the product; assert it on the artifact.
+      - name: Assert the APK carries all 30 locale files
+        run: |
+          set -euo pipefail
+          APK=$(ls client/androidApp/build/outputs/apk/debug/CIRIS-Server-*-debug.apk | head -1)
+          N=$(unzip -l "$APK" | grep -cE 'assets/localization/.*\.json' || true)
+          echo "locale json files in APK: $N"
+          if [ "$N" -ne 30 ]; then
+            echo "::error::APK carries $N locale files, expected 30 (29 languages + manifest)." \
+                 "The committed bundles are green — this is a BUILD-TIME stripping," \
+                 "the class CIRISServer#465 removed. Do not ship."
+            exit 1
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -133,6 +153,19 @@ jobs:
           cd client
           ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
           ls -lh desktopApp/build/compose/jars/
+
+      # ── Same assertion for the jar (see the APK step's comment) ─────────────
+      - name: Assert the jar carries all 30 locale files
+        run: |
+          set -euo pipefail
+          JAR=$(ls client/desktopApp/build/compose/jars/*.jar | head -1)
+          N=$(unzip -l "$JAR" | grep -cE 'localization/.*\.json' || true)
+          echo "locale json files in jar: $N"
+          if [ "$N" -ne 30 ]; then
+            echo "::error::jar carries $N locale files, expected 30. Build-time stripping" \
+                 "(CIRISServer#465 class) — the committed bundles will still be green. Do not ship."
+            exit 1
+          fi
 
       # ── CLIENT_VERSION travels WITH the artifact (CIRISServer#390 ask 3) ────
       #
