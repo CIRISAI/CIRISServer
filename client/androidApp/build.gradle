@@ -331,7 +331,12 @@ task syncPythonSources(type: Exec) {
     dependsOn cleanPythonSources
     dependsOn cleanChaquopyOutputs
 
-    workingDir "../.."
+    // NODE VENDOR DRIFT #10 (restored after the 2.9.28 re-vendor dropped it and
+    // CI's APK job failed with ModuleNotFoundError): in the agent repo the
+    // canonical runtime lives at ../.. ; when this client is vendored into
+    // another repo (CIRISServer/client) point at the CIRISAgent checkout via
+    // -PcirisAgentRoot=/path/to/CIRISAgent — client-artifacts passes it.
+    workingDir(findProperty("cirisAgentRoot") ?: file("../.."))
     commandLine "python3", "-m", "tools.dev.stage_runtime", "${buildDir}/python-src", "--quiet"
 
     // Strip host-platform binaries from the staged tree. The canonical
