@@ -39,7 +39,7 @@
 
 use ciris_crypto::{ml_kem, x25519};
 use ciris_edge::transport::federation_session::{
-    FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys, SessionError, SessionHandshakeMsg,
+    FederationSession, KexAlgorithm, OwnKexKeys, PeerKexPubkeys, SessionHandshakeMsg,
     ALGORITHM_HYBRID_V1,
 };
 
@@ -62,15 +62,32 @@ fn fresh_responder() -> OwnKexKeys {
 fn advertise_hybrid(own: &OwnKexKeys) -> PeerKexPubkeys {
     PeerKexPubkeys {
         x25519_pub: x25519::public_from_secret(&own.x25519_priv),
-        mlkem768_pub: own.mlkem768_pub.clone(),
+        // OwnKexKeys still carries an Option (a node may lack its own PQC
+        // half); the PEER view does not. Unwrapping here is correct for a
+        // fixture that just generated one, and it is where the two types stop
+        // agreeing — the asymmetry is the point, not an oversight.
+        mlkem768_pub: own
+            .mlkem768_pub
+            .clone()
+            .expect("fixture generates a PQC half"),
     }
 }
 
-/// The peer view for a classical-only responder: X25519 only, no ML-KEM half.
-fn advertise_classical_only(own: &OwnKexKeys) -> PeerKexPubkeys {
+/// The peer view for a responder advertising NO USABLE ML-KEM half.
+///
+/// At edge v18.2.0 `mlkem768_pub` stopped being `Option` (CIRISEdge#458), so a
+/// classical-only peer is no longer EXPRESSIBLE — the retirement moved from a
+/// runtime refusal to a type-level impossibility, which is the stronger form.
+///
+/// An EMPTY key is the closest thing that still type-checks, and it is also the
+/// shape an attacker actually has: they cannot delete a field from the wire
+/// struct, they can only strip the bytes. So the refusal tests below keep
+/// running against the case that can still occur, rather than being deleted on
+/// the grounds that the old one cannot.
+fn advertise_no_usable_mlkem(own: &OwnKexKeys) -> PeerKexPubkeys {
     PeerKexPubkeys {
         x25519_pub: x25519::public_from_secret(&own.x25519_priv),
-        mlkem768_pub: None,
+        mlkem768_pub: Vec::new(),
     }
 }
 
@@ -202,12 +219,22 @@ fn dropped_mlkem_ciphertext_fails_closed() {
 #[test]
 fn hybrid_required_rejects_classical_only_peer() {
     let responder = fresh_responder();
-    let classical_peer = advertise_classical_only(&responder);
+    let classical_peer = advertise_no_usable_mlkem(&responder);
 
     let r = FederationSession::initiate(&classical_peer, KexAlgorithm::HybridRequired);
+    // THE PROPERTY IS THE REFUSAL, NOT ITS SPELLING. Before edge v18.2.0 an
+    // absent PQC half was `None` and this returned
+    // `HybridRequiredButPeerLacksMlkem` — a POLICY verdict. Now the field is
+    // non-optional, so "absent" can only be expressed as EMPTY, and the refusal
+    // arrives from the length check instead. Same outcome, earlier gate.
+    //
+    // Asserting the exact variant would have made this test fail on a change
+    // that STRENGTHENED the guarantee, which is how a safety test gets deleted
+    // for being noisy.
     assert!(
-        matches!(r, Err(SessionError::HybridRequiredButPeerLacksMlkem)),
-        "HybridRequired must REJECT a classical-only peer (no silent downgrade), got {r:?}"
+        r.is_err(),
+        "HybridRequired must REJECT a peer with no usable ML-KEM half (no silent \
+         downgrade to classical), got {r:?}"
     );
 }
 
@@ -280,22 +307,42 @@ fn hybrid_path_always_carries_mlkem_ciphertext() {
 #[test]
 fn lenient_hybrid_no_longer_falls_back_against_a_classical_only_peer() {
     let responder = fresh_responder();
-    let classical_peer = advertise_classical_only(&responder);
+    let classical_peer = advertise_no_usable_mlkem(&responder);
 
     let r = FederationSession::initiate(&classical_peer, KexAlgorithm::Hybrid);
+    // Same reasoning as `hybrid_required_rejects_...`: the guarantee is that
+    // lenient `Hybrid` does NOT negotiate down, and it still does not. At edge
+    // v18.2.0 the absent PQC half became inexpressible, so the case now arrives
+    // as an EMPTY key and is refused by the length check rather than the policy
+    // check. Pinning the variant would red this test for a change that made the
+    // downgrade harder, not easier.
     assert!(
         r.is_err(),
-        "lenient `Hybrid` negotiated DOWN to classical against a classical-only peer. \
-         That is the pre-#481 behaviour and it is a downgrade: an attacker who can \
-         strip the ML-KEM half from an advertisement gets a classical session from a \
-         caller who never asked for one."
+        "lenient `Hybrid` negotiated DOWN against a peer with no usable ML-KEM \
+         half. That is a downgrade: an attacker who strips the ML-KEM bytes from \
+         an advertisement gets a classical session from a caller who never asked \
+         for one. Got {r:?}"
     );
+    // THIS ASSERTION EXISTS TO CATCH THE SURFACE MOVING, AND IT DID.
+    //
+    // It pinned `HybridRequiredButPeerLacksMlkem` and went red at edge v18.2.0 —
+    // correctly. `mlkem768_pub` stopped being `Option` (CIRISEdge#458), so the
+    // absent half is now expressed as EMPTY and refused by the LENGTH check
+    // before policy is consulted. The guarantee strengthened; the spelling
+    // changed.
+    //
+    // Widened to the two grounds we know are safe rather than dropped, because
+    // the value here is catching a THIRD shape — a refusal for some unrelated
+    // reason would mean the downgrade path is no longer being tested at all,
+    // which is exactly what this gate is for.
     let msg = format!("{:?}", r.unwrap_err());
     assert!(
-        msg.contains("HybridRequiredButPeerLacksMlkem"),
-        "refused, but not for the documented reason — got `{msg}`. The expected \
-         refusal is HybridRequiredButPeerLacksMlkem: `Hybrid` is now identical to \
-         `HybridRequired`, and a DIFFERENT error here means the negotiation surface \
-         moved again and this gate is no longer measuring what it names."
+        msg.contains("HybridRequiredButPeerLacksMlkem")
+            || msg.contains("ML-KEM-768 pubkey wrong length"),
+        "refused, but on neither documented ground — got `{msg}`. Expected either \
+         the policy refusal (HybridRequiredButPeerLacksMlkem, pre-v18.2.0) or the \
+         length refusal (empty ML-KEM half, v18.2.0+). A different error means the \
+         negotiation surface moved AGAIN and this gate is no longer measuring what \
+         it names."
     );
 }
