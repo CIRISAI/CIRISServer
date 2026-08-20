@@ -1202,6 +1202,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // unauthenticated like the other directory read surfaces;
                     // excludes the node's own self key.
                     .merge(crate::federation_peers::router(Arc::clone(&engine)))
+                    // CONTACTS + USER CHAT: GET/POST /v1/contacts, POST /v1/chat,
+                    // GET/POST /v1/chat/{community_id}/messages. Owner-gated on
+                    // every arm. It shares the peers projection above (a contact
+                    // IS a peer, rendered by the same card) and adds nothing to
+                    // the substrate: a contact is a `consent:replication:v1`
+                    // grant, a chat is a two-member `Community` under a derived
+                    // id, and a message is a `chat:message:v1` attestation at
+                    // `cohort_scope: community`. See `crate::contacts_chat`.
+                    .merge(crate::contacts_chat::router(Arc::clone(&engine)))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
