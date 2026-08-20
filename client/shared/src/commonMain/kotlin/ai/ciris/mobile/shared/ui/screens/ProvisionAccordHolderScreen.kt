@@ -271,7 +271,6 @@ fun ProvisionAccordHolderScreen(
             )
             DirectoryPickerDialog(
                 show = showDirPicker,
-                purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
                 onDirectoryPicked = {
                     viewModel.setUsbPath(it)
                     showDirPicker = false

@@ -91,9 +91,12 @@ fun LoginScreen(
     observerBlocked: Boolean = false,
     showLocalLoginForm: Boolean = false,
     isFirstRun: Boolean = true,
-    /// True when setup JUST completed and the node restarted — the banner
-    /// explaining why a successful setup lands back on this screen.
-    justCompletedSetup: Boolean = false,
+    // Whether this deployment actually has Google OAuth credentials wired
+    // (node's /v1/auth/oauth/providers lists "google"; the PKCE secret is baked
+    // by CI). When false the Google button renders GREYED/disabled instead of
+    // offering a sign-in that can only fail with redirect_uri_mismatch. Defaults
+    // true so callers that don't (yet) probe providers keep the button live.
+    googleOAuthAvailable: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     var marketingOptIn by remember { mutableStateOf(false) }
@@ -106,7 +109,13 @@ fun LoginScreen(
     var showResetConfirm by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
-    // For desktop, always show login form (not OAuth buttons)
+    // Desktop USED to mean "local login only", because there was no native
+    // Google SDK and nothing could complete a browser sign-in. ciris-server
+    // 0.5.165 changed that: the node serves the browser flow and the app polls
+    // /v1/auth/oauth/handoff for the session (CIRISAgent#1028). The handler
+    // behind `onGoogleSignIn` already implements it — see CIRISApp's desktop
+    // branch — so this flag no longer decides whether OAuth is POSSIBLE, only
+    // whether the local form starts expanded.
     val isDesktopMode = isDesktop()
 
     // Localized strings
@@ -188,35 +197,6 @@ fun LoginScreen(
                     modifier = Modifier.width(280.dp)
                 )
 
-                // JUST FINISHED SETUP? SAY SO (CIRISServer#393).
-                //
-                // Completing setup restarts the node, and a restart invalidates
-                // the session by design — the secret that signs it is per-process.
-                // So landing back on this screen is CORRECT, but it looks exactly
-                // like a failure: the user has just spent several minutes proving
-                // who they are and is being asked again, with no explanation.
-                //
-                // A banner is the whole difference between "it worked, sign back
-                // in" and "something broke". Same credentials, not new ones —
-                // people reach for the wrong door when a screen is silent about
-                // which one they used.
-                if (justCompletedSetup) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = LoginColors.White.copy(alpha = 0.12f),
-                        modifier = Modifier.width(300.dp).testable("banner_setup_complete_relogin"),
-                    ) {
-                        Text(
-                            text = localizedString("mobile.login_setup_complete_relogin"),
-                            color = LoginColors.White,
-                            fontSize = 13.sp,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(12.dp),
-                        )
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // NOTE: there is deliberately NO federation-identity sign-in option
@@ -243,14 +223,11 @@ fun LoginScreen(
                         )
                     }
                 } else if (showLoginForm) {
-                    // The local-account form. Reached by CHOOSING "Local Login"
-                    // below, on every platform.
-                    //
-                    // `isDesktopMode ||` used to force this branch, so desktop
-                    // never saw the chooser and the only way in was a username and
-                    // password — correct while desktop had no OAuth, wrong once the
-                    // node started serving the browser flow. Desktop now gets the
-                    // same first screen as mobile: pick Google or a local account.
+                    // Local Login form - show username/password fields.
+                    // `isDesktopMode` deliberately NOT part of this condition: it
+                    // short-circuited desktop straight here, making the OAuth branch
+                    // below unreachable, so the Google button never rendered on
+                    // desktop even though its handler was fully implemented.
                     LocalLoginForm(
                         username = username,
                         onUsernameChange = { username = it },
@@ -261,10 +238,9 @@ fun LoginScreen(
                                 onLocalLoginSubmit(username, password)
                             }
                         },
-                        // Back is available everywhere now: the form is a CHOICE
-                        // on every platform, so it must be reversible on every
-                        // platform. Desktop got no back arrow because it could not
-                        // have arrived here from anywhere.
+                        // Back is available everywhere now. It was null on desktop
+                        // because the form was the only screen there and there was
+                        // nothing to go back TO; with OAuth buttons present there is.
                         onBack = { showLoginForm = false },
                         errorMessage = errorMessage,
                         focusManager = focusManager
@@ -330,20 +306,40 @@ fun LoginScreen(
 
                     Button(
                         onClick = onGoogleSignIn,
+                        enabled = googleOAuthAvailable,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = LoginColors.White,
-                            contentColor = LoginColors.Primary
+                            contentColor = LoginColors.Primary,
+                            // Greyed when this build has no Google credentials wired.
+                            disabledContainerColor = LoginColors.White.copy(alpha = 0.35f),
+                            disabledContentColor = LoginColors.Primary.copy(alpha = 0.5f)
                         ),
                         shape = RoundedCornerShape(24.dp),
                         modifier = Modifier
                             .width(280.dp)
                             .height(48.dp)
-                            .testableClickable(if (isIOS()) "btn_apple_signin" else "btn_google_signin") { onGoogleSignIn() }
+                            .testableClickable(if (isIOS()) "btn_apple_signin" else "btn_google_signin") {
+                                if (googleOAuthAvailable) onGoogleSignIn()
+                            }
                     ) {
                         Text(
                             text = signinProvider,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    // Explain the greyed button rather than leaving a dead control.
+                    if (!googleOAuthAvailable) {
+                        Text(
+                            text = localizedString("mobile.login_google_unavailable"),
+                            color = LoginColors.White.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .width(280.dp)
+                                .padding(top = 6.dp)
+                                .testable("txt_google_unavailable")
                         )
                     }
 

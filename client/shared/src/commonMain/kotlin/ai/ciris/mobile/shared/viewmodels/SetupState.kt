@@ -307,6 +307,10 @@ data class FederationIdentitySetupState(
      *  this is the single canonical name the user's federation identity is keyed
      *  by, so an empty/generic value would collide identities across devices. */
     val label: String = "",
+    /** True once the user edits the Fed-ID label field directly. Until then the
+     *  label AUTO-DERIVES from the username / OAuth id (see [SetupViewModel]), so
+     *  the YOU step needs one fewer field to fill in the common case. */
+    val labelManuallyEdited: Boolean = false,
     /** Custody backend hint. ALWAYS `null` now — the only option is the SECURE
      *  one: the substrate auto-picks the most secure custody available
      *  (YubiKey → TPM/Secure-Enclave → software). The UI exposes no selection. */
@@ -324,22 +328,6 @@ data class FederationIdentitySetupState(
     /** The honest hardware-tier label ("YubiKey" / "TPM / Secure Enclave" /
      *  "software") the local node reported. */
     val hardwareLabel: String? = null,
-    // ── Look BEFORE you import (CIRISServer#404) ──────────────────────────
-    /** A folder the operator picked and has not yet committed to importing. */
-    val inspectDir: String? = null,
-    /** `true` while the node is being asked about [inspectDir]. */
-    val inspecting: Boolean = false,
-    /**
-     * What the node found in [inspectDir] — the IMPORTER's own discovery.
-     *
-     * `null` while [inspecting], and also when the node could not be asked at
-     * all. Those two are rendered differently on purpose: "we could not look" is
-     * not "we looked and it is empty", and a UI that shows one for the other
-     * tells the operator their good USB is bad.
-     */
-    val inspection: ai.ciris.mobile.shared.models.federation.KeysetInspection? = null,
-    /** Set when the probe itself failed, as opposed to finding nothing. */
-    val inspectUnavailable: Boolean = false,
 ) {
     /**
      * Is the entered [label] a usable, UNIQUE federation-identity name?
@@ -384,6 +372,26 @@ data class AgeRangeSetupState(
      *  if not yet selected. Kept as the raw token to avoid leaking the safety
      *  enum into the serializable setup state. */
     val selectedBandToken: String? = null,
+    /**
+     * The subject exercised their right NOT to state an age.
+     *
+     * Distinct from [selectedBandToken] being null, which means "not asked yet".
+     * Before this existed the two were the same value, so "declining sets the
+     * protective default" — which the wizard's own test asserted — had nowhere to
+     * be encoded, and the required-age branch necessarily blocked both.
+     *
+     * Declining is a RIGHT and is never punished. It is also never treated as
+     * adulthood: a subject who has not stated an age is treated as a child, which
+     * is what [SetupFormState.isMinorBand] returns and what the stewardship rule
+     * keys on. Adult treatment follows from an adult declaration, not from silence.
+     *
+     * It is deliberately NOT recorded as `age_self_declared:minor:v1`. That would
+     * put a statement in the subject's own assurance record that they never made,
+     * and age.rs's honesty discipline is the whole point of this surface. Nothing
+     * is posted; the protective treatment is applied locally. Closing that gap
+     * server-side needs a `declined` assurance band — filed upstream.
+     */
+    val declined: Boolean = false,
     val inProgress: Boolean = false,
     /** Set once the local node recorded the self-declared assurance. */
     val recorded: Boolean = false,
@@ -449,19 +457,6 @@ data class NodeOwnershipClaimState(
     /** Human-readable failure reason (e.g. "claim PIN not captured"). */
     val error: String? = null,
     /**
-     * Is [error] worth RETRYING? Set where the failure happens, because that is
-     * the only place that knows.
-     *
-     * Every claim failure used to render as unrecoverable — including "claim PIN
-     * not captured", whose own message tells the operator to claim later, and
-     * ordinary network blips. So the panel said retrying could not work and
-     * offered a wipe-and-reinstall for a node that was fine. Classifying HERE
-     * rather than pattern-matching the message downstream keeps one author for
-     * the fact: a screen that greps an error string is a second opinion about
-     * what happened.
-     */
-    val errorRecoverable: Boolean = false,
-    /**
      * Non-fatal soft notice from the optional federation-announce opt-in. The
      * claim itself already succeeded; the announce can be retried later, so a
      * failure here is surfaced (not fatal). Null when not attempted / succeeded.
@@ -504,11 +499,6 @@ data class SetupFormState(
     val ownershipClaim: NodeOwnershipClaimState = NodeOwnershipClaimState(),
 
     // Google/Apple OAuth state
-    //
-    // `isGoogleAuth` is misnamed: it is set from `isAuth` for BOTH Google and
-    // Apple (see SetupViewModel's OAuth handler), so it means "authenticated via
-    // an external provider", not "Google specifically". Read it through
-    // [SetupState.isExternalAuth] rather than directly.
     val isGoogleAuth: Boolean = false,
     val googleIdToken: String? = null,
     val googleEmail: String? = null,
@@ -689,14 +679,14 @@ data class SetupFormState(
      * `/v1/setup/complete` computes `is_oauth_user = bool(oauth_provider)` and,
      * when true, GENERATES a random password for an account that will never use
      * one. When false it refuses with *"New user password must be at least 8
-     * characters"* — which is correct for a password account and nonsense to
-     * someone who just signed in with Google.
+     * characters"* — correct for a password account, and nonsense to someone who
+     * has just signed in with Google.
      *
-     * The two call sites had disagreed. The CIRIS-proxy branch passed
+     * The two call sites disagreed. The CIRIS-proxy branch passed
      * [oauthProvider] straight through; the BYOK branch required
      * `isGoogleAuth && googleUserId != null`. So a BYOK user who signed in with
-     * OAuth but whose provider returned no subject id read as a PASSWORD user
-     * and was asked for a password they had never set.
+     * OAuth, but whose provider returned no subject id, read as a PASSWORD user
+     * and was asked mid-wizard for a password they had never set.
      *
      * [googleUserId] is evidence about WHICH account, not about WHETHER OAuth
      * happened, so it must not gate this. [isGoogleAuth] is the authoritative
@@ -710,9 +700,9 @@ data class SetupFormState(
         get() = isGoogleAuth || isHAAddonMode
 
     /**
-     * The provider to send as `oauth_provider`, or null when this is a genuine
-     * password account. Paired with [isExternalAuth] so the flag and the value
-     * can never disagree.
+     * The provider to send as `oauth_provider`, or null for a genuine password
+     * account. Paired with [isExternalAuth] so the flag and the value cannot
+     * disagree.
      */
     val effectiveOAuthProvider: String?
         get() = when {
@@ -738,7 +728,12 @@ data class SetupFormState(
      * fail-secure skip of the local-node self-claim on COMPLETE.
      */
     fun isMinorBand(): Boolean {
-        return ageRange.selectedBandToken == "minor"
+        // Declining is treated exactly as `minor`, stewardship included. Anything
+        // less would make declining cost the subject their protections, and a
+        // decline that costs you something is not a right — it is a toll. The
+        // difference between the two lives in what is RECORDED, not in how the
+        // subject is treated: see AgeRangeSetupState.declined.
+        return ageRange.selectedBandToken == "minor" || ageRange.declined
     }
 
     /**
@@ -785,8 +780,13 @@ data class SetupFormState(
         // account needs a matching password pair, and a self-declared MINOR must
         // have generated a stewardship request first — that last one is
         // fail-secure (CC 0.5.1 §2580): an under-18 founder must not self-claim.
-        // The age band itself is optional; declining sets the protective default.
+        // The age question must be ANSWERED; "prefer not to say" is an answer.
         SetupStep.YOU -> {
+            // Age now leads the YOU step and is REQUIRED — it also seeds the fed-ID
+            // and the minor-stewardship gate, so nothing below it can be judged
+            // until it's answered.
+            // An ANSWER is required, not a band. Declining is an answer.
+            val ageOk = ageRange.selectedBandToken != null || ageRange.declined
             val fedIdOk = federationIdentity.minted ||
                 federationIdentity.admitted ||
                 federationIdentity.isLabelValid()
@@ -797,7 +797,7 @@ data class SetupFormState(
                 true
             }
             val stewardshipOk = !isMinorBand() || minorStewardship.requested
-            fedIdOk && accountOk && stewardshipOk
+            ageOk && fedIdOk && accountOk && stewardshipOk
         }
 
         // Every consent here is a real choice with a stated default, including
@@ -847,6 +847,11 @@ data class SetupFormState(
             val accountError = if (showLocalUserFields()) {
                 when {
                     username.isEmpty() -> LocalizationHelper.getString("setup_validation_username_required")
+                    // Reject 'admin' client-side (the backend reserves it — see
+                    // api/routes/setup/models.py) so the user gets an inline error
+                    // now instead of a 422 at completeSetup after the whole wizard.
+                    username.trim().lowercase() == "admin" ->
+                        LocalizationHelper.getString("setup_validation_username_reserved")
                     userPassword.isEmpty() -> LocalizationHelper.getString("setup_validation_password_required")
                     userPassword.length < 8 -> LocalizationHelper.getString("setup_validation_password_length")
                     userPassword != userPasswordConfirm -> LocalizationHelper.getString("setup_validation_password_mismatch")
@@ -860,15 +865,35 @@ data class SetupFormState(
             } else {
                 null
             }
-            fedIdError ?: accountError ?: stewardshipError
+            // Age is the first thing asked now, so its "please choose" is the first
+            // reason surfaced when Next is disabled.
+            val ageError = if (ageRange.selectedBandToken == null && !ageRange.declined) {
+                LocalizationHelper.getString("setup_validation_age_required")
+            } else {
+                null
+            }
+            ageError ?: fedIdError ?: accountError ?: stewardshipError
         }
 
         SetupStep.JOIN_FEDERATION -> null
 
         SetupStep.AI -> when {
             runWithoutAi -> null
-            setupMode == SetupMode.CIRIS_PROXY && googleIdToken == null ->
+            // "Google sign-in is required" told a SIGNED-IN user to sign in.
+            //
+            // The desktop browser-handoff path calls setGoogleAuthState(isAuth =
+            // true, idToken = null) on purpose — it collects a BEARER, not the raw
+            // Google ID token — so isGoogleAuth is true while googleIdToken is
+            // null. The old single check read that as "not signed in".
+            //
+            // The token still genuinely matters: CIRIS_PROXY sends it AS the LLM
+            // api_key (SetupViewModel: llm_api_key = googleIdToken ?: ""), so
+            // waving this through would configure the proxy with an EMPTY key and
+            // fail later, further from the cause. Two states, two messages.
+            setupMode == SetupMode.CIRIS_PROXY && !isGoogleAuth ->
                 LocalizationHelper.getString("setup_validation_google_required")
+            setupMode == SetupMode.CIRIS_PROXY && googleIdToken == null ->
+                LocalizationHelper.getString("setup_validation_proxy_needs_token")
             llmProvider.isEmpty() -> LocalizationHelper.getString("setup_validation_select_provider")
             !isKeylessLlmProvider() && llmApiKey.isEmpty() ->
                 LocalizationHelper.getString("setup_validation_api_key_required")

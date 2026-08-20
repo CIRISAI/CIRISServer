@@ -18,6 +18,10 @@ object CIRISBuild {
     /**
      * True only for the agent build (node + brain). When false (the node client),
      * AI/assistant configuration is hidden from setup and the rest of the UX.
+     *
+     * This repo IS the node client (CIRISServer/client), so the flag stays false
+     * here. The agent repo vendors this same file and flips it true — that flip
+     * is the designed single-flag adoption, and it is the ONLY difference.
      */
     const val HAS_AGENT: Boolean = false
 }

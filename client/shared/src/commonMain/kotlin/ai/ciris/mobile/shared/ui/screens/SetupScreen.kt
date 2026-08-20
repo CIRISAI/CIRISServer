@@ -2,6 +2,9 @@ package ai.ciris.mobile.shared.ui.screens
 
 import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.api.CIRISApiClient
+import ai.ciris.mobile.shared.api.CheckState
+import ai.ciris.mobile.shared.api.checkLlmConfig
+import ai.ciris.mobile.shared.ui.components.LlmCheckRow
 import ai.ciris.mobile.shared.localization.localizedString
 import androidx.compose.foundation.layout.imePadding
 import ai.ciris.mobile.shared.models.ConsentDisclosure
@@ -364,20 +367,7 @@ fun SetupScreen(
                     SetupStep.YOU -> YouStep(viewModel, state)
                     SetupStep.JOIN_FEDERATION -> JoinFederationStep(viewModel, state, apiClient)
                     SetupStep.AI -> AiStep(viewModel, state, apiClient)
-                    SetupStep.COMPLETE ->
-                        CompleteStep(
-                            onSetupComplete,
-                            state.ownershipClaim,
-                            // The SAME providers the first attempt used — a retry
-                            // that read the PIN differently would be a second way
-                            // to claim, not a retry of the first.
-                            onRetryClaim = {
-                                viewModel.claimLocalNodeOwnership(
-                                    claimPinProvider = claimPinProvider,
-                                    nodeCodeProvider = nodeCodeProvider,
-                                )
-                            },
-                        )
+                    SetupStep.COMPLETE -> CompleteStep(onSetupComplete, state.ownershipClaim)
                 }
             }
 
@@ -702,18 +692,16 @@ private fun YouStep(
             modifier = Modifier.padding(bottom = 20.dp)
         )
 
-        // ACCOUNT FIRST, then the federation identity. The order is load-bearing,
-        // not cosmetic: the OAuth identity is who OWNS the federation key, so
-        // signing in has to happen before the key is named. Sign-in then
-        // pre-populates the fed-ID name with `<provider>-<subject>` (see
-        // `SetupViewModel.setGoogleAuthState`) — with the old order the user was
-        // asked to invent a unique name first, and the identity that would have
-        // supplied one arrived a section too late to help.
+        // Order matters: AGE first (required, and it gates minor-stewardship),
+        // then the local account (username/password — only rendered for non-OAuth
+        // setups), then the federation identity whose label AUTO-POPULATES from the
+        // username/OAuth id entered just above (still overridable). Asking age →
+        // who-you-sign-in-as → what-to-name-the-identity reads top to bottom.
+        AgeRangeSection(viewModel = viewModel, state = state)
+        Spacer(modifier = Modifier.height(24.dp))
         AccountSection(viewModel = viewModel, state = state)
         Spacer(modifier = Modifier.height(24.dp))
         FederationIdentitySection(viewModel = viewModel, state = state)
-        Spacer(modifier = Modifier.height(24.dp))
-        AgeRangeSection(viewModel = viewModel, state = state)
     }
 }
 
@@ -1019,6 +1007,9 @@ private fun AiStep(
     var isTesting by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<LlmValidationResult?>(null) }
     var availableModels by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
+
+    /** Shared key/model-list/selected-model verdict (#1062), same as LLM settings. */
+    var configCheck by remember { mutableStateOf<ai.ciris.mobile.shared.api.LlmConfigCheck?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     // State for local LLM server discovery (finds running servers on network)
@@ -1628,21 +1619,28 @@ private fun AiStep(
                             try {
                                 // Provider is now stored as key directly (e.g., "openai", "local")
                                 val providerId = state.llmProvider
-                                val result = apiClient.validateLlmConfiguration(
+                                // THE SAME CHECK LLM SETTINGS RUNS (#1062).
+                                //
+                                // This used to hand-roll the sequence — validate,
+                                // then list, then decide — while the settings
+                                // screen ran only half of it. Two screens asking
+                                // the same question two different ways is how
+                                // they drifted apart in the first place. Both now
+                                // call checkLlmConfig and get identical verdicts.
+                                val check = apiClient.checkLlmConfig(
                                     provider = providerId,
                                     apiKey = state.llmApiKey,
                                     baseUrl = state.llmBaseUrl.takeIf { it.isNotEmpty() },
-                                    model = state.llmModel.takeIf { it.isNotEmpty() }
+                                    selectedModel = state.llmModel.takeIf { it.isNotEmpty() },
                                 )
-
-                                // If validation succeeded, fetch available models
-                                val models = if (result.valid) {
-                                    apiClient.listModels(
-                                        provider = providerId,
-                                        apiKey = state.llmApiKey,
-                                        baseUrl = state.llmBaseUrl.takeIf { it.isNotEmpty() }
-                                    )
-                                } else emptyList()
+                                configCheck = check
+                                val result = LlmValidationResult(
+                                    valid = check.usable,
+                                    message = check.keyMessage ?: "Connection verified",
+                                    error = check.firstProblem,
+                                )
+                                val models = check.availableModels
+                                val modelsAreLive = check.models == CheckState.OK
 
                                 withContext(Dispatchers.Main) {
                                     testResult = result
@@ -1650,7 +1648,11 @@ private fun AiStep(
                                     isTesting = false
 
                                     // Auto-select the best model if none is currently selected
-                                    if (models.isNotEmpty() && state.llmModel.isEmpty()) {
+                                    // Only auto-select from a list the provider
+                                    // actually gave us. Picking a cached model on
+                                    // the user's behalf is what shipped him a
+                                    // config that could never work.
+                                    if (modelsAreLive && models.isNotEmpty() && state.llmModel.isEmpty()) {
                                         // Prefer recommended, then compatible, then first available
                                         val bestModel = models.firstOrNull { it.cirisRecommended }
                                             ?: models.firstOrNull { it.cirisCompatible }
@@ -1692,6 +1694,25 @@ private fun AiStep(
             }
 
             // Show test result
+            // THE SAME THREE INDICATORS LLM SETTINGS SHOWS (#1062).
+            //
+            // The single ✓/✗ below collapses three independent facts into one
+            // verdict, and they do not fail together: a valid key with a model
+            // the provider does not serve reads as "✓ connection verified" and
+            // then fails every request. Break them out.
+            configCheck?.let { c ->
+                Spacer(modifier = Modifier.height(12.dp))
+                if (c.key != CheckState.UNKNOWN) {
+                    LlmCheckRow(state = c.key, message = c.keyMessage)
+                }
+                if (c.models != CheckState.UNKNOWN) {
+                    LlmCheckRow(state = c.models, message = c.modelsMessage)
+                }
+                if (c.selectedModel != CheckState.UNKNOWN) {
+                    LlmCheckRow(state = c.selectedModel, message = c.selectedModelMessage)
+                }
+            }
+
             testResult?.let { result ->
                 Spacer(modifier = Modifier.height(12.dp))
                 Surface(
@@ -2122,93 +2143,12 @@ private fun FederationIdentitySection(
                         }
                         DirectoryPickerDialog(
                             show = showImportPicker,
-                            purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
                             onDirectoryPicked = { dir ->
                                 showImportPicker = false
-                                // LOOK first (CIRISServer#404). Importing on pick
-                                // meant the operator learned whether the folder
-                                // held their identity by watching the import
-                                // succeed or fail — and this import REPLACES this
-                                // device's identity.
-                                if (dir.isNotBlank()) viewModel.inspectKeysetDir(dir)
+                                if (dir.isNotBlank()) viewModel.importPortableFromUsb(dir)
                             },
                             onDismiss = { showImportPicker = false },
                         )
-
-                        // ── The verdict on the picked folder ──────────────────
-                        val picked = fed.inspectDir
-                        if (picked != null) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Column(modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    text = picked,
-                                    fontSize = 11.sp,
-                                    color = SetupColors.TextSecondary,
-                                    modifier = Modifier.testable("txt_keyset_inspect_dir"),
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                when {
-                                    fed.inspecting ->
-                                        Text(
-                                            text = localizedString("mobile.keyset_inspect_checking"),
-                                            fontSize = 12.sp,
-                                            color = SetupColors.TextSecondary,
-                                            modifier = Modifier.testable("txt_keyset_inspecting"),
-                                        )
-                                    // "Could not ask" is NOT "nothing there".
-                                    // Saying the second when the first is true
-                                    // tells the operator their good USB is bad.
-                                    fed.inspectUnavailable ->
-                                        Text(
-                                            text =
-                                                localizedString(
-                                                    "mobile.keyset_inspect_unavailable"
-                                                ),
-                                            fontSize = 12.sp,
-                                            color = SetupColors.ErrorText,
-                                            modifier =
-                                                Modifier.testable("txt_keyset_inspect_unavailable"),
-                                        )
-                                    else ->
-                                        fed.inspection?.let { v ->
-                                            Text(
-                                                text = (if (v.importable) "✓  " else "✕  ") + v.detail,
-                                                fontSize = 12.sp,
-                                                color =
-                                                    if (v.importable) SetupColors.SuccessText
-                                                    else SetupColors.ErrorText,
-                                                modifier =
-                                                    Modifier.testable("txt_keyset_inspect_detail"),
-                                            )
-                                        }
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Row {
-                                    TextButton(
-                                        // Enabled ONLY on a folder the importer
-                                        // itself says it would accept — the button
-                                        // and the outcome come from one answer.
-                                        enabled =
-                                            !fed.inProgress &&
-                                                !fed.inspecting &&
-                                                (fed.inspection?.importable == true ||
-                                                    fed.inspectUnavailable),
-                                        onClick = { viewModel.importPortableFromUsb(picked) },
-                                        modifier =
-                                            Modifier.testableClickable("btn_keyset_import_confirm") {
-                                                viewModel.importPortableFromUsb(picked)
-                                            },
-                                    ) { Text(localizedString("mobile.keyset_import_confirm")) }
-                                    TextButton(
-                                        onClick = { viewModel.clearKeysetInspection() },
-                                        modifier =
-                                            Modifier.testableClickable("btn_keyset_import_cancel") {
-                                                viewModel.clearKeysetInspection()
-                                            },
-                                    ) { Text(localizedString("mobile.keyset_import_cancel")) }
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -2304,13 +2244,66 @@ private fun AgeRangeSection(
                     }
                 }
             }
+
+            // PREFER NOT TO SAY — a real, selectable answer.
+            //
+            // The subject has the right not to state an age, and the question is
+            // required, so declining has to be something they can actually choose.
+            // It is NOT a band: nothing is recorded, because writing
+            // `age_self_declared:minor:v1` for someone who never said it would put
+            // a statement they did not make into their own assurance record.
+            //
+            // The consequence is stated on the option itself rather than discovered
+            // afterwards: declining is treated as under-18, stewardship included.
+            // A protection the subject only finds out about after choosing is not
+            // an informed choice.
+            val declineSelected = age.declined
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (declineSelected) SetupColors.Primary.copy(alpha = 0.18f) else SetupColors.InfoLight,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .testableClickable("age_band_declined") {
+                        if (!age.inProgress) viewModel.declineAgeRange()
+                    }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.Top,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp)
+                ) {
+                    RadioButton(
+                        selected = declineSelected,
+                        onClick = { if (!age.inProgress) viewModel.declineAgeRange() },
+                        enabled = !age.inProgress,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = localizedString("mobile.age_range_decline"),
+                            color = SetupColors.InfoDark,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            text = localizedString("mobile.age_range_decline_note"),
+                            color = SetupColors.TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+            }
         }
 
-        // UNDER-18 STEWARDSHIP (CC 0.5.1 §2580). When the founder self-declares
-        // the `minor` band they cannot self-claim ownership; a kind, plain-English
-        // panel explains that an adult must accept responsibility (stewardship),
-        // and lets the minor generate a stewardship request to hand over.
-        if (age.selectedBandToken == "minor") {
+        // UNDER-18 STEWARDSHIP (CC 0.5.1 §2580). A founder treated as under-18
+        // cannot self-claim ownership; a kind, plain-English panel explains that an
+        // adult must accept responsibility (stewardship), and lets them generate a
+        // stewardship request to hand over.
+        //
+        // Keys on isMinorBand(), NOT on the token: a subject who declined to state
+        // an age is treated as a child, and that treatment has to include this or
+        // declining would quietly buy adult privileges.
+        if (state.isMinorBand()) {
             MinorStewardshipCard(viewModel, state)
         }
 
@@ -2792,8 +2785,6 @@ private fun CompleteStep(
     onSetupComplete: () -> Unit,
     ownershipClaim: ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState =
         ai.ciris.mobile.shared.viewmodels.NodeOwnershipClaimState(),
-    /** Retry the self-claim — offered only for a RECOVERABLE failure. */
-    onRetryClaim: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Hold here until the LOCAL-node ownership self-claim settles (success or
@@ -2808,11 +2799,6 @@ private fun CompleteStep(
     Column(
         modifier = modifier
             .fillMaxSize()
-            // SCROLLS. Without this the column clips whatever does not fit, so
-            // enlarging the error box changed nothing — the box grew and the
-            // window cut it at the same place. A failure surface that cannot be
-            // scrolled to is a failure surface that does not exist.
-            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -2869,24 +2855,11 @@ private fun CompleteStep(
                 )
             }
             ownershipClaim.error != null -> {
-                // A refused claim is UNRECOVERABLE by retrying: the node said no,
-                // and pressing on repeats the same request. It used to render as
-                // 13sp secondary text under a still-spinning progress ring — the
-                // same weight as a hint — so a failed setup looked like a slow
-                // one (CIRISServer#401).
-                ai.ciris.mobile.shared.ui.components.FailurePanel(
-                    title = "This node could not be claimed",
-                    detail = ownershipClaim.error ?: "",
-                    // The kind comes from where the failure HAPPENED, not from
-                    // grepping its message here.
-                    kind =
-                        if (ownershipClaim.errorRecoverable) {
-                            ai.ciris.mobile.shared.ui.components.FailureKind.Recoverable
-                        } else {
-                            ai.ciris.mobile.shared.ui.components.FailureKind.Unrecoverable
-                        },
-                    context = "first-run claim",
-                    onRetry = if (ownershipClaim.errorRecoverable) onRetryClaim else null,
+                Text(
+                    text = "Couldn't claim this node yet: ${ownershipClaim.error}",
+                    color = SetupColors.TextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier.testable("setup_ownership_error"),
                 )
             }
@@ -2894,11 +2867,7 @@ private fun CompleteStep(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // The spinner belongs to work still in flight. Leaving it turning under a
-        // failure is what made a dead setup read as a slow one.
-        if (ownershipClaim.error == null) {
-            CircularProgressIndicator(color = SetupColors.Primary)
-        }
+        CircularProgressIndicator(color = SetupColors.Primary)
     }
 }
 
@@ -2986,4 +2955,3 @@ private fun NavigationButtons(
         }
     }
 }
-

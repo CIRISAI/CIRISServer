@@ -119,25 +119,18 @@ interface PythonRuntimeProtocol {
         get() = EMPTY_CLAIM_PIN
 
     /**
-     * **The one way to obtain this node's one-time claim PIN.**
-     *
-     * Reads the node's DURABLE `<home>/claim_pin` (0600) as the primary source,
-     * because that is the only path that does not depend on process ancestry.
-     * [localClaimPin] captures the boot banner, which requires the app to own
-     * the node's stdout — true when the app launches the node, and FALSE in the
-     * shipped desktop wheel, where the Python launcher starts the node and then
-     * spawns the UI. Treating the file as a "fallback" meant the reliable source
-     * was consulted only on the path that did not need it, so first-run claim
-     * failed with "claim PIN not captured" while the PIN sat readable on disk.
-     *
-     * Suspends and retries briefly: at first run the node writes the file during
-     * boot, so "absent" a moment after launch means *not yet*, not *never*.
-     *
-     * Still never over HTTP. This is a same-machine read of a 0600 file in the
-     * node's own home — first-run operator-level access — and `setup/root` still
-     * verifies the PIN, so nothing is weakened by reading it here.
+     * Read the node's one-time CLAIM PIN from its DURABLE `<CIRIS_HOME>/claim_pin`
+     * file (0600), ON DEMAND. This is the race-free, canonical source: unlike the
+     * [localClaimPin] stdout banner, the file persists until ownership is claimed,
+     * so reading it at claim time (well after boot) always sees it — whereas the
+     * banner/file-at-boot capture can miss it because the node writes `claim_pin`
+     * a few seconds AFTER the health endpoint answers (observed on iOS). Same-
+     * process file access is first-run operator-level access — the same secret the
+     * console banner shows — so this preserves the console-only-over-HTTP guarantee
+     * (setup/root still verifies the PIN before granting ownership). Returns `null`
+     * when the file is absent/empty or on platforms that do not drive a local node.
      */
-    suspend fun claimPin(): String? = localClaimPin.value
+    suspend fun readLocalClaimPin(): String? = null
 
     /**
      * THIS node's own NodeCode, if the node printed it alongside the unclaimed

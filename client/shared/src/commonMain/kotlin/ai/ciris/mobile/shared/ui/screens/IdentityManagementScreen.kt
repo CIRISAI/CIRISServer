@@ -467,7 +467,6 @@ fun IdentityManagementScreen(
                     )
                     DirectoryPickerDialog(
                         show = showPortablePicker,
-                        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
                         onDirectoryPicked = {
                             portableDir = it
                             showPortablePicker = false
@@ -529,7 +528,6 @@ fun IdentityManagementScreen(
                     )
                     DirectoryPickerDialog(
                         show = showAssociatePicker,
-                        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
                         onDirectoryPicked = {
                             associateDir = it
                             showAssociatePicker = false

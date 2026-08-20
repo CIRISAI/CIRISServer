@@ -44,40 +44,11 @@ class TestAutomationServer(
     // Updated by Compose via registerElement() calls
     private val elements = ConcurrentHashMap<String, ElementInfo>()
 
-    // Window position offset (for converting window coords to screen coords).
-    //
-    // These are only the LAST-KNOWN values. `Main.kt` seeds them from a
-    // `LaunchedEffect(Unit)` that reads `frame.x/frame.y` before the window
-    // manager has placed the window, and its `componentMoved` listener never
-    // fires for that initial placement — so on any WM that positions windows
-    // itself (i.e. every tiling/desktop Linux WM) they stayed 0 and every
-    // Robot-driven click landed off-target by the window origin, silently.
-    // `originX`/`originY` below therefore prefer the LIVE AWT bounds and treat
-    // these as a fallback for the window-not-yet-attached case.
+    // Window position offset (for converting window coords to screen coords)
     @Volatile
     var windowX: Int = 0
     @Volatile
     var windowY: Int = 0
-
-    /**
-     * The screen origin of the Compose CONTENT area, read live so a WM-placed
-     * or user-dragged window cannot desynchronise the element registry.
-     *
-     * Compose reports element positions via `positionInWindow()`, which is
-     * relative to the content area — so the frame's decoration insets have to
-     * be added too, or every click is short by the title-bar height. Insets are
-     * zero for an undecorated window, which makes this a no-op there.
-     */
-    private fun contentOrigin(): Pair<Int, Int> {
-        val w = awtWindow ?: return windowX to windowY
-        return runCatching {
-            val ins = w.insets
-            (w.x + (ins?.left ?: 0)) to (w.y + (ins?.top ?: 0))
-        }.getOrDefault(windowX to windowY)
-    }
-
-    private val originX: Int get() = contentOrigin().first
-    private val originY: Int get() = contentOrigin().second
 
     // Current screen name
     @Volatile
@@ -89,33 +60,6 @@ class TestAutomationServer(
 
     // AWT Robot for screen capture (lazy init)
     private val robot: Robot by lazy { Robot() }
-
-    /**
-     * Bring the app window to the front and let the compositor settle.
-     *
-     * `Robot.createScreenCapture` grabs a REGION OF THE SCREEN, not the window's
-     * own buffer — so whatever is stacked above the app is what lands in the
-     * PNG. Before this, `/screenshot` could return a pixel-perfect capture of
-     * somebody else's terminal while reporting `success: true`, which makes it
-     * worse than no screenshot at all: a green automation run with evidence
-     * attached that is not evidence of the app. Raising here keeps the endpoint
-     * self-sufficient, so a walk-test needs no external window manager tooling.
-     */
-    private fun raiseWindow() {
-        val w = awtWindow ?: return
-        runCatching {
-            javax.swing.SwingUtilities.invokeAndWait {
-                w.toFront()
-                w.requestFocus()
-                (w as? java.awt.Frame)?.let { f ->
-                    if (f.state == java.awt.Frame.ICONIFIED) f.state = java.awt.Frame.NORMAL
-                }
-            }
-            // The WM raise is asynchronous to the AWT call; without a settle the
-            // capture can still catch the previous stacking order.
-            Thread.sleep(450)
-        }
-    }
 
     // Callback for navigation requests
     var onNavigationRequest: ((String) -> Unit)? = null
@@ -147,10 +91,9 @@ class TestAutomationServer(
      * Coordinates are converted to absolute screen position using window offset
      */
     fun registerElement(testTag: String, x: Int, y: Int, width: Int, height: Int, text: String? = null) {
-        // Convert window-relative to screen-absolute coordinates, against the
-        // window's LIVE origin (see originX/originY).
-        val screenX = x + originX
-        val screenY = y + originY
+        // Convert window-relative to screen-absolute coordinates
+        val screenX = x + windowX
+        val screenY = y + windowY
         elements[testTag] = ElementInfo(
             testTag = testTag,
             x = screenX,
@@ -590,7 +533,6 @@ class TestAutomationServer(
                     }
 
                     try {
-                        raiseWindow()
                         val bounds = window.bounds
                         val screenRect = Rectangle(bounds.x, bounds.y, bounds.width, bounds.height)
                         val image = robot.createScreenCapture(screenRect)
@@ -641,7 +583,6 @@ class TestAutomationServer(
 
                     try {
                         val request = call.receive<ScreenshotRequest>()
-                        raiseWindow()
                         val bounds = window.bounds
                         val screenRect = Rectangle(bounds.x, bounds.y, bounds.width, bounds.height)
                         val image = robot.createScreenCapture(screenRect)

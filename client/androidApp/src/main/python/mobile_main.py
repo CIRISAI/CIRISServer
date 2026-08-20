@@ -157,16 +157,48 @@ class PydanticCoreFinder:
 
 
 def _detect_architecture() -> str:
-    """Detect the Android CPU architecture.
+    """Detect the Android CPU architecture OF THIS PYTHON PROCESS.
 
     Returns one of: 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+
+    Must NOT use platform.machine()/uname alone: under ndk_translation (arm64
+    APK on an x86_64 emulator image) uname reports the HOST arch (x86_64) while
+    the interpreter and every bundled .so are arm64 — picking the .imy by
+    uname then extracts x86_64 natives into an arm64 process (dlopen:
+    EM_X86_64 instead of EM_AARCH64). The interpreter's own build triplet
+    (sysconfig MULTIARCH / HOST_GNU_TYPE) is the process-ABI ground truth.
     """
     import platform
 
+    # 1) OS ground truth: the ABI directory Android actually installed for this
+    #    app (ends in /arm64, /arm, /x86_64). Survives ndk_translation, and
+    #    unlike sysconfig's MULTIARCH/HOST_GNU_TYPE it can't be polluted by the
+    #    chaquopy cross-compile build host.
+    try:
+        from java import jclass  # type: ignore[import-not-found]
+
+        native_dir = (
+            jclass("com.chaquo.python.Python")
+            .getPlatform()
+            .getApplication()
+            .getApplicationInfo()
+            .nativeLibraryDir
+        )
+        leaf = str(native_dir).rstrip("/").rsplit("/", 1)[-1].lower()
+        if leaf in ("arm64", "arm64-v8a"):
+            return "arm64-v8a"
+        if leaf in ("arm", "armeabi-v7a"):
+            return "armeabi-v7a"
+        if leaf in ("x86_64", "x86"):
+            return "x86_64"
+    except Exception:
+        pass
+
+    # 2) Last resort: uname (WRONG under ndk_translation — reports host arch).
     machine = platform.machine().lower()
     if "aarch64" in machine or "arm64" in machine:
         return "arm64-v8a"
-    if "armv7" in machine or "arm" in machine:
+    if "armv7" in machine or ("arm" in machine and "64" not in machine):
         return "armeabi-v7a"
     return "x86_64"
 
@@ -883,8 +915,34 @@ def setup_android_environment():
     os.environ["CIRIS_OFFLINE_MODE"] = "true"
     os.environ["CIRIS_CLOUD_SYNC"] = "false"
 
-    # Enable CIRISVerify debug logging (logs to stderr)
-    os.environ.setdefault("RUST_LOG", "ciris_verify_core=info")
+    # An offline mobile node has no registry entry, so skip the Agent-build-record
+    # fetch: it blocks ~27s to reach exactly the L4-skipped state an unregistered
+    # build lands in anyway (CIRISVerify#212). Skipping is free correctness, not a
+    # relaxation.
+    os.environ.setdefault("CIRIS_ATTESTATION_SKIP_REGISTRY", "true")
+    #
+    # The budget is NOT relaxed here. It used to set 45 as belt-and-suspenders,
+    # and that was wrong twice over. First, it never applied: the value was read
+    # into a module-level constant when authentication.service was imported,
+    # which happens before this line runs, so the runtime enforced 20 while the
+    # log claimed we had asked for 45. Second, and the reason it is not simply
+    # moved earlier — an attestation always completes within 20s, registry entry
+    # or not. A build that cannot is a verifier bug to file, and buying it 25
+    # more seconds only converts a fast degrade into a slow one. The wait is now
+    # bounded by the budget itself (verifier_runner.attestation_deadline_seconds),
+    # so exceeding it degrades to an unverified attestation instead of hanging.
+
+    # Rust log filter. init_tracing (edge_runtime) does `RUST_LOG or <default>`,
+    # so whatever we set here WINS over its ciris_edge=debug default — the old
+    # `ciris_verify_core=info` silenced the entire edge/transport/replication
+    # stack, leaving the federation-delivery path (the proactive Deliver, the
+    # outbound Reticulum send, link dials) DARK on-device (CIRISAgent#927 field
+    # confirm needed exactly this: did the Deliver fire, and over what path).
+    # Widen to capture delivery/transport at debug while keeping verify at info.
+    os.environ.setdefault(
+        "RUST_LOG",
+        "info,ciris_verify_core=info,ciris_edge=debug,leviculum=debug,reticulum_core=debug,ciris_server=info",
+    )
 
     # Optimize for low-resource devices
     os.environ.setdefault("CIRIS_MAX_WORKERS", "1")

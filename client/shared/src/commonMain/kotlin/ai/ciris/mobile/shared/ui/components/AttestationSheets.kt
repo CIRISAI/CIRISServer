@@ -45,13 +45,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import ai.ciris.mobile.shared.models.federation.YubiKeyStatus
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Surface
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.text.font.FontWeight
 
 /**
  * The shared sign / confirm sub-flows for the Trust Root — defined ONCE, opened by
@@ -125,7 +118,6 @@ fun ColumnScope.HolderSignInputs(
     )
     DirectoryPickerDialog(
         show = usbPicker,
-        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
         onDirectoryPicked = { onUsb(it); usbPicker = false },
         onDismiss = { usbPicker = false },
     )
@@ -463,100 +455,4 @@ fun ConfirmDestructive(
             ) { Text(localizedString("mobile.accord_scrub_cancel")) }
         },
     )
-}
-
-/**
- * **The YubiKey readiness banner — shared by every trust-root card.**
- *
- * It lived private inside the genesis ceremony, so the ONE screen that mints keys
- * showed token status and every other holder-signing surface — provision, the
- * co-scrub sheets, duty conferral — showed nothing. An operator with the wrong
- * token inserted, or a token whose 9C slot is empty, learned that from a failed
- * ceremony with two people already in the room.
- *
- * The probe itself is unchanged (`GET /v1/accord/yubikey-status`); this is purely
- * a move from private to shared.
- *
- * "YUBI DETECTED — FIPS COMPLIANT — 9C PROVISIONED — READY TO PROCEED" — the at-a-
- * glance YubiKey readiness banner (green when ready, error-tinted when something is
- * missing) + PIN/PUK tries remaining + a Re-check button. Driven by
- * [AccordCeremonyViewModel.yubiKeyStatus] (GET /v1/accord/yubikey-status).
- */
-@Composable
-fun YubiKeyStatusBanner(status: YubiKeyStatus?, onRefresh: () -> Unit) {
-    val detected = status?.detected == true
-    val ready = status?.ready == true
-    val bg = when {
-        ready -> MaterialTheme.colorScheme.primaryContainer
-        detected -> MaterialTheme.colorScheme.errorContainer
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    Surface(shape = RoundedCornerShape(10.dp), color = bg, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    if (ready) CIRISIcons.shield else CIRISIcons.keySecure,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = when {
-                        status == null -> "CHECKING YUBIKEY…"
-                        !detected -> "NO YUBIKEY DETECTED"
-                        else -> buildString {
-                            append("YUBI DETECTED")
-                            append(if (status.fipsApproved) " — FIPS COMPLIANT" else " — NOT FIPS")
-                            append(
-                                when {
-                                    status.slot9cKey && status.slot9cCert -> " — 9C PROVISIONED"
-                                    status.slot9cKey -> " — 9C KEY (no cert)"
-                                    else -> " — 9C EMPTY"
-                                }
-                            )
-                            when {
-                                ready -> append(" — READY TO PROCEED")
-                                status.pkcs11Ed25519Ok == false -> append(" — ⚠ HOST PKCS#11 TOO OLD")
-                            }
-                        }
-                    },
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onRefresh) { Text("Re-check") }
-            }
-            status?.takeIf { it.detected }?.let { s ->
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "PIN tries: ${s.pinTriesRemaining ?: "?"}    PUK tries: ${s.pukTriesRemaining ?: "?"}    " +
-                        "key: ${s.slot9cKeyType ?: "—"}",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            // Stale-HOST alert: the slot is perfect but the host's ykcs11 is too old
-            // for Ed25519 — make this loud and actionable (it is NOT a YubiKey fault).
-            if (status?.pkcs11Ed25519Ok == false) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "⚠ STALE HOST LIBRARY — UPGRADE REQUIRED",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-            status?.hint?.takeIf { !ready }?.let {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    it,
-                    fontSize = 11.sp,
-                    fontWeight = if (status.pkcs11Ed25519Ok == false) FontWeight.Medium else FontWeight.Normal,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-    }
 }

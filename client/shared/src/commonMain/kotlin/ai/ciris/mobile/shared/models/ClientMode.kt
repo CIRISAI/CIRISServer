@@ -7,23 +7,18 @@ package ai.ciris.mobile.shared.models
  *   - a bare **ciris-server node** (no AI/brain)            → [NODE]
  *   - a full **CIRIS agent** (ciris-server + cognitive brain) → [AGENT]
  *
- * This is the single source of truth: it is derived from the server capability
- * probe (see [clientModeFrom]) after the server is reachable — at startup, and
- * again on every node switch — held as app/startup state in `CIRISApp`, and
- * read everywhere that must branch on node-vs-agent (the 22 cognitive service
- * lights, "agent" wording in login/status/startup, the WORK-state wait). Do NOT
- * scatter ad-hoc probes — everything keys off this gate.
+ * This is the single source of truth: it is derived ONCE from the server
+ * capability probe (see [clientModeFrom]) after the server is reachable, held as
+ * app/startup state in `CIRISApp`, and read everywhere that must branch on
+ * node-vs-agent (the 22 cognitive service lights, "agent" wording in
+ * login/status/startup, the WORK-state wait). Do NOT scatter ad-hoc probes —
+ * everything keys off this gate.
  *
- * Canonical signal (see `src/health.rs` server-side, CIRISServer#390): since
- * server 0.5.168 `/v1/system/health` is the node's health MERGED with the
- * folded brain's — a bare node serves
- * `{"data":{"status":"ok","role":"fabric-node","services":{},"agent":{"folded":false,…}}}`
- * with **no `cognitive_state`**; a folded brain's `cognitive_state` + service
- * map are merged on top, and `data.agent.{folded,reachable}` carries the
- * THREE-state verdict. AGENT iff the server reports a `cognitive_state`, a
- * non-empty agent service map, or an answering folded brain; NODE otherwise —
- * unless the brain is folded-but-not-answering, which is UNDETERMINED (see
- * [ModeProbe]) and must be retried, never latched.
+ * Canonical signal (see `src/health.rs` server-side): a bare node serves
+ * `/v1/system/health` as `{"data":{"status":"ok","role":"fabric-node","services":{}}}`
+ * with **no `cognitive_state`**; an agent INHERITS that endpoint and ENRICHES it
+ * with `cognitive_state` plus its service map. So: AGENT iff the server reports a
+ * `cognitive_state` (or a non-empty agent service map); otherwise NODE.
  */
 enum class ClientMode {
     /** Bare ciris-server node — no cognitive brain, no 22-service map. */
@@ -37,62 +32,54 @@ enum class ClientMode {
 }
 
 /**
- * A mode derivation that can say "not yet" ([undetermined]) without growing the
- * two-valued [ClientMode] enum — 20+ call sites branch on NODE-vs-AGENT and a
- * third enum value would force every one of them to answer a question they
- * cannot. [undetermined] is a RETRY signal, not a verdict: the caller must
- * re-probe (bounded) and must NOT latch [mode] as final while it is set.
- */
-data class ModeProbe(val mode: ClientMode, val undetermined: Boolean)
-
-/**
- * Derive the node-vs-agent verdict from a probed `/v1/system/health` snapshot.
+ * Derive the [ClientMode] from a probed `/v1/system/health` snapshot. AGENT iff
+ * the server reports a `cognitive_state` (the agent enrichment) OR a non-empty
+ * agent service map; otherwise a bare NODE.
  *
- * Server 0.5.168 (CIRISServer#390) made the NODE's `/v1/system/health` the
- * UNION of both meanings: the brain's `cognitive_state`/`services` are merged
- * over the node's own health, plus `data.agent.{folded,reachable}` — THREE
- * states, not two. "No brain attached" and "a brain is attached and did not
- * answer" are different facts with different fixes, and before the split both
- * rendered as a bare NODE, hiding the 22 cognitive lights of the very agent
- * the client was talking to.
- *
- *   - AGENT iff a `cognitive_state` arrived, the agent service map is
- *     non-empty, or a folded brain ANSWERED (folded && reachable — a brain
- *     that answers is an agent even if its health omitted the usual fields).
- *   - [ModeProbe.undetermined] iff `folded && !reachable`: a brain EXISTS but
- *     is not answering yet. The fold boots the brain on a daemon thread AFTER
- *     the node composes, so an early probe legitimately lands here — the
- *     caller must retry, never commit NODE.
+ * A brain that has not completed setup is NODE regardless of what it reports —
+ * see [brainUnconfigured].
  *
  * @param cognitiveState the `cognitive_state` field (null when absent — the node case).
  * @param serviceCount the agent service count reported in the health envelope (0 on a node).
- * @param agentFolded `data.agent.folded` — a brain is configured on this node
- *        (false when absent, which is also the pre-0.5.168 wire shape).
- * @param agentReachable `data.agent.reachable` — the folded brain answered the
- *        node's own health probe.
+ * @param brainUnconfigured the brain says it still needs setup and holds no config,
+ *   so its 10 first-run services are the wizard's, not an agent's. Only the brain
+ *   knows this; the health envelope alone cannot distinguish it from a real agent.
  */
 fun clientModeFrom(
     cognitiveState: String?,
     serviceCount: Int,
-    agentFolded: Boolean = false,
-    agentReachable: Boolean = false,
-): ModeProbe {
-    val agent = cognitiveState != null || serviceCount > 0 || (agentFolded && agentReachable)
-    return ModeProbe(
-        mode = if (agent) ClientMode.AGENT else ClientMode.NODE,
-        undetermined = agentFolded && !agentReachable,
-    )
-}
-
-/**
- * Two-argument form for the pre-0.5.168 surfaces that carry no `agent` block
- * (the brain's own health, `getSystemStatus`). Same derivation, and the answer
- * is final by construction — with no folded/unreachable axis there is nothing
- * to be undetermined about, so this stays a plain [ClientMode] and existing
- * call sites compile unchanged.
- */
-fun clientModeFrom(cognitiveState: String?, serviceCount: Int): ClientMode =
-    clientModeFrom(cognitiveState, serviceCount, agentFolded = false, agentReachable = false).mode
+    brainUnconfigured: Boolean = false,
+): ClientMode =
+    when {
+        // A HALF-STARTED BRAIN IS NOT AN AGENT (CIRISAgent#1075).
+        //
+        // A brain with no config starts 10 of its 22 services — enough to serve
+        // the setup wizard, not enough to be an agent. It still reports a
+        // `cognitive_state` of "SETUP", and that non-null value was taken as
+        // proof of an agent, so the client ran the full AGENT UI against a
+        // runtime missing telemetry, audit and the LLM bus. Every AGENT-only
+        // poller then hammered services that do not exist:
+        //
+        //     listAdapters      503
+        //     getAuditEntries   503   (every 3s, with a full stack trace each)
+        //     getLlmBusStatus   503
+        //     getLlmProviders   503
+        //     addLlmProvider    503   <- so the user could not configure an escape
+        //
+        // This gate exists precisely to stop AGENT-only pollers firing at a
+        // server that cannot answer them — its call site says so. It just had no
+        // way to know that SETUP is not readiness.
+        //
+        // KEYED ON THE BRAIN'S OWN SETUP STATE, NOT ON SERVICE COUNT. The first
+        // version of this check tested `serviceCount == 0`, which never fires:
+        // the count is derived from the `services` map in /v1/system/health, and
+        // during first-run that map holds the 10 that ARE running. Only the brain
+        // can say whether it is configured, so the caller asks it and passes the
+        // answer in.
+        brainUnconfigured -> ClientMode.NODE
+        cognitiveState != null || serviceCount > 0 -> ClientMode.AGENT
+        else -> ClientMode.NODE
+    }
 
 /**
  * The client build version, used for the node-vs-client VERSION-MISMATCH banner.
@@ -105,13 +92,13 @@ fun clientModeFrom(cognitiveState: String?, serviceCount: Int): ClientMode =
  * it recompiled the whole Compose client and defeated the desktop-JAR gradle
  * cache every leg (CIRISServer#272). Do not hand-edit — run the script.
  *
- * DOWNSTREAM (CIRISAgent, which vendors this file) the rule is different: there
- * is no Cargo.toml there, so the value must equal the `ciris-server==` pin in
- * requirements.txt and the matching Android gradle pin. Nothing enforced that
- * and it drifted — the app showed a VERSION-MISMATCH banner against the node it
- * ships with — so they added `tools/dev/check_version_alignment.py`. Their
- * comment asserting "IN THIS REPO there is no sync script" is true there and
- * FALSE here; do not let it travel back with a vendor sync.
+ * IN THIS REPO there is no Cargo.toml and no sync script: CIRISAgent consumes
+ * the substrate as a pinned wheel, so the value this must equal is the
+ * `ciris-server==` pin in requirements.txt (and the matching Android gradle
+ * pin). Nothing enforced that, and it drifted to 0.5.159 while the bundled node
+ * moved to 0.5.163 — so the app showed every user a VERSION-MISMATCH banner
+ * against the node it ships with. `tools/dev/check_version_alignment.py` now
+ * asserts this equality, which is the enforcement the upstream comment assumes.
  */
 const val CLIENT_VERSION = "0.5.184"
 

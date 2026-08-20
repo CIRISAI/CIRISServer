@@ -2,8 +2,6 @@ package ai.ciris.mobile.shared.platform
 
 import androidx.compose.foundation.clickable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -169,24 +167,11 @@ actual fun Modifier.testable(tag: String, text: String?): Modifier = composed {
  * dismisses when the dialog closes; without dispose-time unregistration the
  * handler outlives the visible button (and walk-tests can dispatch clicks
  * to handlers whose UI is gone).
- *
- * The effect is keyed on the tag ALONE, so it runs once per composition-entry
- * and never again — which is what we want for register/unregister lifetime, but
- * would freeze the very first `onClick` lambda forever if we registered it
- * directly. Any lambda that closes over changing state (`if (!labelHasError)
- * …`, a `remember(activeGroup)` map, …) would then keep its first capture,
- * while the real `.clickable{}` path recomposes normally — so a programmatic
- * click would execute a STALE closure and `POST /click` would still answer
- * `success: true`. That silent divergence between the automated and the human
- * path is exactly what an automation harness must never have, so the handler
- * indirects through [rememberUpdatedState] and always dispatches the CURRENT
- * lambda.
  */
 actual fun Modifier.testableClickable(tag: String, text: String?, onClick: () -> Unit): Modifier = composed {
     if (TestAutomation.isEnabled()) {
-        val currentOnClick by rememberUpdatedState(onClick)
         DisposableEffect(tag) {
-            TestAutomation.registerClickHandler(tag) { currentOnClick() }
+            TestAutomation.registerClickHandler(tag, onClick)
             onDispose {
                 TestAutomation.unregisterClickHandler(tag)
                 TestAutomation.unregisterElement(tag)
@@ -219,15 +204,14 @@ actual fun Modifier.testableClickable(tag: String, text: String?, onClick: () ->
  * Desktop implementation of testableWithHandler modifier.
  * Registers click handler WITHOUT adding clickable - for components that handle clicks internally.
  *
- * Same DisposableEffect pattern as `testableClickable` — including its
- * [rememberUpdatedState] indirection, so the registered handler dispatches the
- * CURRENT lambda rather than the one captured at first composition.
+ * Same DisposableEffect pattern as `testableClickable` so handlers attached
+ * to internally-clickable widgets (switches, sliders, etc.) unregister on
+ * dispose.
  */
 actual fun Modifier.testableWithHandler(tag: String, onClick: () -> Unit): Modifier = composed {
     if (TestAutomation.isEnabled()) {
-        val currentOnClick by rememberUpdatedState(onClick)
         DisposableEffect(tag) {
-            TestAutomation.registerClickHandler(tag) { currentOnClick() }
+            TestAutomation.registerClickHandler(tag, onClick)
             onDispose {
                 TestAutomation.unregisterClickHandler(tag)
                 TestAutomation.unregisterElement(tag)

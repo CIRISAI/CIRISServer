@@ -27,6 +27,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import ai.ciris.mobile.shared.api.CheckState
+import ai.ciris.mobile.shared.api.checkLlmConfig
+import ai.ciris.mobile.shared.ui.components.LlmCheckRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import ai.ciris.mobile.shared.ui.icons.*
@@ -352,21 +355,36 @@ fun LLMSettingsScreen(
                     AdvancedSettingsContent(
                         llmViewModel = llmViewModel,
                         llmBusStatus = llmBusStatus,
-                        llmProviders = llmProviders
+                        llmProviders = llmProviders,
+                        isCirisProxy = isCirisProxy
                     )
                 }
 
                 // Section 6: Authentication (Collapsible)
                 CollapsibleSection(
                     title = localizedString("mobile.llm_settings_auth"),
-                    subtitle = localizedString("mobile.settings_ciris_access_token"),
+                    // SAY WHICH TOKEN THIS ACTUALLY IS.
+                    //
+                    // This asserted "CIRIS Access Token" unconditionally. On a
+                    // BYOK agent signed in with a username and password there is
+                    // no CIRIS access token anywhere — the value is a local
+                    // session bearer (`sess:wa-…`) and the LLM is reached with
+                    // the user's own provider key. A user reading this screen
+                    // reasonably concluded he was on CIRIS Services and had
+                    // never agreed to it.
+                    subtitle = if (isCirisProxy) {
+                        localizedString("mobile.settings_ciris_access_token")
+                    } else {
+                        localizedString("mobile.settings_auth_local_session")
+                    },
                     icon = CIRISIcons.person,
                     expanded = authExpanded,
                     onToggle = { authExpanded = !authExpanded }
                 ) {
                     AuthenticationContent(
                         apiClient = apiClient,
-                        secureStorage = secureStorage
+                        secureStorage = secureStorage,
+                        isCirisProxy = isCirisProxy,
                     )
                 }
             }
@@ -1068,6 +1086,13 @@ private fun AddProviderCard(
     var selectedModel by remember { mutableStateOf<String?>(null) }
     var fetchError by remember { mutableStateOf<String?>(null) }
 
+    /**
+     * Result of the shared key/model check (#1062). Null until the user asks.
+     * Held here rather than in a view-model because this dialog is composing a
+     * provider that does not exist yet — there is nothing to hold it for.
+     */
+    var configCheck by remember { mutableStateOf<ai.ciris.mobile.shared.api.LlmConfigCheck?>(null) }
+
     val coroutineScope = rememberCoroutineScope()
 
     // Filter to cloud providers that need API keys (exclude local/mobile/other)
@@ -1171,6 +1196,11 @@ private fun AddProviderCard(
                     },
                     label = { Text("API Key") },
                     placeholder = { Text("sk-...") },
+                    supportingText = configCheck?.let { c ->
+                        if (c.key != CheckState.UNKNOWN) {
+                            { LlmCheckRow(state = c.key, message = c.keyMessage) }
+                        } else null
+                    },
                     visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
                         IconButton(onClick = { showApiKey = !showApiKey }) {
@@ -1197,21 +1227,35 @@ private fun AddProviderCard(
                             fetchError = null
                             coroutineScope.launch {
                                 try {
-                                    val models = apiClient.listModels(
+                                    // ONE shared check for key + model list +
+                                    // selected model (#1062). This screen used
+                                    // to call listModels ONLY — it never
+                                    // validated the key, so a revoked
+                                    // credential showed a full model dropdown
+                                    // and no hint that nothing on it worked.
+                                    val check = apiClient.checkLlmConfig(
                                         provider = selectedProvider,
                                         apiKey = apiKey,
-                                        baseUrl = null
+                                        baseUrl = null,
+                                        selectedModel = selectedModel,
                                     )
-                                    fetchedModels = models
-                                    // Auto-select recommended or first model
-                                    if (models.isNotEmpty()) {
-                                        val best = models.firstOrNull { it.cirisRecommended }
-                                            ?: models.firstOrNull { it.cirisCompatible }
-                                            ?: models.first()
+                                    configCheck = check
+                                    fetchedModels = check.availableModels
+                                    fetchError = check.firstProblem
+
+                                    // Only auto-select from a list the PROVIDER
+                                    // gave us. Choosing a cached model on the
+                                    // user's behalf is what shipped a config
+                                    // that could never work.
+                                    if (check.models == CheckState.OK && check.availableModels.isNotEmpty()) {
+                                        val best = check.availableModels.firstOrNull { it.cirisRecommended }
+                                            ?: check.availableModels.firstOrNull { it.cirisCompatible }
+                                            ?: check.availableModels.first()
                                         selectedModel = best.id
                                     }
                                 } catch (e: Exception) {
-                                    fetchError = e.message ?: "Failed to fetch models"
+                                    fetchError = e.message ?: "Failed to check this provider"
+                                    configCheck = null
                                 } finally {
                                     isFetchingModels = false
                                 }
@@ -1227,7 +1271,10 @@ private fun AddProviderCard(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Fetch Available Models")
+                        // It checks the key as well as listing models now, and
+                        // the label should not undersell that: a user who reads
+                        // "fetch models" does not expect a credential verdict.
+                        Text(localizedString("mobile.llm_check_button"))
                     }
                 }
 
@@ -1260,6 +1307,19 @@ private fun AddProviderCard(
                 }
 
                 // Model dropdown - show when models are fetched
+                // State of the model list itself, and of the chosen model.
+                // Separate from the key: a valid key with a model the provider
+                // does not serve is a real and common configuration, and it was
+                // exactly one of the two faults in the reported case.
+                configCheck?.let { c ->
+                    if (c.models != CheckState.UNKNOWN) {
+                        LlmCheckRow(state = c.models, message = c.modelsMessage)
+                    }
+                    if (c.selectedModel != CheckState.UNKNOWN) {
+                        LlmCheckRow(state = c.selectedModel, message = c.selectedModelMessage)
+                    }
+                }
+
                 if (fetchedModels.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
 
@@ -2131,7 +2191,10 @@ private fun LocalServersContent(
 private fun AdvancedSettingsContent(
     llmViewModel: LLMSettingsViewModel,
     llmBusStatus: ai.ciris.mobile.shared.models.LlmBusStatus?,
-    llmProviders: List<ai.ciris.mobile.shared.models.LlmProviderStatus>
+    llmProviders: List<ai.ciris.mobile.shared.models.LlmProviderStatus>,
+    // Who is ACTUALLY serving requests, as distinct from whether the CIRIS
+    // proxy is permitted (CIRISAgent#1064).
+    isCirisProxy: Boolean
 ) {
     val currentStrategy = llmBusStatus?.distributionStrategy
         ?: ai.ciris.mobile.shared.models.DistributionStrategy.LATENCY_BASED
@@ -2205,7 +2268,7 @@ private fun AdvancedSettingsContent(
         )
 
         // CIRIS Services Toggle (Danger Zone)
-        CirisServicesToggle(llmViewModel = llmViewModel)
+        CirisServicesToggle(llmViewModel = llmViewModel, isCirisProxy = isCirisProxy)
     }
 }
 
@@ -2214,7 +2277,7 @@ private fun AdvancedSettingsContent(
  * Shows a warning that re-enabling requires re-running the setup wizard.
  */
 @Composable
-private fun CirisServicesToggle(llmViewModel: LLMSettingsViewModel) {
+private fun CirisServicesToggle(llmViewModel: LLMSettingsViewModel, isCirisProxy: Boolean) {
     val semantic = SemanticColors.Default
     var showDisableDialog by remember { mutableStateOf(false) }
     val isCirisServicesEnabled by llmViewModel.cirisServicesEnabled.collectAsState()
@@ -2243,8 +2306,23 @@ private fun CirisServicesToggle(llmViewModel: LLMSettingsViewModel) {
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = if (isCirisServicesEnabled) "Using CIRIS proxy for LLM requests"
-                               else "Disabled - using your own API keys",
+                        // TWO DIFFERENT QUESTIONS (CIRISAgent#1064).
+                        //
+                        // `cirisServicesEnabled` is the KILL SWITCH — it reports
+                        // whether the CIRIS proxy is permitted, from
+                        // /v1/system/llm/ciris-services/status (`disabled`). It
+                        // does NOT mean CIRIS is serving requests. A BYOK user
+                        // with the switch on was told "Using CIRIS proxy for LLM
+                        // requests" while every call went to his own provider on
+                        // his own key — and that is what a maintainer read when
+                        // triaging his report.
+                        //
+                        // `isCirisProxy` is who is actually serving. Say that.
+                        text = when {
+                            !isCirisServicesEnabled -> "Disabled - using your own API keys"
+                            isCirisProxy -> "Using CIRIS proxy for LLM requests"
+                            else -> "Available, but not in use - your own provider is serving requests"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
@@ -2523,7 +2601,9 @@ private fun InfoRow(label: String, value: String) {
 @Composable
 private fun AuthenticationContent(
     apiClient: CIRISApiClient,
-    secureStorage: ai.ciris.mobile.shared.platform.SecureStorage
+    secureStorage: ai.ciris.mobile.shared.platform.SecureStorage,
+    /** Whether the CIRIS proxy is actually serving requests — NOT whether it is permitted. */
+    isCirisProxy: Boolean,
 ) {
     var tokenInfo by remember { mutableStateOf<TokenDisplayInfo?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -2547,7 +2627,13 @@ private fun AuthenticationContent(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         // Explanation
         Text(
-            text = localizedString("mobile.settings_token_info_desc"),
+            // The old copy read "…automatically managed when you sign in with
+            // Google" for every user, including one who had never used OAuth.
+            text = if (isCirisProxy) {
+                localizedString("mobile.settings_token_info_desc_oauth")
+            } else {
+                localizedString("mobile.settings_token_info_desc_local")
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
         )

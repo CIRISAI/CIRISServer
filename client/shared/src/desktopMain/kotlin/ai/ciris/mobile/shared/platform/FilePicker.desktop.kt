@@ -6,7 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import javax.swing.JFileChooser
-import javax.swing.SwingUtilities
 import javax.swing.filechooser.FileNameExtensionFilter
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -22,14 +21,9 @@ actual fun FilePickerDialog(
     LaunchedEffect(show) {
         if (!show) return@LaunchedEffect
 
-        // The CHOOSER runs on the EDT (Swing's contract — see chooseFileOnEdt);
-        // the file READ stays on IO, because a multi-MB attachment must not be
-        // read on the event thread. Splitting them is the point: the previous
-        // version ran BOTH on Dispatchers.IO, which is how the sibling directory
-        // picker crashed the whole app mid-ceremony (IndexOutOfBoundsException
-        // out of DefaultRowSorter, via FilePane.doDirectoryChanged).
-        val chosen = chooseFileOnEdt(mimeTypes)
-        val result = chosen?.let { withContext(Dispatchers.IO) { readDesktopFile(it) } }
+        val result = withContext(Dispatchers.IO) {
+            showNativeFileChooser(mimeTypes)
+        }
 
         if (result != null) {
             onFilePicked(result)
@@ -39,36 +33,8 @@ actual fun FilePickerDialog(
     }
 }
 
-/**
- * Show the file chooser ON THE EDT and return the selected [File], or `null` on
- * cancel or failure.
- *
- * Swing may only be touched from the Event Dispatch Thread. A picker failure is a
- * cancelled pick, never a crash — attaching a file is a convenience and must not
- * be able to take the app down.
- */
-private fun chooseFileOnEdt(mimeTypes: List<String>): File? {
-    val picked = arrayOfNulls<File>(1)
-    val body = Runnable {
-        try {
-            picked[0] = showNativeFileChooser(mimeTypes)
-        } catch (t: Throwable) {
-            PlatformLogger.w(
-                "FilePicker",
-                "file picker failed (${t::class.simpleName}: ${t.message}) — treating as cancelled",
-            )
-        }
-    }
-    return try {
-        if (SwingUtilities.isEventDispatchThread()) body.run() else SwingUtilities.invokeAndWait(body)
-        picked[0]
-    } catch (t: Throwable) {
-        PlatformLogger.w("FilePicker", "file picker dispatch failed: ${t.message}")
-        null
-    }
-}
-
-private fun showNativeFileChooser(mimeTypes: List<String>): File? {
+@OptIn(ExperimentalEncodingApi::class)
+private fun showNativeFileChooser(mimeTypes: List<String>): PickedFile? {
     val chooser = JFileChooser().apply {
         dialogTitle = "Select file to attach"
         isMultiSelectionEnabled = false
@@ -96,7 +62,9 @@ private fun showNativeFileChooser(mimeTypes: List<String>): File? {
 
     val result = chooser.showOpenDialog(null)
     if (result != JFileChooser.APPROVE_OPTION) return null
-    return chooser.selectedFile
+
+    val file = chooser.selectedFile ?: return null
+    return readDesktopFile(file)
 }
 
 @OptIn(ExperimentalEncodingApi::class)
