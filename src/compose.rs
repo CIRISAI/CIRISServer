@@ -3605,9 +3605,43 @@ async fn build_edge(
     )))]
     let _ = resolved;
 
+    // ── ARM SCOPE-NATIVE ADDRESSING (CIRISServer#451 item 2) ───────────────
+    //
+    // Group addresses derive from directory state and are NEVER announced
+    // (CC 5.4.6, default-deny for unregistered destinations). Until this is
+    // installed the scope gates are deliberately DEFAULT-OPEN — edge is
+    // explicit that the arming event is the server's call, not an upstream
+    // wait, so leaving it unarmed is a decision to keep every scope addressed
+    // by one `sha256(fed_pubkey)[..16]` that an observer can link across every
+    // context the node participates in.
+    //
+    // THE TRADE, because this node is on the paying side of it. Edge draws the
+    // line at federation visibility: a node that is NOT federation-visible is
+    // point-to-point anyway and gains unlinkable per-context addresses for
+    // nothing. A node that IS visible — this one — moves its SCOPED flows off
+    // the federation plane onto one-hop delivery. That is a real cost and the
+    // reason edge keeps this separate from `federation_visible` rather than
+    // riding it.
+    //
+    // Armed deliberately: the fleet upgrades together before trace testing, so
+    // there is no window where an armed node and an unarmed peer disagree about
+    // where a scoped flow is addressed.
+    //
+    // `DEFAULT_CONVERGENCE_WINDOW` (300s) is how long a superseded epoch stays
+    // reachable after a rotation. Seal earlier and a peer that has not re-keyed
+    // is cut off; later and a rotated-away address stays live longer. Taking
+    // edge's default rather than inventing a number we have no measurement for.
+    let builder =
+        builder.scope_native_addressing(ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW);
+
     let edge = builder
         .build()
         .map_err(|e| anyhow::anyhow!("build shared Edge: {e}"))?;
+    tracing::info!(
+        convergence_secs = ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW.as_secs(),
+        "scope-native addressing ARMED — scoped flows are one-hop and their \
+         destinations are never announced (CC 5.4.6)"
+    );
     tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
     Ok(edge)
 }

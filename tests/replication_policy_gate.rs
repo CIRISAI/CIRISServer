@@ -96,8 +96,27 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// accepting the sender's verdict, and the value is deliberately kept out of the
 /// `subject_pull:*` namespace so it cannot be mistaken for a subject-scoped read.
 /// Serving a bundle anyone may verify for themselves is not a disclosure.
+/// ## v18.2.0 re-pin — the manifest stopped lying, and that is the whole change
+///
+/// `328d73b0…` → `20499cab…f22d74` (CIRISServer#451).
+///
+/// Edge's own account: the manifest now states the TRUE constant projections for
+/// five planes. **No serve behaviour moved** — the code always served those
+/// planes that way; the manifest previously described them wrongly, so the hash
+/// changed when the description was corrected to match the behaviour.
+///
+/// That is the one re-pin shape this gate should accept most readily and read
+/// most carefully, because "the manifest was wrong" is also what a genuine
+/// relaxation would look like if someone edited the manifest to match a change
+/// they had already made. What separates them is direction: here the DESCRIPTION
+/// moved toward the code. `trace:*` remains `capability:infra:serve` only — the
+/// E3 trace-confidentiality invariant this gate exists for is untouched, which
+/// is the property to re-check on every re-pin rather than the hash itself.
+///
+/// Mirroring this also clears the 6 cohabitation conformance jobs that have been
+/// red on server-skew since v16.3.0.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "328d73b0a6a5c7e2d1272b81e245ecceeca1d837dd08b0415105e1661ff4a699";
+    "20499cabaf1c0566b5a8d66f8d03c8a980b760c733e83444b7345a7733f22d74";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

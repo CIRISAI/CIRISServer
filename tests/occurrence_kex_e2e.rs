@@ -400,7 +400,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
             .expect("x b64")
             .try_into()
             .expect("x 32B"),
-        mlkem768_pub: Some(BASE64.decode(&b_enc.ml_kem_768_base64).expect("mlkem b64")),
+        mlkem768_pub: BASE64.decode(&b_enc.ml_kem_768_base64).expect("mlkem b64"),
     };
     let (handshake, sender_key) =
         FederationSession::initiate(&peer, KexAlgorithm::Hybrid).expect("A seals to B");

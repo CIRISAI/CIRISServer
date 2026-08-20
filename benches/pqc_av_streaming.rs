@@ -180,17 +180,11 @@ fn bench_pqc_kex(c: &mut Criterion) {
     };
     let peer_hybrid = PeerKexPubkeys {
         x25519_pub: x_pub,
-        mlkem768_pub: Some(mlkem_pub.clone()),
+        mlkem768_pub: mlkem_pub.clone(),
     };
-    let peer_classical = PeerKexPubkeys {
-        x25519_pub: x_pub,
-        mlkem768_pub: None,
-    };
-    let own_classical = OwnKexKeys {
-        x25519_priv: x_priv,
-        mlkem768_priv: None,
-        mlkem768_pub: None,
-    };
+    // NO CLASSICAL PEER. `mlkem768_pub` stopped being `Option` at edge v18.2.0
+    // (CIRISServer#451 item 6, CIRISEdge#458) — a classical-only peer is no
+    // longer EXPRESSIBLE, which is the strongest form the retirement could take.
 
     let mut g = c.benchmark_group("pqc_kex");
 
@@ -214,25 +208,21 @@ fn bench_pqc_kex(c: &mut Criterion) {
         });
     });
 
-    // Classical X25519-only — the fallback, for overhead comparison.
-    g.bench_function("classical_initiate", |b| {
-        b.iter(|| {
-            black_box(
-                FederationSession::initiate(black_box(&peer_classical), KexAlgorithm::Classical)
-                    .expect("classical initiate"),
-            )
-        });
-    });
-    let (classical_msg, _k) = FederationSession::initiate(&peer_classical, KexAlgorithm::Classical)
-        .expect("classical initiate");
-    g.bench_function("classical_respond", |b| {
-        b.iter(|| {
-            black_box(
-                FederationSession::respond(black_box(&own_classical), black_box(&classical_msg))
-                    .expect("classical respond"),
-            )
-        });
-    });
+    // THE CLASSICAL ARMS ARE GONE, AND THIS RECORDS WHY (CIRISServer#450).
+    //
+    // They existed as the overhead-comparison BASELINE: "hybrid costs X more
+    // than classical". Edge v18 retired classical-only KEX — `initiate(..,
+    // KexAlgorithm::Classical)` returns `ClassicalKexRetired`, and at v18.2.0
+    // `mlkem768_pub` is no longer even `Option`, so the peer cannot be built.
+    //
+    // A baseline that cannot run is not a slow baseline, it is a comparison
+    // against something that no longer exists. Reporting hybrid as "N% over
+    // classical" would describe a choice nobody can make. The hybrid numbers
+    // above stand on their own as absolute cost, which is the only honest
+    // framing once there is one algorithm.
+    //
+    // The retirement itself is pinned by the type system and by
+    // `ClassicalKexRetired`, not by a benchmark — a bench asserts nothing.
 
     g.finish();
 }
@@ -332,7 +322,7 @@ fn bench_av_rekey(c: &mut Criterion) {
     let (_mlkem_priv, mlkem_pub) = ml_kem::generate_keypair().expect("ml-kem");
     let peer = PeerKexPubkeys {
         x25519_pub: x_pub,
-        mlkem768_pub: Some(mlkem_pub),
+        mlkem768_pub: mlkem_pub,
     };
 
     // ceil(log2(n)) = bit_length(n-1) for n >= 1 — the rekeyed tree-path length.
