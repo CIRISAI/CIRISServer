@@ -110,6 +110,7 @@ pub mod commons_surface;
 /// Gated by `tests/compliance_map.rs`.
 pub mod compliance;
 mod compose;
+pub mod owner_signer_capsule;
 
 /// **The self-occurrence envelope builder, exposed for tests** (CIRISServer#454).
 ///
