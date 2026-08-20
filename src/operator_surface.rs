@@ -1731,7 +1731,10 @@ impl PeerQuotaCause {
     /// Read the cause off the observation persist carries.
     #[must_use]
     pub fn of(state: &NodeState) -> Self {
-        match state.peer_quota.observation {
+        // Borrowed, not moved: the observation stopped being `Copy` at persist
+        // v38.0.0. Reading a cause off a state must never consume it — every
+        // other reader here takes `&NodeState` for the same reason.
+        match &state.peer_quota.observation {
             None => Self::NoQuota,
             Some(o) if o.slot_denials > 0 => Self::Denials,
             Some(o) if o.tracked_peers == 0 => Self::NotExercised,
