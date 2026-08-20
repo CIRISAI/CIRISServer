@@ -295,7 +295,19 @@ async fn a_real_bundle_makes_a_fresh_node_serve() {
     for n in &bundle.serve_nodes {
         let _ = engine
             .federation_directory()
-            .remove_peer_record(&n.record.key_id, true)
+            // persist v38.0.0 requires a REASON and the delegation acted under.
+            // Peer removal is an accountable act now, and a test is not exempt
+            // from saying why — a blank reason here would be the first
+            // meaningless entry in an audit trail built to carry meaning.
+            // `None` delegation is accurate: this is the harness acting
+            // directly, not on anyone's authority.
+            .remove_peer_record(
+                &n.record.key_id,
+                true,
+                "genesis_bundle_validate: clearing seeded serve-node rows so the \
+                 bundle installs onto a node holding only itself",
+                None,
+            )
             .await;
     }
 

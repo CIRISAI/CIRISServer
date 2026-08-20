@@ -1819,6 +1819,44 @@ pub(crate) async fn publish_self_transport_destination(
 /// Best-effort (mirrors the transport publish): no Reticulum transport → debug no-op.
 /// THE AGENT DOES NOTHING — the node self-publishes its sealability, deleting the
 /// agent-side publish step entirely.
+/// **The ONE self-occurrence envelope builder** (CIRISServer#454).
+///
+/// Extracted because the producer and the end-to-end test each had their own,
+/// and they disagreed. `tests/occurrence_kex_e2e.rs` built an envelope carrying
+/// `attesting_key_id`, asserted the whole signed round trip, and passed —
+/// beside a producer that omitted it and was refused on EVERY boot with "signed
+/// bytes do not carry `attesting_key_id`". The test's own comment said it did
+/// "what compose::publish_self_identity_occurrence does at boot". It did not.
+///
+/// A re-implementation that happens to be correct proves the re-implementation.
+/// Both callers now go through here, so the test cannot be right while
+/// production is wrong — that difference is the only thing worth testing.
+///
+/// `attesting_key_id` is inside the signed bytes deliberately, not merely
+/// present: verify refuses an absent binding because "an absent binding is
+/// skippable by omission" — a value the signature does not cover can be
+/// stripped by whoever relays the row. Equal to `identity_key_id` for a
+/// self-occurrence, and equal is not the same as SIGNED.
+pub(crate) fn self_occurrence_envelope(
+    key_id: &str,
+    transport_destination: &serde_json::Value,
+    enc_x25519_base64: &str,
+    enc_ml_kem_768_base64: &str,
+    asserted_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "attesting_key_id": key_id,
+        "identity_key_id": key_id,
+        "occurrence_key_id": key_id,
+        "transport_destination": transport_destination,
+        "encryption_pubkeys": {
+            "x25519_base64": enc_x25519_base64,
+            "ml_kem_768_base64": enc_ml_kem_768_base64,
+        },
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })
+}
+
 async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg: &ServerConfig) {
     use ciris_keyring::self_enc_keys::SelfEncKeys;
     use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
@@ -1886,16 +1924,13 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
         "app_name": "ciris",
         "aspects": ["edge"],
     });
-    let envelope = serde_json::json!({
-        "identity_key_id": key_id,
-        "occurrence_key_id": key_id,
-        "transport_destination": tb_env,
-        "encryption_pubkeys": {
-            "x25519_base64": enc.x25519_base64,
-            "ml_kem_768_base64": enc.ml_kem_768_base64,
-        },
-        "asserted_at": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    });
+    let envelope = self_occurrence_envelope(
+        key_id,
+        &tb_env,
+        &enc.x25519_base64,
+        &enc.ml_kem_768_base64,
+        now,
+    );
 
     // Sign with the node's own hybrid identity (the build_self_key_record pattern);
     // attesting_key_id == identity_key_id == this node's registered key, so the
